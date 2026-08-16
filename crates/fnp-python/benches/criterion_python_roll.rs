@@ -84,5 +84,8 @@ fn bench_roll_boundary(c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[("bench_roll_boundary", bench_roll_boundary)]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_roll.rs"),
+        &[("bench_roll_boundary", bench_roll_boundary)],
+    );
 }

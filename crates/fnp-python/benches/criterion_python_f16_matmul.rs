@@ -136,5 +136,8 @@ fn bench_f16_matmul_boundary(c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[("bench_f16_matmul_boundary", bench_f16_matmul_boundary)]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_f16_matmul.rs"),
+        &[("bench_f16_matmul_boundary", bench_f16_matmul_boundary)],
+    );
 }

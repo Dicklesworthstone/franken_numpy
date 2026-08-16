@@ -90,8 +90,11 @@ pexp = (rng.standard_normal(16_000_000) * 0.5).astype(np.float16)\n";
 }
 
 fn main() {
-    common::gated_main(&[(
-        "bench_f16_binary_transcendental_boundary",
-        bench_f16_binary_transcendental_boundary,
-    )]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_f16_transcendental.rs"),
+        &[(
+            "bench_f16_binary_transcendental_boundary",
+            bench_f16_binary_transcendental_boundary,
+        )],
+    );
 }

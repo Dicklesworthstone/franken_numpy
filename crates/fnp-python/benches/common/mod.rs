@@ -824,11 +824,21 @@ fn harness_contract_source_matches_disk() -> Option<bool> {
     Some(harness_source_matches(HARNESS_CONTRACT_SOURCE, &on_disk))
 }
 
-fn report_bench_identity() {
+/// `bench_source` is the calling bench binary's OWN source, embedded by the
+/// compiler at its call site via `include_str!("<that file>.rs")`. Passing it
+/// closes the gap the contract-module fingerprint alone leaves: a stale remote
+/// build of a per-bench file is otherwise invisible, because `common/mod.rs`
+/// hashes identical while the bench body differs (`deadlock-audit-cvnmf`).
+///
+/// A file that includes ITSELF is tracked by cargo as a dependency of that binary
+/// only, so this does NOT couple the 28 bench binaries to each other — editing one
+/// bench rebuilds that bench. (A build script hashing the whole `benches/` tree
+/// would have coupled them, which is why that route was rejected.)
+fn report_bench_identity(bench_source: Option<&str>) {
     println!("bench_elf_sha256={}", self_identity());
     println!(
         "harness_contract_source_sha256={} harness_contract_source_bytes={} \
-         harness_source_matches_disk={} covers=common/mod.rs_only",
+         harness_source_matches_disk={} covers={}",
         harness_contract_source_sha256(),
         HARNESS_CONTRACT_SOURCE.len(),
         match harness_contract_source_matches_disk() {
@@ -836,7 +846,26 @@ fn report_bench_identity() {
             Some(false) => "false_BINARY_BUILT_FROM_DIFFERENT_SOURCE",
             None => "unknown_source_not_readable",
         },
+        if bench_source.is_some() {
+            "common/mod.rs+bench_file"
+        } else {
+            "common/mod.rs_only"
+        },
     );
+    match bench_source {
+        Some(source) => println!(
+            "bench_file_source_sha256={} bench_file_source_bytes={}",
+            sha256_hex(source.as_bytes()),
+            source.len(),
+        ),
+        // Not silent: a binary that declines to fingerprint its own body is
+        // exactly the case this field exists to make visible.
+        None => println!(
+            "bench_file_source_sha256=unreported \
+             bench_file_source_bytes=0 \
+             stale_bench_body_would_be_undetectable=true"
+        ),
+    }
     println!("bench_invocation_id={}", bench_invocation_id());
     report_host_execution_provenance();
     std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
@@ -1588,10 +1617,26 @@ pub type BenchGroup = (&'static str, fn(&mut Criterion));
 /// Drive the selected bench group functions under one `Criterion`, then emit the
 /// final summary. Mirrors the former `gated_benches!` macro's `main`: each entry
 /// is `(group_fn_name, group_fn)`, gated by [`group_enabled`].
+/// Prefer [`gated_main_with_source`], which additionally fingerprints the calling
+/// bench's own body. This entry point fingerprints only the shared contract module,
+/// and says so on its own identity line (`covers=common/mod.rs_only`,
+/// `stale_bench_body_would_be_undetectable=true`).
 pub fn gated_main(targets: &[BenchGroup]) {
+    gated_main_inner(None, targets);
+}
+
+/// `bench_source` must be the caller's OWN source: `include_str!("<this file>.rs")`
+/// at the call site, which resolves relative to the invoking file's directory and
+/// so needs no path plumbing. See [`report_bench_identity`] for why this is the
+/// only field that ties a running bench binary to the body it was compiled from.
+pub fn gated_main_with_source(bench_source: &'static str, targets: &[BenchGroup]) {
+    gated_main_inner(Some(bench_source), targets);
+}
+
+fn gated_main_inner(bench_source: Option<&str>, targets: &[BenchGroup]) {
     // Line one, before Criterion is constructed: Criterion may print its
     // backend notice during construction.
-    report_bench_identity();
+    report_bench_identity(bench_source);
     verify_contract_gate_semantics();
     verify_group_selection_contract();
     println!(

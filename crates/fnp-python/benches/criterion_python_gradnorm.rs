@@ -883,37 +883,40 @@ fn bench_norm_frobenius_boundary(c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[
-        ("bench_cum_midaxis_boundary", bench_cum_midaxis_boundary),
-        ("bench_int_cum_boundary", bench_int_cum_boundary),
-        ("bench_vander_boundary", bench_vander_boundary),
-        ("bench_polyval_boundary", bench_polyval_boundary),
-        (
-            "bench_gradient_2d_coords_boundary",
-            bench_gradient_2d_coords_boundary,
-        ),
-        (
-            "bench_gradient_coords_boundary",
-            bench_gradient_coords_boundary,
-        ),
-        (
-            "bench_gradient_nd_coords_axis_boundary",
-            bench_gradient_nd_coords_axis_boundary,
-        ),
-        ("bench_gradient_f32_boundary", bench_gradient_f32_boundary),
-        ("bench_gradient_axis_boundary", bench_gradient_axis_boundary),
-        ("bench_norm_axis_boundary", bench_norm_axis_boundary),
-        (
-            "bench_norm_f32_orderfree_boundary",
-            bench_norm_f32_orderfree_boundary,
-        ),
-        (
-            "bench_norm_nonlast_axis_boundary",
-            bench_norm_nonlast_axis_boundary,
-        ),
-        (
-            "bench_norm_frobenius_boundary",
-            bench_norm_frobenius_boundary,
-        ),
-    ]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_gradnorm.rs"),
+        &[
+            ("bench_cum_midaxis_boundary", bench_cum_midaxis_boundary),
+            ("bench_int_cum_boundary", bench_int_cum_boundary),
+            ("bench_vander_boundary", bench_vander_boundary),
+            ("bench_polyval_boundary", bench_polyval_boundary),
+            (
+                "bench_gradient_2d_coords_boundary",
+                bench_gradient_2d_coords_boundary,
+            ),
+            (
+                "bench_gradient_coords_boundary",
+                bench_gradient_coords_boundary,
+            ),
+            (
+                "bench_gradient_nd_coords_axis_boundary",
+                bench_gradient_nd_coords_axis_boundary,
+            ),
+            ("bench_gradient_f32_boundary", bench_gradient_f32_boundary),
+            ("bench_gradient_axis_boundary", bench_gradient_axis_boundary),
+            ("bench_norm_axis_boundary", bench_norm_axis_boundary),
+            (
+                "bench_norm_f32_orderfree_boundary",
+                bench_norm_f32_orderfree_boundary,
+            ),
+            (
+                "bench_norm_nonlast_axis_boundary",
+                bench_norm_nonlast_axis_boundary,
+            ),
+            (
+                "bench_norm_frobenius_boundary",
+                bench_norm_frobenius_boundary,
+            ),
+        ],
+    );
 }

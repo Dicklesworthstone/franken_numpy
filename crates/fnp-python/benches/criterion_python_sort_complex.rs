@@ -78,5 +78,8 @@ fn bench_sort_complex_boundary(c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[("bench_sort_complex_boundary", bench_sort_complex_boundary)]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_sort_complex.rs"),
+        &[("bench_sort_complex_boundary", bench_sort_complex_boundary)],
+    );
 }

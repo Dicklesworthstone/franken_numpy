@@ -79,8 +79,11 @@ x = rng.standard_normal((2048, 2048))\ncond = rng.random(2048) < 0.5\n",
 }
 
 fn main() {
-    common::gated_main(&[(
-        "bench_compress_lastaxis_boundary",
-        bench_compress_lastaxis_boundary,
-    )]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_compress.rs"),
+        &[(
+            "bench_compress_lastaxis_boundary",
+            bench_compress_lastaxis_boundary,
+        )],
+    );
 }

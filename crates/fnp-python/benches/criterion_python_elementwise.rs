@@ -1203,80 +1203,83 @@ fn bench_setops_boundary(c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[
-        ("bench_select_boundary", bench_select_boundary),
-        ("bench_ldexp_boundary", bench_ldexp_boundary),
-        ("bench_float_power_boundary", bench_float_power_boundary),
-        (
-            "bench_logaddexp2_scalar_boundary",
-            bench_logaddexp2_scalar_boundary,
-        ),
-        (
-            "bench_heaviside_scalar_boundary",
-            bench_heaviside_scalar_boundary,
-        ),
-        ("bench_frexp_boundary", bench_frexp_boundary),
-        ("bench_modf_boundary", bench_modf_boundary),
-        ("bench_putmask_boundary", bench_putmask_boundary),
-        ("bench_shift_boundary", bench_shift_boundary),
-        (
-            "bench_column_interleave_boundary",
-            bench_column_interleave_boundary,
-        ),
-        ("bench_vstack_1d_boundary", bench_vstack_1d_boundary),
-        ("bench_concat_hstack_boundary", bench_concat_hstack_boundary),
-        (
-            "bench_indices_construction_boundary",
-            bench_indices_construction_boundary,
-        ),
-        ("bench_char_ascii_boundary", bench_char_ascii_boundary),
-        (
-            "bench_average_nansum_axis_boundary",
-            bench_average_nansum_axis_boundary,
-        ),
-        ("bench_histogram_boundary", bench_histogram_boundary),
-        ("bench_setops_boundary", bench_setops_boundary),
-        (
-            "bench_divide_fe_hazard_serial",
-            bench_divide_fe_hazard_serial,
-        ),
-        (
-            "bench_divide_fe_hazard_parallel",
-            bench_divide_fe_hazard_parallel,
-        ),
-        (
-            "bench_divide_fe_hazard_fused_serial",
-            bench_divide_fe_hazard_fused_serial,
-        ),
-        (
-            "bench_divide_fe_hazard_fused_parallel",
-            bench_divide_fe_hazard_fused_parallel,
-        ),
-        (
-            "bench_divide_vs_numpy_incumbent",
-            bench_divide_vs_numpy_incumbent,
-        ),
-        (
-            "bench_divide_vs_numpy_incumbent_parallel",
-            bench_divide_vs_numpy_incumbent_parallel,
-        ),
-        (
-            "bench_percall_floor_stage_attribution",
-            bench_percall_floor_stage_attribution,
-        ),
-        (
-            "bench_binary_route_overhead_vs_numpy",
-            bench_binary_route_overhead_vs_numpy,
-        ),
-        (
-            "bench_route_floor_size_sweep_vs_numpy",
-            bench_route_floor_size_sweep_vs_numpy,
-        ),
-        (
-            "bench_percall_floor_across_ops_vs_numpy",
-            bench_percall_floor_across_ops_vs_numpy,
-        ),
-    ]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_elementwise.rs"),
+        &[
+            ("bench_select_boundary", bench_select_boundary),
+            ("bench_ldexp_boundary", bench_ldexp_boundary),
+            ("bench_float_power_boundary", bench_float_power_boundary),
+            (
+                "bench_logaddexp2_scalar_boundary",
+                bench_logaddexp2_scalar_boundary,
+            ),
+            (
+                "bench_heaviside_scalar_boundary",
+                bench_heaviside_scalar_boundary,
+            ),
+            ("bench_frexp_boundary", bench_frexp_boundary),
+            ("bench_modf_boundary", bench_modf_boundary),
+            ("bench_putmask_boundary", bench_putmask_boundary),
+            ("bench_shift_boundary", bench_shift_boundary),
+            (
+                "bench_column_interleave_boundary",
+                bench_column_interleave_boundary,
+            ),
+            ("bench_vstack_1d_boundary", bench_vstack_1d_boundary),
+            ("bench_concat_hstack_boundary", bench_concat_hstack_boundary),
+            (
+                "bench_indices_construction_boundary",
+                bench_indices_construction_boundary,
+            ),
+            ("bench_char_ascii_boundary", bench_char_ascii_boundary),
+            (
+                "bench_average_nansum_axis_boundary",
+                bench_average_nansum_axis_boundary,
+            ),
+            ("bench_histogram_boundary", bench_histogram_boundary),
+            ("bench_setops_boundary", bench_setops_boundary),
+            (
+                "bench_divide_fe_hazard_serial",
+                bench_divide_fe_hazard_serial,
+            ),
+            (
+                "bench_divide_fe_hazard_parallel",
+                bench_divide_fe_hazard_parallel,
+            ),
+            (
+                "bench_divide_fe_hazard_fused_serial",
+                bench_divide_fe_hazard_fused_serial,
+            ),
+            (
+                "bench_divide_fe_hazard_fused_parallel",
+                bench_divide_fe_hazard_fused_parallel,
+            ),
+            (
+                "bench_divide_vs_numpy_incumbent",
+                bench_divide_vs_numpy_incumbent,
+            ),
+            (
+                "bench_divide_vs_numpy_incumbent_parallel",
+                bench_divide_vs_numpy_incumbent_parallel,
+            ),
+            (
+                "bench_percall_floor_stage_attribution",
+                bench_percall_floor_stage_attribution,
+            ),
+            (
+                "bench_binary_route_overhead_vs_numpy",
+                bench_binary_route_overhead_vs_numpy,
+            ),
+            (
+                "bench_route_floor_size_sweep_vs_numpy",
+                bench_route_floor_size_sweep_vs_numpy,
+            ),
+            (
+                "bench_percall_floor_across_ops_vs_numpy",
+                bench_percall_floor_across_ops_vs_numpy,
+            ),
+        ],
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -61,5 +61,8 @@ v = rng.integers(-100, 100, 256).astype(np.int64)\n";
 }
 
 fn main() {
-    common::gated_main(&[("bench_int_convolve_boundary", bench_int_convolve_boundary)]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_int_convolve.rs"),
+        &[("bench_int_convolve_boundary", bench_int_convolve_boundary)],
+    );
 }

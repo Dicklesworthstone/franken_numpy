@@ -358,5 +358,8 @@ fn bench_lstsq_tsqr_tall_skinny(_c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[("bench_lstsq_tsqr_tall_skinny", bench_lstsq_tsqr_tall_skinny)]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_linalg.rs"),
+        &[("bench_lstsq_tsqr_tall_skinny", bench_lstsq_tsqr_tall_skinny)],
+    );
 }

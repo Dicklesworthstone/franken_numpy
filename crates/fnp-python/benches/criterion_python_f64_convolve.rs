@@ -66,5 +66,8 @@ v = rng.standard_normal(256).astype(np.float64)\n";
 }
 
 fn main() {
-    common::gated_main(&[("bench_f64_convolve_boundary", bench_f64_convolve_boundary)]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_f64_convolve.rs"),
+        &[("bench_f64_convolve_boundary", bench_f64_convolve_boundary)],
+    );
 }

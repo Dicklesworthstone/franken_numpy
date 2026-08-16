@@ -833,36 +833,39 @@ fn bench_ediff1d_boundary(c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[
-        ("bench_int32_unary_boundary", bench_int32_unary_boundary),
-        (
-            "bench_narrow_int_unary_boundary",
-            bench_narrow_int_unary_boundary,
-        ),
-        (
-            "bench_temporal_astype_boundary",
-            bench_temporal_astype_boundary,
-        ),
-        (
-            "bench_timedelta_addsub_boundary",
-            bench_timedelta_addsub_boundary,
-        ),
-        ("bench_remainder_mod_boundary", bench_remainder_mod_boundary),
-        (
-            "bench_max_min_reduction_boundary",
-            bench_max_min_reduction_boundary,
-        ),
-        ("bench_ptp_f32_axis_boundary", bench_ptp_f32_axis_boundary),
-        ("bench_ptp_axis0_boundary", bench_ptp_axis0_boundary),
-        (
-            "bench_bool_minmax_reduction_boundary",
-            bench_bool_minmax_reduction_boundary,
-        ),
-        (
-            "bench_prod_reduction_boundary",
-            bench_prod_reduction_boundary,
-        ),
-        ("bench_diff_1d_boundary", bench_diff_1d_boundary),
-        ("bench_ediff1d_boundary", bench_ediff1d_boundary),
-    ]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_unaryred.rs"),
+        &[
+            ("bench_int32_unary_boundary", bench_int32_unary_boundary),
+            (
+                "bench_narrow_int_unary_boundary",
+                bench_narrow_int_unary_boundary,
+            ),
+            (
+                "bench_temporal_astype_boundary",
+                bench_temporal_astype_boundary,
+            ),
+            (
+                "bench_timedelta_addsub_boundary",
+                bench_timedelta_addsub_boundary,
+            ),
+            ("bench_remainder_mod_boundary", bench_remainder_mod_boundary),
+            (
+                "bench_max_min_reduction_boundary",
+                bench_max_min_reduction_boundary,
+            ),
+            ("bench_ptp_f32_axis_boundary", bench_ptp_f32_axis_boundary),
+            ("bench_ptp_axis0_boundary", bench_ptp_axis0_boundary),
+            (
+                "bench_bool_minmax_reduction_boundary",
+                bench_bool_minmax_reduction_boundary,
+            ),
+            (
+                "bench_prod_reduction_boundary",
+                bench_prod_reduction_boundary,
+            ),
+            ("bench_diff_1d_boundary", bench_diff_1d_boundary),
+            ("bench_ediff1d_boundary", bench_ediff1d_boundary),
+        ],
+    );
 }

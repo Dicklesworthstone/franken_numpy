@@ -834,25 +834,28 @@ idx = rng.integers(0, 4096, 2048).astype(np.int64)\n";
 }
 
 fn main() {
-    common::gated_main(&[
-        ("bench_f16_ops_boundary", bench_f16_ops_boundary),
-        ("bench_f16_setops_boundary", bench_f16_setops_boundary),
-        ("bench_tile_boundary", bench_tile_boundary),
-        ("bench_digitize_boundary", bench_digitize_boundary),
-        ("bench_bincount_boundary", bench_bincount_boundary),
-        ("bench_searchsorted_boundary", bench_searchsorted_boundary),
-        ("bench_repeat_axis_boundary", bench_repeat_axis_boundary),
-        ("bench_repeat_array_boundary", bench_repeat_array_boundary),
-        ("bench_take_dtype_boundary", bench_take_dtype_boundary),
-        ("bench_take_boundary", bench_take_boundary),
-        (
-            "bench_take_along_axis_c64_boundary",
-            bench_take_along_axis_c64_boundary,
-        ),
-        (
-            "bench_take_along_axis_boundary",
-            bench_take_along_axis_boundary,
-        ),
-        ("bench_take_axis_boundary", bench_take_axis_boundary),
-    ]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_misc1.rs"),
+        &[
+            ("bench_f16_ops_boundary", bench_f16_ops_boundary),
+            ("bench_f16_setops_boundary", bench_f16_setops_boundary),
+            ("bench_tile_boundary", bench_tile_boundary),
+            ("bench_digitize_boundary", bench_digitize_boundary),
+            ("bench_bincount_boundary", bench_bincount_boundary),
+            ("bench_searchsorted_boundary", bench_searchsorted_boundary),
+            ("bench_repeat_axis_boundary", bench_repeat_axis_boundary),
+            ("bench_repeat_array_boundary", bench_repeat_array_boundary),
+            ("bench_take_dtype_boundary", bench_take_dtype_boundary),
+            ("bench_take_boundary", bench_take_boundary),
+            (
+                "bench_take_along_axis_c64_boundary",
+                bench_take_along_axis_c64_boundary,
+            ),
+            (
+                "bench_take_along_axis_boundary",
+                bench_take_along_axis_boundary,
+            ),
+            ("bench_take_axis_boundary", bench_take_axis_boundary),
+        ],
+    );
 }

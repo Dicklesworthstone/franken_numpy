@@ -66,5 +66,8 @@ B32 = B64.astype(np.float32)\n";
 }
 
 fn main() {
-    common::gated_main(&[("bench_float_isin_boundary", bench_float_isin_boundary)]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_isin.rs"),
+        &[("bench_float_isin_boundary", bench_float_isin_boundary)],
+    );
 }

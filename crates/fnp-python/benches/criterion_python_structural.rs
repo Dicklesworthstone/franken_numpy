@@ -131,8 +131,11 @@ idx = np.sort(rng.choice(8_000_000, size=2_000_000, replace=False))\n";
 }
 
 fn main() {
-    common::gated_main(&[
-        ("bench_insert_block_boundary", bench_insert_block_boundary),
-        ("bench_delete_mask_boundary", bench_delete_mask_boundary),
-    ]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_structural.rs"),
+        &[
+            ("bench_insert_block_boundary", bench_insert_block_boundary),
+            ("bench_delete_mask_boundary", bench_delete_mask_boundary),
+        ],
+    );
 }

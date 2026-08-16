@@ -2510,34 +2510,37 @@ xi = rng.integers(-1000, 1000, 8_000_000).astype(np.int32)\n";
 /// final summary. Replaces the former `gated_benches!` macro; the target list is
 /// the same set of group functions in the same order.
 fn main() {
-    common::gated_main(&[
-        ("bench_pad_edge_boundary", bench_pad_edge_boundary),
-        ("bench_pad_wrap_boundary", bench_pad_wrap_boundary),
-        ("bench_pad_reflect_boundary", bench_pad_reflect_boundary),
-        ("bench_kron_boundary", bench_kron_boundary),
-        ("bench_nan_to_num_boundary", bench_nan_to_num_boundary),
-        ("bench_cross_boundary", bench_cross_boundary),
-        ("bench_around_boundary", bench_around_boundary),
-        ("bench_where_boundary", bench_where_boundary),
-        ("bench_clip_boundary", bench_clip_boundary),
-        (
-            "bench_unary_parallel_boundary",
-            bench_unary_parallel_boundary,
-        ),
-        (
-            "bench_flat_sort_dtype_boundary",
-            bench_flat_sort_dtype_boundary,
-        ),
-        (
-            "bench_int32_flat_sort_small_pool_regate",
-            bench_int32_flat_sort_small_pool_regate,
-        ),
-        ("bench_compress_boundary", bench_compress_boundary),
-        (
-            "bench_roll_2d_multi_dtype_boundary",
-            bench_roll_2d_multi_dtype_boundary,
-        ),
-        ("bench_einsum_boundary", bench_einsum_boundary),
-        ("bench_linalg_boundary", bench_linalg_boundary),
-    ]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_surface.rs"),
+        &[
+            ("bench_pad_edge_boundary", bench_pad_edge_boundary),
+            ("bench_pad_wrap_boundary", bench_pad_wrap_boundary),
+            ("bench_pad_reflect_boundary", bench_pad_reflect_boundary),
+            ("bench_kron_boundary", bench_kron_boundary),
+            ("bench_nan_to_num_boundary", bench_nan_to_num_boundary),
+            ("bench_cross_boundary", bench_cross_boundary),
+            ("bench_around_boundary", bench_around_boundary),
+            ("bench_where_boundary", bench_where_boundary),
+            ("bench_clip_boundary", bench_clip_boundary),
+            (
+                "bench_unary_parallel_boundary",
+                bench_unary_parallel_boundary,
+            ),
+            (
+                "bench_flat_sort_dtype_boundary",
+                bench_flat_sort_dtype_boundary,
+            ),
+            (
+                "bench_int32_flat_sort_small_pool_regate",
+                bench_int32_flat_sort_small_pool_regate,
+            ),
+            ("bench_compress_boundary", bench_compress_boundary),
+            (
+                "bench_roll_2d_multi_dtype_boundary",
+                bench_roll_2d_multi_dtype_boundary,
+            ),
+            ("bench_einsum_boundary", bench_einsum_boundary),
+            ("bench_linalg_boundary", bench_linalg_boundary),
+        ],
+    );
 }

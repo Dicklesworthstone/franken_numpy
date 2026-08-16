@@ -111,5 +111,8 @@ fn bench_unique_medium_boundary(c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[("bench_unique_medium_boundary", bench_unique_medium_boundary)]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_unique_medium.rs"),
+        &[("bench_unique_medium_boundary", bench_unique_medium_boundary)],
+    );
 }

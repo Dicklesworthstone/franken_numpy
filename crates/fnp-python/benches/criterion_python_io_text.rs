@@ -677,19 +677,22 @@ fn bench_genfromtxt_text_boundary(c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[
-        ("bench_loadtxt_text_boundary", bench_loadtxt_text_boundary),
-        (
-            "bench_loadtxt_integer_text_boundary",
-            bench_loadtxt_integer_text_boundary,
-        ),
-        (
-            "bench_loadtxt_bool_text_boundary",
-            bench_loadtxt_bool_text_boundary,
-        ),
-        (
-            "bench_genfromtxt_text_boundary",
-            bench_genfromtxt_text_boundary,
-        ),
-    ]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_io_text.rs"),
+        &[
+            ("bench_loadtxt_text_boundary", bench_loadtxt_text_boundary),
+            (
+                "bench_loadtxt_integer_text_boundary",
+                bench_loadtxt_integer_text_boundary,
+            ),
+            (
+                "bench_loadtxt_bool_text_boundary",
+                bench_loadtxt_bool_text_boundary,
+            ),
+            (
+                "bench_genfromtxt_text_boundary",
+                bench_genfromtxt_text_boundary,
+            ),
+        ],
+    );
 }

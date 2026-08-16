@@ -53,5 +53,8 @@ fn bench_sqrt_input_extraction(c: &mut Criterion) {
 }
 
 fn main() {
-    common::gated_main(&[("bench_sqrt_input_extraction", bench_sqrt_input_extraction)]);
+    common::gated_main_with_source(
+        include_str!("criterion_python_extract.rs"),
+        &[("bench_sqrt_input_extraction", bench_sqrt_input_extraction)],
+    );
 }
