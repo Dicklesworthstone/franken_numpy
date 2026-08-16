@@ -9719,6 +9719,44 @@ fn logaddexp2_f32(x: f32, y: f32) -> f32 {
 // 6=remainder, 7=copysign, 8=heaviside, 9=nextafter, 10=divide, 11=floor_divide (fmod/remainder/
 // divide/floor_divide defer on a zero divisor). Same-shape C-contiguous f16 only (no broadcast);
 // other dtypes / shapes / small defer.
+/// Is this operand a float16 ndarray? The shared decline test for every f16 probe.
+///
+/// This predicate was written out as an identical local closure at 13 sites — both
+/// f16 binary probes and eleven f16 matmul/einsum probes — so a fix to its shape had
+/// to be made thirteen times or not at all. It is one function now.
+///
+/// TWO THINGS ARE DIFFERENT FROM THE COPIES IT REPLACES, and both are decline-path
+/// cost on probes that decline far more often than they engage:
+///
+/// 1. `itemsize` is read FIRST because it is the DISCRIMINATING field. `kind` is not:
+///    f64, f32 and f16 all report `'f'`, so testing `kind` first cannot reject the
+///    f64/f32 operands these probes overwhelmingly see, while `itemsize == 2` rejects
+///    every one of them in a single Python operation.
+///
+/// 2. `kind` is read as a `char`, not a `String`. The old form heap-allocated to
+///    compare one byte, on a path taken by every f64 binary ufunc call.
+///
+/// `deadlock-audit-bpxn6` made exactly these two changes to `try_zerocopy_complex_binary`
+/// and measured a 1.353519x worst bound on its decline path.
+///
+/// BOTH CONDITIONS STILL HOLD, and the `kind` test is what keeps **int16** out:
+/// `itemsize == 2` alone is not sufficient, and reinterpreting an int16 buffer as f16
+/// would return silently wrong values rather than raise.
+///
+/// `is_ok_and` rather than `?` on the `kind` read, matching the complex probe: a dtype
+/// whose `kind` is not a single character has no f16 route either, so it must DECLINE
+/// rather than raise.
+fn dtype_is_f16(v: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let dt = v.getattr("dtype")?;
+    if dt.getattr("itemsize")?.extract::<usize>()? != 2 {
+        return Ok(false);
+    }
+    Ok(dt
+        .getattr("kind")
+        .and_then(|kind| kind.extract::<char>())
+        .is_ok_and(|kind| kind == 'f'))
+}
+
 fn try_zerocopy_f16_binary_widen(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -9739,11 +9777,7 @@ fn try_zerocopy_f16_binary_widen(
     if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(a)? || !is_f16(b)? {
         return Ok(None);
     }
@@ -11011,11 +11045,7 @@ fn try_zerocopy_f16_compare(
     if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(a)? || !is_f16(b)? {
         return Ok(None);
     }
@@ -68373,9 +68403,7 @@ fn f16_dtype_ok(arr: &Bound<'_, PyAny>, nd: &Bound<'_, PyAny>) -> PyResult<bool>
     if !arr.is_exact_instance(nd) {
         return Ok(false);
     }
-    let dt = arr.getattr("dtype")?;
-    Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-        && dt.getattr("itemsize")?.extract::<usize>()? == 2)
+    dtype_is_f16(arr)
 }
 
 fn try_native_f16_unique(
@@ -87217,11 +87245,7 @@ fn try_native_f16_matmul(
     if !is_contig(x1)? || !is_contig(x2)? {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(x1)? || !is_f16(x2)? {
         return Ok(None);
     }
@@ -87748,11 +87772,7 @@ fn try_native_f16_batched_matmul(
     if !is_contig(x1)? || !is_contig(x2)? {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(x1)? || !is_f16(x2)? {
         return Ok(None);
     }
@@ -88153,11 +88173,7 @@ fn try_native_f16_broadcast_matmul(
     if !is_contig(x1)? || !is_contig(x2)? {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(x1)? || !is_f16(x2)? {
         return Ok(None);
     }
@@ -88343,11 +88359,7 @@ fn try_native_f16_einsum_matmul(
     if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(&x1)? || !is_f16(&x2)? {
         return Ok(None);
     }
@@ -88535,11 +88547,7 @@ fn try_native_f16_einsum_matmul_transposed(
     if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(&x1)? || !is_f16(&x2)? {
         return Ok(None);
     }
@@ -88759,11 +88767,7 @@ fn try_native_f16_einsum_matmul_gram(
     if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(&x1)? || !is_f16(&x2)? {
         return Ok(None);
     }
@@ -88909,11 +88913,7 @@ fn try_native_f16_einsum_full_contraction(
     if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(&x1)? || !is_f16(&x2)? {
         return Ok(None);
     }
@@ -89052,11 +89052,7 @@ fn try_native_f16_einsum_matmul_batched(
     if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(&x1)? || !is_f16(&x2)? {
         return Ok(None);
     }
@@ -89257,11 +89253,7 @@ fn try_native_f16_einsum_transposed_batched(
     if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(&x1)? || !is_f16(&x2)? {
         return Ok(None);
     }
@@ -89454,11 +89446,7 @@ fn try_native_f16_einsum_gram_batched(
     if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(&x1)? || !is_f16(&x2)? {
         return Ok(None);
     }
@@ -89608,11 +89596,7 @@ fn try_native_f16_einsum_elementwise(
     if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let is_f16 = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = v.getattr("dtype")?;
-        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
-            && dt.getattr("itemsize")?.extract::<usize>()? == 2)
-    };
+    let is_f16 = dtype_is_f16;
     if !is_f16(&x1)? || !is_f16(&x2)? {
         return Ok(None);
     }
@@ -110034,6 +110018,62 @@ mod tests {
             Ok(())
         })
         .expect("second attach must reuse the populated cell");
+    }
+
+    /// NEGATIVE CASE for `dtype_is_f16` reordering `itemsize` ahead of `kind`.
+    ///
+    /// int16 is the operand that makes the ordering non-trivial: it PASSES the new
+    /// leading `itemsize == 2` gate, so the `kind` test is the only thing standing
+    /// between it and the f16 widening kernel. Drop that test — the obvious way to
+    /// "simplify" a predicate whose first condition now looks decisive — and an
+    /// int16 buffer gets reinterpreted as float16, widened, multiplied and narrowed.
+    /// That returns silently wrong VALUES rather than raising, so nothing but a byte
+    /// comparison catches it.
+    ///
+    /// Sized at the f16 parallel minimum on purpose: below `1 << 20` the probe
+    /// declines on size before the dtype test can matter, and the bug would hide.
+    #[test]
+    fn f16_probe_rejects_int16_which_also_has_itemsize_two() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_f16_probe_int16")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let n = 1_usize << 20;
+
+            // int16: itemsize 2 (passes the leading gate), kind 'i' (must decline).
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "int16")?;
+            let ints = numpy.call_method("arange", (n,), Some(&kwargs))?;
+            let ours = module.getattr("multiply")?.call1((&ints, &ints))?;
+            let theirs = numpy.call_method1("multiply", (&ints, &ints))?;
+            assert_eq!(
+                ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "int16 has itemsize 2 and must NOT be routed through the f16 widening kernel"
+            );
+            assert_eq!(
+                repr_string(&ours.getattr("dtype")?),
+                repr_string(&theirs.getattr("dtype")?),
+                "int16 multiply must keep numpy's int16 result dtype"
+            );
+
+            // POSITIVE CONTROL: real f16 at the same size must still engage and stay
+            // byte-identical, so the reorder is not passing by declining everything.
+            let f16_kwargs = PyDict::new(py);
+            f16_kwargs.set_item("dtype", "float16")?;
+            let halves = numpy.call_method("arange", (n,), Some(&f16_kwargs))?;
+            let ours_f16 = module.getattr("multiply")?.call1((&halves, &halves))?;
+            let theirs_f16 = numpy.call_method1("multiply", (&halves, &halves))?;
+            assert_eq!(
+                ours_f16.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                theirs_f16.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "float16 multiply must remain byte-identical through the widening kernel"
+            );
+            Ok(())
+        });
     }
 
     /// ENGAGEMENT PROOF for the import removal. Byte parity cannot see this lever at
