@@ -21,6 +21,72 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - MAXIMUM ARMS ON A QUIET HOST: parallel 2.258922x and the SERIAL ARM FLIPS from a decidable LOSS to a decidable WIN (1.226996x) - which softens my own hzl1w correction; plus an UNEXPLAINED incumbent anomaly (`deadlock-audit-48by6`, `deadlock-audit-hzl1w`)
+
+`RedLynx`. Discharges the retry predicate on the allocation-corrected maximum arms row, which
+banked 1.664906x as a FLOOR because it was taken at loadavg 75. Stability tested first: 1-min 9.10
+and 5-min 15.26, both far below the ~32 saturation threshold established for this box, so the
+parallel arm is fully served at either reading.
+
+**Campaign result class:** incumbent-win (both replicas) + correction to my own conclusion
+
+```
+bench_elf_sha256=af5200ea72988280fc1c56e2d8e617c9803f938783ab4e8be18192f6a6c44d91
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=2^22
+LOADAVG 1min 9.59 before -> 15.77 after; 5min 15.06 -> 16.17 (the rise is partly this bench)
+allocation=neither_arm_allocates, arms_are_replicas_not_the_shipped_route=true
+
+  arm=parallel_native ratio=2.258922 ci95=[2.184629,2.306320] DECIDABLE_WIN worst=2.184629
+      numpy_ns=4947948  fnp_ns=2182599
+      nulls incumbent [0.989991,1.016962] candidate [0.980406,1.020071]  both straddle unity
+  arm=serial_native   ratio=1.226996 ci95=[1.214239,1.244952] DECIDABLE_WIN worst=1.214239
+      numpy_ns=4610579  fnp_ns=3757260
+      nulls incumbent [0.987115,1.012614] candidate [0.988989,1.012666]  both straddle unity
+```
+
+**THE FLOOR WAS INDEED A FLOOR.** The parallel arm reads 2.258922x here against 1.664906x at
+loadavg 75 — 36% higher, exactly the direction that row predicted when it labelled its own figure
+understated.
+
+**THE SERIAL ARM FLIPS SIGN, AND THAT CORRECTS SOMETHING I WROTE.** At loadavg 75 it read
+0.935461 — a DECIDABLE_REGRESSION — and I concluded that "adopting the hzl1w recommendation, drop
+the rayon fan-out and keep the serial native kernel, would replace a decidable win with a decidable
+loss HERE." On a quiet host the serial replica **wins** at 1.226996x, decidably. So the correct
+statement is weaker than mine: dropping the fan-out would replace a 2.26x win with a 1.23x win —
+still clearly worse, but **not** a loss. My earlier sentence was true only of a loaded host and I
+labelled it "HERE" without realising how load-conditional it was.
+
+**BOTH OF OUR ARMS GAINED ~15% FROM THE QUIET HOST, INCLUDING THE SERIAL ONE** (4470575 ->
+3757260 ns, -16%; parallel 2560894 -> 2182599 ns, -15%). A single-threaded replica should not be
+core-starved, so this is not core contention — at 2^22 f64 these arms stream 32 MB buffers, and
+memory bandwidth is shared with whatever else runs. Contention reaches serial arms too when the
+working set is large, which is a useful counterexample to reading "serial" as "contention-immune".
+
+**AN UNEXPLAINED ANOMALY, FLAGGED RATHER THAN SMOOTHED: NumPy's OWN ARM GOT SLOWER ON THE QUIET
+HOST.** 4232670 -> 4947948 ns on the parallel row (+17%) and 4111546 -> 4610579 ns on the serial
+row (+12%), consistently across both rows of this run. Everything else moved the expected way. A
+plausible lead — not a conclusion — is candidate-induced interference inside the interleaved
+ABBAABBA schedule: our arm runs immediately adjacent to NumPy's, and when our arm is FAST it
+saturates memory bandwidth harder per unit time, leaving caches and bandwidth in a worse state for
+the NumPy sample that follows. If that is the mechanism, the ratio is mildly self-flattering
+whenever our arm speeds up, because we degrade the incumbent we are measured against. **This is a
+lead for a designed test, not a correction to the numbers**, and the ratios above are reported as
+measured.
+
+**WHAT THIS DOES NOT CHANGE.** These are bench-local replicas, not the shipped route — the row says
+so in its own output — and the shipped `maximum` reads 0.907848 on this host. Nothing here says
+`fnp.maximum` beats `numpy.maximum` end to end.
+
+RETRY PREDICATE: (1) The hzl1w decision now needs the two options measured on the SHIPPED route in
+one binary, not on replicas; both replica arms win when quiet, so the replica comparison no longer
+distinguishes a loss from a smaller win. (2) Test the interference hypothesis directly — run the
+incumbent arm alone in a separate invocation and compare its median with the interleaved one; if
+NumPy is faster alone, every ratio in this ledger taken with a bandwidth-heavy candidate is
+slightly optimistic. (3) Do not quote 1.664906x for the parallel arm; it is superseded by
+2.258922x with a worst bound of 2.184629x. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - THE REMAINDER POINT ESTIMATE IS PINNED AT 6.97x: load 33 and load 18 agree to 0.4%, the contention effect SATURATES below ~half the thread count, the 8.037x from the unrecoverable ELF is NOT reproduced - and my own "null-ratio as contention detector" is REFUTED (`deadlock-audit-322j4`, `deadlock-audit-ei9jz`)
 
 `RedLynx`. Certified in a window I tested for stability myself: 1-min 19.85 against 5-min 21.89,
