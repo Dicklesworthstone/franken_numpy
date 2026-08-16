@@ -1273,6 +1273,10 @@ fn main() {
                 bench_percall_floor_partition,
             ),
             (
+                "bench_divide_accumulate_isolation_vs_numpy",
+                bench_divide_accumulate_isolation_vs_numpy,
+            ),
+            (
                 "bench_delegation_kwargs_shape",
                 bench_delegation_kwargs_shape,
             ),
@@ -2732,6 +2736,185 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
             wrapper_residual_ns / whole_ns,
             numpy_ns / whole_ns,
             whole_ns / numpy_ns,
+        );
+    });
+}
+
+// Does the f64 divide deficit come from the NORMALITY ACCUMULATE or from our divide
+// CODEGEN? (`deadlock-audit-0ppym`)
+//
+// WHAT IS ALREADY DECIDED, and why this group is the next question rather than a
+// repeat. On thinkstation1 at n=2^20, `multiply` — which shares every route stage
+// with `divide` by construction and computes NO hazard scan — reads 0.965590 against
+// NumPy while `divide` reads 0.845461. Divide's excess over NumPy is 9.52x
+// multiply's, and the route sweep shows `excess_ns` roughly constant from 2^8 to
+// 2^24, reaching parity by 2^24. So the wrapper route is exonerated and ~84 us of
+// divide's ~93 us deficit at 2^20 is divide-specific.
+//
+// WHAT IS NOT DECIDED. That subtraction is across two DIFFERENT ops, so it cannot
+// separate the accumulate from our divide codegen. `bench_divide_fe_hazard_serial`
+// and `bench_divide_fe_hazard_fused_serial` compare our-before against our-after —
+// self-speedup — and structurally cannot settle it either. This group puts BOTH
+// replica shapes against the INCUMBENT in one invocation:
+//
+//   `divide_former_serial` writes quotients and accumulates nothing.
+//   `divide_fused_serial`  is the replica of the shipped arm, accumulating the
+//                          normality flag beside the divide.
+//
+// If the accumulate-free arm lands near multiply's 0.9656 the accumulate is the
+// cost and `deadlock-audit-vqxoa`'s "close to free" is refuted against the
+// incumbent. If it still reads ~0.845 the accumulate is innocent and the cost is
+// our divide codegen — a different lever.
+//
+// NEITHER ARM ALLOCATES, which is the whole reason this is a fair kernel
+// comparison. The incumbent is given a preallocated `out=` array so NumPy does not
+// allocate either, and both replicas write into a preallocated Vec. Comparing an
+// in-place Rust loop against an allocating `numpy.divide(a, b)` would have flattered
+// us by the cost of one 8 MB buffer, which at this size is not small.
+//
+// THIS ARM MUST NEVER SHIP. `divide_former_serial` has no FE-hazard deferral;
+// routing it in production would reintroduce the six divergence rows
+// `deadlock-audit-2nmd1` closed, because NumPy also raises a RuntimeWarning we
+// cannot, and bit-identical values are not parity. It exists here to attribute a
+// cost, not to be adopted.
+fn bench_divide_accumulate_isolation_vs_numpy(_c: &mut Criterion) {
+    assert_divide_hazard_replica_matches_contract();
+    let n = DIVIDE_SERIAL_N;
+    let (a_vec, b_vec) = divide_hazard_free_operands(n);
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        // The SAME generator the Rust replicas use, so both sides divide identical
+        // operands and the checksums are comparable rather than merely similar.
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_py = locals.get_item("a").expect("a operand");
+        let b_py = locals.get_item("b").expect("b operand");
+        let out_py = locals.get_item("out").expect("out buffer");
+        let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &out_py).expect("bind out");
+        let numpy_divide = numpy.getattr("divide").expect("numpy.divide");
+
+        // Parity gate before any timing: if a replica does not reproduce NumPy's
+        // quotients bit for bit, the ratio it produces is meaningless.
+        let numpy_result = numpy_divide
+            .call(&args, Some(&out_kwargs))
+            .expect("numpy.divide probe");
+        let numpy_sum = numpy_divide_checksum(&numpy_result, n);
+        let mut probe_out = vec![0.0_f64; n];
+        divide_former_serial(&a_vec, &b_vec, &mut probe_out);
+        assert_eq!(
+            divide_checksum(&probe_out),
+            numpy_sum,
+            "the accumulate-free replica does not reproduce numpy.divide bit for bit"
+        );
+        let fused_hazard = divide_fused_serial(&a_vec, &b_vec, &mut probe_out);
+        assert!(
+            !fused_hazard,
+            "these operands must be hazard-free or the fused arm takes its rare \
+             second pass and the comparison measures a different branch"
+        );
+        assert_eq!(
+            divide_checksum(&probe_out),
+            numpy_sum,
+            "the fused replica does not reproduce numpy.divide bit for bit"
+        );
+
+        let mut former_out = vec![0.0_f64; n];
+        let mut fused_out = vec![0.0_f64; n];
+
+        let incumbent_former = || {
+            let started = Instant::now();
+            let result = numpy_divide
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.divide call");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let candidate_former = || {
+            let started = Instant::now();
+            divide_former_serial(&a_vec, &b_vec, &mut former_out);
+            let elapsed = started.elapsed();
+            let checksum = divide_checksum(&former_out);
+            black_box(&former_out);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (former_effect, _in_null, _cand_null) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_accumulate_free_vs_numpy",
+            incumbent_former,
+            candidate_former,
+        );
+
+        let incumbent_fused = || {
+            let started = Instant::now();
+            let result = numpy_divide
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.divide call");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let candidate_fused = || {
+            let started = Instant::now();
+            let hazard = divide_fused_serial(&a_vec, &b_vec, &mut fused_out);
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(&fused_out);
+            black_box(&fused_out);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (fused_effect, _in_null2, _cand_null2) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_fused_accumulate_vs_numpy",
+            incumbent_fused,
+            candidate_fused,
+        );
+
+        // The attribution: how much of the divide deficit the accumulate carries.
+        // Reported as a difference of two ratios measured against the SAME
+        // incumbent in the SAME invocation, which is the only way these two are
+        // comparable — quoting either against a remembered number would not be.
+        let accumulate_cost_ns = fused_effect.arm_b_median_ns - former_effect.arm_b_median_ns;
+        println!(
+            "DIVIDE_ACCUMULATE_ISOLATION n={n} numpy_version={numpy_version} worker={} \
+             harness=common::run_dual_null_median_ci_contract \
+             arms_are_preallocated_no_alloc_either_side=true \
+             accumulate_free_ratio={:.6} accumulate_free_ci95=[{:.6},{:.6}] \
+             fused_ratio={:.6} fused_ci95=[{:.6},{:.6}] \
+             numpy_ns={:.1} accumulate_free_ns={:.1} fused_ns={:.1} \
+             accumulate_cost_ns={accumulate_cost_ns:.1} \
+             multiply_same_route_reference_ratio=0.965590 \
+             shipped_route_divide_reference_ratio=0.845461",
+            measurement_worker(),
+            former_effect.ratio_median,
+            former_effect.ratio_ci_low,
+            former_effect.ratio_ci_high,
+            fused_effect.ratio_median,
+            fused_effect.ratio_ci_low,
+            fused_effect.ratio_ci_high,
+            former_effect.arm_a_median_ns,
+            former_effect.arm_b_median_ns,
+            fused_effect.arm_b_median_ns,
         );
     });
 }
