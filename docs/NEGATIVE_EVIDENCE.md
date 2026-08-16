@@ -24,6 +24,74 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - TESTED AND NOT CONFIRMED: our arm does NOT measurably slow the incumbent it is paired against - the effect is COMMON-MODE, and the naive test for it is a printing artifact (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. I was asked to quantify a contamination I had confirmed and to say which rows it
+invalidates. **I had not confirmed it, and testing it does not confirm it.** Recording the test rather
+than the assumption, because a contamination this shape would invalidate a large part of this ledger
+and it should not be asserted or dismissed without the numbers.
+
+**Campaign result class:** maintenance-diagnostic (hypothesis tested, not supported)
+
+**LOADAVG, observed:** `11.64/18.02/24.51` - converged, all under ~30. No new build; this is an
+analysis of 58 already-banked row-pairs from this session's saved bench output.
+
+**THE TEST.** Every dual-null contract emits NumPy's median TWICE: once in its own A/A null (numpy
+against numpy) and once in the effect row (numpy against OUR arm). If our arm slowed the incumbent,
+the effect-row figure would sit systematically above the A/A figure. 58 row-pairs were compared.
+
+**RESULT 1 - THE NAIVE TEST IS A PRINTING ARTIFACT AT SMALL n.** The raw comparison shows apparent
+inflations of +33.7%, +26.7%, +25.2% - all on rows whose medians are 0.0003-0.0005 ms. `arm_*_median_ms`
+is printed to FOUR DECIMALS, so one unit of printed resolution at 300 ns is 100 ns, i.e. 20-33%. Every
+large percentage at n<=256 is one print tick. Those cells cannot measure this effect at all, in either
+direction, and the apparent negatives of -17.4% and -19.3% in the same set are the same artifact.
+
+**RESULT 2 - WHERE PRECISION IS ADEQUATE, THE INFLATION IS COMMON-MODE.** Restricting to rows with
+medians >= 0.05 ms (quantisation < 0.2%), both arms move TOGETHER:
+
+```
+row                          incumbent   candidate
+addsweep2 n=2^20              +109.5%     +101.3%
+addsweep2 n=2^24                +6.7%       +3.8%
+sizes multiply n=2^20           +8.9%       +3.7%
+sweep2 multiply n=2^20          -5.8%      +11.0%
+addsweep  n=2^20                +8.3%       -7.1%
+```
+
+Common-mode movement is exactly what the ABBAABBA balanced square exists to cancel, and it is what a
+BUSY HOST looks like - the +109.5%/+101.3% row is the second add sweep, already flagged in this ledger
+as running on a loaded machine (NumPy alone took 676481 ns there against 267722 ns in its sibling).
+
+**RESULT 3 - THE ONLY QUANTITY THAT CAN BIAS A RATIO SCATTERS AROUND ZERO.** A ratio is biased only by
+the DIFFERENCE between the two arms' inflation. Across the ten adequately-resolved rows that difference
+is **mean +1.99 pts, median +2.90 pts, range -16.8 to +15.4** - both signs, no trend.
+
+**RESULT 4 - THE HARDEST CASE FLIPS SIGN WITHIN ONE BENCH.** `bench_divide_accumulate_isolation_vs_numpy`
+has the largest footprint asymmetry in the suite (NumPy writing a preallocated `out=` against a Rust
+replica writing a `Vec`), so it is where a real effect should show most clearly. Its two pairs give
+incumbent-minus-candidate of **-10.7 pts and +11.3 pts** - opposite signs, same bench, same invocation.
+That is noise, not a mechanism.
+
+**WHICH BANKED ROWS THIS INVALIDATES: NONE.** No row is withdrawn on this basis. The ratios were all
+measured with both arms interleaved under identical conditions, which is what the paired design
+guarantees, and no systematic asymmetry was found to undermine that.
+
+**WHAT IT DOES ESTABLISH, and it is a real methodological limit worth having:** an A/A null's ABSOLUTE
+times are NOT a baseline for the effect row's absolute times. The two pairings have different combined
+working sets - the null runs one arm's buffers twice, the effect row runs two different arms' buffers -
+so subtracting across them manufactures a "contamination" that is really a footprint difference. That
+subtraction is precisely the naive test above, and it is the fourth time this session that
+differencing nearly-equal measured quantities across contexts has produced a number that did not
+survive scrutiny.
+
+RETRY PREDICATE: do not re-derive contamination by comparing A/A absolute ns against effect-row
+absolute ns - that comparison is confounded by working-set size and by print resolution below ~0.05 ms.
+If contamination is suspected again, test it directly: run the incumbent ALONE in one invocation and
+interleaved in another, at n >= 2^18 where the printed precision resolves it, on a host whose 1- and
+5-minute loadavg agree. Nothing short of that can distinguish it from the common-mode load this test
+found instead.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - THE INTERFERENCE DISCOUNT DOES NOT TRANSFER: `maximum` replicates at 1.067x but `remainder` shows NONE (0.999024, CI contains unity) - so I WITHDRAW the discount I applied to the remainder row one row ago (`deadlock-audit-48by6`, `deadlock-audit-322j4`)
 
 `RedLynx`. The previous row measured a 6.26% interference factor with `maximum_parallel` shadowing
