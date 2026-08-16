@@ -9146,8 +9146,20 @@ fn zerocopy_f64_isclose_flat<'py>(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.get_type().is(&ndarray_type) || !b.get_type().is(&ndarray_type) {
+    // CACHED TYPE, not a per-call `numpy.getattr("ndarray")` (`deadlock-audit-ei9jz`).
+    // This runs on EVERY call of these routes, and the old form built a fresh `PyString`
+    // from the `&str` and probed the module dict to fetch a type object that never
+    // changes. `is_exact_numpy_ndarray` already holds it in a `PyOnceLock`; the stage was
+    // measured at `getattr_ndarray_ns=100`.
+    //
+    // WHY CACHING A TYPE IS SAFE HERE WHERE CACHING A CALLABLE IS NOT: the failure mode is
+    // FAIL-CLOSED. The handle is used only for an identity test that decides whether to
+    // take the fast path. If it were ever stale the test returns FALSE, the route
+    // DECLINES, and the call delegates to NumPy - the incumbent's own answer, just slower.
+    // A cached bound callable has no such property: it would keep calling a replaced
+    // function and return a wrong-but-plausible array, which is why `cached_numpy` holds
+    // the module and not the callable.
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
         return Ok(None);
     }
     let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
@@ -9226,8 +9238,20 @@ fn zerocopy_f32_isclose_flat<'py>(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.get_type().is(&ndarray_type) || !b.get_type().is(&ndarray_type) {
+    // CACHED TYPE, not a per-call `numpy.getattr("ndarray")` (`deadlock-audit-ei9jz`).
+    // This runs on EVERY call of these routes, and the old form built a fresh `PyString`
+    // from the `&str` and probed the module dict to fetch a type object that never
+    // changes. `is_exact_numpy_ndarray` already holds it in a `PyOnceLock`; the stage was
+    // measured at `getattr_ndarray_ns=100`.
+    //
+    // WHY CACHING A TYPE IS SAFE HERE WHERE CACHING A CALLABLE IS NOT: the failure mode is
+    // FAIL-CLOSED. The handle is used only for an identity test that decides whether to
+    // take the fast path. If it were ever stale the test returns FALSE, the route
+    // DECLINES, and the call delegates to NumPy - the incumbent's own answer, just slower.
+    // A cached bound callable has no such property: it would keep calling a replaced
+    // function and return a wrong-but-plausible array, which is why `cached_numpy` holds
+    // the module and not the callable.
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
         return Ok(None);
     }
     let is_f32 = |o: &Bound<'_, PyAny>| -> PyResult<bool> {
@@ -9680,8 +9704,20 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
     const FLOAT_POWER_PARALLEL_MIN_LEN: usize = 16_384;
 
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.get_type().is(&ndarray_type) || !b.get_type().is(&ndarray_type) {
+    // CACHED TYPE, not a per-call `numpy.getattr("ndarray")` (`deadlock-audit-ei9jz`).
+    // This runs on EVERY call of these routes, and the old form built a fresh `PyString`
+    // from the `&str` and probed the module dict to fetch a type object that never
+    // changes. `is_exact_numpy_ndarray` already holds it in a `PyOnceLock`; the stage was
+    // measured at `getattr_ndarray_ns=100`.
+    //
+    // WHY CACHING A TYPE IS SAFE HERE WHERE CACHING A CALLABLE IS NOT: the failure mode is
+    // FAIL-CLOSED. The handle is used only for an identity test that decides whether to
+    // take the fast path. If it were ever stale the test returns FALSE, the route
+    // DECLINES, and the call delegates to NumPy - the incumbent's own answer, just slower.
+    // A cached bound callable has no such property: it would keep calling a replaced
+    // function and return a wrong-but-plausible array, which is why `cached_numpy` holds
+    // the module and not the callable.
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
         return Ok(None);
     }
     let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
@@ -9731,8 +9767,9 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
     // C-contiguous, which is what `PyBuffer::as_mut_slice` below requires.
     let flat = if let Some(out) = caller_out {
         // Validate the caller's buffer, declining to NumPy on anything unexpected.
-        let ndarray_type_for_out = numpy.getattr("ndarray")?;
-        if !out.is_exact_instance(&ndarray_type_for_out) {
+        // Same cached type, same fail-closed argument: a stale handle declines the
+        // `out=` fast path and falls through to NumPy.
+        if !is_exact_numpy_ndarray(py, out)? {
             return Ok(None);
         }
         let out_char = out
@@ -11501,8 +11538,20 @@ fn zerocopy_f32_binary_flat<'py>(
         return Ok(None);
     }
     const F32_BINARY_PARALLEL_MIN: usize = 1 << 21;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.get_type().is(&ndarray_type) || !b.get_type().is(&ndarray_type) {
+    // CACHED TYPE, not a per-call `numpy.getattr("ndarray")` (`deadlock-audit-ei9jz`).
+    // This runs on EVERY call of these routes, and the old form built a fresh `PyString`
+    // from the `&str` and probed the module dict to fetch a type object that never
+    // changes. `is_exact_numpy_ndarray` already holds it in a `PyOnceLock`; the stage was
+    // measured at `getattr_ndarray_ns=100`.
+    //
+    // WHY CACHING A TYPE IS SAFE HERE WHERE CACHING A CALLABLE IS NOT: the failure mode is
+    // FAIL-CLOSED. The handle is used only for an identity test that decides whether to
+    // take the fast path. If it were ever stale the test returns FALSE, the route
+    // DECLINES, and the call delegates to NumPy - the incumbent's own answer, just slower.
+    // A cached bound callable has no such property: it would keep calling a replaced
+    // function and return a wrong-but-plausible array, which is why `cached_numpy` holds
+    // the module and not the callable.
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
         return Ok(None);
     }
     let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<f32>::get(a), PyBuffer::<f32>::get(b)) else {
@@ -55443,6 +55492,33 @@ fn native_binary_arctan2_or_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // ARCTAN2 OUT= FAST PATH (`deadlock-audit-ei9jz`). The guard below refuses EVERY
+    // kwarg, so `fnp.arctan2(a, b, out=c)` delegated the whole call to NumPy and got
+    // none of the native parallel path - even though `Arctan2` is in the
+    // `parallelizable` set, is compute-bound (a libm `atan2` per element) and NumPy runs
+    // it single-threaded. That is the same profile as `power` (6.39x) and `remainder`
+    // (8.04x), the two largest wins in this ledger.
+    //
+    // A LONE `out=` is now routed natively: the result is written into the caller's
+    // buffer and that buffer is returned, matching NumPy. Any OTHER kwarg, or `out=`
+    // alongside anything else, still delegates - this widens the native surface by
+    // exactly one well-understood parameter and nothing else.
+    if args.len() == 2
+        && let Some(kwargs) = kwargs
+        && kwargs.len() == 1
+        && let Ok(Some(out_obj)) = kwargs.get_item("out")
+        && numpy_dtype_is_f64(py, &args.get_item(0)?)
+        && numpy_dtype_is_f64(py, &args.get_item(1)?)
+        && let Some(written) = try_zerocopy_f64_binary_into(
+            py,
+            &args.get_item(0)?,
+            &args.get_item(1)?,
+            &out_obj,
+            BinaryOp::Arctan2,
+        )?
+    {
+        return Ok(written);
+    }
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         // f16 arctan2: numpy has no f16 ALU, widens f16->f32->atan2f->narrow single-threaded
         // (~292ms@16M, compute-bound). Native parallel widen-atan2-narrow is bit-exact and
@@ -110249,6 +110325,88 @@ mod tests {
     /// defect (`f16-isin-402x-and-pyufunc-registration-trap`: green parity does not
     /// prove kernel engagement), which is why this test asserts the PREDICATE and not
     /// just the output.
+    /// `arctan2(a, b, out=c)` must take the NATIVE parallel path, not delegate
+    /// (`deadlock-audit-ei9jz`).
+    ///
+    /// `Arctan2` is in the `parallelizable` set and is compute-bound - a libm `atan2`
+    /// per element, which NumPy runs single-threaded. That is the profile that produced
+    /// this ledger's two largest wins (`power` 6.39x, `remainder` 8.04x). But the
+    /// wrapper refused EVERY kwarg, so the `out=` call form got none of it.
+    #[test]
+    fn arctan2_out_kwarg_takes_the_native_path_and_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_arctan2_out")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            let code = std::ffi::CString::new(
+                "a = np.linspace(-3.0, 3.0, 64)\nb = np.linspace(1.0, 4.0, 64)\nc = np.zeros(64)\nref = np.arctan2(a, b)\nbad = np.zeros(32)\n",
+            )
+            .expect("no interior nul");
+            py.run(code.as_c_str(), Some(&locals), Some(&locals))?;
+            let get = |name: &str| {
+                locals
+                    .get_item(name)
+                    .expect("dict lookup")
+                    .expect("binding present")
+            };
+            let (a, b, c, reference, bad) = (get("a"), get("b"), get("c"), get("ref"), get("bad"));
+            let fnp_arctan2 = module.getattr("arctan2")?;
+
+            // Values, and the caller's buffer is the object returned.
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("out", &c)?;
+            let returned = fnp_arctan2.call((&a, &b), Some(&kwargs))?;
+            assert!(
+                returned
+                    .call_method1("__eq__", (&reference,))?
+                    .call_method0("all")?
+                    .extract::<bool>()?,
+                "arctan2 out= must equal numpy.arctan2"
+            );
+            assert!(
+                returned.is(&c),
+                "arctan2 out= must return the caller's buffer, as numpy does"
+            );
+
+            // ENGAGEMENT: every assertion above passes even if we delegate, because
+            // numpy writes into `out` too. Sabotage numpy.arctan2 so only the native
+            // path can succeed.
+            let sabotage = std::ffi::CString::new(
+                "import numpy as _np\n_orig_at2 = _np.arctan2\ndef _boom(*a, **k):\n    raise RuntimeError('delegated')\n_np.arctan2 = _boom\n",
+            )
+            .expect("no interior nul");
+            py.run(sabotage.as_c_str(), Some(&locals), Some(&locals))?;
+            let engage_kwargs = PyDict::new(py);
+            engage_kwargs.set_item("out", &c)?;
+            let engaged = fnp_arctan2.call((&a, &b), Some(&engage_kwargs));
+            let restore = std::ffi::CString::new("import numpy as _np\n_np.arctan2 = _orig_at2\n")
+                .expect("no interior nul");
+            py.run(restore.as_c_str(), Some(&locals), Some(&locals))?;
+            assert!(
+                engaged.is_ok(),
+                "arctan2 out= must take the NATIVE path: with numpy.arctan2 sabotaged \
+                 the call still has to succeed, or this lever is dead"
+            );
+
+            // A wrong-shape out must still behave exactly as numpy does.
+            let bad_kwargs = PyDict::new(py);
+            bad_kwargs.set_item("out", &bad)?;
+            let ours = fnp_arctan2.call((&a, &b), Some(&bad_kwargs));
+            let theirs = numpy.getattr("arctan2")?.call((&a, &b), Some(&bad_kwargs));
+            assert_eq!(
+                ours.is_err(),
+                theirs.is_err(),
+                "fnp and numpy must agree on whether a wrong-shape out= is an error"
+            );
+            Ok(())
+        });
+    }
+
     /// `out=` on the native f64 binary route must honour NumPy's contract exactly
     /// (`deadlock-audit-ei9jz`).
     ///
