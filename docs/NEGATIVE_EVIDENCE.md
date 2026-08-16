@@ -4,6 +4,65 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, REPLICATED ON TWO WORKERS: the declined probe chain is ~40% of a DELEGATING binary-ufunc call - worst bound 1.389629x (`deadlock-audit-wsd7h`)
+
+`TealOak`. The delegating path adds 5.6-5.8 us of pure overhead (`qapyb`, `cydda`) and only ~1.4 us
+of it had been attributed. I had already guessed twice and been wrong twice — the `numpy.empty`
+dtype string (~110 ns) and the delegation kwargs, which I refuted at 28 ns from a local `timeit`
+loop before a peer measured it properly at 727 ns on-worker. So this is an in-situ control rather
+than a third guess.
+
+**Campaign result class:** maintenance-self-speedup
+
+THE CONTROL IS ALREADY IN THE SHIPPED CODE. The whole probe block in `PyUFunc::__call__` sits
+behind a guard requiring out/where/dtype/signature to be `None`, `casting == "same_kind"`,
+`order == "K"` and `subok`. Any other casting value skips EVERY probe and falls straight to the
+delegation tail:
+
+  arm A  `fnp.multiply(a, b)`                     full probe chain, then delegate
+  arm B  `fnp.multiply(a, b, casting="unsafe")`   no probes, delegate directly
+
+Both enter the same PyO3 `__call__` with the same nine parameters and leave through the same
+delegation tail, so the difference is the probe chain and nothing else. Ratio is A/B, so above 1.0
+means the probes cost real time.
+
+harness=common::run_dual_null_median_ci_contract (both A/A nulls, ABBAABBA, 41 rounds, min-of-3)
+n=256 float64 C-contiguous, numpy 2.4.3, profile `release` via `cargo test --release --bench`.
+
+run 1  worker=vmi1152480  ratio=1.396597 ci95=[1.389674,1.400306]  probed_ns=6347 skipped_ns=4569 probe_chain_ns=1778  DECIDABLE_WIN
+       bench_elf_sha256=29c2d0402a7b353948ad35c47234461956e11df8cdaac97d90243b3e1443c7a6
+       nulls: probed 0.998208-1.007209, skipped 0.990639-1.012491
+run 2  worker=vmi1227854  ratio=1.403108 ci95=[1.389629,1.414874]  probed_ns=3004 skipped_ns=2128 probe_chain_ns=876   DECIDABLE_WIN
+       bench_elf_sha256=1c0707d511640b452413c16ecee31c4950c7ff2f594daa52cbee2dcaa8630c46
+       nulls: probed 0.993994-1.004993, skipped 0.996545-1.003455
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+
+**QUOTE THE WORST BOUND: 1.389629x.** The RATIO replicates across two workers with overlapping
+CIs — 1.396597 and 1.403108 — which is the cleanest replication in this ledger. The ABSOLUTE cost
+does not: 1778 ns on vmi1152480 against 876 ns on vmi1227854, where the whole call was also twice
+as fast (3004 ns against 6347). Quote the fraction, not the nanoseconds; the nanoseconds are
+worker-scoped.
+
+**THE MEASUREMENT IS BIASED AGAINST ITS OWN CONCLUSION.** Arm B additionally pays for a non-empty
+kwargs dict on its delegation, measured elsewhere at 727 ns, and it still comes out ~40% faster.
+The true probe-chain cost is therefore LARGER than reported here, not smaller.
+
+**WHAT IT LEAVES.** Skipping the probes still leaves 2128-4569 ns in a call that does nothing but
+hand two arrays to NumPy. So the delegating floor splits roughly into a ~40% probe chain and a
+larger remainder in PyO3 entry and the delegation tail. The probe chain is the attackable half and
+its size is now bounded rather than assumed.
+
+PARITY: both arms' results are checksum-compared before timing and again every round by the
+contract — `casting` governs coercion only, and both operands are already float64, so a divergence
+would fail the measurement rather than win it.
+
+RETRY PREDICATE / THE LEVER THIS ENABLES: for an op with NO possible native route at the operand
+dtype — f64 `multiply` is the clean case, since `Mul` is absent from the f64 binop set and the
+complex probe requires `kind == 'c'` — the entire chain is guaranteed waste and can be skipped by
+an early-out. Measure any such early-out at n=2^8-2^12 where the floor dominates, and do NOT quote
+a large-n number for it: by 2^24 the whole floor is amortised to nothing.
+AGENT_NAME=TealOak.
+
 ## 2026-08-16 - WIN (KEEP, maintenance-self-speedup) + A CORRECTION TO MY OWN ARITHMETIC: the no-op reshape costs 200 ns, not the ~1.1 us I inferred by subtracting across two workers (`deadlock-audit-6twge`)
 
 `TealOak`. `try_zerocopy_f64_binary` called `reshape((n,))` on an output that already

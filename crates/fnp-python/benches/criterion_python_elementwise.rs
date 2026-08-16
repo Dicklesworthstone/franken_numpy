@@ -1280,6 +1280,7 @@ fn main() {
                 "bench_wrapper_remainder_stages",
                 bench_wrapper_remainder_stages,
             ),
+            ("bench_noop_reshape_cost", bench_noop_reshape_cost),
             (
                 "bench_binary_route_overhead_vs_numpy",
                 bench_binary_route_overhead_vs_numpy,
@@ -1299,6 +1300,10 @@ fn main() {
             (
                 "bench_remainder_vs_numpy_incumbent",
                 bench_remainder_vs_numpy_incumbent,
+            ),
+            (
+                "bench_delegating_probe_chain_cost",
+                bench_delegating_probe_chain_cost,
             ),
         ],
     );
@@ -2632,6 +2637,72 @@ fn probe_varargs(
 /// repetitions inside one timer, so a 10 ns stage shows up as a 2.5 us
 /// observation. An empty-loop arm is measured and SUBTRACTED so the reported
 /// per-call figures are the stage, not the loop.
+/// Hold the NO-OP RESHAPE up on its own (`deadlock-audit-6twge`).
+///
+/// `try_zerocopy_f64_binary` used to call `reshape((n,))` on an output that already
+/// had shape `(n,)`. Arm A is that no-op; arm B skips it. Both arms allocate the
+/// same array first, so the delta is the reshape and nothing else. One binary, one
+/// invocation, one worker, ABBAABBA, A/A null first — the shape that has now
+/// isolated four levers in a row, and the only shape that is sound while the rch
+/// fleet is heterogeneous, unpinnable, and shared with peers' uncommitted work.
+fn bench_noop_reshape_cost(_c: &mut Criterion) {
+    const N: usize = 256;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let shape = PyTuple::new(py, [N]).expect("shape tuple");
+
+        let with_reshape = || {
+            let started = Instant::now();
+            let flat = numpy.call_method1("empty", (N,)).expect("numpy.empty");
+            let out = flat.call_method1("reshape", (&shape,)).expect("reshape");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+        let without_reshape = || {
+            let started = Instant::now();
+            let out = numpy.call_method1("empty", (N,)).expect("numpy.empty");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+
+        let (effect, null) =
+            common::run_median_ci_contract("noop_reshape_cost_n256", with_reshape, without_reshape);
+        println!(
+            "NOOP_RESHAPE_COST n={N} numpy_version={numpy_version} worker={} \
+             harness=common::run_median_ci_contract rounds={} \
+             arms=numpy_empty_only_no_fnp_code \
+             with_reshape_ns={:.1} without_reshape_ns={:.1} ratio_median={:.6} \
+             ratio_ci95=[{:.6},{:.6}] null_ratio_median={:.6} null_ci95=[{:.6},{:.6}] \
+             reshape_cost_ns={:.1} skipping_is_faster={}",
+            measurement_worker(),
+            common::CONTRACT_ROUNDS,
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            null.ratio_median,
+            null.ratio_ci_low,
+            null.ratio_ci_high,
+            effect.arm_a_median_ns - effect.arm_b_median_ns,
+            effect.ratio_ci_low > 1.0,
+        );
+    });
+}
+
 fn bench_wrapper_remainder_stages(_c: &mut Criterion) {
     const N: usize = 256;
     const BATCH: usize = 256;
@@ -3054,6 +3125,121 @@ fn bench_remainder_vs_numpy_incumbent(_c: &mut Criterion) {
              faster_than_numpy={} worst_bound={:.6}",
             lo > 1.0,
             lo,
+        );
+    });
+}
+
+// Isolates the probe chain a DELEGATING binary ufunc runs before it gives up and
+// hands the call to NumPy (deadlock-audit-wsd7h).
+//
+// The control already exists in the shipped code: the entire probe block in
+// `PyUFunc::__call__` sits behind a guard requiring out/where/dtype/signature to
+// be None, `casting == "same_kind"`, `order == "K"` and `subok`. Passing any
+// other casting value skips EVERY probe and falls straight to the delegation
+// tail. So:
+//
+//   arm A  fnp.multiply(a, b)                     full probe chain, then delegate
+//   arm B  fnp.multiply(a, b, casting="unsafe")   no probes, delegate directly
+//
+// Both enter the same PyO3 `__call__` with the same nine parameters and leave
+// through the same delegation tail; the difference is the probe chain and nothing
+// else. Deliberately CONSERVATIVE: arm B additionally pays for a non-empty kwargs
+// dict on the delegation, measured elsewhere at 727 ns, so the comparison is
+// biased AGAINST finding probe cost.
+//
+// Ratio is A/B, so ABOVE 1.0 means the probes cost real time. Results are
+// identical because casting only governs coercion and both operands are already
+// float64, so the contract's cross-arm checksum assertion holds throughout.
+fn bench_delegating_probe_chain_cost(_c: &mut Criterion) {
+    const N: usize = 1 << 8;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+        let ours = module.getattr("multiply").expect("fnp.multiply");
+        let theirs = numpy.getattr("multiply").expect("numpy.multiply");
+        assert!(
+            !ours.is(&theirs),
+            "fnp.multiply IS numpy's object — there is no candidate arm here"
+        );
+        let skip_probes = PyDict::new(py);
+        skip_probes
+            .set_item("casting", "unsafe")
+            .expect("bind casting");
+
+        // Both arms must agree bit for bit before either is timed, or the ratio
+        // is between two different computations.
+        let probed_probe = ours.call1(&args).expect("probed probe");
+        let skipped_probe = ours.call(&args, Some(&skip_probes)).expect("skipped probe");
+        assert_eq!(
+            numpy_divide_checksum(&probed_probe, N),
+            numpy_divide_checksum(&skipped_probe, N),
+            "the casting override changed the result — it must only change the ROUTE"
+        );
+
+        let with_probes = || {
+            let started = Instant::now();
+            let result = ours.call1(&args).expect("fnp.multiply");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, N);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let without_probes = || {
+            let started = Instant::now();
+            let result = ours
+                .call(&args, Some(&skip_probes))
+                .expect("fnp.multiply casting=unsafe");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, N);
+            common::ContractObservation { elapsed, checksum }
+        };
+
+        let (effect, probed_null, skipped_null) = common::run_dual_null_median_ci_contract(
+            "delegating_probe_chain_n256",
+            with_probes,
+            without_probes,
+        );
+        println!(
+            "DELEGATING_PROBE_CHAIN n={N} numpy_version={numpy_version} \
+             harness=common::run_dual_null_median_ci_contract \
+             arms=fnp_multiply_probed_over_fnp_multiply_casting_unsafe \
+             ratio={:.6} ratio_ci95=[{:.6},{:.6}] \
+             probed_ns={:.1} skipped_ns={:.1} probe_chain_ns={:.1} \
+             probed_null={:.6} skipped_null={:.6} probes_cost_real_time={} \
+             worst_bound={:.6}",
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.arm_a_median_ns - effect.arm_b_median_ns,
+            probed_null.ratio_median,
+            skipped_null.ratio_median,
+            effect.ratio_ci_low > 1.0,
+            effect.ratio_ci_low,
         );
     });
 }
