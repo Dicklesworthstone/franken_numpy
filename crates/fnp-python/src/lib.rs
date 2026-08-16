@@ -11337,7 +11337,13 @@ fn try_zerocopy_f32_binary(
     b: &Bound<'_, PyAny>,
     op: BinaryOp,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    // Cached module handle rather than a fresh `py.import("numpy")` on every
+    // call. This probe runs on the f32 arm of the delegating binary route and
+    // declines far more often than it engages, so the import was pure decline
+    // cost - 400 ns on thinkstation1 against a 2394 ns whole-call floor
+    // (`deadlock-audit-ei9jz`). `.clone()` keeps the owned `Bound` that the rest
+    // of this function passes on as `&numpy`. See `cached_numpy`.
+    let numpy = cached_numpy(py)?.clone();
     let Some((flat, shape)) = zerocopy_f32_binary_flat(py, &numpy, a, b, op)? else {
         return Ok(None);
     };
@@ -11700,7 +11706,13 @@ fn try_native_int_power(
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const INT_POW_PARALLEL_MIN: usize = 1 << 18;
-    let numpy = py.import("numpy")?;
+    // Cached module handle rather than a fresh `py.import("numpy")` on every
+    // call. This probe runs on the integer arm of the delegating binary route and
+    // declines far more often than it engages, so the import was pure decline
+    // cost - 400 ns on thinkstation1 against a 2394 ns whole-call floor
+    // (`deadlock-audit-ei9jz`). `.clone()` keeps the owned `Bound` that the rest
+    // of this function passes on as `&numpy`. See `cached_numpy`.
+    let numpy = cached_numpy(py)?.clone();
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
         return Ok(None);
@@ -11965,7 +11977,13 @@ fn try_native_timedelta_addsub(
     is_add: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const TD_ADDSUB_PARALLEL_MIN: usize = 1 << 18;
-    let numpy = py.import("numpy")?;
+    // Cached module handle rather than a fresh `py.import("numpy")` on every
+    // call. This probe runs on the timedelta64 arm of the delegating binary route and
+    // declines far more often than it engages, so the import was pure decline
+    // cost - 400 ns on thinkstation1 against a 2394 ns whole-call floor
+    // (`deadlock-audit-ei9jz`). `.clone()` keeps the owned `Bound` that the rest
+    // of this function passes on as `&numpy`. See `cached_numpy`.
+    let numpy = cached_numpy(py)?.clone();
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
         return Ok(None);
@@ -12124,7 +12142,13 @@ fn try_native_timedelta_remainder(
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const TD_REM_PARALLEL_MIN: usize = 1 << 18;
-    let numpy = py.import("numpy")?;
+    // Cached module handle rather than a fresh `py.import("numpy")` on every
+    // call. This probe runs on the timedelta64 arm of the delegating binary route and
+    // declines far more often than it engages, so the import was pure decline
+    // cost - 400 ns on thinkstation1 against a 2394 ns whole-call floor
+    // (`deadlock-audit-ei9jz`). `.clone()` keeps the owned `Bound` that the rest
+    // of this function passes on as `&numpy`. See `cached_numpy`.
+    let numpy = cached_numpy(py)?.clone();
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
         return Ok(None);
@@ -12201,7 +12225,13 @@ fn try_native_int_remainder(
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const INT_REM_PARALLEL_MIN: usize = 1 << 18;
-    let numpy = py.import("numpy")?;
+    // Cached module handle rather than a fresh `py.import("numpy")` on every
+    // call. This probe runs on the integer arm of the delegating binary route and
+    // declines far more often than it engages, so the import was pure decline
+    // cost - 400 ns on thinkstation1 against a 2394 ns whole-call floor
+    // (`deadlock-audit-ei9jz`). `.clone()` keeps the owned `Bound` that the rest
+    // of this function passes on as `&numpy`. See `cached_numpy`.
+    let numpy = cached_numpy(py)?.clone();
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
         return Ok(None);
@@ -12806,7 +12836,13 @@ fn try_zerocopy_f64_binary(
     b: &Bound<'_, PyAny>,
     op: BinaryOp,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    // Cached module handle rather than a fresh `py.import("numpy")` on every
+    // call. This probe runs on the f64 arm of the delegating binary route and
+    // declines far more often than it engages, so the import was pure decline
+    // cost - 400 ns on thinkstation1 against a 2394 ns whole-call floor
+    // (`deadlock-audit-ei9jz`). `.clone()` keeps the owned `Bound` that the rest
+    // of this function passes on as `&numpy`. See `cached_numpy`.
+    let numpy = cached_numpy(py)?.clone();
     let Some((flat, shape)) = zerocopy_f64_binary_flat(py, &numpy, a, b, op)? else {
         return Ok(None);
     };
