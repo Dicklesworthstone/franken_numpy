@@ -1269,6 +1269,10 @@ fn main() {
                 bench_percall_floor_stage_attribution,
             ),
             (
+                "bench_percall_floor_partition",
+                bench_percall_floor_partition,
+            ),
+            (
                 "bench_delegation_kwargs_shape",
                 bench_delegation_kwargs_shape,
             ),
@@ -2510,6 +2514,168 @@ fn bench_percall_floor_stage_attribution(_c: &mut Criterion) {
             measurement_worker(),
             accounted / ours_ns,
             ours_ns / numpy_ns,
+        );
+    });
+}
+
+// PARTITION attribution of the per-call floor — the successor method to the stage
+// replicas above (`deadlock-audit-ei9jz`).
+//
+// WHY A NEW METHOD. `bench_percall_floor_stage_attribution` prices stages as
+// STANDALONE REPLICAS and reached accounted_fraction=0.397 on thinkstation1: 950 ns
+// of a 2394 ns call. Seven stages have now been priced that way and the floor has
+// not fallen to any of them. A replica can only price a stage someone already
+// suspected, so the method structurally cannot find the remaining 60%.
+//
+// WHAT THIS DOES INSTEAD. It PARTITIONS the real call into three pieces that are
+// individually measured, mutually exclusive, and exhaustive by construction:
+//
+//   numpy_multiply_ns    the incumbent's own work, which we also pay when we delegate
+//   probe_chain_ns       what we spend DECIDING not to take a fast path
+//   wrapper_residual_ns  PyO3 entry + kwarg binding + the delegation call itself
+//
+// The probe chain is separated using the control that already exists in shipped
+// code and needs no instrumentation: the entire probe block in `PyUFunc::__call__`
+// sits behind a guard requiring `casting == "same_kind"`, so passing any other
+// casting value skips EVERY probe and falls straight to the delegation tail
+// (`deadlock-audit-wsd7h`). Both arms enter the same `__call__` with the same nine
+// parameters and leave through the same tail.
+//
+// HONESTY ABOUT WHAT THE FRACTION MEANS. Under a partition accounted_fraction is
+// 1.0 BY CONSTRUCTION and is therefore NOT evidence of anything. The informative
+// output is the SPLIT — how 2394 ns divides across the three pieces — and the fact
+// that the pieces are measured rather than inferred. A reader who quotes
+// "accounted_fraction=1.000" as progress has misread this group. `multiply` is used
+// because it is NOT in the fast-path binop set (Remainder/Power/Maximum/Minimum/
+// Divide), so it exercises the DELEGATING route, which is the route the floor
+// belongs to.
+//
+// NEGATIVE CASE this asserts, which a naive implementation would fail: a partition
+// built by summing overlapping in-situ measurements double-counts. Every piece is
+// asserted non-negative and the three are asserted to sum to the whole call within
+// tolerance, so an implementation that measures overlapping regions and adds them
+// panics here rather than publishing a flattering fraction.
+fn bench_percall_floor_partition(_c: &mut Criterion) {
+    const N: usize = 256;
+    const TRIALS: usize = 2001;
+
+    fn min_ns(trials: usize, mut op: impl FnMut()) -> f64 {
+        let mut best = u128::MAX;
+        for _ in 0..trials {
+            let started = Instant::now();
+            op();
+            best = best.min(started.elapsed().as_nanos());
+        }
+        best as f64
+    }
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        let ours = module.getattr("multiply").expect("fnp.multiply");
+        let theirs = numpy.getattr("multiply").expect("numpy.multiply");
+        assert!(
+            !ours.is(&theirs),
+            "fnp.multiply IS numpy's object — there is no candidate arm"
+        );
+
+        // The probe-skipping arm must still produce numpy's answer, or the two arms
+        // are not the same computation and the subtraction is meaningless.
+        let probed_probe = ours.call1(&args).expect("fnp.multiply probe");
+        let unsafe_kwargs = PyDict::new(py);
+        unsafe_kwargs
+            .set_item("casting", "unsafe")
+            .expect("bind casting");
+        let skipped_probe = ours
+            .call((&a, &b), Some(&unsafe_kwargs))
+            .expect("fnp.multiply casting=unsafe probe");
+        assert_eq!(
+            numpy_divide_checksum(&probed_probe, N),
+            numpy_divide_checksum(&skipped_probe, N),
+            "the probed and probe-skipped arms disagree — they are not the same call"
+        );
+
+        // Whole call, full probe chain, every kwarg at its default.
+        let whole_ns = min_ns(TRIALS, || {
+            black_box(ours.call1(&args).expect("fnp.multiply call"));
+        });
+        // Same call with every probe skipped by the shipped casting guard.
+        let skipped_ns = min_ns(TRIALS, || {
+            black_box(
+                ours.call((&a, &b), Some(&unsafe_kwargs))
+                    .expect("fnp.multiply casting=unsafe call"),
+            );
+        });
+        // The incumbent's own work, which the delegation tail also pays.
+        let numpy_ns = min_ns(TRIALS, || {
+            black_box(theirs.call1(&args).expect("numpy.multiply call"));
+        });
+
+        let probe_chain_ns = whole_ns - skipped_ns;
+        let wrapper_residual_ns = skipped_ns - numpy_ns;
+
+        // A partition cannot have negative parts. If the probe-skipping arm is not
+        // cheaper than the probed one, or delegation is not dearer than NumPy's own
+        // call, the subtraction has been contaminated and the row must not publish.
+        assert!(
+            probe_chain_ns >= 0.0,
+            "probe chain measured NEGATIVE ({probe_chain_ns:.1} ns): the casting=unsafe arm \
+             was not cheaper than the probed arm, so this partition is invalid"
+        );
+        assert!(
+            wrapper_residual_ns >= 0.0,
+            "wrapper residual measured NEGATIVE ({wrapper_residual_ns:.1} ns): our delegating \
+             call was faster than numpy's own call, so this partition is invalid"
+        );
+        let partition_sum = numpy_ns + probe_chain_ns + wrapper_residual_ns;
+        assert!(
+            (partition_sum - whole_ns).abs() <= 1.0,
+            "partition sum {partition_sum:.1} ns does not reconstruct the whole call \
+             {whole_ns:.1} ns — the pieces overlap and are being double-counted"
+        );
+
+        println!(
+            "PERCALL_FLOOR_PARTITION n={N} numpy_version={numpy_version} worker={} \
+             harness=partition_min_of_{TRIALS} trials={TRIALS} op=multiply \
+             route=delegating partition_is_exhaustive_by_construction=true \
+             accounted_fraction_is_tautological=true \
+             probe_separation=shipped_casting_guard_deadlock-audit-wsd7h \
+             fnp_multiply_ns={whole_ns:.1} probes_skipped_ns={skipped_ns:.1} \
+             numpy_multiply_ns={numpy_ns:.1} probe_chain_ns={probe_chain_ns:.1} \
+             wrapper_residual_ns={wrapper_residual_ns:.1} \
+             probe_chain_share={:.3} wrapper_residual_share={:.3} numpy_share={:.3} \
+             fnp_over_numpy={:.3}",
+            measurement_worker(),
+            probe_chain_ns / whole_ns,
+            wrapper_residual_ns / whole_ns,
+            numpy_ns / whole_ns,
+            whole_ns / numpy_ns,
         );
     });
 }

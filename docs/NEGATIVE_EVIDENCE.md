@@ -4,6 +4,53 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, PROVENANCE INVALIDATION: today's three `thinkstation1` rows measured an UNCOMMITTED tree that TWO LATER COMMITS have already superseded - re-measure before any of them is quoted as a property of the library (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. This row exists to stop three of my own numbers from being quoted as facts about
+HEAD. It records a defect in their provenance, not a measurement.
+
+**Campaign result class:** maintenance-diagnostic
+
+**THE THREE ROWS**: remainder run 5 (8.037497x), the lookup-hoisting ceiling (586 ns), and the
+per-call floor attribution (2394 ns, accounted_fraction=0.397). All three came from ELF
+`ef5467cb2a43c00b191011ba4b6a4b56ad1f09ec9506a9df7d7df015083431cd`, built at 09:13:22 **from the
+working tree, not from a commit**.
+
+**WHAT WAS IN THAT TREE IS NOT RECOVERABLE.** `crates/fnp-python/src/lib.rs` was last written at
+10:23:02, 70 minutes after that build. The source those three rows measured was never committed and
+cannot be reconstructed from git.
+
+**AND IT HAS SINCE BEEN SUPERSEDED TWICE, BOTH TIMES ON THE EXACT PATH I MEASURED.** `e4cdd808`
+cached the numpy module handle on the ufunc hot route, and `f8475a76` found that
+`try_zerocopy_f16_binary_widen` and `try_zerocopy_f16_compare` were each running their OWN
+`py.import("numpy")` on essentially every f64/f32/integer binary ufunc call before declining. Both
+commits remove per-call imports from the route the 2394 ns floor belongs to. So:
+
+- the attribution row's `import_numpy_ns=400` is a bench-side REPLICA of `py.import` and the route
+  no longer pays it — **do not carry 400 ns forward as a live route cost**;
+- the 2394 ns floor and the 5.985x n=256 ratio are **PRE-FIX** numbers and are expected to have
+  moved;
+- the 1444 ns unattributed remainder is the figure those two commits were aimed at, so quoting it
+  after they land would misstate the current gap.
+
+**WHAT SURVIVES.** The ratios stand *as ratios within their own binary*: both arms ran in that one
+ELF in one invocation, which is what the contract requires, and the A/A nulls were carried. Nothing
+here says a measurement was wrong. It says none of the three has been shown to describe HEAD.
+
+**HOW THIS HAPPENED, so it is not repeated.** I built from a dirty shared checkout without
+capturing the tree, on a repo where a dozen agents hold uncommitted edits at any moment. The
+campaign's own rule already says to measure from COMMITTED source and check a marker unique to the
+change under test; I did neither, and only caught it by reading `lib.rs` for an unrelated reason and
+noticing a peer's `cached_numpy` that HEAD did not contain.
+
+RETRY PREDICATE: re-run all three groups from a committed SHA above the 52G disk brake, on
+thinkstation1, and replace the numbers in the three rows above with the post-fix figures rather than
+appending new ones — a pre-fix and a post-fix number for the same cell must never sit side by side
+without their commits named. Before the next measurement build of any kind: record `git rev-parse
+HEAD` and `git status --porcelain` alongside the ELF sha, and refuse to bank a row whose tree was
+dirty in the crate under measurement.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MEASURED, CEILING (the prize before the risk): hoisting the two Python lookups is worth 586 ns/call TOTAL - `py.import("numpy")` is the expensive half at 426 ns, `getattr("empty")` only 160 ns (`deadlock-audit-v8nx6`)
 
 `SlateHeron`. This is a CEILING CONTROL, not a ship and not a win over NumPy. Both arms are ours;
