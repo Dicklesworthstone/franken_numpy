@@ -32,6 +32,64 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CODE: the `out=` group now covers ALL THREE ~0.91 cells, so the sign-flip can be decided per cell instead of transferred from `maximum` (`deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+
+`SlateHeron`. Load was 74.45 at the 1-minute mark, so nothing was certified. This lands the
+instrument named as the top remaining work one row ago, and makes the three-cell comparison
+reproducible from the repo rather than from my scratchpad.
+
+**Campaign result class:** operational (instrument extended; no ratio produced)
+
+**PROVENANCE:** the bench change landed in `dbdd5a08`, committed by a peer from this shared
+checkout - my edit was in the working tree when they ran `git commit`. The change is mine and
+unaltered. That is the FOURTH time today work has crossed between agents through the shared index;
+it is benign each time, but the commit author and the change author differ and the ledger should say so.
+
+**LOADAVG AND CPU MHz, observed:** `74.45/45.16/28.04` - the 1-minute figure is nearly three times the
+threshold and the 5-minute is above it, so this turn is code only. **CPU MHz max 4068** from the
+last clean sample; not re-read under this load, since a frequency reading taken while 74 tasks are
+runnable describes the contention, not the route.
+
+**WHY THIS AND NOT A RESTATEMENT.** The certified `out=` row showed `maximum` flipping 0.907848 (loss,
+both sides allocating) to 1.501804 (WIN, neither allocating). The obvious next move is to declare the
+other two memory-bound cells - `minimum` 0.913424 and `divide` parallel 0.920786 - wins as well, since
+they share the mechanism. **That is precisely the cross-cell transfer `deadlock-audit-48by6` withdrew
+one row after making it**, and this ledger has retracted two more transfers of the same shape today.
+So instead of restating them, they get their own cells and their own numbers.
+
+**WHAT THE GROUP NOW MEASURES:**
+
+```
+divide  n=2^20   serial regime - already certified at 0.824614, does NOT flip
+maximum n=2^22   already certified at 1.501804, DOES flip
+minimum n=2^22   untested - the second ~0.91 cell
+divide  n=2^22   untested - the third ~0.91 cell, and divide's PARALLEL regime
+```
+
+**`divide` APPEARS AT BOTH SIZES DELIBERATELY.** At 2^20 it is below its own `parallel_min` and `out=`
+did not flip it; at 2^22 it is above, which is where the 0.920786 figure came from. If divide behaves
+differently either side of that gate, the difference is a property of the GATE rather than of `out=` -
+and that is only visible if both sizes are in the same group, measured in the same invocation.
+
+**THE SYMMETRY PROPERTY IS PRESERVED FOR THE NEW CELLS:** each side still allocates its OWN `out` of
+matching dtype and shape, and both arms are asserted to return the very buffer they were given and to
+agree on the lane checksum before any timing. The new cells inherit those asserts rather than
+re-implementing them.
+
+**GATES:** `cargo clippy -p fnp-python --benches` exit 0 with zero warnings; `rustfmt --check` exit 0.
+
+**NO RATIO IS CLAIMED for the two new cells.** They have not been run. The certified numbers for
+`divide` at 2^20 (0.824614) and `maximum` at 2^22 (1.501804) stand from the previous row and are
+unchanged by this commit.
+
+RETRY PREDICATE: run `fnp-group=bench_out_kwarg_vs_numpy` when 1- and 5-minute loadavg are close and
+both under ~30, and require the effect phase's `same_core=true` before quoting any magnitude to more
+than two figures - the certified `maximum` run did NOT have it (arm_a cpu 17 at 3909.4 MHz, arm_b cpu
+10 at 4029.0 MHz). If `minimum` and `divide`@2^22 both flip, the three ~0.91 rows should be restated
+together as "loses WHEN ALLOCATING". If only some flip, the mechanism is narrower than allocation and
+the row that says so is worth more than the win.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CERTIFIED, AND THE PREDICTION IS CONFIRMED: `out=` FLIPS THE SIGN for `maximum` - 0.907848 (loss) allocating becomes 1.501804 (WIN) with the caller's buffer (`deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
 
 `SlateHeron`. The paired `out=` arm banked one row ago, now run. It discharges three retry predicates
