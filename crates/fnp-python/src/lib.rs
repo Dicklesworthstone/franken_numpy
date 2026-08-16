@@ -9670,6 +9670,30 @@ fn f64_binary_route_is_worth_taking(op: BinaryOp, a: &Bound<'_, PyAny>) -> bool 
     }
 }
 
+/// The `numpy.dtype('float64')` object, resolved once (`deadlock-audit-ei9jz`).
+///
+/// The f64 output allocation passed the dtype as the STRING `"float64"`, which costs twice
+/// per call: Rust builds a fresh `PyString` from the `&str`, and NumPy then resolves that
+/// string through its dtype-from-object machinery. The resulting descriptor is a canonical
+/// immutable singleton, so resolving it once and passing the object is the same request
+/// with the lookup removed.
+///
+/// EQUIVALENCE, not an approximation: `numpy.empty(shape, numpy.dtype('float64'))` and
+/// `numpy.empty(shape, 'float64')` differ only in how the second argument is spelled -
+/// NumPy converts the string to exactly this descriptor. `f64_output_dtype_is_float64`
+/// pins that the object still reports `float64`, and the byte-parity tests on this route
+/// would fail loudly if the output dtype ever changed.
+fn cached_float64_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static F64_DTYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(F64_DTYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "dtype"), ("float64",))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
 fn zerocopy_f64_binary_flat<'py>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -9790,11 +9814,20 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             return Ok(None);
         }
         out.clone()
-    } else if let [only] = shape.as_slice() {
-        numpy.call_method1("empty", (*only, "float64"))?
     } else {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1("empty", (&output_shape, "float64"))?
+        // INTERNED METHOD NAME + CACHED DTYPE OBJECT (`deadlock-audit-ei9jz`). The old form
+        // built a `PyString` for "empty" AND one for "float64" on every call, then made
+        // NumPy resolve that string to a descriptor. `numpy.empty` is now fetched with an
+        // interned key and handed the descriptor directly. Output allocation is the largest
+        // named stage left on this route.
+        let np_empty = numpy.getattr(intern!(py, "empty"))?;
+        let dtype = cached_float64_dtype(py)?;
+        if let [only] = shape.as_slice() {
+            np_empty.call1((*only, dtype))?
+        } else {
+            let output_shape = PyTuple::new(py, shape.iter().copied())?;
+            np_empty.call1((&output_shape, dtype))?
+        }
     };
     // Set by the Div arms below when an element would raise an FE flag that numpy
     // turns into a warning. The Div arms first keep the quotient loop free of
@@ -109709,23 +109742,23 @@ mod tests {
     use super::{
         BinaryOp, F64_DIV_NATIVE_MIN_LEN, MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize,
         PythonNativeGemmOp, UFuncKind, argwhere, bincount, blas_is_single_threaded,
-        build_numpy_array_from_ufunc, cached_numpy, ceil_native, choose, compress, copysign,
-        count_nonzero, degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal,
-        digitize, extract, extract_numeric_array, extract_precise_numeric_array,
-        f64_binary_route_is_worth_taking, f64_divide_fast_accepts_without_fp_error,
-        f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
-        f64_divide_raises_fp_error, fill_diagonal, flatnonzero, flip, fliplr, flipud, floor_native,
-        fnp_python, frexp, hypot, indices, interned_ufunc_name, interp, isfinite_native,
-        isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp,
-        logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
-        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
-        python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
-        required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
-        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
-        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
-        try_native_lstsq_tsqr, unravel_index, where_py, wide_int_table_bounds,
-        zerocopy_f64_binary_flat,
+        build_numpy_array_from_ufunc, cached_float64_dtype, cached_numpy, ceil_native, choose,
+        compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
+        diagflat, diagonal, digitize, extract, extract_numeric_array,
+        extract_precise_numeric_array, f64_binary_route_is_worth_taking,
+        f64_divide_fast_accepts_without_fp_error, f64_divide_non_fast_raises_fp_error,
+        f64_divide_quotient_bits_are_normal, f64_divide_raises_fp_error, fill_diagonal,
+        flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices,
+        interned_ufunc_name, interp, isfinite_native, isinf_native, isnan_native, isneginf_native,
+        isposinf_native, ix_, ldexp, logaddexp, logaddexp2, masked_pairwise_parallel,
+        masked_pairwise_streamed, meshgrid, modf, nan_to_num, narrow_bitmap_setop, nextafter,
+        place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
+        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate,
+        radians_native, ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted,
+        select, sign, signbit_native, sinc, solve_triangular, spacing, take, take_along_axis,
+        tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from,
+        triu_indices, triu_indices_from, trunc_native, try_native_lstsq_tsqr, unravel_index,
+        where_py, wide_int_table_bounds, zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -110292,6 +110325,53 @@ mod tests {
                      WRONG numpy ufunc and still return a plausible array"
                 );
             }
+            Ok(())
+        });
+    }
+
+    /// Pins the cached descriptor behind the f64 output allocation (`deadlock-audit-ei9jz`).
+    ///
+    /// `cached_float64_dtype` resolves `numpy.dtype('float64')` ONCE and hands the object to
+    /// `numpy.empty` in place of the string `"float64"`. That is only equivalent while the
+    /// cached object really is the float64 descriptor, and a wrong descriptor would not
+    /// raise - it would allocate an output of a DIFFERENT dtype and the route would keep
+    /// returning arrays, just wrong ones. So this asserts identity against NumPy's own
+    /// `dtype('float64')` rather than a hardcoded repr, then checks the route's actual
+    /// output bytes and dtype against `numpy.divide` above the native gate.
+    #[test]
+    fn f64_output_dtype_is_float64() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let expected = numpy.call_method1("dtype", ("float64",))?;
+            let cached = cached_float64_dtype(py)?;
+            assert!(
+                cached.eq(&expected)?,
+                "cached descriptor is not numpy.dtype('float64') - the f64 route would \
+                 allocate its output with the WRONG dtype and still return arrays"
+            );
+
+            let module = PyModule::new(py, "fnp_python_test_f64_output_dtype")?;
+            fnp_python(&module)?;
+            let n = F64_DIV_NATIVE_MIN_LEN.max(4096);
+            let a = numpy
+                .call_method1("arange", (n,))?
+                .call_method1("astype", ("float64",))?;
+            let b = numpy.call_method1("full", (n, 7.5_f64))?;
+            let ours = module.getattr("divide")?.call1((&a, &b))?;
+            let theirs = numpy.call_method1("divide", (&a, &b))?;
+            assert_eq!(
+                repr_string(&ours.getattr("dtype")?),
+                repr_string(&theirs.getattr("dtype")?),
+                "output dtype must match numpy after swapping the string for the descriptor"
+            );
+            assert_eq!(
+                ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "cached descriptor must leave the native f64 divide bytes unchanged"
+            );
             Ok(())
         });
     }

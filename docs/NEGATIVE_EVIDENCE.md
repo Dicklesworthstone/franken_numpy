@@ -32,6 +32,67 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CAPABILITY: `arctan2(a, b, out=c)` now takes the NATIVE PARALLEL path instead of delegating - the first `out=` extension to the compute-bound family where this project actually wins (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. Capability code with tests, chosen against the evidence rather than against the worst
+cell, for a reason stated below.
+
+**Campaign result class:** capability (new native surface; no ratio claimed)
+
+**LOADAVG AND CPU MHz, observed:** loadavg `21.24/20.37/21.95` at the start and `29.37/23.89/20.79` at
+the gate. **CPU MHz max 3993, min 1429** - the MAX is the field recorded here, because `a7be8cf1`
+measured that the MEAN is anticorrelated with quietness (it tracks how many cores sit at the 1429 MHz
+idle floor). No certification was attempted; this row banks code, not a ratio.
+
+**WHY NOT THE WORST CELL.** The worst measured ratio is `add` at n=256, 2.176x slower - and `add` is a
+DELEGATING op with no native f64 route. Three measured cells say a native parallel arm would not
+rescue it either: `maximum` 0.907848, `minimum` 0.913424 and `divide` parallel 0.920786 all LOSE,
+because they are memory-bound and NumPy's single-threaded loop already saturates the streams. The ops
+this project WINS on are compute-bound - `power` 6.394659x, `floor_divide` 6.341392x, `remainder`
+8.037497x. Spending a turn adding a parallel `add` would be re-running an experiment this ledger has
+already lost three times.
+
+**THE GAP FOUND INSTEAD.** `Arctan2` is in the route's own `parallelizable` set, is compute-bound (a
+libm `atan2` per element), and NumPy runs it single-threaded - the exact profile of the two largest
+wins here. But `native_binary_arctan2_or_passthrough` opens with
+`kwargs.is_none_or(|kwargs| kwargs.is_empty())`, so **any** keyword sent the whole call to NumPy.
+`fnp.arctan2(a, b, out=c)` therefore got none of the native path.
+
+**WHAT CHANGED.** A lone `out=` now routes natively through `try_zerocopy_f64_binary_into` (landed in
+`2832d590`), writing into the caller's buffer and returning it. Any other kwarg, or `out=` alongside
+anything else, still delegates - this widens the native surface by exactly one well-understood
+parameter.
+
+**A FALSE FINDING I CAUGHT BEFORE BANKING IT.** While looking for this I ran
+`grep -c 'wrap_pyfunction!(native_binary_arctan2_or_passthrough'` and got **0**, which matches this
+ledger's recorded trap of dead ufunc-named `#[pyfunction]`s - the one that cost a cycle on
+`native_binary_divide_or_passthrough`. I was about to record a dead native kernel. It is not dead: the
+registration is `m.add_function(wrap_pyfunction!(arctan2, m)?)` at line 107854, and `fn arctan2`
+delegates to the helper. **The grep was right and my inference from it was wrong** - a helper reached
+through a thin wrapper looks identical to a dead one under a name-based grep. Check the wrapper before
+declaring anything dead.
+
+**ENGAGEMENT PROVEN, NOT ASSUMED.** Values and identity assertions pass whether we take the native
+path or delegate, since NumPy writes into `out` too. So the test sabotages `numpy.arctan2` to raise and
+repeats the call: the delegation tail would hit it, the native path does not. The call succeeds, so
+the native route ran. The patch is restored before the assertion so a failure cannot poison later
+tests.
+
+**TESTS:** `arctan2_out_kwarg_takes_the_native_path_and_matches_numpy` covers values against
+`numpy.arctan2`, identity (the returned object IS the caller's buffer), the engagement proof, and a
+wrong-shape `out=` which must raise exactly when NumPy raises.
+
+**NO RATIO IS CLAIMED.** No bench exercises `arctan2` with `out=`. The expectation is that it inherits
+the compute-bound family's behaviour, but expectation is not measurement, and the retraction one row
+above exists precisely because I attributed a number to a path without checking it.
+
+RETRY PREDICATE: certify with a paired arm calling `fnp.arctan2(a, b, out=c)` against
+`numpy.arctan2(a, b, out=c)` - both preallocated, one invocation, dual-null contract, `CPU_WITNESS`
+line present - at n at or above the route's parallel threshold, since a compute-bound parallel win does
+not appear below it. Only after that should `out=` be extended to the siblings (`hypot`, `logaddexp`,
+`logaddexp2`, `copysign`, `nextafter`, `float_power`), which share the identical kwargs guard.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MEASURED WIN with CLEAN attribution: two interning/caching levers cut the per-call excess by 27-44% and the worst cell is now 1.855x (`deadlock-audit-ei9jz`)
 
 `RedLynx`. Unlike the previous self-speedup row, this delta is attributable: **only two commits
