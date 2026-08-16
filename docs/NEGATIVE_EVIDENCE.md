@@ -4,6 +4,128 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED (four native f64 binary routes, first op-level rows): `floor_divide` and `power` beat NumPy on every run; `maximum` and `minimum` LOSE and are UNSTABLE - one flipped 0.872 to 0.424 on the SAME worker (`deadlock-audit-4j5ba`)
+
+`TealOak`. Five binary ufuncs take a native f64 route. Only `divide` had an op-level
+row (`deadlock-audit-su0i6`); `remainder` and `divide` are being worked in another
+pane. These are the first rows for the other four. Measured at n=1<<22, which clears
+every gate involved - `FLOAT_POWER_PARALLEL_MIN_LEN` is 16_384 and the
+Maximum/Minimum/Div `parallel_min` is 1<<21 - so all four take their PARALLEL arm.
+Ratio is incumbent/candidate = numpy/fnp, so BELOW 1.0 means we are slower.
+
+**Campaign result class:** maintenance-diagnostic
+
+**THREE RUNS, TWO WORKERS, NOT POOLED.** Each row is its own measurement; the fleet is
+heterogeneous and unpinnable and a passing A/A null does not license a cross-worker
+comparison. Worst bound is the quoted figure.
+
+```
+HOST_BASELINE host=vmi1293453 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=8 logical_threads=8 governor=unavailable
+bench_elf_sha256=961b2111616db22a8ff5ed37fd8016dadf13684fe30e6afa4e54ad857df17c58
+NATIVE_BINARY_VS_NUMPY op=power n=4194304 regime=parallel_arm numpy_version=2.4.3 worker=vmi1293453 harness=common::run_dual_null_median_ci_contract rounds=41 rayon_threads=8 numpy_ns=52731052.0 fnp_ns=14892689.0 ratio_median=3.616597 ratio_ci95=[3.529255,3.780252]
+NATIVE_BINARY_VS_NUMPY op=maximum n=4194304 ... worker=vmi1293453 rayon_threads=8 numpy_ns=4365003.0 fnp_ns=3905742.0 ratio_median=1.117034 ratio_ci95=[1.064508,1.173619]
+NATIVE_BINARY_VS_NUMPY op=minimum n=4194304 ... worker=vmi1293453 rayon_threads=8 numpy_ns=4209560.0 fnp_ns=4070743.0 ratio_median=1.008651 ratio_ci95=[0.990507,1.041233]
+NATIVE_BINARY_VS_NUMPY op=floor_divide n=4194304 ... worker=vmi1293453 rayon_threads=8 numpy_ns=33687898.0 fnp_ns=8128492.0 ratio_median=4.188734 ratio_ci95=[3.970292,4.317584]
+
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+bench_elf_sha256=f96363c382db5785724b474670f920c71902d07cff94400e402eda4d35c7983a   (run A)
+bench_elf_sha256=661d3f747de43516b7598af2327b71fb49a9aab9fee834e0620498bc40503c2c   (run B)
+op=power        run A ratio_median=2.270178 ci95=[2.184668,2.506629] | run B ratio_median=2.143882 ci95=[1.982732,2.292896]
+op=maximum      run A ratio_median=0.871703 ci95=[0.817939,0.924989] | run B ratio_median=0.423700 ci95=[0.392482,0.469148]
+op=minimum      run A ratio_median=0.824975 ci95=[0.743693,0.892054] | run B ratio_median=0.494712 ci95=[0.429274,0.527552]
+op=floor_divide run A ratio_median=3.589783 ci95=[3.335249,3.973010] | run B ratio_median=4.086415 ci95=[3.793869,4.228043]
+```
+
+**ROBUST, worst bound across all three runs:**
+
+| op | worst lower CI | direction |
+|---|---|---|
+| `floor_divide` | **3.335249x faster** | win on 3/3 runs, both workers |
+| `power` | **1.982732x faster** | win on 3/3 runs, both workers |
+
+**NOT CLAIMABLE, and the instability is the finding:**
+
+| op | w1 (8 thr) | w2 run A | w2 run B | worst |
+|---|---|---|---|---|
+| `maximum` | 1.117034 WIN | 0.871703 loss | 0.423700 loss | 0.392482 |
+| `minimum` | 1.008651 undecided | 0.824975 loss | 0.494712 loss | 0.429274 |
+
+`maximum` reversed DIRECTION between workers, and then moved 0.871703 -> 0.423700 on the
+SAME worker with disjoint CIs. The absolute times say why: fnp's arm went 4.92 ms ->
+13.43 ms (2.7x) while NumPy's moved only 4.60 -> 5.71 ms (1.24x). Our parallel
+maximum/minimum arm is far more sensitive to host contention than NumPy's serial loop,
+so on a busy 10-thread worker it is not merely slower, it is unpredictable. The
+single-run 1.117034 "win" on the 8-thread worker does NOT replicate and must not be
+cited.
+
+**NOT BANKED AS `incumbent-win`, deliberately.** The two robust results would qualify on
+their numbers, but this repo's `incumbent-win` contract additionally requires a
+same-line incumbent marker carrying NumPy's `artifact_sha256` and a shared
+`invocation_id`, and these runs did not capture them. Recording as measured rather than
+inflating the class; see the retry predicate.
+
+**UNGATED - stated plainly.** `/data` hit its floor and a fleet-wide build freeze took
+effect before this row could be run through `ledger_hygiene`. It was written against
+that gate's rules by reading them (worker and harness named on every measured line,
+one result class, a retry predicate, a unique heading) but it has NOT been executed
+against them. Whoever next runs a build must gate this row and correct it if it fails.
+
+**Retry predicate.** (1) Re-run `FNP_BENCH_GROUPS=bench_native_binary_family_vs_numpy`
+capturing NumPy's `artifact_sha256` and a shared `invocation_id`, then re-bank
+`floor_divide` and `power` as `incumbent-win` with the worst bounds above. (2) For
+`maximum`/`minimum` the next lever is NOT a kernel change: measure whether the parallel
+arm should be gated by thread count or declined entirely for these two ops, since
+NumPy's serial loop is already memory-bound at this size and our parallel arm buys
+nothing while paying contention. Do not re-attack them without first reproducing the
+2.7x within-worker swing - a lever measured against that noise cannot be decided.
+
+## 2026-08-16 - UNDECIDED (measured, the two workers DISAGREE ON THE DIRECTION): reordering the complex probe's decline is below this harness's cross-worker resolution (`deadlock-audit-80uph`)
+
+`TealOak`. The complex probe runs on every delegating f64 `multiply`/`divide` and always declines
+there, so the ORDER of its checks is the cost. It tested the ndarray type first
+(`getattr("ndarray")` + `is_exact_instance` x2) and only then the discriminating `dtype.kind` —
+about 7 Python operations to reach a decision the dtype could make in 4. Reordered to test
+`dtype.kind` first.
+
+**Campaign result class:** maintenance-self-speedup
+
+harness=common::run_dual_null_median_ci_contract, n=256 f64, numpy 2.4.3, profile `release`, nulls
+on unity throughout. Ratio is probed/skipped, so LOWER means a cheaper probe chain.
+
+  worker=vmi1227854  before 1.403108 ci95=[1.389629,1.414874]   after 1.333774 ci95=[1.322521,1.340747]   BETTER, CIs disjoint
+  worker=vmi1152480  before 1.396597 ci95=[1.389674,1.400306]   after 1.428706 ci95=[1.422987,1.438771]   WORSE,  CIs disjoint
+  after-elf vmi1227854 bench_elf_sha256=1e38f5e14d72a545a9fc8e3f0489c3d3fcfbdfe7263696412e28a29a863a14ae
+  after-elf vmi1152480 bench_elf_sha256=eea2fa649862ce51b36d5ba02cae5abce67d00fec2033c4b3ee9a3148e95a26b
+HOST_BASELINE host=vmi1152480 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+
+**THE TWO WORKERS DISAGREE ON THE SIGN.** On vmi1227854 the change looks like a clean win with
+disjoint CIs; on vmi1152480 it looks like a clean loss, also with disjoint CIs. Both cannot be
+true of the code. The post-change ratio spans 1.334-1.429 across workers, which is wider than the
+entire claimed effect, so the reorder's cost is BELOW what this harness resolves across machines.
+
+**I ALMOST BANKED THE FIRST HALF AS A WIN.** The vmi1227854 pair alone — 1.403108 against
+1.333774, non-overlapping intervals, control arm invariant — reads exactly like a decidable
+improvement, and I had begun writing it up as one. It was only the second run, which happened to
+land on a different worker, that showed the sign was not stable. A single-worker before/after with
+disjoint CIs is NOT sufficient evidence for a change this small; that is the same lesson as the
+13.6x `splu` swing, at a scale where it is far easier to miss.
+
+**WHAT IS TRUE INDEPENDENT OF MEASUREMENT.** The reordered path performs strictly fewer Python
+operations to decline a non-complex operand (no `getattr("ndarray")`, no two
+`is_exact_instance` calls). That is a structural fact about the code, not a claim about wall time,
+and it is the only basis on which the change is kept.
+
+KEPT, AS MAINTENANCE, NOT AS A LEVER. Correctness verified where it matters — this probe is the
+ONLY native path for complex multiply/divide, so a reorder that stopped admitting complex would
+silently delegate them: `conformance_complex_ops` 15 passed, `conformance_complex` 12 passed,
+`conformance_diagnostics` 1 passed. Ordering is safe by construction because every check moved is
+a DECLINE condition, and `is_exact_instance` still runs before any buffer is touched.
+
+RETRY PREDICATE: do not re-measure this with a cross-build pair on one worker — that is what
+produced the false positive. Effects of this size need before and after in ONE binary behind an
+env-selected branch, run on at least two workers, with the sign required to agree.
+AGENT_NAME=TealOak.
+
 ## 2026-08-16 - UNDECIDED (measured, kept as maintenance): removing two heap allocations from the complex probe moves the probed arm ~14% but the gate does NOT decide it (`deadlock-audit-pgbtf`)
 
 `TealOak`. The complex probe runs on every delegating f64 `multiply` and `divide` before declining,

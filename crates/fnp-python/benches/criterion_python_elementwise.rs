@@ -1282,6 +1282,10 @@ fn main() {
             ),
             ("bench_noop_reshape_cost", bench_noop_reshape_cost),
             (
+                "bench_native_binary_family_vs_numpy",
+                bench_native_binary_family_vs_numpy,
+            ),
+            (
                 "bench_binary_route_overhead_vs_numpy",
                 bench_binary_route_overhead_vs_numpy,
             ),
@@ -2645,6 +2649,75 @@ fn probe_varargs(
 /// invocation, one worker, ABBAABBA, A/A null first — the shape that has now
 /// isolated four levers in a row, and the only shape that is sound while the rch
 /// fleet is heterogeneous, unpinnable, and shared with peers' uncommitted work.
+/// End-to-end vs-NumPy for the four native f64 binary routes that have never had an
+/// op-level row: `power`, `maximum`, `minimum`, `floor_divide`
+/// (`deadlock-audit-4j5ba`). `remainder` and `divide` are deliberately absent - they
+/// are being worked elsewhere and duplicating them would just collide.
+///
+/// SIZE IS LOAD-BEARING. n = 1<<22 clears every gate involved:
+/// `FLOAT_POWER_PARALLEL_MIN_LEN` is 16_384 and the Maximum/Minimum/Div
+/// `parallel_min` is 1<<21, so all four take their PARALLEL native arm. Measuring
+/// below a gate characterises the serial arm only, which is the correction
+/// `deadlock-audit-su0i6`'s row needed.
+///
+/// Operands are the file's standard pair - `a` in [1,2), `b` in [1.25,2.25) - which
+/// are safe for all four without special-casing: `power` cannot overflow or produce
+/// NaN there, `floor_divide` has no zero divisor.
+///
+/// Each op goes through `measure_binary_ufunc_vs_numpy`, so each carries the runtime
+/// dispatch trap (fnp's callable is asserted not to be NumPy's object) and the
+/// cross-arm parity probe, under the dual-null contract with both A/A nulls. Ratio
+/// is incumbent/candidate = numpy/fnp, so BELOW 1.0 means we are slower.
+fn bench_native_binary_family_vs_numpy(_c: &mut Criterion) {
+    let n = 1usize << 22;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        for op in ["power", "maximum", "minimum", "floor_divide"] {
+            let (ratio, lo, hi, incumbent_ns, candidate_ns) =
+                measure_binary_ufunc_vs_numpy(py, &module, &numpy, op, &args, n);
+            println!(
+                "NATIVE_BINARY_VS_NUMPY op={op} n={n} regime=parallel_arm \
+                 numpy_version={numpy_version} worker={} \
+                 harness=common::run_dual_null_median_ci_contract rounds={} \
+                 rayon_threads={} numpy_ns={incumbent_ns:.1} fnp_ns={candidate_ns:.1} \
+                 ratio_median={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
+                 faster_than_numpy={} slower_than_numpy={}",
+                measurement_worker(),
+                common::CONTRACT_ROUNDS,
+                rayon::current_num_threads(),
+                lo > 1.0,
+                hi < 1.0,
+            );
+        }
+    });
+}
+
 fn bench_noop_reshape_cost(_c: &mut Criterion) {
     const N: usize = 256;
     Python::initialize();
