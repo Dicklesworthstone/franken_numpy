@@ -539,10 +539,16 @@ impl PyUFunc {
             // Verified against the measured interpreter, numpy 2.4.3, and identical on
             // 1.26.4: f16='e', f32='f', f64='d', complex64='F', complex128='D',
             // clongdouble='G', datetime64='M', timedelta64='m', int64='l', int16='h'.
+            // INTERNED KEYS (`deadlock-audit-ei9jz`). This sniff runs on EVERY delegating
+            // call and did TWO `&str` getattrs, each of which builds a fresh `PyString`
+            // and hashes it before the attribute can be looked up. `intern!` hands CPython
+            // a process-lifetime string whose hash it caches, so only the lookup remains.
+            // The getattrs still happen against the live objects, so nothing about dtype
+            // resolution changes - only the key construction is removed.
             let x1_dtype_char: Option<char> = x1
                 .bind(py)
-                .getattr("dtype")
-                .and_then(|dtype| dtype.getattr("char"))
+                .getattr(intern!(py, "dtype"))
+                .and_then(|dtype| dtype.getattr(intern!(py, "char")))
                 .and_then(|c| c.extract::<char>())
                 // No `dtype`/`char`, or unreadable: the sniff establishes nothing, so
                 // skip nothing.
@@ -9773,13 +9779,13 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             return Ok(None);
         }
         let out_char = out
-            .getattr("dtype")
-            .and_then(|d| d.getattr("char"))
+            .getattr(intern!(py, "dtype"))
+            .and_then(|d| d.getattr(intern!(py, "char")))
             .and_then(|c| c.extract::<char>());
         if out_char.ok() != Some('d') {
             return Ok(None);
         }
-        let out_shape: Vec<usize> = out.getattr("shape")?.extract()?;
+        let out_shape: Vec<usize> = out.getattr(intern!(py, "shape"))?.extract()?;
         if out_shape != shape {
             return Ok(None);
         }
