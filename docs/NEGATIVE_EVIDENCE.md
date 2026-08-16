@@ -12,6 +12,63 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - THE WORST RATIO'S ASYMPTOTE: `add` bottoms out at 4.019x slower by n=4, and the per-call excess is FLAT at ~1100 ns from n=1 to n=256 while the work grows 256x (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. Every size sweep in this ledger bottomed out at n=256 — the smallest n ever measured
+for any binary op. Since the cost is a fixed per-call floor, the ratio had to keep worsening below
+that, and nothing had ever looked. New group `bench_add_tiny_n_floor_vs_numpy`, anchored on n=256 in
+the SAME invocation so the new cells compare against a value measured beside them rather than
+remembered from another run.
+
+**Campaign result class:** incumbent-loss
+
+```
+TINY_N_FLOOR op=add worker=thinkstation1 numpy_version=2.4.3  anchored_in_same_invocation=true
+  n=1    ratio=0.251188 ci95=[0.250169,0.253036]  numpy_ns=371  fnp_ns=1478  excess_ns=1107
+  n=4    ratio=0.248823 ci95=[0.247794,0.251015]  numpy_ns=370  fnp_ns=1478  excess_ns=1108
+  n=16   ratio=0.258315 ci95=[0.256971,0.259647]  numpy_ns=470  fnp_ns=1814  excess_ns=1344
+  n=64   ratio=0.257781 ci95=[0.256912,0.258540]  numpy_ns=380  fnp_ns=1468  excess_ns=1088
+  n=256  ratio=0.288114 ci95=[0.287671,0.288802]  numpy_ns=441  fnp_ns=1532  excess_ns=1091   <- anchor
+```
+
+All five `DECIDABLE_REGRESSION`; **all ten A/A nulls straddle unity.**
+
+| n | slower by |
+|---|---|
+| 1 | 3.981x |
+| **4** | **4.019x** |
+| 16 | 3.871x |
+| 64 | 3.879x |
+| 256 (anchor) | 3.471x |
+
+**THE ASYMPTOTE IS ~4.0x AND IT IS REACHED BY n≈64.** The ratio does worsen below 256, so the
+campaign's standing "~3.5-3.8x at n=256" did understate the small-array case — but only modestly,
+and it FLATTENS rather than diverging. **The true worst-case bound on this route is 4.019x slower**,
+and no smaller array makes it worse. That is the number to quote as the ceiling on the damage.
+
+**THE CLEANEST DEMONSTRATION YET THAT THIS IS A PURE PER-CALL COST.** `excess_ns` reads 1107, 1108,
+1344, 1088, 1091 ns across n=1..256 — **flat to within noise while the work grows 256x**. At n=1,
+where the kernel adds a single pair of doubles and there is essentially nothing to do, we still pay
+1478 ns against NumPy's 371 ns. Nothing about the arithmetic explains any of it; it is all dispatch,
+probing and delegation. The n=16 cell is the one wobble (both arms high: numpy 470, fnp 1814) and is
+noise, not structure — its ratio sits between its neighbours.
+
+**WHAT THIS CLOSES.** The worst vs-incumbent ratio in this campaign is now bounded on BOTH ends: it
+asymptotes to 4.019x as n→1 and reaches parity at 2^24 (established with a clean null in the previous
+row). The whole loss lives in a ~1100 ns fixed per-call cost, and every ratio between those bounds is
+that constant divided by the work.
+
+bench_elf_sha256=ae357155a4bfde664811552f73dd4e2480a2f3ae9df411e71e186045938394cd
+Local build under the exported cargo-shim bypass, zero `[RCH]` lines, executable path from
+`--message-format=json`. host=thinkstation1 5975WX 32c/64t governor=powersave, numpy 2.4.3.
+
+RETRY PREDICATE: do not measure below n=1. The size axis for this op is now closed at both ends and
+in the middle, over six invocations. Every remaining question about this ratio is about the ~1100 ns
+constant itself, and the named lever against it is `deadlock-audit-v46rn`'s 731 ns dtype-fetch ceiling
+— which is **67% of the entire measured excess**, making it the largest single identified component
+of the campaign's worst ratio.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - PRE-REGISTERED PREDICTION CONFIRMED WITHIN ONE INVOCATION: at load 105 the PARALLEL divide cell sits 11.5% below its quiet-host value while the DELEGATING cell is unmoved - but the dose-response is NOT established (`deadlock-audit-322j4`, `deadlock-audit-0ppym`)
 
 `RedLynx`. A test of the rule refined one row above, which generalised the load bias from

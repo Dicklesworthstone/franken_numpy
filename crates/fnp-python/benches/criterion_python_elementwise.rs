@@ -1318,6 +1318,10 @@ fn main() {
                 bench_add_route_floor_size_sweep_vs_numpy,
             ),
             (
+                "bench_add_tiny_n_floor_vs_numpy",
+                bench_add_tiny_n_floor_vs_numpy,
+            ),
+            (
                 "bench_percall_floor_across_ops_vs_numpy",
                 bench_percall_floor_across_ops_vs_numpy,
             ),
@@ -3184,6 +3188,70 @@ fn bench_dtype_probe_fanout_ceiling(_c: &mut Criterion) {
 // Deliberately a SEPARATE group rather than a parameter on the multiply sweep: that group
 // is cited by banked rows, and changing its shape would silently change what those rows
 // refer to.
+// How bad does the campaign's worst ratio get as n -> 1? (`deadlock-audit-ei9jz`)
+//
+// EVERY size sweep in this ledger bottoms out at n=256, which is the SMALLEST n ever
+// measured for any binary op. That is a gap, not a floor: the per-call cost is FIXED
+// (excess_ns sits at ~1100-1700 ns from 2^8 to 2^16 while the work grows 256x), so the
+// ratio must keep worsening below 256 and approach an asymptote of
+// numpy_per_call / fnp_per_call. The campaign quotes "~3.5-3.8x slower at n=256" as its
+// worst number; that is the worst MEASURED number, not the worst number.
+//
+// This measures 1, 4, 16, 64 and anchors on 256. The anchor is the point: 256 is measured
+// in the SAME invocation as the new cells, so the comparison is within-invocation rather
+// than against a remembered figure from another run - the cross-run subtraction that has
+// already produced three retracted numbers today.
+//
+// WHAT WOULD MAKE THIS ROW MEANINGLESS, stated so the reader can check it: if the ratio
+// FLATTENS below 256 the asymptote is already reached and n=256 was a fair worst case. If
+// it keeps falling, every "worst ratio" figure in this ledger understates the small-array
+// case. Either answer is worth having; the group does not presuppose one.
+fn bench_add_tiny_n_floor_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        for n in [1usize, 4, 16, 64, 256] {
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a = locals.get_item("a").expect("a operand");
+            let b = locals.get_item("b").expect("b operand");
+            let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+            let (ratio, lo, hi, numpy_ns, fnp_ns) =
+                measure_binary_ufunc_vs_numpy(py, &module, &numpy, "add", &args, n);
+            let excess_ns = fnp_ns - numpy_ns;
+            println!(
+                "TINY_N_FLOOR op=add n={n} numpy_version={numpy_version} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
+                 numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={excess_ns:.1} \
+                 is_anchor_cell={} anchored_in_same_invocation=true",
+                n == 256,
+            );
+        }
+    });
+}
+
 fn bench_add_route_floor_size_sweep_vs_numpy(_c: &mut Criterion) {
     Python::initialize();
     Python::attach(|py| {
