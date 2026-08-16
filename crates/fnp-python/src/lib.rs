@@ -9726,7 +9726,15 @@ fn try_zerocopy_f16_binary_widen(
     op: u8,
 ) -> PyResult<Option<Py<PyAny>>> {
     const F16_BINARY_PARALLEL_MIN: usize = 1 << 20;
-    let numpy = py.import("numpy")?;
+    // A SECOND numpy import per call, on the probe that declines the most often.
+    // `f16op` is `Some(..)` for add/subtract/multiply/divide/floor_divide/power/
+    // maximum/minimum, so this function runs — and declines — on essentially every
+    // f64, f32 and integer binary ufunc call, paying a fresh `py.import("numpy")`
+    // each time. That import is 400 ns on thinkstation1 against a 2394 ns
+    // whole-call floor (`deadlock-audit-ei9jz`), i.e. ~28% of the 1444 ns that row
+    // could not attribute to any named stage. Removing it from `PyUFunc::__call__`
+    // alone did not remove it from the route. See `cached_numpy`.
+    let numpy = cached_numpy(py)?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
         return Ok(None);
@@ -10996,7 +11004,9 @@ fn try_zerocopy_f16_compare(
     op: u8,
 ) -> PyResult<Option<Py<PyAny>>> {
     const F16_CMP_PARALLEL_MIN: usize = 1 << 20;
-    let numpy = py.import("numpy")?;
+    // Same second-import cost as the widening probe above, on the comparison arm:
+    // this runs and declines on every greater/less/greater_equal/less_equal call.
+    let numpy = cached_numpy(py)?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
         return Ok(None);
@@ -110024,6 +110034,91 @@ mod tests {
             Ok(())
         })
         .expect("second attach must reuse the populated cell");
+    }
+
+    /// ENGAGEMENT PROOF for the import removal. Byte parity cannot see this lever at
+    /// all — the route produces identical bytes whether it imports numpy once, twice
+    /// or not at all — so this test makes a re-import FATAL instead of invisible.
+    ///
+    /// After the caches are warm, `sys.modules["numpy"]` is replaced with an object
+    /// that raises on every attribute access. Any surviving `py.import("numpy")` on
+    /// the f64 multiply route now receives that object instead of numpy and the call
+    /// fails; a route running entirely off the cached handle is unaffected. The f64
+    /// multiply route executes exactly two probes — `try_zerocopy_complex_binary`
+    /// (which takes the module as a parameter) and `try_zerocopy_f16_binary_widen`
+    /// (which declines on f64 but used to import numpy first) — plus `__call__`'s own
+    /// import, so before this lever it paid two imports and would fail here twice over.
+    ///
+    /// IF THIS TEST FAILS it has found a THIRD import site on the route, which is the
+    /// question `deadlock-audit-ei9jz` is asking: 1444 ns of a 2394 ns call is not
+    /// attributed to any named stage. Read the raised attribute name in the message —
+    /// it names what the re-importing site went looking for.
+    #[test]
+    fn f64_multiply_route_does_not_reimport_numpy() {
+        struct SysModulesGuard {
+            original: Py<PyAny>,
+            _mutex: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for SysModulesGuard {
+            fn drop(&mut self) {
+                // Unconditional restore, and it runs during unwind too, so a failing
+                // assertion below cannot leave a poisoned interpreter for the sibling
+                // tests that share it.
+                Python::attach(|py| {
+                    if let Ok(modules) = py.import("sys").and_then(|sys| sys.getattr("modules")) {
+                        let _ = modules.set_item("numpy", self.original.bind(py));
+                    }
+                });
+            }
+        }
+
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_no_reimport")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let multiply = module.getattr("multiply")?;
+            let a = numpy
+                .call_method1("arange", (256_usize,))?
+                .call_method1("astype", ("float64",))?;
+            let b = numpy.call_method1("full", (256_usize, 3.0_f64))?;
+
+            // Warm every cache the route touches BEFORE numpy is taken away.
+            let expected = multiply
+                .call1((&a, &b))?
+                .call_method0("tobytes")?
+                .extract::<Vec<u8>>()?;
+
+            let trap = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!(
+                    "class Trap:\n    def __getattr__(self, name):\n        raise AssertionError('the f64 multiply route re-imported numpy and asked it for ' + name)\nTRAP = Trap()\n"
+                ),
+                pyo3::ffi::c_str!("numpy_import_trap.py"),
+                pyo3::ffi::c_str!("numpy_import_trap"),
+            )?;
+            let sys_modules = py.import("sys")?.getattr("modules")?;
+            let observed = {
+                let _guard = SysModulesGuard {
+                    original: sys_modules.get_item("numpy")?.unbind(),
+                    _mutex: POISON_MUTEX
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                };
+                sys_modules.set_item("numpy", trap.getattr("TRAP")?)?;
+                multiply
+                    .call1((&a, &b))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?
+            };
+            assert_eq!(
+                observed, expected,
+                "the import-free route must produce the same bytes as the warm-up call"
+            );
+            Ok(())
+        });
     }
 
     /// The native fast path is reached through the same `__call__` whose import was
