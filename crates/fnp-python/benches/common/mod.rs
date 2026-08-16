@@ -1031,6 +1031,7 @@ fn report_contract_gate(row: &str, effect: ContractPairStats, null: ContractPair
         "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
          effect_ci95=[{:.6},{:.6}] effect_ci_excludes_one={} \
          null_ci95=[{:.6},{:.6}] null_half_width={:.6} required_2x_delta={required_delta:.6} \
+         null_straddles_unity={} null_bias={:.6} \
          cv_is_provenance_only=true",
         effect.ratio_median,
         effect.ratio_ci_low,
@@ -1039,6 +1040,8 @@ fn report_contract_gate(row: &str, effect: ContractPairStats, null: ContractPair
         null.ratio_ci_low,
         null.ratio_ci_high,
         null_half_width,
+        null_straddles_unity(null),
+        null_bias(null),
     );
 }
 
@@ -1046,6 +1049,46 @@ fn null_half_width(null: ContractPairStats) -> f64 {
     (null.ratio_ci_low - 1.0)
         .abs()
         .max((null.ratio_ci_high - 1.0).abs())
+}
+
+/// Does this A/A null's 95% CI actually contain 1.0? (`deadlock-audit-7xcq2`)
+///
+/// An A/A null runs the SAME arm against ITSELF, so its ratio must be 1.0. A null
+/// whose CI EXCLUDES unity means the harness is systematically favouring one
+/// position in the schedule, and the effect measured in that same position inherits
+/// the bias.
+///
+/// WHAT THIS IS *NOT* FOR, because I first justified it with a mechanism that turned
+/// out to be false and the correction belongs where the next reader will see it: I
+/// claimed the gate was BLIND to bias, on the theory that `contract_gate_verdict`
+/// scales its threshold by the null's half-width and so a biased-but-tight null would
+/// slip through with a small threshold. That is wrong. `null_half_width` measures the
+/// distance from **1.0** to the furthest CI bound — not the width of the interval — so
+/// an offset null produces a LARGER half-width and a STRICTER threshold. The observed
+/// lookup-ceiling row proves it arithmetically: half_width 0.034364 gave
+/// required_2x_delta 0.068729, exactly 2x, and that is larger than a centred-but-wider
+/// null would have produced. The gate already charges bias into the threshold.
+///
+/// WHAT IT IS FOR: VISIBILITY. A biased null is a real anomaly — the harness favoured
+/// one position in the schedule — and today nothing in the emitted line says so. You
+/// can only notice by reading the CI bounds yourself and doing the comparison in your
+/// head, which is exactly how both of today's instances got banked with hand-written
+/// prose caveats instead of a machine-readable flag. It also makes the population
+/// auditable: across the whole ledger there are 116 prose `ci95=` mentions but ZERO
+/// pasted null rows, so nobody can currently count how often this happens.
+///
+/// Two instances were observed on thinkstation1 on 2026-08-16, both of which passed
+/// the gate legitimately (their effects cleared the inflated threshold): the
+/// lookup-ceiling `empty` pair at 1.030928 ci95=[1.030405,1.034364] (3.1% bias), and
+/// the parallel divide incumbent null at 1.006625 ci95=[1.001361,1.029159] (0.66%
+/// bias, under an effect clearing its threshold by only 1.2x — the thin one).
+fn null_straddles_unity(null: ContractPairStats) -> bool {
+    null.ratio_ci_low <= 1.0 && null.ratio_ci_high >= 1.0
+}
+
+/// How far the null's CENTRE sits from unity — the quantity the half-width misses.
+fn null_bias(null: ContractPairStats) -> f64 {
+    (null.ratio_median - 1.0).abs()
 }
 
 pub fn dual_null_contract_verdict(
@@ -1080,7 +1123,10 @@ fn report_dual_null_contract_gate(
          incumbent_null_half_width={incumbent_half_width:.6} \
          candidate_null_half_width={candidate_half_width:.6} \
          controlling_null_half_width={controlling_half_width:.6} \
-         required_2x_delta={required_delta:.6} both_nulls=true cv_is_provenance_only=true",
+         required_2x_delta={required_delta:.6} both_nulls=true \
+         incumbent_null_straddles_unity={} candidate_null_straddles_unity={} \
+         incumbent_null_bias={:.6} candidate_null_bias={:.6} \
+         cv_is_provenance_only=true",
         effect.ratio_median,
         effect.ratio_ci_low,
         effect.ratio_ci_high,
@@ -1089,6 +1135,10 @@ fn report_dual_null_contract_gate(
         incumbent_null.ratio_ci_high,
         candidate_null.ratio_ci_low,
         candidate_null.ratio_ci_high,
+        null_straddles_unity(incumbent_null),
+        null_straddles_unity(candidate_null),
+        null_bias(incumbent_null),
+        null_bias(candidate_null),
     );
 }
 
@@ -1130,8 +1180,97 @@ fn verify_stale_source_detector() {
     );
 }
 
+/// Proves the straddle detector DISCRIMINATES, and proves the inversion it exists to
+/// expose is real (`deadlock-audit-7xcq2`).
+///
+/// This lives in the startup self-check rather than a `#[test]`, because these are
+/// benchmark binaries: `cargo test` does not run their `#[test]`s, so a unit test here
+/// would be dormant and prove nothing on any real run. `verify_contract_gate_semantics`
+/// executes on every bench invocation, before Criterion is constructed.
+fn verify_null_straddle_detector() {
+    // Every field is written out: `ContractPairStats` does not derive `Default`, and
+    // adding a derive to a shared public struct to shorten a self-check would be a
+    // worse trade than four extra lines here.
+    let stats = |median: f64, low: f64, high: f64| ContractPairStats {
+        ratio_median: median,
+        ratio_ci_low: low,
+        ratio_ci_high: high,
+        ratio_cv_pct: 0.0,
+        ratio_mad: 0.0,
+        arm_a_median_ns: 0.0,
+        arm_b_median_ns: 0.0,
+        checksum: 0,
+    };
+
+    // POSITIVE: a healthy null contains unity and reports ~zero bias.
+    let healthy = stats(1.000332, 0.998696, 1.000817);
+    assert!(
+        null_straddles_unity(healthy),
+        "a null whose CI contains 1.0 must report straddles_unity=true",
+    );
+    assert!(
+        null_bias(healthy) < 0.001,
+        "a healthy null's bias must be near zero, got {:.6}",
+        null_bias(healthy),
+    );
+
+    // NEGATIVE CASE — the whole point of this check, and the shape a naive
+    // implementation gets wrong. Both of these were MEASURED on thinkstation1 on
+    // 2026-08-16 and both PASSED the live gate. A detector that tested the null's
+    // half-width, or its median alone, or that compared against a tolerance instead
+    // of against the interval, reports these as fine.
+    let biased_tight = stats(1.030928, 1.030405, 1.034364);
+    assert!(
+        !null_straddles_unity(biased_tight),
+        "the observed lookup-ceiling null [1.030405,1.034364] EXCLUDES 1.0 and must be \
+         reported as not straddling — this is the case the live gate misses",
+    );
+    let biased_wide = stats(1.006625, 1.001361, 1.029159);
+    assert!(
+        !null_straddles_unity(biased_wide),
+        "the observed parallel-divide incumbent null [1.001361,1.029159] EXCLUDES 1.0 \
+         and must be reported as not straddling",
+    );
+
+    // PINS THE CORRECTION, so the false mechanism cannot come back. `null_half_width`
+    // is the distance from 1.0 to the furthest bound, NOT the interval's width, so a
+    // biased null yields a LARGER half-width and therefore a STRICTER threshold — the
+    // gate charges bias rather than missing it. If someone later "fixes" half-width to
+    // mean interval width, this assertion fails and they are forced to re-read why
+    // these fields exist, instead of silently recreating the hole I wrongly claimed
+    // was already there.
+    let healthy_wide = stats(0.999575, 0.976336, 1.032376);
+    assert!(
+        null_half_width(biased_tight) > null_half_width(healthy_wide),
+        "expected the BIASED null to have the LARGER half-width ({:.6} vs {:.6}): \
+         half_width is measured from 1.0, so offset inflates it and the gate becomes \
+         stricter, not more permissive",
+        null_half_width(biased_tight),
+        null_half_width(healthy_wide),
+    );
+    // And the reason a separate bias field still earns its place: half-width conflates
+    // offset with spread, so these two nulls have nearly equal half-widths for
+    // completely different reasons — one is centred and noisy, the other is tight and
+    // displaced. Only `null_bias` tells them apart in the emitted line.
+    assert!(
+        null_bias(biased_tight) > null_bias(healthy_wide),
+        "expected the biased-tight null to have the LARGER bias ({:.6} vs {:.6})",
+        null_bias(biased_tight),
+        null_bias(healthy_wide),
+    );
+
+    // Boundary: a CI that touches unity exactly still straddles. Using a strict
+    // comparison here would flag every null that happens to land on the boundary,
+    // which is a false alarm rather than a finding.
+    assert!(
+        null_straddles_unity(stats(1.0005, 1.000000, 1.001000)),
+        "a CI whose bound is exactly 1.0 must count as straddling",
+    );
+}
+
 fn verify_contract_gate_semantics() {
     verify_stale_source_detector();
+    verify_null_straddle_detector();
     assert_eq!(
         BALANCED_SQUARE,
         [true, false, false, true, true, false, false, true]

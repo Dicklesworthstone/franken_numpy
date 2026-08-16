@@ -549,9 +549,22 @@ zero.
 (`deadlock-audit-7xcq2`). Two A/A nulls measured today EXCLUDE unity and still passed the gate: the
 lookup-ceiling `empty` pair at 1.030928 ci95=[1.030405,1.034364] (3.1% bias) and the parallel divide
 incumbent null at 1.006625 ci95=[1.001361,1.029159] (0.66% bias, under an effect clearing its
-threshold by only 1.2x). A biased-but-TIGHT null makes `report_median_gate_pair` MORE permissive,
-because that gate tests the null's half-width and never its centre. So I tried to count how many
-banked rows are affected. **The count is not obtainable.** Across this entire ledger there are 116
+threshold by only 1.2x).
+
+> **CORRECTION, 2026-08-16, same day — the mechanism I gave here was WRONG.** I wrote that "a
+> biased-but-TIGHT null makes `report_median_gate_pair` MORE permissive, because that gate tests the
+> null's half-width and never its centre." That is false, and I found it only when an assertion I
+> wrote to pin the claim failed its own arithmetic. `null_half_width` is
+> `max(|ci_low - 1|, |ci_high - 1|)` — the distance from **1.0** to the furthest bound, NOT the width
+> of the interval. An offset null therefore produces a LARGER half-width and a STRICTER threshold.
+> The lookup-ceiling row proves it: half_width 0.034364 → required_2x_delta 0.068729, exactly 2x, and
+> larger than the 0.064752 a centred-but-wider null produced in the same run. **The gate already
+> charges bias into its threshold; it does not miss it.** What survives is narrower and still worth
+> having: nothing in the emitted line SAYS a null was biased, so both of today's instances were
+> banked with hand-written prose caveats rather than a machine-readable flag. The lever is
+> visibility, not a gate hole.
+
+So I tried to count how many banked rows are affected. **The count is not obtainable.** Across this entire ledger there are 116
 prose `ci95=[` mentions but only 8 verbatim `MEDIAN_CI_GATE` lines and ZERO pasted `PAIRED row=…null…`
 lines: rows quote their effect CI in prose and describe their nulls in English. Of the 31
 machine-readable `*null*_ci95` fields that do exist, exactly 1 excludes unity, by +0.0002 — a number
