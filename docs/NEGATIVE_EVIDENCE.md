@@ -4,6 +4,104 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, POST-FIX, FROM A COMMITTED SHA: the n=256 per-call floor stands at 3.05-3.64x SLOWER than NumPy across all four delegating ops - `add` is the worst cell at 3.6359x (`deadlock-audit-v8nx6`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. This is the campaign's WORST vs-incumbent ratio, re-measured after the four
+per-call-import commits, and it is the row that discharges the retry predicate of the
+PROVENANCE INVALIDATION entry immediately below: same host, committed SHA, clean tree, both
+arms in one binary in one invocation, both A/A nulls carried.
+
+**Campaign result class:** decidable-regression (we LOSE; this is our gap to close, not a win)
+
+**PROVENANCE, recorded the way the row below demands.**
+
+```
+git_rev_parse_HEAD=fd58d09c580c1d1256d96bcb31b1e1fca028c78e   (see note on identification below)
+git_status_porcelain=<empty>   tree clean in the crate under measurement
+bench_elf_sha256=6766850940f767ebfb2d82734e05d3ace4cd02f1e210e0aae5e10439ca7bd8fd
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307295616 bytes)
+bench_file_source_sha256=388c39543b7accc27ac4c42af5b6464bc64dd9658879d009c22b07cefcafba66
+harness_contract_source_sha256=0b980265f5757b898355e6ca52d4730e4b503ee5d9952eb1d4f879d62502fe38
+harness_source_matches_disk=true
+profile=bench (cargo defaults: opt-level 3, lto=false, codegen-units=16) = TRIAGE grade
+HOST_BASELINE host=thinkstation1 cpu_model=AMD_Ryzen_Threadripper_PRO_5975WX_32-Cores
+  physical_cores=32 logical_threads=64 allowed_logical_threads=64 governor=powersave
+THREAD_CONFIGURATION rayon_pool_threads=64 (OBSERVED) RAYON_NUM_THREADS=unset
+  OPENBLAS_NUM_THREADS=unset OMP_NUM_THREADS=unset MKL_NUM_THREADS=unset
+numpy_version=2.4.3   harness=common::run_dual_null_median_ci_contract
+schedule=ABBAABBA rounds=41 min_of=3 group=bench_percall_floor_across_ops_vs_numpy
+```
+
+**HOW THE ELF WAS TIED TO A COMMIT**, since that is the exact failure the row below records. The
+binary embeds its own bench source via `include_str!`, and its reported
+`bench_file_source_sha256` matches BOTH the working tree and `git show
+fd58d09c:crates/fnp-python/benches/criterion_python_elementwise.rs` byte for byte;
+`crates/fnp-python/src/lib.rs` is identical at `5c7735da`, at `fd58d09c` and on disk, and
+`git status --porcelain` is empty. So the measured source is recoverable from git, which is
+what `ef5467cb2a43c00b` was not.
+
+**THE ROW.** Ratio is numpy/fnp, so BELOW 1.0 means we are slower. All four are
+`DECIDABLE_REGRESSION`; `routes_natively` is true only for `divide`, which is the one op that
+takes the native f64 path at this size.
+
+| op | numpy/fnp | ci95 | fnp/numpy | numpy ns | fnp ns | excess ns |
+|---|---|---|---|---|---|---|
+| add | 0.275034 | [0.273769, 0.275981] | **3.6359x slower** (worst bound 3.6527x) | 401.0 | 1463.0 | 1062.0 |
+| subtract | 0.281461 | [0.280246, 0.284168] | 3.5529x slower (worst bound 3.5683x) | 415.0 | 1467.0 | 1052.0 |
+| multiply | 0.327948 | [0.326892, 0.330113] | 3.0493x slower (worst bound 3.0591x) | 406.0 | 1242.0 | 836.0 |
+| divide | 0.320179 | [0.317638, 0.320923] | 3.1233x slower (worst bound 3.1482x) | 426.0 | 1337.0 | 911.0 |
+
+**A/A NULL CONTROLS - all eight sit on unity, and the gate passed on both nulls for every op.**
+
+```
+add       incumbent_null_ci95=[1.000000,1.000000] candidate_null_ci95=[0.996606,1.003429]
+subtract  incumbent_null_ci95=[1.000000,1.002439] candidate_null_ci95=[0.997292,1.004090]
+multiply  incumbent_null_ci95=[1.000000,1.009852] candidate_null_ci95=[0.995961,1.004092]
+divide    incumbent_null_ci95=[1.000000,1.009390] candidate_null_ci95=[1.000000,1.006701]
+```
+
+Every effect CI is disjoint from unity by two orders of magnitude more than the controlling null
+half-width (largest controlling null half-width 0.009852, required_2x_delta 0.019704, observed
+effect distance from unity >= 0.669887), so no null is anywhere near explaining an effect.
+Per-op checksums were identical across all three phases, so both arms computed the same values.
+
+**WHAT THIS LICENSES.** `fnp.add/subtract/multiply/divide` on f64 at n=256 are 3.05-3.64x slower
+than NumPy's own, measured against NumPy in the same invocation on the same operands. `add` is
+the worst cell and is the campaign's current worst vs-incumbent ratio. The per-call excess is
+836-1062 ns and is nearly FLAT across the four ops, which is the signature of a fixed wrapper
+cost rather than anything op-specific - `multiply` and `divide` differ by 75 ns despite divide
+taking a different (native) route.
+
+**WHAT THIS DOES NOT LICENSE, and this is the important half.** It is NOT a clean before/after
+for the four import commits (`e4cdd808`, `f8475a76`, `e42056a3`, `5c7735da`). The pre-fix n=256
+figure on this host was 5.985x, but it came from `bench_percall_floor_stage_attribution`
+(standalone stage REPLICAS, min-of-2001) and from an ELF whose source is unrecoverable - a
+different harness AND an invalidated tree. Subtracting across harnesses is the same error class
+as subtracting across workers, which this ledger has already paid for twice. The earlier readings
+of THIS group (add 0.120120, and before that 0.098052) are from `vmi1227854` and `vmi1153651`,
+different workers again, and the standing rule is that host moves these ratios ~35%. **So this
+row is a standing figure for HEAD, not a delta.** Anyone wanting the value of the import removal
+must measure it as a control, one binary, both arms.
+
+**WHAT IT DOES SETTLE:** the 2394 ns floor and the 5.985x n=256 ratio must not be quoted forward.
+The live post-fix numbers for this cell are the table above, and the live worst ratio is 3.6359x,
+not 7.97x and not 5.985x.
+
+**ENGAGEMENT CAVEAT, stated rather than glossed.** This row proves a RATIO; it does not prove the
+route stopped importing numpy. The instrument for that is
+`f64_multiply_route_does_not_reimport_numpy` (lib test module, added in `f8475a76`), which swaps
+`sys.modules["numpy"]` for an object raising on any attribute access, so a surviving import is
+fatal. It has NOT been run. Byte parity cannot see the import lever, so until that test runs, the
+mechanism behind these numbers is inferred from source reading, not demonstrated.
+
+RETRY PREDICATE: (1) run `f64_multiply_route_does_not_reimport_numpy` and the other four new
+tests to convert the mechanism from inferred to demonstrated - if it FAILS it has found another
+import site on the route, which is `deadlock-audit-ei9jz`'s question. (2) Replicate this table on
+a second worker before quoting 3.6359x as a fleet figure; one host fixes the cell, not the
+generality. (3) The next named lever is `deadlock-audit-t4lri`: `PyUFunc::__call__`'s
+nine-parameter signature, the largest never-priced stage of the remaining ~1000 ns excess.
+AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED, PROVENANCE INVALIDATION: today's three `thinkstation1` rows measured an UNCOMMITTED tree that TWO LATER COMMITS have already superseded - re-measure before any of them is quoted as a property of the library (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. This row exists to stop three of my own numbers from being quoted as facts about
