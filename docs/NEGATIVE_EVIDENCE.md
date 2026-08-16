@@ -9,6 +9,68 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - THE SIZE AXIS FOR THE WORST CELL: `add` is worse than `multiply` at every size, and unlike multiply it does NOT reach parity by 2^24 - though the cell that would decide that has a defective null (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. `add` was the campaign's worst vs-incumbent cell but had only ever been measured at ONE
+size. New group `bench_add_route_floor_size_sweep_vs_numpy`, mirroring the multiply sweep exactly —
+same size ladder, same operand generator, same contract — so the two are comparable cell for cell.
+
+**Campaign result class:** incumbent-loss
+
+```
+ROUTE_FLOOR_SWEEP op=add worker=thinkstation1 numpy_version=2.4.3
+  harness=common::run_dual_null_median_ci_contract  (ABBAABBA, 41 rounds, min-of-3)
+  n=2^8   ratio=0.285809 ci95=[0.284410,0.287206]  numpy_ns=436      fnp_ns=1528      excess_ns=1092   DECIDABLE_REGRESSION
+  n=2^12  ratio=0.565756 ci95=[0.564493,0.567824]  numpy_ns=1553     fnp_ns=2750      excess_ns=1197   DECIDABLE_REGRESSION
+  n=2^16  ratio=0.906477 ci95=[0.905572,0.907109]  numpy_ns=16351    fnp_ns=18029     excess_ns=1678   DECIDABLE_REGRESSION
+  n=2^20  ratio=0.986286 ci95=[0.981350,0.989247]  numpy_ns=267722   fnp_ns=271795    excess_ns=4073   UNDECIDED
+  n=2^24  ratio=0.995634 ci95=[0.993635,0.999127]  numpy_ns=19152855 fnp_ns=19169332  excess_ns=16477  UNDECIDED
+```
+
+bench_elf_sha256=fa1d5c41dabf5038e36678c4278bb2403d25f13137b5d999119f028c29cf8c1e (new binary — the
+group is new). Local build under the exported cargo-shim bypass, zero `[RCH]` lines, executable path
+taken from `--message-format=json`. host=thinkstation1 5975WX 32c/64t governor=powersave.
+
+**`add` IS WORSE THAN `multiply` AT EVERY SIZE BUT ONE**, comparing against the multiply sweep banked
+in `b058a0c0` (same host, same ladder, same contract):
+
+| log2 n | add | multiply | add worse |
+|---|---|---|---|
+| 8 | 0.285809 | 0.320122 | yes |
+| 12 | 0.565756 | 0.572363 | yes |
+| 16 | 0.906477 | 0.919712 | yes |
+| 20 | 0.986286 | 0.979997 | no |
+| 24 | 0.995634 | 0.997427 | yes |
+
+The 2^20 and 2^24 differences are fractions of a percent and both cells are `UNDECIDED` in both
+sweeps, so only the 2^8/2^12/2^16 rows carry a decidable "add is worse".
+
+**THE NEW FINDING — AND ITS OWN CONTROL UNDERMINES IT, WHICH IS WHY IT IS STATED AS A QUESTION.**
+`multiply` reached `at_parity=true` at 2^24 with clean nulls (ci95 [0.988936,1.004904] contains 1.0).
+`add` reads `at_parity=false` at 2^24: ci95 [0.993635,0.999127], whose upper bound sits **0.0009
+below unity**. Taken at face value that says the worst op never amortises even at 16.7M elements,
+which would make it a different and worse problem than multiply's small-n floor. **But the 2^24 cell
+is exactly the one whose `incumbent_null_straddles_unity=false`**, so its own A/A control is
+defective, and the gate correctly returns `UNDECIDED`. **I am not claiming add fails to reach parity.**
+The four other cells' nulls are clean; this one is not, and it is the only one that would decide the
+question.
+
+**THE WORST-CELL MAGNITUDE, now pooled over THREE independent invocations** (two from
+`bench_percall_floor_across_ops_vs_numpy`, one here): 0.275225 / 0.262606 / 0.285809 →
+**3.633x, 3.808x, 3.499x slower**, an 8.8% spread. Quote the worst cell as **~3.5-3.8x slower at
+n=256**, not to four figures. All six of those cells' nulls straddle unity.
+
+**`excess_ns` — read only the small-n end.** It reads 1092 / 1197 / 1678 / 4073 / 16477 ns, which
+looks like growth, but at 2^20 and 2^24 it is a difference of two nearly-equal large numbers (16477 ns
+out of 19.15 ms is 0.086%) and carries no resolution, the same cancellation trap recorded three times
+already today. The defensible statement is that excess sits at **~1100-1700 ns from 2^8 to 2^16**.
+
+RETRY PREDICATE: to settle whether `add` amortises, re-run ONLY the 2^24 cell until its incumbent
+null straddles unity, then read `at_parity`. Do not re-run the small-n cells — they are decided and
+now measured three times. Do not compare `add` and `multiply` at 2^20/2^24; both are UNDECIDED there
+and the differences are inside the noise.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - REPLICATED: `add` IS the worst cell (3.633x then 3.808x) - but the "495 ns op-dependent spread" I banked one commit ago does NOT replicate and is partly CORRECTED here (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. The worst-cell claim had been measured exactly once. Given this session already produced
