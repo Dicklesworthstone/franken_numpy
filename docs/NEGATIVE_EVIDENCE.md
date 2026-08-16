@@ -25,6 +25,79 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - THE LAST UNEXPLAINED TERM IS LOCATED: `wrapper_residual` is 83% OUTPUT ALLOCATION, and 88 ns of it is a getattr that MUST stay live for monkeypatch correctness (`deadlock-audit-ei9jz`, `deadlock-audit-tmmud`)
+
+`SlateHeron`. `deadlock-audit-tmmud` priced output construction at 1310 ns PRE-FIX and it had never
+been re-measured since the per-call floor fell 59%. Re-measured here against the current 370 ns
+residual, which the previous certification left as the largest term with NO named suspect.
+
+**Campaign result class:** maintenance-diagnostic
+
+**LOADAVG, observed and CONVERGED:** `13.01/15.84/20.86` before the build, `21.41/24.69/23.92` after
+it, and `18.05/23.71/23.61` **identical before and after the measurement** - all three figures within 6
+of each other and none above 25. A stable window, not a dip.
+
+```
+OUTPUT_CONSTRUCTION_DECOMPOSITION worker=thinkstation1
+  harness=batched_min_of_401_minus_empty_loop trials=401
+  empty_loop_ns=0.31            getattr_empty_ns=88.10
+  empty_flat_ns=310.12          empty_at_final_shape_ns=307.50
+  noop_reshape_ns=290.16        real_reshape_ns=302.73
+  empty_plus_noop_reshape_ns=600.28   empty_plus_real_reshape_ns=612.84
+  final_shape_saves_ns=305.34
+```
+
+bench_elf_sha256=0bd9569e3bff75f258151badcd94b903a919905e9d9ab52a7a74523bf2032927, LOCAL build under
+the exported cargo-shim bypass, path from `--message-format=json`, zero `[RCH]` lines, no dirty files
+under `crates/`.
+
+**THE ATTRIBUTION - the 370 ns residual is now 83% explained:**
+
+| component | ns | share of residual |
+|---|---|---|
+| `numpy.empty` at final shape | **307.50** | **83.1%** |
+| — of which `getattr("empty")` | 88.10 | 28.7% *of the allocation* |
+| — the allocation call itself | 219.40 | |
+| unattributed remainder | 62.5 | 16.9% |
+
+After the probe chain fell to 91 ns and PyO3 binding measured ~40 ns for a whole 9-parameter call,
+this closes the account: **what is left of our per-call cost is buying the output buffer.**
+
+**AND 88 ns OF IT IS THE PRICE OF A CORRECTNESS PROPERTY, NOT WASTE.** `getattr("empty")` is 28.7% of
+the allocation. The obvious lever is to cache the bound callable — and this ledger has already
+established, in the `cached_numpy` reasoning and its liveness test, that caching the bound CALLABLE is
+the variant that breaks monkeypatch semantics: a callable captured at warm-up keeps being invoked after
+the attribute it came from is replaced, so the route silently ignores a monkeypatch NumPy itself would
+honour, and every conformance suite stays green. The module is cached; the getattr must stay on the hot
+path. **So 88 ns per call is what monkeypatch liveness costs, and it should be recorded as a priced
+correctness property rather than re-proposed as a lever.**
+
+**THE RESHAPE HALF IS ALREADY BANKED AND THIS CONFIRMS IT INDEPENDENTLY.** `empty_at_final_shape`
+307.50 ns against `empty_plus_real_reshape` 612.84 ns is a **305.34 ns** saving, and `7c04bef0` already
+shipped exactly that change (allocate the f64 binary output at its final shape, removing the reshape at
+every rank). This is a post-fix confirmation of a pre-fix lever, measured on the current binary rather
+than inferred from `tmmud`'s stale 1310 ns.
+
+**WHY `tmmud`'s 1310 ns NO LONGER APPLIES.** That figure was `numpy.empty` + reshape measured before the
+four import-removal commits and before the reshape was removed. The comparable quantity today is
+`empty_at_final_shape` = 307.50 ns — a **4.3x** reduction — and quoting 1310 ns against the current
+370 ns residual would have implied the residual was entirely output construction plus more, which is
+arithmetically impossible.
+
+**NO A/A NULL ON THIS ROW, and the reason is structural rather than an omission:** this group is a
+stage decomposition (`batched_min_of_401_minus_empty_loop`), not a two-arm contract - there is no
+incumbent to pair against, so a dual-null has nothing to control. Its own control is the `empty_loop_ns`
+= 0.31 ns baseline that is subtracted from every stage. That is weaker evidence than a contract row and
+the number should be read as an attribution, not as a competitive ratio.
+
+RETRY PREDICATE: do NOT propose caching the bound `numpy.empty` callable - it is priced at 88 ns and
+rejected on correctness, and that rejection is now measured rather than argued. The remaining
+addressable term is the 219 ns allocation call itself; the only way to remove it is to stop allocating
+through NumPy, which means `out=` support or a Rust-owned buffer handed back as an ndarray - a
+different and much larger change than anything in this lever family. The 62.5 ns unattributed remainder
+is below this harness's useful resolution and should not be chased.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CONFOUND REMOVED, AND MY MECHANISM IS WRONG: interference is a roughly FIXED ~100-125 us disturbance, not a property of the incumbent's regime - so the discount scales as 1/incumbent_duration (`deadlock-audit-48by6`, `deadlock-audit-ei9jz`)
 
 `RedLynx`. The experiment registered one row ago, run. It removes the shadow/size confound I
