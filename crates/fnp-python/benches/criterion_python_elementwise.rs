@@ -12,7 +12,7 @@ use common::ensure_numpy_available;
 use criterion::Criterion;
 use fnp_python::fnp_python;
 use pyo3::Python;
-use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
+use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyModuleMethods, PyTuple};
 use rayon::prelude::*;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -1269,6 +1269,10 @@ fn main() {
             (
                 "bench_delegation_kwargs_shape",
                 bench_delegation_kwargs_shape,
+            ),
+            (
+                "bench_pyo3_signature_binding_cost",
+                bench_pyo3_signature_binding_cost,
             ),
             (
                 "bench_binary_route_overhead_vs_numpy",
@@ -2560,6 +2564,122 @@ fn bench_route_floor_size_sweep_vs_numpy(_c: &mut Criterion) {
 /// make a before/after across two builds unsound here. It measures exactly what
 /// was removed, and deliberately NOT the whole route, which is reported separately
 /// and must not be attributed to this lever.
+/// Two `#[pyfunction]`s with IDENTICAL bodies that differ only in their PyO3
+/// binding signature, so the delta between them is the binding cost and nothing
+/// else (`deadlock-audit-7ocfa`).
+///
+/// `PyUFunc::__call__` declares nine parameters, six optional with defaults, and
+/// PyO3 binds all of them on every call before any element is touched. `probe_nine`
+/// reproduces that exact signature; `probe_varargs` takes `(*args, **kwargs)` and
+/// parses nothing. Both immediately return their first argument, so nothing but
+/// argument handling is inside the timer.
+///
+/// Written as a control BEFORE changing the real signature: if binding turns out to
+/// be cheap, the change should not be made at all, and that is a result worth
+/// banking. Same-binary and same-invocation for the same reasons as
+/// `bench_delegation_kwargs_shape` - the fleet is heterogeneous, cannot be pinned,
+/// and the shared tree carries peers' uncommitted work, so a two-build before/after
+/// would not be attributable to the signature.
+#[pyo3::pyfunction]
+#[pyo3(signature = (x1, _x2, /, _out=None, *, _where=None, _casting="same_kind", _order="K", _dtype=None, _subok=true, _signature=None))]
+#[allow(clippy::too_many_arguments)]
+fn probe_nine(
+    x1: pyo3::Py<pyo3::PyAny>,
+    _x2: pyo3::Py<pyo3::PyAny>,
+    _out: Option<pyo3::Py<pyo3::PyAny>>,
+    _where: Option<pyo3::Py<pyo3::PyAny>>,
+    _casting: &str,
+    _order: &str,
+    _dtype: Option<pyo3::Py<pyo3::PyAny>>,
+    _subok: bool,
+    _signature: Option<pyo3::Py<pyo3::PyAny>>,
+) -> pyo3::Py<pyo3::PyAny> {
+    x1
+}
+
+#[pyo3::pyfunction]
+#[pyo3(signature = (*args, **_kwargs))]
+fn probe_varargs(
+    args: &pyo3::Bound<'_, PyTuple>,
+    _kwargs: Option<&pyo3::Bound<'_, PyDict>>,
+) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
+    Ok(args.get_item(0)?.unbind())
+}
+
+fn bench_pyo3_signature_binding_cost(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let probe_mod = PyModule::new(py, "fnp_binding_probe").expect("probe module");
+        probe_mod
+            .add_function(pyo3::wrap_pyfunction!(probe_nine, &probe_mod).expect("wrap nine"))
+            .expect("add nine");
+        probe_mod
+            .add_function(pyo3::wrap_pyfunction!(probe_varargs, &probe_mod).expect("wrap varargs"))
+            .expect("add varargs");
+        let nine = probe_mod.getattr("probe_nine").expect("probe_nine");
+        let varargs = probe_mod.getattr("probe_varargs").expect("probe_varargs");
+
+        // The bodies ignore the operands, but binding an ndarray is what the real
+        // signature does, so hand them the same kind of object.
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        py.run(
+            std::ffi::CString::new("a = np.arange(256, dtype=np.float64)\nb = a + 1.0\n")
+                .unwrap()
+                .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a");
+        let b = locals.get_item("b").expect("b");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        let call_nine = || {
+            let started = Instant::now();
+            let out = nine.call1(&args).expect("probe_nine call");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+        let call_varargs = || {
+            let started = Instant::now();
+            let out = varargs.call1(&args).expect("probe_varargs call");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+
+        let (effect, null) =
+            common::run_median_ci_contract("pyo3_signature_binding_cost", call_nine, call_varargs);
+        println!(
+            "PYO3_BINDING_COST worker={} harness=common::run_median_ci_contract rounds={} \
+             arms=identical_bodies_differing_only_in_signature \
+             nine_param_ns={:.1} varargs_ns={:.1} ratio_median={:.6} \
+             ratio_ci95=[{:.6},{:.6}] null_ratio_median={:.6} null_ci95=[{:.6},{:.6}] \
+             binding_cost_ns={:.1} varargs_is_faster={}",
+            measurement_worker(),
+            common::CONTRACT_ROUNDS,
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            null.ratio_median,
+            null.ratio_ci_low,
+            null.ratio_ci_high,
+            effect.arm_a_median_ns - effect.arm_b_median_ns,
+            effect.ratio_ci_low > 1.0,
+        );
+    });
+}
+
 fn bench_delegation_kwargs_shape(_c: &mut Criterion) {
     const N: usize = 256;
     Python::initialize();

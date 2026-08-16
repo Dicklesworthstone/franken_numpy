@@ -4,6 +4,60 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - REJECT (hypothesis refuted BEFORE the change was made): PyO3 nine-parameter argument binding costs NOTHING resolvable, so it is not the `PyUFunc::__call__` wrapper floor (`deadlock-audit-7ocfa`)
+
+`TealOak`. I named PyO3 argument binding as the prime suspect for the remaining ~90% of
+the ~7-8 us wrapper floor, in my own retry predicate on `deadlock-audit-s2fkk`. It is
+wrong. Measured before touching the real signature, which is the point of writing the
+control first.
+
+**Campaign result class:** unmeasured
+
+**THE CONTROL.** Two `#[pyfunction]`s with IDENTICAL bodies - each returns its first
+argument immediately - differing ONLY in binding signature. `probe_nine` reproduces
+`PyUFunc::__call__`'s exact shape (nine parameters, six optional with defaults);
+`probe_varargs` takes `(*args, **kwargs)` and parses nothing. One binary, one
+invocation, one worker, ABBAABBA interleaved, A/A null first, no NumPy and no fnp
+route in either arm:
+
+```
+HOST_BASELINE host=hetzner1 cpu_model=AMD_EPYC-Milan_Processor physical_cores=4 logical_threads=8 online_cpus=0:1:2:3:4:5:6:7 allowed_logical_threads=8 allowed_cpus=0:1:2:3:4:5:6:7 governor=unavailable
+bench_elf_sha256=3e9d5eb6542a8ddf398606e248d56ea3eb506a58664788c8ea63d775c59cac14
+MEDIAN_CI_GATE row=pyo3_signature_binding_cost verdict=UNDECIDED effect_ratio=1.000000 effect_ci95=[1.000000,1.000000] effect_ci_excludes_one=false null_ci95=[1.000000,1.100000] null_half_width=0.100000 required_2x_delta=0.200000 cv_is_provenance_only=true
+PYO3_BINDING_COST worker=hetzner1 harness=common::run_median_ci_contract rounds=41 arms=identical_bodies_differing_only_in_signature nine_param_ns=60.0 varargs_ns=60.0 ratio_median=1.000000 ratio_ci95=[1.000000,1.000000] null_ratio_median=1.071429 null_ci95=[1.000000,1.100000] binding_cost_ns=0.0 varargs_is_faster=false
+```
+
+**A/A NULL CONTROL, same invocation:** `null_ratio_median=1.071429`,
+`null_ci95=[1.000000,1.100000]`. That null is the finding's own caveat and is stated
+rather than buried: at a 60 ns call the harness is AT ITS RESOLUTION FLOOR, and two
+IDENTICAL arms already read 7% apart from timer quantisation. So this row does not
+claim binding costs exactly zero. It claims the binding cost is **below a noise floor
+that is itself ~4 ns**, against a wrapper floor of 6968-8375 ns - three orders of
+magnitude apart. No plausible refinement of this measurement turns 0 ns into
+microseconds.
+
+**WHY THIS MATTERS MORE THAN A WIN WOULD HAVE.** The change it would have justified is
+not cosmetic: rewriting `__call__` to `(*args, **kwargs)` means hand-parsing the
+keyword surface of every binary ufunc, which is exactly the class of change that
+previously drifted NumPy's keyword surface (`where=` was once exposed as `where_arg`,
+recorded in the `reduce` comment in `lib.rs`). Refuting it here costs one bench group
+and avoids that risk entirely.
+
+**WHAT REMAINS.** With binding eliminated, four stages bounded at 700 ns
+(`deadlock-audit-cydda`) and the default-kwargs dict removed at 727 ns
+(`deadlock-audit-s2fkk`), the unexplained majority of the wrapper floor now sits in
+`PyBuffer::<f64>::get` acquisition and the output construction path
+(`numpy.empty` + `reshape` + the `Bound`/`Py` round trip). Those are the only
+unexplored stages left.
+
+**Retry predicate.** Reopen ONLY if a probe shows a per-call cost that scales with the
+NUMBER of declared parameters - e.g. the same two probes at 3, 9 and 20 parameters
+showing a monotone trend above the null. Do not reopen on the strength of the
+signature "looking expensive": it was measured at the same call cost as `(*args,
+**kwargs)` and the two are indistinguishable. Next lever should instead instrument
+`PyBuffer` acquisition and the output construction path, which is where the remainder
+now has to be.
+
 ## 2026-08-16 - MEASURED, REPLICATED TWICE ON ONE WORKER: `fnp.divide` is behind `numpy.divide` on BOTH sides of the new size gate - 6.7-6.9x at n=256, 1.6-1.7x at n=65536 (`deadlock-audit-qapyb`)
 
 `TealOak`. `2efdb79d` landed a size gate so `Div` declines the native route below 1<<14 and
@@ -252,6 +306,22 @@ default, which forces NumPy's slow kwargs path instead of its vectorcall fast pa
   np.multiply(a,b,casting='same_kind',order='K',subok=True) 624.2 ns
 
 Worth ~28 ns: **0.4%**.
+
+> **REFUTED THE SAME DAY BY A BETTER MEASUREMENT — see the `deadlock-audit-s2fkk` row.** A peer
+> measured this properly on an rch worker (vmi1227854, harness=common::run_median_ci_contract,
+> ABBAABBA interleaved, A/A null at exactly 1.000000, elf `b8810dc40280847c...`): passing the
+> three default-valued keywords costs **727 ns per call**, ratio 2.442387 ci95=[2.420744,2.458586],
+> `DECIDABLE_WIN`. That is **~9-10% of the wrapper floor**, not 0.4%, and the lever is real — they
+> shipped the fix.
+>
+> Why mine was wrong, since the failure mode matters more than the number: I timed it with a local
+> Python `timeit` loop on this dev box, hammering one call shape until the interpreter's
+> argument-parsing paths were maximally warm, which is close to the best case for the kwargs path
+> and nothing like a cold call inside a real ufunc dispatch. A cheap local probe is legitimate for
+> KILLING a hypothesis that shows a huge effect, but it cannot certify one as dead — the null
+> result is exactly the direction a warm micro-loop is biased toward. I used it for the second
+> thing and should not have. The `numpy.empty` dtype refutation above rests on the same kind of
+> probe and should be treated as unconfirmed until measured under the contract.
 
 PROVENANCE OF THOSE TWO: local numpy-only triage on this dev box, numpy 2.4.3, best-of-5 x 20000
 iterations, NO rch worker and NO fnp code involved. They are deliberately NOT campaign ratios and
