@@ -157,6 +157,18 @@ disjoint CIs; on vmi1152480 it looks like a clean loss, also with disjoint CIs. 
 true of the code. The post-change ratio spans 1.334-1.429 across workers, which is wider than the
 entire claimed effect, so the reorder's cost is BELOW what this harness resolves across machines.
 
+> **SUPERSEDED ON THE SUBSTANTIVE QUESTION, same day, by `deadlock-audit-bpxn6`.** The conclusion
+> above — "below what this harness resolves" — was too strong. It is below what a CROSS-BUILD PAIR
+> resolves. Re-measured with both orderings as replicas interleaved in ONE binary, the ordering is
+> decidable and the sign AGREES on two workers: `vmi1152480` 1.360065 ci95=[1.353519,1.371287] and
+> `vmi1227854` 1.406250 ci95=[1.375000,1.406250], both DECIDABLE_WIN with nulls on unity, worst
+> bound **1.353519x** in favour of declining on `dtype.kind` first.
+>
+> Note which worker that is: `vmi1152480` is the host that, measured as a cross-build pair, said
+> the reorder was WORSE with disjoint CIs. The same worker, measured properly, says it is 1.36x
+> better. So this row's UNDECIDED verdict remains TRUE as a statement about the cross-build
+> method, and false as a statement about the code. Anyone arriving here should read `bpxn6`.
+
 **I ALMOST BANKED THE FIRST HALF AS A WIN.** The vmi1227854 pair alone — 1.403108 against
 1.333774, non-overlapping intervals, control arm invariant — reads exactly like a decidable
 improvement, and I had begun writing it up as one. It was only the second run, which happened to
