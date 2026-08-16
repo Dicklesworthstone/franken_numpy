@@ -1277,6 +1277,10 @@ fn main() {
                 bench_divide_accumulate_isolation_vs_numpy,
             ),
             (
+                "bench_dtype_probe_fanout_ceiling",
+                bench_dtype_probe_fanout_ceiling,
+            ),
+            (
                 "bench_delegation_kwargs_shape",
                 bench_delegation_kwargs_shape,
             ),
@@ -3013,6 +3017,144 @@ fn bench_divide_accumulate_isolation_vs_numpy(_c: &mut Criterion) {
             former_effect.arm_a_median_ns,
             former_effect.arm_b_median_ns,
             fused_effect.arm_b_median_ns,
+        );
+    });
+}
+
+// How much is there to win by fetching `dtype` ONCE and threading it through the
+// probe chain, instead of every probe fetching it again? (`deadlock-audit-v46rn`)
+//
+// WHY THIS IS THE NEXT LEVER. The multiply route sweep measured `excess_ns` roughly
+// CONSTANT at ~2.0-9.8 us from n=2^8 to n=2^24 — a fixed per-call floor. At n=256
+// that floor is 2044 ns against a NumPy call that takes 410 ns in total, i.e. we
+// spend 5x NumPy's entire runtime before delegating to it. Separately, the stage
+// attribution priced ONE `dtype` fetch of both operands at 140 ns, and a static read
+// of `PyUFunc::__call__` (lines 317-582) finds ELEVEN predicate/probe call sites on
+// the delegating path — `numpy_dtype_is_f64` x2, `numpy_dtype_is_f32` x2,
+// `try_zerocopy_f16_binary_widen` x2, plus the f64/f32/complex/floor_divide/f16_compare
+// probes — each of which fetches `dtype` for itself. Not all run for every op, but
+// nothing shares the fetch.
+//
+// THIS IS A CEILING, exactly like the lookup-hoisting control: the hoisted arm holds
+// the dtype in a local, which is the best any threading-through could achieve and
+// which a real refactor must additionally pay for in plumbing. Measure the prize
+// before touching `PyUFunc::__call__`.
+//
+// THE NEGATIVE CASE, and it is the whole reason this group can be trusted: CPython
+// may make a repeated `getattr("dtype")` nearly free — numpy caches the descriptor,
+// and attribute lookup is a dict hit. If so the "prize" collapses to ~0 for a reason
+// that has nothing to do with our route, and a naive implementation would report a
+// tiny saving and conclude the lever is dead. So this group measures the repeated arm
+// at THREE fanouts (1, 2, and PROBE_FANOUT) and asserts the cost actually SCALES with
+// the number of fetches. If it does not scale, the fetch is being cached or elided and
+// the row says the measurement is void rather than reporting a small number as if it
+// were a finding.
+fn bench_dtype_probe_fanout_ceiling(_c: &mut Criterion) {
+    // The count of dtype-fetching predicate/probe sites on the delegating path in
+    // `PyUFunc::__call__`. Read from source, not guessed; see the header comment.
+    const PROBE_FANOUT: usize = 6;
+    const N: usize = 256;
+    const TRIALS: usize = 2001;
+
+    fn min_ns(trials: usize, mut op: impl FnMut()) -> f64 {
+        let mut best = u128::MAX;
+        for _ in 0..trials {
+            let started = Instant::now();
+            op();
+            best = best.min(started.elapsed().as_nanos());
+        }
+        best as f64
+    }
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+
+        // One fetch of BOTH operands, repeated `fanout` times — what the probe chain
+        // does today, each probe fetching for itself.
+        let repeated = |fanout: usize| -> f64 {
+            min_ns(TRIALS, || {
+                for _ in 0..fanout {
+                    black_box(a.getattr("dtype").expect("a dtype"));
+                    black_box(b.getattr("dtype").expect("b dtype"));
+                }
+            })
+        };
+        // Fetched once, then reused `fanout` times — the ceiling on any threading.
+        let hoisted = |fanout: usize| -> f64 {
+            min_ns(TRIALS, || {
+                let da = a.getattr("dtype").expect("a dtype");
+                let db = b.getattr("dtype").expect("b dtype");
+                for _ in 0..fanout {
+                    black_box(&da);
+                    black_box(&db);
+                }
+            })
+        };
+
+        let repeated_1 = repeated(1);
+        let repeated_2 = repeated(2);
+        let repeated_n = repeated(PROBE_FANOUT);
+        let hoisted_n = hoisted(PROBE_FANOUT);
+
+        // PARITY: hoisting must not change the answer. The dtype read once must equal
+        // the dtype read per-probe, or the "optimisation" is a different computation.
+        let once = a.getattr("dtype").expect("a dtype");
+        let again = a.getattr("dtype").expect("a dtype");
+        assert!(
+            once.eq(&again).expect("dtype equality"),
+            "a hoisted dtype must equal a per-probe dtype, or hoisting changes behaviour"
+        );
+
+        // THE NEGATIVE CASE. If repeated fetches are cached or elided, cost does not
+        // grow with fanout and any "saving" this group reports is an artefact. Require
+        // the 6-fetch arm to cost meaningfully more than the 1-fetch arm — at least
+        // 2x, which is far below the 6x that genuinely-uncached fetches would give and
+        // so tolerates measurement noise without tolerating a cached lookup.
+        let scaling = repeated_n / repeated_1.max(1.0);
+        assert!(
+            scaling >= 2.0,
+            "repeated dtype fetches did NOT scale with fanout ({repeated_1:.1} ns at 1 \
+             vs {repeated_n:.1} ns at {PROBE_FANOUT}, ratio {scaling:.2}): the fetch is \
+             being cached or optimised away, so this group cannot measure the probe \
+             chain's dtype cost and its numbers must not be banked"
+        );
+
+        let saved_ns = repeated_n - hoisted_n;
+        let per_fetch_ns = (repeated_2 - repeated_1).max(0.0);
+        println!(
+            "DTYPE_PROBE_FANOUT_CEILING n={N} numpy_version={numpy_version} worker={} \
+             harness=replica_min_of_{TRIALS} trials={TRIALS} probe_fanout={PROBE_FANOUT} \
+             fanout_from_static_read_of_pyufunc_call=true \
+             repeated_1_ns={repeated_1:.1} repeated_2_ns={repeated_2:.1} \
+             repeated_n_ns={repeated_n:.1} hoisted_n_ns={hoisted_n:.1} \
+             per_fetch_pair_ns={per_fetch_ns:.1} saved_ns={saved_ns:.1} \
+             scaling_ratio={scaling:.3} \
+             route_floor_reference_excess_ns_at_n256=2044.0 \
+             numpy_whole_call_reference_ns_at_n256=410.0",
+            measurement_worker(),
         );
     });
 }
