@@ -9,6 +9,66 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - THE TRUE WORST vs-INCUMBENT CELL IS `add`, NOT `multiply`: 3.633x SLOWER at n=256 with PERFECT nulls - and three ops that all delegate differ by 600 ns in OUR cost (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. I banked `multiply` at n=256 as my worst ratio last turn. It is not the worst. Sweeping
+all four binary ops at that size in ONE invocation puts `add` 18% worse, and the cell that beats it
+has cleaner nulls than the one I banked.
+
+**Campaign result class:** incumbent-loss
+
+```
+PERCALL_FLOOR n=256 worker=thinkstation1 numpy_version=2.4.3
+  harness=common::run_dual_null_median_ci_contract   (ABBAABBA, 41 rounds, min-of-3)
+  op=add       routes_natively=false  ratio=0.275225 ci95=[0.274499,0.276686]  numpy_ns=526 fnp_ns=1898 excess_ns=1372
+  op=subtract  routes_natively=false  ratio=0.278898 ci95=[0.277704,0.281313]  numpy_ns=416 fnp_ns=1492 excess_ns=1076
+  op=divide    routes_natively=true   ratio=0.319027 ci95=[0.316761,0.320172]  numpy_ns=446 fnp_ns=1393 excess_ns=947
+  op=multiply  routes_natively=false  ratio=0.324240 ci95=[0.323101,0.325077]  numpy_ns=421 fnp_ns=1298 excess_ns=877
+```
+
+All four `DECIDABLE_REGRESSION`.
+
+| op | ratio | slower by |
+|---|---|---|
+| **add** | **0.275225** | **3.633x** |
+| subtract | 0.278898 | 3.586x |
+| divide | 0.319027 | 3.135x |
+| multiply | 0.324240 | 3.084x |
+
+bench_elf_sha256=4e95267adbfb12897b831b42e832a81666b3636f36a5baf0a42a50384d3db904.
+Built from COMMITTED source: zero files under `crates/` changed since the build, working tree clean,
+so the ELF matches HEAD's code exactly. HOST_BASELINE host=thinkstation1 5975WX 32c/64t
+governor=powersave, rayon_pool_threads=64, avx2/fma, avx512f=false.
+
+**A/A NULL CONTROL — and the WORST cell is the CLEANEST.** `add`'s two nulls both straddle unity with
+bias **0.000000 and 0.000000**; `divide`'s likewise. So the headline 3.633x carries no null defect at
+all. **`subtract` is the exception**: `candidate_null_straddles_unity=false`, bias 0.003374 — its
+3.586x is directionally sound but its magnitude is soft, and it must not be quoted to four figures.
+That is the third catch by the field added in `a9f0651f`, and it happens to land on the cell a peer's
+row (`ee74e2af`) quotes as 3.596x — consistent with my 3.586x, but now known to sit on a defective
+null.
+
+**THE FINDING WORTH MORE THAN THE HEADLINE: three ops that ALL delegate differ by 600 ns in OUR
+cost.** `add`, `subtract` and `multiply` all carry `routes_natively=false` — none has a native f64
+route at this size, so all three do the same thing: probe, decline, hand the call to NumPy. Yet our
+side reads 1898 / 1492 / 1298 ns. NumPy's own spread explains only part of it (526 / 416 / 421), and
+after subtracting the incumbent the excess is still 1372 / 1076 / 877 ns — **a 495 ns spread across
+ops that supposedly take an identical path**. Something in the wrapper is op-dependent, which the
+per-call floor work has so far treated as a single constant. The probe chain is the obvious suspect
+since the f16/f32/int/complex probe sets are selected by `UFuncKind`, but that is a hypothesis and
+this row does not test it.
+
+**WHAT THIS SUPERSEDES.** My previous "worst ratio" row put `multiply` at 3.124x; this run reads
+multiply at 3.084x, consistent, and simply finds two ops worse. The worst-cell claim moves to `add`;
+the multiply row's shape findings (fixed per-call excess, parity only at 2^24) are unaffected.
+
+RETRY PREDICATE: do not re-run this sweep to re-rank the ops — the ordering is stable and the nulls
+are recorded. The live question it opens is the 495 ns op-dependent spread among delegating ops. Test
+it by counting which probe families actually execute per `UFuncKind` on the delegating path, which is
+a source read plus one instrumented run, not another ratio sweep. Note `deadlock-audit-v46rn`'s 731 ns
+dtype-fetch ceiling is of the same order as this spread, so the two may be the same cost seen twice.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MEASURED, THIRD RUN OF THE WORST CELL: ~3.4x with all eight nulls clean - and it does NOT support the "quote the excess" recommendation I made one row ago (`deadlock-audit-ei9jz`, `deadlock-audit-7xcq2`)
 
 `RedLynx`. Third independent run of the campaign's worst vs-incumbent cell, same ELF as run 2,
