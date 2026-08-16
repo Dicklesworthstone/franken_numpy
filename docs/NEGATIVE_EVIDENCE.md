@@ -4,6 +4,67 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, CEILING (the prize before the risk): hoisting the two Python lookups is worth 586 ns/call TOTAL - `py.import("numpy")` is the expensive half at 426 ns, `getattr("empty")` only 160 ns (`deadlock-audit-v8nx6`)
+
+`SlateHeron`. This is a CEILING CONTROL, not a ship and not a win over NumPy. Both arms are ours;
+it measures the largest saving any cache could ever deliver, so the risk of process-lifetime
+`Py<PyAny>` state can be priced before anyone takes it. The hoisted arm holds the handle in a
+local, which a real cache cannot beat and which additionally does not have to survive GIL
+reacquisition or interpreter finalisation.
+
+**Campaign result class:** maintenance-self-speedup (ceiling control — NOT a vs-incumbent row)
+
+```
+PYTHON_LOOKUP_HOISTING n=4096 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_median_ci_contract rounds=41 min_of=3
+  arms=identical_work_differing_only_in_repeated_vs_hoisted_lookup
+  empty_repeated_ns=291.0  empty_hoisted_ns=131.0  empty_ratio=2.221374 ci95=[2.192593,2.238462]  empty_saves_ns=160.0
+  import_repeated_ns=526.0 import_hoisted_ns=100.0 import_ratio=5.257426 ci95=[5.210000,5.260000] import_saves_ns=426.0
+  combined_ceiling_ns=586.0
+```
+
+both rows DECIDABLE_WIN, effect_ci_excludes_one=true.
+bench_elf_sha256=ef5467cb2a43c00b191011ba4b6a4b56ad1f09ec9506a9df7d7df015083431cd
+bench_invocation_id=000000000000000018cc4ef478b9cc84-00014610 checksum=deb836c8dc24cfdd (all four rows)
+harness_contract_source_sha256=0b980265f5757b898355e6ca52d4730e4b503ee5d9952eb1d4f879d62502fe38 harness_source_matches_disk=true
+HOST_BASELINE host=thinkstation1 cpu_model=AMD_Ryzen_Threadripper_PRO_5975WX_32-Cores physical_cores=32 logical_threads=64 governor=powersave
+THREAD_CONFIGURATION rayon_pool_threads=64 RAYON_NUM_THREADS=unset
+profile `release` (stock, triage grade for absolute ns), local build under the cargo-shim bypass, zero `[RCH]` lines.
+
+**A/A NULL — ONE OF THE TWO IS BIASED AND I AM NOT HIDING IT.** The import row's null is exactly
+1.000000 ci95=[1.000000,1.000000]. The `empty` row's null is **1.030928 ci95=[1.030405,1.034364]**,
+which EXCLUDES unity — a 3.1% bias, roughly 9 ns on a 291 ns arm. The live gate passed it because
+it compares the effect against `2 x null_half_width` (0.068729) and has no CI-straddle veto, and
+2.221374 clears that by a wide margin. But a null that does not contain 1.0 is a defect in the
+measurement, not a clean control: read the 160 ns `empty` saving as **~151-160 ns**, and the
+combined ceiling as **~577-586 ns**, never tighter. The import row needs no such haircut.
+
+**WHAT THIS DECIDES.** The bead's decision rule was: if the combined saving is small, close the
+whole repeated-lookup line and write no unsafe caching. 586 ns against the ~7-8 us per-call floor
+is **~7-8% of the floor** — it will not move the 7.97x deficit at n=256 to anything like parity
+(7.97x becomes roughly 7.3x). It is real and it is the second-largest named stage after output
+construction's 1310 ns (`deadlock-audit-tmmud`), but it is not the articulation point, and the
+per-call floor does not fall by paying it.
+
+**THE SPLIT INVERTS THE BEAD'S OWN PREMISE.** v8nx6 was filed around `getattr('empty')` at 110.09 ns
+(k4yus, hetzner1) with `py.import("numpy")` at 310 ns (cydda, vmi1149989) as the secondary figure —
+two numbers taken on different workers with different harnesses and never compared like for like.
+Compared like for like in ONE invocation, the ranking flips: the import is **2.7x the larger cost**
+(426 ns vs 160 ns). Any cache built here should hold the MODULE handle first; caching the bound
+`empty` callable is the smaller and, per note 2 in the bead, the more finalisation-exposed half.
+
+**WHAT THIS DOES NOT SAY.** It does not show a cache achieves 586 ns — that is the ceiling, and a
+real cache pays reacquisition and validity checks the hoisted local does not. It says nothing about
+whether a `OnceLock<Py<PyAny>>` is SOUND across `Python::initialize` per bench group; the bead's
+note 2 (stale handle = use-after-free, invisible to conformance output) is untouched by this row.
+
+RETRY PREDICATE: do not re-measure the ceiling — it is decided. Before writing any cache, first
+re-run this control with the `empty` null clean (the 3.1% bias is unexplained; suspect first-arm
+warm-up in the shorter of the two pairs), then price the MODULE handle alone at 426 ns against the
+soundness work, and require a finalisation test that constructs and drops an interpreter twice with
+the cache live. If that soundness cost exceeds a day, close the line — 426 ns does not buy it.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - REJECT (measured): `deadlock-audit-hzl1w` proposed DELEGATING f64 maximum/minimum to NumPy - the serial native arm BEATS NumPy 1.352401x and delegating would throw that away
 
 `TealOak`. `hzl1w` measured the PARALLEL native arm losing to NumPy on `maximum`/`minimum` and
