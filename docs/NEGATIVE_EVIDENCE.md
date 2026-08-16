@@ -4,6 +4,80 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, POST-FIX AT n=2^20: `multiply` reaches PARITY (UNDECIDED) while `divide` stays a DECIDABLE_REGRESSION at 1.0913x - and 78.6% of divide's excess is divide-SPECIFIC, not the shared route floor (`deadlock-audit-0ppym`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. No build - /data at 43G, one gig above the hard stop - so this re-runs the SAME
+committed-provenance ELF as the two rows below, on a different group. It is the LARGE-n
+companion to the n=256 row: where that one isolates the per-call wrapper, this one amortises
+it and shows what is left.
+
+**Campaign result class:** decidable-regression for `divide`; no-loss-reproduced for `multiply`
+
+```
+BINARY_ROUTE_OVERHEAD n=1048576 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract schedule=ABBAABBA
+  multiply_ratio=0.988423 multiply_ci95=[0.980143,0.992324]
+    multiply_numpy_ns=393501.0 multiply_fnp_ns=398691.0 multiply_excess_ns=5190.0
+  divide_ratio=0.916390   divide_ci95=[0.871910,0.944903]
+    divide_numpy_ns=449042.0 divide_fnp_ns=473283.0 divide_excess_ns=24241.0
+  divide_specific_excess_ns=19051.0 divide_specific_share_of_divide_excess=0.786
+  intervals_disjoint=true same_invocation=true
+  verdict=route_floor_PLUS_larger_divide_specific_cost
+```
+
+bench_elf_sha256=6766850940f767ebfb2d82734e05d3ace4cd02f1e210e0aae5e10439ca7bd8fd
+HEAD at measurement = `cfc98fb5`, tree clean in the crate under measurement; `lib.rs` and the
+bench file are byte-identical at `fd58d09c`, at that HEAD and on disk.
+HOST_BASELINE host=thinkstation1 cpu_model=AMD_Ryzen_Threadripper_PRO_5975WX_32-Cores
+physical_cores=32 logical_threads=64 governor=powersave; rayon_pool_threads=64 OBSERVED,
+RAYON_NUM_THREADS unset. profile `bench` = TRIAGE grade. Ratio is numpy/fnp: below 1.0 is slower.
+
+**A/A NULL CONTROLS - both pairs on unity, and the gate USED them to refuse a verdict.**
+
+```
+multiply  incumbent_null_ci95=[0.992797,1.009935] candidate_null_ci95=[0.987319,1.013727]
+          controlling_null_half_width=0.013727 required_2x_delta=0.027453
+          effect distance from unity = 0.011577  ->  UNDECIDED
+divide    incumbent_null_ci95=[0.993324,1.008574] candidate_null_ci95=[0.994987,1.009290]
+          controlling_null_half_width=0.009290 required_2x_delta=0.018580
+          effect distance from unity = 0.083610  ->  DECIDABLE_REGRESSION
+```
+
+**MULTIPLY IS UNDECIDED, AND THAT IS THE HONEST READING.** Its effect CI does exclude unity
+(0.980143-0.992324), but the margin is 0.011577 against a controlling null half-width of
+0.013727 - the null is WIDER than the effect. The contract requires 2x the null half-width and
+correctly refuses to call it. So: `fnp.multiply` on f64 at n=2^20 is NOT shown to lose. It must
+not be quoted as a 1.012x loss, and it must not be quoted as a win either.
+
+**DIVIDE LOSES BY 1.0913x** (worst bound 1.1469x, best bound 1.0583x), decidably.
+
+**THE STRUCTURAL FINDING, and it is what `deadlock-audit-0ppym` asked for.** The two arms share
+one route, so the shared wrapper cost is visible in `multiply_excess_ns=5190`. Divide's excess is
+24241 ns, so **19051 ns - 78.6% - is divide-SPECIFIC and cannot be explained by the route**. That
+is 4.2% of NumPy's own divide call. The shared route floor is therefore NOT the reason divide
+loses at this size; something on the divide path alone is, and the FE-hazard classifier scan over
+the output buffer is the standing candidate. 0ppym should attack that scan, not the wrapper.
+
+**THIS IS A DIFFERENT REGIME FROM THE n=256 ROW, and the comparison between them is instructive
+rather than subtractable.** At n=256 `multiply` loses 3.0493x with an excess of 836 ns; here it is
+at parity with an excess of 5190 ns. The excess GREW 6.2x while the ratio collapsed to 1.0 -
+exactly what a fixed wrapper plus a size-proportional term looks like, with the proportional part
+(an 8 MB `numpy.empty` and its first-touch faults) dominating at 2^20 and the fixed part invisible
+against a 393 us call. **So the per-call floor is not one number**: quoting 836 ns as "the wrapper
+cost" would be wrong at 2^20, and quoting 5190 ns would be wrong at 256.
+
+**WHAT THIS DOES NOT LICENSE.** Not a before/after: there is no same-harness, same-host pre-fix
+reading of this group, and the import commits are expected to matter little here anyway since a
+~400 ns import is 0.1% of a 400 us call. The campaign's WORST ratio is unchanged and still lives
+at small n - `add` at n=256, 3.6359x (row below).
+
+RETRY PREDICATE: (1) `deadlock-audit-0ppym` should isolate the 19051 ns divide-specific term
+directly - a candidate arm with the classifier scan removed, against the same incumbent, one
+binary - rather than inferring it from this subtraction, which is a difference of two medians and
+carries both their errors. (2) Replicate on a second worker before quoting 78.6%. (3) `multiply`
+being UNDECIDED here means the large-n multiply route is NOT a live target; do not spend levers
+on it without first re-establishing a decidable loss. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED, POST-FIX STAGE ATTRIBUTION + TWO INSTRUMENT DEFECTS: the floor is 1232 ns (was 2394 pre-fix), `import_numpy_ns` is now a DEAD STAGE the route never executes, and `bench_percall_floor_partition` is STRUCTURALLY INVALID (`deadlock-audit-ei9jz`)
 
 `RedLynx`. No build this turn - /data at 43G, one gig above the hard stop - so this re-runs the
