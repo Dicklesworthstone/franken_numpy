@@ -894,6 +894,45 @@ banned as an rch *config* setting — if you need one local build, run that one
 command with `env -u CARGO_TARGET_DIR cargo build --profile release-perf ...`
 directly rather than editing rch config.
 
+### `cargo bench` CANNOT COMPLETE ON THIS FLEET — use `cargo test --release --bench`
+
+**Observed 2026-08-16, three times, landing ZERO measurement cells each.**
+`cargo bench -p fnp-python --bench criterion_python_elementwise` hit rch's 1800s
+SSH ceiling (`RCH-E104`) on `vmi1153651` twice and `vmi1293453` once, with the log
+showing `Compiling fnp-python` and never reaching `Finished`. The **bench-profile
+lib build alone** consumes the whole ceiling. Trimming the bench from four cells
+to two changed nothing, because the cost is the BUILD, not the run.
+
+The route that works:
+
+```bash
+RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec -- \
+  env FNP_BENCH_GROUPS=<group> cargo test --release -p fnp-python --bench <target>
+```
+
+Two reasons it completes. `[profile.bench]` inherits `release`, and the artifacts
+already live in `release/` — successful `cargo bench` runs wrote
+`.rch-target-*/release/deps/<bench>-*` — so `--release` reuses a warm pool instead
+of building cold. And the resulting binary is far smaller (49 MB vs 307 MB).
+
+**It still measures.** `gated_main` calls each selected group function directly,
+and the self-timing groups do their own timing through
+`run_dual_null_median_ci_contract` rather than through criterion, so they run and
+print their rows in criterion's test mode. This is NOT the "criterion without
+`--bench` measures nothing" trap: that trap applies to criterion-driven arms,
+which collect no samples in test mode. Verified —
+`FNP_BENCH_GROUPS=bench_divide_size_gate_vs_numpy` under this route produced four
+`DECIDABLE_REGRESSION` cells with nulls on unity on `vmi1152480`.
+
+**The caveat travels with the number.** This is the `release` profile, not
+`release-perf` and not `bench`. Both arms sit in one binary so RATIOS are fair,
+but absolute ns are not ship-grade and a row using this route must say so — and a
+row measured this way cannot be compared against one measured under `cargo bench`,
+because that is a different binary at a different profile.
+
+DELETION CONDITION: remove this section when the bench-profile build fits inside
+the ceiling again.
+
 ### PROFILE: `bench` is triage-grade, `release-perf` is ship-grade
 
 `[profile.bench]` inherits stock `release` (`lto = false`,
