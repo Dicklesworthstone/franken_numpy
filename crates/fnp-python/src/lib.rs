@@ -110478,6 +110478,28 @@ mod tests {
         });
     }
 
+    /// Drift guard for a MIRRORED constant in the bench (`deadlock-audit-ei9jz`).
+    ///
+    /// `criterion_python_elementwise.rs` cannot see this private constant, so
+    /// `bench_percall_floor_across_ops_vs_numpy` mirrors it to decide whether it should
+    /// label a cell as taking the native route. A stale mirror does not corrupt a
+    /// measurement - it mislabels one, which is worse, because the label is what a ledger
+    /// row reasons FROM. That already happened once: the loop hardcoded
+    /// `routes_natively=true` for divide at n=256, and a banked row explained divide's
+    /// excess by a native route it was not taking.
+    ///
+    /// If this fails, update `NATIVE_MIN_LEN_MIRROR` in that bench to match.
+    #[test]
+    fn f64_div_native_min_len_is_mirrored_in_the_percall_floor_bench() {
+        assert_eq!(
+            F64_DIV_NATIVE_MIN_LEN,
+            1 << 14,
+            "F64_DIV_NATIVE_MIN_LEN changed; update NATIVE_MIN_LEN_MIRROR in \
+             crates/fnp-python/benches/criterion_python_elementwise.rs, which mirrors it \
+             to label PERCALL_FLOOR cells as native or delegating"
+        );
+    }
+
     fn numpy_available(py: Python<'_>) -> bool {
         py.import("numpy").is_ok()
     }

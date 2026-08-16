@@ -4849,17 +4849,40 @@ fn bench_percall_floor_across_ops_vs_numpy(_c: &mut Criterion) {
         let b = locals.get_item("b").expect("b operand");
         let args = PyTuple::new(py, [&a, &b]).expect("args");
 
-        // divide is the one of these four that takes the native f64 route.
-        for (name, routes_natively) in [
+        // CORRECTED (`deadlock-audit-ei9jz`): this loop used to hardcode
+        // `routes_natively=true` for divide, and that label was FALSE at this size.
+        // The native f64 route needs n >= F64_DIV_NATIVE_MIN_LEN (1<<14 = 16384) and
+        // this group runs at n = 1<<8 = 256, so ALL FOUR ops delegate to NumPy here.
+        // A row that read the old label concluded divide gained least from the
+        // interning levers "because it takes the native route"; the true reason is
+        // below and has the opposite shape.
+        //
+        // What actually separates divide from the other three is which ops ENTER the
+        // f64 binary block at all: `PyUFunc::__call__` maps only Remainder, Power,
+        // Maximum, Minimum and Divide to `Some(BinaryOp)`; add/subtract/multiply hit
+        // the `_ => None` arm and skip the block entirely. So at n=256 divide alone
+        // pays the block's dtype probes and THEN declines at the size gate - which is
+        // why its excess was double multiply's while every op delegated.
+        //
+        // MIRRORED CONSTANT: F64_DIV_NATIVE_MIN_LEN is private to lib.rs (defined at
+        // its `const F64_DIV_NATIVE_MIN_LEN: usize = 1 << 14`). If it changes without
+        // this mirror changing, the LABEL goes stale, not the measurement - the lib
+        // test `f64_div_native_min_len_is_mirrored_in_the_percall_floor_bench` fails
+        // and names this line.
+        const NATIVE_MIN_LEN_MIRROR: usize = 1 << 14;
+        for (name, enters_f64_block) in [
             ("add", false),
             ("subtract", false),
             ("multiply", false),
             ("divide", true),
         ] {
+            let routes_natively = enters_f64_block && n >= NATIVE_MIN_LEN_MIRROR;
             let (ratio, lo, hi, numpy_ns, fnp_ns) =
                 measure_binary_ufunc_vs_numpy(py, &module, &numpy, name, &args, n);
             println!(
                 "PERCALL_FLOOR op={name} n={n} routes_natively={routes_natively} \
+                 enters_f64_binary_block={enters_f64_block} \
+                 native_route_min_len={NATIVE_MIN_LEN_MIRROR} \
                  numpy_version={numpy_version} \
                  harness=common::run_dual_null_median_ci_contract \
                  ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
