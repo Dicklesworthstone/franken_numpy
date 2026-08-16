@@ -18,6 +18,74 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - REPLICATED INDEPENDENTLY, AND THE WORST CELL HAS MOVED: `v46rn` halved `add`/`subtract` but left `multiply`/`divide` untouched, so the campaign's worst ratio is now `divide` at 3.051x, NOT the 2.328x banked for `add` (`deadlock-audit-v46rn`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. Independent certification of the `deadlock-audit-v46rn` lever (`a04d7f64`) on the
+quietest host of this session, from a clean committed tree. It confirms the improvement and
+corrects which cell now carries the campaign's worst ratio.
+
+**Campaign result class:** decidable-regression (all four cells) + correction to a banked headline
+
+```
+bench_elf_sha256=d2ad1a6fa898c64db63da7000c9bac81159232c8221b707ec59b8c5e83323579
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307679408 bytes)
+harness_source_matches_disk=true   built from a CLEAN committed tree (`git status` empty for
+  crates/fnp-python; the rebuild was a 0.13 s no-op, which is itself the check that the binary
+  already matched HEAD)
+worker=thinkstation1 (5975WX 32P/64L, powersave)  numpy 2.4.3  profile=bench
+LOADAVG 1min 10.40 before and 10.40 after (64 logical threads) — quietest window of the session
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+
+ op        ratio      ci95                    fnp/numpy  worst   numpy_ns  fnp_ns  excess
+ divide    0.327744   [0.327011,0.328506]     3.051x     3.058x     431     1312     881
+ multiply  0.329499   [0.328151,0.330858]     3.035x     3.047x     401     1222     821
+ add       0.423442   [0.421218,0.423890]     2.362x     2.374x     401      952     551
+ subtract  0.416840   [0.415800,0.419018]     2.399x     2.405x     401      961     560
+```
+
+**ALL EIGHT A/A NULLS STRADDLE UNITY.** Half-widths 0.0008-0.0053; the `add` and `subtract`
+candidate nulls carry a ~0.52% bias (0.005225, 0.005198) and are disclosed for that
+(`deadlock-audit-7xcq2`), but every effect clears `required_2x_delta` by 50-400x.
+
+**THE LEVER IS CONFIRMED, INDEPENDENTLY.** Against this project's own pre-lever measurement at
+loadavg 25 (excess: add 1037, subtract 1057, multiply 826, divide 902 ns), `add` and `subtract`
+have roughly HALVED — 1037 -> 551 and 1057 -> 560 ns. `a04d7f64`'s claim that half the per-call
+floor is gone holds for the ops it measured.
+
+**BUT `multiply` AND `divide` DID NOT MOVE: 826 -> 821 and 902 -> 881 ns.** The saving is
+op-specific, and the mechanism is in the commit title. The lever gates the TIMEDELTA probe on the
+hoisted sniff, and `try_native_timedelta_addsub` is called under
+`matches!(self.kind, UFuncKind::Add | UFuncKind::Subtract)` — it never runs for `multiply` or
+`divide`, so those ops had no timedelta dtype fetches to remove and gained nothing.
+
+**SO THE CAMPAIGN'S WORST RATIO IS NOW 3.051x ON `divide`, NOT 2.328x.** The banked certification
+row measured `add` — correctly, since `add` was the worst cell before the lever — and reported the
+new worst as 2.328x. That figure is right about `add` and wrong as a statement about the campaign:
+the lever moved `add` past `multiply` and `divide`, which are now the worst by a clear margin
+(0.328 against 0.417-0.423, CIs disjoint by a factor). **Anyone quoting 2.328x as "our worst ratio"
+is quoting the second-best of four.**
+
+**THIS IS A DIFFERENT SITUATION FROM THE EARLIER OP-ORDERING WARNING.** A previous row cautioned
+that the worst-OP label was unstable and driven by 5 ns of NumPy's own cost, and advised quoting
+the cell rather than an op. That advice does not apply here: the four ops have now SPLIT INTO TWO
+GROUPS by a known mechanism — 551/560 ns for the ops that ran the timedelta probe, 821/881 ns for
+the ops that never did. The gap is ~270 ns and the CIs are far apart. This is a real divergence,
+not label noise, and the cell must now be reported as two groups.
+
+**WHAT IT IMPLIES FOR THE NEXT LEVER.** The remaining floor on `multiply`/`divide` is ~821-881 ns
+and contains no timedelta probe to remove. The same hoisted sniff already exists in `__call__`;
+extending its gating to the probes those ops DO run — the complex probe and the f16 widen probe,
+both of which currently fetch dtype for themselves — is the obvious continuation, and the sniff it
+would reuse is already computed.
+
+RETRY PREDICATE: (1) Re-state the campaign's worst ratio as `divide` 3.051x (worst bound 3.058x)
+until a lever touches the multiply/divide probe chain. (2) Replicate this two-group split on a
+second worker before treating the ~270 ns gap as a fleet figure; every row in this series is
+thinkstation1. (3) The `v46rn` bead should not be closed on the `add` measurement alone — its own
+premise was ELEVEN dtype-fetching sites across probe FAMILIES, and the families that serve
+multiply and divide are still fetching. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - CERTIFIED UNDER RECORDED LOAD: the worst cell is 2.328x slower, replicating the post-gate figure to 0.07%, with the per-call excess flat at 526-536 ns (`deadlock-audit-v46rn`, `deadlock-audit-ei9jz`)
 
 `SlateHeron`. Certification run of the campaign's worst vs-incumbent ratio after both probe gates, and
