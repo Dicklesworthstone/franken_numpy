@@ -9587,8 +9587,6 @@ fn zerocopy_f64_binary_flat<'py>(
     }
     let shape: Vec<usize> = a_buffer.shape().to_vec();
     let n = a_in.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
     // Allocate at the FINAL shape, not flat-then-reshape. The caller therefore never
     // reshapes, at any rank. Measured on WORKER hetzner1 in ONE invocation, batched
     // 256 reps with the empty loop subtracted (`deadlock-audit-k4yus`):
@@ -9604,8 +9602,30 @@ fn zerocopy_f64_binary_flat<'py>(
     // PyO3's `PyBuffer::as_mut_slice` requires only `!readonly() && is_c_contiguous()`
     // and hands back `item_count()` elements — it does NOT require ndim == 1
     // (pyo3-0.29.2 src/buffer.rs). The flat write loop is unchanged at any rank.
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let flat = numpy.call_method("empty", (&output_shape,), Some(&kwargs))?;
+    // Allocate POSITIONALLY, and pass a bare int at rank 1 (`deadlock-audit-ei9jz`).
+    //
+    // The previous form built a `PyDict` and set `dtype` into it on EVERY call, then
+    // built a shape tuple even when the shape has one element:
+    //     let kwargs = PyDict::new(py); kwargs.set_item("dtype", "float64")?;
+    //     numpy.call_method("empty", (&PyTuple::new(py, shape)?,), Some(&kwargs))
+    // `numpy.empty` takes dtype as its SECOND POSITIONAL parameter, so the dict is pure
+    // overhead — and this ledger priced a 3-key kwargs dict at 230 ns in the partition
+    // group, against a total output allocation of 307.50 ns.
+    //
+    // The rank-1 branch additionally skips constructing a one-element Python tuple:
+    // `numpy.empty(5, "float64")` and `numpy.empty((5,), "float64")` produce the same
+    // dtype, shape and C-contiguity (verified against numpy 2.4.3), and rank 1 is the
+    // overwhelmingly common case on this route.
+    //
+    // NOT a behaviour change: dtype resolves through the same `numpy.dtype` machinery
+    // whether it arrives positionally or by keyword, and the result is still
+    // C-contiguous, which is what `PyBuffer::as_mut_slice` below requires.
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1("empty", (*only, "float64"))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1("empty", (&output_shape, "float64"))?
+    };
     // Set by the Div arms below when an element would raise an FE flag that numpy
     // turns into a warning. The Div arms first keep the quotient loop free of
     // classification so it remains vectorizable, then inspect results only
@@ -110025,6 +110045,98 @@ mod tests {
     /// defect (`f16-isin-402x-and-pyufunc-registration-trap`: green parity does not
     /// prove kernel engagement), which is why this test asserts the PREDICATE and not
     /// just the output.
+    /// The positional-dtype output allocation must match the keyword form at EVERY rank
+    /// (`deadlock-audit-ei9jz`).
+    ///
+    /// `zerocopy_f64_binary_flat` now allocates with `numpy.empty(shape, "float64")`
+    /// positionally, and passes a bare int rather than a one-element tuple at rank 1. Two
+    /// things could go wrong and NEITHER is a slowdown:
+    ///   1. a dtype that is not float64 - the kernel writes f64 through `PyBuffer`, so a
+    ///      mismatched itemsize would corrupt the output rather than fail loudly;
+    ///   2. a non-C-contiguous result - `PyBuffer::as_mut_slice` requires contiguity, so
+    ///      the route would silently DECLINE and delegate, losing the native path while
+    ///      every parity suite stays green.
+    #[test]
+    fn positional_dtype_output_allocation_matches_the_keyword_form_at_every_rank() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let empty = numpy.getattr("empty")?;
+
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "float64")?;
+            let reference = empty.call((5,), Some(&kwargs))?;
+            let ref_dtype = reference.getattr("dtype")?;
+            let ref_shape = reference.getattr("shape")?;
+
+            let int_form = empty.call1((5, "float64"))?;
+            let tuple_form = empty.call1(((5,), "float64"))?;
+            for (label, produced) in [("int", &int_form), ("one_tuple", &tuple_form)] {
+                assert!(
+                    produced.getattr("dtype")?.eq(&ref_dtype)?,
+                    "{label} form must produce the same dtype as the keyword form"
+                );
+                assert!(
+                    produced.getattr("shape")?.eq(&ref_shape)?,
+                    "{label} form must produce the same shape as the keyword form"
+                );
+                assert!(
+                    produced
+                        .getattr("flags")?
+                        .getattr("c_contiguous")?
+                        .extract::<bool>()?,
+                    "{label} form must be C-contiguous, or PyBuffer::as_mut_slice refuses \
+                     and the native route silently delegates"
+                );
+            }
+
+            let rank2 = empty.call1(((2, 3), "float64"))?;
+            let rank2_shape: Vec<usize> = rank2.getattr("shape")?.extract()?;
+            assert_eq!(
+                rank2_shape,
+                vec![2usize, 3usize],
+                "rank-2 shape must survive the positional form"
+            );
+            assert!(
+                rank2
+                    .getattr("flags")?
+                    .getattr("c_contiguous")?
+                    .extract::<bool>()?,
+                "rank-2 positional allocation must stay C-contiguous"
+            );
+
+            // And the ROUTE itself must still match numpy at rank 1 and rank 2.
+            let module = PyModule::new(py, "fnp_python_test_positional_alloc")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            let code = std::ffi::CString::new(
+                "a1 = np.arange(1.0, 65.0)\nb1 = a1 + 1.0\na2 = a1.reshape(8, 8)\nb2 = b1.reshape(8, 8)\n",
+            )
+            .expect("no interior nul");
+            py.run(code.as_c_str(), Some(&locals), Some(&locals))?;
+            for (an, bn) in [("a1", "b1"), ("a2", "b2")] {
+                let a = locals.get_item(an).expect("a operand");
+                let b = locals.get_item(bn).expect("b operand");
+                let ours = module.getattr("divide")?.call1((&a, &b))?;
+                let theirs = numpy.getattr("divide")?.call1((&a, &b))?;
+                assert!(
+                    ours.call_method1("__eq__", (&theirs,))?
+                        .call_method0("all")?
+                        .extract::<bool>()?,
+                    "native divide must match numpy for operands {an}/{bn}"
+                );
+                assert!(
+                    ours.getattr("shape")?.eq(theirs.getattr("shape")?)?,
+                    "native divide must preserve rank for operands {an}/{bn}"
+                );
+            }
+            Ok(())
+        });
+    }
+
     #[test]
     fn f16_probe_skip_admits_f16_and_declines_only_what_can_never_match() {
         with_python(|py| {
