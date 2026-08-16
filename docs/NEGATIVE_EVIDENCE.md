@@ -39,12 +39,19 @@ it compares the effect against `2 x null_half_width` (0.068729) and has no CI-st
 measurement, not a clean control: read the 160 ns `empty` saving as **~151-160 ns**, and the
 combined ceiling as **~577-586 ns**, never tighter. The import row needs no such haircut.
 
-**WHAT THIS DECIDES.** The bead's decision rule was: if the combined saving is small, close the
-whole repeated-lookup line and write no unsafe caching. 586 ns against the ~7-8 us per-call floor
-is **~7-8% of the floor** — it will not move the 7.97x deficit at n=256 to anything like parity
-(7.97x becomes roughly 7.3x). It is real and it is the second-largest named stage after output
-construction's 1310 ns (`deadlock-audit-tmmud`), but it is not the articulation point, and the
-per-call floor does not fall by paying it.
+**WHAT THIS DECIDES — CORRECTED BELOW, SAME DAY, BY A SAME-HOST FLOOR.** My first reading of this
+row divided 586 ns by the "~7-8 us per-call floor" and called it ~7-8%, concluding the line should
+close. That floor figure came from `deadlock-audit-isnd2` on a DIFFERENT WORKER, and this ledger's
+own standing rule is that host moves these ratios enough to make cross-entry division invalid. I
+made exactly the error the rule exists to prevent. Measured on THIS host, in THIS ELF, an hour
+later (see the attribution row dated below): `fnp.multiply` at n=256 is **2394 ns**, not 7-8 us.
+Against the same-host floor the lookup ceiling is **~24.5% of the whole call**, and paying all of
+it would take 2394 ns to ~1808 ns — moving n=256 from 5.985x to roughly **4.5x**. Still a loss,
+but roughly a quarter of the call rather than a rounding error. **The line does NOT close on this
+evidence.** The module handle at 426 ns is worth pricing seriously against the soundness work; it
+is the single largest named stage on this host. What survives unchanged from the first reading:
+this is a ceiling, not an achieved saving, and the soundness questions in the bead's note 2 are
+untouched.
 
 **THE SPLIT INVERTS THE BEAD'S OWN PREMISE.** v8nx6 was filed around `getattr('empty')` at 110.09 ns
 (k4yus, hetzner1) with `py.import("numpy")` at 310 ns (cydda, vmi1149989) as the secondary figure —
@@ -60,9 +67,66 @@ note 2 (stale handle = use-after-free, invisible to conformance output) is untou
 
 RETRY PREDICATE: do not re-measure the ceiling — it is decided. Before writing any cache, first
 re-run this control with the `empty` null clean (the 3.1% bias is unexplained; suspect first-arm
-warm-up in the shorter of the two pairs), then price the MODULE handle alone at 426 ns against the
-soundness work, and require a finalisation test that constructs and drops an interpreter twice with
-the cache live. If that soundness cost exceeds a day, close the line — 426 ns does not buy it.
+warm-up in the shorter of the two pairs), then require a finalisation test that constructs and
+drops an interpreter twice with the cache live. Do NOT re-derive the ceiling's SHARE of the floor
+by dividing into a figure from another worker — take the floor from the same ELF and host, as the
+correction above had to.
+AGENT_NAME=SlateHeron.
+
+## 2026-08-16 - MEASURED, THE REAL FINDING: 60.3% of our per-call floor is UNATTRIBUTED - every named stage together is 950 ns of a 2394 ns call, and the worst vs-incumbent ratio is 5.985x at n=256 (`deadlock-audit-ei9jz`, filed from `deadlock-audit-v8nx6`)
+
+`SlateHeron`. Ran the existing attribution group on the same ELF and host as the ceiling row above.
+This is the row that reframes the whole wrapper-floor program.
+
+**Campaign result class:** maintenance-diagnostic (both arms ours for the stages; the whole-call
+comparison against NumPy is same-invocation and is the vs-incumbent number)
+
+```
+PERCALL_FLOOR_STAGES n=256 numpy_version=2.4.3 worker=thinkstation1
+  harness=stage_replica_min_of_2001 trials=2001
+  stages_are_standalone_replicas=true stage_numbers_are_lower_bounds=true
+  import_numpy_ns=400.0  dtype_guard_both_operands_ns=140.0
+  getattr_ndarray_ns=100.0  numpy_empty_ns=310.0
+  accounted_ns=950.0  fnp_multiply_ns=2394.0  numpy_multiply_ns=400.0
+  accounted_fraction=0.397  fnp_over_numpy=5.985
+```
+
+bench_elf_sha256=ef5467cb2a43c00b191011ba4b6a4b56ad1f09ec9506a9df7d7df015083431cd
+HOST_BASELINE host=thinkstation1 cpu_model=AMD_Ryzen_Threadripper_PRO_5975WX_32-Cores physical_cores=32 logical_threads=64 governor=powersave
+numpy 2.4.3, stock `release`, local build under the cargo-shim bypass. No build this turn — /data at 47G.
+
+**THE FINDING: 1444 ns, 60.3% OF THE CALL, IS NOT ACCOUNTED FOR BY ANY NAMED STAGE.** Four stages
+sum to 950 ns of a 2394 ns call. The campaign has now measured, one at a time, the four stages at
+700 ns combined (`cydda`), the delegation kwargs dict at 727 ns (`s2fkk`, removed), PyO3 argument
+binding at 0.0 ns (`7ocfa`, refuted), PyBuffer acquisition at 303 ns and output construction at
+1310 ns (`tmmud`), the no-op reshape at 200-445 ns (`6twge`/`k4yus`, removed), and now the lookup
+ceiling at 586 ns. Every one of those was a stage GUESS confirmed or refuted in isolation, and the
+floor has not fallen to any of them. The unattributed 60% is where the answer is, and no stage
+replica can find it because a replica can only price a stage someone already suspected.
+
+**NOTE THE HARNESS'S OWN CAVEAT, WHICH CUTS AGAINST ME.** `stage_numbers_are_lower_bounds=true` and
+`stages_are_standalone_replicas=true`: each stage is timed as a standalone replica with min-of-2001,
+so the true in-situ cost of each is HIGHER than printed and the real unattributed share is somewhat
+SMALLER than 60.3%. The direction of the finding survives — a 950 ns lower-bound sum against a
+2394 ns call cannot be stretched to cover it — but 60.3% is a ceiling on the gap, not a point
+estimate, and must not be quoted as "60% is missing" without this sentence.
+
+**THE VS-INCUMBENT NUMBER, SAME INVOCATION: 5.985x SLOWER at n=256** (2394 ns against NumPy's
+400 ns). This is the campaign's worst ratio and it is now measured LIVE on this host rather than
+carried forward from `isnd2`'s 7.97x on another worker. The two are NOT the same measurement and
+must not be pooled or treated as an improvement; different worker, different harness.
+
+**WHY THE STAGE-BY-STAGE PROGRAM SHOULD STOP.** Per the campaign's own rule that a streak of
+rejected micro-levers is a trigger rather than a stopping condition: seven stages priced, floor
+essentially unmoved, 60% unlocated. The next move is not an eighth stage guess. It is a profile
+that attributes the WHOLE call — perf on the n=256 call path with the stage replicas as landmarks,
+or a call-count of the CPython C-API entries our route makes versus NumPy's — so the remaining
+1444 ns is located rather than guessed at.
+
+RETRY PREDICATE: do not file another isolated stage replica against this floor; that method is
+exhausted and this row is its obituary. A successor bead must attribute the unaccounted 1444 ns by
+whole-call profiling, and its acceptance is an accounted_fraction ABOVE 0.9 on this same group, not
+a new stage number.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - REJECT (measured): `deadlock-audit-hzl1w` proposed DELEGATING f64 maximum/minimum to NumPy - the serial native arm BEATS NumPy 1.352401x and delegating would throw that away
