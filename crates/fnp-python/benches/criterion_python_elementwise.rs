@@ -1290,6 +1290,10 @@ fn main() {
                 bench_output_construction_decomposition,
             ),
             (
+                "bench_python_lookup_hoisting_ceiling",
+                bench_python_lookup_hoisting_ceiling,
+            ),
+            (
                 "bench_binary_route_overhead_vs_numpy",
                 bench_binary_route_overhead_vs_numpy,
             ),
@@ -2695,6 +2699,120 @@ fn probe_varargs(
 /// The `empty_at_final_shape` stage is the one with a lever behind it: if allocating
 /// directly at the target shape costs about the same as allocating flat, then the
 /// higher-rank sites can skip their reshape too, not just the 1-D ones.
+/// Ceiling for the cached-callable lever (`deadlock-audit-v8nx6`): what would we save
+/// if the per-call Python lookups were free?
+///
+/// The route pays two lookups on every invocation - `py.import("numpy")` at the top of
+/// `PyUFunc::__call__`, and the attribute half of `numpy.call_method("empty", ..)`.
+/// They were measured separately at 310 ns (`deadlock-audit-cydda`) and 110.09 ns
+/// (`deadlock-audit-k4yus`), on different workers with different harnesses, so they
+/// have never been compared like for like or against a hoisted alternative.
+///
+/// Each pair below is IDENTICAL work differing only in whether the lookup is repeated
+/// or hoisted, in one binary, one invocation, ABBAABBA, A/A null first. The hoisted arm
+/// is the ceiling: a real cache cannot beat holding the handle in a local, and it must
+/// additionally survive GIL reacquisition and interpreter finalisation, which is the
+/// risk this measurement exists to justify or refuse.
+fn bench_python_lookup_hoisting_ceiling(_c: &mut Criterion) {
+    const N: usize = 4096;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let hoisted_empty = numpy.getattr("empty").expect("hoisted empty");
+
+        // Pair 1: the attribute lookup on numpy.empty, repeated versus hoisted.
+        let lookup_each_call = || {
+            let started = Instant::now();
+            let out = numpy
+                .call_method1("empty", (N,))
+                .expect("empty via call_method1");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+        let lookup_hoisted = || {
+            let started = Instant::now();
+            let out = hoisted_empty
+                .call1((N,))
+                .expect("empty via hoisted callable");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+        let (empty_effect, empty_null) = common::run_median_ci_contract(
+            "python_lookup_hoisting_empty",
+            lookup_each_call,
+            lookup_hoisted,
+        );
+
+        // Pair 2: py.import("numpy") repeated versus a held module handle. Both arms do
+        // the same trivial attribute read afterwards so the import is what differs.
+        let import_each_call = || {
+            let started = Instant::now();
+            let m = py.import("numpy").expect("import numpy");
+            let out = m.getattr("pi").expect("pi");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+        let import_hoisted = || {
+            let started = Instant::now();
+            let out = numpy.getattr("pi").expect("pi");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+        let (import_effect, import_null) = common::run_median_ci_contract(
+            "python_lookup_hoisting_import",
+            import_each_call,
+            import_hoisted,
+        );
+
+        println!(
+            "PYTHON_LOOKUP_HOISTING n={N} numpy_version={numpy_version} worker={} \
+             harness=common::run_median_ci_contract rounds={} \
+             arms=identical_work_differing_only_in_repeated_vs_hoisted_lookup \
+             empty_repeated_ns={:.1} empty_hoisted_ns={:.1} empty_ratio={:.6} \
+             empty_ci95=[{:.6},{:.6}] empty_null={:.6} empty_saves_ns={:.1} \
+             import_repeated_ns={:.1} import_hoisted_ns={:.1} import_ratio={:.6} \
+             import_ci95=[{:.6},{:.6}] import_null={:.6} import_saves_ns={:.1} \
+             combined_ceiling_ns={:.1}",
+            measurement_worker(),
+            common::CONTRACT_ROUNDS,
+            empty_effect.arm_a_median_ns,
+            empty_effect.arm_b_median_ns,
+            empty_effect.ratio_median,
+            empty_effect.ratio_ci_low,
+            empty_effect.ratio_ci_high,
+            empty_null.ratio_median,
+            empty_effect.arm_a_median_ns - empty_effect.arm_b_median_ns,
+            import_effect.arm_a_median_ns,
+            import_effect.arm_b_median_ns,
+            import_effect.ratio_median,
+            import_effect.ratio_ci_low,
+            import_effect.ratio_ci_high,
+            import_null.ratio_median,
+            import_effect.arm_a_median_ns - import_effect.arm_b_median_ns,
+            (empty_effect.arm_a_median_ns - empty_effect.arm_b_median_ns)
+                + (import_effect.arm_a_median_ns - import_effect.arm_b_median_ns),
+        );
+    });
+}
+
 fn bench_output_construction_decomposition(_c: &mut Criterion) {
     const N: usize = 4096;
     const BATCH: usize = 256;
