@@ -610,13 +610,25 @@ wrapper floor measured on the delegating ops, this is ~9-10% of it.
 **WHY THE CONTROL IS SHAPED THIS WAY, and what it does NOT claim.** A before/after
 across two builds is unsound here for three independent reasons, all live today: the
 rch fleet is heterogeneous and cannot be pinned, so the two builds land on different
-workers; `[profile.bench]` inherits `release` (lto, codegen-units=1) and blows the
-1800s SSH ceiling, so the practical profile differs between attempts; and a peer had
+workers; a `fnp-python` bench build repeatedly blew the 1800s SSH ceiling
+(`RCH-E104`), so the practical profile differed between attempts; and a peer had
 an uncommitted change to the same route in the shared tree, so an "after" build
 contains their lever as well as mine. This control sidesteps all three by putting both
 arms in one binary with no fnp code in either. Consequently it measures EXACTLY what
 the fix removes, and it does NOT measure the end-to-end route - no vs-NumPy ratio is
 claimed for the op here, and the 7-8 us wrapper floor is not claimed as closed.
+
+> **CORRECTION appended 2026-08-16.** This row originally said `[profile.bench]`
+> inherits `release` with `lto` and `codegen-units = 1`, and that this is why the
+> bench build blew the SSH ceiling. That is FALSE. The workspace defines no
+> `[profile.release]` at all, so `bench` takes Cargo's defaults (`opt-level 3`,
+> `lto = false`, `codegen-units = 16`) - identical to `bench-fast`. The timeouts
+> were real (six `RCH-E104` across three workers) but the profile is not their
+> mechanism; the build is simply large and cold pools on slow workers do not finish
+> inside the ceiling. I had believed a stale `[profile.release]` block in AGENTS.md,
+> now corrected there. Nothing else in this row depends on the claim: the reason the
+> control is shaped this way is that a two-build before/after is unsound, and that
+> holds on the worker-heterogeneity and peer-uncommitted-change grounds alone.
 
 **Route-level context, NOT a before/after.** On the same worker and profile after the
 fix, `bench_percall_floor_across_ops_vs_numpy` reads add 0.120120 [0.119522,0.121167],
