@@ -4,6 +4,102 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, POST-FIX STAGE ATTRIBUTION + TWO INSTRUMENT DEFECTS: the floor is 1232 ns (was 2394 pre-fix), `import_numpy_ns` is now a DEAD STAGE the route never executes, and `bench_percall_floor_partition` is STRUCTURALLY INVALID (`deadlock-audit-ei9jz`)
+
+`RedLynx`. No build this turn - /data at 43G, one gig above the hard stop - so this re-runs the
+SAME committed-provenance ELF banked in the row below. It discharges the remaining half of
+`SlateHeron`'s PROVENANCE INVALIDATION retry predicate: the stage attribution group, re-run from a
+committed SHA on `thinkstation1`.
+
+**Campaign result class:** maintenance-diagnostic (both arms ours for the stages; the whole-call
+comparison against NumPy is same-invocation)
+
+```
+PERCALL_FLOOR_STAGES n=256 numpy_version=2.4.3 worker=thinkstation1
+  harness=stage_replica_min_of_2001 trials=2001
+  stages_are_standalone_replicas=true stage_numbers_are_lower_bounds=true
+  import_numpy_ns=410.0  dtype_guard_both_operands_ns=130.0
+  getattr_ndarray_ns=90.0  numpy_empty_ns=310.0
+  accounted_ns=940.0  fnp_multiply_ns=1232.0  numpy_multiply_ns=390.0
+  accounted_fraction=0.763  fnp_over_numpy=3.159
+```
+
+bench_elf_sha256=6766850940f767ebfb2d82734e05d3ace4cd02f1e210e0aae5e10439ca7bd8fd
+HEAD=cfc98fb5f4ab5a5257270323dade23615103428a, `git status --porcelain` empty.
+`crates/fnp-python/src/lib.rs` and the bench file are BYTE-IDENTICAL at `fd58d09c`, at HEAD and on
+disk, so this ELF describes HEAD exactly; only ledger commits intervened.
+HOST_BASELINE host=thinkstation1 cpu_model=AMD_Ryzen_Threadripper_PRO_5975WX_32-Cores
+physical_cores=32 logical_threads=64 governor=powersave; THREAD_CONFIGURATION
+rayon_pool_threads=64 OBSERVED, RAYON_NUM_THREADS unset. profile `bench` = TRIAGE grade.
+
+**DEFECT 1 - `accounted_fraction=0.763` IS WRONG AS A DESCRIPTION OF THE ROUTE, and it is wrong in
+the flattering direction.** `import_numpy_ns=410.0` is a bench-side REPLICA of `py.import("numpy")`.
+Commits `e4cdd808`, `f8475a76` and `5c7735da` removed that call from `PyUFunc::__call__` and from
+every probe on the binary route, so **the route no longer executes this stage at all**. The
+decomposition still prices it and still adds it to `accounted_ns`, which credits the accounting with
+410 ns the route does not pay. `SlateHeron`'s invalidation row predicted exactly this
+("do not carry 400 ns forward as a live route cost"); this row confirms the instrument still emits
+it. Corrected accounting for HEAD:
+
+```
+  live_accounted_ns = 130 (dtype guard) + 90 (getattr ndarray) + 310 (numpy.empty) = 530
+  unattributed_ns   = 1232 - 530 = 702      unattributed_fraction = 0.570
+```
+
+So the honest post-fix reading is **702 ns / 57.0% unattributed**, not 292 ns / 23.7%. The call got
+much cheaper while the unattributed SHARE barely moved (60.3% -> 57.0%), which is the expected
+shape: what was removed was a NAMED stage, so the named total shrank alongside the call.
+
+**DEFECT 2 - `bench_percall_floor_partition` NOW PANICS ON ITS OWN VALIDITY GUARD, and the cause is
+structural rather than noise.**
+
+```
+thread 'main' panicked at criterion_python_elementwise.rs:2650:
+probe chain measured NEGATIVE (-40.0 ns): the casting=unsafe arm was not cheaper than
+the probed arm, so this partition is invalid
+```
+
+The method computes `probe_chain_ns = whole_ns - skipped_ns`, where `skipped_ns` is a
+`casting="unsafe"` call chosen because that kwarg makes the shipped guard skip the native probe
+block. **But the two arms no longer differ only by the probe chain.** `deadlock-audit-s2fkk` added a
+fast path so an ALL-DEFAULTS call returns `np_ufunc.call1((x1, x2))` and sends no keywords, while any
+non-default kwarg - including `casting="unsafe"` - falls to the slow tail that allocates a `PyDict`,
+sets `casting`/`order`/`subok` and makes NumPy parse three keywords. s2fkk priced that shape at
+727 ns. So the subtraction is really `probe_chain - kwargs_construction_and_parse`, which is biased
+negative by a term far larger than the probe chain now is. The bench's own comment anticipated the
+failure mode ("on a cheap probe chain, driving it negative") without noticing that the shipped fast
+path guarantees it.
+
+This is NOT evidence that the probe chain is free. It is evidence that this instrument cannot
+measure it, and the reading must not be inverted into a claim about probe cost.
+
+**CROSS-HARNESS CORROBORATION, worth recording because it is rare here.** Two independent harnesses
+in the SAME binary, same host, same commit agree closely on the same cell:
+
+```
+  harness=run_dual_null_median_ci_contract (ABBAABBA, 41 rounds)  fnp 1242 ns  numpy 406 ns  3.049x
+  harness=stage_replica_min_of_2001                               fnp 1232 ns  numpy 390 ns  3.159x
+```
+
+0.8% apart on the candidate and 3.6% apart on the ratio. That is not a before/after and does not
+license subtraction between them, but two methods landing this close on `fnp.multiply` at n=256
+raises confidence that ~1240 ns and ~3.1x are real properties of HEAD rather than harness artefacts.
+
+**WHAT IS NOT CLAIMED.** The 2394 -> 1232 ns movement is same-harness, same-host and same-group, but
+the 2394 ns came from ELF `ef5467cb2a43c00b`, whose source was never committed and is unrecoverable.
+An unrecoverable baseline cannot anchor a delta no matter how well the harness matches, so the drop
+is stated as context and NOT as a measured saving for the import commits. Anyone wanting that number
+must measure it as a control with both arms in one binary.
+
+RETRY PREDICATE: (1) Fix the decomposition to stop counting `import_numpy_ns` as accounted for the
+binary route, or relabel the stage as a bench-side replica of a cost the route no longer pays -
+until then any `accounted_fraction` it prints is an overstatement. (2) Repair
+`bench_percall_floor_partition` by giving the probe-skipping arm the SAME kwargs shape as the probed
+arm (or by skipping probes some way that does not change the call shape), then re-run; the current
+guard is doing its job and must not be relaxed to make the row publish. (3) The 702 ns unattributed
+remainder is now the target, and `deadlock-audit-t4lri` names the largest never-priced candidate in
+it. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED, POST-FIX, FROM A COMMITTED SHA: the n=256 per-call floor stands at 3.05-3.64x SLOWER than NumPy across all four delegating ops - `add` is the worst cell at 3.6359x (`deadlock-audit-v8nx6`, `deadlock-audit-ei9jz`)
 
 `RedLynx`. This is the campaign's WORST vs-incumbent ratio, re-measured after the four
