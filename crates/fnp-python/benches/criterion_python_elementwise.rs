@@ -1267,6 +1267,10 @@ fn main() {
                 bench_percall_floor_stage_attribution,
             ),
             (
+                "bench_delegation_kwargs_shape",
+                bench_delegation_kwargs_shape,
+            ),
+            (
                 "bench_binary_route_overhead_vs_numpy",
                 bench_binary_route_overhead_vs_numpy,
             ),
@@ -2540,6 +2544,103 @@ fn bench_route_floor_size_sweep_vs_numpy(_c: &mut Criterion) {
 // n=2^8 deliberately: 2 KiB operands are L1-resident, so the excess is nearly the
 // per-call cost itself rather than an extrapolation. Uses only ops already on the
 // public surface, so nothing is added to the module just to measure it.
+/// Isolate the cost of the DELEGATION CALL SHAPE, which is the lever in
+/// `deadlock-audit-s2fkk`, rather than the route that contains it.
+///
+/// `PyUFunc::__call__`'s delegation tail used to allocate a `PyDict` and set
+/// `casting`, `order` and `subok` on EVERY call, even when all three already held
+/// NumPy's own defaults (`same_kind`, `K`, `True`). Both arms below call NumPy's
+/// own `multiply` on identical operands; they differ ONLY in whether those three
+/// default-valued keywords are passed. Arm A is the old shape, arm B the new one.
+///
+/// This is the cleanest available control for this lever: one binary, one
+/// invocation, one worker, interleaved ABBAABBA with an A/A null, and NO fnp code
+/// in either arm. It cannot be confounded by worker heterogeneity, by build
+/// profile, or by a peer's uncommitted change to the route — the three things that
+/// make a before/after across two builds unsound here. It measures exactly what
+/// was removed, and deliberately NOT the whole route, which is reported separately
+/// and must not be attributed to this lever.
+fn bench_delegation_kwargs_shape(_c: &mut Criterion) {
+    const N: usize = 256;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+        let np_multiply = numpy.getattr("multiply").expect("numpy.multiply");
+
+        // Arm A: the shape the delegation tail used to emit.
+        let with_default_kwargs = || {
+            let started = Instant::now();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("casting", "same_kind").expect("casting");
+            kwargs.set_item("order", "K").expect("order");
+            kwargs.set_item("subok", true).expect("subok");
+            let result = np_multiply
+                .call(&args, Some(&kwargs))
+                .expect("numpy multiply with default kwargs");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, N);
+            common::ContractObservation { elapsed, checksum }
+        };
+        // Arm B: the shape it emits now.
+        let without_kwargs = || {
+            let started = Instant::now();
+            let result = np_multiply.call1(&args).expect("numpy multiply bare");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, N);
+            common::ContractObservation { elapsed, checksum }
+        };
+
+        let (effect, null) = common::run_median_ci_contract(
+            "delegation_kwargs_shape_n256",
+            with_default_kwargs,
+            without_kwargs,
+        );
+        println!(
+            "DELEGATION_KWARGS_SHAPE n={N} numpy_version={numpy_version} worker={} \
+             harness=common::run_median_ci_contract rounds={} \
+             arms=numpy_multiply_only_no_fnp_code \
+             with_default_kwargs_ns={:.1} without_kwargs_ns={:.1} \
+             ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \
+             null_ratio_median={:.6} null_ci95=[{:.6},{:.6}] \
+             saved_ns={:.1} bare_call_is_faster={}",
+            measurement_worker(),
+            common::CONTRACT_ROUNDS,
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            null.ratio_median,
+            null.ratio_ci_low,
+            null.ratio_ci_high,
+            effect.arm_a_median_ns - effect.arm_b_median_ns,
+            effect.ratio_ci_low > 1.0,
+        );
+    });
+}
+
 fn bench_percall_floor_across_ops_vs_numpy(_c: &mut Criterion) {
     let n = 1usize << 8;
     Python::initialize();
@@ -2608,7 +2709,11 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
             .extract::<String>()
             .expect("numpy version is a string");
 
-        for exponent in [8u32, 12, 16, 20] {
+        // Two cells, one either side of the 1<<14 gate. A four-cell sweep did not
+        // fit rch's 1800s SSH ceiling: the bench compile alone consumed it and
+        // ZERO cells landed. Both sides is the minimum that can detect a gate
+        // which helps below the threshold and hurts above it.
+        for exponent in [8u32, 16] {
             let n = 1usize << exponent;
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");
