@@ -13,6 +13,79 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - A SPURIOUS WIN CAUGHT BEFORE BANKING, and a DEFECT IN MY OWN GROUP: the 2^14 divide cell read 1.2276x FASTER than NumPy once and 0.5549x SLOWER the next run - clean nulls did not catch it (`deadlock-audit-q00ev`, `deadlock-audit-7xcq2`)
+
+`RedLynx`. Two consecutive runs of `bench_percall_floor_across_sizes_vs_numpy` on a quiet host
+(load 15-22), same ELF, same committed source. Banked for the two defects it exposed, one of them
+mine.
+
+**Campaign result class:** maintenance-diagnostic (the perf conclusion survives; two instruments do not)
+
+```
+bench_elf_sha256=04cdb2f447f8336615022e40f6c5c3b51961c7e91e04b4ae62d3b87b90e4f8bf
+harness_source_matches_disk=true  built from committed source
+worker=thinkstation1 (5975WX 32P/64L, powersave)  numpy 2.4.3  profile=bench
+run 1 load 15.73 -> 17.11   run 2 load 21.59 -> 20.99
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+```
+
+**DEFECT 1 - AN ARTIFACT IN THE INCUMBENT ARM THAT WOULD HAVE BEEN A PUBLISHED WIN.**
+
+```
+ n=2^14 divide      run 1                          run 2
+ ratio              1.227586 [1.173142,1.300466]   0.554877 [0.480723,0.560751]
+ numpy_ns           13541                          5571
+ fnp_ns             10861                          10806
+ delegating_better  FALSE                          TRUE
+```
+
+Run 1 said our native divide was **1.23x FASTER than NumPy** at 2^14 with a CI decisively
+excluding unity. Run 2 says it is 1.80x SLOWER. **Our arm is stable to 0.5% (10861 vs 10806); the
+entire 2.4x swing is in NumPy's arm.** The tell was visible without the second run: 13541 ns broke
+NumPy's own scaling trend (2^12 -> 2^14 -> 2^16 read 3472 / 13541 / 20103, only 1.48x across a 4x
+size step), while run 2's 5571 fits it (1763 / 5571 / 20098). Had run 1 been banked, the campaign
+would carry a spurious incumbent-beating divide result at 2^14.
+
+**THE CLEAN NULLS DID NOT CATCH IT, and this is a SECOND, DISTINCT instance of the blind spot
+documented on `run_dual_null_median_ci_contract`.** Run 2's 2^14 nulls are clean — incumbent
+[0.997096,1.001756], candidate [0.999562,1.002213], biases 0.0008 and 0.0011. An A/A null compares
+an arm against ITSELF WITHIN one invocation, so if the incumbent is uniformly slow for that whole
+invocation the null still lands on unity while the EFFECT is wrong by a factor. The first
+documented blind spot was that a null cannot show two arms are COMPARABLE; this one is that a null
+cannot show an arm's LEVEL is REPRESENTATIVE. Both are invisible to the gate and both need a
+cross-run or trend check to catch.
+
+**DEFECT 2 - MY OWN GROUP MIXES TWO STATISTICS, and it produced an impossible number.** At n=2^20
+in run 2 the group emitted `wrapper_ns=-5821.0` and `projected_delegating_ratio=1.018389`. A
+negative wrapper cost is nonsense, and a projected delegating ratio above 1.0 asserts that
+delegating to NumPy would be FASTER than NumPy's own call. The cause: I compute `wrapper_ns` and
+the projection from `arm_a_median_ns - arm_b_median_ns` (a RATIO OF MEDIANS) while the verdict and
+`multiply_ratio` come from `ratio_median` (a MEDIAN OF PAIRED RATIOS). Those are different
+statistics and they diverge when the paired ratios are skewed — at 2^20 run 2 reported
+`multiply_ratio=0.983313` while its arm medians say 305925/300104 = 1.019. **Every derived field in
+this group inherits that mismatch**, which includes the `projected_delegating_*` fields the divide
+gate decision leans on.
+
+**WHAT SURVIVES.** The `deadlock-audit-q00ev` conclusion — delegating beats our native f64 divide —
+survives DIRECTIONALLY: `delegating_looks_better=true` at all five sizes in run 2, and at four of
+five in run 1 (the exception being the artifact cell). The divide axis on a quiet host reads
+0.634 / 0.555 / 0.766 / 0.875 / 0.836 from 2^12 to 2^20, all decidable regressions. **But the
+MAGNITUDES in that row must not be quoted**: they were computed with the mixed statistic.
+
+**NULLS CAPTURED THIS RUN**: the 2^14 multiply and divide pair only (both clean, above). The other
+cells' gate lines were filtered out of the capture, so their nulls are not in evidence here and
+this row makes no claim resting on them.
+
+RETRY PREDICATE: (1) Fix the group to derive `wrapper_ns` and the projection from the SAME
+statistic the verdict uses, or emit both and label them; until then treat every
+`projected_delegating_*` figure as directional only. Filed against `deadlock-audit-q00ev`. (2) Add
+a monotonicity check on the INCUMBENT arm across sizes — NumPy's own cost must scale with n, and a
+cell that breaks the trend should refuse to publish rather than be caught by a human reading the
+column. That check would have flagged run 1 automatically. (3) Never bank a single-run
+incumbent-beating result from this group without a trend check; our arm being stable while
+NumPy's moves 2.4x is exactly the shape that produces one. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - SETTLED ON A QUIET HOST: `add` REACHES PARITY AT 2^24 within +-0.34% - the size axis of the campaign's worst cell is now complete, and it is a per-call FLOOR, not a scaling defect (`deadlock-audit-ei9jz`)
 
 `RedLynx`. The question two rows deferred for want of a quiet host. Load fell from 105 to 25 and
