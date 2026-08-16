@@ -2502,18 +2502,52 @@ fn bench_percall_floor_stage_attribution(_c: &mut Criterion) {
         });
 
         let accounted = import_ns + dtype_ns + ndarray_ns + empty_ns;
+        // `import_numpy_ns` IS NO LONGER A LIVE ROUTE COST, and counting it as
+        // accounted overstates how well this wrapper is understood — in the
+        // FLATTERING direction, which is the direction that stops people hunting.
+        // `e4cdd808`, `f8475a76` and `5c7735da` replaced every per-call
+        // `py.import("numpy")` on the binary ufunc route — the one at the top of
+        // `PyUFunc::__call__` and the one each probe was making before it declined
+        // — with the cached `cached_numpy` module handle. The route never executes
+        // this stage now, so its replica cannot be part of the live total.
+        //
+        // THE REPLICA IS KEPT AND STILL PRINTED, deliberately. Deleting it would
+        // silently break comparability with every pre-fix row whose sums include
+        // it (`deadlock-audit-cydda`, and the invalidated `thinkstation1` row) —
+        // those rows would then be reading a differently-defined `accounted_ns`
+        // under the same name, which is worse than an overstatement because it is
+        // invisible. So both totals are emitted, each labelled with what it
+        // contains, and `accounted_fraction` keeps its historical meaning.
+        // `deadlock-audit-kido6`.
+        let live_accounted = dtype_ns + ndarray_ns + empty_ns;
+        let live_unattributed = ours_ns - live_accounted;
+        let worker = measurement_worker();
+        let accounted_fraction = accounted / ours_ns;
+        let live_unattributed_fraction = live_unattributed / ours_ns;
+        let fnp_over_numpy = ours_ns / numpy_ns;
         println!(
-            "PERCALL_FLOOR_STAGES n={N} numpy_version={numpy_version} worker={} \
+            "PERCALL_FLOOR_STAGES n={N} numpy_version={numpy_version} worker={worker} \
              harness=stage_replica_min_of_{TRIALS} trials={TRIALS} \
              stages_are_standalone_replicas=true stage_numbers_are_lower_bounds=true \
-             import_numpy_ns={import_ns:.1} dtype_guard_both_operands_ns={dtype_ns:.1} \
+             import_numpy_ns={import_ns:.1} import_is_live_route_cost=false \
+             dtype_guard_both_operands_ns={dtype_ns:.1} \
              getattr_ndarray_ns={ndarray_ns:.1} numpy_empty_ns={empty_ns:.1} \
-             accounted_ns={accounted:.1} fnp_multiply_ns={ours_ns:.1} \
-             numpy_multiply_ns={numpy_ns:.1} accounted_fraction={:.3} \
-             fnp_over_numpy={:.3}",
-            measurement_worker(),
-            accounted / ours_ns,
-            ours_ns / numpy_ns,
+             accounted_ns={accounted:.1} accounted_includes_dead_import=true \
+             accounted_fraction={accounted_fraction:.3} \
+             live_accounted_ns={live_accounted:.1} \
+             live_unattributed_ns={live_unattributed:.1} \
+             live_unattributed_fraction={live_unattributed_fraction:.3} \
+             fnp_multiply_ns={ours_ns:.1} numpy_multiply_ns={numpy_ns:.1} \
+             fnp_over_numpy={fnp_over_numpy:.3}"
+        );
+        // The live partition must be exact by construction: every nanosecond of the
+        // call is either in a named live stage or in the unattributed remainder.
+        // A future edit that adds a stage to one total and forgets the other shows
+        // up here rather than as a quietly wrong fraction in a banked row.
+        assert!(
+            (live_accounted + live_unattributed - ours_ns).abs() < 1e-6,
+            "live stages must partition the whole call: {live_accounted:.1} + \
+             {live_unattributed:.1} != {ours_ns:.1}"
         );
     });
 }
