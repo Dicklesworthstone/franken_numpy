@@ -11,8 +11,8 @@ mod common;
 use common::ensure_numpy_available;
 use criterion::Criterion;
 use fnp_python::fnp_python;
-use pyo3::Python;
-use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyModuleMethods, PyTuple};
+use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyModuleMethods, PyTuple, PyTupleMethods};
+use pyo3::{Bound, Py, PyAny, PyResult, Python, pyclass, pymethods};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -1332,6 +1332,10 @@ fn main() {
             (
                 "bench_signature_keyword_binding_cost",
                 bench_signature_keyword_binding_cost,
+            ),
+            (
+                "bench_signature_shape_pyclass_control",
+                bench_signature_shape_pyclass_control,
             ),
             (
                 "bench_divide_size_gate_vs_numpy",
@@ -4206,6 +4210,140 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
             "THE BELOW-GATE NULL CELL INVERTED — the projection model is wrong and no cell \
              in this group may be read: {}",
             null_cell_violations.join(" | ")
+        );
+    });
+}
+
+/// The CLEAN experiment for `deadlock-audit-t4lri`: a nine-parameter `__call__` against a
+/// `(*args, **kwargs)` one, doing identical work.
+///
+/// `bench_signature_keyword_binding_cost` could only price binding seven PRESENT keywords
+/// (276 ns) and said so in its own output — it is an upper bound on the keyword-handling
+/// component, not the lever's value, because the hot path passes NO keywords and pays
+/// PyO3 filling defaults instead. Pricing that needs two call surfaces that differ ONLY
+/// in their signature, which needs two types. That was deferred while the build freeze
+/// held, since no bench in this crate had ever declared a `#[pyclass]` and unverifiable
+/// macro surface in a shared binary is a bad trade. Builds are permitted now.
+///
+/// Both types are called the SAME WAY — two positionals, no keywords, exactly the hot
+/// path's shape — and both return their first argument. The nine-parameter arm pays PyO3
+/// binding two positionals and filling seven defaults; the varargs arm pays a tuple
+/// extract. That difference IS the lever.
+#[pyclass]
+struct SignatureNineParam;
+
+#[pymethods]
+impl SignatureNineParam {
+    #[pyo3(signature = (x1, x2, /, out=None, *, r#where=None, casting="same_kind", order="K", dtype=None, subok=true, signature=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn __call__(
+        &self,
+        x1: Py<PyAny>,
+        x2: Py<PyAny>,
+        out: Option<Py<PyAny>>,
+        r#where: Option<Py<PyAny>>,
+        casting: &str,
+        order: &str,
+        dtype: Option<Py<PyAny>>,
+        subok: bool,
+        signature: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        // Touch every bound parameter so none can be optimised out of the signature.
+        let _ = (
+            &x2, &out, &r#where, casting, order, &dtype, subok, &signature,
+        );
+        Ok(x1)
+    }
+}
+
+#[pyclass]
+struct SignatureVarargs;
+
+#[pymethods]
+impl SignatureVarargs {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __call__(
+        &self,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        // A real lazy implementation would parse kwargs only when present; the hot path
+        // passes none, so this is exactly the work it would do.
+        let _ = kwargs;
+        Ok(args.get_item(0)?.unbind())
+    }
+}
+
+/// Price the nine-parameter signature directly (`deadlock-audit-t4lri`).
+fn bench_signature_shape_pyclass_control(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let a = numpy
+            .call_method1("arange", (256_usize,))
+            .expect("operand a");
+        let b = numpy
+            .call_method1("arange", (256_usize,))
+            .expect("operand b");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        let nine = Py::new(py, SignatureNineParam).expect("nine-parameter callable");
+        let varargs = Py::new(py, SignatureVarargs).expect("varargs callable");
+        let nine = nine.bind(py);
+        let varargs = varargs.bind(py);
+
+        // PARITY BEFORE TIMING: both must hand back the same object, or they are not
+        // doing the same work and the difference is not a signature cost.
+        let nine_probe = nine.call1(&args).expect("nine-parameter probe");
+        let varargs_probe = varargs.call1(&args).expect("varargs probe");
+        assert!(
+            nine_probe.is(&a) && varargs_probe.is(&a),
+            "both signature arms must return their first argument unchanged"
+        );
+
+        let nine_arm = || {
+            let started = Instant::now();
+            let out = nine.call1(&args).expect("nine-parameter call");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+        let varargs_arm = || {
+            let started = Instant::now();
+            let out = varargs.call1(&args).expect("varargs call");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(out.is_none()),
+            }
+        };
+        let (effect, null) =
+            common::run_median_ci_contract("signature_shape_pyclass", nine_arm, varargs_arm);
+
+        let signature_cost_ns = effect.arm_a_median_ns - effect.arm_b_median_ns;
+        println!(
+            "SIGNATURE_SHAPE_PYCLASS n=256 numpy_version={numpy_version} worker={} \
+             harness=common::run_median_ci_contract \
+             arms=nine_parameter_pyclass_vs_varargs_pyclass_same_work \
+             called_with_two_positionals_no_keywords=true \
+             nine_param_ns={:.1} varargs_ns={:.1} signature_cost_ns={signature_cost_ns:.1} \
+             ratio={:.6} ratio_ci95=[{:.6},{:.6}] null={:.6} \
+             this_IS_eager_vs_lazy_on_the_hot_path_shape=true",
+            measurement_worker(),
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            null.ratio_median,
         );
     });
 }

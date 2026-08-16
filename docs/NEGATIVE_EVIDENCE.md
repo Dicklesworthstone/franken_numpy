@@ -17,6 +17,71 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - LEVER CLOSED (measured, negative): the nine-parameter signature costs 5 ns, not hundreds - `deadlock-audit-t4lri` is NOT where the per-call floor lives (`deadlock-audit-t4lri`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. The clean experiment this bead always wanted, deferred while the build freeze held
+because no bench in this crate had ever declared a `#[pyclass]`. Builds are permitted, the macro
+surface compiles, and the answer kills the lever.
+
+**Campaign result class:** rejected-lever (measured; the prize is ~0.3% of the floor)
+
+```
+bench_elf_sha256=d2ad1a6fa898c64db63da7000c9bac81159232c8221b707ec59b8c5e83323579
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307679408 bytes)
+built from committed source, local, zero [RCH] lines, executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 1min 21.26 before and 21.26 after (64 logical threads)
+harness=common::run_median_ci_contract, A/A null run first
+
+SIGNATURE_SHAPE_PYCLASS n=256
+  arms=nine_parameter_pyclass_vs_varargs_pyclass_same_work
+  called_with_two_positionals_no_keywords=true
+  nine_param_ns=45.0  varargs_ns=40.0  signature_cost_ns=5.0
+  ratio=1.000000 ci95=[1.000000,1.125000]  null=1.000000  verdict=UNDECIDED
+```
+
+**THE DESIGN.** Two `#[pyclass]` types whose `__call__` differs ONLY in signature — one carrying
+`PyUFunc::__call__`'s exact nine-parameter declaration (two positionals, `out`, `where`, `casting`,
+`order`, `dtype`, `subok`, `signature`), one taking `(*args, **kwargs)`. Both return their first
+argument, asserted identical before timing. Both are called the way the hot path calls: **two
+positionals, no keywords**. So the nine-parameter arm pays PyO3 binding two positionals and
+FILLING SEVEN DEFAULTS, and the varargs arm pays a tuple extract. That difference is the lever, and
+nothing else differs.
+
+**THE RESULT: 5 ns.** Against the per-call floor this bead was filed against — ~1127 ns of excess
+at n=256, or the 2044 ns figure the bead itself quotes — the nine-parameter signature is
+**0.2-0.4%**. It is not a lever. `deadlock-audit-t4lri` is closed as a perf target.
+
+**WHY THE EARLIER TRIAGE OVERSTATED IT, and it was labelled at the time.**
+`bench_signature_keyword_binding_cost` measured binding seven PRESENT keywords and emitted
+`prices_binding_present_keywords_NOT_eager_vs_lazy=true` precisely because it could not price the
+hot path. It read 276 ns then and **145 ns in this same invocation** — both upper bounds, and both
+irrelevant to a call that passes no keywords. Filling a default needs no dict lookup, no
+conversion and no error path; it costs about 0.7 ns per parameter. The triage was right to clear
+its own >150 ns rule and right to refuse to call that the lever's value.
+
+**HONEST LIMIT ON THIS ROW'S STATISTICS.** The verdict is `UNDECIDED` and the ratio CI is
+[1.000000,1.125000] — coarse, because both arms total under 50 ns and the timer quantises at that
+scale. **The conclusion does not rest on the ratio.** It rests on the ABSOLUTE bound: both call
+surfaces complete in 40-45 ns, so the signature's contribution to a 1127 ns floor cannot exceed a
+few nanoseconds no matter how the ratio is read. A lever whose entire arm is 45 ns cannot explain a
+1127 ns excess. The A/A null is exactly 1.000000, so the harness is not adding spread here either.
+
+**WHAT THIS REDIRECTS.** The floor's named components on this route are now: NumPy's own work
+~31%, the declined probe chain ~41%, everything else ~28% (from the partition row). The signature
+is inside that last bucket and is worth 0.4% of it. **The probe chain remains the only large named
+target**, and `deadlock-audit-v46rn` — sharing one dtype fetch across the probe families, ceiling
+731 ns — is already being implemented by a peer whose uncommitted `PyUFunc::__call__` edits carry
+that bead's name. I did not duplicate it.
+
+RETRY PREDICATE: (1) Do not re-open the signature as a perf lever; if someone wants the ratio
+certified rather than bounded, the arms need padding to a few hundred ns, which changes what is
+being measured and answers a question nobody has. (2) The `(*args, **kwargs)` refactor of
+`PyUFunc::__call__` should NOT be undertaken for speed — 5 ns — though it may still be worth doing
+for other reasons, which this row does not address. (3) The remaining floor is the probe chain;
+see `deadlock-audit-v46rn`. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - SECOND GATE, AND HALF THE PER-CALL FLOOR IS GONE: 1091 -> 552 ns, the worst cell 3.471x -> 2.330x slower (`deadlock-audit-v46rn`)
 
 `SlateHeron`. The timedelta probe gated on the same hoisted sniff. Cumulative with the f16 gate this
