@@ -1286,6 +1286,10 @@ fn main() {
                 bench_native_binary_family_vs_numpy,
             ),
             (
+                "bench_output_construction_decomposition",
+                bench_output_construction_decomposition,
+            ),
+            (
                 "bench_binary_route_overhead_vs_numpy",
                 bench_binary_route_overhead_vs_numpy,
             ),
@@ -1310,6 +1314,7 @@ fn main() {
                 bench_delegating_probe_chain_cost,
             ),
             ("bench_probe_decline_ordering", bench_probe_decline_ordering),
+            ("bench_maximum_arms_vs_numpy", bench_maximum_arms_vs_numpy),
         ],
     );
 }
@@ -2669,6 +2674,104 @@ fn probe_varargs(
 /// dispatch trap (fnp's callable is asserted not to be NumPy's object) and the
 /// cross-arm parity probe, under the dual-null contract with both A/A nulls. Ratio
 /// is incumbent/candidate = numpy/fnp, so BELOW 1.0 means we are slower.
+/// Decompose OUTPUT CONSTRUCTION, the largest unexplained piece of the PyUFunc
+/// per-call floor, inside ONE invocation (`deadlock-audit-tmmud` follow-up).
+///
+/// The numbers that motivate this do not add up, and they cannot be made to add up
+/// because they come from different workers with different harnesses:
+///   `numpy.empty` alone            220 ns   (`deadlock-audit-cydda`, vmi1149989, min-of-2001)
+///   `numpy.empty` + `reshape`     1310 ns   (`deadlock-audit-tmmud`, vmi1152480, batched min-of-401)
+///   the reshape in isolation       200 ns   (`deadlock-audit-6twge`, vmi1293453, contract A/B)
+/// 220 + 200 is 420, not 1310, so roughly 890 ns is unaccounted — but subtracting
+/// across those rows is precisely the cross-worker arithmetic that already
+/// overstated one lever by 5.5x, so the gap is NOT evidence of anything yet. This
+/// group measures every piece side by side on ONE worker in ONE process so the
+/// arithmetic is finally legitimate.
+///
+/// BATCHED, because `deadlock-audit-7ocfa` showed a single-call arm bottoms out at
+/// the timer floor: two IDENTICAL arms read 7% apart at a 60 ns call. Each stage runs
+/// `BATCH` repetitions inside one timer and an empty loop is measured and subtracted.
+///
+/// The `empty_at_final_shape` stage is the one with a lever behind it: if allocating
+/// directly at the target shape costs about the same as allocating flat, then the
+/// higher-rank sites can skip their reshape too, not just the 1-D ones.
+fn bench_output_construction_decomposition(_c: &mut Criterion) {
+    const N: usize = 4096;
+    const BATCH: usize = 256;
+    const TRIALS: usize = 401;
+
+    fn min_batch_ns(trials: usize, batch: usize, mut op: impl FnMut()) -> f64 {
+        let mut best = u128::MAX;
+        for _ in 0..trials {
+            let started = Instant::now();
+            for _ in 0..batch {
+                op();
+            }
+            best = best.min(started.elapsed().as_nanos());
+        }
+        best as f64 / batch as f64
+    }
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let flat_shape = PyTuple::new(py, [N]).expect("flat shape");
+        let two_d = PyTuple::new(py, [64usize, 64usize]).expect("2-D shape");
+
+        let empty_loop = min_batch_ns(TRIALS, BATCH, || {
+            black_box(());
+        });
+        // The attribute lookup alone, so it can be separated from the call.
+        let getattr_empty = min_batch_ns(TRIALS, BATCH, || {
+            black_box(numpy.getattr("empty").expect("getattr empty"));
+        });
+        // Allocation only.
+        let empty_flat = min_batch_ns(TRIALS, BATCH, || {
+            black_box(numpy.call_method1("empty", (N,)).expect("empty"));
+        });
+        // Allocation + the no-op reshape to the shape it already has.
+        let empty_plus_noop_reshape = min_batch_ns(TRIALS, BATCH, || {
+            let f = numpy.call_method1("empty", (N,)).expect("empty");
+            black_box(f.call_method1("reshape", (&flat_shape,)).expect("reshape"));
+        });
+        // Allocation + a REAL reshape to a different rank.
+        let empty_plus_real_reshape = min_batch_ns(TRIALS, BATCH, || {
+            let f = numpy.call_method1("empty", (N,)).expect("empty");
+            black_box(f.call_method1("reshape", (&two_d,)).expect("reshape"));
+        });
+        // Allocation directly at the final 2-D shape - the candidate lever.
+        let empty_at_final_shape = min_batch_ns(TRIALS, BATCH, || {
+            black_box(numpy.call_method1("empty", (&two_d,)).expect("empty 2-D"));
+        });
+
+        let noop_reshape = empty_plus_noop_reshape - empty_flat;
+        let real_reshape = empty_plus_real_reshape - empty_flat;
+        let direct_saves = empty_plus_real_reshape - empty_at_final_shape;
+        println!(
+            "OUTPUT_CONSTRUCTION_DECOMPOSITION n={N} batch={BATCH} trials={TRIALS} \
+             numpy_version={numpy_version} worker={} \
+             harness=batched_min_of_{TRIALS}_minus_empty_loop one_invocation=true \
+             empty_loop_ns={empty_loop:.2} getattr_empty_ns={:.2} \
+             empty_flat_ns={:.2} empty_plus_noop_reshape_ns={:.2} \
+             empty_plus_real_reshape_ns={:.2} empty_at_final_shape_ns={:.2} \
+             noop_reshape_ns={noop_reshape:.2} real_reshape_ns={real_reshape:.2} \
+             allocating_at_final_shape_saves_ns={direct_saves:.2}",
+            measurement_worker(),
+            getattr_empty - empty_loop,
+            empty_flat - empty_loop,
+            empty_plus_noop_reshape - empty_loop,
+            empty_plus_real_reshape - empty_loop,
+            empty_at_final_shape - empty_loop,
+        );
+    });
+}
+
 fn bench_native_binary_family_vs_numpy(_c: &mut Criterion) {
     let n = 1usize << 22;
     Python::initialize();
@@ -3473,5 +3576,192 @@ fn bench_probe_decline_ordering(_c: &mut Criterion) {
             effect.ratio_ci_low > 1.0,
             effect.ratio_ci_low,
         );
+    });
+}
+
+/// Exact replica of `BinaryOp::Maximum` (crates/fnp-ufunc/src/lib.rs:854): NaN on
+/// either side propagates, equal operands return the RIGHT one, otherwise `max`.
+/// The equal-operands arm is not cosmetic — it is what makes -0.0/+0.0 agree with
+/// NumPy, and a replica using bare `f64::max` would diverge there.
+#[inline(always)]
+fn maximum_elem(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_nan() || rhs.is_nan() {
+        f64::NAN
+    } else if lhs == rhs {
+        rhs
+    } else {
+        lhs.max(rhs)
+    }
+}
+
+#[inline(never)]
+fn maximum_serial(a: &[f64], b: &[f64], out: &mut [f64]) {
+    for ((slot, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        *slot = maximum_elem(x, y);
+    }
+}
+
+/// Same chunking the shipped parallel arm uses.
+#[inline(never)]
+fn maximum_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
+    let chunk = out.len().div_ceil(rayon::current_num_threads());
+    out.par_chunks_mut(chunk)
+        .zip(a.par_chunks(chunk))
+        .zip(b.par_chunks(chunk))
+        .for_each(|((o, l), r)| {
+            for ((slot, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                *slot = maximum_elem(x, y);
+            }
+        });
+}
+
+// deadlock-audit-hzl1w asks whether the native parallel arm should decline for
+// maximum/minimum. Its evidence compares the PARALLEL arm to NumPy and shows it
+// losing, which argues for delegating — but it never measured the SERIAL native
+// arm, so "decline the parallel arm" (keep native, drop rayon) and "delegate to
+// NumPy" are two different changes and only one of them has data.
+//
+// This measures BOTH against NumPy in ONE invocation, so the three-way comparison
+// is licensed: parallel-native vs NumPy and serial-native vs NumPy, same binary,
+// same operands, same host, each under the dual-null contract. Ratio is
+// numpy/candidate, so ABOVE 1.0 means our arm is faster.
+//
+// n=1<<22 sits above the 1<<21 parallel_min, the regime the losing measurements
+// came from — below it the shipped route runs serially anyway.
+fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
+    const N: usize = 1 << 22;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        // Mixed signs so neither operand dominates, plus NaN and signed-zero lanes
+        // so the replica's semantics are exercised rather than assumed.
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = (1.0 + (i % 1000) / 1000.0) * np.where(i % 3 == 0, -1.0, 1.0)\nb = (1.25 + (i % 997) / 997.0) * np.where(i % 5 == 0, -1.0, 1.0)\na[3] = np.nan\nb[7] = np.nan\na[11] = 0.0\nb[11] = -0.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_obj = locals.get_item("a").expect("a operand");
+        let b_obj = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a_obj, &b_obj]).expect("args");
+        let np_maximum = numpy.getattr("maximum").expect("numpy.maximum");
+
+        let a_vec: Vec<f64> = a_obj
+            .call_method0("tolist")
+            .expect("a list")
+            .extract()
+            .expect("a f64s");
+        let b_vec: Vec<f64> = b_obj
+            .call_method0("tolist")
+            .expect("b list")
+            .extract()
+            .expect("b f64s");
+        let mut serial_out = vec![0.0_f64; N];
+        let mut parallel_out = vec![0.0_f64; N];
+
+        // PARITY BEFORE TIMING: both replicas must reproduce NumPy bit for bit on
+        // these operands, NaN and signed-zero lanes included, or the ratio is
+        // between two different computations.
+        maximum_serial(&a_vec, &b_vec, &mut serial_out);
+        maximum_parallel(&a_vec, &b_vec, &mut parallel_out);
+        let numpy_probe = np_maximum.call1(&args).expect("numpy.maximum probe");
+        let numpy_checksum = numpy_divide_checksum(&numpy_probe, N);
+        assert_eq!(
+            divide_checksum(&serial_out),
+            numpy_checksum,
+            "serial maximum replica diverges from numpy.maximum"
+        );
+        assert_eq!(
+            divide_checksum(&parallel_out),
+            numpy_checksum,
+            "parallel maximum replica diverges from numpy.maximum"
+        );
+
+        {
+            let incumbent = || {
+                let started = Instant::now();
+                let result = np_maximum.call1(&args).expect("numpy.maximum");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: numpy_divide_checksum(&result, N),
+                }
+            };
+            let parallel_arm = || {
+                let started = Instant::now();
+                maximum_parallel(&a_vec, &b_vec, &mut parallel_out);
+                let elapsed = started.elapsed();
+                let checksum = divide_checksum(&parallel_out);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let (effect, _, _) = common::run_dual_null_median_ci_contract(
+                "maximum_f64_parallel_vs_numpy",
+                incumbent,
+                parallel_arm,
+            );
+            println!(
+                "MAXIMUM_ARM arm=parallel_native n={N} numpy_version={numpy_version} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
+                 faster_than_numpy={} worst_bound={:.6}",
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_ci_low > 1.0,
+                effect.ratio_ci_low,
+            );
+        }
+
+        {
+            let incumbent = || {
+                let started = Instant::now();
+                let result = np_maximum.call1(&args).expect("numpy.maximum");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: numpy_divide_checksum(&result, N),
+                }
+            };
+            let serial_arm = || {
+                let started = Instant::now();
+                maximum_serial(&a_vec, &b_vec, &mut serial_out);
+                let elapsed = started.elapsed();
+                let checksum = divide_checksum(&serial_out);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let (effect, _, _) = common::run_dual_null_median_ci_contract(
+                "maximum_f64_serial_vs_numpy",
+                incumbent,
+                serial_arm,
+            );
+            println!(
+                "MAXIMUM_ARM arm=serial_native n={N} numpy_version={numpy_version} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
+                 faster_than_numpy={} worst_bound={:.6} same_invocation_as_parallel_arm=true",
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_ci_low > 1.0,
+                effect.ratio_ci_low,
+            );
+        }
     });
 }
