@@ -12727,6 +12727,30 @@ fn try_zerocopy_f64_binary(
     let Some((flat, shape)) = zerocopy_f64_binary_flat(py, &numpy, a, b, op)? else {
         return Ok(None);
     };
+    // 1-D operands: `zerocopy_f64_binary_flat` already allocated the output with
+    // exactly `n` elements, so its shape IS the target shape and `reshape((n,))`
+    // hands back an array identical to the one it was given. Skipping it removes a
+    // tuple allocation, an attribute lookup and a Python call from every 1-D call.
+    //
+    // Measured cost of that no-op: **200 ns per call**, isolated in ONE invocation
+    // on WORKER vmi1293453 — `numpy.empty` + `reshape` 415.0 ns versus
+    // `numpy.empty` alone 215.0 ns, ratio 1.940625 ci95 [1.911628,1.953488] with
+    // the A/A null at 1.007184. Bead `deadlock-audit-6twge`.
+    //
+    // Do NOT quote the ~1.1 us figure that an earlier draft of this comment
+    // carried. It came from subtracting `deadlock-audit-cydda`'s 220 ns
+    // `numpy.empty` from `deadlock-audit-tmmud`'s 1310 ns `empty` + `reshape` —
+    // two numbers from DIFFERENT workers measured with DIFFERENT harnesses
+    // (min-of-2001 single calls versus batched min-of-401). Cross-row arithmetic
+    // like that is exactly what the fleet's worker-provenance rule forbids, and it
+    // overstated this lever by 5.5x. The 200 ns above is the same-invocation
+    // number and is the only one that may be cited.
+    //
+    // The 0-D branch below still needs its reshape: it reshapes to `()` so that
+    // `get_item(())` can extract the scalar. Only `len() == 1` may skip.
+    if shape.len() == 1 {
+        return Ok(Some(flat.unbind()));
+    }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
     let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
     if shape.is_empty() {
@@ -54223,8 +54247,13 @@ fn try_zerocopy_complex_binary(
     }
     let dta = a.getattr("dtype")?;
     let dtb = b.getattr("dtype")?;
-    if dta.getattr("kind")?.extract::<String>()? != "c"
-        || dtb.getattr("kind")?.extract::<String>()? != "c"
+    // `char` rather than `String`: `dtype.kind` is a single character, and this
+    // probe runs on EVERY delegating f64 multiply and divide before declining, so
+    // the two heap allocations were pure waste on a measured hot path. The
+    // declined probe chain is ~40% of a delegating call
+    // (`deadlock-audit-wsd7h`, worst bound 1.389629x), and this is inside it.
+    if dta.getattr("kind")?.extract::<char>()? != 'c'
+        || dtb.getattr("kind")?.extract::<char>()? != 'c'
     {
         return Ok(None);
     }
