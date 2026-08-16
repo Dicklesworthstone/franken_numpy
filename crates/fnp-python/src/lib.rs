@@ -327,7 +327,11 @@ impl PyUFunc {
         subok: bool,
         signature: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        // Cached module handle, not `py.import("numpy")`: the import is 310 ns on every
+        // invocation (`deadlock-audit-cydda`) against a ~7-8 us per-call floor, and this
+        // is the route that floor belongs to. See `cached_numpy` for why holding the
+        // handle is sound and why the module — not a bound callable — is what is held.
+        let numpy = cached_numpy(py)?;
         // Fast parallel f64 path for the high-compute binary ufuncs numpy runs single-threaded
         // (remainder = floored-mod, power = libm pow). Only the plain call surface (every kwarg
         // at its default) routes to the zero-copy parallel kernel; any out/where/dtype/casting/
@@ -458,7 +462,7 @@ impl PyUFunc {
                     ComplexBinOp::Divide
                 };
                 if let Some(out_val) =
-                    try_zerocopy_complex_binary(py, &numpy, x1.bind(py), x2.bind(py), cop)?
+                    try_zerocopy_complex_binary(py, numpy, x1.bind(py), x2.bind(py), cop)?
                 {
                     return Ok(out_val);
                 }
@@ -80193,6 +80197,49 @@ fn take_along_axis(
     fallback()
 }
 
+/// The process-lifetime `numpy` module handle, imported once instead of on every call.
+///
+/// `py.import("numpy")` is not free even though CPython only does a `sys.modules`
+/// dict hit: `deadlock-audit-cydda` measured it at 310 ns per call on `vmi1149989`
+/// (min-of-2001), against a per-call floor of ~7-8 us on the small-array binary
+/// route — the campaign's worst vs-incumbent ratio (`deadlock-audit-v8nx6`).
+///
+/// WHY THIS IS SAFE, point by point against the hazards the bead names:
+///
+/// 1. *A cached `Py<PyModule>` outlives any single GIL acquisition.* That is
+///    precisely what `PyOnceLock` is for: `get_or_try_init` takes a `Python<'_>`
+///    token, and the only way back to a usable reference is `.bind(py)`, which
+///    demands the token again. There is no path here that dereferences the handle
+///    without being attached, and none of it is `unsafe`.
+///
+/// 2. *Interpreter finalisation could invalidate the handle.* In pyo3 0.28.3 the
+///    only route to `Py_Finalize` is the explicitly-`unsafe`
+///    `with_embedded_python_interpreter`, which this crate never calls, and
+///    `Python::initialize()` is a `std::sync::Once` guarded no-op once the
+///    interpreter is up (`interpreter_lifecycle.rs`) — it does NOT finalise. So a
+///    bench harness calling `Python::initialize()` per group cannot invalidate this
+///    cell; the concern the bead raised does not apply to this pyo3 version.
+///
+/// 3. *Sub-interpreters would need a per-interpreter cache.* This cell is global.
+///    Nothing in this crate creates a sub-interpreter, and pyo3 0.28.3 does not
+///    support them; if that ever changes, this helper is the single place to fix.
+///
+/// 4. *Behaviour parity.* The cached object is the same module object CPython keeps
+///    in `sys.modules["numpy"]`, and callers still do their own `getattr` through
+///    it, so monkeypatching `numpy.<name>` after the cell is populated is still
+///    honoured. Caching the *bound callable* instead would break exactly that, which
+///    is why only the module handle is held. If the import fails, `get_or_try_init`
+///    leaves the cell uninitialised, so a later successful import still populates it
+///    and the error surface is unchanged (`ImportError` on every failing call).
+fn cached_numpy(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static NUMPY_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(NUMPY_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("numpy")?.unbind())
+        })?
+        .bind(py))
+}
+
 // ---------------------------------------------------------------------------
 // Historical reality-check (k74v.8) - 31 core numpy passthrough wrappers.
 //
@@ -80209,17 +80256,7 @@ fn core_numpy_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Cache the numpy module once instead of re-importing it on every call. This
-    // passthrough backs 185 ops; on SMALL arrays the per-call `py.import("numpy")`
-    // (~200ns, measured) dominates the trivial kernel, so caching it cuts the
-    // dispatch overhead for every passthrough ufunc with zero behaviour change
-    // (same module, same getattr+call). Large-array ops are unaffected (amortized).
-    static NUMPY_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
-    let numpy = NUMPY_MODULE
-        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
-            Ok(py.import("numpy")?.unbind())
-        })?
-        .bind(py);
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
 }
 
@@ -109319,9 +109356,9 @@ mod tests {
     use super::{
         BinaryOp, F64_DIV_NATIVE_MIN_LEN, MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize,
         PythonNativeGemmOp, argwhere, bincount, blas_is_single_threaded,
-        build_numpy_array_from_ufunc, ceil_native, choose, compress, copysign, count_nonzero,
-        degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize,
-        extract, extract_numeric_array, extract_precise_numeric_array,
+        build_numpy_array_from_ufunc, cached_numpy, ceil_native, choose, compress, copysign,
+        count_nonzero, degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal,
+        digitize, extract, extract_numeric_array, extract_precise_numeric_array,
         f64_binary_route_is_worth_taking, f64_divide_fast_accepts_without_fp_error,
         f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
         f64_divide_raises_fp_error, fill_diagonal, flatnonzero, flip, fliplr, flipud, floor_native,
@@ -109852,6 +109889,178 @@ mod tests {
 
     fn numpy_available(py: Python<'_>) -> bool {
         py.import("numpy").is_ok()
+    }
+
+    // -----------------------------------------------------------------------
+    // `cached_numpy` — the process-lifetime numpy module handle
+    // (`deadlock-audit-v8nx6`). `PyUFunc::__call__` used to run
+    // `py.import("numpy")` on every invocation, measured at 310 ns
+    // (`deadlock-audit-cydda`) against a ~7-8 us per-call floor. These tests lock
+    // the two properties that make holding the handle admissible instead of
+    // merely faster: it stays USABLE across GIL acquisitions, and it stays LIVE,
+    // so the getattr on the hot path still sees the current module contents.
+    // -----------------------------------------------------------------------
+
+    /// NEGATIVE CASE — this is the test a naive implementation of this lever fails.
+    ///
+    /// The tempting version caches the bound `numpy.add` CALLABLE, which is
+    /// strictly faster (it removes the getattr too) and wrong: a callable captured
+    /// at warm-up keeps being invoked after the attribute it came from has been
+    /// replaced, so the route silently ignores a monkeypatch NumPy itself would
+    /// honour. Holding the MODULE keeps the getattr on the hot path. A
+    /// callable-caching implementation passes every conformance suite in this
+    /// crate — byte parity cannot see the difference — and fails here.
+    #[test]
+    fn cached_numpy_handle_is_live_so_a_post_warmup_monkeypatch_is_still_honoured() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_cached_numpy_liveness")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let add = module.getattr("add")?;
+            let a = numpy.call_method1("array", (vec![7.0_f64, 9.0],))?;
+            let b = numpy.call_method1("array", (vec![4.0_f64, 5.0],))?;
+
+            // Warm the cell FIRST: the claim under test is about a handle that is
+            // already held. f64 `add` maps to `None` in the native binop match, so
+            // this is the delegating shape that reaches `numpy.getattr("add")` —
+            // the same shape `deadlock-audit-cydda` measured.
+            let warm = add.call1((&a, &b))?;
+            assert_eq!(
+                warm.call_method0("tolist")?.extract::<Vec<f64>>()?,
+                vec![11.0, 14.0],
+                "warm-up call must delegate to numpy.add and produce numpy's result"
+            );
+
+            let sentinel = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!(
+                    "CALLS = []\ndef patched(*args, **kwargs):\n    CALLS.append(1)\n    return 'patched-add'\n"
+                ),
+                pyo3::ffi::c_str!("sentinel_add.py"),
+                pyo3::ffi::c_str!("sentinel_add"),
+            )?;
+            let patched = {
+                let _guard = AttrGuard::new(&numpy, "add")?;
+                numpy.setattr("add", sentinel.getattr("patched")?)?;
+                add.call1((&a, &b))?
+            };
+            assert_eq!(
+                patched.extract::<String>()?,
+                "patched-add",
+                "the cached handle must resolve `add` at CALL time, not at warm-up time"
+            );
+            assert_eq!(
+                sentinel.getattr("CALLS")?.len()?,
+                1,
+                "the patched callable must have been invoked exactly once"
+            );
+
+            // AttrGuard restored `numpy.add` on drop, and the same cached handle
+            // must now see the restored function: the cell is not poisoned by a
+            // patch that came and went.
+            let restored = add.call1((&a, &b))?;
+            assert_eq!(
+                restored.call_method0("tolist")?.extract::<Vec<f64>>()?,
+                vec![11.0, 14.0],
+                "restoring numpy.add must be visible through the cached module handle"
+            );
+            Ok(())
+        });
+    }
+
+    /// The handle outlives the GIL acquisition that created it. `PyOnceLock` stores
+    /// an owned `Py<PyModule>` and hands it back only through `.bind(py)`, which
+    /// demands the token again — so a second, independent attach gets a usable
+    /// reference to the SAME object. A cache holding a borrowed `Bound<'py, _>`
+    /// could not be written at all; one holding a raw pointer would dangle here.
+    #[test]
+    fn cached_numpy_handle_is_reusable_from_a_later_independent_attach() {
+        let _guard = PY_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Python::initialize();
+
+        let first = Python::attach(|py| -> PyResult<Option<Py<PyModule>>> {
+            if !numpy_available(py) {
+                return Ok(None);
+            }
+            Ok(Some(cached_numpy(py)?.as_unbound().clone_ref(py)))
+        })
+        .expect("first attach must populate the numpy cell");
+        let Some(first) = first else {
+            return;
+        };
+
+        Python::attach(|py| -> PyResult<()> {
+            let again = cached_numpy(py)?;
+            assert!(
+                again.is(first.bind(py)),
+                "a later attach must get the same module object, not a fresh import"
+            );
+
+            // LIVENESS, stated against the interpreter rather than against
+            // ourselves: the handle is whatever `sys.modules['numpy']` currently
+            // is, which is why callers' getattrs through it stay correct.
+            let live = py.import("sys")?.getattr("modules")?.get_item("numpy")?;
+            assert!(
+                again.as_any().is(&live),
+                "the cached handle must be the interpreter's live numpy module"
+            );
+
+            // And the route still works when driven entirely from the handle that
+            // was created during the previous, now-released attach.
+            let module = PyModule::new(py, "fnp_python_test_cached_numpy_reuse")?;
+            fnp_python(&module)?;
+            let a = again.call_method1("array", (vec![1.5_f64, 2.5],))?;
+            let sum = module.getattr("add")?.call1((&a, &a))?;
+            assert_eq!(
+                sum.call_method0("tolist")?.extract::<Vec<f64>>()?,
+                vec![3.0, 5.0],
+                "the ufunc route must work through a handle held across attaches"
+            );
+            Ok(())
+        })
+        .expect("second attach must reuse the populated cell");
+    }
+
+    /// The native fast path is reached through the same `__call__` whose import was
+    /// replaced, so pin that the change is result-identical where it does NOT
+    /// delegate: f64 `remainder` on a size above the native gate must stay
+    /// byte-for-byte equal to numpy's own. A cache that returned some other module
+    /// (or that broke the f64 route's `numpy.empty` allocation) shows up here as a
+    /// byte difference rather than as an exception.
+    #[test]
+    fn cached_numpy_handle_leaves_the_native_f64_route_byte_identical() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_cached_numpy_parity")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let n = F64_DIV_NATIVE_MIN_LEN.max(4096);
+            let a = numpy
+                .call_method1("arange", (n,))?
+                .call_method1("astype", ("float64",))?;
+            let b = numpy.call_method1("full", (n, 7.5_f64))?;
+
+            let ours = module.getattr("remainder")?.call1((&a, &b))?;
+            let theirs = numpy.call_method1("remainder", (&a, &b))?;
+            assert_eq!(
+                ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "the cached module handle must not change the native f64 remainder bytes"
+            );
+            assert_eq!(
+                repr_string(&ours.getattr("dtype")?),
+                repr_string(&theirs.getattr("dtype")?),
+                "output dtype must be unchanged by the cached handle"
+            );
+            Ok(())
+        });
     }
 
     fn object_dtype<'py>(py: Python<'py>) -> pyo3::Bound<'py, pyo3::types::PyAny> {
