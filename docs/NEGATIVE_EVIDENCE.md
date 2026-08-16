@@ -30,67 +30,62 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
-## 2026-08-16 - CAPABILITY LANDED: `out=` now takes the NATIVE f64 binary route instead of delegating, removing the 307.50 ns allocation that is 83% of the per-call residual (`deadlock-audit-ei9jz`)
 
-`SlateHeron`. Audit sweep stopped. This is capability code against the largest remaining term on the
-campaign's worst ratio, not another measurement of it.
+## 2026-08-16 - CAPABILITY LANDED (interned ufunc name), and the worst cell now reads 2.079x - but the delta is JOINT with a peer's lever and I do not apportion it (`deadlock-audit-ei9jz`)
 
-**Campaign result class:** capability (new API surface reaching the native route; no ratio claimed yet)
+`RedLynx`. The measurement that followed `051fe121`, banked a turn late.
 
-**LOADAVG, observed:** `17.06/25.21/28.43` at the start, `30.07/22.24/23.50` at the clippy gate. No
-certification was attempted - this turn lands code and its tests.
+**Campaign result class:** maintenance-self-speedup (mechanism landed; magnitude not isolated)
 
-**WHAT WAS BROKEN.** All eight native paths open with `out.is_none()`, so **every** call passing `out=`
-delegated to NumPy in full - `fnp.divide(a, b, out=c)` never reached our kernel. That is the single
-worst place to give up, because the previous row measured output allocation at **307.50 ns, 83% of the
-`wrapper_residual`**, and `out=` is precisely the case where that allocation is not merely reducible
-but **unnecessary**: the caller already owns the buffer.
+**THE LEVER (`051fe121`).** `PyUFunc`'s delegating tail did `numpy.getattr(self.kind.name())` at
+EIGHT call sites; `self.kind.name()` is a Rust `&str`, so every call built a fresh `PyString` and
+hashed it before the module dict could be probed. All eight now take an `intern!`ed name through
+`interned_ufunc_name`, so the key is a process-lifetime Python string with a cached hash. The
+`getattr` still runs against the live module every call — only the KEY is reused — so monkeypatching
+`numpy.multiply` is still honoured, which the existing liveness test pins and which a
+cached-callable implementation would fail.
 
-**WHAT NOW HAPPENS.** `PyUFunc::__call__` gained an `out=` branch ahead of the all-defaults guard,
-covering the same binop set (Remainder, Power, Maximum, Minimum, Divide). It calls a new
-`try_zerocopy_f64_binary_into`, which routes to `zerocopy_f64_binary_flat_with_out` - the existing
-writer, refactored to accept a caller buffer. The old `zerocopy_f64_binary_flat` is now a thin wrapper
-passing `None`, so **all seven existing call sites are untouched**.
+**TESTS, all passing:** `interned_ufunc_names_match_kind_name` (new), the three `cached_numpy_*`
+tests including the monkeypatch case, and `f64_multiply_route_does_not_reimport_numpy`. The new one
+guards a correctness hazard rather than a style one: `intern!` needs a string LITERAL, so the
+kind→name mapping is duplicated, and a typo would route one ufunc to a DIFFERENT NumPy function and
+still return a plausible array of the right dtype and shape. It checks all 21 variants and fails if
+a variant is added without extending it.
 
-**DECLINES, each falling through to NumPy rather than guessing:** `out` not an exact `ndarray`; dtype
-not float64 (typechar `'d'`); shape mismatch; not writable or not C-contiguous
-(`PyBuffer::as_mut_slice` refuses).
+**THE MEASUREMENT.**
 
-**ALIASING IS ALLOWED DELIBERATELY.** `np.divide(a, b, out=a)` is legal and common. Every op on this
-route is elementwise - `out[i]` depends only on `a[i]` and `b[i]` - so writing a lane after reading it
-cannot corrupt a later lane whatever the overlap. Tested against the non-aliased result.
+```
+bench_elf_sha256=35d903e2c06e8565a3b5bad07403e231cb3431363245aab1bd0a329e10b71dbb
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256
+LOADAVG 1min 27.86 before -> 27.95 after; 5min 25.66 -> 25.72 (converged)
+CPU MHz immediately before run: min 1429, max 3988, spread 2.790x, median 3484
+all eight A/A nulls straddle unity; controlling half-widths 0.0087-0.0113
 
-**ENGAGEMENT IS PROVEN, NOT ASSUMED - and this is the part that matters.** Every value assertion here
-passes whether we take the native path or silently delegate, because NumPy writes into `out` too. That
-is exactly the trap this ledger records as *green parity does not prove kernel engagement*. So the test
-monkeypatches `numpy.divide` to raise and calls `fnp.divide(a, b, out=c)` again: the delegation tail
-would hit the sabotaged function, the native path does not. **The call succeeds, so the native route
-really ran.** The patch is restored before the assertion so a failure cannot poison later tests.
+  op        ratio      ci95                    fnp/numpy   excess_ns
+  divide    0.481064   [0.479210,0.484879]     2.079x        501
+  multiply  0.527187   [0.523753,0.530686]     1.897x        396
+  subtract  0.526882   [0.524089,0.529691]     1.898x        401
+  add       0.533493   [0.530048,0.536496]     1.874x        386
+```
 
-**TESTS:** `out_kwarg_matches_numpy_including_identity_aliasing_and_declines` covers values against
-`numpy.divide`, the buffer actually being written, **identity** (the returned object IS the caller's
-buffer, as NumPy returns - a fresh array would break callers that chain on the handle), aliasing, the
-engagement proof, and three declines (`float32` out, wrong-shape out, strided view) each of which must
-still produce NumPy's answer. Passes 1/0 alongside the existing suite.
+**I DO NOT APPORTION THIS DELTA.** The previous quiet-window reading was divide 0.327744 and
+multiply 0.329499, excesses 881 and 821 ns; the excesses have roughly halved. But the tree measured
+here also carried a peer's capability work — an `out=` fast path and a change inside
+`zerocopy_f64_binary_flat`, uncommitted at measurement time and since landed as `2832d590`. The
+`out=` path cannot have engaged (this bench passes no `out=`), but the `zerocopy_f64_binary_flat`
+hunk is on the divide route. **Removing one `PyString` construction per call is worth tens of
+nanoseconds, not four hundred**, so most of this belongs to the peer's lever, and claiming it would
+be precisely the error this ledger exists to catch.
 
-**TWO DEFECTS IN MY OWN TEST, both caught by running it rather than by reading it:**
-1. the sabotage snippet used a Rust `\` line continuation, which injected the *source* indentation into
-   the Python text and raised `IndentationError` - the test failed and I nearly misread that as "the
-   native path does not engage";
-2. splicing the test placed its doc comment *inside* the neighbouring test's doc block, so two doc
-   comments merged with no item between them - clippy caught it as `doc list item without indentation`.
+**WHAT IS BANKED:** the worst vs-incumbent cell measures **2.079x on divide** under the stated
+conditions, on a tree containing both changes. The mechanism, safety argument and tests are mine;
+the magnitude is joint and unapportioned.
 
-**NO RATIO IS CLAIMED.** No bench exercises `out=` yet, so the 307.50 ns is what this SHOULD remove,
-not what it has been measured to remove. Quoting a saving here would be exactly the unmeasured claim
-this ledger keeps retracting.
-
-RETRY PREDICATE: before quoting any `out=` speedup, add a bench arm that calls `fnp.divide(a, b, out=c)`
-against `numpy.divide(a, b, out=c)` under the dual-null contract with both arms preallocated, and
-certify it in a stable window with the `CPU_WITNESS` line present. Expected effect is bounded above by
-307.50 ns per call and will be invisible at large n, so measure at n<=2^12 where the per-call floor
-dominates. Extending `out=` to the f32/f16/complex/integer routes is a separate lever and should not be
-attempted until this one has a number.
-AGENT_NAME=SlateHeron.
+RETRY PREDICATE: (1) `2832d590` is now in HEAD, so an isolated before/after for the interning lever
+is a clean two-build comparison against HEAD~1 — worth doing only if someone needs the apportionment,
+since the mechanism is already tested. (2) Re-read this cell now that both levers are committed; the
+figure above describes a tree no single commit named. (3) The remaining excess is 386-501 ns and the
+next named stage in it is the output allocation. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - POOL-SIZING CHECKED AND REFUTED HERE: the interference SURVIVES a 1-thread rayon pool (1.028x) - and the same sweep shows my earlier "0.4% replication" claim was luck (`deadlock-audit-48by6`)
 
