@@ -4,6 +4,91 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - PROVISIONAL, NOT REPLICATED (do not quote): the `fnp.divide` loss is REGIME-SCOPED - one observation shows a 1.553x WIN above the parallel gate (`deadlock-audit-su0i6`)
+
+`TealOak`. The `fnp.divide` loss row banked earlier measures `DIVIDE_SERIAL_N` = 1<<20,
+which is deliberately BELOW the kernel's `1 << 21` rayon gate for `BinaryOp::Div` (the
+`parallel_min` table in `crates/fnp-python/src/lib.rs`). It therefore compares our
+SINGLE-THREADED arm against NumPy's single-threaded loop. That is a true statement about
+the serial regime and NOT a statement about `fnp.divide` in general. Read that row with
+its `n`.
+
+**Campaign result class:** unmeasured
+
+A new bench group `bench_divide_vs_numpy_incumbent_parallel` measures the other side of
+the gate at `DIVIDE_PARALLEL_N` = 1<<22 through the same dual-null contract, same
+operands, and the same runtime dispatch and parity traps. One observation so far:
+
+```
+HOST_BASELINE host=hetzner1 cpu_model=AMD_EPYC-Milan_Processor physical_cores=4 logical_threads=8 online_cpus=0:1:2:3:4:5:6:7 allowed_logical_threads=8 allowed_cpus=0:1:2:3:4:5:6:7 governor=unavailable
+MEDIAN_CI_GATE row=divide_f64_1m_vs_numpy_route verdict=DECIDABLE_WIN effect_ratio=1.553045 effect_ci95=[1.521424,1.618591] effect_ci_excludes_one=true incumbent_null_ci95=[0.996214,1.000722] candidate_null_ci95=[0.998118,1.045105] incumbent_null_half_width=0.003786 candidate_null_half_width=0.045105 controlling_null_half_width=0.045105 required_2x_delta=0.090210 both_nulls=true cv_is_provenance_only=true
+DIVIDE_VS_NUMPY_PARALLEL n=4194304 regime=rayon_arm parallel_min=2097152 numpy_version=2.4.3 worker=hetzner1 harness=common::run_dual_null_median_ci_contract rounds=41 rayon_threads=8 incumbent_median_ns=5012341.0 candidate_median_ns=3219708.0 ratio_median=1.553045 ratio_ci95=[1.521424,1.618591] faster_than_numpy=true
+```
+
+**THIS IS NOT BANKED AS A WIN AND MUST NOT BE QUOTED.** It is a single observation, and
+this repo's standing rule is that a sub-2x ratio gets replicated before it is quoted.
+Two replication attempts died on the rch 1800s SSH ceiling (`RCH-E104`, worker
+`vmi1153651` both times): the n=1<<22 dual-null contract is three phases of 25 rounds at
+min-of-3, which that worker cannot finish inside the ceiling. The row exists so the
+REGIME SCOPING of the loss is not lost, not to claim the number.
+
+The gate row above still reads `divide_f64_1m_vs_numpy_route` for a 4,194,304-element
+array: the shared helper hardcoded "1m" while every caller happened to pass the serial
+size. Fixed in the same commit to interpolate the real `n`, so later rows are
+self-describing. This row is pasted exactly as it was emitted rather than corrected
+after the fact.
+
+**Retry predicate.** Re-run `FNP_BENCH_GROUPS=bench_divide_vs_numpy_incumbent_parallel`
+until two runs complete on the SAME named worker, then bank as `incumbent-win` if both
+clear the dual-null gate, or as a loss if they do not. Do not compare against the
+`hetzner1` observation from a different worker. If `RCH-E104` keeps selecting
+`vmi1153651`, cut the round count for this group rather than the array size - the size is
+load-bearing, it is what selects the rayon arm.
+
+## 2026-08-15 - MEASURED (worst vs-NumPy ratio found so far): the fnp binary-ufunc per-call floor is ~6.6-7 us, and at n=256 `fnp.multiply` is 7.97x SLOWER than NumPy (`deadlock-audit-isnd2`)
+
+`TealOak`. `deadlock-audit-m7tti` identified the mechanism as fixed per-call overhead and
+INFERRED ~10-13 us by bracketing two cells at opposite ends of a 256x sweep. This measures it
+directly by sweeping DOWN to where the kernel has nothing to do: at 2^8 the operands are 2 KiB
+and L1-resident, so the excess essentially IS the per-call cost.
+
+**Campaign result class:** maintenance-self-speedup
+
+worker=vmi1153651 (10 physical cores, AMD EPYC IBPB)
+harness=common::run_dual_null_median_ci_contract (incumbent A/A + candidate A/A, ABBAABBA, 41 rounds, min-of-3)
+HOST_BASELINE host=vmi1153651 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+numpy_version=2.4.3, `multiply`, float64 C-contiguous, profile `bench` (triage grade), ONE invocation.
+Ratio is numpy/fnp, so BELOW 1.0 means we are slower. All four cells `DECIDABLE_REGRESSION`, nulls at unity.
+
+  n=2^8     ratio 0.125948 ci95=[0.125197,0.126375]  numpy     946 ns  fnp    7539 ns  excess  6593 ns
+  n=2^12    ratio 0.279600 ci95=[0.277951,0.281856]  numpy    2720 ns  fnp    9708 ns  excess  6988 ns
+  n=2^16    ratio 0.720000 ci95=[0.710439,0.727495]  numpy   25111 ns  fnp   35136 ns  excess 10025 ns
+  n=2^20    ratio 0.947235 ci95=[0.919376,0.954287]  numpy 1946670 ns  fnp 2021740 ns  excess 75070 ns
+
+**THE FLOOR IS ~6.6-7 MICROSECONDS PER CALL.** excess_ns reads 6593 / 6988 / 10025 while the
+work grows 256x — flat to within ~1.5x. m7tti's mechanism is confirmed and its magnitude is now
+measured rather than bracketed.
+
+**AND THE SMALL-ARRAY REGIME IS THE CAMPAIGN'S WORST vs-NumPy RATIO.** At n=256, `fnp.multiply`
+takes 7539 ns against NumPy's 946: **7.97x slower**, on a core surface, with almost no data to
+touch. Every previous divide row in this ledger measured at 2^20, where the floor is diluted to
+~5%, which is why this never surfaced.
+
+NOT PURELY FIXED AT THE TOP END: excess reaches 75070 ns at 2^20, so a size-dependent term sits
+on the floor — plausibly the 8 MiB `numpy.empty` and its first-touch faults, consistent with the
+banked large-buffer mmap-churn row. Small arrays are dominated by the floor, large arrays by
+allocation, and the crossover is around 2^16.
+
+THE 2^24 CELL DID NOT RUN. Five dual-null cells exceed rch's 1800s SSH ceiling (`RCH-E104`).
+m7tti established parity at 2^24 from a three-cell run, and that number is NOT pasted in here: it
+came from a different invocation, and this row does not borrow it.
+
+RETRY PREDICATE / WHAT TO ATTACK: the floor, at small n, where a lever will actually show. Order
+of suspicion, cheapest first: the per-call Python attribute lookups the route performs to sniff
+dtype/`itemsize`/`c_contiguous` on both operands; `PyBuffer::get` on each; and the `numpy.empty`
+output allocation. A lever that removes 3 us of a 6.6 us floor is worth ~2x at n=256 and nothing
+at 2^24, so measure it at 2^8-2^12 and do not quote a large-n number for it. AGENT_NAME=TealOak.
+
 ## 2026-08-15 - MEASURED (mechanism identified): the fnp binary-ufunc loss is FIXED PER-CALL OVERHEAD, and the kernel is AT PARITY with NumPy at 2^24 (`deadlock-audit-m7tti`)
 
 `TealOak`. `deadlock-audit-su0i6` found `fnp.divide` behind `numpy.divide`; `1pt96` found the
