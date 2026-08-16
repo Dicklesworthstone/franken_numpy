@@ -1425,6 +1425,37 @@ where
 /// incumbent/candidate effect. This is the realistic-workload contract: both
 /// arms occupy symmetric slots on a contended host, and the wider A/A interval
 /// controls the median-CI verdict.
+///
+/// # WHAT THESE NULLS CANNOT DETECT
+///
+/// A null proves each arm is INTERNALLY REPRODUCIBLE. It can never show that the two
+/// arms are COMPARABLE. Two arms measuring different things are both perfectly stable,
+/// so both nulls sit on unity while the effect between them measures something other
+/// than the difference under test. Passing this gate is necessary, not sufficient.
+///
+/// `deadlock-audit-48by6` is the worked example: `bench_maximum_arms_vs_numpy` timed
+/// Rust replicas writing into `Vec`s allocated ONCE outside the loop against a NumPy
+/// call allocating a fresh 32 MB output every iteration. The candidate was handed for
+/// free the most expensive thing the incumbent did. Both nulls were clean throughout,
+/// and the group read 2.430654x where the shipped route read 0.907848x for the same op
+/// at the same n — a 2.7x error that survived long enough for a REJECT to be built on
+/// it.
+///
+/// So before trusting a row from this contract, check by hand what the nulls cannot:
+///
+/// - **Allocation symmetry.** Does exactly one side allocate its output per iteration?
+///   Say which side allocates in the row rather than assuming symmetry — and note that
+///   `numpy.empty` and a Rust `Vec` do not have the same first-touch behaviour, so
+///   "make both allocate" is not automatically a fix.
+/// - **Route or replica.** Is the candidate the shipped path, or a bench-local replica
+///   that skips work the real route pays? If a replica, the row must say so and must
+///   never be quoted as a vs-incumbent number.
+/// - **Parallel against serial.** If the candidate is parallel and the incumbent
+///   serial, host load biases the ratio DIRECTIONALLY against the candidate rather than
+///   adding symmetric noise. The ratio of the two null half-widths is the cheapest
+///   in-band detector; record the load endpoints (`deadlock-audit-322j4`).
+/// - **Operand parity.** Do both arms compute the same values, checked by checksum
+///   BEFORE timing?
 pub fn run_dual_null_median_ci_contract<A, B>(
     row: &str,
     incumbent: A,
