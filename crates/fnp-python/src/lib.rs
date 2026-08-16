@@ -377,6 +377,7 @@ impl PyUFunc {
                     false
                 };
                 if !zero_divisor
+                    && f64_binary_route_is_worth_taking(op, a)
                     && numpy_dtype_is_f64(py, a)
                     && numpy_dtype_is_f64(py, b)
                     && let Some(out_val) = try_zerocopy_f64_binary(py, a, b, op)?
@@ -549,6 +550,31 @@ impl PyUFunc {
             }
         }
         let np_ufunc = numpy.getattr(self.kind.name())?;
+        // FAST PATH: every keyword already at its NumPy default, so send none of
+        // them. The slow path below sets `casting`, `order` and `subok`
+        // UNCONDITIONALLY, which allocates a PyDict and then makes NumPy parse
+        // three keywords in order to be told exactly what it would have assumed:
+        // its own defaults are `same_kind`, `K` and True. Omitting a keyword whose
+        // value equals its default cannot change behaviour, so this is a change to
+        // the CALL SHAPE, not to semantics.
+        //
+        // This is charged to every delegating call, which is most of them: `add`,
+        // `subtract` and `multiply` map to `None` in the f64 binop match and reach
+        // here on every invocation. `deadlock-audit-cydda` measured 6968-8375 ns of
+        // excess on exactly those three and bounded the four obvious stages (numpy
+        // re-import, dtype guard, ndarray getattr, output allocation) at 700 ns
+        // combined, so the remainder is argument handling and this call shape.
+        // Bead `deadlock-audit-s2fkk`.
+        if out.is_none()
+            && r#where.is_none()
+            && dtype.is_none()
+            && signature.is_none()
+            && casting == "same_kind"
+            && order == "K"
+            && subok
+        {
+            return Ok(np_ufunc.call1((x1.bind(py), x2.bind(py)))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(o) = out.as_ref() {
             kwargs.set_item("out", o.bind(py))?;
@@ -9423,6 +9449,42 @@ fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
 // inputs unchanged — for non-float64, broadcasting/shape-mismatch, scalar, or
 // non-ndarray operands, and for a `Div` whose input would raise a
 // floating-point exception we cannot reproduce (see f64_divide_raises_fp_error).
+/// Below this element count the native f64 binary route costs MORE than simply
+/// handing the call to NumPy, so `Div` declines it and delegates.
+///
+/// Measured (`deadlock-audit-cydda`) on rch worker vmi1153651 under
+/// `common::run_dual_null_median_ci_contract`, elf `8203f255de2174ac...`, n=256,
+/// numpy 2.4.3: `fnp.divide` takes this route and costs 13540 ns against NumPy's
+/// 1092 (excess 12448 ns), while `add`/`subtract`/`multiply` — which delegate —
+/// cost 9197/9302/7930 ns (excess 8290/8375/6968). Taking our own fast path is
+/// ~4 us DEARER than not taking it, because at that size the route pays two
+/// `PyBuffer` acquisitions, a `numpy.empty` output allocation and its dispatch to
+/// save essentially no compute.
+///
+/// The check must run BEFORE those acquisitions or it saves nothing, which is why
+/// it reads `size` off the operand rather than waiting for the buffer length.
+///
+/// SCOPED TO `Div` ON PURPOSE: the other ops in this fast-path set (remainder,
+/// power, maximum, minimum) are compute-heavy ones NumPy runs single-threaded, so
+/// their crossover sits at a much smaller n and a blanket gate could regress them.
+/// Gate only where there is evidence.
+///
+/// Delegating is safe by construction: it is the incumbent's own implementation,
+/// so the values are NumPy's and the FE-hazard deferral question does not arise.
+const F64_DIV_NATIVE_MIN_LEN: usize = 1 << 14;
+
+fn f64_binary_route_is_worth_taking(op: BinaryOp, a: &Bound<'_, PyAny>) -> bool {
+    if !matches!(op, BinaryOp::Div) {
+        return true;
+    }
+    // A missing/odd `size` means this is not the plain ndarray shape the route
+    // wants anyway; let the existing checks decline it rather than guessing.
+    match a.getattr("size").and_then(|size| size.extract::<usize>()) {
+        Ok(size) => size >= F64_DIV_NATIVE_MIN_LEN,
+        Err(_) => true,
+    }
+}
+
 fn zerocopy_f64_binary_flat<'py>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -109184,11 +109246,12 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BinaryOp, MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp,
-        argwhere, bincount, blas_is_single_threaded, build_numpy_array_from_ufunc, ceil_native,
-        choose, compress, copysign, count_nonzero, degrees_native, diag, diag_indices,
-        diag_indices_from, diagflat, diagonal, digitize, extract, extract_numeric_array,
-        extract_precise_numeric_array, f64_divide_fast_accepts_without_fp_error,
+        BinaryOp, F64_DIV_NATIVE_MIN_LEN, MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize,
+        PythonNativeGemmOp, argwhere, bincount, blas_is_single_threaded,
+        build_numpy_array_from_ufunc, ceil_native, choose, compress, copysign, count_nonzero,
+        degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize,
+        extract, extract_numeric_array, extract_precise_numeric_array,
+        f64_binary_route_is_worth_taking, f64_divide_fast_accepts_without_fp_error,
         f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
         f64_divide_raises_fp_error, fill_diagonal, flatnonzero, flip, fliplr, flipud, floor_native,
         fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native, isnan_native,
@@ -158190,6 +158253,69 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 }
             }
             Ok(())
+        });
+    }
+
+    /// The size gate must decline the native f64 divide route only for `Div` and
+    /// only below the threshold. Two ways to get this wrong that a
+    /// "does it return a bool" check waves through: gating every op in the
+    /// fast-path set (which would send compute-heavy remainder/power to NumPy,
+    /// where they are single-threaded and we beat them), and gating at or above
+    /// the threshold instead of below it.
+    #[test]
+    fn f64_divide_size_gate_declines_only_small_divides() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(numpy) => numpy,
+                // The gate is pure arithmetic on `size`; without numpy there is
+                // no ndarray to read it from, so skip rather than fake a pass.
+                Err(_) => return,
+            };
+            let make = |n: usize| {
+                numpy
+                    .call_method1("empty", (n,))
+                    .expect("numpy.empty for the gate fixture")
+            };
+
+            let below = make(F64_DIV_NATIVE_MIN_LEN - 1);
+            let at = make(F64_DIV_NATIVE_MIN_LEN);
+            let above = make(F64_DIV_NATIVE_MIN_LEN + 1);
+
+            assert!(
+                !f64_binary_route_is_worth_taking(BinaryOp::Div, &below),
+                "a divide below the threshold must decline the native route and delegate"
+            );
+            assert!(
+                f64_binary_route_is_worth_taking(BinaryOp::Div, &at),
+                "the threshold itself must TAKE the route — the gate is `>=`, not `>`"
+            );
+            assert!(
+                f64_binary_route_is_worth_taking(BinaryOp::Div, &above),
+                "a divide above the threshold must keep the native route"
+            );
+
+            // The other ops in the fast-path set are compute-heavy and numpy runs
+            // them single-threaded, so they must be untouched at ANY size.
+            for op in [
+                BinaryOp::Remainder,
+                BinaryOp::Power,
+                BinaryOp::Maximum,
+                BinaryOp::Minimum,
+            ] {
+                assert!(
+                    f64_binary_route_is_worth_taking(op, &below),
+                    "{op:?} must keep the native route even below the divide threshold"
+                );
+            }
+
+            // A non-array operand has no `size`; the gate must defer to the
+            // existing checks rather than declining on a failed lookup.
+            let not_an_array = numpy.getattr("pi").expect("numpy.pi");
+            assert!(
+                f64_binary_route_is_worth_taking(BinaryOp::Div, &not_an_array),
+                "an operand without `size` must not be declined by the size gate"
+            );
         });
     }
 }

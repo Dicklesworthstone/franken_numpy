@@ -1278,6 +1278,10 @@ fn main() {
                 "bench_percall_floor_across_ops_vs_numpy",
                 bench_percall_floor_across_ops_vs_numpy,
             ),
+            (
+                "bench_divide_size_gate_vs_numpy",
+                bench_divide_size_gate_vs_numpy,
+            ),
         ],
     );
 }
@@ -2581,6 +2585,56 @@ fn bench_percall_floor_across_ops_vs_numpy(_c: &mut Criterion) {
                  harness=common::run_dual_null_median_ci_contract \
                  ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
                  numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={:.1}",
+                fnp_ns - numpy_ns,
+            );
+        }
+    });
+}
+
+// Straddles F64_DIV_NATIVE_MIN_LEN (1<<14) so ONE invocation shows both sides of
+// the gate: 2^8 and 2^12 now DELEGATE to NumPy, 2^16 and 2^20 still take the
+// native route (deadlock-audit-qapyb). A gate that helps below the threshold and
+// hurts above it is a REJECT, and only measuring both sides can say which it is.
+fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        for exponent in [8u32, 12, 16, 20] {
+            let n = 1usize << exponent;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a = locals.get_item("a").expect("a operand");
+            let b = locals.get_item("b").expect("b operand");
+            let args = PyTuple::new(py, [&a, &b]).expect("args");
+            let (ratio, lo, hi, numpy_ns, fnp_ns) =
+                measure_binary_ufunc_vs_numpy(py, &module, &numpy, "divide", &args, n);
+            println!(
+                "DIVIDE_SIZE_GATE op=divide n={n} log2n={exponent} \
+                 delegates_under_gate={} numpy_version={numpy_version} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
+                 numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={:.1}",
+                n < (1usize << 14),
                 fnp_ns - numpy_ns,
             );
         }
