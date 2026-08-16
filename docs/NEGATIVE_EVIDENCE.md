@@ -14,6 +14,80 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - INSTRUMENT REPAIR, HALF RIGHT: the incumbent-scaling guard and the statistic labelling both work on first run - but my replacement projection is a WRONG MODEL, and the method-null cell caught it immediately (`deadlock-audit-q00ev`)
+
+`RedLynx`. First run of the two fixes the previous row's retry predicate asked for. One landed,
+one traded a mixed-statistic bug for a modelling bug. Banked so the next agent fixes it correctly
+rather than trusting a field that now has a clean-looking provenance tag.
+
+**Campaign result class:** maintenance-diagnostic (instrument; no perf conclusion is licensed here)
+
+```
+bench_elf_sha256=a5f38b2add140d021b554af5752e3bb3a2c7bc0d899f5b7cb48b67e4a91ffa5b
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307551528 bytes)
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench  load 45.14 -> 43.36
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+
+ n      mul_ratio  div_ratio  numpy_mul  numpy_div  scaling_ok  delegating_better
+ 2^12   0.632094   0.648276      1297       1598      true        FALSE  <- NULL CELL
+ 2^14   0.809815   0.577144      4393       5500      true        true
+ 2^16   0.931500   0.755748     17147      20258      true        true
+ 2^18   0.978804   0.841310     67378      77547      true        true
+ 2^20   0.988888   0.824899    415030     516948      true        true
+```
+
+**WHAT WORKS.** (1) The incumbent-scaling guard passes at every cell and would have failed the run
+that produced the spurious 2^14 win: NumPy's arms are monotonic here (multiply 1297 -> 4393 ->
+17147 -> 67378 -> 415030; divide 1598 -> 5500 -> 20258 -> 77547 -> 516948). (2) The ns fields are
+renamed to `*_arm_median_ns` and carry
+`ns_fields_are_arm_medians_do_not_mix_with_ratios=true`, so the statistic that produced
+`wrapper_ns=-5821` cannot be silently combined with a ratio again. (3) No impossible values were
+emitted this run.
+
+**WHAT IS WRONG, AND THE NULL CELL FOUND IT ON THE FIRST RUN.** I replaced the projection with
+`projected_delegating_ratio = multiply_ratio`, reasoning that a delegating `divide` pays exactly
+what a delegating `multiply` pays. **That is false, and the 2^12 cell proves it.** At 2^12 BOTH ops
+delegate, so `delegating_looks_better` must be a tie or meaningless there — it came out **FALSE**,
+because `divide_ratio` (0.648276) is BETTER than `multiply_ratio` (0.632094).
+
+The mechanism is arithmetic, not noise. A delegating op costs `numpy_op + wrapper`, so its ratio is
+`numpy_op / (numpy_op + wrapper)`. The wrapper is shared, but `numpy_divide` is DEARER than
+`numpy_multiply` (1598 vs 1297 here), so the same wrapper is a **smaller fraction of a dearer
+call** and delegating divide necessarily scores BETTER than delegating multiply. Equating the two
+ratios discards the denominator that makes them differ.
+
+**SO THE ORIGINAL MODEL WAS RIGHT AND ONLY ITS ARITHMETIC WAS WRONG.** I fixed the arithmetic by
+breaking the model. The correct form keeps `numpy_divide + wrapper` and estimates the wrapper from
+the RATIO rather than from an arm-median difference:
+
+```
+  wrapper_ns             = numpy_multiply_ns * (1/multiply_ratio - 1)
+  projected_delegating   = numpy_divide_ns / (numpy_divide_ns + wrapper_ns)
+```
+
+At 2^12 that gives wrapper 754.9 ns and a projected 0.6792 against an actual 0.6483 — a 4.8% gap
+that is the known ~114 ns divide-specific residual (this run: 114.0 ns), i.e. the null cell reads
+as it should instead of inverting.
+
+**NOTHING ABOUT THE GATE DECISION IS BANKED FROM THIS RUN.** `delegating_looks_better` is true at
+2^14 through 2^20 here, but it is computed from the broken projection, and the same field is false
+at the cell where it cannot be false. The `deadlock-audit-q00ev` conclusion still rests on its
+earlier rows and on direction alone; this run neither strengthens nor weakens it.
+
+**THE METHOD-NULL CELL PAID FOR ITSELF TWICE NOW.** It was added so a contaminated subtraction
+could not publish; it has since caught a 310 ns residual under load, and now a wrong model
+introduced by its own author in the act of fixing a different defect. A cell whose answer is known
+in advance is the cheapest guard in this harness.
+
+RETRY PREDICATE: (1) Implement the two-line formula above, re-run, and require the 2^12 null cell
+to show projected ABOVE actual by roughly the divide-specific residual — if it inverts again the
+model is still wrong. (2) Do not quote `projected_delegating_*` or `delegating_looks_better` from
+any run before that fix, including this one. (3) The scaling guard and the field renaming are
+sound and need no further work. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - A SPURIOUS WIN CAUGHT BEFORE BANKING, and a DEFECT IN MY OWN GROUP: the 2^14 divide cell read 1.2276x FASTER than NumPy once and 0.5549x SLOWER the next run - clean nulls did not catch it (`deadlock-audit-q00ev`, `deadlock-audit-7xcq2`)
 
 `RedLynx`. Two consecutive runs of `bench_percall_floor_across_sizes_vs_numpy` on a quiet host

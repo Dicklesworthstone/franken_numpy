@@ -4059,6 +4059,9 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
             .extract::<String>()
             .expect("numpy version is a string");
 
+        let mut previous_incumbent: Option<(u32, f64, f64)> = None;
+        let mut incumbent_scaling_violations: Vec<String> = Vec::new();
+
         // 2^12 is BELOW the 1<<14 gate and is the method null; 2^14 sits at it; the rest
         // are above it. Four cells above the gate locate the worst band instead of
         // inferring it from the two the existing size-gate group happens to carry.
@@ -4089,18 +4092,58 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
             let (div_ratio, div_lo, div_hi, div_numpy_ns, div_fnp_ns) =
                 measure_binary_ufunc_vs_numpy(py, &module, &numpy, "divide", &args, n);
 
-            // multiply always delegates, so ITS excess is the wrapper cost at this size.
-            let wrapper_ns = mul_fnp_ns - mul_numpy_ns;
-            let divide_excess_ns = div_fnp_ns - div_numpy_ns;
-            let divide_specific_excess_ns = divide_excess_ns - wrapper_ns;
-
-            // What would divide cost if it DELEGATED at this size? NumPy's own divide plus
-            // the same wrapper multiply pays. That is the counterfactual the gate turns on.
-            let projected_delegating_fnp_ns = div_numpy_ns + wrapper_ns;
-            let projected_delegating_ratio = div_numpy_ns / projected_delegating_fnp_ns;
-            // Strictly a POINT comparison: both sides carry CI, and the verdict field below
-            // is a lead for a decision bench, not the decision itself.
+            // STATISTIC CONSISTENCY (`deadlock-audit-q00ev`, defect found on this group's
+            // own first runs). `ratio` from the harness is a MEDIAN OF PAIRED RATIOS;
+            // the `*_ns` are ARM MEDIANS. They are different statistics and diverge when
+            // the paired ratios are skewed — at n=2^20 one run reported
+            // multiply_ratio=0.983313 while its own arm medians said 305925/300104 =
+            // 1.019. Deriving the gate decision from the ns DIFFERENCE mixed the two and
+            // produced wrapper_ns=-5821 (a negative wrapper cost) and
+            // projected_delegating_ratio=1.018389, which asserts that delegating to NumPy
+            // is faster than NumPy's own call. Both are impossible, not merely imprecise.
+            //
+            // THE DECISION IS NOW DERIVED FROM THE RATIO ALONE. If `divide` delegated it
+            // would pay exactly what `multiply` pays — same wrapper, same delegation tail
+            // — so its ratio WOULD BE multiply's ratio. That is the projection. It uses
+            // one statistic end to end and cannot produce an impossible value, because
+            // multiply_ratio is itself a measured ratio against NumPy. It also explains
+            // why the old projection landed within ~1% of multiply_ratio at four of five
+            // sizes: that agreement was the model being right, not the arithmetic.
+            let projected_delegating_ratio = mul_ratio;
             let delegating_looks_better = projected_delegating_ratio > div_ratio;
+
+            // Absolute nanoseconds below are ARM MEDIANS, emitted for provenance only.
+            // They must NOT be combined with the ratios above, which is the mistake this
+            // block exists to prevent; the field names say so.
+            let wrapper_arm_median_ns = mul_fnp_ns - mul_numpy_ns;
+            let divide_excess_arm_median_ns = div_fnp_ns - div_numpy_ns;
+            let divide_specific_excess_arm_median_ns =
+                divide_excess_arm_median_ns - wrapper_arm_median_ns;
+            let projected_delegating_fnp_ns = div_numpy_ns / mul_ratio;
+
+            // INCUMBENT SCALING GUARD. NumPy's own cost must grow with n. A cell where it
+            // does not has an unrepresentative incumbent arm — exactly the shape that
+            // produced a spurious "our divide is 1.23x FASTER than NumPy" at n=2^14 in
+            // one run, where our arm was stable to 0.5% while NumPy's moved 2.4x and
+            // broke its own scaling trend. A clean A/A null CANNOT detect this: the null
+            // compares an arm against ITSELF within one invocation, so a uniformly slow
+            // incumbent leaves the null on unity while the effect is wrong by a factor.
+            // This cross-cell check is what catches it, and it fails the run rather than
+            // relying on someone reading the column.
+            let incumbent_scaling_ok = match previous_incumbent {
+                Some((prev_exponent, prev_mul_ns, prev_div_ns)) => {
+                    let ok = mul_numpy_ns > prev_mul_ns && div_numpy_ns > prev_div_ns;
+                    if !ok {
+                        incumbent_scaling_violations.push(format!(
+                            "2^{exponent}: numpy multiply {mul_numpy_ns:.1} vs 2^{prev_exponent} \
+                             {prev_mul_ns:.1}; numpy divide {div_numpy_ns:.1} vs {prev_div_ns:.1}"
+                        ));
+                    }
+                    ok
+                }
+                None => true,
+            };
+            previous_incumbent = Some((exponent, mul_numpy_ns, div_numpy_ns));
 
             println!(
                 "PERCALL_FLOOR_SIZES n={n} log2n={exponent} below_gate={below_gate} \
@@ -4110,13 +4153,26 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
                  multiply_numpy_ns={mul_numpy_ns:.1} multiply_fnp_ns={mul_fnp_ns:.1} \
                  divide_ratio={div_ratio:.6} divide_ci95=[{div_lo:.6},{div_hi:.6}] \
                  divide_numpy_ns={div_numpy_ns:.1} divide_fnp_ns={div_fnp_ns:.1} \
-                 wrapper_ns={wrapper_ns:.1} divide_excess_ns={divide_excess_ns:.1} \
-                 divide_specific_excess_ns={divide_specific_excess_ns:.1} \
+                 wrapper_arm_median_ns={wrapper_arm_median_ns:.1} \
+                 divide_excess_arm_median_ns={divide_excess_arm_median_ns:.1} \
+                 divide_specific_excess_arm_median_ns={divide_specific_excess_arm_median_ns:.1} \
+                 ns_fields_are_arm_medians_do_not_mix_with_ratios=true \
                  projected_delegating_fnp_ns={projected_delegating_fnp_ns:.1} \
                  projected_delegating_ratio={projected_delegating_ratio:.6} \
+                 projection_derived_from=ratio_median_only \
+                 incumbent_scaling_ok={incumbent_scaling_ok} \
                  delegating_looks_better={delegating_looks_better} same_invocation=true"
             );
         }
+
+        // Printed first, failed second: the cells stay visible for diagnosis, but a run
+        // whose incumbent did not scale must not be banked.
+        assert!(
+            incumbent_scaling_violations.is_empty(),
+            "INCUMBENT ARM DID NOT SCALE WITH n — the cells above are printed for diagnosis \
+             but MUST NOT be banked: {}",
+            incumbent_scaling_violations.join(" | ")
+        );
     });
 }
 
