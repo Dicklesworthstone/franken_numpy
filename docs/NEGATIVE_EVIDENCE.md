@@ -18,6 +18,57 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CERTIFIED UNDER RECORDED LOAD: the worst cell is 2.328x slower, replicating the post-gate figure to 0.07%, with the per-call excess flat at 526-536 ns (`deadlock-audit-v46rn`, `deadlock-audit-ei9jz`)
+
+`SlateHeron`. Certification run of the campaign's worst vs-incumbent ratio after both probe gates, and
+the first row in this ledger to carry an OBSERVED loadavg as a provenance field.
+
+**Campaign result class:** incumbent-loss
+
+**LOADAVG, observed with `uptime`/`/proc/loadavg` on a 64-core host, not requested:**
+`before = 10.26 / 18.34 / 24.92`, `after = 9.99 / 18.02 / 24.74` (1/5/15 min). Both ends below the
+~30 certification threshold, and falling across the run rather than rising.
+
+```
+TINY_N_FLOOR op=add worker=thinkstation1 numpy_version=2.4.3
+  harness=common::run_dual_null_median_ci_contract  (ABBAABBA, 41 rounds, min-of-3)
+  n=1    ratio=0.389791 ci95=[0.383991,0.389791]  numpy_ns=336  fnp_ns=862  excess_ns=526
+  n=4    ratio=0.386390 ci95=[0.385321,0.388631]  numpy_ns=336  fnp_ns=867  excess_ns=531
+  n=16   ratio=0.389269 ci95=[0.387685,0.391055]  numpy_ns=341  fnp_ns=876  excess_ns=535
+  n=64   ratio=0.391055 ci95=[0.388826,0.391055]  numpy_ns=341  fnp_ns=876  excess_ns=535
+  n=256  ratio=0.429467 ci95=[0.427962,0.430998]  numpy_ns=406  fnp_ns=942  excess_ns=536
+```
+
+All five `DECIDABLE_REGRESSION`; **all ten A/A nulls straddle unity**, biases 0.000000-0.005669.
+
+**THE WORST CELL: 2.328x SLOWER at n=256**, and it REPLICATES the post-gate measurement to **0.07%**
+(0.429467 against 0.429162 from a separate invocation on the same ELF).
+
+**THIS RUN IS MUCH TIGHTER THAN THE ONE IT CONFIRMS.** Excess reads 526 / 531 / 535 / 535 / 536 ns —
+a **1.9% band across a 256x range of n**, against 541-707 ns in the earlier post-gate run. The n=4
+outlier (707 ns) that I flagged as noise there does not reappear, which is what a noisy cell should do.
+That the tightening coincides with a lower observed load is consistent with the new protocol's premise,
+though one pair of runs does not establish it.
+
+**WHAT THE FLATNESS MEANS.** 526-536 ns of excess while the work grows 256x is a pure per-call cost
+with the arithmetic contribution invisible. After removing 547 ns of probe overhead in `04e6ede7` and
+`a04d7f64`, this is the residue — and it is now measured tightly enough that the next lever has a
+clean baseline to beat.
+
+bench_elf_sha256=a5aca8c972da9b4a3eb8b032e390e5c887efef1455ffc4eb9e0406503cce07ed, identical binary to
+the run it replicates, built LOCALLY under the exported cargo-shim bypass. Code unchanged: no dirty
+files under `crates/`, and the ELF matches HEAD. host=thinkstation1 5975WX 32c/64t governor=powersave,
+rayon_pool_threads=64.
+
+**STILL A LOSS, and the number to quote is 2.328x**, superseding the 3.5-3.8x that stood before the
+gates. It is not a win and must not be cited as one.
+
+RETRY PREDICATE: this cell is now certified twice on one ELF with load recorded; do not re-certify it.
+Any future row on this ratio must carry its observed loadavg, and any run whose load exceeds ~30
+should be deferred rather than banked — a failure to certify under load is not a loss and must not be
+recorded as one.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - LEVER CLOSED (measured, negative): the nine-parameter signature costs 5 ns, not hundreds - `deadlock-audit-t4lri` is NOT where the per-call floor lives (`deadlock-audit-t4lri`, `deadlock-audit-ei9jz`)
 
 `RedLynx`. The clean experiment this bead always wanted, deferred while the build freeze held
