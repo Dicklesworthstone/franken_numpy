@@ -20,6 +20,82 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - THE REMAINDER POINT ESTIMATE IS PINNED AT 6.97x: load 33 and load 18 agree to 0.4%, the contention effect SATURATES below ~half the thread count, the 8.037x from the unrecoverable ELF is NOT reproduced - and my own "null-ratio as contention detector" is REFUTED (`deadlock-audit-322j4`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. Certified in a window I tested for stability myself: 1-min 19.85 against 5-min 21.89,
+9% apart and both under a third of the thread count. This discharges the standing retry predicate
+that this cell's point estimate needed a genuinely quiet host.
+
+**Campaign result class:** incumbent-win (KEEP) + three methodology corrections
+
+```
+bench_elf_sha256=af5200ea72988280fc1c56e2d8e617c9803f938783ab4e8be18192f6a6c44d91
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1 (5975WX 32P/64L, powersave)  numpy 2.4.3  profile=bench  n=2^21
+LOADAVG 1min 17.92 before -> 15.33 after; 5min 21.37 -> 20.34 (converged, both low)
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+
+  ratio=6.967606 ci95=[6.571741,7.191951] worst_bound=6.571741  DECIDABLE_WIN
+  numpy_ns=18026456  fnp_ns=2598334
+  incumbent_null_ci95=[0.998980,1.002931] hw=0.002931 (cv 0.69%)  straddles unity
+  candidate_null_ci95=[0.967294,1.025536] hw=0.032706 (cv 7.18%)  straddles unity
+  REMAINDER_INCUMBENT_ARM name=NumPy version=2.4.3
+    artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48
+```
+
+**1. THE ESTIMATE IS PINNED.** Against the load-33 run of the same cell and ELF family:
+
+```
+  loadavg 98   ratio 4.107151   fnp_ns 4432643
+  loadavg 33   ratio 6.994300   fnp_ns 2593291
+  loadavg 18   ratio 6.967606   fnp_ns 2598334   <- this run
+```
+
+Load 33 to load 18 moves the ratio by **0.4%** and our own arm by **0.2%**. Two independent runs
+at different loads agreeing to within half a percent is what "pinned" means here. **`fnp.remainder`
+beats `numpy.remainder` at 2^21 by 6.97x, worst bound 6.57x.**
+
+**2. THE CONTENTION EFFECT SATURATES — it is a THRESHOLD, not a gradient.** The ratio moves 70%
+between load 98 and 33, then 0.4% between 33 and 18. Below roughly half the thread count the
+parallel arm is fully served and further quieting buys nothing. This corrects the practical advice
+in this ledger: "re-run somewhere quieter" is worth doing ONCE to get under the threshold, and is
+worthless after that. Chasing an ever-quieter box is not a measurement strategy.
+
+**3. THE 8.037497x FIGURE IS NOT REPRODUCED, and should now be treated as superseded.** That value
+came from ELF `ef5467cb2a43c00b`, whose tree was never committed and is unrecoverable. Two quiet
+runs on committed source both land near 6.97x — 15% below it — so the gap is not contention and
+cannot be recovered by quieting further, per finding 2. The honest banked figure for this cell is
+6.97x with a worst bound of 6.57x; 8.04x should not be quoted.
+
+**4. MY OWN PROPOSED DETECTOR IS REFUTED.** Two rows ago I offered the ratio of the two A/A null
+half-widths as "the cheapest in-band contention detector" and suggested it fleet-wide. Measured
+across three loads on this cell:
+
+```
+  loadavg 98   incumbent hw 0.007851  candidate hw 0.060264   ratio 7.7x
+  loadavg 33   incumbent hw 0.008764  candidate hw 0.043775   ratio 5.0x
+  loadavg 18   incumbent hw 0.002931  candidate hw 0.032706   ratio 11.2x
+```
+
+The ratio is **non-monotonic in load and largest at the QUIETEST point**, because the serial
+incumbent's null tightens faster than the parallel candidate's as the box empties (0.0088 ->
+0.0029, a 3x improvement, against 0.0438 -> 0.0327, a 1.3x one). So it does not measure contention.
+What it does measure, reliably at every load, is **which arm is intrinsically noisier** — the
+64-thread fan-out is 5-11x noisier than NumPy's serial loop no matter how quiet the host. That is
+still useful, but it is a different claim, and the fleet-wide suggestion should be withdrawn.
+
+**WHAT SURVIVES OF THE CONTENTION WORK:** the directional bias against a parallel candidate is
+real and large (4.107 vs 6.97), and load endpoints belong in every row. What does not survive is
+the idea that any single in-band number reads the host's contention level.
+
+RETRY PREDICATE: (1) This cell is DONE for point estimation — three loads, converged below the
+threshold; do not re-run it for precision. (2) Replicate on a second worker before quoting 6.97x
+as a fleet figure; every row in this series is thinkstation1, and that remains the one open item.
+(3) Do not use the null-width ratio as a contention signal anywhere; use it to identify the noisier
+arm, which it does well. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - CODE LEVER, UNMEASURED (host too volatile): `dtype.char` collapses the sniff from FIVE Python operations to THREE, and fixes an over-admission the itemsize form had (`deadlock-audit-v46rn`)
 
 `SlateHeron`. No certification this turn — the host was volatile, not merely loaded, and under the
