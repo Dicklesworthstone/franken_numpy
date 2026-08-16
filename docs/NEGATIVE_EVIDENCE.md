@@ -20,6 +20,60 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CODE LEVER, UNMEASURED (host too volatile): `dtype.char` collapses the sniff from FIVE Python operations to THREE, and fixes an over-admission the itemsize form had (`deadlock-audit-v46rn`)
+
+`SlateHeron`. No certification this turn — the host was volatile, not merely loaded, and under the
+standing rule that is not a loss. This row records a landed lever with NO ratio attached.
+
+**Campaign result class:** operational (no measurement produced)
+
+**LOADAVG, observed with `uptime` throughout and recorded because the rule requires it even when the
+answer is "defer":** 53/59 at turn start (user-reported), then `38.33/37.12/29.19`,
+`75.59/59.74/39.78`, `15.92/42.00/39.69`, `14.44/24.33/32.57`. The 1-minute figure dipped under 30
+twice, but the 5-minute swung 59 -> 42 -> 24 inside a few minutes. **That is a dip, not a stable
+window**, which is exactly the distinction this protocol asks for, so nothing was certified.
+
+**THE LEVER.** The hoisted sniff read `dtype.itemsize` AND `dtype.kind` — five Python operations
+(getattr dtype, getattr itemsize, extract, getattr kind, extract). `dtype.char` encodes both in ONE
+attribute, so the sniff is now three (getattr dtype, getattr char, extract).
+
+**VERIFIED AGAINST THE MEASURED INTERPRETER, not assumed.** numpy 2.4.3 — the version every banked row
+here uses — and cross-checked on 1.26.4, identical in both:
+
+| dtype | char | dtype | char |
+|---|---|---|---|
+| float16 | `e` | complex64 | `F` |
+| float32 | `f` | complex128 | `D` |
+| float64 | `d` | clongdouble | `G` |
+| int16 | `h` | datetime64 | `M` |
+| int64 | `l` | timedelta64 | `m` |
+
+**IT ALSO FIXES AN OVER-ADMISSION I SHIPPED.** The previous f16 gate tested `itemsize == 2`, which is
+true of **int16 and uint16** as well as f16. Those arrays were being handed to the f16 probe only to be
+refused by its `kind` check — the gate was correct but not tight. `'e'` is float16 and nothing else, so
+the char form is both cheaper AND stricter.
+
+**AND IT CAME WITH A TRAP THAT THE VERIFICATION CAUGHT.** The complex probe declines unless `kind ==
+'c'`, and **three** typechars carry that kind: `F`, `D` and `G` (clongdouble). A char-based complex gate
+that listed only `F` and `D` would have silently disengaged the native complex route for clongdouble —
+correct answers from NumPy, green parity, dead kernel. `G` is admitted explicitly and asserted.
+
+**GATES:** `cargo test -p fnp-python --lib f16_probe_skip` 1 passed 0 failed; `cargo clippy -p
+fnp-python --all-targets` exit 0; `rustfmt --check` exit 0. The engagement test now mirrors the
+production sniff exactly (one `dtype.char` read) and asserts: f16 ADMITTED; complex64/complex128/**
+clongdouble** ADMITTED; datetime64/timedelta64 ADMITTED; f64/f32/int64/**int16**/**uint16** SKIPPED by
+the f16 gate; and a dtype-less operand skipped by NONE of the three gates.
+
+**NO RATIO IS CLAIMED.** The expected effect is a fraction of the ~536 ns residue certified in
+`e477ba70`, and the three-gate build it sits on has never been certified either. Two consecutive code
+levers now stand unmeasured; that is the correct state under this host, not a backlog to paper over.
+
+RETRY PREDICATE: certify BOTH outstanding levers together in one invocation once `uptime` is under ~30
+on the 1-, 5- AND 15-minute figures simultaneously — a single-figure dip is what this row declined to
+act on. Measure `multiply`/`divide` for the complex gate and `add` for the char sniff; `add` does not
+run the complex probe and will show nothing for it. Baseline is `e477ba70`'s 526-536 ns excess band.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - WORST CELL CERTIFIES AT LOADAVG 62, but the run cannot adjudicate the two-group split - and it REFUTES my own "short serial arms stay tight on a busy box" (`deadlock-audit-ei9jz`, `deadlock-audit-7xcq2`)
 
 `RedLynx`. The orchestrator reported loadavg 8.44; I read **68.03** in the same minute, then 85.76,

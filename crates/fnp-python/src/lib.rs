@@ -454,33 +454,40 @@ impl PyUFunc {
             // ONE fetch serving every gate below. `kind` costs one extra getattr here and
             // saves the timedelta probe's TWO `dtype` fetches plus two `kind` extracts,
             // so it pays for itself on any call that is not temporal.
-            let x1_dtype_probe: Option<(char, usize)> = match x1.bind(py).getattr("dtype") {
-                Ok(dtype) => {
-                    let itemsize = dtype.getattr("itemsize").and_then(|s| s.extract::<usize>());
-                    let kind = dtype.getattr("kind").and_then(|k| k.extract::<char>());
-                    match (kind, itemsize) {
-                        (Ok(kind), Ok(itemsize)) => Some((kind, itemsize)),
-                        // Either field unreadable: sniff establishes nothing, skip nothing.
-                        _ => None,
-                    }
-                }
-                // No `dtype` attribute at all (list, scalar): skip nothing.
-                Err(_) => None,
-            };
-            let x1_is_maybe_f16 = match x1_dtype_probe {
-                Some((_, itemsize)) => itemsize == 2,
+            // `dtype.char` is the array-protocol typechar and encodes BOTH fields the
+            // gates need in ONE attribute, so this reads three Python operations
+            // (getattr dtype, getattr char, extract) where the previous form read five
+            // (getattr dtype, getattr itemsize, extract, getattr kind, extract).
+            // Verified against the measured interpreter, numpy 2.4.3, and identical on
+            // 1.26.4: f16='e', f32='f', f64='d', complex64='F', complex128='D',
+            // clongdouble='G', datetime64='M', timedelta64='m', int64='l', int16='h'.
+            let x1_dtype_char: Option<char> = x1
+                .bind(py)
+                .getattr("dtype")
+                .and_then(|dtype| dtype.getattr("char"))
+                .and_then(|c| c.extract::<char>())
+                // No `dtype`/`char`, or unreadable: the sniff establishes nothing, so
+                // skip nothing.
+                .ok();
+            // STRICTER as well as cheaper: the previous `itemsize == 2` test also
+            // admitted int16 and uint16, which paid the f16 probe only to be refused by
+            // its `kind` check. 'e' is float16 and nothing else.
+            let x1_is_maybe_f16 = match x1_dtype_char {
+                Some(c) => c == 'e',
                 None => true,
             };
             // `try_native_timedelta_addsub` declines unless BOTH operands carry kind 'M'
             // (datetime64) or 'm' (timedelta64), so a numeric x1 guaranteed a decline.
-            let x1_is_maybe_temporal = match x1_dtype_probe {
-                Some((kind, _)) => kind == 'M' || kind == 'm',
+            let x1_is_maybe_temporal = match x1_dtype_char {
+                Some(c) => c == 'M' || c == 'm',
                 None => true,
             };
             // `try_zerocopy_complex_binary` declines unless BOTH operands carry kind
-            // 'c', so a non-complex x1 guaranteed a decline there too.
-            let x1_is_maybe_complex = match x1_dtype_probe {
-                Some((kind, _)) => kind == 'c',
+            // 'c'. The complex typechars are 'F' (complex64), 'D' (complex128) and 'G'
+            // (clongdouble) — 'G' is included deliberately: its kind IS 'c', so omitting
+            // it would silently disengage the native complex route for clongdouble.
+            let x1_is_maybe_complex = match x1_dtype_char {
+                Some(c) => c == 'F' || c == 'D' || c == 'G',
                 None => true,
             };
 
@@ -110027,15 +110034,18 @@ mod tests {
             let numpy = py.import("numpy")?;
 
             // The sniff exactly as `__call__` computes it.
+            // Mirrors the production sniff exactly: one `dtype.char` read.
+            let dtype_char = |value: &Bound<'_, PyAny>| -> Option<char> {
+                value
+                    .getattr("dtype")
+                    .and_then(|dtype| dtype.getattr("char"))
+                    .and_then(|c| c.extract::<char>())
+                    .ok()
+            };
             let sniff = |value: &Bound<'_, PyAny>| -> bool {
-                match value.getattr("dtype") {
-                    Ok(dtype) => {
-                        match dtype.getattr("itemsize").and_then(|s| s.extract::<usize>()) {
-                            Ok(itemsize) => itemsize == 2,
-                            Err(_) => true,
-                        }
-                    }
-                    Err(_) => true,
+                match dtype_char(value) {
+                    Some(c) => c == 'e',
+                    None => true,
                 }
             };
 
@@ -110051,7 +110061,15 @@ mod tests {
             // NEGATIVE: the dtypes whose probes can never match must be skipped. These
             // are the cells that pay for the skip, so if they stop being skipped the
             // lever has quietly stopped working while every test still passes.
-            for (name, itemsize) in [("float64", 8usize), ("float32", 4), ("int64", 8)] {
+            // int16/uint16 are the cells the previous `itemsize == 2` sniff wrongly
+            // ADMITTED: two bytes wide but never f16. They must now be skipped.
+            for (name, itemsize) in [
+                ("float64", 8usize),
+                ("float32", 4),
+                ("int64", 8),
+                ("int16", 2),
+                ("uint16", 2),
+            ] {
                 let arr = numpy.call_method1("zeros", (4,))?;
                 let arr = arr.call_method1("astype", (numpy.getattr(name)?,))?;
                 let observed: usize = arr.getattr("dtype")?.getattr("itemsize")?.extract()?;
@@ -110067,12 +110085,9 @@ mod tests {
             // timedelta add/subtract route is silently disengaged while td arithmetic
             // keeps returning correct answers from NumPy.
             let temporal_sniff = |value: &Bound<'_, PyAny>| -> bool {
-                match value.getattr("dtype") {
-                    Ok(dtype) => match dtype.getattr("kind").and_then(|k| k.extract::<char>()) {
-                        Ok(kind) => kind == 'M' || kind == 'm',
-                        Err(_) => true,
-                    },
-                    Err(_) => true,
+                match dtype_char(value) {
+                    Some(c) => c == 'M' || c == 'm',
+                    None => true,
                 }
             };
             let td = py.eval(
@@ -110112,15 +110127,12 @@ mod tests {
             // native complex multiply/divide route dies silently while NumPy keeps
             // returning correct complex answers.
             let complex_sniff = |value: &Bound<'_, PyAny>| -> bool {
-                match value.getattr("dtype") {
-                    Ok(dtype) => match dtype.getattr("kind").and_then(|k| k.extract::<char>()) {
-                        Ok(kind) => kind == 'c',
-                        Err(_) => true,
-                    },
-                    Err(_) => true,
+                match dtype_char(value) {
+                    Some(c) => c == 'F' || c == 'D' || c == 'G',
+                    None => true,
                 }
             };
-            for name in ["complex128", "complex64"] {
+            for name in ["complex128", "complex64", "clongdouble"] {
                 let arr = numpy.call_method1("zeros", (4,))?;
                 let arr = arr.call_method1("astype", (numpy.getattr(name)?,))?;
                 assert!(
