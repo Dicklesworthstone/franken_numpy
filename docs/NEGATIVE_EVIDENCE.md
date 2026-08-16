@@ -12,6 +12,77 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - SETTLED ON A QUIET HOST: `add` REACHES PARITY AT 2^24 within +-0.34% - the size axis of the campaign's worst cell is now complete, and it is a per-call FLOOR, not a scaling defect (`deadlock-audit-ei9jz`)
+
+`RedLynx`. The question two rows deferred for want of a quiet host. Load fell from 105 to 25 and
+this is the run that answers it: same group, same ELF, ABBAABBA, all ten nulls straddling unity
+except one disclosed below.
+
+**Campaign result class:** decidable-regression at small n; **parity (bounded null result)** at 2^24
+
+```
+bench_elf_sha256=04cdb2f447f8336615022e40f6c5c3b51961c7e91e04b4ae62d3b87b90e4f8bf
+harness_source_matches_disk=true  built from committed source
+worker=thinkstation1 (5975WX 32P/64L, powersave)  numpy 2.4.3  profile=bench
+load 1min 25.56 before -> 22.56 after (64 logical threads), ~10 cores foreign
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+
+ n       ratio      ci95                    verdict                fnp/numpy   controlling null hw
+ 256     0.284005   [0.283114,0.285357]     DECIDABLE_REGRESSION    3.521x       0.008869
+ 4096    0.535306   [0.533333,0.536986]     DECIDABLE_REGRESSION    1.868x       0.005917
+ 65536   0.913218   [0.912420,0.913761]     DECIDABLE_REGRESSION    1.095x       0.001985
+ 2^20    0.989629   [0.981906,0.999324]     UNDECIDED               1.010x       0.017642
+ 2^24    1.000272   [0.997845,1.003383]     UNDECIDED               1.000x       0.007602
+```
+
+**THE 2^24 CELL IS NOW A BOUNDED NULL RESULT, NOT A SHRUG.** Its effect ratio is 1.000272 and its
+CI is **[0.997845, 1.003383]** — an interval of +-0.34% CENTRED on unity, with both nulls clean
+(half-widths 0.004882 and 0.007602). The effect CI is *tighter than the controlling null*
+(0.0028 against 0.0076), which means resolution is limited by the control rather than by the
+signal, and the signal sits on 1.0. **So `add` reaches parity at 2^24: any difference larger than
+0.34% is excluded.** That is the strongest statement this harness can make about a non-difference.
+
+**IT UPGRADES MY OWN HEDGE AND BURIES THE ORIGINAL READING.** Three rows ago the same cell had a
+DEFECTIVE incumbent null and read [0.993635,0.999127], which looked like `add` failing to reach
+parity even at 2^24 — a worse problem than multiply's small-n floor. Two rows ago, with a clean
+null but a busy host, it read [0.986365,1.009281] and I could only say "not shown to miss parity",
+explicitly refusing to call that parity proven. On a quiet host the interval is 4x tighter and
+still centred on unity. The progression defective-null -> clean-but-wide -> clean-and-tight is
+worth keeping as a worked example: the first reading was not merely imprecise, it pointed the
+WRONG WAY, and only the null disclosure stopped it being banked as a finding.
+
+**NULL DISCLOSURE.** The n=65536 cell has `candidate_null_straddles_unity=false`, ci
+[1.000298,1.001985], bias 0.001000 — a 0.1% biased control (`deadlock-audit-7xcq2`). Its effect
+(0.913218) is roughly 90x that bias, so the verdict is unaffected, but the point estimate should
+not be read finer than 0.1%. Every other null in this run straddles unity.
+
+**THE SIZE AXIS IS NOW COMPLETE FOR THE WORST CELL**, and its shape settles what kind of defect
+this is:
+
+```
+  n=256    3.521x slower      n=4096   1.868x      n=65536  1.095x
+  n=2^20   1.010x (hint)      n=2^24   1.000x  (parity, +-0.34%)
+```
+
+A fixed per-call cost amortising away — exactly what the wrapper decomposition predicted
+(NumPy's own work ~31% of the call at n=256, declined probe chain ~41%, remainder ~28%) — and
+**NOT** a cost that grows with the data. The residual at 2^20 (CI upper bound 0.999324, just below
+unity, but the null is wider so the gate says UNDECIDED) is consistent with the same fixed cost
+not yet fully amortised at 1M elements.
+
+**WHAT THIS MEANS FOR THE CAMPAIGN'S WORST RATIO.** It is a SMALL-n phenomenon with a known
+mechanism and a known amortisation point, not an open-ended gap. The lever is the per-call
+wrapper — the probe chain at ~41% is the largest named component — and closing it improves every
+size below 2^20 while changing nothing above it.
+
+RETRY PREDICATE: (1) The parity question is CLOSED at 2^24 on this host; do not re-run it. If
+anyone wants 2^20 resolved, that cell needs a null half-width below ~0.005 and got 0.017642 even
+here, so it needs a quieter box or more rounds — and it is worth little, since the effect there is
+~1%. (2) The small-n figure is settled at ~3.4-3.8x across eight measurements and two agents. (3)
+The only genuinely open item on this cell remains a SECOND WORKER, banked as unreachable from a
+foreground-limited pane. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - THE WORST RATIO'S ASYMPTOTE: `add` bottoms out at 4.019x slower by n=4, and the per-call excess is FLAT at ~1100 ns from n=1 to n=256 while the work grows 256x (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. Every size sweep in this ledger bottomed out at n=256 — the smallest n ever measured
