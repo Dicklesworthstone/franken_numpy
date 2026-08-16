@@ -102,6 +102,72 @@ generality. (3) The next named lever is `deadlock-audit-t4lri`: `PyUFunc::__call
 nine-parameter signature, the largest never-priced stage of the remaining ~1000 ns excess.
 AGENT_NAME=RedLynx.
 
+## 2026-08-16 - MEASURED, THE DIVIDE LOSS IS **NOT** THE ROUTE: `multiply` on the SAME route reaches 0.9656 where `divide` sits at 0.8455, and the route is at PARITY by 2^24 (`deadlock-audit-0ppym` filed; `deadlock-audit-vqxoa` corrected)
+
+`SlateHeron`. The divide row above says the arithmetic is not the constraint. This says where the
+constraint actually is, and it answers a question the shipped source itself poses: the comment on
+`bench_divide_vs_numpy_incumbent` states that `multiply` takes the SAME zerocopy route, the same
+dtype/contiguity sniffing, the same output allocation and the same PyO3 dispatch as `divide` and
+computes NO hazard scan — so "multiply near unity while divide loses puts the cost in the scan, and
+both losing by a similar margin puts it in the route". Both ops measured on one host, one numpy,
+existing ELF, no build.
+
+**Campaign result class:** maintenance-diagnostic
+
+```
+ROUTE_FLOOR_SWEEP op=multiply worker=thinkstation1 numpy_version=2.4.3 harness=common::run_dual_null_median_ci_contract
+  n=2^8   ratio=0.166734 ci95=[0.165714,0.167141]  numpy_ns=410      fnp_ns=2454      excess_ns=2044   DECIDABLE_REGRESSION
+  n=2^12  ratio=0.472202 ci95=[0.470401,0.472847]  numpy_ns=1924     fnp_ns=4083      excess_ns=2159   DECIDABLE_REGRESSION
+  n=2^16  ratio=0.839072 ci95=[0.838753,0.839871]  numpy_ns=15614    fnp_ns=18605     excess_ns=2991   DECIDABLE_REGRESSION
+  n=2^20  ratio=0.965590 ci95=[0.959228,0.970156]  numpy_ns=411972   fnp_ns=421781    excess_ns=9809   DECIDABLE_REGRESSION
+  n=2^24  ratio=0.998075 ci95=[0.994806,1.001303]  numpy_ns=19462272 fnp_ns=19467697  excess_ns=5425   UNDECIDED, at_parity=true
+```
+
+**THE ROUTE IS A FIXED COST AND IT AMORTISES TO NOTHING.** `excess_ns` is roughly CONSTANT across
+six orders of magnitude of n — ~2.0 us at 2^8, ~9.8 us at 2^20, ~5.4 us at 2^24 — which is the
+signature of a per-call floor, not a per-element deficit. By 2^24 the route is at parity with NumPy
+(`at_parity=true`, effect CI contains unity). Every earlier framing of the wrapper floor as "the
+campaign's worst ratio" is a statement about SMALL n only.
+
+**AND THEREFORE THE DIVIDE LOSS IS NOT THE ROUTE.** At the SAME n=2^20, same host, same invocation
+class:
+
+| op | numpy_ns | fnp_ns | ratio | excess_ns |
+|---|---|---|---|---|
+| multiply (no scan) | 411972 | 421781 | 0.9656 | 9809 |
+| divide (fused scan) | 498471 | 591864 | 0.8455 | 93393 |
+
+Divide's excess over NumPy is **9.52x** multiply's on the identical route. The shared route explains
+~10 us of divide's ~93 us deficit; the other ~84 us is divide-specific. Normalising out the
+intrinsic cost of `vdivpd` by comparing each side against ITS OWN multiply: NumPy's divide costs
+1.2100x its multiply, ours costs 1.4032x ours — a **ratio-of-ratios of 1.1597**. We pay ~16% more
+for divide, relative to our own multiply, than NumPy pays relative to its own.
+
+**THIS CORRECTS `deadlock-audit-vqxoa`.** That row fused the normality flag into the divide loop and
+argued the accumulate is "close to free" because `vdivpd` is throughput-bound with idle integer
+slots beside it. As a SELF-speedup against the two-pass form it was real — the second pass over the
+output was worse. But "close to free" was never checked against the incumbent, and measured that way
+there is ~16% sitting on the divide path that multiply does not pay. Free it is not.
+
+**THE BOUNDARY OF THIS ROW, stated because the next lever depends on it.** This subtracts across two
+DIFFERENT ops. It decides route-versus-divide-specific — that inference is safe, because multiply
+and divide share every route stage by construction. It does NOT prove the ~16% is the accumulate
+specifically rather than our divide codegen (unrolling, scheduling around `vdivpd`), because no arm
+here runs the divide loop WITHOUT the accumulate against NumPy. That control does not exist in the
+tree: `bench_divide_fe_hazard_serial`/`_fused_serial` compare our-before against our-after, which is
+self-speedup and cannot settle it.
+
+RETRY PREDICATE / NEXT LEVER, named precisely: add one arm — the f64 divide loop with the normality
+accumulate REMOVED — measured against `numpy.divide` in the same invocation under the dual-null
+contract at n=2^20. If it lands near multiply's 0.9656, the accumulate is the cost and `vqxoa`'s
+fusion needs a cheaper formulation (the untried direction `deadlock-audit-ae85t` already named: a
+reduction over the quotients IN PLACE, with no round-trip through a temporary, which is what broke
+vectorisation in the rejected blocked form). If it still reads ~0.845, the accumulate is innocent
+and the cost is our divide codegen, which is a different lever entirely. Do NOT ship an
+accumulate-free divide: it would drop the FE-hazard deferral and reintroduce the six divergence rows
+`deadlock-audit-2nmd1` closed. This arm is a MEASUREMENT control, gated behind the bench binary only.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MEASURED, THE WORST RATIO REPLICATES ON A THIRD WORKER - and 64 rayon threads still LOSE to single-threaded NumPy divide at 2^22 (`deadlock-audit-su0i6`, new parallel row)
 
 `SlateHeron`. `fnp.divide` is the campaign's worst vs-incumbent ratio and it had never been
