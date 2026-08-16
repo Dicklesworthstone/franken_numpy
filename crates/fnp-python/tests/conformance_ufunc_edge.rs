@@ -2698,3 +2698,74 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn zerocopy_binary_output_shape_survives_the_flat_output_helper() -> Result<(), String> {
+    // Guards `finish_flat_output`, which every zero-copy route now shares
+    // (`deadlock-audit-omyno`). It applies three different rules by rank and a bug in
+    // any one of them is invisible to a value-only check: 1-D returns the flat buffer
+    // UNCHANGED (skipping a reshape to the shape it already has, worth 200 ns per call
+    // per `deadlock-audit-6twge`), 0-D reshapes to `()` and then extracts a SCALAR via
+    // `get_item(())`, and everything else reshapes to the target shape.
+    //
+    // So this asserts SHAPE, NDIM, DTYPE and TYPE against numpy, not just values -
+    // returning a flat 1-D array where numpy returns 2-D is exactly the regression the
+    // 1-D skip could cause if it were ever applied to a rank it does not hold for, and
+    // every element would still compare equal.
+    let script = fnp_script(
+        r#"
+verdicts = []
+rng = np.random.default_rng(20260816)
+
+def check(name, a, b):
+    for op in ("divide", "multiply", "add", "subtract", "maximum", "minimum", "power", "floor_divide"):
+        ours = getattr(fnp, op)(a, b)
+        theirs = getattr(np, op)(a, b)
+        oa, ta = np.asarray(ours), np.asarray(theirs)
+        if oa.shape != ta.shape:
+            verdicts.append(f"FAIL {name} {op} shape {oa.shape} != {ta.shape}")
+        if oa.ndim != ta.ndim:
+            verdicts.append(f"FAIL {name} {op} ndim {oa.ndim} != {ta.ndim}")
+        if str(oa.dtype) != str(ta.dtype):
+            verdicts.append(f"FAIL {name} {op} dtype {oa.dtype} != {ta.dtype}")
+        # a 0-D route must hand back a SCALAR, not a 0-D array, exactly as numpy does
+        if type(ours).__name__ != type(theirs).__name__:
+            verdicts.append(f"FAIL {name} {op} type {type(ours).__name__} != {type(theirs).__name__}")
+        if oa.tobytes() != ta.tobytes():
+            verdicts.append(f"FAIL {name} {op} bytes")
+
+# rank 1 - the arm that skips the reshape
+n = 1 << 12
+a1 = 1.0 + (np.arange(n) % 1000) / 1000.0
+b1 = 1.25 + (np.arange(n) % 997) / 997.0
+check("1-D", a1, b1)
+
+# rank 1 large enough to cross the parallel gates, so the skip is exercised on the
+# rayon arm too (FLOAT_POWER_PARALLEL_MIN_LEN is 16_384; Max/Min/Div use 1<<21)
+nbig = (1 << 21) + 3
+abig = 1.0 + (np.arange(nbig) % 1000) / 1000.0
+bbig = 1.25 + (np.arange(nbig) % 997) / 997.0
+check("1-D above the parallel gate", abig, bbig)
+
+# rank 2 and rank 3 - the arm that must still reshape
+check("2-D", a1.reshape(64, 64), b1.reshape(64, 64))
+check("3-D", a1.reshape(16, 16, 16), b1.reshape(16, 16, 16))
+
+# rank 0 - the arm that reshapes to () and extracts a scalar
+check("0-D", np.float64(3.5), np.float64(1.25))
+
+# non-contiguous and broadcasting forms defer, but must still agree on shape
+check("strided", a1[::3], b1[::3])
+check("broadcast row", a1.reshape(64, 64), b1.reshape(64, 64)[0])
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "zero-copy binary routes must preserve shape/ndim/dtype/type through finish_flat_output: {result}"
+    );
+    Ok(())
+}

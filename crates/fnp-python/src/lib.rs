@@ -12717,6 +12717,47 @@ fn try_zerocopy_f16_unary_widen(
 }
 
 // Wrap zerocopy_f64_binary_flat with the shared reshape / 0-d scalar handling.
+/// Turn a FLAT result buffer into the array a ufunc route must return, applying the
+/// shape rules every zero-copy route shares.
+///
+/// Three behaviours, and the middle one is the reason this exists:
+/// - `shape.len() == 1`: return `flat` UNCHANGED. The callers all allocate `flat` as
+///   a 1-D `numpy.empty(n)` with `n == product(shape)`, so for 1-D operands its shape
+///   ALREADY equals the target and `reshape((n,))` is a no-op that allocates a tuple,
+///   does an attribute lookup and makes a Python call to hand back the same array.
+///   Measured at **200 ns per call** (`deadlock-audit-6twge`, WORKER vmi1293453,
+///   isolated same-invocation control: `numpy.empty` 215.0 ns versus
+///   `numpy.empty` + `reshape` 415.0 ns, ratio 1.940625 ci95 [1.911628,1.953488],
+///   A/A null 1.007184).
+/// - `shape.is_empty()` (0-D): reshape to `()` and extract the scalar with
+///   `get_item(())`. This branch is why the skip above cannot be applied blindly, and
+///   why this logic belongs in one place instead of being re-derived at each site.
+/// - anything else: reshape to `shape`.
+///
+/// Returns the value itself; callers whose signature is
+/// `PyResult<Option<Py<PyAny>>>` wrap it in `Ok(Some(..))`.
+///
+/// The duplicate of this block appears at **62 sites** in this file, all audited as
+/// eligible for the 1-D skip: `flat` is a 1-D buffer of exactly `product(shape)`
+/// elements at every one (30 via a direct `numpy.empty(n)`, 29 via a `*_flat` helper
+/// that does the same, 3 via a 1-D `.view()`/`.astype()` of such a buffer). Routing
+/// the remaining sites through here is `deadlock-audit-omyno`.
+fn finish_flat_output(
+    py: Python<'_>,
+    flat: Bound<'_, PyAny>,
+    shape: &[usize],
+) -> PyResult<Py<PyAny>> {
+    if shape.len() == 1 {
+        return Ok(flat.unbind());
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
+}
+
 fn try_zerocopy_f64_binary(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -12727,36 +12768,18 @@ fn try_zerocopy_f64_binary(
     let Some((flat, shape)) = zerocopy_f64_binary_flat(py, &numpy, a, b, op)? else {
         return Ok(None);
     };
-    // 1-D operands: `zerocopy_f64_binary_flat` already allocated the output with
-    // exactly `n` elements, so its shape IS the target shape and `reshape((n,))`
-    // hands back an array identical to the one it was given. Skipping it removes a
-    // tuple allocation, an attribute lookup and a Python call from every 1-D call.
+    // Shape rules — including the 200 ns 1-D no-op-reshape skip and the 0-D scalar
+    // extraction — live in `finish_flat_output`, which documents the measurement.
     //
-    // Measured cost of that no-op: **200 ns per call**, isolated in ONE invocation
-    // on WORKER vmi1293453 — `numpy.empty` + `reshape` 415.0 ns versus
-    // `numpy.empty` alone 215.0 ns, ratio 1.940625 ci95 [1.911628,1.953488] with
-    // the A/A null at 1.007184. Bead `deadlock-audit-6twge`.
-    //
-    // Do NOT quote the ~1.1 us figure that an earlier draft of this comment
-    // carried. It came from subtracting `deadlock-audit-cydda`'s 220 ns
-    // `numpy.empty` from `deadlock-audit-tmmud`'s 1310 ns `empty` + `reshape` —
-    // two numbers from DIFFERENT workers measured with DIFFERENT harnesses
-    // (min-of-2001 single calls versus batched min-of-401). Cross-row arithmetic
-    // like that is exactly what the fleet's worker-provenance rule forbids, and it
-    // overstated this lever by 5.5x. The 200 ns above is the same-invocation
-    // number and is the only one that may be cited.
-    //
-    // The 0-D branch below still needs its reshape: it reshapes to `()` so that
-    // `get_item(())` can extract the scalar. Only `len() == 1` may skip.
-    if shape.len() == 1 {
-        return Ok(Some(flat.unbind()));
-    }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    // One number that used to live here and must NOT be revived: an earlier draft
+    // claimed the skip was worth ~1.1 us. That came from subtracting
+    // `deadlock-audit-cydda`'s 220 ns `numpy.empty` from `deadlock-audit-tmmud`'s
+    // 1310 ns `empty` + `reshape` — two figures from DIFFERENT workers measured with
+    // DIFFERENT harnesses (min-of-2001 single calls versus batched min-of-401).
+    // Cross-row arithmetic like that is what the fleet's worker-provenance rule
+    // forbids, and it overstated the lever by 5.5x. 200 ns is the same-invocation
+    // number and the only one that may be cited (`deadlock-audit-6twge`).
+    Ok(Some(finish_flat_output(py, flat, &shape)?))
 }
 
 fn ndarray_has_native_f64_dtype(value: &Bound<'_, PyAny>) -> PyResult<bool> {
