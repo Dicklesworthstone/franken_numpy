@@ -4061,6 +4061,7 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
 
         let mut previous_incumbent: Option<(u32, f64, f64)> = None;
         let mut incumbent_scaling_violations: Vec<String> = Vec::new();
+        let mut null_cell_violations: Vec<String> = Vec::new();
 
         // 2^12 is BELOW the 1<<14 gate and is the method null; 2^14 sits at it; the rest
         // are above it. Four cells above the gate locate the worst band instead of
@@ -4109,8 +4110,35 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
             // multiply_ratio is itself a measured ratio against NumPy. It also explains
             // why the old projection landed within ~1% of multiply_ratio at four of five
             // sizes: that agreement was the model being right, not the arithmetic.
-            let projected_delegating_ratio = mul_ratio;
+            // CORRECTED (`deadlock-audit-q00ev`). The previous form set
+            // `projected_delegating_ratio = mul_ratio`, which is a WRONG MODEL: a
+            // delegating op costs `numpy_op + wrapper`, so its ratio is
+            // `numpy_op / (numpy_op + wrapper)`. The wrapper is shared between the two
+            // ops but `numpy_divide` is DEARER than `numpy_multiply`, so the same wrapper
+            // is a smaller fraction of a dearer call and a delegating divide necessarily
+            // scores BETTER than a delegating multiply. Equating the two ratios discarded
+            // the denominator that makes them differ, and the 2^12 null cell caught it by
+            // reporting `delegating_looks_better=false` where both ops delegate.
+            //
+            // The original model was right; only its arithmetic mixed statistics. So keep
+            // the model and estimate the wrapper from the RATIO rather than from an
+            // arm-median difference — one statistic, and no impossible values.
+            let wrapper_from_ratio_ns = mul_numpy_ns * (1.0 / mul_ratio - 1.0);
+            let projected_delegating_fnp_ns = div_numpy_ns + wrapper_from_ratio_ns;
+            let projected_delegating_ratio = div_numpy_ns / projected_delegating_fnp_ns;
             let delegating_looks_better = projected_delegating_ratio > div_ratio;
+
+            // NULL-CELL SELF-CHECK. Below the gate BOTH ops delegate, so the projection
+            // must land slightly ABOVE the measured divide ratio — above, not equal,
+            // because a delegating divide still pays the small divide-specific residual
+            // (the f64 binop-block size and dtype guards that multiply skips). If it
+            // inverts, the model is wrong again and no cell in this group may be read.
+            if below_gate && projected_delegating_ratio <= div_ratio {
+                null_cell_violations.push(format!(
+                    "2^{exponent}: projected {projected_delegating_ratio:.6} did not exceed \
+                     measured {div_ratio:.6} at a cell where both ops delegate"
+                ));
+            }
 
             // Absolute nanoseconds below are ARM MEDIANS, emitted for provenance only.
             // They must NOT be combined with the ratios above, which is the mistake this
@@ -4119,7 +4147,6 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
             let divide_excess_arm_median_ns = div_fnp_ns - div_numpy_ns;
             let divide_specific_excess_arm_median_ns =
                 divide_excess_arm_median_ns - wrapper_arm_median_ns;
-            let projected_delegating_fnp_ns = div_numpy_ns / mul_ratio;
 
             // INCUMBENT SCALING GUARD. NumPy's own cost must grow with n. A cell where it
             // does not has an unrepresentative incumbent arm — exactly the shape that
@@ -4159,6 +4186,7 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
                  ns_fields_are_arm_medians_do_not_mix_with_ratios=true \
                  projected_delegating_fnp_ns={projected_delegating_fnp_ns:.1} \
                  projected_delegating_ratio={projected_delegating_ratio:.6} \
+                 wrapper_from_ratio_ns={wrapper_from_ratio_ns:.1} \
                  projection_derived_from=ratio_median_only \
                  incumbent_scaling_ok={incumbent_scaling_ok} \
                  delegating_looks_better={delegating_looks_better} same_invocation=true"
@@ -4172,6 +4200,12 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
             "INCUMBENT ARM DID NOT SCALE WITH n — the cells above are printed for diagnosis \
              but MUST NOT be banked: {}",
             incumbent_scaling_violations.join(" | ")
+        );
+        assert!(
+            null_cell_violations.is_empty(),
+            "THE BELOW-GATE NULL CELL INVERTED — the projection model is wrong and no cell \
+             in this group may be read: {}",
+            null_cell_violations.join(" | ")
         );
     });
 }

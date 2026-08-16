@@ -15,6 +15,80 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - THE PROJECTION IS CORRECT NOW AND ITS NULL CELL PROVES IT - so the divide-gate conclusion finally rests on sound arithmetic at 2^14-2^18; but a THIRD impossible value appears at 2^20 where multiply reaches parity (`deadlock-audit-q00ev`)
+
+`RedLynx`. Implements the two-line formula the previous row's retry predicate specified, with the
+self-check that predicate demanded. One run, quiet host.
+
+**Campaign result class:** maintenance-diagnostic (instrument) + supports the q00ev decision at three sizes
+
+```
+bench_elf_sha256=a2b9c113ae2d9351822b8ebc768079d72a4213e8fc7a8d2b3a876ad73511c4b7
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307557960 bytes)
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench  load 20.58 -> 20.93 (quiet)
+each cell's ratio and CI come from common::run_dual_null_median_ci_contract (ABBAABBA, 41
+  rounds, min-of-3, both A/A nulls run per cell)
+
+ n      mul_ratio  div_ratio  projected  wrapper_from_ratio  wrapper_arm_median  scaling_ok
+ 2^12   0.616107   0.642287   0.665981         773.9               772.0           true   <- NULL
+ 2^14   0.823340   0.584550   0.851523         937.2               922.0           true
+ 2^16   0.926689   0.776451   0.936166        1254.3              1663.0           true
+ 2^18   0.972574   0.854177   0.977546        1717.6              1869.0           true
+ 2^20   1.003433   0.823580   1.002870       -1473.9              -120.0           true
+```
+
+**THE NULL CELL NOW READS CORRECTLY, WHICH IS THE POINT OF THE ROW.** At 2^12 both ops delegate.
+The projection lands at 0.665981 ABOVE the measured 0.642287 — above, as it must be, because a
+delegating divide still pays the small divide-specific residual that multiply skips (89.0 ns this
+run). Last run the same cell INVERTED, which is what exposed the wrong model. The self-check now
+fails the run if it inverts again, so this cannot regress silently.
+
+**AND THE TWO WRAPPER ESTIMATORS AGREE WHERE THEY SHOULD.** At 2^12 the ratio-derived wrapper is
+773.9 ns against an arm-median 772.0 ns — 0.25% apart. That agreement is the evidence that the
+mixed-statistic bug is genuinely gone rather than hidden: when the paired ratios are not skewed,
+the two roads meet.
+
+**SO THE q00ev DECISION IS NOW ON SOUND ARITHMETIC AT THREE SIZES.** Delegating beats our native
+f64 divide by a wide margin wherever the projection is valid:
+
+```
+  2^14  projected 0.851523  vs measured 0.584550   delegating better by 0.267
+  2^16  projected 0.936166  vs measured 0.776451   delegating better by 0.160
+  2^18  projected 0.977546  vs measured 0.854177   delegating better by 0.123
+```
+
+These are the cells the gate actually governs, and the margins are 10-45x the divide-specific
+residual the null cell measures. The earlier conclusion — the native f64 divide path does not pay
+where it is enabled — survives its instrument being rebuilt underneath it.
+
+**A THIRD IMPOSSIBLE VALUE, AT A SIZE THE OLD GUARD DOES NOT COVER.** At 2^20 `multiply_ratio` is
+**1.003433** with a CI of [0.983145,1.034903] that straddles unity — multiply has reached parity,
+so the wrapper is smaller than the measurement floor. The formula then returns
+`wrapper_from_ratio_ns = -1473.9`, a negative wrapper, and `projected_delegating_ratio = 1.002870`,
+which again asserts that delegating to NumPy beats NumPy's own call. **The model is right; it is
+being asked a question the data cannot answer at that size.** My null-cell check guards only the
+BELOW-GATE cell and cannot see this.
+
+The fix is a positivity precondition, not another formula: where `multiply_ratio`'s CI contains
+1.0, the wrapper is unmeasurable at that size and the projection must be emitted as UNAVAILABLE
+rather than computed. Note the arm-median estimator fails there too (-120.0 ns), so this is a
+property of the data, not of either estimator.
+
+**WHAT IS STILL SUPPORTABLE AT 2^20 WITHOUT THE PROJECTION:** multiply sits at parity while divide
+reads 0.823580, and both delegate through the same wrapper. A delegating divide would therefore
+land near parity too, so the native path is losing roughly 18% at that size. That is the same
+direction as the projected cells, argued from the measured ratios alone.
+
+RETRY PREDICATE: (1) Add the positivity precondition and emit `projection_available=false` when
+`multiply_ratio` CI contains unity; until then ignore the 2^20 projected fields, as this row does.
+(2) The 2^14/2^16/2^18 projections are sound and may be quoted. (3) The instrument now carries
+three guards — incumbent scaling, arm-median labelling, and the below-gate null cell — and each
+was added after a defect it would have caught; the positivity check is the fourth and last known
+gap. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - LEVER LANDED AND MEASURED: one hoisted dtype sniff removes 176 ns from EVERY delegating binary ufunc call - the worst cell goes 3.471x -> 3.268x slower (`deadlock-audit-v46rn`)
 
 `SlateHeron`. First code lever of this session rather than another measurement. `deadlock-audit-v46rn`
