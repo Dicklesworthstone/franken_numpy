@@ -1275,6 +1275,10 @@ fn main() {
                 bench_pyo3_signature_binding_cost,
             ),
             (
+                "bench_wrapper_remainder_stages",
+                bench_wrapper_remainder_stages,
+            ),
+            (
                 "bench_binary_route_overhead_vs_numpy",
                 bench_binary_route_overhead_vs_numpy,
             ),
@@ -2604,6 +2608,104 @@ fn probe_varargs(
     _kwargs: Option<&pyo3::Bound<'_, PyDict>>,
 ) -> pyo3::PyResult<pyo3::Py<pyo3::PyAny>> {
     Ok(args.get_item(0)?.unbind())
+}
+
+/// Attribute or bound the LAST two unexplored stages of the `PyUFunc::__call__`
+/// wrapper floor: `PyBuffer` acquisition and output construction
+/// (`deadlock-audit-tmmud`).
+///
+/// Everything else named has been measured and eliminated: four stages at 700 ns
+/// combined (`deadlock-audit-cydda`), the delegation default-kwargs dict at 727 ns
+/// (`deadlock-audit-s2fkk`, removed), and PyO3 argument binding at 0.0 ns
+/// (`deadlock-audit-7ocfa`, refuted). Against a 6968-8375 ns floor that leaves
+/// buffer acquisition and result construction.
+///
+/// BATCHED ON PURPOSE. `deadlock-audit-7ocfa`'s probe bottomed out: at a 60 ns call
+/// two IDENTICAL arms read 7% apart from timer quantisation, so a stage cheaper than
+/// ~10 ns is invisible to a single-call arm. Each observation here runs `BATCH`
+/// repetitions inside one timer, so a 10 ns stage shows up as a 2.5 us
+/// observation. An empty-loop arm is measured and SUBTRACTED so the reported
+/// per-call figures are the stage, not the loop.
+fn bench_wrapper_remainder_stages(_c: &mut Criterion) {
+    const N: usize = 256;
+    const BATCH: usize = 256;
+    const TRIALS: usize = 401;
+
+    fn min_batch_ns(trials: usize, batch: usize, mut op: impl FnMut()) -> f64 {
+        let mut best = u128::MAX;
+        for _ in 0..trials {
+            let started = Instant::now();
+            for _ in 0..batch {
+                op();
+            }
+            best = best.min(started.elapsed().as_nanos());
+        }
+        best as f64 / batch as f64
+    }
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+        let np_add = numpy.getattr("add").expect("numpy.add");
+
+        // Loop overhead, subtracted from every stage below.
+        let empty_ns = min_batch_ns(TRIALS, BATCH, || {
+            black_box(());
+        });
+        // Stage: acquire a zero-copy f64 view of BOTH operands, which is what the
+        // native route does before it can touch an element.
+        let buffers_ns = min_batch_ns(TRIALS, BATCH, || {
+            let ba = pyo3::buffer::PyBuffer::<f64>::get(&a).expect("buffer a");
+            let bb = pyo3::buffer::PyBuffer::<f64>::get(&b).expect("buffer b");
+            black_box((ba.item_count(), bb.item_count()));
+        });
+        // Stage: construct the output the way the route does - allocate flat, then
+        // reshape back to the operand shape.
+        let output_ns = min_batch_ns(TRIALS, BATCH, || {
+            let flat = numpy.call_method1("empty", (N,)).expect("numpy.empty");
+            let shaped = flat.call_method1("reshape", ((N,),)).expect("reshape");
+            black_box(shaped);
+        });
+        // Denominator: a whole delegating call through NumPy itself.
+        let numpy_add_ns = min_batch_ns(TRIALS, BATCH, || {
+            black_box(np_add.call1(&args).expect("numpy.add"));
+        });
+
+        let buffers = buffers_ns - empty_ns;
+        let output = output_ns - empty_ns;
+        println!(
+            "WRAPPER_REMAINDER_STAGES n={N} batch={BATCH} trials={TRIALS} \
+             numpy_version={numpy_version} worker={} harness=batched_min_of_{TRIALS}_minus_empty_loop \
+             stages_are_standalone_replicas=true \
+             empty_loop_ns={empty_ns:.2} pybuffer_get_both_ns={buffers:.2} \
+             output_empty_plus_reshape_ns={output:.2} numpy_add_whole_call_ns={numpy_add_ns:.2} \
+             two_stages_sum_ns={:.2}",
+            measurement_worker(),
+            buffers + output,
+        );
+    });
 }
 
 fn bench_pyo3_signature_binding_cost(_c: &mut Criterion) {
