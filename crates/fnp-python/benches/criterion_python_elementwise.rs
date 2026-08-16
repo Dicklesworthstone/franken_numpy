@@ -5202,6 +5202,78 @@ fn maximum_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
 //
 // n=1<<22 sits above the 1<<21 parallel_min, the regime the losing measurements
 // came from — below it the shipped route runs serially anyway.
+/// Which logical CPU is this thread on right now? (`deadlock-audit-48by6`)
+///
+/// Two projects found broken arm placement on this box — one had BOTH arms pinned to a
+/// single physical core, another voided rows over contention — so placement is checked
+/// here rather than assumed. `/proc/self/stat` field 39 is the last CPU the task ran on;
+/// the `comm` field can contain spaces and parentheses, so parsing starts after the LAST
+/// `)`.
+///
+/// SMT is active on this host: `thread_siblings_list` for cpu0 is `0,32`, so logical CPUs
+/// N and N+32 are siblings on 32 physical cores, and two arms on sibling CPUs share
+/// execution resources while reporting different CPU ids.
+fn current_cpu() -> i32 {
+    match std::fs::read_to_string("/proc/self/stat") {
+        Ok(text) => match text.rfind(')') {
+            Some(close) => text[close + 2..]
+                .split_whitespace()
+                .nth(36)
+                .and_then(|field| field.parse().ok())
+                .unwrap_or(-1),
+            None => -1,
+        },
+        Err(_) => -1,
+    }
+}
+
+/// Physical core backing a logical CPU, so SMT siblings can be told apart from distinct cores.
+fn core_id_of(cpu: i32) -> i32 {
+    if cpu < 0 {
+        return -1;
+    }
+    std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/topology/core_id"))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(-1)
+}
+
+/// Most frequent CPU in a sample, and how many distinct CPUs the arm touched. A high
+/// distinct count means the thread MIGRATED during the arm, which on a box with a 2.8x
+/// cross-core spread is a measurement hazard in itself.
+fn modal_cpu(samples: &[i32]) -> (i32, usize) {
+    if samples.is_empty() {
+        return (-1, 0);
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let distinct = {
+        let mut d = sorted.clone();
+        d.dedup();
+        d.len()
+    };
+    let mut best = sorted[0];
+    let mut best_run = 0usize;
+    let mut cur = sorted[0];
+    let mut run = 0usize;
+    for &c in &sorted {
+        if c == cur {
+            run += 1;
+        } else {
+            if run > best_run {
+                best_run = run;
+                best = cur;
+            }
+            cur = c;
+            run = 1;
+        }
+    }
+    if run > best_run {
+        best = cur;
+    }
+    (best, distinct)
+}
+
 /// Sample every core's current frequency, in MHz (`deadlock-audit-48by6`).
 ///
 /// This host runs `amd-pstate-epp` under the `powersave` governor and shows a LIVE
@@ -5672,6 +5744,8 @@ fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
         // samples LOWER MHz than the isolated arm.
         let isolated_mhz = RefCell::new(Vec::new());
         let shadowed_mhz = RefCell::new(Vec::new());
+        let isolated_cpu: RefCell<Vec<i32>> = RefCell::new(Vec::new());
+        let shadowed_cpu: RefCell<Vec<i32>> = RefCell::new(Vec::new());
 
         let isolated = || {
             let started = Instant::now();
@@ -5682,6 +5756,7 @@ fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
             // Sampled AFTER the timer stops, so the sysfs reads are not charged to the arm.
             let (max_mhz, _mean_mhz) = sample_cpu_mhz();
             isolated_mhz.borrow_mut().push(max_mhz);
+            isolated_cpu.borrow_mut().push(current_cpu());
             common::ContractObservation {
                 elapsed,
                 checksum: numpy_divide_checksum(&result, N),
@@ -5698,6 +5773,7 @@ fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
             let elapsed = started.elapsed();
             let (max_mhz, _mean_mhz) = sample_cpu_mhz();
             shadowed_mhz.borrow_mut().push(max_mhz);
+            shadowed_cpu.borrow_mut().push(current_cpu());
             common::ContractObservation {
                 elapsed,
                 checksum: numpy_divide_checksum(&result, N),
@@ -5709,6 +5785,13 @@ fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
         let interference_ns = effect.arm_a_median_ns - effect.arm_b_median_ns;
         let shadowed_mhz_median = median_of(&mut shadowed_mhz.borrow_mut());
         let isolated_mhz_median = median_of(&mut isolated_mhz.borrow_mut());
+        let (iso_cpu, iso_distinct) = modal_cpu(&isolated_cpu.borrow());
+        let (sh_cpu, sh_distinct) = modal_cpu(&shadowed_cpu.borrow());
+        let iso_core = core_id_of(iso_cpu);
+        let sh_core = core_id_of(sh_cpu);
+        let arms_same_cpu = iso_cpu == sh_cpu;
+        let arms_same_physical_core = iso_core >= 0 && iso_core == sh_core;
+        let arms_are_smt_siblings = arms_same_physical_core && !arms_same_cpu;
         let mhz_ratio = if isolated_mhz_median > 0.0 {
             shadowed_mhz_median / isolated_mhz_median
         } else {
@@ -5723,6 +5806,10 @@ fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
              ratio={:.6} ratio_ci95=[{:.6},{:.6}] null={:.6} \
              shadowed_max_mhz={shadowed_mhz_median:.0} isolated_max_mhz={isolated_mhz_median:.0} \
              mhz_ratio_shadowed_over_isolated={mhz_ratio:.4} \
+             isolated_cpu={iso_cpu} isolated_core_id={iso_core} isolated_distinct_cpus={iso_distinct} \
+             shadowed_cpu={sh_cpu} shadowed_core_id={sh_core} shadowed_distinct_cpus={sh_distinct} \
+             arms_same_cpu={arms_same_cpu} arms_same_physical_core={arms_same_physical_core} \
+             arms_are_smt_siblings={arms_are_smt_siblings} \
              above_one_means_our_ratios_are_optimistic_by_this_factor=true",
             measurement_worker(),
             effect.arm_a_median_ns,

@@ -27,6 +27,71 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - ARM PLACEMENT AUDITED AND IT IS UNPINNED: the bench thread MIGRATES across 53-64 of 64 logical CPUs within a single arm, on a box with a 2.942x cross-core spread - measured, not assumed (`deadlock-audit-48by6`)
+
+`RedLynx`. Prompted by two projects finding broken arm placement — one with BOTH arms on a single
+physical core, one voiding rows over contention. I had never checked mine. It is broken in a third
+way, and the row records what the fields now show rather than an assurance.
+
+**Campaign result class:** maintenance-diagnostic (instrument defect found in my own harness)
+
+```
+bench_elf_sha256=9d621ee520acb0ff07a086087c0f3476eb445cd582789d1dc35871b026f2b2b3
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=2^22
+governor=powersave  driver=amd-pstate-epp  SMT ACTIVE (cpu N and N+32 are siblings, 32 physical cores)
+LOADAVG 1min 16.02 before -> 17.85 after; 5min 25.22 -> 25.06
+CPU MHz IMMEDIATELY BEFORE RUN: min 1429, max 4204, spread 2.942x, median 3353
+
+  isolated arm   modal_cpu=16  core_id=16  distinct_cpus=53  max_mhz=4141
+  shadowed arm   modal_cpu=41  core_id= 9  distinct_cpus=64  max_mhz=4189
+  arms_same_cpu=false  arms_same_physical_core=false  arms_are_smt_siblings=false
+  ratio=1.039661 ci95=[1.016936,1.098345]  UNDECIDED  null [0.952075,1.005468] hw 0.047925
+```
+
+**THE DEFECT: NOTHING IS PINNED.** A single arm's observations land on 53 distinct logical CPUs,
+and the shadowed arm touches all 64. The scheduler is free to move the timing thread between every
+observation, and on this host the core it lands on can differ by **2.942x in clock** (1429 against
+4204 MHz). Every row this harness has produced was taken under those conditions.
+
+**THE TWO ARMS ALSO DIFFER SYSTEMATICALLY IN PLACEMENT, which is the part that could bias rather
+than merely blur.** The shadowed arm touches 64 distinct CPUs against the isolated arm's 53,
+because `maximum_parallel` runs rayon across every core and the calling thread participates in that
+pool — so after the shadow, the timing thread has just been scheduled somewhere in a
+freshly-disturbed placement. The modal cores differ (16 against 41) and are neither the same
+physical core nor SMT siblings.
+
+**WHAT IT DOES NOT APPEAR TO HAVE DONE, on the evidence available.** The interference effect has now
+been measured four times: 1.062643, 1.067266, 1.063965 (all DECIDABLE) and 1.039661 here
+(UNDECIDED). The point estimates agree within 2.6% across four ELFs and four load windows, and the
+per-arm clocks in this run are comparable and in the SHADOWED arm's favour (4189 against 4141) —
+the opposite of what a placement penalty would look like. So migration is adding VARIANCE rather
+than an obvious bias: this run's controlling null half-width is 0.047925 against 0.026442 in the
+previous one, and that widening is why this run does not certify.
+
+**WHAT IT MEANS FOR THE BANKED ROWS.** No row is withdrawn on this evidence — the effects that
+survived did so with nulls that straddled unity and, in the replicated cases, across four
+placements. But **no row from this harness may claim controlled placement**, and any row whose
+verdict turns on a margin smaller than the spread migration can inject should be treated as
+provisional until re-run pinned. The n=256 per-call floor rows are the least exposed: their arms are
+microseconds long and their effects are 2-3x, far outside anything a clock difference explains.
+
+**THE FIX, and why I did not apply it in the same run that found the problem.** The right shape is
+to pin the TIMING thread to one core while leaving rayon free to use the rest — pinning the whole
+process would starve the parallel candidate and change what is being measured. That needs
+`sched_setaffinity` for the calling thread only, which is a dependency and API decision, and
+changing the instrument in the same run that diagnoses it is how a number gets tuned to taste. The
+fields land first; the pinning lands next, with a before/after.
+
+RETRY PREDICATE: (1) Pin the timing thread to a single logical CPU and re-run this group; the
+prediction is that `distinct_cpus` falls to 1 for both arms and the controlling null half-width
+drops back below ~0.03. (2) Emit these fields from every group, not just this one — they are three
+`RefCell`s and a print. (3) When comparing rows across sessions, check `distinct_cpus` before
+attributing a difference to code: a row taken at 53 distinct CPUs and one taken pinned are not the
+same measurement. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - FLEET CPU-SPREAD FINDING VERIFIED EXACTLY (2.882x), PER-ARM MHz NOW RECORDED - and it REFUTES the frequency explanation for our interference: the shadowed arm runs at a HIGHER clock, not lower (`deadlock-audit-48by6`)
 
 `RedLynx`. Response to the fleet report that a live cross-core spread of 2.879x, not ambient load,
