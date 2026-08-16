@@ -14,6 +14,8 @@ use fnp_python::fnp_python;
 use pyo3::Python;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyModuleMethods, PyTuple};
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -3014,8 +3016,35 @@ fn bench_remainder_vs_numpy_incumbent(_c: &mut Criterion) {
         let b = locals.get_item("b").expect("b operand");
         let args = PyTuple::new(py, [&a, &b]).expect("args");
 
+        // The incumbent's own artifact, hashed from inside the measuring process.
+        // The ledger's incumbent-win contract requires a sha256 that identifies
+        // NumPy and is distinct from our ELF, so a candidate binary cannot stand
+        // in for the incumbent it claims to have beaten.
+        let numpy_artifact = numpy
+            .getattr("core")
+            .and_then(|core| core.getattr("_multiarray_umath"))
+            .and_then(|module| module.getattr("__file__"))
+            .and_then(|path| path.extract::<String>())
+            .ok()
+            .and_then(|path| std::fs::read(&path).ok())
+            .map(|bytes| {
+                let mut hasher = Sha256::new();
+                hasher.update(&bytes);
+                let digest = hasher.finalize();
+                let mut hex = String::with_capacity(digest.len() * 2);
+                for byte in digest {
+                    write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
+                }
+                hex
+            })
+            .unwrap_or_else(|| "unavailable".to_string());
+
         let (ratio, lo, hi, numpy_ns, fnp_ns) =
             measure_binary_ufunc_vs_numpy(py, &module, &numpy, "remainder", &args, N);
+        println!(
+            "REMAINDER_INCUMBENT_ARM name=NumPy version={numpy_version} \
+             artifact_sha256={numpy_artifact} measured_ratio={ratio:.6}x"
+        );
         println!(
             "REMAINDER_VS_NUMPY n={N} log2n=21 above_parallel_threshold=true \
              numpy_version={numpy_version} \

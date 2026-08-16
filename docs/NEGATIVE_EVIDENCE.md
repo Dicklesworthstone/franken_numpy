@@ -4,6 +4,56 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, SEARCH CLOSED: output construction is the dominant wrapper stage at 1310 ns - 1.8x NumPy's ENTIRE add call - and the reshape, not the allocation, is the expensive half (`deadlock-audit-tmmud`)
+
+`TealOak`. Third and last stage of the wrapper-floor hunt. Everything else named has
+been measured and eliminated, so this row closes the search rather than opening it:
+four stages at 700 ns combined (`deadlock-audit-cydda`), the delegation
+default-kwargs dict at 727 ns (`deadlock-audit-s2fkk`, removed), and PyO3 argument
+binding at 0.0 ns (`deadlock-audit-7ocfa`, refuted). That left `PyBuffer` acquisition
+and output construction. Here they are.
+
+**Campaign result class:** maintenance-diagnostic
+
+```
+HOST_BASELINE host=vmi1152480 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 online_cpus=0:1:2:3:4:5:6:7:8:9 allowed_logical_threads=10 allowed_cpus=0:1:2:3:4:5:6:7:8:9 governor=unavailable
+bench_elf_sha256=8511e6fe59bcb8f0566d8aa430054401016020bc07103860ed1dc9a45d6584c3
+WRAPPER_REMAINDER_STAGES n=256 batch=256 trials=401 numpy_version=2.4.3 worker=vmi1152480 harness=batched_min_of_401_minus_empty_loop stages_are_standalone_replicas=true empty_loop_ns=0.59 pybuffer_get_both_ns=302.95 output_empty_plus_reshape_ns=1310.34 numpy_add_whole_call_ns=718.84 two_stages_sum_ns=1613.29
+```
+
+**THE FINDING.** Constructing the output — `numpy.empty(n)` then `.reshape(shape)` —
+costs **1310.34 ns**, which is **1.8x NumPy's entire `add` call measured in the same
+invocation** (718.84 ns). Buffer acquisition for both operands is 302.95 ns, about a
+quarter of it. Together the two stages are 1613.29 ns, i.e. **2.2x a whole NumPy
+call**, on a route whose job is to be faster than that call.
+
+**THE RESHAPE IS THE EXPENSIVE HALF, NOT THE ALLOCATION.** `deadlock-audit-cydda`
+measured `numpy.empty` ALONE at 220 ns. Here `empty` + `reshape` is 1310 ns, so the
+reshape and its attribute lookup account for roughly 1.1 us. That is the difference
+between allocating the output at its final shape in one call and allocating flat then
+reshaping — and it is the single largest identified stage in the whole floor.
+
+**BATCHING WAS REQUIRED, and is why this row exists at all.**
+`deadlock-audit-7ocfa`'s probe bottomed out at the timer floor: two IDENTICAL arms
+read 7% apart at a 60 ns call. Each observation here runs 256 repetitions inside one
+timer and subtracts a measured empty loop (0.59 ns/iteration), so a 10 ns stage is
+resolvable. Without that this row would have reported noise.
+
+**LIMITS, stated.** These are standalone replicas timed in-process, not probes inside
+the live route, so each is a LOWER BOUND on its stage — safe for "this stage is
+expensive", which is the claim, and it would be unsafe for the reverse. The absolute
+ns are not comparable to the 6968-8375 ns floor figures from other rows: different
+worker, different profile. What IS internal to this invocation, and therefore sound,
+is the comparison against `numpy_add_whole_call_ns=718.84` measured beside it.
+
+**Retry predicate / next lever.** Allocate the output at its FINAL shape —
+`numpy.empty(shape)` — instead of `numpy.empty(n).reshape(shape)`, in
+`zerocopy_f64_binary_flat` and the `try_zerocopy_f64_binary` wrapper that reshapes
+after it. Expected to recover most of the ~1.1 us. Measure it with an isolated
+same-invocation control first, exactly as the three preceding rows did, then the
+route; bank either way. Do NOT attack `PyBuffer` acquisition first — at 302.95 ns it
+is a quarter of the output path and the cheaper target.
+
 ## 2026-08-16 - REJECT (hypothesis refuted BEFORE the change was made): PyO3 nine-parameter argument binding costs NOTHING resolvable, so it is not the `PyUFunc::__call__` wrapper floor (`deadlock-audit-7ocfa`)
 
 `TealOak`. I named PyO3 argument binding as the prime suspect for the remaining ~90% of
