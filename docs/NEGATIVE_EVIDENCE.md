@@ -4,6 +4,74 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, THREE SIZES POST-FIX: the native f64 divide is at its WORST just above its own gate - 1.286x slower at 2^16 against 1.091x at 2^20 - which puts `F64_DIV_NATIVE_MIN_LEN` itself in question (`deadlock-audit-0ppym`, `deadlock-audit-qapyb`)
+
+`RedLynx`. No build - /data at 42G, the floor - so this re-runs the same committed-provenance ELF
+on a third group. Combined with the two rows below it gives `divide` at three sizes straddling the
+native gate, all from one binary and one commit.
+
+**Campaign result class:** decidable-regression (all three cells are losses)
+
+```
+DIVIDE_SIZE_GATE op=divide n=256   log2n=8  delegates_under_gate=true
+  ratio=0.313928 ci95=[0.311812,0.314327] numpy_ns=430.0    fnp_ns=1368.0  excess_ns=938.0
+  incumbent_null_ci95=[0.997625,1.000000] candidate_null_ci95=[1.000000,1.002967]
+DIVIDE_SIZE_GATE op=divide n=65536 log2n=16 delegates_under_gate=false
+  ratio=0.777800 ci95=[0.741101,0.778620] numpy_ns=19136.0  fnp_ns=24577.0 excess_ns=5441.0
+  incumbent_null_ci95=[0.999737,1.000210] candidate_null_ci95=[1.000213,1.001185]
+(from the n=2^20 row below, same ELF)
+  ratio=0.916390 ci95=[0.871910,0.944903] numpy_ns=449042.0 fnp_ns=473283.0 excess_ns=24241.0
+```
+
+All three `DECIDABLE_REGRESSION`; all six A/A nulls on unity. bench_elf_sha256=6766850940f767eb.
+worker=thinkstation1, load 1min 25.88 before and after, numpy 2.4.3, profile `bench` = TRIAGE grade.
+Ratio is numpy/fnp: below 1.0 is slower.
+
+**THE SHAPE, and it is not the shape a fixed wrapper predicts.**
+
+```
+  n        path        fnp/numpy   excess_ns   excess as % of numpy's own call
+  2^8      DELEGATES   3.185x         938      218%
+  2^16     NATIVE      1.286x        5441       28.4%
+  2^20     NATIVE      1.091x       24241        5.4%
+```
+
+**THE NATIVE DIVIDE PATH IS AT ITS WORST IMMEDIATELY ABOVE ITS OWN GATE.** `deadlock-audit-qapyb`
+set `F64_DIV_NATIVE_MIN_LEN = 1 << 14` so that 2^8 and 2^12 delegate while 2^16 and 2^20 go native.
+At 2^20 that pays: 5.4% overhead. At 2^16, the first decade above the gate, it costs 28.4% - more
+than five times worse proportionally.
+
+**THE HYPOTHESIS THIS RAISES, STATED AS A HYPOTHESIS BECAUSE I CANNOT SETTLE IT FROM THESE NUMBERS.**
+If the wrapper cost at 2^16 were near the 938 ns measured at 2^8, then delegating at 2^16 would cost
+about 19136+938 = 20074 ns, i.e. ~1.049x - substantially BETTER than the 1.286x the native path
+actually delivers. That would make the gate wrong.
+
+**BUT THAT ARITHMETIC IS NOT VALID YET, AND THE REASON MATTERS.** The wrapper cost is NOT constant
+in n. The row below measures `multiply`, which delegates at every size here, at an excess of 836 ns
+at n=256 and 5190 ns at n=2^20 - it grew 6.2x. So the 938 ns figure cannot be carried to 2^16, and
+subtracting it there would repeat exactly the cross-size subtraction error that overstated
+`deadlock-audit-6twge` by 5.5x. **The comparison needs `multiply` measured AT 2^16**, in the same
+invocation, as the delegating control. That cell does not exist:
+`bench_percall_floor_across_ops_vs_numpy` hardcodes `n = 1 << 8`.
+
+**WHAT IS SETTLED.** Divide loses at all three sizes; the native path's proportional overhead falls
+monotonically with n (218% -> 28.4% -> 5.4%); and the worst native cell sits just above the gate.
+Whether the fix is to raise the gate, or to fix what the native path does at 2^16, is undecided.
+
+**WHY 2^16 MIGHT BE STRUCTURALLY BAD FOR US, as a lead rather than a claim.** At 2^16 the operands
+are 512 KB and fit in cache, so NumPy's serial loop is fast and our costs are dispatch-shaped: a
+rayon fan-out over 64 threads gives ~1024 elements per thread, where scheduling can plausibly cost
+more than the arithmetic. At 2^20 the arrays are 8 MB, both sides are DRAM-bound, and the fan-out
+amortises. That predicts the loss is worst in a band just above the gate and shrinks either side -
+consistent with all three cells, and testable by adding 2^14 and 2^18.
+
+RETRY PREDICATE / NEXT MEASUREMENT, in order: (1) Measure `multiply` (always delegating) at 2^16 in
+the same invocation as divide, giving the delegating control the gate decision actually needs. Do
+NOT reuse the n=256 wrapper figure. (2) Add 2^14 and 2^18 cells to locate the worst band rather
+than inferring it from three points. (3) Only then re-decide `F64_DIV_NATIVE_MIN_LEN`; qapyb's
+existing REJECT of a gate move was measured on other sizes and does not cover this question.
+Filed as its own bead. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - RETRY PREDICATE DISCHARGED, AND THE CONTENTION MECHANISM IS NOW DEMONSTRATED: the same ELF reads 4.107x under load 98 and 6.994x under load 33, because OUR arm is parallel and NumPy's is serial (`deadlock-audit-322j4`)
 
 `RedLynx`. No build - /data at 42G, at the hard stop. Same committed-provenance ELF as the row
