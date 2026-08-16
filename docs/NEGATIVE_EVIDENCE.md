@@ -937,6 +937,66 @@ NumPy call — the same defect is structural, not specific to `maximum`, and thi
 allocation has silently set an elementwise ratio in this ledger.
 AGENT_NAME=SlateHeron.
 
+## 2026-08-16 - THE CORRECTED MAXIMUM ARMS KILL `hzl1w`'s COUNTER-EVIDENCE: the serial arm is 1.027788 UNDECIDED, not the 1.352401x that decision cited - and our KERNEL wins 1.70x while our ROUTE loses 0.91x (`deadlock-audit-48by6`, `deadlock-audit-hzl1w`)
+
+`SlateHeron`. `bench_maximum_arms_vs_numpy` had never run since `e5d5a67d` made it
+allocation-symmetric. It has now, and it discharges the last open item on `48by6`.
+
+**Campaign result class:** maintenance-diagnostic
+
+```
+MAXIMUM_ARM arm=parallel_native n=4194304 numpy_version=2.4.3 worker=thinkstation1
+  allocation=neither_arm_allocates  arms_are_replicas_not_the_shipped_route=true
+  ratio=1.702079 ci95=[1.629664,1.749020]  numpy_ns=3814213.0 fnp_ns=2250726.0  DECIDABLE_WIN
+MAXIMUM_ARM arm=serial_native   n=4194304  same_invocation_as_parallel_arm=true
+  ratio=1.027788 ci95=[1.019918,1.042297]  numpy_ns=3699671.0 fnp_ns=3579148.0  UNDECIDED
+```
+
+bench_elf_sha256=4e95267adbfb12897b831b42e832a81666b3636f36a5baf0a42a50384d3db904,
+committed HEAD=7374a9bd, `crates/fnp-python` clean. Threadripper PRO 5975WX 32c/64t, powersave.
+
+**BOTH FLATTERED NUMBERS FELL BY ~30% ONCE THE ALLOCATION WAS SYMMETRIC**, which is the
+confirmation `48by6` predicted: parallel 2.430654 → **1.702079** (−30.0%), serial 1.446484 →
+**1.027788** (−28.9%).
+
+**`hzl1w`'s COUNTER-EVIDENCE DOES NOT SURVIVE.** That decision declined delegating f64
+maximum/minimum because "the serial native arm BEATS NumPy 1.352401x and delegating would throw
+that away". Corrected, the serial arm reads **1.027788 and the gate says UNDECIDED** — its effect
+delta of 0.0278 does not clear the required 2x delta of 0.031828. There is no decidable serial win
+to throw away. The reason for that decision is gone.
+
+**BUT THE DECISION MAY STILL BE RIGHT, FOR A DIFFERENT REASON — and this is the useful part.**
+Compare the same op at the same size, kernel versus route:
+
+| | numpy_ns | fnp_ns | ratio |
+|---|---|---|---|
+| KERNEL, neither arm allocates | 3 814 213 | 2 250 726 | **1.702079 WIN** |
+| ROUTE, both arms allocate | 6 441 077 | 7 075 751 | **0.907848 LOSS** |
+
+Our parallel maximum KERNEL beats NumPy by 1.70x. Our ROUTE loses by 1.10x. The kernel is not the
+problem and delegating would throw away a genuinely good kernel; what loses is everything around it
+— the allocation and the wrapper. That reframes `hzl1w` from "should max/min decline the parallel
+arm" to "why does a 1.70x kernel arrive as a 0.91x route", which is a different and more valuable
+question.
+
+**A/A NULL — AND THE NEW FIELD EARNED ITS KEEP ON ITS FIRST REAL RUN.** The parallel row reports
+`incumbent_null_straddles_unity=false`, null_ci95=[0.986804,0.996485], bias 0.006997: the incumbent
+A/A EXCLUDES unity by 0.7%. Under the old output that would have been invisible unless someone read
+the bounds and did the comparison mentally — which is exactly how two biased nulls got banked with
+prose caveats earlier today. **Treat the parallel magnitude as soft**: direction is solid (the effect
+clears its threshold by a wide margin) but 1.702079 should not be quoted to four figures. The serial
+row's nulls both straddle (`true`/`true`, biases 0.005437 / 0.002287); its UNDECIDED verdict is
+clean.
+
+**BOUNDARY:** `arms_are_replicas_not_the_shipped_route=true`. These are bench-local Rust replicas
+against NumPy with `out=`, i.e. a KERNEL comparison. They do not license a vs-incumbent claim about
+`fnp.maximum` as shipped — the route-level number for that is 0.907848.
+
+RETRY PREDICATE: `hzl1w` must now be re-decided on the kernel/route split rather than on the
+withdrawn 1.352401x. Do not quote 2.430654 or 1.446484 again in any direction — they are the
+allocation-flattered pair and are superseded here. The open question is the route, not the kernel.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MEASURED, CEILING, AND THE NEGATIVE CASE PASSED: sharing ONE dtype fetch across the probe chain is worth 731 ns - 35.8% of the n=256 per-call floor and 1.78x NumPy's ENTIRE call (`deadlock-audit-v46rn`)
 
 `SlateHeron`. Ceiling control, run on the first build after the freeze. Both arms are ours: it
