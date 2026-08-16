@@ -26,6 +26,84 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CODE, UNMEASURED: the output allocation stops building a kwargs dict per call, and stops building a one-element tuple at rank 1 (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. Directly against the term the previous row located. No certification: the host rose all
+turn and never converged, so this lands with NO ratio.
+
+**Campaign result class:** operational (no measurement produced)
+
+**PROVENANCE NOTE:** the code landed in `d16ee71a`, committed by a peer from this shared
+checkout rather than by me - my edit was in the working tree when they ran `git commit`. The
+change and its test are mine and are unaltered; this is the third time today work has crossed
+between agents through the shared index, and it is worth recording that the commit author and
+the change author differ here.
+
+**LOADAVG, observed with `uptime` and recorded because the rule requires it even when deferring:**
+`68.87/40.51/29.44` at the start, `65.50/51.10/35.06` mid-turn, `33.38/46.90/39.73` at the end. The
+1-minute figure never came down alongside the 5-minute; at the end the 5-minute is HIGHER than the
+1-minute and both are above ~30.
+
+**WHY THIS SITE.** The preceding row attributed the 370 ns `wrapper_residual` as 83% output
+allocation - `numpy.empty` at final shape, 307.50 ns - and named the 219 ns allocation call as the only
+addressable part, since the 88 ns `getattr` is priced correctness (monkeypatch liveness). This trims
+the call itself rather than the getattr.
+
+**WHAT THE ROUTE DID PER CALL, and it is visible in the source rather than inferred:**
+
+```rust
+let kwargs = PyDict::new(py);                 // a Python dict, every call
+kwargs.set_item("dtype", "float64")?;         // plus a str key and a str value
+let output_shape = PyTuple::new(py, shape)?;  // a tuple, even when shape has ONE element
+numpy.call_method("empty", (&output_shape,), Some(&kwargs))?;
+```
+
+`numpy.empty` takes dtype as its **second positional parameter**, so the dict was pure overhead. This
+ledger already priced a 3-key kwargs dict at **230 ns** in the partition group, against a total output
+allocation of 307.50 ns - so the dict is plausibly a large fraction of what the allocation costs,
+though a 1-key dict is cheaper than a 3-key one and the effect is NOT yet measured.
+
+**NOW:**
+
+```rust
+let flat = if let [only] = shape.as_slice() {
+    numpy.call_method1("empty", (*only, "float64"))?      // bare int at rank 1
+} else {
+    numpy.call_method1("empty", (&PyTuple::new(py, shape)?, "float64"))?
+};
+```
+
+**VERIFIED AGAINST THE MEASURED INTERPRETER (numpy 2.4.3) BEFORE WRITING IT:** `np.empty(5,'float64')`,
+`np.empty((5,),'float64')` and `np.empty(5,dtype='float64')` agree on dtype, shape and C-contiguity, and
+`np.empty((2,3),'float64')` is C-contiguous at rank 2.
+
+**THE DEAD-CODE TRAP I NEARLY SHIPPED.** After switching to the positional form I left the original
+`PyDict::new` + `set_item` two lines above. It was no longer *used*, but it still **executed** on every
+call, so the lever would have saved nothing while looking correct and passing every test. Removed. A
+reviewer checking only the call site would not have seen it.
+
+**THE TEST TARGETS CORRUPTION AND DISENGAGEMENT, not speed.** Two failure modes, neither of which is a
+slowdown: a dtype that is not float64 would make the kernel write f64 through a `PyBuffer` of the wrong
+itemsize and **corrupt** the output; a non-C-contiguous result would make `PyBuffer::as_mut_slice`
+refuse, so the route would silently **decline and delegate** - correct answers, green parity, dead
+native path. `positional_dtype_output_allocation_matches_the_keyword_form_at_every_rank` asserts dtype,
+shape and contiguity for the int form, the 1-tuple form and rank 2, and that the native `divide` route
+still matches NumPy and preserves rank at both rank 1 and rank 2. Passes 1/0.
+
+**GATES:** `cargo test -p fnp-python --lib positional_dtype` 1 passed 0 failed; `cargo clippy -p
+fnp-python --all-targets` exit 0; `rustfmt --check` exit 0.
+
+**NO RATIO IS CLAIMED.** The expected effect is a fraction of the 307.50 ns allocation, and it is
+entirely possible that a 1-key dict is cheap enough that this is worth little - the 230 ns figure is for
+a 3-key dict in a different group and must not be transferred. That transfer is the error
+`deadlock-audit-48by6` withdrew one row after making it.
+
+RETRY PREDICATE: certify with `bench_output_construction_decomposition` (the same group that produced
+the 307.50 ns baseline) plus `bench_add_tiny_n_floor_vs_numpy` for the route-level effect, when 1- and
+5-minute loadavg are close and both under ~30. Baseline: `empty_at_final_shape_ns=307.50` and add
+excess 445-450 ns. If the allocation does not move, the dict was not the cost and this closes.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - THE FIXED-COST MODEL IS ALSO WRONG: the ratio falls with incumbent duration as predicted, but the implied disturbance GROWS 170 -> 325 -> 512 us - plus my verified load window closed during the build, and this group repeats a statistic mismatch I already fixed elsewhere (`deadlock-audit-48by6`)
 
 `RedLynx`. The test registered one row ago, run. It supports the prediction's direction and
