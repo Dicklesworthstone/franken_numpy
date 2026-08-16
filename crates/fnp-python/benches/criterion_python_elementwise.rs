@@ -1318,6 +1318,10 @@ fn main() {
                 bench_percall_floor_across_sizes_vs_numpy,
             ),
             (
+                "bench_signature_keyword_binding_cost",
+                bench_signature_keyword_binding_cost,
+            ),
+            (
                 "bench_divide_size_gate_vs_numpy",
                 bench_divide_size_gate_vs_numpy,
             ),
@@ -2579,9 +2583,36 @@ fn bench_percall_floor_stage_attribution(_c: &mut Criterion) {
 // The probe chain is separated using the control that already exists in shipped
 // code and needs no instrumentation: the entire probe block in `PyUFunc::__call__`
 // sits behind a guard requiring `casting == "same_kind"`, so passing any other
-// casting value skips EVERY probe and falls straight to the delegation tail
-// (`deadlock-audit-wsd7h`). Both arms enter the same `__call__` with the same nine
-// parameters and leave through the same tail.
+// casting value skips EVERY probe (`deadlock-audit-wsd7h`).
+//
+// THAT SUBTRACTION IS CONTAMINATED, AND THE CONTAMINATION CANNOT BE DESIGNED OUT
+// (`deadlock-audit-uj3r3`, found by RedLynx when this group's own guard panicked at
+// -40 ns). `deadlock-audit-s2fkk` added a delegation fast path, and its condition is
+// the IDENTICAL boolean expression as the probe guard:
+//
+//     out.is_none() && where.is_none() && dtype.is_none() && signature.is_none()
+//       && casting == "same_kind" && order == "K" && subok
+//
+// and it is VALUE-based, not presence-based. So an all-defaults call both runs the
+// probes AND returns through `np_ufunc.call1((x1, x2))` sending no keywords, while
+// `casting="unsafe"` both skips the probes AND falls to the tail that allocates a
+// PyDict and makes NumPy parse three keywords. The two costs are perfectly coupled:
+// there is NO kwarg that toggles one without the other, so uj3r3's suggested fix of
+// giving both arms the same non-default kwarg cannot work — that would disable the
+// probes in both arms and leave nothing to measure. Passing `order="K"` explicitly
+// does not help either, because the guard tests the VALUE and "K" is the default.
+//
+// So the tail is a term to MEASURE, not to avoid:
+//
+//     whole - skipped = probe_chain - kwargs_tail
+//     probe_chain     = (whole - skipped) + kwargs_tail
+//
+// `kwargs_tail` is measured in THIS invocation rather than carried in from s2fkk's
+// 727 ns on another worker — dividing into a figure from another host is the exact
+// error the provenance row in this ledger records. It is a LOWER BOUND: the
+// available control times NumPy's own keyword parsing (`arms=numpy_multiply_only_
+// no_fnp_code`) and therefore excludes our PyDict construction, so the true tail is
+// larger and the recovered probe chain is larger still. The row says so.
 //
 // HONESTY ABOUT WHAT THE FRACTION MEANS. Under a partition accounted_fraction is
 // 1.0 BY CONSTRUCTION and is therefore NOT evidence of anything. The informative
@@ -3809,6 +3840,144 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
                  delegating_looks_better={delegating_looks_better} same_invocation=true"
             );
         }
+    });
+}
+
+/// TRIAGE for the nine-parameter signature (`deadlock-audit-t4lri`), using the REAL
+/// route and adding no new types.
+///
+/// `PyUFunc::__call__` is declared with nine parameters, seven of them optional with
+/// defaults, all bound by PyO3 before any work happens. `deadlock-audit-ei9jz` leaves
+/// ~702 ns of a 1232 ns call unattributed and names this as the largest never-priced
+/// candidate. The clean experiment is a nine-parameter signature against a
+/// `(*args, **kwargs)` one, but that needs two new `#[pyclass]`es with `__call__`, and
+/// no bench in this crate has ever declared a pyclass — new macro surface that cannot
+/// be compiled while the build freeze holds.
+///
+/// SO THIS PRICES THE HALF THAT NEEDS NO NEW SURFACE. Both arms call the shipped ufunc
+/// and are SEMANTICALLY all-defaults, because the route's gate compares keyword VALUES,
+/// not presence: passing `casting="same_kind"`, `order="K"`, `subok=True` and
+/// `out/where/dtype/signature=None` leaves every one of the seven gate conditions true,
+/// so the probe block still runs and the fast delegation tail is still chosen. The only
+/// difference is whether PyO3 binds seven keywords OUT OF A DICT or fills them from its
+/// own defaults.
+///
+/// WHAT IT DECIDES. If binding seven present keywords costs little, then filling seven
+/// defaults costs less still, PyO3's keyword machinery is not where the 702 ns lives,
+/// and the whole `(*args, **kwargs)` proposal can be dropped without writing it — which
+/// is the cheaper outcome. If it costs a lot, the pyclass experiment is worth building
+/// when the freeze lifts.
+///
+/// WHAT IT DOES NOT DECIDE, stated so the row is not over-read: it is NOT a measurement
+/// of eager-versus-lazy binding on the hot path. The hot path passes no keywords at all,
+/// and this control cannot isolate what PyO3 spends filling defaults there. It bounds
+/// the family; it does not price the lever.
+fn bench_signature_keyword_binding_cost(_c: &mut Criterion) {
+    const N: usize = 256;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+        let ours = module.getattr("multiply").expect("fnp.multiply");
+
+        // Every keyword at the value PyO3 would have defaulted it to. This keeps
+        // `out.is_none() && where.is_none() && dtype.is_none() && signature.is_none()
+        // && casting == "same_kind" && order == "K" && subok` all true, so the route
+        // taken is byte-for-byte the one `call1` takes.
+        let default_kwargs = PyDict::new(py);
+        default_kwargs.set_item("out", py.None()).expect("bind out");
+        default_kwargs
+            .set_item("where", py.None())
+            .expect("bind where");
+        default_kwargs
+            .set_item("casting", "same_kind")
+            .expect("bind casting");
+        default_kwargs.set_item("order", "K").expect("bind order");
+        default_kwargs
+            .set_item("dtype", py.None())
+            .expect("bind dtype");
+        default_kwargs.set_item("subok", true).expect("bind subok");
+        default_kwargs
+            .set_item("signature", py.None())
+            .expect("bind signature");
+
+        // PARITY BEFORE TIMING: if the two call shapes do not agree bit for bit they are
+        // not the same computation and the difference is not a signature cost.
+        let bare_probe = ours.call1(&args).expect("bare call probe");
+        let kwargs_probe = ours
+            .call(&args, Some(&default_kwargs))
+            .expect("explicit-defaults call probe");
+        assert_eq!(
+            numpy_divide_checksum(&bare_probe, N),
+            numpy_divide_checksum(&kwargs_probe, N),
+            "passing every keyword at its default changed the result — the two arms are \
+             not the same computation and this control is invalid"
+        );
+
+        let bare = || {
+            let started = Instant::now();
+            let out = ours.call1(&args).expect("bare call");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: numpy_divide_checksum(&out, N),
+            }
+        };
+        let explicit = || {
+            let started = Instant::now();
+            let out = ours
+                .call(&args, Some(&default_kwargs))
+                .expect("explicit-defaults call");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: numpy_divide_checksum(&out, N),
+            }
+        };
+        let (effect, null) =
+            common::run_median_ci_contract("signature_keyword_binding", explicit, bare);
+
+        let keyword_binding_ns = effect.arm_a_median_ns - effect.arm_b_median_ns;
+        println!(
+            "SIGNATURE_KEYWORD_BINDING n={N} numpy_version={numpy_version} worker={} \
+             harness=common::run_median_ci_contract \
+             arms=same_route_same_result_differing_only_in_keyword_presence \
+             seven_keywords_passed_at_their_defaults=true \
+             explicit_kwargs_ns={:.1} bare_call_ns={:.1} \
+             keyword_binding_ns={keyword_binding_ns:.1} \
+             ratio={:.6} ratio_ci95=[{:.6},{:.6}] null={:.6} \
+             prices_binding_present_keywords_NOT_eager_vs_lazy=true",
+            measurement_worker(),
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            null.ratio_median,
+        );
     });
 }
 
