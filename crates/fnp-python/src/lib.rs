@@ -458,16 +458,32 @@ impl PyUFunc {
                 } else {
                     false
                 };
-                // The f64 question is answered by one cheap `dtype.char` read per operand
-                // - NOT by `numpy_dtype_is_f64`, which imports numpy and runs a full `asarray`
-                // round-trip PER OPERAND. On this path that cost was paid only to decline:
-                // `divide` at n=256 sits below `F64_DIV_NATIVE_MIN_LEN` and delegates, and
-                // its measured excess (471 ns) was more than double `multiply`'s (220 ns),
-                // which skips this block entirely because `Multiply` maps to `None` above.
+                // ORDERED BY COST, CHEAPEST DECIDER FIRST (`deadlock-audit-ei9jz`).
+                //
+                // The f64 question is answered by one cheap `dtype.char` read per operand -
+                // NOT by `numpy_dtype_is_f64`, which imports numpy and runs a full `asarray`
+                // round-trip PER OPERAND. On this path that cost was paid only to decline.
+                //
+                // The size gate now runs BEFORE those reads, because it is both cheaper and,
+                // on the op that reaches here, more selective. For every op but `Div` it does
+                // NO Python work at all - it returns `true` straight off the op match - so
+                // moving it first cannot cost them anything. For `Div` it is a single
+                // `getattr("size")`, and below `F64_DIV_NATIVE_MIN_LEN` it declines the whole
+                // block for the price of that one read instead of four `getattr`s and two
+                // extracts. `divide` is exactly the op that pays this: add/subtract/multiply
+                // hit `_ => None` above and never enter the block, so divide alone carried the
+                // probe cost, and its measured per-call excess (471 ns) was more than double
+                // `multiply`'s (220 ns).
+                //
+                // Reordering is safe because all three are side-effect-free reads that swallow
+                // their own errors, so the conjunction's VALUE is unchanged - only the number
+                // of reads taken to compute it. The one case worth stating: a non-ndarray now
+                // meets the size check first, which returns `true` when `size` is missing, and
+                // is still declined by the dtype read that follows.
                 if !zero_divisor
+                    && f64_binary_route_is_worth_taking(op, a)
                     && dtype_char_of(a) == Some('d')
                     && dtype_char_of(b) == Some('d')
-                    && f64_binary_route_is_worth_taking(op, a)
                     && let Some(out_val) = try_zerocopy_f64_binary(py, a, b, op)?
                 {
                     return Ok(out_val);
@@ -8528,9 +8544,23 @@ fn zerocopy_f32_unary_flat<'py>(
     }
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
-    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    // Allocate at the FINAL shape, positionally - the two levers already measured on the
+    // f64 route, applied to f32 which still paid both (`deadlock-audit-ei9jz`).
+    //
+    //   `7c04bef0` allocate-at-final-shape removed a per-call `reshape`; the output
+    //   decomposition measured `empty_at_final_shape` 307.50 ns against
+    //   `empty_plus_real_reshape` 612.84 ns - a 305.34 ns saving.
+    //   `d16ee71a` positional dtype removed a per-call `PyDict` + `set_item`, since
+    //   `numpy.empty` takes dtype as its SECOND POSITIONAL parameter.
+    //
+    // This route was still doing `empty(n, dtype=...)` flat and letting its caller
+    // reshape, so it paid both. Rank 1 passes a bare int, skipping a one-element tuple.
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1("empty", (*only, "float32"))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1("empty", (&output_shape, "float32"))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
@@ -8944,8 +8974,9 @@ fn try_zerocopy_f64_unary(
     let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? else {
         return Ok(None);
     };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    // No reshape: `zerocopy_f32_binary_flat` now allocates at the final shape, so the
+    // buffer arrives with the right rank at every rank (`deadlock-audit-ei9jz`).
+    let output = flat.unbind();
     if shape.is_empty() {
         return Ok(Some(output.bind(py).get_item(())?.unbind()));
     }
@@ -9694,7 +9725,10 @@ fn f64_binary_route_is_worth_taking(op: BinaryOp, a: &Bound<'_, PyAny>) -> bool 
     }
     // A missing/odd `size` means this is not the plain ndarray shape the route
     // wants anyway; let the existing checks decline it rather than guessing.
-    match a.getattr("size").and_then(|size| size.extract::<usize>()) {
+    match a
+        .getattr(intern!(a.py(), "size"))
+        .and_then(|size| size.extract::<usize>())
+    {
         Ok(size) => size >= F64_DIV_NATIVE_MIN_LEN,
         Err(_) => true,
     }
@@ -110500,6 +110534,66 @@ mod tests {
         );
     }
 
+    /// Reordering the f64 gate must not change WHICH inputs it admits
+    /// (`deadlock-audit-ei9jz`).
+    ///
+    /// The gate is a conjunction of three side-effect-free reads, and the size predicate
+    /// was moved ahead of the two dtype reads so a small divide declines for one
+    /// `getattr` instead of four. That is only sound if the conjunction's value is
+    /// order-independent, and the risk is not the algebra - it is that each predicate
+    /// swallows its own errors and returns a DEFAULT. `f64_binary_route_is_worth_taking`
+    /// returns `true` when `size` is missing, so on a non-ndarray the new order consults
+    /// it first and gets a PERMISSIVE answer; the dtype read has to be what declines.
+    ///
+    /// This walks the size threshold from below to above with real operands and compares
+    /// against NumPy, so a reorder that admitted an input it used to decline - or declined
+    /// one it used to admit - surfaces as a wrong result, not a silent route change.
+    #[test]
+    fn f64_gate_order_is_outcome_invariant_across_the_size_threshold() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_gate_order")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("divide")?;
+            let theirs = numpy.getattr("divide")?;
+
+            for n in [
+                1_usize << 8,
+                F64_DIV_NATIVE_MIN_LEN - 1,
+                F64_DIV_NATIVE_MIN_LEN,
+                F64_DIV_NATIVE_MIN_LEN + 1,
+            ] {
+                let a = numpy
+                    .call_method1("arange", (n,))?
+                    .call_method1("astype", ("float64",))?;
+                let b = numpy.call_method1("full", (n, 3.25_f64))?;
+                assert_eq!(
+                    ours.call1((&a, &b))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    theirs
+                        .call1((&a, &b))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    "divide at n={n} must be byte-identical to numpy on both sides of the gate"
+                );
+            }
+
+            // The permissive `Err` default in the size predicate is now consulted FIRST.
+            let la = vec![1.0_f64, 2.0, 4.0];
+            let lb = vec![8.0_f64, 16.0, 32.0];
+            assert_eq!(
+                repr_string(&ours.call1((la.clone(), lb.clone()))?),
+                repr_string(&theirs.call1((la, lb))?),
+                "a list must still decline at the dtype read, not slip through the size default"
+            );
+            Ok(())
+        });
+    }
+
     fn numpy_available(py: Python<'_>) -> bool {
         py.import("numpy").is_ok()
     }
@@ -110535,6 +110629,87 @@ mod tests {
     /// defect (`f16-isin-402x-and-pyufunc-registration-trap`: green parity does not
     /// prove kernel engagement), which is why this test asserts the PREDICATE and not
     /// just the output.
+    /// The f32 route now allocates at its FINAL shape, so rank must survive without a
+    /// reshape (`deadlock-audit-ei9jz`).
+    ///
+    /// This applies to f32 the two levers already measured on the f64 route: allocate at
+    /// the final shape (`7c04bef0`, worth 305.34 ns there - `empty_at_final_shape` 307.50
+    /// against `empty_plus_real_reshape` 612.84) and pass dtype POSITIONALLY
+    /// (`d16ee71a`, dropping a per-call `PyDict`). The f32 route was still doing
+    /// `empty(n, dtype=...)` flat and letting its caller reshape, so it paid both.
+    ///
+    /// THE FAILURE THIS GUARDS is rank, not speed. Removing the caller's `reshape` means
+    /// the buffer must arrive already shaped; if it did not, a rank-2 result would come
+    /// back FLAT while still holding the right values in the right order - so an
+    /// elementwise comparison would pass and only `.shape` would reveal it.
+    ///
+    /// n must exceed `F32_BINARY_PARALLEL_MIN` (1 << 21) or the route declines and this
+    /// test would silently exercise NumPy instead.
+    #[test]
+    fn f32_route_preserves_rank_without_a_reshape() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            if rayon::current_num_threads() < 2 {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_f32_final_shape")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            // 1<<21 elements exactly at the gate, plus a rank-2 view of the same data.
+            let code = std::ffi::CString::new(
+                "n = 1 << 21\na1 = (np.arange(n, dtype=np.float32) % 97.0) + 1.0\nb1 = (np.arange(n, dtype=np.float32) % 13.0) + 1.5\na2 = a1.reshape(2048, 1024)\nb2 = b1.reshape(2048, 1024)\n",
+            )
+            .expect("no interior nul");
+            py.run(code.as_c_str(), Some(&locals), Some(&locals))?;
+            let get = |name: &str| {
+                locals
+                    .get_item(name)
+                    .expect("dict lookup")
+                    .expect("binding present")
+            };
+            let fnp_remainder = module.getattr("remainder")?;
+            let np_remainder = numpy.getattr("remainder")?;
+
+            for (an, bn, want_rank) in [("a1", "b1", 1usize), ("a2", "b2", 2)] {
+                let (a, b) = (get(an), get(bn));
+                let ours = fnp_remainder.call1((&a, &b))?;
+                let theirs = np_remainder.call1((&a, &b))?;
+
+                // RANK is the property the reshape removal could break.
+                let our_shape: Vec<usize> = ours.getattr("shape")?.extract()?;
+                let their_shape: Vec<usize> = theirs.getattr("shape")?.extract()?;
+                assert_eq!(
+                    our_shape.len(),
+                    want_rank,
+                    "{an}: f32 route must return rank {want_rank} without a reshape"
+                );
+                assert_eq!(
+                    our_shape, their_shape,
+                    "{an}: f32 route shape must match numpy exactly"
+                );
+
+                // dtype must still be float32 - the positional form must not have
+                // widened or narrowed it.
+                assert!(
+                    ours.getattr("dtype")?.eq(theirs.getattr("dtype")?)?,
+                    "{an}: f32 route must return float32, as numpy does"
+                );
+
+                assert!(
+                    ours.call_method1("__eq__", (&theirs,))?
+                        .call_method0("all")?
+                        .extract::<bool>()?,
+                    "{an}: f32 remainder must match numpy elementwise"
+                );
+            }
+            Ok(())
+        });
+    }
+
     /// `arctan2(a, b, out=c)` must take the NATIVE parallel path, not delegate
     /// (`deadlock-audit-ei9jz`).
     ///

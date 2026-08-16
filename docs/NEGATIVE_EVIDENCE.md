@@ -32,6 +32,66 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CAPABILITY: the f32 route was still paying BOTH costs the f64 route already shed - a per-call PyDict and a per-call reshape (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. Code with tests. Chosen because it applies two levers that are already MEASURED on a
+sibling route, rather than a speculative codegen tweak I could not evaluate without a window.
+
+**Campaign result class:** capability (no ratio claimed)
+
+**LOADAVG AND CPU MHz, observed:** loadavg `57.06/30.19/24.62` when I checked at the start - a 1-minute
+spike well above ~30, so **nothing was certified** - and `12.20/21.63/23.99` by the gate. **CPU MHz max
+4043, min 1429**; max is the recorded field per `a7be8cf1`.
+
+**THE GAP.** `zerocopy_f32_binary_flat` was doing exactly what the f64 route did before two landed
+fixes:
+
+```rust
+let kwargs = PyDict::new(py);              // a Python dict, every call
+kwargs.set_item("dtype", "float32")?;      // plus a str key and value
+let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;   // FLAT
+...and the caller then did flat.reshape(shape)
+```
+
+Both costs have already been measured on the f64 route and removed there:
+- **allocate at final shape** (`7c04bef0`), worth **305.34 ns** - `empty_at_final_shape` 307.50 ns
+  against `empty_plus_real_reshape` 612.84 ns in the output decomposition;
+- **positional dtype** (`d16ee71a`), removing a per-call `PyDict` + `set_item`, since `numpy.empty`
+  takes dtype as its SECOND POSITIONAL parameter.
+
+The f32 route paid both on every call. It now allocates at the final shape, positionally, with a bare
+int at rank 1, and its caller no longer reshapes.
+
+**THE FAILURE THIS COULD HAVE INTRODUCED IS RANK, NOT SPEED - and it is the interesting part.** With
+the caller's `reshape` removed, the buffer must arrive already shaped. If it did not, a rank-2 result
+would come back FLAT **while holding the right values in the right order** - so an elementwise
+comparison against NumPy would still pass, and only `.shape` would reveal the defect. The test
+therefore asserts rank and shape FIRST, then dtype, then values.
+
+**THE TEST MUST ALSO CLEAR THE ROUTE'S OWN GATE.** `F32_BINARY_PARALLEL_MIN` is `1 << 21`, so anything
+smaller declines and the test would silently exercise NumPy instead while passing. It uses exactly
+`1 << 21` elements and a 2048x1024 view of the same data, and skips itself when
+`rayon::current_num_threads() < 2`, which is the route's other decline condition.
+
+**GATES:** `cargo test -p fnp-python --lib f32_route_preserves` 1 passed 0 failed; `cargo clippy -p
+fnp-python --all-targets` exit 0 with zero warnings; `rustfmt --check` exit 0.
+
+**ALSO DISCHARGED THIS TURN:** the `out=` bench group banked as UNVERIFIED in `b6710cc6` now compiles -
+`cargo clippy -p fnp-python --benches` exit 0. The peer's in-flight `lib.rs` edit that broke the shared
+tree has been resolved on their side, so that caveat is closed.
+
+**NO RATIO IS CLAIMED.** The 305.34 ns is what the same change measured on the **f64** route; f32
+allocations are a different size and the saving here is unmeasured. Transferring a sibling route's
+figure is the error this ledger retracted twice today, so it is stated as the MOTIVE for the change,
+not as its result.
+
+RETRY PREDICATE: certify with `bench_out_kwarg_vs_numpy` extended to an f32 cell, or with a direct f32
+remainder row at n >= 2^21 - below that the route declines and any measurement is of NumPy. Only then
+quote a saving. The remaining unapplied instance of this pattern, if any, is in the f16 and complex
+writers, which should be checked for the same flat-then-reshape shape before anyone assumes they are
+clean.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - THE PAIRED `out=` ARM THREE RETRY PREDICATES ASKED FOR, and the prediction it exists to test: `out=` may flip `maximum` from 0.907848 to 1.702079 (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. Code only - the host was rising and I did not certify. Three of my own rows end with
