@@ -957,6 +957,42 @@ ordering to hold; a single-worker ordering is what produced a sign inversion in
 `deadlock-audit-80uph`. Then gate with the existing conformance suites — the change is
 result-identical, since both paths call the same `op.apply`. AGENT_NAME=TealOak.
 
+> **CORRECTION appended 2026-08-16 by `RedLynx` — THE EVIDENCE FOR THIS REJECT IS WITHDRAWN
+> (`deadlock-audit-48by6`).** The 1.352401x worst bound this row rests on came from
+> `bench_maximum_arms_vs_numpy`, and that group was measuring an ALLOCATION ASYMMETRY, not a
+> kernel. Its candidates were Rust replicas writing into `Vec`s allocated ONCE outside the
+> timing loop; its incumbent was `np_maximum.call1(&args)`, positional only, allocating a fresh
+> 32 MB output and paying its first-touch faults on every iteration. The candidate was handed
+> for free the most expensive thing the incumbent did.
+>
+> The scale of the flattery is measurable on one host in one session: this group read
+> **2.430654x** for parallel `maximum` at n=2^22 while `bench_native_binary_family_vs_numpy`
+> read **0.907848x** for the same op at the same n — a 2.7x disagreement, and the 3.4x is on
+> OUR side (2.09 ms against 7.08 ms), not NumPy's.
+>
+> **SO THIS ROW'S CONCLUSION NO LONGER FOLLOWS FROM ITS EVIDENCE.** It rejected delegating f64
+> `maximum`/`minimum` on the ground that "the serial native arm BEATS NumPy 1.352401x". Both
+> replica arms were flattered by the same mechanism, so neither the 1.374754x serial figure nor
+> the 1.014081x parallel one may be read as a comparison against NumPy. What survives is the
+> INTERNAL ordering — serial beat parallel in that binary — because both replicas were flattered
+> the same way; that ordering is untouched by this correction.
+>
+> **AND THE ROUTE-LEVEL NUMBERS POINT THE OTHER WAY.** On the same host, the shipped route reads
+> `maximum` 0.907848 and `minimum` 0.913424 — we LOSE by ~1.10x, which is what
+> `deadlock-audit-hzl1w` originally claimed. This does not by itself license delegating: that
+> decision needs the two options measured against each other in one binary, and this row's own
+> "CHANGE NOT YET LANDED" note still stands. But the stated reason for refusing hzl1w is gone.
+>
+> **WHY NO NULL CAUGHT IT.** Both groups carried clean dual A/A nulls throughout. A null proves
+> each arm is internally reproducible; it can NEVER show that two arms are comparable. This is a
+> structural blind spot of the null gate and is worth stating wherever the gate is documented.
+>
+> The group is corrected in `e5d5a67d` — NumPy now writes into a preallocated `out=` so neither
+> side allocates, and both rows now state which side allocates rather than assuming symmetry.
+> The corrected numbers are NOT yet measured: the build freeze was in force at /data 42G. Until
+> they are, quote 0.907848 / 0.913424 (route level) and nothing from the arms group.
+> AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - WIN (KEEP, maintenance-self-speedup): allocate the f64 binary output AT ITS FINAL SHAPE - the reshape costs 445.65 ns and the shaped allocation is not more expensive (`deadlock-audit-k4yus`)
 
 `TealOak`. `zerocopy_f64_binary_flat` allocated `numpy.empty(n)` and the caller then
