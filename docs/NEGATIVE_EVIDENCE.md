@@ -32,6 +32,54 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - THE PAIRED `out=` ARM THREE RETRY PREDICATES ASKED FOR, and the prediction it exists to test: `out=` may flip `maximum` from 0.907848 to 1.702079 (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. Code only - the host was rising and I did not certify. Three of my own rows end with
+"certify with a paired `out=` arm" and none could be run, because no group exercised `out=` at all.
+This is that group.
+
+**Campaign result class:** operational (instrument added; no ratio produced)
+
+**LOADAVG AND CPU MHz, observed:** loadavg `26.81/29.26/24.56` on my own check (reported as 46.3
+rising a moment earlier - this host moves fast), **CPU MHz max 3993, min 1429**. The 5-minute figure
+at 29.26 sits on the threshold, so nothing was certified.
+
+**WHAT THE GROUP DOES.** `bench_out_kwarg_vs_numpy` runs `fnp.op(a, b, out=c)` against
+`numpy.op(a, b, out=c)` under the dual-null contract, at two cells: `divide` at 2^20 (native serial
+regime) and `maximum` at 2^22 (above the parallel threshold).
+
+**THE PREDICTION IT EXISTS TO TEST, and it is a sharp one.** The corrected maximum arms measured what
+happens when each side stops allocating: NumPy fell from 6441077 to 3814213 ns, and OUR arm fell
+further, 7075751 to 2250726 ns. The same op therefore reads **0.907848 - a loss - when both sides
+allocate, and 1.702079 - a win - when neither does.** If that holds through the real route, `out=` is
+not a small saving here; it is the parameter that **decides the sign of the result**. This group is
+how that stops being an inference from two separate measurements and becomes one paired number.
+
+**BOTH ARMS ARE SYMMETRIC BY CONSTRUCTION**, which is the defect `deadlock-audit-48by6` caught in the
+old maximum arms: each side gets its OWN preallocated `out` of the same dtype and shape - separate
+buffers, not one shared - so neither arm is handed work the other has to do, and neither can be
+accused of warming the other's cache lines.
+
+**PARITY AND IDENTITY ARE ASSERTED BEFORE TIMING:** both arms must return the very buffer they were
+given (`is(&out)`, matching NumPy's contract) and must agree on the lane checksum. An arm that
+returned a fresh array would be measuring a different operation.
+
+**COMPILE VERIFICATION WAS NOT OBTAINED, and I am not claiming it.** The shared working tree currently
+fails to compile - `x1_dtype_char` used before definition in a PEER's uncommitted `lib.rs` edit
+(`dtype_char_of` does not exist in HEAD; `git diff --stat` shows 105 insertions on their side). The
+build stops at `lib`, so the bench target is never reached. **HEAD itself is healthy** - in HEAD the
+sniff is defined at 548 and used at 559/565/573. I did not touch, stash or revert their work; my own
+`lib.rs` reservation expired at 22:14 and they hold it legitimately. They have been notified with the
+diagnosis, including that I hit the same use-before-definition twice while hoisting that sniff.
+
+RETRY PREDICATE: run `fnp-group=bench_out_kwarg_vs_numpy` once the tree compiles and 1- and 5-minute
+loadavg are close and both under ~30, and record the `CPU_WITNESS` line with it. If `maximum` comes
+back near 1.70x, the interference between allocation and ratio sign is confirmed and every ~0.91
+memory-bound cell in this ledger needs restating as "loses WHEN ALLOCATING". If it comes back near
+0.91, the allocation-free arms measured something the route does not reproduce, and it is the
+allocation-free numbers that need withdrawing - not these.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CAPABILITY: `arctan2(a, b, out=c)` now takes the NATIVE PARALLEL path instead of delegating - the first `out=` extension to the compute-bound family where this project actually wins (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. Capability code with tests, chosen against the evidence rather than against the worst

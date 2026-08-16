@@ -1326,6 +1326,7 @@ fn main() {
                 "bench_add_tiny_n_floor_vs_numpy",
                 bench_add_tiny_n_floor_vs_numpy,
             ),
+            ("bench_out_kwarg_vs_numpy", bench_out_kwarg_vs_numpy),
             (
                 "bench_percall_floor_across_ops_vs_numpy",
                 bench_percall_floor_across_ops_vs_numpy,
@@ -3231,6 +3232,133 @@ fn bench_dtype_probe_fanout_ceiling(_c: &mut Criterion) {
 // FLATTENS below 256 the asymptote is already reached and n=256 was a fair worst case. If
 // it keeps falling, every "worst ratio" figure in this ledger understates the small-array
 // case. Either answer is worth having; the group does not presuppose one.
+// The paired `out=` arm every recent retry predicate asks for, and which did not exist
+// (`deadlock-audit-ei9jz`).
+//
+// Three rows now end with "certify with a paired out= arm" and none could be run, because
+// no group exercises `out=` at all. This is that group.
+//
+// WHY IT MATTERS MORE THAN IT LOOKS. The corrected maximum arms measured NumPy's own cost
+// collapsing when it stops allocating - 6441077 ns allocating against 3814213 ns with
+// `out=` - while ours fell further, 7075751 to 2250726. So the SAME op reads 0.907848
+// (a loss) when both sides allocate and 1.702079 (a win) when neither does. `out=` is not
+// a small saving on this route; it is the parameter that decides the sign of the result.
+// That prediction is exactly what this group exists to test.
+//
+// BOTH ARMS ARE SYMMETRIC BY CONSTRUCTION, which is the defect `deadlock-audit-48by6`
+// caught in the old maximum arms: each side gets its OWN preallocated `out` of the same
+// dtype and shape, so neither is handed a buffer the other has to build. Separate buffers
+// rather than one shared, so no arm can be accused of warming the other's cache line.
+//
+// CELLS: `divide` at 2^20 (native serial regime, where the per-call floor dominates) and
+// `maximum` at 2^22 (above the parallel threshold, where the 1.702079 kernel win should
+// appear if `out=` really is the deciding parameter).
+fn bench_out_kwarg_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        for (op_name, exponent) in [("divide", 20u32), ("maximum", 22u32)] {
+            let n = 1usize << exponent;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout_np = np.empty(n)\nout_fnp = np.empty(n)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a = locals.get_item("a").expect("a operand");
+            let b = locals.get_item("b").expect("b operand");
+            let out_np = locals.get_item("out_np").expect("numpy out buffer");
+            let out_fnp = locals.get_item("out_fnp").expect("fnp out buffer");
+            let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+            let ours = module.getattr(op_name).expect("fnp op");
+            let theirs = numpy.getattr(op_name).expect("numpy op");
+            assert!(
+                !ours.is(&theirs),
+                "fnp.{op_name} IS numpy's object - there is no candidate arm"
+            );
+            let np_kwargs = PyDict::new(py);
+            np_kwargs.set_item("out", &out_np).expect("bind numpy out");
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("out", &out_fnp).expect("bind fnp out");
+
+            // Parity before timing: the two arms must agree, and each must have actually
+            // written its own buffer rather than returning a fresh array.
+            let numpy_probe = theirs
+                .call(&args, Some(&np_kwargs))
+                .expect("numpy out= probe");
+            let fnp_probe = ours.call(&args, Some(&fnp_kwargs)).expect("fnp out= probe");
+            assert!(
+                numpy_probe.is(&out_np),
+                "numpy.{op_name} must return the out buffer it was given"
+            );
+            assert!(
+                fnp_probe.is(&out_fnp),
+                "fnp.{op_name} must return the out buffer it was given, as numpy does"
+            );
+            assert_eq!(
+                numpy_divide_checksum(&numpy_probe, n),
+                numpy_divide_checksum(&fnp_probe, n),
+                "fnp.{op_name} and numpy.{op_name} disagree under out="
+            );
+
+            let incumbent = || {
+                let started = Instant::now();
+                let result = theirs
+                    .call(&args, Some(&np_kwargs))
+                    .expect("numpy out= call");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&result, n);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let candidate = || {
+                let started = Instant::now();
+                let result = ours.call(&args, Some(&fnp_kwargs)).expect("fnp out= call");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&result, n);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let (effect, _incumbent_null, _candidate_null) =
+                common::run_dual_null_median_ci_contract(
+                    &format!("{op_name}_f64_n{n}_out_kwarg_vs_numpy"),
+                    incumbent,
+                    candidate,
+                );
+            println!(
+                "OUT_KWARG_VS_NUMPY op={op_name} n={n} log2n={exponent} \
+                 numpy_version={numpy_version} worker={} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 both_arms_preallocate_their_own_out=true \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
+                 faster_than_numpy={}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_ci_low > 1.0,
+            );
+        }
+    });
+}
+
 fn bench_add_tiny_n_floor_vs_numpy(_c: &mut Criterion) {
     Python::initialize();
     Python::attach(|py| {
