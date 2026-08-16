@@ -504,7 +504,7 @@ site only if a site's shape can be non-1-D in the common case - otherwise the 20
 figure above transfers, and the risk is entirely in the 0-D branch each site must
 keep.
 
-## 2026-08-16 - WIN (KEEP, INCUMBENT-WIN): `fnp.remainder` beats `numpy.remainder` at 2^21 - worst bound 1.121225x, best 2.950744x, four runs on two workers all DECIDABLE_WIN (`deadlock-audit-322j4`)
+## 2026-08-16 - WIN (KEEP, INCUMBENT-WIN): `fnp.remainder` beats `numpy.remainder` at 2^21 - worst bound 1.121225x, best 8.037497x, five runs on three workers all DECIDABLE_WIN (`deadlock-audit-322j4`)
 
 `TealOak`. This campaign's numpy ledger held ONE vs-incumbent row and it was a loss. This is the
 op the f64 fast-path set was built for: NumPy runs floored-mod single-threaded and it is
@@ -533,14 +533,33 @@ run 4  worker=vmi1153651  ratio=1.299521 ci95=[1.121225,1.381368] numpy_ns=19547
        bench_elf_sha256=99d45b3fe7d5b85824830c8b410772f1b97117253ad5f4bb2c47b427c28fbc79
        harness_contract_source_sha256=0b980265f5757b898355e6ca52d4730e4b503ee5d9952eb1d4f879d62502fe38 harness_source_matches_disk=true covers=common/mod.rs+bench_file
 HOST_BASELINE host=vmi1153651 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+run 5  worker=thinkstation1  ratio=8.037497 ci95=[7.819150,8.302176] numpy_ns=17390619 fnp_ns=2164548 DECIDABLE_WIN
+       bench_elf_sha256=ef5467cb2a43c00b191011ba4b6a4b56ad1f09ec9506a9df7d7df015083431cd
+       numpy_artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48
+       harness_contract_source_sha256=0b980265f5757b898355e6ca52d4730e4b503ee5d9952eb1d4f879d62502fe38 harness_source_matches_disk=true covers=common/mod.rs+bench_file
+       bench_invocation_id=000000000000000018cc4d6a3a76054a-003f3437 checksum=8e318611f6985c10 (identical across effect row and both nulls)
+       incumbent A/A ratio_median=1.000332 ci95=[0.998696,1.000817]; candidate A/A ratio_median=0.999575 ci95=[0.976336,1.032376]; controlling_null_half_width=0.032376 required_2x_delta=0.064752 both_nulls=true
+HOST_BASELINE host=thinkstation1 cpu_model=AMD_Ryzen_Threadripper_PRO_5975WX_32-Cores physical_cores=32 logical_threads=64 allowed_logical_threads=64 governor=powersave
+THREAD_CONFIGURATION rayon_pool_threads=64 RAYON_NUM_THREADS=unset OPENBLAS_NUM_THREADS=unset OMP_NUM_THREADS=unset MKL_NUM_THREADS=unset
+ISA_BASELINE compile_avx2=true runtime_avx2=true runtime_fma=true runtime_f16c=true runtime_avx512f=false
 
-**QUOTE THE WORST BOUND: 1.121225x.** The four runs do not agree on magnitude and are NOT pooled.
+**Run 5 is the FIRST LOCAL measurement in this row** and the first produced under the cargo-shim
+bypass (`export RCH_CARGO_WRAPPER_BYPASS=1` then `env -u CARGO_TARGET_DIR cargo build --release
+--bench criterion_python_elementwise --message-format=json`, executable path taken from the JSON,
+zero `[RCH]` lines in the build output). Runs 1-4 were remote. Same stock `release` profile as the
+others, so it is TRIAGE grade for absolute ns and its ratio is not comparable across workers.
+
+**QUOTE THE WORST BOUND: 1.121225x.** The five runs do not agree on magnitude and are NOT pooled.
 Three landed on `vmi1227854` (rch keeps returning to a warm pool and placement cannot be pinned)
 and one on `vmi1153651`, where BOTH arms were slower in absolute terms — NumPy 19.5 ms against
 13.6-14.1 ms, and our arm 15.6 ms against 4.7-5.3 ms. Our arm degraded ~3x on that host while
 NumPy's degraded ~1.4x, which is what compresses the ratio: a parallel kernel loses more to a busy
-box than a single-threaded one does. The direction and the verdict replicate on both workers; the
-magnitude is worker-scoped, and 2.95x must never be quoted as the result.
+box than a single-threaded one does. The direction and the verdict replicate on all three workers;
+the magnitude is worker-scoped, and neither 2.95x nor run 5's 8.04x may be quoted as the result.
+Run 5 makes the worker-scoping unmistakable: on a 32-core/64-thread Threadripper our parallel arm
+drops to 2.16 ms while NumPy's single-threaded arm holds at 17.4 ms — the ratio moves 7x across
+workers because OUR arm scales with cores and the incumbent's does not. The worst bound is the
+only number that survives the host axis.
 
 **WHY n=2^21 IS LOAD-BEARING.** `parallel_min` for Remainder is exactly 1<<21. Below it the native
 path runs SERIAL and the parallel win cannot appear. Every earlier elementwise row in this ledger
@@ -548,7 +567,7 @@ measured at 2^20 or smaller — strictly under the threshold — which is why a 
 already exist. This is not a new kernel; it is the first measurement of an existing one at a size
 where it can work.
 
-**ENGAGEMENT PROOF.** A 1.12-2.95x speedup is itself proof the native path ran: had the route
+**ENGAGEMENT PROOF.** A 1.12-8.04x speedup is itself proof the native path ran: had the route
 declined and delegated, the ratio would sit at unity. Dispatch is additionally asserted at runtime
 inside the measured binary — `fnp.remainder` is checked not to BE NumPy's object and the incumbent
 module's `__name__` is checked to be `numpy`. Both arms' results are checksum-compared before
@@ -562,7 +581,12 @@ about `divide`, which remains a replicated loss.
 
 RETRY PREDICATE: re-measure on a quiet host and on a >=16-core worker before quoting anything above
 the worst bound; the spread here is host-driven and the top of the range came from the warm pool.
-AGENT_NAME=TealOak.
+Run 5 SATISFIED that predicate on the >=16-core axis (32 physical cores, local, no rch queue) and
+returned 8.04x — which does NOT license quoting 8.04x, because the predicate asked for a wider
+host sample and got one that widened the spread rather than narrowing it. The next useful move is
+a `--profile release-perf` build on this same local host, since every run in this row is stock
+`release` and therefore triage grade.
+AGENT_NAME=TealOak (runs 1-4).
 
 ## 2026-08-16 - MEASURED, SEARCH CLOSED: output construction is the dominant wrapper stage at 1310 ns - 1.8x NumPy's ENTIRE add call - and the reshape, not the allocation, is the expensive half (`deadlock-audit-tmmud`)
 
