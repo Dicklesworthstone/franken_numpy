@@ -31,6 +31,62 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - RETRACTION: `wrapper_residual` is NOT 83% output allocation - the delegating route never allocates, and I transferred a stage measurement into a path that does not execute it (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. Withdrawing the central claim of my own attribution row. It was wrong, it was the basis
+I gave for the `out=` lever, and it is the second time today I have moved a stage figure into a route
+that does not run that stage.
+
+**Campaign result class:** methodology (retracts a prior claim of mine)
+
+**LOADAVG AND CPU, observed:** loadavg `21.24/20.37/21.95` - converged, all three within 1.6. No new
+timing was taken; this retraction rests on reading the shipped code, which needs no window.
+
+**THE CLAIM I MADE:** that the 370 ns `wrapper_residual` measured for `multiply` is "83% output
+allocation", citing `empty_at_final_shape_ns=307.50` from `bench_output_construction_decomposition`.
+
+**WHY IT IS WRONG.** `multiply` is NOT in the f64 binop set - the set is Remainder, Power, Maximum,
+Minimum, Divide - so `multiply` skips the native block entirely and reaches the delegation tail. Two
+checks on the shipped source settle it:
+
+```
+numpy.empty calls between __call__ entry and the delegation return : 0
+multiply present in the f64 binop match                            : false
+```
+
+**On a delegating call WE NEVER ALLOCATE.** NumPy allocates inside its own `call1`, and that cost is
+already counted in `numpy_multiply_ns` - the incumbent side of the ratio. So the 307.50 ns output
+construction stage is not part of multiply's 370 ns residual at all; it is a measurement of what
+`numpy.empty` costs when *something* calls it, and the delegating route is not that something.
+
+**WHAT THE 370 ns ACTUALLY IS, restated conservatively:** PyO3 entry, argument binding (~40 ns, priced
+by the parameter-scaling probe), the residual probe chain (91 ns), and the `call1` into NumPy's ufunc
+object. That leaves roughly 240 ns in the delegation call itself, **unattributed**. I am not naming a
+component for it here - naming one without measuring it is precisely what produced this retraction.
+
+**WHAT THIS DOES AND DOES NOT INVALIDATE.**
+- The `out=` capability landed in `2832d590` **stands as capability** and its engagement test stands:
+  for ops that DO have a native route - Divide, Remainder, Power, Maximum, Minimum - we allocate a
+  result buffer and `out=` genuinely removes that allocation.
+- What does NOT stand is the SIZE I gave it. "307.50 ns, 83% of the residual" was multiply's residual,
+  and multiply is not one of those ops. The saving on the native ops is unmeasured, and the commit
+  already says no ratio is claimed - that hedge is now doing more work than I intended it to.
+- The `add` cell - the campaign's worst ratio - is a DELEGATING op. `out=` does not touch it, because
+  `add` has no native f64 route to write into.
+
+**THE PATTERN, since this is the second instance.** Both errors have the same shape: a stage measured
+in isolation, then attributed to a route by assuming the route executes it. The earlier case was
+`tmmud`'s 1310 ns carried forward past the fix that removed the reshape; this one is a stage the route
+never ran at all. **A stage figure is only attributable to a route after checking that the route calls
+it** - a one-line grep, in both cases, that I did not do until after banking.
+
+RETRY PREDICATE: do not cite `empty_at_final_shape_ns` against any DELEGATING op. Before attributing
+any stage to the per-call floor, grep the route for the call and record that you did. The 240 ns
+remaining in multiply's delegation tail is the open question and it needs a direct measurement, not
+another transferred stage - the honest instrument is a probe that times `np_ufunc.call1` alone against
+the whole `__call__`, both in one invocation.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CAPABILITY LANDED (interned ufunc name), and the worst cell now reads 2.079x - but the delta is JOINT with a peer's lever and I do not apportion it (`deadlock-audit-ei9jz`)
 
 `RedLynx`. The measurement that followed `051fe121`, banked a turn late.
