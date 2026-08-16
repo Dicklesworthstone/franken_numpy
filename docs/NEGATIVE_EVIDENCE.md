@@ -24,6 +24,76 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - RECONCILIATION: incumbent contamination is a property of the HARNESS, not of the phenomenon - torch's harness can be right and mine can be right, and here is the self-check that tells any project which it is (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. A sibling project (torch) CONFIRMED incumbent contamination for its harness; my test on
+this harness did not confirm it. Both can be true, and treating either as the fleet-wide answer would
+be wrong. This row reconciles them and gives every project a decidable self-check.
+
+**Campaign result class:** maintenance-diagnostic
+
+**LOADAVG, observed:** `36.88/32.49/27.81` - 1- and 5-minute both above ~30, so nothing was certified
+this turn. This row is analysis of already-banked output plus a source read; no new measurement.
+
+**FIRST, A CORRECTION TO MY OWN PRIOR ROW.** I reported the test as "NOT confirmed" and "invalidates
+NONE". Both stand, but I did not state the test's POWER, and without it "not confirmed" reads as
+"proven absent". It is not. Over the 10 adequately-resolved row-pairs the incumbent-minus-candidate
+inflation is **mean +1.99 pts, sd 8.13, se 2.57, 95% CI [-3.05, +7.03]**. So:
+
+> **My test excludes a systematic contamination larger than ~5 percentage points. It does NOT exclude
+> a bias of a few percent** - which is exactly the size that would still matter for rows quoted to
+> three decimals.
+
+That is a materially weaker claim than my previous row implied, and it is the honest one.
+
+**SECOND, WHY THE TWO HARNESSES CAN DISAGREE.** Contamination is not a fact about NumPy or about our
+kernels; it is a fact about how a harness SCHEDULES its arms. Four properties of this harness, verified
+in `benches/common/mod.rs` rather than assumed, each suppress it:
+
+| property | value here | effect on contamination |
+|---|---|---|
+| arm schedule | `BALANCED_SQUARE = [A,B,B,A,A,B,B,A]` (line 38) | interleaves at slot granularity, so cache/frequency drift lands on BOTH arms and cancels in the ratio |
+| per-slot estimator | `min_observation_with`, min-of-N (line 914) | the minimum is the least-contaminated sample; contamination inflates the TAIL, which the min discards |
+| warm-up | `DUAL_NULL_WARMUP_ROUNDS = 4` (line 39) | discards the cold-cache transition where cross-arm eviction is worst |
+| controls | dual A/A nulls per row | a contaminating asymmetry shows up as a null that stops straddling unity |
+
+**A HARNESS WITHOUT THESE IS EXPOSED, and the exposure is largest when:** arms run in BLOCKS (all
+incumbent reps, then all candidate reps) rather than interleaved; the estimator is a MEAN or a
+whole-run median rather than a min-of-N; the two arms have LARGE and UNEQUAL working sets, so each
+evicts the other's; or there is no A/A null to reveal it. Any one of those makes torch's result
+entirely plausible for torch's harness while mine remains valid for mine.
+
+**THE SELF-CHECK, runnable by any project in one invocation, no new code:** measure the incumbent
+TWICE in the same binary - once interleaved against the candidate, once against ITSELF - and compare.
+Report **both** arms' inflation, not just the incumbent's, because:
+
+- both arms inflating together is COMMON-MODE (host load), which interleaving cancels and which is not
+  contamination;
+- only the DIFFERENCE between the two arms' inflation can bias a ratio;
+- and the comparison is invalid where the printed precision cannot resolve it. On this harness
+  `arm_*_median_ms` prints four decimals, so at a 300 ns median one print tick is 100 ns = 33%. **Every
+  large percentage I first saw at n<=256 was one tick.** A project running this check at small n will
+  manufacture a contamination that is not there.
+
+**WHAT THIS MEANS FOR THE FLEET.** Do not port either conclusion across projects. A project should run
+the self-check above on its OWN harness at n large enough to resolve it, and record the answer with its
+schedule, estimator and warm-up alongside - those three fields decide the outcome, and none of them is
+visible in a banked ratio.
+
+**WHICH ROWS ARE AFFECTED HERE: still none withdrawn**, but now with a stated bound rather than a bare
+assertion - no row in this ledger depends on a contamination smaller than the ~5 pt floor my test could
+resolve, because no row here is quoted to a precision finer than that against a competing figure. Rows
+that WOULD be exposed are the tight ones: the 0.07% agreement between two certifications of the worst
+cell, and the 1.1% excess band across n - those are internal consistency checks between runs of the
+SAME harness, so a common bias cancels there too.
+
+RETRY PREDICATE: if a tighter bound is needed, the direct experiment is the one my previous row already
+named - run the incumbent ALONE in one invocation and interleaved in another, at n >= 2^18, on a host
+whose 1- and 5-minute loadavg agree, and repeat until the standard error is below the bias you care
+about. With se=2.57 pts from 10 rows, resolving a 2 pt bias needs roughly 4x the sample; that is a real
+cost and should only be paid if a row's conclusion actually turns on it.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - TESTED AND NOT CONFIRMED: our arm does NOT measurably slow the incumbent it is paired against - the effect is COMMON-MODE, and the naive test for it is a printing artifact (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. I was asked to quantify a contamination I had confirmed and to say which rows it

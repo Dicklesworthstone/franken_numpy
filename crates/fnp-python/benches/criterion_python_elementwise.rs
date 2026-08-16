@@ -1363,6 +1363,10 @@ fn main() {
                 "bench_incumbent_interference_remainder_route",
                 bench_incumbent_interference_remainder_route,
             ),
+            (
+                "bench_incumbent_interference_shadow_held_constant",
+                bench_incumbent_interference_shadow_held_constant,
+            ),
         ],
     );
 }
@@ -5193,6 +5197,120 @@ fn maximum_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
 //
 // n=1<<22 sits above the 1<<21 parallel_min, the regime the losing measurements
 // came from — below it the shipped route runs serially anyway.
+/// THE CONFOUND-FREE interference experiment: hold the SHADOW constant, vary only the
+/// incumbent (`deadlock-audit-48by6`).
+///
+/// Two rows ago I concluded that interference is governed by whether the INCUMBENT is
+/// bandwidth-bound, from two cells: `numpy.maximum` shadowed by `maximum_parallel` showed
+/// 1.067x, and `numpy.remainder` shadowed by `fnp.remainder` showed none. **Those two
+/// cells differ in the SHADOW as well as the incumbent, and in size.** The conclusion is
+/// therefore not licensed by that data — a different shadow could explain the difference
+/// just as well as a different incumbent, and I did not notice while writing it.
+///
+/// This group removes the confound. ONE shadow (`maximum_parallel`), ONE size (2^22), two
+/// incumbents that differ only in their regime:
+///   `numpy.maximum`   — one trivial op per element, memory-bound
+///   `numpy.remainder` — an fmod per element, compute-bound
+///
+/// PRE-REGISTERED PREDICTION: if the incumbent's regime is the driver, `maximum` shows
+/// interference near the 1.067x already replicated and `remainder` shows none. If BOTH
+/// show interference, the driver was the shadow all along and the compute-bound story is
+/// wrong. If NEITHER does, the earlier maximum result was specific to something else again.
+fn bench_incumbent_interference_shadow_held_constant(_c: &mut Criterion) {
+    const N: usize = 1 << 22;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_obj = locals.get_item("a").expect("a operand");
+        let b_obj = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a_obj, &b_obj]).expect("args");
+        let np_out = numpy
+            .call_method1("empty_like", (&a_obj,))
+            .expect("preallocated numpy output");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &np_out).expect("bind out=");
+
+        let a_vec: Vec<f64> = a_obj
+            .call_method0("tolist")
+            .expect("a list")
+            .extract()
+            .expect("a f64s");
+        let b_vec: Vec<f64> = b_obj
+            .call_method0("tolist")
+            .expect("b list")
+            .extract()
+            .expect("b f64s");
+        let mut shadow_out = vec![0.0_f64; N];
+
+        for op in ["maximum", "remainder"] {
+            let np_op = numpy.getattr(op).expect("numpy op");
+            let isolated = || {
+                let started = Instant::now();
+                let result = np_op
+                    .call(&args, Some(&out_kwargs))
+                    .expect("numpy op isolated");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: numpy_divide_checksum(&result, N),
+                }
+            };
+            let shadowed = || {
+                // The SAME shadow for both incumbents — this is the whole point.
+                maximum_parallel(&a_vec, &b_vec, &mut shadow_out);
+                let started = Instant::now();
+                let result = np_op
+                    .call(&args, Some(&out_kwargs))
+                    .expect("numpy op shadowed");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: numpy_divide_checksum(&result, N),
+                }
+            };
+            let (effect, null) = common::run_median_ci_contract(
+                &format!("interference_fixed_shadow_{op}"),
+                shadowed,
+                isolated,
+            );
+            let interference_ns = effect.arm_a_median_ns - effect.arm_b_median_ns;
+            println!(
+                "INTERFERENCE_FIXED_SHADOW incumbent={op} n={N} numpy_version={numpy_version} \
+                 worker={} harness=common::run_median_ci_contract \
+                 shadow=maximum_parallel_HELD_CONSTANT size_held_constant=true \
+                 shadowed_ns={:.1} isolated_ns={:.1} interference_ns={interference_ns:.1} \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] null={:.6}",
+                measurement_worker(),
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                null.ratio_median,
+            );
+        }
+    });
+}
+
 /// The same interference test, but for the REMAINDER cell and using the SHIPPED ROUTE as
 /// the shadow (`deadlock-audit-48by6`).
 ///
