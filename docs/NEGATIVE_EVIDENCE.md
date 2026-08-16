@@ -28,6 +28,72 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - PER-ARM CPU WITNESS SHIPPED, AND IT ANSWERS THE FREQUENCY QUESTION: both arms share ONE core (spread 1.0005), but the clock moves 1.267x ACROSS phases (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. The harness now records, per ARM, which core ran it and at what clock. That is the
+support I said was missing when I refused to print a per-arm MHz field. It exists now, it is verified
+by running it, and the first thing it shows is that the frequency worry lands somewhere other than
+where it was aimed.
+
+**Campaign result class:** maintenance-diagnostic (instrument shipped and verified; no perf ratio
+claimed)
+
+**LOADAVG, observed:** `16.25/22.04/28.60` during the smoke test. High load earlier in the turn
+(56.5 as reported, 36.31 measured by me) is why NO certification was attempted; this run is instrument
+verification, and no timing from it is banked.
+
+**HOW BOTH ARMS ARE ENSURED TO RUN ON COMPARABLE CORES - BY CONSTRUCTION, NOW VERIFIED.** The balanced
+square interleaves A and B slots inside ONE thread of ONE process (`BALANCED_SQUARE = [A,B,B,A,A,B,B,A]`,
+`observe(is_a)` called in sequence). Both arms therefore execute on whatever core that thread is on,
+and share its clock domain by construction rather than by pinning. **Verified empirically across 18
+phases: `same_core=true` in every one, and the worst within-phase arm clock spread is 1.0005.**
+
+```
+CPU_WITNESS phase=effect arm_a_cpu=50 arm_b_cpu=50 arm_a_mhz_mean=4204.3 arm_b_mhz_mean=4203.9
+            same_core=true arm_mhz_spread=1.0001
+            sampled_after_each_slot_outside_the_timed_region=true
+```
+
+**SO A RATIO FROM THIS HARNESS IS NOT A FREQUENCY RATIO IN DISGUISE.** The cross-core spread is real -
+I measured 4089 MHz on cpu0/cpu5 against 2733 MHz on cpu63 in the same instant, and frankenfs reports
+2.879x - but it cannot enter a ratio here, because the two arms are never on different cores at the
+same time. That is a property of the interleaved single-threaded schedule, and it is now checked rather
+than assumed.
+
+**WHERE THE FREQUENCY PROBLEM ACTUALLY IS: BETWEEN PHASES.** The thread MIGRATES between phases and the
+clock moves with it. Across the 18 phases of one invocation the mean clock ranged **3320.1 to 4207.1
+MHz, a 1.267x spread**, and the thread visited cores 18, 21 and 49. The three phases of a dual-null row -
+incumbent null, candidate null, effect - are separate loops, so **the null and the effect can be
+measured at clocks 1.267x apart.**
+
+That is a MECHANISM for something this ledger already recorded behaviourally: an A/A null's absolute
+times are not a baseline for the effect row's absolute times. I attributed that to differing working
+sets; the clock difference is a second, independent cause, and this one is measured rather than
+inferred. **Ratios WITHIN a phase remain sound - that is where the arms are paired - and it is
+comparisons ACROSS phases that the witness now warns about.**
+
+**IMPLEMENTATION, and why it costs nothing it should not.** `observed_cpu()` reads field 39 of
+`/proc/self/stat` (parsed after the LAST `)`, since `comm` can contain spaces and parentheses -
+splitting the whole line is the classic bug). `cpu_mhz(cpu)` reads that core's
+`scaling_cur_freq`. Both are safe `std::fs`: no `libc`, no `sched_getcpu`, no new dependency, no
+`unsafe`. Sampling happens **after each slot's timed work, outside the timed region**, so it cannot
+inflate the measurement it describes. `balanced_square_round_with` keeps its old signature and is
+implemented in terms of a new witnessed sibling, so the other seven call sites are untouched.
+`ContractPairStats` was deliberately NOT extended - it is constructed by literal in several places
+including a self-check, so adding fields would have rippled - the witness is emitted as its own line
+instead.
+
+**GATES:** `cargo clippy -p fnp-python --benches` exit 0, `rustfmt --check` exit 0, and the instrument
+was RUN before being banked - an emitted provenance field that has never printed is not evidence.
+
+RETRY PREDICATE: from here, any row comparing an A/A null's absolute ns to an effect row's absolute ns
+must cite the `CPU_WITNESS` lines for both phases and show the clocks were comparable; the 1.267x
+observed here is large enough to manufacture or erase a small effect on its own. Do NOT add per-arm
+core PINNING on the strength of this - the arms already share a core, so pinning would address a
+problem the witness shows does not exist, and would risk pinning both arms to a core the scheduler
+wanted to migrate away from.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - ARM PLACEMENT AUDITED AND IT IS UNPINNED: the bench thread MIGRATES across 53-64 of 64 logical CPUs within a single arm, on a box with a 2.942x cross-core spread - measured, not assumed (`deadlock-audit-48by6`)
 
 `RedLynx`. Prompted by two projects finding broken arm placement — one with BOTH arms on a single

@@ -67,6 +67,15 @@ impl DualNullPhase {
             .count()
     }
 
+    /// Short name for provenance lines.
+    fn label(self) -> &'static str {
+        match self {
+            Self::IncumbentNull => "incumbent_null",
+            Self::CandidateNull => "candidate_null",
+            Self::Effect => "effect",
+        }
+    }
+
     fn checksum_mismatch_message(self) -> &'static str {
         match self {
             Self::IncumbentNull => {
@@ -144,14 +153,139 @@ pub struct ContractObservation {
 /// slots to its median. The checksum check is deliberately per-arm: an A/A
 /// null runs the same closure in both arms, while an effect pair has its
 /// cross-arm check at the caller where equivalent results are required.
-fn balanced_square_round_with<F>(mut observe: F) -> (ContractObservation, ContractObservation)
+/// Which CPU is this thread running on right now? (`deadlock-audit-ei9jz`)
+///
+/// Field 39 of `/proc/self/stat` is the last CPU the task executed on. The `comm`
+/// field can itself contain spaces and parentheses, so the parse starts after the
+/// LAST `)` - splitting the whole line on whitespace is the classic bug here.
+///
+/// Safe `std::fs` only: no `libc`, no `sched_getcpu`, no new dependency, and nothing
+/// that would need `unsafe`.
+fn observed_cpu() -> Option<u32> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let tail = &stat[stat.rfind(')')? + 1..];
+    // After `comm`, the first field is `state`, which is field 3. So the CPU (field
+    // 39) is the 37th whitespace-separated token of this tail, i.e. index 36.
+    tail.split_whitespace().nth(36)?.parse::<u32>().ok()
+}
+
+/// The CURRENT clock of one specific core, in MHz.
+///
+/// This is the field that matters: cores on this 64-core part run at DIFFERENT clocks
+/// SIMULTANEOUSLY - 4089 MHz on cpu0/cpu5 against 2733 MHz on cpu63, read in the same
+/// instant. A machine-wide mean is therefore not a property of the timed arm, and a
+/// ratio whose two arms sat on cores at different clocks is partly a FREQUENCY ratio.
+fn cpu_mhz(cpu: u32) -> Option<f64> {
+    let path = format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq");
+    let khz = std::fs::read_to_string(path).ok()?;
+    Some(khz.trim().parse::<f64>().ok()? / 1000.0)
+}
+
+/// Per-ARM frequency provenance for one contract phase.
+///
+/// `same_core` is the field that decides whether a ratio is trustworthy: if the two
+/// arms ran on cores at different clocks, the ratio carries a frequency component that
+/// no amount of interleaving removes.
+#[derive(Clone, Copy, Default)]
+pub struct ArmCpuWitness {
+    pub a_cpu: Option<u32>,
+    pub b_cpu: Option<u32>,
+    pub a_mhz_mean: f64,
+    pub b_mhz_mean: f64,
+    pub a_samples: usize,
+    pub b_samples: usize,
+}
+
+impl ArmCpuWitness {
+    /// True when both arms were observed on the SAME core, so they necessarily shared
+    /// a clock domain and the ratio cannot be a frequency artefact.
+    pub fn same_core(&self) -> bool {
+        match (self.a_cpu, self.b_cpu) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// How far apart the two arms' observed clocks sat, as a ratio >= 1.0. A row whose
+    /// arms differ here is reporting a frequency ratio in disguise to that extent.
+    pub fn mhz_spread(&self) -> f64 {
+        if self.a_mhz_mean <= 0.0 || self.b_mhz_mean <= 0.0 {
+            return 1.0;
+        }
+        let (lo, hi) = if self.a_mhz_mean < self.b_mhz_mean {
+            (self.a_mhz_mean, self.b_mhz_mean)
+        } else {
+            (self.b_mhz_mean, self.a_mhz_mean)
+        };
+        hi / lo
+    }
+
+    /// Combine another round's witness into this phase-level one, weighting each arm's
+    /// mean clock by how many slots contributed to it.
+    fn merge(&mut self, other: &ArmCpuWitness) {
+        if other.a_samples > 0 {
+            let total = self.a_samples + other.a_samples;
+            self.a_mhz_mean = (self.a_mhz_mean * self.a_samples as f64
+                + other.a_mhz_mean * other.a_samples as f64)
+                / total as f64;
+            self.a_samples = total;
+            self.a_cpu = other.a_cpu;
+        }
+        if other.b_samples > 0 {
+            let total = self.b_samples + other.b_samples;
+            self.b_mhz_mean = (self.b_mhz_mean * self.b_samples as f64
+                + other.b_mhz_mean * other.b_samples as f64)
+                / total as f64;
+            self.b_samples = total;
+            self.b_cpu = other.b_cpu;
+        }
+    }
+
+    fn record(&mut self, is_a: bool) {
+        let Some(cpu) = observed_cpu() else {
+            return;
+        };
+        let mhz = cpu_mhz(cpu).unwrap_or(0.0);
+        if is_a {
+            self.a_cpu = Some(cpu);
+            self.a_mhz_mean =
+                (self.a_mhz_mean * self.a_samples as f64 + mhz) / (self.a_samples as f64 + 1.0);
+            self.a_samples += 1;
+        } else {
+            self.b_cpu = Some(cpu);
+            self.b_mhz_mean =
+                (self.b_mhz_mean * self.b_samples as f64 + mhz) / (self.b_samples as f64 + 1.0);
+            self.b_samples += 1;
+        }
+    }
+}
+
+fn balanced_square_round_with<F>(observe: F) -> (ContractObservation, ContractObservation)
+where
+    F: FnMut(bool) -> ContractObservation,
+{
+    let (a, b, _witness) = balanced_square_round_witnessed(observe);
+    (a, b)
+}
+
+/// The same balanced square, additionally witnessing WHICH CORE each arm ran on and at
+/// WHAT CLOCK (`deadlock-audit-ei9jz`).
+///
+/// The frequency is sampled immediately after each slot's timed work, so it reflects the
+/// core that just executed that arm rather than a machine-wide average. Sampling is two
+/// small `/proc` and `/sys` reads and happens OUTSIDE the timed region.
+fn balanced_square_round_witnessed<F>(
+    mut observe: F,
+) -> (ContractObservation, ContractObservation, ArmCpuWitness)
 where
     F: FnMut(bool) -> ContractObservation,
 {
     let mut a_slots = Vec::with_capacity(BALANCED_SQUARE.len() / 2);
     let mut b_slots = Vec::with_capacity(BALANCED_SQUARE.len() / 2);
+    let mut witness = ArmCpuWitness::default();
     for is_a in BALANCED_SQUARE {
         let observation = observe(is_a);
+        witness.record(is_a);
         if is_a {
             a_slots.push(observation);
         } else {
@@ -176,7 +310,7 @@ where
             checksum,
         }
     };
-    (reduce(&a_slots, "A"), reduce(&b_slots, "B"))
+    (reduce(&a_slots, "A"), reduce(&b_slots, "B"), witness)
 }
 
 #[derive(Clone, Copy)]
@@ -1536,11 +1670,12 @@ where
         }));
     }
 
+    let mut phase_witness = ArmCpuWitness::default();
     let mut arm_a = Vec::with_capacity(rounds);
     let mut arm_b = Vec::with_capacity(rounds);
     let mut checksum = 0_u64;
     for _ in 0..rounds {
-        let (a, b) = balanced_square_round_with(|slot_is_a| {
+        let (a, b, round_witness) = balanced_square_round_witnessed(|slot_is_a| {
             if phase.selects_incumbent(slot_is_a) {
                 min_observation_with(incumbent, min_of)
             } else {
@@ -1553,10 +1688,31 @@ where
             "{}",
             phase.checksum_mismatch_message()
         );
+        phase_witness.merge(&round_witness);
         arm_a.push(a.elapsed.as_secs_f64() * 1.0e9);
         arm_b.push(b.elapsed.as_secs_f64() * 1.0e9);
         checksum = mix_checksum(checksum, a.checksum);
     }
+    // Per-ARM frequency provenance. Emitted rather than folded into
+    // `ContractPairStats` because that struct is constructed by literal in several
+    // places, so adding fields would ripple into every one of them.
+    println!(
+        "CPU_WITNESS phase={} arm_a_cpu={} arm_b_cpu={} \
+         arm_a_mhz_mean={:.1} arm_b_mhz_mean={:.1} \
+         same_core={} arm_mhz_spread={:.4} \
+         sampled_after_each_slot_outside_the_timed_region=true",
+        phase.label(),
+        phase_witness
+            .a_cpu
+            .map_or_else(|| "unknown".to_string(), |c| c.to_string()),
+        phase_witness
+            .b_cpu
+            .map_or_else(|| "unknown".to_string(), |c| c.to_string()),
+        phase_witness.a_mhz_mean,
+        phase_witness.b_mhz_mean,
+        phase_witness.same_core(),
+        phase_witness.mhz_spread(),
+    );
     contract_pair_stats(&arm_a, &arm_b, checksum)
 }
 
