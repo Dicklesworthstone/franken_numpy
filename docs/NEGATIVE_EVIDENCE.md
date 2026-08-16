@@ -748,6 +748,28 @@ route stopped importing numpy. The instrument for that is
 fatal. It has NOT been run. Byte parity cannot see the import lever, so until that test runs, the
 mechanism behind these numbers is inferred from source reading, not demonstrated.
 
+> **CAVEAT DISCHARGED 2026-08-16 by `RedLynx`, first build after the freeze lifted.** All five
+> tests written during the freeze now RUN and PASS on `fnp_python-bfa8a15fb6fc9b5e`
+> (`cargo test -p fnp-python --lib`, profile `test`):
+> `cached_numpy_handle_is_live_so_a_post_warmup_monkeypatch_is_still_honoured`,
+> `cached_numpy_handle_is_reusable_from_a_later_independent_attach`,
+> `cached_numpy_handle_leaves_the_native_f64_route_byte_identical`,
+> `f16_probe_rejects_int16_which_also_has_itemsize_two`, and
+> `f64_multiply_route_does_not_reimport_numpy` — 3 passed / 0 failed, then 1 / 0, then 1 / 0.
+>
+> **THE MECHANISM IS NOW DEMONSTRATED, NOT INFERRED.** With `sys.modules["numpy"]` replaced by an
+> object that raises on ANY attribute access, the f64 multiply route still produced the warm-up
+> bytes. A surviving `py.import("numpy")` anywhere on that route would have received the trap and
+> died naming the attribute it asked for. It did not, so the route is import-free end to end.
+>
+> **AND THERE WAS NO THIRD IMPORT SITE.** This row's retry predicate said a FAILURE here would
+> have found one, which was the open question in `deadlock-audit-ei9jz`. The pass closes it: the
+> sites removed in `e4cdd808`, `f8475a76` and `5c7735da` were all of them on this route.
+>
+> The monkeypatch test is the one that matters for design: it FAILS any implementation that caches
+> the bound `numpy.add` callable instead of the module, and every conformance suite in this crate
+> passes such an implementation. That is why only the module handle is held.
+
 RETRY PREDICATE: (1) run `f64_multiply_route_does_not_reimport_numpy` and the other four new
 tests to convert the mechanism from inferred to demonstrated - if it FAILS it has found another
 import site on the route, which is `deadlock-audit-ei9jz`'s question. (2) Replicate this table on
