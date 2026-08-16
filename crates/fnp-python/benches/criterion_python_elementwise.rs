@@ -3266,7 +3266,25 @@ fn bench_out_kwarg_vs_numpy(_c: &mut Criterion) {
             .extract::<String>()
             .expect("numpy version is a string");
 
-        for (op_name, exponent) in [("divide", 20u32), ("maximum", 22u32)] {
+        // All THREE of the ~0.91 memory-bound cells, plus divide's serial regime.
+        //
+        // The certified `maximum` cell flipped 0.907848 (loss, both sides allocating) to
+        // 1.501804 (WIN, neither allocating), which means `out=` decides the SIGN there.
+        // `minimum` 0.913424 and `divide` parallel 0.920786 are the other two cells of
+        // that class and have NOT been tested this way. Restating them as wins on
+        // `maximum` alone would be the cross-cell transfer `deadlock-audit-48by6`
+        // withdrew one row after making, so they get their own cells here.
+        //
+        // `divide` appears at BOTH 2^20 and 2^22 deliberately: 2^20 is its serial regime,
+        // where `out=` did NOT flip it (0.824614), and 2^22 is the parallel regime where
+        // the ~0.91 figure was measured. If divide behaves differently across its own
+        // parallel_min, that is a property of the gate rather than of `out=`.
+        for (op_name, exponent) in [
+            ("divide", 20u32),
+            ("maximum", 22u32),
+            ("minimum", 22u32),
+            ("divide", 22u32),
+        ] {
             let n = 1usize << exponent;
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");
