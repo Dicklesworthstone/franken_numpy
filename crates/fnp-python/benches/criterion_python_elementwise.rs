@@ -2612,8 +2612,12 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
         unsafe_kwargs
             .set_item("casting", "unsafe")
             .expect("bind casting");
+        // Both arms pass the SAME prebuilt `args` tuple. Constructing a fresh tuple
+        // in one arm and reusing a prebuilt one in the other would charge that
+        // construction to the probe-skipped arm alone, shrinking `probe_chain_ns`
+        // by the difference and, on a cheap probe chain, driving it negative.
         let skipped_probe = ours
-            .call((&a, &b), Some(&unsafe_kwargs))
+            .call(&args, Some(&unsafe_kwargs))
             .expect("fnp.multiply casting=unsafe probe");
         assert_eq!(
             numpy_divide_checksum(&probed_probe, N),
@@ -2628,7 +2632,7 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
         // Same call with every probe skipped by the shipped casting guard.
         let skipped_ns = min_ns(TRIALS, || {
             black_box(
-                ours.call((&a, &b), Some(&unsafe_kwargs))
+                ours.call(&args, Some(&unsafe_kwargs))
                     .expect("fnp.multiply casting=unsafe call"),
             );
         });
@@ -2653,11 +2657,29 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
             "wrapper residual measured NEGATIVE ({wrapper_residual_ns:.1} ns): our delegating \
              call was faster than numpy's own call, so this partition is invalid"
         );
-        let partition_sum = numpy_ns + probe_chain_ns + wrapper_residual_ns;
+        // NOT asserted here: that the three pieces sum to the whole call. That check
+        // would be TAUTOLOGICAL — the partition telescopes
+        // (numpy + (whole - skipped) + (skipped - numpy) == whole identically), so it
+        // can never fail and would be testing this function's arithmetic rather than
+        // the measurement. The two non-negativity assertions above are the real
+        // gate: each compares two INDEPENDENTLY timed arms and fails when the
+        // subtraction is contaminated.
+        //
+        // The premise check that CAN fail: we are supposed to be slower than the
+        // incumbent on this route, and the probe-skipped arm still delegates to it.
+        // If either stops holding, the partition is describing a different route
+        // than the one this row claims to measure.
         assert!(
-            (partition_sum - whole_ns).abs() <= 1.0,
-            "partition sum {partition_sum:.1} ns does not reconstruct the whole call \
-             {whole_ns:.1} ns — the pieces overlap and are being double-counted"
+            whole_ns > numpy_ns,
+            "fnp.multiply ({whole_ns:.1} ns) was not slower than numpy.multiply \
+             ({numpy_ns:.1} ns) — this row's premise, that the delegating route carries \
+             a per-call floor, does not hold on this host and the split is meaningless"
+        );
+        assert!(
+            skipped_ns >= numpy_ns,
+            "the probe-skipped arm ({skipped_ns:.1} ns) was faster than the numpy call \
+             it delegates to ({numpy_ns:.1} ns) — impossible if it really delegates, so \
+             the casting=unsafe arm is not taking the route this row assumes"
         );
 
         println!(
