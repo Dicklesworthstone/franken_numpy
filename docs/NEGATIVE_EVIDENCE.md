@@ -7,6 +7,86 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - MEASURED, THE WORST vs-INCUMBENT CELL ON THE QUIETEST HOST OF THE SESSION: `subtract` at n=256 is 3.596x slower than NumPy (worst bound 3.608x) - and `add`/`subtract` are the SAME cell within resolution, so naming a winner between them over-reads 5 ns (`deadlock-audit-ei9jz`, `deadlock-audit-7xcq2`)
+
+`RedLynx`. The campaign's worst vs-incumbent ratio, re-measured ABBA in one invocation on a
+rebuilt binary that reproduced its predecessor's sha byte for byte. Load 19.31 before and after —
+the quietest conditions of this session.
+
+**Campaign result class:** decidable-regression (all four cells are losses; this is our gap)
+
+```
+bench_elf_sha256=d285003d76596de0d4fd37c23b681c6d78f4cc0f43eda81f2141c0090c2f08d2
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307508944 bytes)
+harness_contract_source_sha256=2188f288f6e7775520b371d4c09d6d6ef298b22979d7e43aa54af69ff38eeaae
+harness_source_matches_disk=true covers=common/mod.rs+bench_file
+HEAD=7e6c0729  rebuilt from committed source; the rebuild reproduced the SAME elf sha as the
+  previous build, which is itself the check that no source drifted under it
+HOST_BASELINE host=thinkstation1 cpu_model=AMD_Ryzen_Threadripper_PRO_5975WX_32-Cores
+  physical_cores=32 logical_threads=64 allowed_logical_threads=64 governor=powersave
+THREAD_CONFIGURATION rayon_pool_threads=64 OBSERVED, RAYON_NUM_THREADS=unset
+load 1min 19.31 before and 19.31 after (64 logical threads); foreign: frankensearch_q ~14 cores
+numpy 2.4.3  profile=bench (TRIAGE grade)  harness=common::run_dual_null_median_ci_contract
+schedule=ABBAABBA rounds=41 min_of=3  n=256
+```
+
+Ratio is numpy/fnp, so below 1.0 is slower. All four `DECIDABLE_REGRESSION`.
+
+```
+ op        ratio      ci95                    fnp/numpy   worst bound  numpy_ns  fnp_ns  excess
+ subtract  0.278061   [0.277177,0.279468]     3.596x      3.608x          436     1563    1127
+ add       0.282413   [0.281250,0.284439]     3.541x      3.556x          441     1568    1127
+ divide    0.324061   [0.322829,0.325106]     3.086x      3.098x          461     1423     962
+ multiply  0.339939   [0.338392,0.341331]     2.942x      2.955x          446     1307     861
+```
+
+**A/A NULL CONTROLS — and two of them EXCLUDE unity, which must be disclosed rather than buried.**
+
+```
+ add       incumbent [1.000000,1.000000] candidate [0.996821,1.003179]  both straddle unity
+ subtract  incumbent [1.000000,1.002273] candidate [0.996821,1.003189]  both straddle unity
+ multiply  incumbent [1.000000,1.011468] candidate [0.988567,0.995395]  CANDIDATE EXCLUDES UNITY
+                                                                        bias 0.007680 (0.77%)
+ divide    incumbent [1.000000,1.002174] candidate [1.006392,1.010768]  CANDIDATE EXCLUDES UNITY
+                                                                        bias 0.009979 (1.00%)
+```
+
+The gate passed all four — the smallest effect distance from unity is 0.660 against a
+`required_2x_delta` of 0.023 — so the verdicts stand by a wide margin. But `multiply` and
+`divide` carry a biased candidate null and their point estimates must be read with ~1% of slack.
+This is exactly the class `deadlock-audit-7xcq2` was filed for. **The headline cell is not one of
+them**: `subtract`'s nulls both straddle unity with zero bias, so the worst-ratio claim rests on
+clean controls.
+
+**THE HEADLINE, STATED CAREFULLY: `subtract` is the worst cell at 3.596x, but `add` and
+`subtract` are the SAME measurement within resolution and I will not claim otherwise.** Their
+excess over NumPy is IDENTICAL to the nanosecond — 1127 ns both — and our arms differ by 5 ns
+(1563 against 1568). The entire ratio difference comes from NumPy's own side: its `subtract` cost
+436 ns and its `add` 441 ns. Their ratio CIs happen to be disjoint (0.279468 < 0.281250), but
+that disjointness is manufactured by a 5 ns difference in the DENOMINATOR, not by anything about
+our code. The previous run of this cell had `add` worst and `subtract` second; the ordering
+flipped and nothing changed in the route. **Read this as one cell — the delegating binary route
+at n=256, ~3.55x slower, excess ~1127 ns — not as four ranked ops.**
+
+**REPLICATION.** The previous run of this same group (elf `6766850940f767eb`) read add 0.275034,
+subtract 0.281461, multiply 0.327948, divide 0.320179. Every cell lands within ~4% of that, on a
+different build and a much quieter host, with the route source unchanged between the two builds
+(only bench and harness files differed). Four cells replicating within 4% across two builds is
+the strongest evidence yet that ~3.0-3.6x is a property of the route rather than of a run.
+
+**WHERE THE ~1127 ns GOES**, from the partition and stage rows on this same ELF: NumPy's own work
+is ~31% of the call, the declined probe chain ~41%, and the rest ~28%. The probe chain is the
+largest single component of our overhead and is the standing target
+(`deadlock-audit-wsd7h`, `deadlock-audit-v46rn`).
+
+RETRY PREDICATE: (1) Do not quote a winner between `add` and `subtract`; quote the cell. If a
+future row needs a single number, use the excess (1127 ns), which is identical for both and does
+not depend on NumPy's per-op cost. (2) Replicate on a second worker before quoting 3.596x as a
+fleet figure — every row in this series is thinkstation1. (3) `multiply` and `divide` need their
+candidate-null bias understood before their point estimates are used for anything finer than 1%;
+that is `deadlock-audit-7xcq2`. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED, BOTH INSTRUMENT REPAIRS WORK - the partition no longer panics and its correction validates at 0.895x an independent figure; but the first run exposes a flaw in a field I added myself (`deadlock-audit-uj3r3`, `deadlock-audit-kido6`)
 
 `RedLynx`. First run of two repairs written blind during the freeze. Same ELF and invocation
