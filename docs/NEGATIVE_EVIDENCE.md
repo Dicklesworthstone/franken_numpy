@@ -17,6 +17,71 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - SECOND GATE, AND HALF THE PER-CALL FLOOR IS GONE: 1091 -> 552 ns, the worst cell 3.471x -> 2.330x slower (`deadlock-audit-v46rn`)
+
+`SlateHeron`. The timedelta probe gated on the same hoisted sniff. Cumulative with the f16 gate this
+removes **49% of the per-call floor** that every earlier row in this campaign described as fixed and
+irreducible.
+
+**Campaign result class:** maintenance-self-speedup (the vs-incumbent ratio improves but is STILL a LOSS)
+
+```
+TINY_N_FLOOR op=add worker=thinkstation1 numpy_version=2.4.3  harness=common::run_dual_null_median_ci_contract
+        excess_ns:  ORIGINAL      +f16 gate      +timedelta gate      total saved
+  n=1              1107            931              541                566 ns
+  n=4              1108            922              707*               401 ns
+  n=16             1344*           912              601                743 ns
+  n=64             1088            907              551                537 ns
+  n=256            1091            932              552                539 ns
+  * one noisy cell per run (both arms high); the quiet cells are the estimate.
+  quiet-cell mean saving: 547 ns
+```
+
+**THE WORST CELL: 3.471x -> 3.268x -> 2.330x SLOWER.** Ratio at n=256 went 0.288114 -> 0.306031 ->
+**0.429162**. All five cells remain `DECIDABLE_REGRESSION` and **all ten A/A nulls straddle unity**.
+
+**THE SECOND GATE PAID 3x THE FIRST** (≈360 ns against 176 ns), and the reason is visible in the
+source rather than inferred: `try_native_timedelta_addsub` pays TWO `dtype` fetches, TWO `kind`
+extracts, a `numpy.ndarray` getattr and TWO `is_exact_instance` checks before it can decline — and it
+runs on **every add and subtract**. The f16 probe it follows was cheaper per call.
+
+**ONE FETCH NOW SERVES BOTH GATES.** The sniff yields `(kind, itemsize)`; `kind` costs one extra
+getattr and removes four lookups from the timedelta probe, so it pays for itself on any non-temporal
+call. It is hoisted ABOVE the whole probe run — worth noting because the first draft defined it after
+the timedelta call site, which would not have compiled.
+
+**VERIFIED FROM SOURCE BEFORE WRITING, both gates:** each probe declines unless BOTH operands carry
+the dtype in question — f16 via `!is_f16(a)? || !is_f16(b)?`, temporal via
+`!matches!(ak.as_str(), "M" | "m") || !matches!(bk.as_str(), "M" | "m")`. A non-matching x1 therefore
+guaranteed a decline. An operand with no `dtype` at all yields "skip nothing" from both gates.
+
+**ENGAGEMENT TEST EXTENDED, because parity cannot see this failure.** The risk is silent
+DISENGAGEMENT: a wrong sniff would route timedelta arithmetic to NumPy, which returns correct answers,
+leaving every parity suite green while the native td add/subtract path was dead. The test asserts the
+PREDICATE — `timedelta64` and `datetime64` ADMITTED, f64/f32/int64/f16 SKIPPED, dtype-less operand
+skipped by NEITHER gate. `cargo test -p fnp-python --lib f16_probe_skip` passes 1/0.
+
+**AGAINST THE CEILING:** `deadlock-audit-v46rn` priced 731 ns for six probe families sharing one
+fetch. Two families realise **547 ns, i.e. 75% of the ceiling** — so the remaining four families are
+worth much less than the arithmetic suggested, which is useful for deciding whether to keep going.
+
+bench_elf_sha256 = a5aca8c972da9b4a3eb8b032e390e5c887efef1455ffc4eb9e0406503cce07ed (both gates),
+b9e7d482ce41bf79072fa10774dce409574a79850bfface63f2b888c17a0a110 (f16 gate only),
+ae357155a4bfde664811552f73dd4e2480a2f3ae9df411e71e186045938394cd (original). All three LOCAL builds on
+the SAME host and toolchain — the `deadlock-audit-ae85t` condition for any before/after comparison.
+Gates: clippy `--all-targets` exit 0, `rustfmt --check` exit 0, release build exit 0, zero `[RCH]`
+lines. `lib.rs` held under an exclusive Agent Mail reservation throughout.
+
+**STILL A LOSS.** 2.330x slower at n=256 is an improvement on 3.471x and is not a win. The remaining
+552 ns is what a vs-incumbent claim would have to close.
+
+RETRY PREDICATE: the next candidates are the f32, complex and integer probes, and each needs its
+decline condition read in source FIRST — the two gated so far were safe only because both demand BOTH
+operands carry their dtype. Expect diminishing returns: 75% of the priced ceiling is already taken.
+Do not gate a probe that can engage on a MIXED dtype pair; that is the one shape this technique
+cannot handle.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - FLEET FINDING CHECKED AGAINST THIS GATE: host contention is REAL here and worth ~70% on one cell, but certification does NOT track loadavg - a busy host certified everything while a quieter one did not, and the quiet-window prescription does NOT repair my non-certifying cell (`deadlock-audit-ei9jz`, `deadlock-audit-322j4`)
 
 `RedLynx`. Response to the fleet finding that torch's 21-lane board read zero-certified for four

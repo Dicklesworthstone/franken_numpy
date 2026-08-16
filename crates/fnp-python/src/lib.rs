@@ -467,6 +467,35 @@ impl PyUFunc {
                     return Ok(out_val);
                 }
             }
+            // ONE dtype sniff for the whole probe run below (`deadlock-audit-v46rn`).
+            // Hoisted ABOVE the first gated probe so every gate can read it.
+            // ONE fetch serving every gate below. `kind` costs one extra getattr here and
+            // saves the timedelta probe's TWO `dtype` fetches plus two `kind` extracts,
+            // so it pays for itself on any call that is not temporal.
+            let x1_dtype_probe: Option<(char, usize)> = match x1.bind(py).getattr("dtype") {
+                Ok(dtype) => {
+                    let itemsize = dtype.getattr("itemsize").and_then(|s| s.extract::<usize>());
+                    let kind = dtype.getattr("kind").and_then(|k| k.extract::<char>());
+                    match (kind, itemsize) {
+                        (Ok(kind), Ok(itemsize)) => Some((kind, itemsize)),
+                        // Either field unreadable: sniff establishes nothing, skip nothing.
+                        _ => None,
+                    }
+                }
+                // No `dtype` attribute at all (list, scalar): skip nothing.
+                Err(_) => None,
+            };
+            let x1_is_maybe_f16 = match x1_dtype_probe {
+                Some((_, itemsize)) => itemsize == 2,
+                None => true,
+            };
+            // `try_native_timedelta_addsub` declines unless BOTH operands carry kind 'M'
+            // (datetime64) or 'm' (timedelta64), so a numeric x1 guaranteed a decline.
+            let x1_is_maybe_temporal = match x1_dtype_probe {
+                Some((kind, _)) => kind == 'M' || kind == 'm',
+                None => true,
+            };
+
             // f64 floor_divide: numpy's DOUBLE npy_floor_divide loop is single-threaded
             // and compute-heavy (fmod + floor + correction per element, ~300ms@8M on hz1;
             // it is NOT in the f64 binop fast-path set above). Exact per-element
@@ -497,7 +526,12 @@ impl PyUFunc {
             // TIMEDELTA64 add/subtract (td +/- td -> td, same unit): numpy runs int64 add/sub with
             // per-element NaT checks single-threaded (~85ms@16M); the native parallel wrapping op
             // with inline NaT propagation is bit-identical (overflow wraps to NaT like numpy).
-            if matches!(self.kind, UFuncKind::Add | UFuncKind::Subtract)
+            // Gated on the hoisted sniff: this probe declines unless BOTH operands carry
+            // kind 'M' or 'm', so a numeric x1 was always going to reach `Ok(None)` after
+            // paying two `dtype` fetches, two `kind` extracts, a `numpy.ndarray` getattr
+            // and two `is_exact_instance` checks. It runs on EVERY add and subtract.
+            if x1_is_maybe_temporal
+                && matches!(self.kind, UFuncKind::Add | UFuncKind::Subtract)
                 && let Some(out_val) = try_native_timedelta_addsub(
                     py,
                     x1.bind(py),
@@ -552,19 +586,6 @@ impl PyUFunc {
             // `dtype` at all (a Python list, a scalar) the sniff yields `None` and
             // NOTHING is skipped: the chain runs exactly as before, which is the
             // conservative direction.
-            let x1_is_maybe_f16 = match x1.bind(py).getattr("dtype") {
-                Ok(dtype) => {
-                    // itemsize first: it is the discriminating field and an integer
-                    // compare, the same ordering `dtype_is_f16` already uses.
-                    match dtype.getattr("itemsize").and_then(|s| s.extract::<usize>()) {
-                        Ok(itemsize) => itemsize == 2,
-                        // Unreadable itemsize: do not skip.
-                        Err(_) => true,
-                    }
-                }
-                // No `dtype` attribute at all: do not skip.
-                Err(_) => true,
-            };
             if x1_is_maybe_f16
                 && let Some(op) = f16op
                 && let Some(out_val) =
@@ -110034,15 +110055,65 @@ mod tests {
                 );
             }
 
+            // The TEMPORAL gate, same shape and the same failure mode: datetime64 and
+            // timedelta64 must still ADMIT `try_native_timedelta_addsub`, or the native
+            // timedelta add/subtract route is silently disengaged while td arithmetic
+            // keeps returning correct answers from NumPy.
+            let temporal_sniff = |value: &Bound<'_, PyAny>| -> bool {
+                match value.getattr("dtype") {
+                    Ok(dtype) => match dtype.getattr("kind").and_then(|k| k.extract::<char>()) {
+                        Ok(kind) => kind == 'M' || kind == 'm',
+                        Err(_) => true,
+                    },
+                    Err(_) => true,
+                }
+            };
+            let td = py.eval(
+                std::ffi::CString::new("__import__('numpy').zeros(4, dtype='timedelta64[s]')")
+                    .expect("no interior nul")
+                    .as_c_str(),
+                None,
+                None,
+            )?;
+            assert!(
+                temporal_sniff(&td),
+                "timedelta64 must ADMIT the timedelta probe — if this fails the native \
+                 td add/subtract route is silently disengaged and parity stays green"
+            );
+            let dt = py.eval(
+                std::ffi::CString::new("__import__('numpy').zeros(4, dtype='datetime64[s]')")
+                    .expect("no interior nul")
+                    .as_c_str(),
+                None,
+                None,
+            )?;
+            assert!(
+                temporal_sniff(&dt),
+                "datetime64 must ADMIT the timedelta probe"
+            );
+            for name in ["float64", "float32", "int64", "float16"] {
+                let arr = numpy.call_method1("zeros", (4,))?;
+                let arr = arr.call_method1("astype", (numpy.getattr(name)?,))?;
+                assert!(
+                    !temporal_sniff(&arr),
+                    "{name} can never satisfy the timedelta probe, so it must be skipped"
+                );
+            }
+
             // CONSERVATIVE FALLBACK: an operand with no `dtype` at all must NOT be
-            // skipped. A sniff that returned false here would skip probes for inputs it
-            // never inspected, which is the one way this change could alter a result.
+            // skipped by EITHER gate. A sniff that returned false here would skip probes
+            // for inputs it never inspected, which is the one way this could alter a
+            // result.
             let code = std::ffi::CString::new("[1.0, 2.0]").expect("no interior nul");
             let list = py.eval(code.as_c_str(), None, None)?;
             assert!(
                 sniff(&list),
                 "an operand without a dtype must NOT be skipped — the sniff has not \
                  established anything about it"
+            );
+            assert!(
+                temporal_sniff(&list),
+                "an operand without a dtype must NOT be skipped by the temporal gate either"
             );
 
             // And the skip must leave answers alone on the op it actually gates.
