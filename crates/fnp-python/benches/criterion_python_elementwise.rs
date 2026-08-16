@@ -1257,8 +1257,16 @@ fn main() {
             bench_divide_vs_numpy_incumbent,
         ),
         (
+            "bench_divide_vs_numpy_incumbent_parallel",
+            bench_divide_vs_numpy_incumbent_parallel,
+        ),
+        (
             "bench_binary_route_overhead_vs_numpy",
             bench_binary_route_overhead_vs_numpy,
+        ),
+        (
+            "bench_route_floor_size_sweep_vs_numpy",
+            bench_route_floor_size_sweep_vs_numpy,
         ),
     ]);
 }
@@ -2176,6 +2184,75 @@ fn measure_binary_ufunc_vs_numpy(
 // comparison mean anything: multiply near unity while divide loses puts the cost
 // in the scan, and both losing by a similar margin puts it in the route, which
 // no divide-kernel lever can reach (deadlock-audit-1pt96).
+/// The PARALLEL-REGIME twin of `bench_divide_vs_numpy_incumbent`.
+///
+/// `deadlock-audit-su0i6` banked a 1.16-1.22x loss against `numpy.divide`, and that
+/// row is real but REGIME-SCOPED: it measures `DIVIDE_SERIAL_N` = 1<<20, which is
+/// deliberately BELOW the kernel's `1 << 21` rayon gate for `BinaryOp::Div`. So it
+/// compares our single-threaded arm against NumPy's single-threaded loop and says
+/// nothing about the regime where we actually spend the cores. Quoting it as
+/// "fnp.divide is slower than numpy.divide" without the size would overstate it.
+///
+/// This group measures the other side of the gate at `DIVIDE_PARALLEL_N` = 1<<22
+/// through the SAME dual-null contract, same operands, same dispatch and parity
+/// traps. NumPy's elementwise loops are single-threaded, so if the parallel arm does
+/// not win here the deficit is structural rather than a threading gap - which is a
+/// more useful thing to know than another serial number.
+fn bench_divide_vs_numpy_incumbent_parallel(_c: &mut Criterion) {
+    let n = DIVIDE_PARALLEL_N;
+    assert!(
+        n >= 1 << 21,
+        "this group exists to exercise the rayon arm; n must clear the Div parallel gate"
+    );
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        // Reuses the shared helper, so the dispatch trap (fnp.divide is not NumPy's
+        // object) and the cross-arm parity probe are the identical checks the serial
+        // group runs - not a second, weaker copy of them.
+        let (ratio, lo, hi, incumbent_ns, candidate_ns) =
+            measure_binary_ufunc_vs_numpy(py, &module, &numpy, "divide", &args, n);
+
+        println!(
+            "DIVIDE_VS_NUMPY_PARALLEL n={n} regime=rayon_arm parallel_min=2097152 \
+             numpy_version={numpy_version} worker={} \
+             harness=common::run_dual_null_median_ci_contract rounds={} \
+             rayon_threads={} incumbent_median_ns={incumbent_ns:.1} \
+             candidate_median_ns={candidate_ns:.1} ratio_median={ratio:.6} \
+             ratio_ci95=[{lo:.6},{hi:.6}] faster_than_numpy={}",
+            measurement_worker(),
+            common::CONTRACT_ROUNDS,
+            rayon::current_num_threads(),
+            lo > 1.0,
+        );
+    });
+}
+
 fn bench_binary_route_overhead_vs_numpy(_c: &mut Criterion) {
     let n = DIVIDE_SERIAL_N;
     Python::initialize();
@@ -2251,5 +2328,65 @@ fn bench_binary_route_overhead_vs_numpy(_c: &mut Criterion) {
              intervals_disjoint={divide_loses_more} same_invocation=true verdict={verdict}",
             divide_specific_excess_ns / divide_excess_ns,
         );
+    });
+}
+
+// Separates a FIXED per-call route cost from a PROPORTIONAL kernel cost, which
+// need opposite levers (deadlock-audit-m7tti). `multiply` is the probe because it
+// has no hazard scan, so what remains is the route: PyO3 dispatch, dtype and
+// contiguity sniffing, and the `numpy.empty` output allocation with its
+// first-touch faults.
+//
+// The discriminator is the EXCESS IN NANOSECONDS across sizes spanning 256x, not
+// the ratio. A fixed cost holds excess_ns roughly constant while the ratio walks
+// toward 1.0 as n grows; a proportional cost grows excess_ns with n while the
+// ratio stays flat. Reading the ratio alone cannot tell those apart, which is why
+// the single-size 1pt96 row could not answer it.
+fn bench_route_floor_size_sweep_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        for exponent in [16u32, 20, 24] {
+            let n = 1usize << exponent;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a = locals.get_item("a").expect("a operand");
+            let b = locals.get_item("b").expect("b operand");
+            let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+            let (ratio, lo, hi, numpy_ns, fnp_ns) =
+                measure_binary_ufunc_vs_numpy(py, &module, &numpy, "multiply", &args, n);
+            let excess_ns = fnp_ns - numpy_ns;
+            println!(
+                "ROUTE_FLOOR_SWEEP op=multiply n={n} log2n={exponent} \
+                 numpy_version={numpy_version} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
+                 numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={excess_ns:.1} \
+                 excess_ns_per_element={:.6} at_parity={}",
+                excess_ns / n as f64,
+                hi >= 1.0,
+            );
+        }
     });
 }
