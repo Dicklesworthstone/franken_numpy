@@ -97,17 +97,30 @@ We only use **Cargo** in this project, NEVER any other package manager.
 | `base64` | Encoding for artifact payloads |
 | `getrandom` | OS entropy for NumPy-compatible unseeded RNG constructors |
 
-### Release Profile
+### Build Profiles — READ THIS BEFORE REASONING ABOUT BUILD COST
 
-The release build optimizes for performance (this is a library, not a binary):
+**The workspace defines NO `[profile.release]`.** Verified 2026-08-16: the only
+profile sections in the root `Cargo.toml` are `[profile.release-perf]`,
+`[profile.bench]` and `[profile.bench-fast]`. `release` — and therefore `bench`,
+which inherits it — takes **Cargo's defaults**: `opt-level = 3`, `lto = false`,
+`codegen-units = 16`.
 
-```toml
-[profile.release]
-opt-level = 3       # Maximum performance optimization
-lto = true          # Link-time optimization
-codegen-units = 1   # Single codegen unit for better optimization
-strip = true        # Remove debug symbols
-```
+This section previously showed a `[profile.release]` block with `lto = true` and
+`codegen-units = 1`. That block is not in `Cargo.toml` and never governed a build
+here. It is corrected rather than deleted because it actively misled at least one
+agent (me) into asserting that `cargo bench` does a full LTO build and that this
+explains rch SSH-ceiling timeouts. It does not: `bench` and `bench-fast` are
+configured **identically** in optimization terms, so switching between them cannot
+change build time by construction.
+
+| profile | opt-level | lto | codegen-units | use |
+|---|---|---|---|---|
+| `release` / `bench` (Cargo defaults) | 3 | false | 16 | triage |
+| `bench-fast` (explicit, same settings) | 3 | false | 16 | triage |
+| `release-perf` | 3 | thin | 1 | **ship-grade ratios** |
+
+Ship-grade fnp-vs-NumPy ratios must be confirmed under `--profile release-perf`;
+anything at `bench`/`bench-fast` is triage grade and the row must say so.
 
 ---
 
@@ -874,25 +887,79 @@ self-timing workload groups that ignore criterion entirely. For criterion-driven
 arms use the `FNP_BENCH_GROUPS` environment variable, which criterion never
 sees.
 
-**Route 2 is FROZEN as of 2026-07-30 23:10 — do not start a local cargo build.**
-The 150G floor below has tripped: `/data` fell to 127G and then 114G free,
-because an unrelated build outside this swarm grew one target directory to 261G.
-The cause is not this campaign, but the guardrail is enforced regardless. Use
-Route 1 (a few MB) until told otherwise, keep `force_local = true` unset, and if
-a local build is already running let it finish rather than wasting the space
-already spent. The guardrails below are the standing policy for when the floor
-clears again.
+### THE BUILD BUDGET — check `df` yourself before EVERY build (current rule, 2026-08-16)
 
-**Route 2 (guardrails): one bounded local build.** Local builds are not banned in
-principle — that ban was a disk-emergency measure and it was pushing people
-to measure on the wrong profile. Guardrails: reuse ONE target dir per repo (never
-mint a fresh `CARGO_TARGET_DIR` per task — that ballooned `/data/tmp` to 612G
-twice); **`df` precheck, and do not start a local build under 150G free on
-/data**; local builds are for the final measurement artifact only (edit loop,
-`cargo check`, clippy, and tests stay remote); and `force_local = true` remains
-banned as an rch *config* setting — if you need one local build, run that one
-command with `env -u CARGO_TARGET_DIR cargo build --profile release-perf ...`
-directly rather than editing rch config.
+**`df -h /data` first, every time. At 59G or above free you may start ONE build
+from your pane; at most TWO per project, coordinated in Agent Mail. Below 59G,
+do build-free work that turn and retry next turn. Never delete anything to make
+space — reclaim is the user's call and is escalated.**
+
+Read the number yourself. It moves within seconds on this box: a threshold quoted
+to me in one message was stale by the time I ran `df`, twice in one session, once
+in each direction. A stale "disk is fine" is how a floor gets breached, and a
+stale "disk is full" is how the whole fleet throttles itself to zero — an earlier
+60G threshold sat exactly on the working set, so every build was declined until it
+was corrected to 59G.
+
+Build-free work is not a stall: correctness reasoning, reading the incumbent's
+implementation, writing tests ready to gate later, bead hygiene, ledger
+corrections. A source-provenance audit that removes a stated blocker costs no disk
+at all.
+
+*History, kept because it is the reason the rule exists:* a 2026-07-30 freeze set
+a 150G floor after an unrelated build grew one target directory to 261G, and
+`/data/tmp` had twice ballooned to 612G from per-task `CARGO_TARGET_DIR`s. Those
+numbers are dead; the lesson is not.
+
+**Route 2 (local builds), unchanged where it still applies.** Reuse ONE target dir
+per repo — never mint a fresh `CARGO_TARGET_DIR` per task. Local builds are for a
+final measurement artifact only; the edit loop, `cargo check`, clippy and tests
+stay remote. `force_local = true` remains banned as an rch *config* setting — if
+you need one local build, run that single command with
+`env -u CARGO_TARGET_DIR cargo build --profile release-perf ...` directly. Note
+that `RCH_REQUIRE_REMOTE=1 env -u CARGO_TARGET_DIR rch exec` creates NO local
+target dir, which is why it is the default form under any disk pressure.
+
+### A `fnp-python` bench build often blows rch's 1800s SSH ceiling — and the PROFILE IS NOT WHY
+
+Measured 2026-08-16: six `RCH-E104 SSH command timed out` failures across
+`vmi1153651`, `vmi1152480` and `vmi1264463` while building `fnp-python` benches.
+The build is genuinely large — the bench ELF is ~307 MB and the lib is 60k+ LOC —
+so a COLD pool on a slow or contended worker does not finish inside the ceiling.
+
+**Do not attribute this to the profile.** I did, and I was wrong: this workspace
+defines no `[profile.release]`, so `bench` and `bench-fast` carry identical
+optimization settings (see Build Profiles above). Runs with `--profile bench-fast`
+did complete after `cargo bench` had failed, but since the two are configured the
+same, the difference has to be pool warmth or which worker was drawn, not the
+profile. Treat that as an open question, not a mechanism.
+
+What actually helps, all verified: keep the project hash STABLE so the remote pool
+stays warm (every edit moves it and buys a cold build); scope the overlay to what
+the command needs — `--overlay-path docs` gates the ledger in seconds while adding
+`--overlay-path crates/fnp-python` forces a full lib rebuild; and retry, because
+worker draw is a lottery you cannot pin.
+
+### rch admits by command VERB, not crate size — pass `-j2 -p <crate>`
+
+`cargo test` through rch requests 8 slots by verb, so it is admissible on only
+about three of ten workers and gets refused while the fleet reports itself
+healthy. `cargo test -j2 -p <crate>` is admitted. **`-j2` must be paired with
+`-p <crate>`** — `-j2 --workspace` exceeds the SSH ceiling. Scope the overlay too:
+a `--overlay-path docs` run gates the ledger in seconds, while adding
+`--overlay-path crates/fnp-python` forces a full lib rebuild and can time out.
+
+### rch workers differ in glibc and CANNOT be pinned
+
+A binary built on one worker may refuse to start on another
+(`libm.so.6: version GLIBC_2.43 not found`). Verified mitigations: `ldd <binary> |
+grep "not found"` before trusting a fresh binary; record the build worker on every
+banked row; and — the real fix — keep BOTH arms of a comparison in ONE binary and
+ONE invocation, which `common::run_dual_null_median_ci_contract` already does by
+construction, making this repo's rows immune to the class. The
+`[selection.affinity]` pinning knob in `~/.config/rch/config.toml` is UNVERIFIED
+and is global config shared by every project on the box; do not flip it
+unilaterally.
 
 ### `cargo bench` CANNOT COMPLETE ON THIS FLEET — use `cargo test --release --bench`
 
