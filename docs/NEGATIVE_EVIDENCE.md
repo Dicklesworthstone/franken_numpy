@@ -29,6 +29,61 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - POOL-SIZING CHECKED AND REFUTED HERE: the interference SURVIVES a 1-thread rayon pool (1.028x) - and the same sweep shows my earlier "0.4% replication" claim was luck (`deadlock-audit-48by6`)
+
+`RedLynx`. Torch found its undecidable board was caused by its own 64-thread pool, arms fighting
+each other regardless of placement. I have a 64-thread pool — every row in this ledger reports
+`rayon_pool_threads=64` on a 64-thread box — so the check was owed. It is not my cause.
+
+**Campaign result class:** maintenance-diagnostic (hypothesis tested and refuted; one of my claims corrected)
+
+```
+bench_elf_sha256=9d621ee520acb0ff07a086087c0f3476eb445cd582789d1dc35871b026f2b2b3
+harness_source_matches_disk=true  worker=thinkstation1  numpy 2.4.3  n=2^22
+Three runs back to back in ONE window, no rebuild, only RAYON_NUM_THREADS varied.
+LOADAVG 35.09 -> 33.25 -> 29.87 -> 25.11 across the sweep (1min); 5min held 23.85-24.23.
+
+ pool  ratio      ci95                  interference_ns  shadowed/isolated ns   same_cpu  distinct cpus
+  64   1.018019  [1.013381,1.032275]        110930        5113944 / 5003014      false      45 / 59
+   8   1.041901  [1.025800,1.054437]        180547        5293178 / 5112631      false      40 / 63
+   1   1.028475  [1.014577,1.044830]        164387        4332233 / 4167846      TRUE       18 / 34
+```
+
+**THE POOL IS NOT THE CAUSE. At `RAYON_NUM_THREADS=1` the shadow is single-threaded — no pool to
+fight with, nothing spinning down — and the incumbent is still 2.8% slower when shadowed**, with a
+CI excluding unity. Whatever our arm does to the following NumPy call, one thread doing it is
+enough. Torch's mechanism does not transfer.
+
+**AND THERE IS NO MONOTONIC DEPENDENCE ON POOL SIZE.** 1.018 at 64, 1.042 at 8, 1.028 at 1 — the
+three intervals overlap and the middle value is the largest. Pool size does not order the effect.
+
+**WHAT POOL SIZE DOES FIX IS PLACEMENT, which is worth recording separately.** At pool=1 the two
+arms landed on the SAME logical CPU and the same physical core (`arms_same_cpu=true`, cpu 16), and
+migration collapsed from 45/59 distinct CPUs to 18/34. So the unpinned-migration defect banked one
+row ago is largely a consequence of the 64-thread pool relocating the calling thread — **and the
+interference survives even when that is fixed**, which separates the two problems cleanly.
+
+**A CLAIM OF MINE IS CORRECTED BY THIS SWEEP.** Two rows ago I called the interference "the
+strongest replication in this ledger" on the strength of 1.062643 / 1.067266 / 1.063965 — a 0.4%
+spread. Today's three runs read 1.018019 / 1.041901 / 1.028475. **Across all six the ratio spans
+1.018 to 1.067, a 4.8% spread, not 0.4%.** The three that agreed did so by luck of window, and I
+generalised from them. What survives is the sign and the existence: all six runs put the ratio
+above unity, five of six with CIs excluding it. What does not survive is the precision — the
+discount is somewhere in 2-7%, not 6.3% +- 0.4%.
+
+**CONSEQUENCE FOR THE BANKED DISCOUNT.** The maximum rows carry a ~6.7% discount taken from the
+high end of that range. On this evidence the honest correction is a RANGE, and the conservative
+choice for a discount applied to our own favour is the LOW end: **~2%**, with the row citing 2-7%.
+I am not re-editing those rows this turn — the capability directive takes precedence — but the
+figure should be read as a range and is flagged here.
+
+RETRY PREDICATE: (1) Do not attribute the interference to pool size, spin-down, or arm contention;
+one thread reproduces it. (2) Pin the timing thread anyway — pool=1 achieved `arms_same_cpu=true`
+incidentally and the placement fix is worth having on its own terms. (3) Before quoting any
+interference discount, quote the RANGE 2-7% or re-measure in the window being corrected; the
+point estimate is not stable across windows. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - COUNTED_MECHANISM, and it REFUTES this bead's own first step: the shipped f64 divide loop is ALREADY packed 4-wide ymm with 2x unroll - the 94us codegen gap is not a packing failure and there is nothing to restore (`deadlock-audit-6y5wp`)
 
 `RedLynx`. `deadlock-audit-6y5wp` names a cheap build-free first step — disassemble the shipped
