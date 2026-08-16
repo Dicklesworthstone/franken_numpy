@@ -4,6 +4,68 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - WIN (KEEP, maintenance-self-speedup): allocate the f64 binary output AT ITS FINAL SHAPE - the reshape costs 445.65 ns and the shaped allocation is not more expensive (`deadlock-audit-k4yus`)
+
+`TealOak`. `zerocopy_f64_binary_flat` allocated `numpy.empty(n)` and the caller then
+reshaped to the operand shape. It now allocates at the final shape, so the route
+reshapes at NO rank; `finish_preshaped_output` is left with only the 0-D rule, where
+NumPy returns a scalar rather than a 0-D array.
+
+**Campaign result class:** maintenance-self-speedup
+
+Base arm is our own former call shape, so this is maintenance and not a competitive
+claim. We remain far behind NumPy on this surface - the per-call floor is still the
+campaign's worst vs-incumbent ratio at 7.97x slower at n=256.
+
+```
+HOST_BASELINE host=hetzner1 cpu_model=AMD_EPYC-Milan_Processor physical_cores=4 logical_threads=8 online_cpus=0:1:2:3:4:5:6:7 allowed_logical_threads=8 allowed_cpus=0:1:2:3:4:5:6:7 governor=unavailable
+bench_elf_sha256=f737ef06f19e6d150beb7e53c0bf8a903758b67f349c904ccbb5bd0b56d00f28
+OUTPUT_CONSTRUCTION_DECOMPOSITION n=4096 batch=256 trials=401 numpy_version=2.4.3 worker=hetzner1 harness=batched_min_of_401_minus_empty_loop one_invocation=true empty_loop_ns=0.43 getattr_empty_ns=110.09 empty_flat_ns=382.44 empty_plus_noop_reshape_ns=800.03 empty_plus_real_reshape_ns=817.88 empty_at_final_shape_ns=372.23 noop_reshape_ns=417.59 real_reshape_ns=435.43 allocating_at_final_shape_saves_ns=445.65
+```
+
+**THE DECISION RULE WAS WRITTEN BEFORE THE MEASUREMENT** (`deadlock-audit-k4yus`):
+clearly positive saving means implement, about zero means do not. It came out
+**445.65 ns saved**, and the shaped allocation is if anything CHEAPER than the flat
+one (372.23 vs 382.44 ns), so there was no trade to weigh.
+
+**THE INFORMATIVE COMPARISON is the no-op against the real reshape:** 417.59 ns
+versus 435.43 ns. A reshape that changes nothing costs 96% of one that changes rank.
+The price is the Python call - attribute lookup, argument tuple, dispatch - not the
+shape work. That is why removing the call is the whole lever, and why shaving the
+reshape's arguments would have bought nothing.
+
+**THIS SUPERSEDES THE SHAPE OF THE FIX IN `deadlock-audit-omyno`.** That bead
+proposed a shared helper that SKIPS the reshape at rank 1, worth 200 ns
+(`deadlock-audit-6twge`). Allocating at the target shape is strictly better: it
+removes the reshape at EVERY rank, for the same edit. The helper `finish_flat_output`
+I added earlier this session has been REMOVED rather than left dead - it was the right
+abstraction for the wrong fix. The remaining 61 sites should be converted by moving
+their allocation, not by adding a skip.
+
+**SAFETY, checked before moving the allocation:** PyO3's `PyBuffer::as_mut_slice`
+requires only `!readonly() && is_c_contiguous()` and returns `item_count()` elements -
+it does NOT require `ndim == 1` (pyo3-0.29.2 `src/buffer.rs`). `numpy.empty(shape)` is
+C-contiguous by default, so the flat write loop is unchanged at any rank. Worth stating
+because the failure mode would have been silent: a `None` from `as_mut_slice` makes the
+route return `Ok(None)` and defer to NumPy, which is still CORRECT and would pass every
+conformance test while quietly deleting the fast path.
+
+**ONE MEASUREMENT, ONE WORKER, and the arithmetic is finally internal.** The three
+figures that motivated this hunt (220 ns `empty`, 1310 ns `empty` + `reshape`, 200 ns
+isolated reshape) came from three different workers with three different harnesses and
+did not add up - 220 + 200 = 420, not 1310. That ~890 ns gap was never evidence,
+because subtracting across rows is what overstated `deadlock-audit-6twge` by 5.5x.
+Every number above is from ONE invocation on ONE worker, so its subtractions are
+legitimate. It is NOT replicated on a second worker; the retry predicate says so.
+
+**Retry predicate.** (1) Replicate on a second worker before quoting 445.65 ns as a
+fleet figure - one worker fixes the arithmetic, not the generality. (2) Gate the code:
+`cargo test -j2 -p fnp-python --test conformance_ufunc_edge`, which now carries
+`zerocopy_binary_output_shape_survives_the_flat_output_helper` asserting shape, ndim,
+dtype, Python type and bytes at ranks 0/1/2/3 plus a size above the parallel gates -
+the type assertion is what catches a 0-D route returning a 0-D array where NumPy
+returns a scalar. (3) Then convert the other 61 sites the same way.
+
 ## 2026-08-16 - MEASURED, SIGN AGREES ON TWO WORKERS: declining on `dtype.kind` first is 1.353519x cheaper (worst bound) - and it SUPERSEDES the cross-build false positive (`deadlock-audit-bpxn6`)
 
 `TealOak`. `deadlock-audit-80uph` asked whether the complex probe's decline ordering matters and
