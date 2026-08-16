@@ -54241,20 +54241,38 @@ fn try_zerocopy_complex_binary(
     b: &Bound<'_, PyAny>,
     op: ComplexBinOp,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
+    // DECLINE ON THE DISCRIMINATING FIELD FIRST. This probe runs on every
+    // delegating f64 multiply and divide and always declines there, so the order
+    // of its checks is the cost. Reading `dtype.kind` rejects a non-complex
+    // operand in 2 Python operations; the previous order spent 3 on the ndarray
+    // type check before it could even look. The declined probe chain is ~40% of a
+    // delegating call (`deadlock-audit-wsd7h`, worst bound 1.389629x).
+    //
+    // Ordering is safe because these are all DECLINE conditions: a non-complex
+    // operand is rejected whether or not it is an exact ndarray, so moving the
+    // dtype test earlier cannot admit anything the old order refused. The
+    // `is_exact_instance` check still runs before any buffer is touched below.
+    // `.ok()` rather than `?`: an operand without `dtype` (a Python scalar) has no
+    // complex route either, and must decline rather than raise.
+    //
+    // `char` rather than `String`: `dtype.kind` is a single character, and the two
+    // heap allocations were pure waste on a measured hot path.
+    let (Some(dta), Some(dtb)) = (a.getattr("dtype").ok(), b.getattr("dtype").ok()) else {
+        return Ok(None);
+    };
+    let complex_kinds = dta
+        .getattr("kind")
+        .and_then(|kind| kind.extract::<char>())
+        .is_ok_and(|kind| kind == 'c')
+        && dtb
+            .getattr("kind")
+            .and_then(|kind| kind.extract::<char>())
+            .is_ok_and(|kind| kind == 'c');
+    if !complex_kinds {
         return Ok(None);
     }
-    let dta = a.getattr("dtype")?;
-    let dtb = b.getattr("dtype")?;
-    // `char` rather than `String`: `dtype.kind` is a single character, and this
-    // probe runs on EVERY delegating f64 multiply and divide before declining, so
-    // the two heap allocations were pure waste on a measured hot path. The
-    // declined probe chain is ~40% of a delegating call
-    // (`deadlock-audit-wsd7h`, worst bound 1.389629x), and this is inside it.
-    if dta.getattr("kind")?.extract::<char>()? != 'c'
-        || dtb.getattr("kind")?.extract::<char>()? != 'c'
-    {
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
     let itemsize = dta.getattr("itemsize")?.extract::<usize>()?;
