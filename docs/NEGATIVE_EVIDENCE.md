@@ -8,6 +8,68 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - THE WORST vs-INCUMBENT RATIO, RE-MEASURED POST-FIX: `fnp.multiply` at n=256 is 3.124x SLOWER than NumPy (was 5.998x), and parity still arrives only at 2^24 (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. My worst measured vs-incumbent ratio, run ABBA in one invocation on the current ELF.
+This also replaces the pre-fix version of this sweep, which was one of the three rows voided earlier
+today for measuring an unrecoverable working tree.
+
+**Campaign result class:** incumbent-loss
+
+```
+ROUTE_FLOOR_SWEEP op=multiply worker=thinkstation1 numpy_version=2.4.3
+  harness=common::run_dual_null_median_ci_contract   (ABBAABBA, 41 rounds, min-of-3)
+  n=2^8   ratio=0.320122 ci95=[0.319263,0.321596]  numpy_ns=415      fnp_ns=1292      excess_ns=877     DECIDABLE_REGRESSION
+  n=2^12  ratio=0.572363 ci95=[0.567336,0.576130]  numpy_ns=1323     fnp_ns=2315      excess_ns=992     DECIDABLE_REGRESSION
+  n=2^16  ratio=0.919712 ci95=[0.918484,0.920404]  numpy_ns=19702    fnp_ns=21395     excess_ns=1693    DECIDABLE_REGRESSION
+  n=2^20  ratio=0.979997 ci95=[0.973084,0.994050]  numpy_ns=349161   fnp_ns=350264    excess_ns=1103    UNDECIDED
+  n=2^24  ratio=0.997427 ci95=[0.988936,1.004904]  numpy_ns=19898764 fnp_ns=19948148  excess_ns=49384   UNDECIDED, at_parity=true
+```
+
+**THE WORST CELL: n=256, ratio 0.320122 — we are 3.124x SLOWER than NumPy.** NumPy does the whole
+call in 415 ns; we take 1292 ns.
+
+bench_elf_sha256=4e95267adbfb12897b831b42e832a81666b3636f36a5baf0a42a50384d3db904
+Built from COMMITTED source; `git diff --name-only` across every commit since the build shows **zero**
+files under `crates/`, and the working tree was clean, so the ELF matches HEAD's code exactly.
+HOST_BASELINE host=thinkstation1 AMD_Ryzen_Threadripper_PRO_5975WX 32c/64t governor=powersave,
+rayon_pool_threads=64, avx2/fma, avx512f=false.
+
+**A/A NULL CONTROL (same invocation), machine-checked:** eight of the ten nulls straddle unity. The
+worst cell's own nulls are clean — incumbent [1.000000,1.002439], candidate [0.996103,1.004235], both
+`straddles_unity=true` — so **the 3.124x figure is not qualified by a null defect**. The one exception
+is the n=2^20 INCUMBENT null at [0.984544,0.999669], which EXCLUDES unity by ~1.5%; that cell is
+`UNDECIDED` in any case and nothing is claimed from it. Flagging it here is only possible because
+`a9f0651f` added the field — this is its second catch.
+
+**THE FLOOR HAS FALLEN 57% SINCE THE PRE-FIX SWEEP.** Same group, same host, same size:
+
+| | ratio | numpy_ns | fnp_ns | excess_ns |
+|---|---|---|---|---|
+| pre-fix, elf `ef5467cb` | 0.166734 | 410 | 2454 | 2044 |
+| now, elf `4e95267a` | **0.320122** | 415 | **1292** | **877** |
+
+1167 ns of per-call excess removed — the four import-removal commits, whose effect is now measured in
+a second independent group (the partition read 1333 ns for the same call; this sweep reads 1292 ns).
+**We are still 3.124x slower at this size.** Halving a floor that starts at 6x does not make it small.
+
+**THE SHAPE IS UNCHANGED AND IS THE ACTIONABLE PART.** `excess_ns` stays within 877-1693 ns from
+n=2^8 to n=2^20 — a fixed per-call cost, not a per-element one — so the ratio is simply that cost
+divided by an increasing amount of real work. Parity arrives only at **2^24**
+(`at_parity=true`, 0.997427). Every vs-incumbent claim about this route must therefore carry its n.
+
+**ONE COLUMN NOT TO TRUST:** `excess_ns` at 2^24 reads 49384 ns, larger than at 2^20, because it is a
+difference of two ~19 900 000 ns quantities whose ratio CI still contains unity. That is cancellation
+noise, the same failure the 2^20 cells of the across-sizes group showed. Read `excess_ns` at small n,
+where it is a large fraction of the call; read the RATIO at large n.
+
+RETRY PREDICATE: do not re-run this sweep to re-derive the shape — it is stable across two ELFs and a
+code change. The live lever against this 877 ns is `deadlock-audit-v46rn`, which measured a 731 ns
+ceiling for sharing one dtype fetch across the probe chain; note 731 ns is 83% of the 877 ns excess
+measured here, which is either an encouraging coincidence or a sign the two groups are measuring
+overlapping costs, and only a route-level before/after can tell them apart.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CONFLICT, DO NOT DROP THE NATIVE DIVIDE PATH YET: two same-host runs with clean nulls disagree IN DIRECTION at 2^20 (0.890373 vs 1.099069) while the kernel SOURCE is byte-identical (`deadlock-audit-q00ev`)
 
 `SlateHeron`. I was asked to decide whether the native f64 divide path survives, on the basis of
