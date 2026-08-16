@@ -26,6 +26,58 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - MEASURED, A PROVENANCE FIELD THAT WOULD MISLEAD: MEAN CPU MHz is ANTICORRELATED with quietness - it tracks how many cores are IDLE, not how fast the benchmarked core runs (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. Certification deferred - load was RISING and externally driven. While deciding I sampled
+`/proc/cpuinfo` three times, and the samples answer the frequency question directly: the
+quiet-equals-slow relationship is not merely "not clean", **it is inverted for the statistic a row
+would naturally record.**
+
+**Campaign result class:** maintenance-diagnostic (methodology; no ratio produced)
+
+**LOADAVG AND MHz, all observed by me, same host, within ~4 minutes:**
+
+| load 1-min | MHz mean | MHz min | MHz max |
+|---|---|---|---|
+| 26.60 | 2781 | **1429** | 4093 |
+| 32.47 | 3176 | - | 3934 |
+| 36.31 | 4009 | 3254 | 4117 |
+
+**MEAN MHz RISES WITH LOAD: 2781 -> 3176 -> 4009 as load goes 26.6 -> 32.5 -> 36.3.**
+**MAX MHz IS FLAT: 4093 -> 3934 -> 4117, all ~4.0-4.1 GHz.**
+
+**THE MECHANISM, and it makes the mean useless as provenance.** This is a 64-core part. On a QUIET
+host most cores sit at the idle floor - the quietest sample shows `min = 1429 MHz` - and the mean is
+dragged toward that floor by cores doing nothing. As external work arrives those cores wake and clock
+up, so the MEAN rises. Meanwhile the core actually executing a single-threaded per-call benchmark is
+boosting to ~4.1 GHz in every sample. **So mean MHz measures core IDLENESS and is anticorrelated with
+quietness; it says almost nothing about the speed of the arm being timed.**
+
+**CONSEQUENCE FOR THE PROTOCOL.** "Record the observed CPU MHz" is right, but recording the MEAN would
+put a number in every row that moves the wrong way - a row banked on a quiet host would show a LOWER
+MHz than the same row banked on a busy one, and a later reader comparing them would conclude the quiet
+run was throttled when the opposite is true. **Record MAX (the boost ceiling the timed core is
+actually reaching), or the frequency of the specific core running the arm. Not the mean.**
+
+**WHAT I CANNOT DO YET, stated rather than glossed:** per-ARM MHz is not separable with this harness.
+`/proc/cpuinfo` is a whole-machine snapshot, the two arms interleave at slot granularity inside one
+process, and nothing samples frequency per slot. Recording "MHz per arm" today would mean attributing
+one machine-wide sample to two arms that shared it - which is exactly the kind of fabricated
+attribution this ledger has been retracting all day. The honest field is a before/after snapshot for
+the whole row, labelled as such, with max rather than mean.
+
+**WHY NOTHING WAS CERTIFIED.** Load rose across the three samples (26.60 -> 32.47 -> 36.31) with the
+1-minute ending above ~30, and the driver was external: two `frankensearch_quill_gauntlet` processes at
+834% and 629% CPU, roughly 14 cores. Both the rise and its cause are recorded because a row banked in
+that window would have been measured against a moving machine.
+
+RETRY PREDICATE: when the positional-allocation lever is certified, record `MHz max` before and after
+alongside loadavg, and label it a whole-row snapshot, not a per-arm figure. If per-arm frequency ever
+matters enough to claim, it needs harness support - sampling the running core's frequency at slot
+boundaries - and until that exists no row should print a per-arm MHz field. Baselines for that
+certification are unchanged: `empty_at_final_shape_ns=307.50` and add excess 445-450 ns.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CODE, UNMEASURED: the output allocation stops building a kwargs dict per call, and stops building a one-element tuple at rank 1 (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. Directly against the term the previous row located. No certification: the host rose all
