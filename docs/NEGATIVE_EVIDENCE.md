@@ -4,6 +4,57 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - REJECT (measured): `deadlock-audit-hzl1w` proposed DELEGATING f64 maximum/minimum to NumPy - the serial native arm BEATS NumPy 1.352401x and delegating would throw that away
+
+`TealOak`. `hzl1w` measured the PARALLEL native arm losing to NumPy on `maximum`/`minimum` and
+proposed letting them delegate. Its own evidence could not distinguish two different changes:
+dropping the rayon fan-out while keeping the native kernel, versus delegating to NumPy entirely.
+Nobody had measured the SERIAL native arm. This measures both, against the same incumbent, in ONE
+invocation.
+
+**Campaign result class:** maintenance-self-speedup
+
+**A/A null control (same invocation):** parallel row incumbent A/A ci95=[0.987258,1.029173] and candidate A/A ci95=[0.977189,1.117320]; serial row incumbent A/A ci95=[0.958303,1.016463] and candidate A/A ci95=[0.990270,1.028743]. All four sit on unity.
+
+worker=vmi1152480, harness=common::run_dual_null_median_ci_contract (both A/A nulls, ABBAABBA,
+41 rounds, min-of-3), numpy_version=2.4.3, n=4194304 f64, profile `release`.
+bench_elf_sha256=e47bcfd2dbfb5dfd012c9082900190518e3dd36b4901a82b435c04af0d234b7d
+HOST_BASELINE host=vmi1152480 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+Ratio is numpy/candidate, so ABOVE 1.0 means our arm is faster.
+
+  arm=parallel_native  ratio=1.014081 ci95=[0.941037,1.158438]  numpy 13402782 ns  fnp 14766706 ns  UNDECIDED
+  arm=serial_native    ratio=1.374754 ci95=[1.352401,1.404449]  numpy 12392934 ns  fnp  9026543 ns  DECIDABLE_WIN
+
+**THE PROPOSAL IS REJECTED.** Delegating would replace an arm that beats NumPy by a worst bound of
+1.352401x with NumPy itself. The parallel arm is indeed not winning — its CI spans 1.0 and it is
+UNDECIDED — but the fix `hzl1w` inferred from that is the wrong one. The right change is to drop
+the rayon fan-out for `Maximum`/`Minimum` and KEEP the native kernel.
+
+**WHAT IS LICENSED HERE, AND WHAT IS NOT.** Both arms are bench-local replicas of
+`BinaryOp::Maximum` measured against the same incumbent in the same invocation, so the INTERNAL
+comparison — serial beats parallel for this op — is sound, and it is the comparison the decision
+turns on.
+
+The absolute "we beat NumPy 1.37x" does NOT transfer to the shipped route, and the asymmetry runs
+in our favour: the replicas write into a pre-allocated `Vec` while NumPy allocates a fresh output
+on every call, and the shipped route allocates too (`numpy.empty`). So this row must not be read
+as `fnp.maximum` beating `numpy.maximum` end to end. It says the serial kernel is the better of
+our two kernels, by a wide and decidable margin.
+
+PARITY: both replicas reproduce `numpy.maximum` bit for bit before any timing, on operands that
+include NaN lanes on both sides and a `+0.0`/`-0.0` pair — the equal-operands arm of the kernel
+(`lhs == rhs` returns the RIGHT operand) is exactly what makes signed zeros agree, and a replica
+using bare `f64::max` would have diverged there.
+
+CHANGE NOT YET LANDED: removing `Maximum`/`Minimum` from the `parallelizable` set needs a
+correctness gate, and `df -h /data` read 58G — below the 59G build budget — when this row was
+written, so no build was started. The edit is one line and the measurement justifying it is here.
+
+RETRY PREDICATE: before landing, re-measure on a second worker and require the serial-over-parallel
+ordering to hold; a single-worker ordering is what produced a sign inversion in
+`deadlock-audit-80uph`. Then gate with the existing conformance suites — the change is
+result-identical, since both paths call the same `op.apply`. AGENT_NAME=TealOak.
+
 ## 2026-08-16 - WIN (KEEP, maintenance-self-speedup): allocate the f64 binary output AT ITS FINAL SHAPE - the reshape costs 445.65 ns and the shaped allocation is not more expensive (`deadlock-audit-k4yus`)
 
 `TealOak`. `zerocopy_f64_binary_flat` allocated `numpy.empty(n)` and the caller then
