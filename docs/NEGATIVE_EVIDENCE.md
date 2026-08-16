@@ -4,6 +4,70 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - RETRY PREDICATE DISCHARGED, AND THE CONTENTION MECHANISM IS NOW DEMONSTRATED: the same ELF reads 4.107x under load 98 and 6.994x under load 33, because OUR arm is parallel and NumPy's is serial (`deadlock-audit-322j4`)
+
+`RedLynx`. No build - /data at 42G, at the hard stop. Same committed-provenance ELF as the row
+below, same commit, same host, same group, run twice about twenty minutes apart as the machine
+drained. The row below HYPOTHESISED that asymmetric contention explained a depressed ratio. This
+one tests that hypothesis by re-running when the load fell, and it holds.
+
+**Campaign result class:** incumbent-win (remainder) + methodology
+
+**THE PAIRED READINGS.** Both `DECIDABLE_WIN`, both dual-null, both from ELF
+`6766850940f767eb`.
+
+```
+                        CONTENDED run            QUIETER run
+  load 1min before      82.96                    31.65
+  load 1min after       98.12                    33.66
+  foreign top procs     python3 2075%, 757%,     python3 667%, h2h_dense 549%,
+                        gauntlet_lane_s 293%,    python 295%, rustc 111%,
+                        fp-bench 237% (~40 cores) fp-bench 100% (~17 cores)
+  ratio                 4.107151                 6.994300
+  ratio_ci95            [2.268180,5.672140]      [6.629466,7.243170]
+  worst_bound           2.268180                 6.629466
+  fnp_ns  (PARALLEL)    4432643                  2593291      -41.5%
+  numpy_ns (SERIAL)     18979383                 18205798      -4.1%
+  candidate_null_hw     0.060264 (cv 16.71%)     0.043775 (cv 10.48%)
+  incumbent_null_hw     0.007851 (cv 2.05%)      0.008764 (cv 1.42%)
+```
+
+Contention was captured BEFORE and AFTER this run, correcting the after-only limitation disclosed
+in the row below.
+
+**THE MECHANISM IS CONFIRMED BY THE ASYMMETRY, WHICH IS THE WHOLE POINT.** As the box drained,
+NumPy's single-threaded arm moved 4.1% while our 64-thread rayon arm moved 41.5% - **ten times more
+load-sensitive**. A symmetric noise source cannot do that; it is exactly what core starvation of a
+parallel arm against a serial incumbent looks like. So the depressed 4.107x was an artefact of the
+machine, not a property of the code, and the ledger's earlier instinct to read it as a regression
+would have been wrong.
+
+**THE NULL PREDICTED IT IN BAND.** The rule proposed in the row below - that the ratio of the two
+A/A null half-widths is a cheap in-band contention detector - is borne out: the candidate null
+half-width fell from 0.060264 to 0.043775 as the load fell, while the incumbent null barely moved
+(0.007851 -> 0.008764). The candidate-to-incumbent half-width ratio went 7.7x -> 5.0x. **An agent
+who cannot see the machine can still see this**, because both nulls are measured inside the same
+invocation as the effect.
+
+**THE NUMBER FOR THIS CELL IS NOW THE QUIETER RUN'S WORST BOUND: 6.629466x.** That supersedes the
+2.268x floor stated in the row below, which was correct but badly depressed. It remains BELOW
+`deadlock-audit-322j4`'s run-5 point estimate of 8.037497x, and it should: this host still carried
+~17 cores of foreign load, so 6.994x is itself a floor rather than a clean-room figure. The honest
+ordering is `2.268 (load 98) < 6.629 (load 33) <= true quiet-host value <= ~8.04`.
+
+**WHAT IS SETTLED.** `fnp.remainder` beats `numpy.remainder` at 2^21 by at least 6.63x on
+recoverable source, and all three of `SlateHeron`'s invalidated groups have now been re-measured
+from a committed SHA. What is NOT settled is the point estimate; that needs an actually idle box.
+
+RETRY PREDICATE: (1) For a clean-room figure, measure on a host with load well under half its
+thread count and disclose both endpoints again; do not quote 8.037497x until then. (2) GENERALISE
+THIS: any banked row whose candidate arm is parallel and whose incumbent is serial should carry its
+load endpoints, because the bias is directional and always against us - and rows lacking them
+should be treated as floors, not estimates. Worth a sweep of existing parallel-arm rows for missing
+load provenance. (3) Do not re-run under load and re-bank a third point estimate for this cell; two
+are already enough to establish the mechanism and a third adds noise, not information.
+AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - RE-MEASURED FROM COMMITTED PROVENANCE, CONTENDED HOST: the remainder WIN survives (DECIDABLE_WIN, worst bound 2.268x) and the hoisting RATIOS replicate - but absolute ns inflate ~1.6x under load 98, so no point estimate may be compared to the pre-fix ones (`deadlock-audit-322j4`, `deadlock-audit-v8nx6`, `deadlock-audit-ei9jz`)
 
 `RedLynx`. No build - /data at 43G. This re-runs the last TWO of `SlateHeron`'s three invalidated
