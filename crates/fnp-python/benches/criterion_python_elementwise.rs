@@ -2667,6 +2667,18 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
             "the probed and probe-skipped arms disagree — they are not the same call"
         );
 
+        // The three keywords our SLOW TAIL always sets when any kwarg is non-default
+        // (`casting`, `order`, `subok`). Handed to NumPy's own ufunc below to price the
+        // parse half of `kwargs_overhead_ns` without involving our probe chain.
+        let tail_kwargs = PyDict::new(py);
+        tail_kwargs
+            .set_item("casting", "unsafe")
+            .expect("bind tail casting");
+        tail_kwargs.set_item("order", "K").expect("bind tail order");
+        tail_kwargs
+            .set_item("subok", true)
+            .expect("bind tail subok");
+
         // Whole call, full probe chain, every kwarg at its default.
         let whole_ns = min_ns(TRIALS, || {
             black_box(ours.call1(&args).expect("fnp.multiply call"));
@@ -2683,16 +2695,72 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
             black_box(theirs.call1(&args).expect("numpy.multiply call"));
         });
 
-        let probe_chain_ns = whole_ns - skipped_ns;
-        let wrapper_residual_ns = skipped_ns - numpy_ns;
+        // THE TWO ARMS DIFFER BY MORE THAN THE PROBE CHAIN, and correcting for that is
+        // what makes this partition valid again (`deadlock-audit-uj3r3`).
+        //
+        // The probe block is gated on ALL SEVEN of out/where/dtype/signature being absent
+        // and casting/order/subok being at their defaults, and `deadlock-audit-s2fkk`'s
+        // fast path keys off the SAME predicate. So "probes engaged" and "no keyword tail"
+        // are not two knobs, they are one: the all-defaults arm sends NO keywords, while
+        // the `casting="unsafe"` arm falls to the tail that allocates a PyDict, sets
+        // casting/order/subok, and makes NumPy parse three keywords — a shape s2fkk priced
+        // at ~727 ns. The raw subtraction is therefore `probe_chain MINUS kwargs`, and
+        // once the per-call imports were removed from the probes (f8475a76, 5c7735da) the
+        // kwargs term dominated and drove it NEGATIVE (-40.0 ns), tripping the guard below.
+        //
+        // There is no spelling of "probes on, keywords on" to compare against, so the term
+        // is CANCELLED rather than eliminated. Both halves are measurable:
+        //   (a) NumPy's own parse of the same three keywords our tail always sets, taken on
+        //       NumPy's ufunc so no probe chain is involved;
+        //   (b) our PyDict construction, as a standalone replica.
+        // Replica-based, so a LOWER BOUND, which is the same caveat the stage decomposition
+        // already carries — and it is checked below against s2fkk's independent figure.
+        let numpy_kwargs_ns = min_ns(TRIALS, || {
+            black_box(
+                theirs
+                    .call(&args, Some(&tail_kwargs))
+                    .expect("numpy.multiply with the tail's three keywords"),
+            );
+        });
+        let pydict_build_ns = min_ns(TRIALS, || {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("casting", "unsafe").expect("set casting");
+            kwargs.set_item("order", "K").expect("set order");
+            kwargs.set_item("subok", true).expect("set subok");
+            black_box(kwargs);
+        });
+        let kwargs_overhead_ns = (numpy_kwargs_ns - numpy_ns) + pydict_build_ns;
+        // What the probe-skipping arm WOULD have cost had it taken the fast tail, i.e. the
+        // arm the probed one should have been compared against all along.
+        let skipped_fast_tail_ns = skipped_ns - kwargs_overhead_ns;
+        let probe_chain_ns = whole_ns - skipped_fast_tail_ns;
+        let wrapper_residual_ns = skipped_fast_tail_ns - numpy_ns;
+
+        // The correction must be POSITIVE: the keyword tail does strictly more work than
+        // the fast tail — it builds a PyDict and hands NumPy three keywords to parse. A
+        // non-positive value means the replica is not capturing that work at all, and a
+        // correction that is not measuring anything must not be silently applied.
+        assert!(
+            kwargs_overhead_ns > 0.0,
+            "kwargs overhead measured NON-POSITIVE ({kwargs_overhead_ns:.1} ns): the keyword \
+             tail cannot be cheaper than the fast tail, so this correction is invalid"
+        );
+        // Independent sanity check on the correction, emitted rather than asserted:
+        // `deadlock-audit-s2fkk` priced this same call shape at ~727 ns by a different
+        // method. A ratio far from 1.0 means the correction is mis-scaled and the
+        // probe-chain figure below should not be trusted — but the threshold is a
+        // judgement for the reader, not a hard gate, since the two methods differ and
+        // 727 ns was measured on another host.
+        let kwargs_overhead_vs_s2fkk = kwargs_overhead_ns / 727.0;
 
         // A partition cannot have negative parts. If the probe-skipping arm is not
         // cheaper than the probed one, or delegation is not dearer than NumPy's own
         // call, the subtraction has been contaminated and the row must not publish.
         assert!(
             probe_chain_ns >= 0.0,
-            "probe chain measured NEGATIVE ({probe_chain_ns:.1} ns): the casting=unsafe arm \
-             was not cheaper than the probed arm, so this partition is invalid"
+            "probe chain measured NEGATIVE ({probe_chain_ns:.1} ns) even after cancelling \
+             the {kwargs_overhead_ns:.1} ns keyword tail: the corrected probe-skipping arm \
+             was still not cheaper than the probed arm, so this partition is invalid"
         );
         assert!(
             wrapper_residual_ns >= 0.0,
@@ -2730,7 +2798,12 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
              route=delegating partition_is_exhaustive_by_construction=true \
              accounted_fraction_is_tautological=true \
              probe_separation=shipped_casting_guard_deadlock-audit-wsd7h \
-             fnp_multiply_ns={whole_ns:.1} probes_skipped_ns={skipped_ns:.1} \
+             fnp_multiply_ns={whole_ns:.1} probes_skipped_raw_ns={skipped_ns:.1} \
+             numpy_kwargs_ns={numpy_kwargs_ns:.1} pydict_build_ns={pydict_build_ns:.1} \
+             kwargs_overhead_ns={kwargs_overhead_ns:.1} \
+             kwargs_overhead_vs_s2fkk_727ns={kwargs_overhead_vs_s2fkk:.3} \
+             correction=deadlock-audit-uj3r3_keyword_tail_cancelled \
+             probes_skipped_ns={skipped_fast_tail_ns:.1} \
              numpy_multiply_ns={numpy_ns:.1} probe_chain_ns={probe_chain_ns:.1} \
              wrapper_residual_ns={wrapper_residual_ns:.1} \
              probe_chain_share={:.3} wrapper_residual_share={:.3} numpy_share={:.3} \
