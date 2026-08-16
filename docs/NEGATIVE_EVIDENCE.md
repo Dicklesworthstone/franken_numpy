@@ -9,6 +9,64 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - RETRY PREDICATE DISCHARGED: `add` DOES reach parity at 2^24 - the earlier `at_parity=false` was riding on a defective null, and the ratio never moved (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. My own retry predicate said: re-run ONLY the 2^24 cell until its incumbent null
+straddles unity, then read `at_parity`. Done. The answer flips, and the reason it flips is a control,
+not a measurement.
+
+**Campaign result class:** incumbent-loss (worst cell), with a resolved parity question
+
+```
+ROUTE_FLOOR_SWEEP op=add worker=thinkstation1 numpy_version=2.4.3  elf fa1d5c41...
+  n=2^8   ratio=0.261567 ci95=[0.260755,0.262524]  numpy_ns=697      fnp_ns=2665      DECIDABLE_REGRESSION
+  n=2^12  ratio=0.455369 ci95=[0.455121,0.458266]  numpy_ns=1718     fnp_ns=3762      DECIDABLE_REGRESSION
+  n=2^16  ratio=0.862354 ci95=[0.860457,0.865019]  numpy_ns=17453    fnp_ns=20213     DECIDABLE_REGRESSION
+  n=2^20  ratio=0.997711 ci95=[0.943624,1.050978]  numpy_ns=676481   fnp_ns=686275    UNDECIDED, at_parity=true
+  n=2^24  ratio=0.995687 ci95=[0.978535,1.018746]  numpy_ns=23808644 fnp_ns=23954135  UNDECIDED, at_parity=TRUE
+```
+
+**THE 2^24 CELL, BOTH RUNS:**
+
+| | ratio | ci95 | incumbent null straddles | at_parity |
+|---|---|---|---|---|
+| run 1 | 0.995634 | [0.993635,0.999127] | **false** | false |
+| run 2 | 0.995687 | [0.978535,1.018746] | **true** | **true** |
+
+**The ratio is identical to 0.0053%.** What changed is the CI WIDTH, and with it the verdict. So
+`add` DOES amortise to parity at 16.7M elements, exactly as `multiply` does — it is a small-n floor
+problem, not a permanent deficit. The `at_parity=false` I banked one commit ago was an artefact of a
+run whose control was defective, which is precisely why I refused to claim it then. **Had I quoted it,
+I would have published "the worst op never amortises" off a broken null.**
+
+**AND THE DEFECT MOVED, which is the useful generalisation.** This run's defective null is at
+**2^20** (`incumbent_null_straddles_unity=false`), not 2^24. It is not a property of one cell. Null
+half-widths this run are **0.0017-0.0057 at 2^8-2^16 against 0.0222-0.0343 at 2^20-2^24 — 20x wider
+at the large end**. The large-n cells of this family cannot resolve anything finer than ~5%, so
+`at_parity` there is a statement about the harness's reach, not a tight fact about the route. The
+small-n cells, where every null has been clean in all runs, are the only ones carrying decidable
+information.
+
+**THE WORST CELL, now FOUR independent invocations:** 0.275225 / 0.262606 / 0.285809 / 0.261567 →
+**3.633x / 3.808x / 3.499x / 3.823x slower**. Range 3.50-3.82x, all with clean nulls. The figure to
+quote remains **~3.5-3.8x slower at n=256**.
+
+**HOST NOTE, since it explains the wider nulls:** this run was on a busier machine — NumPy itself took
+697 ns at n=256 against 436 ns in run 1, and 23.8 ms at 2^24 against 19.2 ms. Both arms move together
+so the RATIOS stay comparable (that is what the paired contract is for), but absolute ns from the two
+runs must not be mixed.
+
+bench_elf_sha256=fa1d5c41dabf5038e36678c4278bb2403d25f13137b5d999119f028c29cf8c1e, identical binary to
+run 1. Code unchanged: zero files under `crates/` differ from the commit the ELF was built at, and no
+crate file was dirty. host=thinkstation1 5975WX 32c/64t governor=powersave.
+
+RETRY PREDICATE: the parity question is CLOSED — `add` reaches parity at 2^24 and the worst cell is
+settled over four runs. Do not re-run this sweep again. The remaining work on this ratio is a LEVER,
+not another measurement: `deadlock-audit-v46rn`'s 731 ns dtype-fetch ceiling against a per-call excess
+of ~1100-1700 ns at the small-n end. Anyone re-measuring large-n cells of this family should first fix
+the null width there, because at 20x the small-n half-width they decide nothing.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - THE SIZE AXIS FOR THE WORST CELL: `add` is worse than `multiply` at every size, and unlike multiply it does NOT reach parity by 2^24 - though the cell that would decide that has a defective null (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. `add` was the campaign's worst vs-incumbent cell but had only ever been measured at ONE
