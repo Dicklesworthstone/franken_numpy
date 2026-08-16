@@ -4,6 +4,128 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-15 - UNDECIDED (measured, direction is a LOSS): `fnp.divide` reads 0.905098x vs live `numpy.divide` at 1M f64, and the whole FE-hazard family turns out to have been optimising a route we have never beaten (`deadlock-audit-su0i6`)
+
+`TealOak`. Every previous divide row in this ledger — `deadlock-audit-2nmd1`,
+`jw7vk`, `ae85t`, `vqxoa` — is `maintenance-self-speedup`: our own code before vs after.
+This is the first time the shipped route has been run against the incumbent.
+
+**Campaign result class:** maintenance-self-speedup
+
+Deliberately NOT `incumbent-win`: the direction is a LOSS, and the class exists to say
+which comparison produced the number, not to flatter it. It is banked here so the loss is
+on the record with its provenance.
+
+WORKER=vmi1293453 (8 physical cores, AMD EPYC IBPB, avx2, no avx512f)
+harness=common::run_dual_null_median_ci_contract (incumbent A/A + candidate A/A, ABBAABBA, 41 rounds, min-of-3)
+HOST_BASELINE host=vmi1293453 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=8 logical_threads=8 governor=unavailable
+bench_elf_sha256=05383c2c31c7c1a1258c000d79b2b5c5f1d212d1fdf6c3afa5059cf2358d0787
+harness_contract_source_sha256=41b3066deb47e99b9e7ada4c86a7d3bd6d93b3c94bf6235dd3cf7ae609e79807 harness_source_matches_disk=true
+numpy_version=2.4.3, profile `bench` (triage grade), n=1048576 float64, C-contiguous, hazard-free operands.
+
+  numpy.divide  592906 ns      fnp.divide  651574 ns
+  effect ratio_median=0.905098 ci95=[0.881811,0.933693]  (below 1.0 = WE ARE SLOWER)
+  incumbent A/A ratio_median=1.006408 ci95=[1.000217,1.038409] half_width=0.038409
+  candidate A/A ratio_median=0.969666 ci95=[0.933709,1.017142] half_width=0.066291
+  MEDIAN_CI_GATE verdict=UNDECIDED controlling_null_half_width=0.066291 required_2x_delta=0.132582
+
+WHY UNDECIDED AND NOT A 10% LOSS. The effect CI excludes 1.0, which is necessary and not
+sufficient here. The controlling null half-width is 0.066291, so the gate requires the
+effect median to deviate from unity by more than 0.132582; it deviates by 0.094902. The
+incumbent's OWN two arms differed by up to 3.8% in this invocation. The point estimate is
+a ~10% loss and the direction is consistent across both nulls, but the verdict is
+UNDECIDED and quoting "10% slower" as decided would be exactly the overreach this gate
+exists to stop.
+
+WHAT IT MEANS FOR THE FAMILY. The fusion win banked above is real and unaffected — it is
+our code against our code, and it recovered most of what the correctness deferral cost.
+But it was closing a gap we opened, on a route that still sits behind the incumbent. That
+reframes the retry predicate: the serial arm's remaining ~1.37x against our own former
+loop is not the target; the target is the ~0.9x against NumPy, and the deferral we pay for
+IEEE-warning parity is part of that budget.
+
+PARITY: both arms' results are checksum-compared before timing and again every round by
+the contract, so a divergence would fail the measurement rather than win it. Dispatch was
+asserted at runtime inside the measured binary — `fnp.divide` is not numpy's object and
+the incumbent module's `__name__` is `numpy`.
+
+RETRY PREDICATE: re-run on a host where the incumbent A/A null sits at unity (this one's
+excluded 1.0 on the high side) or raise the round count until the controlling half-width
+is under ~0.047, which is what a 0.0949 deviation needs to clear the 2x margin. Then the
+verdict decides. Do NOT re-open the ae85t per-block pre-filter to chase it — that is
+refuted on a counted mechanism. AGENT_NAME=TealOak.
+
+## 2026-08-15 - LOSS vs INCUMBENT (REPLICATED, TWO WORKERS): `fnp.divide` is 1.16-1.22x SLOWER than `numpy.divide` on f64 n=2^20 - the whole FE-hazard line has been optimising a route that is BEHIND the incumbent (`deadlock-audit-su0i6`)
+
+`TealOak`. The f64 divide line of work (`deadlock-audit-2nmd1` -> `jw7vk` -> `ae85t` ->
+`vqxoa`) is entirely `maintenance-self-speedup`: every arm was our own code, before vs
+after. Nobody had ever run `fnp.divide` against `numpy.divide`. This row is that
+measurement, and it is a loss. Reporting it was the bead's stated success condition.
+
+**Campaign result class:** incumbent-loss
+
+Ratio is incumbent/candidate = numpy/fnp, so BELOW 1.0 means NumPy is faster.
+
+**Result, replicated on two workers, both `DECIDABLE_REGRESSION` under the dual-null gate
+with the effect CI excluding 1.0 and the deviation clearing twice the controlling null
+half-width:**
+
+| worker | ISA / cores | numpy | ratio (numpy/fnp) | ratio CI95 | numpy ns | fnp ns | incumbent null | candidate null | ELF sha256 |
+|---|---|---|---|---|---|---|---|---|---|
+| `hz2` (`/etc/hostname`=hetzner2) | AVX-512, EPYC-Genoa, 16c | 2.4.3 | **0.865383** | [0.858914, 0.872459] | 403963.0 | 471115.0 | 0.995366, CI [0.980478,1.008227] | 1.004442, CI [0.997608,1.014631] | `f6b08d8324506c6e3f4a817e6eb9f0dd18eb471d676948b739cead8f5c92a952` |
+| `vmi1149989` | AVX2, EPYC, 10c | 2.4.3 | **0.817054** | [0.788595, 0.838746] | 453749.0 | 564706.0 | 0.988121, CI [0.967854,1.007050] | 0.985995, CI [0.972726,1.012406] | `bd38d7117ad7c289408b7cf383ebfa48567cebe9a43f22c39647705461cadeef` |
+
+**The harness's own output, pasted verbatim** (both rows carry `worker=` and `harness=`;
+the `hz2` run's `HOST_BASELINE` is included as printed - note `/etc/hostname` reports
+`hetzner2` while the rch alias for the same machine is `hz2`):
+
+```
+HOST_BASELINE host=hetzner2 cpu_model=AMD_EPYC-Genoa_Processor physical_cores=16 logical_threads=16 online_cpus=0:1:2:3:4:5:6:7:8:9:10:11:12:13:14:15 allowed_logical_threads=16 allowed_cpus=0:1:2:3:4:5:6:7:8:9:10:11:12:13:14:15 governor=unavailable
+BENCH_GROUP_SELECTION selector="bench_divide_vs_numpy_incumbent" selected_groups=1
+MEDIAN_CI_GATE row=divide_f64_1m_vs_numpy verdict=DECIDABLE_REGRESSION effect_ratio=0.865383 effect_ci95=[0.858914,0.872459] effect_ci_excludes_one=true incumbent_null_ci95=[0.980478,1.008227] candidate_null_ci95=[0.997608,1.014631] incumbent_null_half_width=0.019522 candidate_null_half_width=0.014631 controlling_null_half_width=0.019522 required_2x_delta=0.039043 both_nulls=true cv_is_provenance_only=true
+DIVIDE_VS_NUMPY n=1048576 numpy_version=2.4.3 worker=hetzner2 harness=common::run_dual_null_median_ci_contract rounds=41 incumbent_median_ns=403963.0 candidate_median_ns=471115.0 ratio_median=0.865383 ratio_ci95=[0.858914,0.872459] incumbent_null_median=0.995366 candidate_null_median=1.004442 faster_than_numpy=false checksum=eb91d471f37fc5e0
+
+MEDIAN_CI_GATE row=divide_f64_1m_vs_numpy verdict=DECIDABLE_REGRESSION effect_ratio=0.817054 effect_ci95=[0.788595,0.838746] effect_ci_excludes_one=true incumbent_null_ci95=[0.967854,1.007050] candidate_null_ci95=[0.972726,1.012406] incumbent_null_half_width=0.032146 candidate_null_half_width=0.027274 controlling_null_half_width=0.032146 required_2x_delta=0.064291 both_nulls=true cv_is_provenance_only=true
+DIVIDE_VS_NUMPY n=1048576 numpy_version=2.4.3 worker=vmi1149989 harness=common::run_dual_null_median_ci_contract rounds=41 incumbent_median_ns=453749.0 candidate_median_ns=564706.0 ratio_median=0.817054 ratio_ci95=[0.788595,0.838746] incumbent_null_median=0.988121 candidate_null_median=0.985995 faster_than_numpy=false checksum=eb91d471f37fc5e0
+```
+
+**Harness:** `common::run_dual_null_median_ci_contract`, 41 rounds, min-of-3, ABBAABBA
+interleaved, NumPy/NumPy A/A and fnp/fnp A/A both run before the effect in the SAME
+process. Bench group `bench_divide_vs_numpy_incumbent` in
+`crates/fnp-python/benches/criterion_python_elementwise.rs`, selected via
+`FNP_BENCH_GROUPS`, `selected_groups=1` confirmed on the run line. Profile: `bench`
+(stock release) = TRIAGE grade, not `release-perf`; both arms sit in one binary at one
+profile so the RATIO is fair, the absolute ns are not ship-grade.
+
+**The two ratios are NOT pooled and must not be averaged.** They are separate rows on
+separate machines. The fleet measured a 13.6x swing for one cell across two workers with
+both A/A nulls passing, so a passing null does not license a cross-worker comparison. What
+replicates here is the DIRECTION and the VERDICT, on two independent workers of different
+ISA and core count - which is what makes the loss robust rather than a one-host artifact.
+
+**Traps checked.** Dispatch: the bench asserts at runtime that `fnp.divide` is not
+NumPy's object before timing and prints `numpy.__version__`. Config match: both arms take
+the identical C-contiguous float64 operands built once. Interleaving: ABBAABBA inside one
+measured routine. Parity: the cross-arm checksum is asserted every round and came out
+`eb91d471f37fc5e0` identically on BOTH workers, so the two arms computed the same thing.
+Shared component: neither arm calls the other; this is our whole call against their whole
+call, end to end through the Python surface.
+
+**WHY THIS MATTERS MORE THAN THE NUMBER.** `vqxoa` banked a 1.408x/1.661x self-speedup for
+fusing the FE-hazard scan, and that fusion is real. But the route it improved is still
+behind `numpy.divide`, so none of that line may be quoted competitively, and the family's
+remaining self-speedup levers are worth less than they look: closing 1.16-1.22x against the
+incumbent is the actual target. This is the campaign's worst known vs-incumbent ratio on a
+core elementwise op.
+
+**Retry predicate.** Reopen when a divide lever lands that plausibly moves the ROUTE (not
+the kernel replica) - the two named candidates are widening the fast-accept predicate so
+fewer elements take the deferral, and removing the per-call operand marshalling on the
+PyO3 boundary - then re-run `bench_divide_vs_numpy_incumbent` on a NAMED worker and compare
+against THIS row only if it is the same worker. A new worker needs its own baseline row.
+Do not treat `DIVIDE_ROUTE_SHARE` as evidence in either direction: it still fails its
+own two-run reproducibility test (`deadlock-audit-c9rn8`).
+
 ## 2026-08-15 - WIN (KEEP, maintenance-self-speedup): fusing the f64 divide FE-hazard scan into the divide loop - 1.408x serial, 1.661x parallel, and the deferral's parallel cost goes to zero (`deadlock-audit-vqxoa`)
 
 `TealOak`. `deadlock-audit-2nmd1` made the f64 divide fast path defer to NumPy on any
