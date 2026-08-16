@@ -15,6 +15,7 @@ use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyModuleMethods, PyTuple, PyTu
 use pyo3::{Bound, Py, PyAny, PyResult, Python, pyclass, pymethods};
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
@@ -5201,6 +5202,49 @@ fn maximum_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
 //
 // n=1<<22 sits above the 1<<21 parallel_min, the regime the losing measurements
 // came from — below it the shipped route runs serially anyway.
+/// Sample every core's current frequency, in MHz (`deadlock-audit-48by6`).
+///
+/// This host runs `amd-pstate-epp` under the `powersave` governor and shows a LIVE
+/// CROSS-CORE SPREAD: 2565-4092 MHz measured simultaneously across 64 cores, a 1.595x
+/// range, at a moment when the load average was 42. A fleet report put the spread as high
+/// as 2.879x. Two arms of a paired benchmark can therefore run at materially different
+/// clocks without either the load average or the A/A null showing anything — the null
+/// compares an arm against ITSELF and cancels a difference that is common to both of its
+/// halves.
+///
+/// Returns `(max, mean)` across all cores. Sampled OUTSIDE the timed region: 64 sysfs
+/// reads cost tens of microseconds and would otherwise be charged to the arm.
+fn sample_cpu_mhz() -> (f64, f64) {
+    let mut seen = Vec::with_capacity(64);
+    for cpu in 0..1024u32 {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_cur_freq");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                if let Ok(khz) = text.trim().parse::<f64>() {
+                    seen.push(khz / 1000.0);
+                }
+            }
+            // cpufreq absent for this index: the enumeration is done.
+            Err(_) => break,
+        }
+    }
+    if seen.is_empty() {
+        return (0.0, 0.0);
+    }
+    let max = seen.iter().copied().fold(f64::MIN, f64::max);
+    let mean = seen.iter().sum::<f64>() / seen.len() as f64;
+    (max, mean)
+}
+
+/// Median of a sample, for the per-arm MHz columns.
+fn median_of(values: &mut [f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).expect("no NaN in MHz samples"));
+    values[values.len() / 2]
+}
+
 /// Does the interference scale as a FIXED cost divided by the incumbent's duration?
 /// (`deadlock-audit-48by6`)
 ///
@@ -5620,12 +5664,24 @@ fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
         let mut shadow_out = vec![0.0_f64; N];
 
         // Arm A: the incumbent alone. Nothing of ours runs adjacent to it.
+        // Per-arm clock sampling (`deadlock-audit-48by6`). If a 64-thread shadow pushes the
+        // package into a lower turbo bin, the single-threaded NumPy call that follows runs
+        // slower for a reason that has nothing to do with caches — and that would be a
+        // FOURTH mechanism for this effect after three I have already withdrawn. PREDICTION,
+        // registered here before the run: if frequency is the cause, the shadowed arm
+        // samples LOWER MHz than the isolated arm.
+        let isolated_mhz = RefCell::new(Vec::new());
+        let shadowed_mhz = RefCell::new(Vec::new());
+
         let isolated = || {
             let started = Instant::now();
             let result = np_maximum
                 .call(&args, Some(&out_kwargs))
                 .expect("numpy.maximum isolated");
             let elapsed = started.elapsed();
+            // Sampled AFTER the timer stops, so the sysfs reads are not charged to the arm.
+            let (max_mhz, _mean_mhz) = sample_cpu_mhz();
+            isolated_mhz.borrow_mut().push(max_mhz);
             common::ContractObservation {
                 elapsed,
                 checksum: numpy_divide_checksum(&result, N),
@@ -5640,6 +5696,8 @@ fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
                 .call(&args, Some(&out_kwargs))
                 .expect("numpy.maximum shadowed");
             let elapsed = started.elapsed();
+            let (max_mhz, _mean_mhz) = sample_cpu_mhz();
+            shadowed_mhz.borrow_mut().push(max_mhz);
             common::ContractObservation {
                 elapsed,
                 checksum: numpy_divide_checksum(&result, N),
@@ -5649,6 +5707,13 @@ fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
             common::run_median_ci_contract("incumbent_interference", shadowed, isolated);
 
         let interference_ns = effect.arm_a_median_ns - effect.arm_b_median_ns;
+        let shadowed_mhz_median = median_of(&mut shadowed_mhz.borrow_mut());
+        let isolated_mhz_median = median_of(&mut isolated_mhz.borrow_mut());
+        let mhz_ratio = if isolated_mhz_median > 0.0 {
+            shadowed_mhz_median / isolated_mhz_median
+        } else {
+            0.0
+        };
         println!(
             "INCUMBENT_INTERFERENCE n={N} numpy_version={numpy_version} worker={} \
              harness=common::run_median_ci_contract \
@@ -5656,6 +5721,8 @@ fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
              candidate_work_is_outside_the_timer=true \
              shadowed_ns={:.1} isolated_ns={:.1} interference_ns={interference_ns:.1} \
              ratio={:.6} ratio_ci95=[{:.6},{:.6}] null={:.6} \
+             shadowed_max_mhz={shadowed_mhz_median:.0} isolated_max_mhz={isolated_mhz_median:.0} \
+             mhz_ratio_shadowed_over_isolated={mhz_ratio:.4} \
              above_one_means_our_ratios_are_optimistic_by_this_factor=true",
             measurement_worker(),
             effect.arm_a_median_ns,

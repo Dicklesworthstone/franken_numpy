@@ -26,6 +26,80 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - FLEET CPU-SPREAD FINDING VERIFIED EXACTLY (2.882x), PER-ARM MHz NOW RECORDED - and it REFUTES the frequency explanation for our interference: the shadowed arm runs at a HIGHER clock, not lower (`deadlock-audit-48by6`)
+
+`RedLynx`. Response to the fleet report that a live cross-core spread of 2.879x, not ambient load,
+is why ratios move between windows. Verified here, instrumented per arm, and used to test whether
+frequency explains the interference effect this ledger has been chasing. It does not.
+
+**Campaign result class:** maintenance-diagnostic (fleet finding confirmed; a fourth mechanism refuted)
+
+```
+bench_elf_sha256=8f4506a8c47b166a94587cbf50ffe2012cb425047dd61aac963d66041fc8c7a8
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=2^22
+governor=powersave  driver=amd-pstate-epp
+LOADAVG 1min 33.55 before -> 31.41 after; 5min 38.24 -> 37.43
+CPU MHz sampled IMMEDIATELY BEFORE THE RUN: min 1429, max 4118, spread 2.882x, median 1429
+```
+
+**THE FLEET NUMBER REPRODUCES TO THREE DIGITS: 2.882x here against 2.879x reported.** An earlier
+sample this turn gave 1.595x (2565-4092), so the spread itself varies; it is not a fixed property
+of the box.
+
+**AND THE SHAPE OF THE SPREAD MATTERS MORE THAN ITS SIZE.** The MEDIAN core sits at 1429 MHz — the
+floor — while the maximum is 4118. Under `amd-pstate-epp`/`powersave` this is not cores randomly
+differing: idle cores park at minimum and busy cores boost. So "2.882x spread" describes the gap
+between parked and working cores, and a benchmark arm that is actually running sits at the top of
+that range, not in the middle of it. **The right per-arm statistic is therefore the MAX across
+cores**, which is what the instrumentation records.
+
+**PER-ARM MHz, NOW EMITTED IN THE ROW:**
+
+```
+  shadowed_max_mhz = 4143    isolated_max_mhz = 4084    ratio = 1.0143
+```
+
+**Both arms ran on comparably clocked cores — 1.4% apart, both boosted near 4.1 GHz.** That is the
+check the fleet guidance asks for, made rather than assumed.
+
+**AND IT REFUTES THE FREQUENCY EXPLANATION FOR OUR INTERFERENCE, which was my next hypothesis.**
+The obvious story was that a 64-thread shadow pushes the package into a lower turbo bin so the
+single-threaded NumPy call that follows runs slower. The prediction was registered in the group's
+doc comment before the run: the shadowed arm should sample LOWER MHz. **It samples HIGHER** — 4143
+against 4084. Whatever our shadow does to the incumbent, it is not clocking it down; if anything
+the core is warmer and boosting. That is a fourth mechanism proposed and dropped, and unlike the
+previous three it was killed by a measurement designed in advance to kill it.
+
+**THE INTERFERENCE ITSELF REPLICATES A THIRD TIME, and is now a tight figure:**
+
+```
+  run 1  ratio 1.062643   run 2  ratio 1.067266   run 3  ratio 1.063965   (this row)
+  spread across three runs, three ELFs and three load windows: 0.4%
+```
+
+This run: ci95 [1.035677,1.087034], DECIDABLE, null [0.973558,1.021733] straddling unity with a
+bias of 0.003075. Three independent certifications at 1.062-1.067 is the strongest replication in
+this ledger.
+
+**A PARTIAL TEST OF THE FLEET'S CAUSAL CLAIM.** The report says frequency spread rather than
+ambient load is why ratios move between windows. For THIS measurement neither moved it: the ratio
+held to 0.4% across load windows of ~10, ~25 and ~34 with the spread varying between 1.595x and
+2.882x. That is what a within-invocation alternating design is supposed to deliver, and it does.
+The cells that DID move between windows — the remainder cell went 4.107 at loadavg 98 to 6.968 at
+loadavg 18 — have a 64-thread candidate that needs every core, so core AVAILABILITY is a sufficient
+explanation there and frequency is not required. Disentangling them needs per-arm MHz on that cell,
+which the instrumentation now makes cheap.
+
+RETRY PREDICATE: (1) Wire `sample_cpu_mhz` into the remainder and maximum-arms groups so their rows
+carry per-arm MHz too; that is where the fleet's claim can actually be tested, since those are the
+cells that moved. (2) Record the spread AND the median, not the spread alone — a 2.882x spread with
+a 1429 MHz median means most cores are parked, which is a different situation from a genuinely
+uneven boost distribution and would call for different handling. (3) Do not propose a fifth
+mechanism for the interference from the current evidence. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED, A PROVENANCE FIELD THAT WOULD MISLEAD: MEAN CPU MHz is ANTICORRELATED with quietness - it tracks how many cores are IDLE, not how fast the benchmarked core runs (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. Certification deferred - load was RISING and externally driven. While deciding I sampled
