@@ -58,13 +58,13 @@ use pyo3::exceptions::{
     PyDeprecationWarning, PyMemoryError, PyOSError, PyOverflowError, PyTypeError, PyValueError,
     PyZeroDivisionError,
 };
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyAny, PyBool, PyBytes, PyComplex, PyDict, PyInt, PyList, PyModule, PySlice, PySliceMethods,
     PyString, PyTuple, PyType,
 };
-use pyo3::intern;
 use pyo3::wrap_pyfunction;
 use pyo3::{Bound, IntoPyObject};
 
@@ -381,6 +381,40 @@ impl PyUFunc {
         // at its default) routes to the zero-copy parallel kernel; any out/where/dtype/casting/
         // order/subok/signature override falls through to numpy verbatim. op.apply is the SAME
         // per-element function as numpy's (powf; floored-mod), so the result is bit-identical.
+        // OUT= FAST PATH (`deadlock-audit-ei9jz`). Every native route below requires
+        // `out.is_none()`, so until now `fnp.add(a, b, out=c)` delegated to NumPy in
+        // full. Output allocation is 307.50 ns and 83% of this route's per-call
+        // residual; when the caller supplies the buffer that cost is not merely
+        // reducible, it is unnecessary. Declines to the delegation tail on any
+        // shape/dtype/contiguity mismatch.
+        if let Some(out_obj) = out.as_ref()
+            && r#where.is_none()
+            && dtype.is_none()
+            && signature.is_none()
+            && casting == "same_kind"
+            && order == "K"
+            && subok
+        {
+            let binop = match self.kind {
+                UFuncKind::Remainder => Some(BinaryOp::Remainder),
+                UFuncKind::Power => Some(BinaryOp::Power),
+                UFuncKind::Maximum => Some(BinaryOp::Maximum),
+                UFuncKind::Minimum => Some(BinaryOp::Minimum),
+                UFuncKind::Divide => Some(BinaryOp::Div),
+                _ => None,
+            };
+            if let Some(op) = binop
+                && let Some(out_val) = try_zerocopy_f64_binary_into(
+                    py,
+                    x1.bind(py),
+                    x2.bind(py),
+                    out_obj.bind(py),
+                    op,
+                )?
+            {
+                return Ok(out_val);
+            }
+        }
         if out.is_none()
             && r#where.is_none()
             && dtype.is_none()
@@ -9613,6 +9647,37 @@ fn zerocopy_f64_binary_flat<'py>(
     b: &Bound<'py, PyAny>,
     op: BinaryOp,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    zerocopy_f64_binary_flat_with_out(py, numpy, a, b, op, None)
+}
+
+/// The same writer, but able to write into a CALLER-SUPPLIED output buffer
+/// (`deadlock-audit-ei9jz`).
+///
+/// WHY: output allocation is 307.50 ns and 83% of the per-call `wrapper_residual`
+/// measured on this route - the single largest remaining term on the campaign's worst
+/// ratio. When the caller passes `out=`, that allocation is not merely cheaper, it is
+/// UNNECESSARY: NumPy's own contract is that the result is written into the buffer the
+/// caller already owns. Until now every native path DECLINED whenever `out` was
+/// supplied, so `fnp.add(a, b, out=c)` delegated to NumPy in full.
+///
+/// DECLINES, each of which falls through to NumPy rather than guessing:
+///   - `out` is not an exact `ndarray`
+///   - `out` is not float64 (typechar 'd')
+///   - `out`'s shape differs from the operands'
+///   - `out` is not writable or not C-contiguous (`PyBuffer::as_mut_slice` refuses)
+///
+/// ALIASING IS SAFE HERE and is deliberately allowed: `np.add(a, b, out=a)` is legal
+/// and common. Every op on this route is ELEMENTWISE - `out[i]` depends only on `a[i]`
+/// and `b[i]` - so writing a lane after reading the same lane cannot corrupt a later
+/// lane, whatever overlap the buffers have.
+fn zerocopy_f64_binary_flat_with_out<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    b: &Bound<'py, PyAny>,
+    op: BinaryOp,
+    caller_out: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
     const FLOAT_POWER_PARALLEL_MIN_LEN: usize = 16_384;
 
     let ndarray_type = numpy.getattr("ndarray")?;
@@ -9664,7 +9729,25 @@ fn zerocopy_f64_binary_flat<'py>(
     // NOT a behaviour change: dtype resolves through the same `numpy.dtype` machinery
     // whether it arrives positionally or by keyword, and the result is still
     // C-contiguous, which is what `PyBuffer::as_mut_slice` below requires.
-    let flat = if let [only] = shape.as_slice() {
+    let flat = if let Some(out) = caller_out {
+        // Validate the caller's buffer, declining to NumPy on anything unexpected.
+        let ndarray_type_for_out = numpy.getattr("ndarray")?;
+        if !out.is_exact_instance(&ndarray_type_for_out) {
+            return Ok(None);
+        }
+        let out_char = out
+            .getattr("dtype")
+            .and_then(|d| d.getattr("char"))
+            .and_then(|c| c.extract::<char>());
+        if out_char.ok() != Some('d') {
+            return Ok(None);
+        }
+        let out_shape: Vec<usize> = out.getattr("shape")?.extract()?;
+        if out_shape != shape {
+            return Ok(None);
+        }
+        out.clone()
+    } else if let [only] = shape.as_slice() {
         numpy.call_method1("empty", (*only, "float64"))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
@@ -12967,6 +13050,27 @@ fn finish_preshaped_output(output: Bound<'_, PyAny>, shape: &[usize]) -> PyResul
 
 // Wrap zerocopy_f64_binary_flat with the shared 0-d scalar handling; the allocation
 // is already at the final shape, so there is no reshape here at any rank.
+/// `out=` sibling of `try_zerocopy_f64_binary` (`deadlock-audit-ei9jz`).
+///
+/// Returns `Ok(Some(out))` having written into the caller's buffer, matching NumPy's
+/// contract that `np.op(a, b, out=c)` returns `c` itself. Declines to `Ok(None)` on any
+/// shape/dtype/contiguity mismatch so NumPy handles it.
+fn try_zerocopy_f64_binary_into(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    out: &Bound<'_, PyAny>,
+    op: BinaryOp,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = cached_numpy(py)?.clone();
+    let Some((written, _shape)) =
+        zerocopy_f64_binary_flat_with_out(py, &numpy, a, b, op, Some(out))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(written.unbind()))
+}
+
 fn try_zerocopy_f64_binary(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -109522,17 +109626,16 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         BinaryOp, F64_DIV_NATIVE_MIN_LEN, MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize,
-        PythonNativeGemmOp, argwhere, bincount, blas_is_single_threaded,
-        UFuncKind, build_numpy_array_from_ufunc, cached_numpy, ceil_native, choose, compress,
-        copysign, interned_ufunc_name,
+        PythonNativeGemmOp, UFuncKind, argwhere, bincount, blas_is_single_threaded,
+        build_numpy_array_from_ufunc, cached_numpy, ceil_native, choose, compress, copysign,
         count_nonzero, degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal,
         digitize, extract, extract_numeric_array, extract_precise_numeric_array,
         f64_binary_route_is_worth_taking, f64_divide_fast_accepts_without_fp_error,
         f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
         f64_divide_raises_fp_error, fill_diagonal, flatnonzero, flip, fliplr, flipud, floor_native,
-        fnp_python, frexp, hypot, indices, interp, isfinite_native, isinf_native, isnan_native,
-        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
-        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
+        fnp_python, frexp, hypot, indices, interned_ufunc_name, interp, isfinite_native,
+        isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp,
+        logaddexp2, masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
         narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
@@ -110146,6 +110249,140 @@ mod tests {
     /// defect (`f16-isin-402x-and-pyufunc-registration-trap`: green parity does not
     /// prove kernel engagement), which is why this test asserts the PREDICATE and not
     /// just the output.
+    /// `out=` on the native f64 binary route must honour NumPy's contract exactly
+    /// (`deadlock-audit-ei9jz`).
+    ///
+    /// This is new API surface, not just a speed change, so the test covers the
+    /// semantics rather than the timing:
+    ///   1. VALUES match `numpy.divide(a, b, out=c)`;
+    ///   2. IDENTITY - the returned object IS the caller's buffer, which is what NumPy
+    ///      returns and what callers chain on;
+    ///   3. ALIASING - `divide(a, b, out=a)` is legal and must give the same answer as
+    ///      the non-aliased form, because every op here is elementwise;
+    ///   4. DECLINES - a wrong dtype, a wrong shape and a non-contiguous view must all
+    ///      still produce NumPy's answer. Those fall through to delegation, so the
+    ///      user-visible behaviour is unchanged whether we take the native path or not.
+    #[test]
+    fn out_kwarg_matches_numpy_including_identity_aliasing_and_declines() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_out_kwarg")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            let code = std::ffi::CString::new(
+                "a = np.arange(1.0, 65.0)\nb = np.arange(1.0, 65.0) + 3.0\n\
+                 c = np.zeros(64)\nref = np.divide(a, b)\n\
+                 bad_dtype = np.zeros(64, dtype=np.float32)\n\
+                 bad_shape = np.zeros(32)\n\
+                 strided = np.zeros(128)[::2]\n",
+            )
+            .expect("no interior nul");
+            py.run(code.as_c_str(), Some(&locals), Some(&locals))?;
+            let get = |name: &str| {
+                locals
+                    .get_item(name)
+                    .expect("dict lookup")
+                    .expect("binding present")
+            };
+            let (a, b, c, reference) = (get("a"), get("b"), get("c"), get("ref"));
+            let fnp_divide = module.getattr("divide")?;
+
+            // 1 + 2: values match, and the RETURNED object is the caller's buffer.
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("out", &c)?;
+            let returned = fnp_divide.call((&a, &b), Some(&kwargs))?;
+            assert!(
+                returned
+                    .call_method1("__eq__", (&reference,))?
+                    .call_method0("all")?
+                    .extract::<bool>()?,
+                "out= result must equal numpy.divide"
+            );
+            assert!(
+                c.call_method1("__eq__", (&reference,))?
+                    .call_method0("all")?
+                    .extract::<bool>()?,
+                "the caller's buffer must actually have been written"
+            );
+            assert!(
+                returned.is(&c),
+                "out= must RETURN the caller's buffer, as numpy does - a fresh array \
+                 would break callers that chain on the returned handle"
+            );
+
+            // 3: aliasing. divide(a, b, out=a) is legal; elementwise ops are safe in place.
+            let alias_code =
+                std::ffi::CString::new("a2 = np.arange(1.0, 65.0)\nb2 = np.arange(1.0, 65.0) + 3.0\nexpected = np.divide(a2, b2)\n")
+                    .expect("no interior nul");
+            py.run(alias_code.as_c_str(), Some(&locals), Some(&locals))?;
+            let (a2, b2, expected) = (get("a2"), get("b2"), get("expected"));
+            let alias_kwargs = PyDict::new(py);
+            alias_kwargs.set_item("out", &a2)?;
+            let aliased = fnp_divide.call((&a2, &b2), Some(&alias_kwargs))?;
+            assert!(
+                aliased
+                    .call_method1("__eq__", (&expected,))?
+                    .call_method0("all")?
+                    .extract::<bool>()?,
+                "divide(a, b, out=a) must match the non-aliased result"
+            );
+
+            // 3b: ENGAGEMENT. Every assertion above passes whether we take the native
+            // path or silently delegate, because NumPy writes into `out` too - the exact
+            // trap this ledger records as "green parity does not prove kernel
+            // engagement". Monkeypatch `numpy.divide` to raise: the delegation tail calls
+            // it, the native path does not. If this call still succeeds, the native
+            // out= route really ran.
+            // Built as ONE literal: a Rust `\` continuation would inject the source
+            // indentation into the Python text and raise IndentationError.
+            let sabotage = std::ffi::CString::new(
+                "import numpy as _np\n_orig = _np.divide\ndef _boom(*a, **k):\n    raise RuntimeError('delegated')\n_np.divide = _boom\n",
+            )
+            .expect("no interior nul");
+            py.run(sabotage.as_c_str(), Some(&locals), Some(&locals))?;
+            let engage_kwargs = PyDict::new(py);
+            engage_kwargs.set_item("out", &c)?;
+            let engaged = fnp_divide.call((&a, &b), Some(&engage_kwargs));
+            let restore = std::ffi::CString::new("import numpy as _np\n_np.divide = _orig\n")
+                .expect("no interior nul");
+            py.run(restore.as_c_str(), Some(&locals), Some(&locals))?;
+            assert!(
+                engaged.is_ok(),
+                "out= must take the NATIVE path: with numpy.divide sabotaged the call \
+                 still has to succeed, or we are merely delegating and this lever is dead"
+            );
+
+            // 4: declines must still produce numpy's answer via delegation.
+            for name in ["bad_dtype", "bad_shape", "strided"] {
+                let target = get(name);
+                let decline_kwargs = PyDict::new(py);
+                decline_kwargs.set_item("out", &target)?;
+                let ours = fnp_divide.call((&a, &b), Some(&decline_kwargs));
+                let theirs = numpy
+                    .getattr("divide")?
+                    .call((&a, &b), Some(&decline_kwargs));
+                assert_eq!(
+                    ours.is_err(),
+                    theirs.is_err(),
+                    "{name}: fnp and numpy must agree on whether this out= is an error"
+                );
+                if let (Ok(ours), Ok(theirs)) = (ours, theirs) {
+                    assert!(
+                        ours.call_method1("__eq__", (&theirs,))?
+                            .call_method0("all")?
+                            .extract::<bool>()?,
+                        "{name}: declining to numpy must still give numpy's answer"
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+
     /// The positional-dtype output allocation must match the keyword form at EVERY rank
     /// (`deadlock-audit-ei9jz`).
     ///
@@ -110157,6 +110394,7 @@ mod tests {
     ///   2. a non-C-contiguous result - `PyBuffer::as_mut_slice` requires contiguity, so
     ///      the route would silently DECLINE and delegate, losing the native path while
     ///      every parity suite stays green.
+
     #[test]
     fn positional_dtype_output_allocation_matches_the_keyword_form_at_every_rank() {
         with_python(|py| {

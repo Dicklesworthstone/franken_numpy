@@ -30,6 +30,68 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CAPABILITY LANDED: `out=` now takes the NATIVE f64 binary route instead of delegating, removing the 307.50 ns allocation that is 83% of the per-call residual (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. Audit sweep stopped. This is capability code against the largest remaining term on the
+campaign's worst ratio, not another measurement of it.
+
+**Campaign result class:** capability (new API surface reaching the native route; no ratio claimed yet)
+
+**LOADAVG, observed:** `17.06/25.21/28.43` at the start, `30.07/22.24/23.50` at the clippy gate. No
+certification was attempted - this turn lands code and its tests.
+
+**WHAT WAS BROKEN.** All eight native paths open with `out.is_none()`, so **every** call passing `out=`
+delegated to NumPy in full - `fnp.divide(a, b, out=c)` never reached our kernel. That is the single
+worst place to give up, because the previous row measured output allocation at **307.50 ns, 83% of the
+`wrapper_residual`**, and `out=` is precisely the case where that allocation is not merely reducible
+but **unnecessary**: the caller already owns the buffer.
+
+**WHAT NOW HAPPENS.** `PyUFunc::__call__` gained an `out=` branch ahead of the all-defaults guard,
+covering the same binop set (Remainder, Power, Maximum, Minimum, Divide). It calls a new
+`try_zerocopy_f64_binary_into`, which routes to `zerocopy_f64_binary_flat_with_out` - the existing
+writer, refactored to accept a caller buffer. The old `zerocopy_f64_binary_flat` is now a thin wrapper
+passing `None`, so **all seven existing call sites are untouched**.
+
+**DECLINES, each falling through to NumPy rather than guessing:** `out` not an exact `ndarray`; dtype
+not float64 (typechar `'d'`); shape mismatch; not writable or not C-contiguous
+(`PyBuffer::as_mut_slice` refuses).
+
+**ALIASING IS ALLOWED DELIBERATELY.** `np.divide(a, b, out=a)` is legal and common. Every op on this
+route is elementwise - `out[i]` depends only on `a[i]` and `b[i]` - so writing a lane after reading it
+cannot corrupt a later lane whatever the overlap. Tested against the non-aliased result.
+
+**ENGAGEMENT IS PROVEN, NOT ASSUMED - and this is the part that matters.** Every value assertion here
+passes whether we take the native path or silently delegate, because NumPy writes into `out` too. That
+is exactly the trap this ledger records as *green parity does not prove kernel engagement*. So the test
+monkeypatches `numpy.divide` to raise and calls `fnp.divide(a, b, out=c)` again: the delegation tail
+would hit the sabotaged function, the native path does not. **The call succeeds, so the native route
+really ran.** The patch is restored before the assertion so a failure cannot poison later tests.
+
+**TESTS:** `out_kwarg_matches_numpy_including_identity_aliasing_and_declines` covers values against
+`numpy.divide`, the buffer actually being written, **identity** (the returned object IS the caller's
+buffer, as NumPy returns - a fresh array would break callers that chain on the handle), aliasing, the
+engagement proof, and three declines (`float32` out, wrong-shape out, strided view) each of which must
+still produce NumPy's answer. Passes 1/0 alongside the existing suite.
+
+**TWO DEFECTS IN MY OWN TEST, both caught by running it rather than by reading it:**
+1. the sabotage snippet used a Rust `\` line continuation, which injected the *source* indentation into
+   the Python text and raised `IndentationError` - the test failed and I nearly misread that as "the
+   native path does not engage";
+2. splicing the test placed its doc comment *inside* the neighbouring test's doc block, so two doc
+   comments merged with no item between them - clippy caught it as `doc list item without indentation`.
+
+**NO RATIO IS CLAIMED.** No bench exercises `out=` yet, so the 307.50 ns is what this SHOULD remove,
+not what it has been measured to remove. Quoting a saving here would be exactly the unmeasured claim
+this ledger keeps retracting.
+
+RETRY PREDICATE: before quoting any `out=` speedup, add a bench arm that calls `fnp.divide(a, b, out=c)`
+against `numpy.divide(a, b, out=c)` under the dual-null contract with both arms preallocated, and
+certify it in a stable window with the `CPU_WITNESS` line present. Expected effect is bounded above by
+307.50 ns per call and will be invisible at large n, so measure at n<=2^12 where the per-call floor
+dominates. Extending `out=` to the f32/f16/complex/integer routes is a separate lever and should not be
+attempted until this one has a number.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - POOL-SIZING CHECKED AND REFUTED HERE: the interference SURVIVES a 1-thread rayon pool (1.028x) - and the same sweep shows my earlier "0.4% replication" claim was luck (`deadlock-audit-48by6`)
 
 `RedLynx`. Torch found its undecidable board was caused by its own 64-thread pool, arms fighting
