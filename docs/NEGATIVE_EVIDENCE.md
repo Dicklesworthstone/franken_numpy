@@ -4,6 +4,58 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-15 - MEASURED (attribution complete): the per-call floor is a PyUFunc::__call__ WRAPPER property (~7-8.4 us on three delegating ops), and the native f64 route COSTS 4 us MORE than delegating at n=256 (`deadlock-audit-cydda`)
+
+`TealOak`. `deadlock-audit-isnd2` measured a ~6.6-7 us floor; this attributes it. Reading the
+dispatch, f64 `add`, `subtract` and `multiply` all map to `None` in the f64 binop match and
+DELEGATE to NumPy, while `divide` is in that set and takes the native zerocopy route. So a floor
+that is uniform across the delegating three is a property of the wrapper, and a divide figure
+that differs is a property of the route. Measured at n=2^8, where 2 KiB operands are L1-resident
+and there is almost no data to touch.
+
+**Campaign result class:** maintenance-self-speedup
+
+worker=vmi1153651 (10 physical cores, AMD EPYC IBPB)
+harness=common::run_dual_null_median_ci_contract (incumbent A/A + candidate A/A, ABBAABBA, 41 rounds, min-of-3)
+HOST_BASELINE host=vmi1153651 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+bench_elf_sha256=8203f255de2174acd99d38e7faa1d1c31fb872789f0bd351f46b83d64ecf1a3c
+harness_contract_source_sha256=41b3066deb47e99b9e7ada4c86a7d3bd6d93b3c94bf6235dd3cf7ae609e79807 harness_source_matches_disk=true
+numpy_version=2.4.3, float64 C-contiguous, n=256, profile `bench` (triage grade), ONE invocation.
+Ratio is numpy/fnp, so BELOW 1.0 means we are slower.
+
+  op        native route   numpy_ns   fnp_ns   excess_ns   ratio      ci95
+  add       no               907.0    9197.0      8290.0   0.098052  [0.097653,0.098726]
+  subtract  no               927.0    9302.0      8375.0   0.099176  [0.098806,0.099656]
+  multiply  no               962.0    7930.0      6968.0   0.121082  [0.120736,0.121388]
+  divide    YES             1092.0   13540.0     12448.0   0.081557  [0.080883,0.081957]
+
+**FINDING 1 - THE FLOOR IS THE WRAPPER.** The three ops that merely delegate to NumPy still cost
+6968-8375 ns more than NumPy alone. They share no kernel: whatever they pay, they pay in
+`PyUFunc::__call__` before and around the delegation. That is ~8x NumPy's entire call at this
+size, and it is charged to every fnp binary ufunc.
+
+**FINDING 2, AND IT INVERTS AN ASSUMPTION - THE NATIVE ROUTE IS A LIABILITY AT SMALL n.** `divide`
+is the only one of the four that takes our zerocopy kernel, and it is the SLOWEST: 12448 ns of
+excess against 8290-8375 for ops that just hand the work to NumPy. Taking our own fast path costs
+about 4 us MORE than not taking it. The route was built for large arrays and has no lower size
+gate, so at 256 elements it pays buffer acquisition, an output allocation and its dispatch to save
+essentially nothing.
+
+**WHAT THIS MAKES ACTIONABLE.** Two independent levers, neither in a kernel: (a) a minimum-size
+gate on the native f64 binary route so small calls delegate instead — worth ~4 us at n=256 by
+these numbers, and safe by construction because delegating to NumPy is the incumbent behaviour;
+(b) the ~7-8 us wrapper floor itself, which no routing decision can reach.
+
+SCOPE: one worker, one size, `bench` profile. The ordering (native dearer than delegating at
+small n) is what matters here and it is a within-invocation comparison of four arms measured
+under the same contract; the absolute microseconds are triage grade. Two earlier candidate levers
+were already refuted for this floor — the `numpy.empty` dtype string (~110 ns) and the default
+kwargs on the delegation call (~28 ns) — so neither appears here.
+
+RETRY PREDICATE: before shipping the size gate, find its crossover by sweeping the native-vs-
+delegating comparison for `divide` across n, on one worker in one invocation; the gate threshold
+must come from that curve rather than from this single point. AGENT_NAME=TealOak.
+
 ## 2026-08-15 - TWO LEVERS REFUTED BEFORE A BUILD, and the mechanism of the ~6.6us floor RE-ATTRIBUTED: f64 `multiply` never enters the zerocopy route, it DELEGATES (`deadlock-audit-cydda`)
 
 `TealOak`. `deadlock-audit-isnd2` measured a ~6.6-7 us per-call floor and 7.97x slower than
