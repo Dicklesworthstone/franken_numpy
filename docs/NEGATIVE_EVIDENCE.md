@@ -32,6 +32,68 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CERTIFIED, AND THE PREDICTION IS CONFIRMED: `out=` FLIPS THE SIGN for `maximum` - 0.907848 (loss) allocating becomes 1.501804 (WIN) with the caller's buffer (`deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+
+`SlateHeron`. The paired `out=` arm banked one row ago, now run. It discharges three retry predicates
+at once and confirms the sharp prediction they were written for.
+
+**Campaign result class:** incumbent-win (maximum) + incumbent-loss (divide), same invocation
+
+**LOADAVG AND CPU MHz, observed:** loadavg `26.53/22.18/23.70` before the build, `17.49/21.87/23.51`
+before the run and `22.35/22.59/23.71` after - all three figures under 30 throughout, spread ~5.
+**CPU MHz max 4068.** Per-ARM witness below.
+
+```
+OUT_KWARG_VS_NUMPY worker=thinkstation1 numpy_version=2.4.3
+  harness=common::run_dual_null_median_ci_contract  both_arms_preallocate_their_own_out=true
+  op=divide  n=2^20  ratio=0.824614 ci95=[0.806340,0.835260]  numpy 332685  fnp 409812   DECIDABLE_REGRESSION
+  op=maximum n=2^22  ratio=1.501804 ci95=[1.437360,1.533950]  numpy 5770025 fnp 3867855  DECIDABLE_WIN
+```
+
+**A/A null control (same invocation):** all four nulls straddle unity - both null phases on both
+cells, verified by the machine-readable `*_straddles_unity` fields added in `a9f0651f`.
+
+**THE SIGN FLIP IS CONFIRMED FOR `maximum`.** The same op, same host, same harness:
+
+| form | ratio | verdict |
+|---|---|---|
+| route-level, both sides allocate | 0.907848 | LOSS (1.102x slower) |
+| **with `out=`, neither allocates** | **1.501804** | **WIN (1.502x faster)** |
+
+`out=` is not a small saving on this route - **it decides the sign of the result.** The predicted
+value was 1.702079, taken from the allocation-free kernel arms; the route delivers **1.501804**, which
+is lower, and the gap between them is the wrapper cost that the kernel-only comparison did not carry.
+So the prediction held in DIRECTION and magnitude-class, and the honest number for the shipped route
+is 1.501804, not 1.702079.
+
+**WHAT THIS MEANS FOR THE ~0.91 CELLS.** `maximum` 0.907848, `minimum` 0.913424 and `divide` parallel
+0.920786 are all memory-bound cells measured WITH allocation on both sides. At least one of them is a
+win once the allocation is removed. **Those rows must now be read as "loses when allocating", not as a
+property of the kernel** - the kernel is faster than NumPy's; the allocation is what buries it.
+
+**`divide` DOES NOT FLIP, and that is the more informative half.** At 2^20 it reads 0.824614 with
+`out=` against 0.845461 at route level - essentially unchanged, still a **decidable loss**. Divide's
+deficit was never allocation: it is the ~50/50 accumulate-plus-kernel split measured earlier
+(96398 ns accumulate, 93987 ns kernel). Removing the allocation cannot touch either, and this row is
+the direct confirmation of that split rather than an inference from it.
+
+**PER-ARM CPU WITNESS, the field added in `d6255c02`:** the two null phases ran with
+`same_core=true` (cpu 38 and cpu 8, arm clocks within 11 MHz of each other). **The effect phase
+reports `same_core=false` - arm_a on cpu 17 at 3909.4 MHz, arm_b on cpu 10 at 4029.0 MHz, a 1.031x
+clock difference.** That is exactly the artefact the witness exists to expose, and it is disclosed
+rather than buried: a 3.1% clock gap cannot manufacture a 1.502x win or erase a 0.825x loss, so both
+verdicts stand, but the MAGNITUDES carry that much slack and should not be quoted to four figures.
+
+bench_elf_sha256=d3ef54e667f4c1b999c4530811a1b43927ed64198effcdab4c8e1cd5baa6b783, LOCAL build under
+the exported cargo-shim bypass, zero `[RCH]` lines, no dirty files under `crates/`.
+
+RETRY PREDICATE: re-run the `maximum` cell until the effect phase reports `same_core=true` before
+quoting 1.501804 to more than two figures - the witness says this run did not have it. Then extend the
+group to `minimum` at 2^22 and `divide` parallel at 2^22, the other two ~0.91 cells, since this row
+establishes only that ONE of the three flips. Do NOT restate the other two as wins on the strength of
+`maximum` alone; that is the cross-cell transfer `deadlock-audit-48by6` withdrew.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CAPABILITY: the f32 route was still paying BOTH costs the f64 route already shed - a per-call PyDict and a per-call reshape (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. Code with tests. Chosen because it applies two levers that are already MEASURED on a
