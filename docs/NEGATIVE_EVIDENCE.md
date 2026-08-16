@@ -8,7 +8,15 @@ dead ends are not rediscovered as fresh ideas.
 
 `TealOak`. Every previous divide row in this ledger — `deadlock-audit-2nmd1`,
 `jw7vk`, `ae85t`, `vqxoa` — is `maintenance-self-speedup`: our own code before vs after.
-This is the first time the shipped route has been run against the incumbent.
+This is the shipped route run against the incumbent.
+
+**READ THE ROW BELOW FIRST.** Two agents sharing the `TealOak` pane identity worked this
+bead concurrently on one checkout, and the row immediately following this one is the
+stronger evidence: the same bench group on `hz2` (0.865383) and `vmi1149989` (0.817054),
+both `DECIDABLE_REGRESSION`. This row is a THIRD worker whose incumbent A/A was too wide
+to decide. It is kept because an undecided host is data — it says where the gate refuses
+to call the loss, not that the loss is absent — but the decided verdict lives there, not
+here, and the three ratios must not be pooled or averaged.
 
 **Campaign result class:** maintenance-self-speedup
 
