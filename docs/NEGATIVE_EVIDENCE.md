@@ -4,6 +4,126 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, REPLICATED TWICE ON ONE WORKER: `fnp.divide` is behind `numpy.divide` on BOTH sides of the new size gate - 6.7-6.9x at n=256, 1.6-1.7x at n=65536 (`deadlock-audit-qapyb`)
+
+`TealOak`. `2efdb79d` landed a size gate so `Div` declines the native route below 1<<14 and
+delegates to NumPy. This is the post-gate state, measured twice on the SAME worker so the two
+runs are comparable to each other.
+
+**Campaign result class:** maintenance-self-speedup
+
+worker=vmi1152480 (10 physical cores, AMD EPYC IBPB)
+harness=common::run_dual_null_median_ci_contract (incumbent A/A + candidate A/A, ABBAABBA, 41 rounds, min-of-3)
+HOST_BASELINE host=vmi1152480 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+run 1 bench_elf_sha256=7a736c42be5ede45ae6c69f2e29ffccf70246f20906b5bf6d0e716eeadc2a2fd
+run 2 bench_elf_sha256=3c378f3dc9eb77bc07cf1c7475876c1bf5e0b7d999ca67096f9cc98c92659024
+numpy_version=2.4.3, float64 C-contiguous. Ratio is numpy/fnp, so BELOW 1.0 means we are slower.
+All four cells `DECIDABLE_REGRESSION`; every null sits on unity (widest half-width 0.0073).
+
+  n=256   (BELOW gate, delegates)  run 1  0.144221 ci95=[0.143547,0.145417]  numpy   977 ns  fnp  6793 ns  excess  5816 ns
+  n=256   (BELOW gate, delegates)  run 2  0.148403 ci95=[0.147312,0.150175]  numpy   952 ns  fnp  6517 ns  excess  5565 ns
+  n=65536 (ABOVE gate, native)     run 1  0.577185 ci95=[0.574512,0.581702]  numpy 30822 ns  fnp 53264 ns  excess 22442 ns
+  n=65536 (ABOVE gate, native)     run 2  0.621716 ci95=[0.614808,0.626028]  numpy 28824 ns  fnp 46352 ns  excess 17528 ns
+
+WHAT REPLICATES: the direction and the magnitude class. n=256 lands at 0.144/0.148 (we are ~6.8x
+slower) and n=65536 at 0.577/0.622 (~1.7x slower). The two runs' CIs do NOT overlap in either
+cell — 2.9% apart at n=256 and 7.7% at n=65536 — which is the same-worker run-to-run drift
+already banked as `deadlock-audit-lrhrx`, not a defect of this measurement. Quote the pair, not
+either one alone.
+
+**THE LOSS IS ON BOTH SIDES OF THE GATE, AND THAT IS THE POINT.** Below it we delegate to NumPy
+and are still ~6.8x slower, which is the `PyUFunc::__call__` wrapper floor and nothing else — we
+literally call NumPy and take 5.6-5.8 us longer than NumPy took. Above it we run our own kernel
+and are ~1.7x slower at 64K, a size where the native route is supposed to be earning its keep.
+
+**WHAT THIS ROW DOES NOT CLAIM.** It is NOT a before/after of the gate. The pre-gate n=256 figure
+(0.081557) was taken on a DIFFERENT worker (vmi1153651) with a different, 307 MB `bench`-profile
+binary; these runs are a 49 MB `release` test-mode binary on vmi1152480. Comparing them would be
+exactly the cross-worker, cross-binary comparison this ledger forbids, so the gate's improvement
+remains unmeasured and `deadlock-audit-qapyb` stays OPEN carrying that debt. What justified the
+gate is the same-invocation cross-op measurement in `deadlock-audit-cydda`, not this row.
+
+MEASUREMENT ROUTE, because it is not the usual one: `cargo bench` could not complete — the
+`bench`-profile lib build alone exceeded rch's 1800s SSH ceiling on vmi1153651 and vmi1293453,
+landing ZERO cells twice. `cargo test --release --bench` reuses the warm `release/` artifacts and
+still executes the self-timing groups, which is how these cells were obtained. The arms are
+identical either way; only the build profile differs, and both arms sit in the same binary.
+
+RETRY PREDICATE: to license the gate's before/after, measure pre- and post-gate code in ONE
+binary on ONE worker — an env-selected threshold read once at module init would do it — rather
+than comparing two builds. Until then the gate is justified by mechanism, not by a delta.
+AGENT_NAME=TealOak.
+
+## 2026-08-16 - WIN (KEEP, maintenance-self-speedup): the delegation tail passed three DEFAULT-valued keywords on every call, and NumPy spent 727 ns per call parsing them - 2.442387x on an isolated same-invocation control (`deadlock-audit-s2fkk`)
+
+`TealOak`. `PyUFunc::__call__`'s delegation tail allocated a `PyDict` and set
+`casting`, `order` and `subok` on EVERY delegating call, even when all three already
+held NumPy's own defaults (`same_kind`, `K`, `True`). It asked NumPy to parse three
+keywords in order to be told exactly what it would have assumed. The fix sends none of
+them when every keyword is at its default: `np_ufunc.call1((x1, x2))`.
+
+**Campaign result class:** maintenance-self-speedup
+
+The base arm is OUR OWN former call shape, so this is maintenance and must never be
+quoted as a competitive claim against NumPy. The isolating control below happens to
+use NumPy on both sides — that is how the call shape is held up on its own, not a
+comparison against the incumbent. We remain behind NumPy on this surface; see the
+route-level figures further down.
+
+**THE MECHANISM, MEASURED IN ISOLATION.** Both arms below are NumPy's own `multiply`
+on identical operands with NO fnp code in either one; they differ only in whether the
+three default-valued keywords are passed. One binary, one invocation, one worker,
+ABBAABBA interleaved, A/A null first:
+
+```
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 online_cpus=0:1:2:3:4:5:6:7:8:9 allowed_logical_threads=10 allowed_cpus=0:1:2:3:4:5:6:7:8:9 governor=unavailable
+bench_elf_sha256=b8810dc40280847c53475cb490c087d76ba4afc00d29b1dfabf92d38e3c15012
+bench_file_source_sha256=7cf584357afd2e03d46bb7604a71ed1c531f82c7428edd5fd0492f9b94596f67 bench_file_source_bytes=119351
+MEDIAN_CI_GATE row=delegation_kwargs_shape_n256 verdict=DECIDABLE_WIN effect_ratio=2.442387 effect_ci95=[2.420744,2.458586] effect_ci_excludes_one=true null_ci95=[0.996022,1.004835] null_half_width=0.004835 required_2x_delta=0.010000 cv_is_provenance_only=true
+DELEGATION_KWARGS_SHAPE n=256 numpy_version=2.4.3 worker=vmi1227854 harness=common::run_median_ci_contract rounds=41 arms=numpy_multiply_only_no_fnp_code with_default_kwargs_ns=1227.0 without_kwargs_ns=500.0 ratio_median=2.442387 ratio_ci95=[2.420744,2.458586] null_ratio_median=1.000000 null_ci95=[0.996022,1.004835] saved_ns=727.0 bare_call_is_faster=true
+```
+
+**727 ns per call**, and the null came out at exactly 1.000000 with a half-width of
+0.0048. NumPy spends more time parsing three keywords it did not need than it spends
+multiplying 256 doubles (500 ns for the whole bare call). Against the 6968-8375 ns
+wrapper floor measured on the delegating ops, this is ~9-10% of it.
+
+**WHY THE CONTROL IS SHAPED THIS WAY, and what it does NOT claim.** A before/after
+across two builds is unsound here for three independent reasons, all live today: the
+rch fleet is heterogeneous and cannot be pinned, so the two builds land on different
+workers; `[profile.bench]` inherits `release` (lto, codegen-units=1) and blows the
+1800s SSH ceiling, so the practical profile differs between attempts; and a peer had
+an uncommitted change to the same route in the shared tree, so an "after" build
+contains their lever as well as mine. This control sidesteps all three by putting both
+arms in one binary with no fnp code in either. Consequently it measures EXACTLY what
+the fix removes, and it does NOT measure the end-to-end route - no vs-NumPy ratio is
+claimed for the op here, and the 7-8 us wrapper floor is not claimed as closed.
+
+**Route-level context, NOT a before/after.** On the same worker and profile after the
+fix, `bench_percall_floor_across_ops_vs_numpy` reads add 0.120120 [0.119522,0.121167],
+subtract 0.126615, multiply 0.161780, divide 0.165165, all `DECIDABLE_REGRESSION`
+(ratio is numpy/fnp, so below 1.0 is slower). These are NOT comparable to the earlier
+0.098052/0.099176/0.121082/0.081557 figures: different worker (`vmi1227854` vs
+`vmi1153651`), different profile (`bench-fast` vs `bench`), and the build carries a
+peer's uncommitted route change. Recorded for provenance only.
+
+**PARITY.** Omitting a keyword whose value equals its default cannot change behaviour,
+so this is a call-SHAPE change rather than a semantic one. Verified regardless:
+`cargo test -p fnp-python --test conformance_ufunc_edge` on WORKER hz2, 71 passed, 0
+failed.
+
+**Profile:** `bench-fast` (opt-level 3, lto off, codegen-units 16) = TRIAGE grade. Both
+arms sit in one binary at one profile so the RATIO is fair; the absolute ns are not
+ship-grade.
+
+**Retry predicate.** The remaining ~90% of the wrapper floor is untouched. The next
+named lever is PyO3 argument binding: `__call__` is declared with nine parameters, six
+optional with defaults, all bound before any work. Switching to `(*args, **kwargs)`
+with lazy parsing is SAFE for introspection because the type defines an explicit
+`__signature__` property and `inspect.signature` reads that, not PyO3's binding
+signature. Measure it the same way - an isolated same-invocation control first, then
+the route - and bank it either way.
+
 ## 2026-08-16 - MEASURED, NARROWS THE ROW BELOW: four named stages inside the `PyUFunc::__call__` wrapper are only 700 ns, so >=90% of the wrapper floor is argument binding and result construction (`deadlock-audit-cydda`)
 
 `TealOak`. The row below establishes that the floor is a WRAPPER property and does not
