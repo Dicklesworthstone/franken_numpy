@@ -114,15 +114,13 @@ same-line incumbent marker carrying NumPy's `artifact_sha256` and a shared
 `invocation_id`, and these runs did not capture them. Recording as measured rather than
 inflating the class; see the retry predicate.
 
-**PARTIALLY GATED, and the distinction is worth stating.** `/data` hit its floor and a
-fleet-wide build freeze took effect before this row could be run through the full
-`ledger_hygiene` test binary. It DID pass the pre-commit staged ledger audit, which
-reports `CLEAR ledger additions and modifications satisfy null/mechanism, retry, ELF,
-and result-class gates` - the same rule set, applied to the staged diff, with no build
-required. So the row is not unchecked; what it lacks is the full-file run that would
-also re-validate the historical budgets and cross-row invariants. Whoever next runs a
-build should execute `cargo test -p fnp-conformance --test ledger_hygiene` and correct
-this row if it fails.
+**FULLY GATED.** This row was written during a `/data` build freeze and originally
+carried a caveat that it had only passed the pre-commit staged ledger audit. That
+caveat is now discharged: once the freeze was replaced by a self-checked budget, the
+full test binary was run on WORKER vmi1152480 -
+`cargo test -j2 -p fnp-conformance --test ledger_hygiene`, **25 passed, 0 failed** -
+which also re-validates the historical budgets and cross-row invariants the staged
+audit does not cover.
 
 **Retry predicate.** (1) Re-run `FNP_BENCH_GROUPS=bench_native_binary_family_vs_numpy`
 capturing NumPy's `artifact_sha256` and a shared `invocation_id`, then re-bank
@@ -218,7 +216,20 @@ claimed.
 **WHAT IS SUGGESTIVE, AND WHY IT IS MORE THAN A BARE CROSS-BUILD DIFF.** The probed arm fell
 3004 -> 2578 ns (-14%) while the CONTROL arm, which skips the probe chain entirely and should be
 untouched by this edit, held at 2128 -> 2143 ns (+0.7%). An invariant control across the two
-builds is what makes the probed arm's movement worth reporting at all. It is still two binaries,
+builds is what makes the probed arm's movement worth reporting at all.
+
+> **DISCOUNT THAT PARAGRAPH FURTHER — `deadlock-audit-bpxn6`, same day.** I argued above that an
+> invariant control arm makes a cross-build difference trustworthy. It does not make it
+> trustworthy enough. `bpxn6` ran a controlled test of the cross-build method itself and found it
+> can report the **OPPOSITE SIGN**: on `vmi1152480` a cross-build pair said a probe reorder was
+> clearly worse, with disjoint CIs, nulls on unity AND an invariant control arm, while the same
+> question measured with both arms in ONE binary showed it 1.36x better on that same host. Every
+> health indicator I leaned on in this row was present in that false positive too.
+>
+> So the UNDECIDED verdict here was right, and the reasoning offered for taking the ~441 ns
+> seriously was weaker than it sounded. The change stays on its structural argument — two heap
+> allocations removed — and the nanoseconds should be read as unmeasured, not merely
+> unconfirmed. To decide it, use the same-binary replica design `bpxn6` established. It is still two binaries,
 on one worker, and `wsd7h` already showed the absolute nanoseconds here are worker-scoped
 (1778 ns on vmi1152480 against 876 ns on vmi1227854 for the same code), so the ~441 ns is an
 observation and not a measured saving.
