@@ -5,6 +5,99 @@ losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
 
+
+## 2026-08-16 - MEASURED, THE GATE IS WRONG AT EVERY SIZE: delegating beats our native f64 divide at 2^14 through 2^20, so `F64_DIV_NATIVE_MIN_LEN` is not too low, it is admitting a path that never pays - plus the nine-parameter signature priced at 276 ns (`deadlock-audit-q00ev`, `deadlock-audit-t4lri`, `deadlock-audit-0ppym`)
+
+`RedLynx`. First run of two specs written blind during the build freeze, on the first build
+after it lifted. One invocation, one ELF, dual A/A nulls on every cell.
+
+**Campaign result class:** decidable-regression (the native divide path) + maintenance-diagnostic
+(the signature control)
+
+```
+bench_elf_sha256=d285003d76596de0d4fd37c23b681c6d78f4cc0f43eda81f2141c0090c2f08d2
+harness_source_matches_disk=true  worker=thinkstation1 (5975WX 32P/64L, powersave)
+numpy 2.4.3  profile=bench  load 1min 60.91 before -> 61.00 after (64 logical threads)
+harness=common::run_dual_null_median_ci_contract (sizes) / run_median_ci_contract (signature)
+```
+
+### PART 1 - the divide gate (`deadlock-audit-q00ev`)
+
+`multiply` delegates at every size, so its excess IS the wrapper cost there; `divide` goes native
+above `F64_DIV_NATIVE_MIN_LEN = 1<<14`. Every subtraction below is WITHIN a size and WITHIN one
+invocation. Ratio is numpy/fnp, so below 1.0 is slower.
+
+```
+ n     mul_ratio  div_ratio  wrapper_ns  div_specific_ns  projected_delegating  delegating_better
+ 2^12   0.533044   0.534993      1779            310            0.574809          true  (NULL CELL)
+ 2^14   0.749818   0.600726      2080           2069            0.751671          true
+ 2^16   0.882390   0.660598      2801           8750            0.889524          true
+ 2^18   0.964364   0.868477      3302           9584            0.964073          true
+ 2^20   0.992288   0.890373      3096          65294            0.994443          true
+```
+
+**THE FINDING: `delegating_looks_better` is TRUE AT EVERY SIZE, including 2^20.** The native f64
+divide path does not merely lose in a band just above its gate, as the three-point row lower down
+suggested — it loses everywhere it is enabled. At 2^16 it delivers 0.660598 where delegating
+projects 0.889524; even at 2^20, where the earlier rows made it look nearly amortised, it delivers
+0.890373 against a projected 0.994443. So the gate is not set too LOW. The path behind it never
+pays at any size measured.
+
+**THE METHOD VALIDATES ITSELF, and this is why the projection can be trusted.**
+`projected_delegating_ratio` is computed independently of `multiply_ratio`, yet the two agree
+closely wherever both ops truly delegate: 0.751671 vs 0.749818 at 2^14, 0.889524 vs 0.882390 at
+2^16, 0.964073 vs 0.964364 at 2^18, 0.994443 vs 0.992288 at 2^20 — all within ~1%. A delegating
+divide should cost what a delegating multiply costs plus NumPy's own extra, and it does.
+
+**THE NULL CELL DID ITS JOB, AND IT DID NOT COME OUT AT ZERO.** At 2^12 both ops delegate, so
+`divide_specific_excess_ns` was predicted near zero. It came out at **310 ns**, and the projection
+diverges from `multiply_ratio` there (0.574809 vs 0.533044, ~8%) where it agrees within 1%
+everywhere else. That residual is REAL, not contamination: a delegating `divide` still enters the
+f64 binop block and pays `f64_binary_route_is_worth_taking` plus two `numpy_dtype_is_f64` guards,
+which `multiply` skips entirely because `Multiply` maps to `None` in that match. So the method
+resolves to about 310 ns and no `divide_specific_excess_ns` below that figure means anything.
+Every cell above the gate is 2069 ns or more, so all of them clear it — but the 2^14 cell clears
+it by only 6.7x and should not be read more finely than that.
+
+**WHAT THE DIVIDE-SPECIFIC COST IS.** It grows from 2069 ns at 2^14 to 65294 ns at 2^20 — roughly
+with n, which is the signature of an extra PASS over the data rather than a fixed dispatch cost.
+The standing candidate is the FE-hazard classifier scan over the output buffer, which the divide
+route runs and multiply does not. At 2^20 it is 11.8% of NumPy's own divide call. This is the
+answer `deadlock-audit-0ppym` was after: the loss is divide-specific, it scales with n, and it is
+not the wrapper.
+
+### PART 2 - the nine-parameter signature (`deadlock-audit-t4lri`)
+
+```
+SIGNATURE_KEYWORD_BINDING n=256 arms=same_route_same_result_differing_only_in_keyword_presence
+  seven_keywords_passed_at_their_defaults=true
+  explicit_kwargs_ns=2891.0 bare_call_ns=2615.0 keyword_binding_ns=276.0
+  ratio=1.103846 ratio_ci95=[1.095969,1.111923] null=1.001351
+  prices_binding_present_keywords_NOT_eager_vs_lazy=true
+```
+
+Binding seven PRESENT keywords costs **276 ns**, decidably (CI width 1.6%, A/A null 1.001351).
+Against the bead's pre-written rule — clearly more than ~150 ns means the lever is real — this
+CLEARS, so the `(*args, **kwargs)` experiment is worth building now that compiles are allowed.
+
+**BUT THE ROW CANNOT BE READ AS THE LEVER'S VALUE, and it says so in its own output.** The hot
+path passes NO keywords, so what it pays is PyO3 filling seven defaults, not parsing seven
+present ones. Filling a default needs no dict lookup and no conversion, so the hot-path cost is
+strictly less than 276 ns — this is an UPPER BOUND on the keyword-handling component, not a
+measurement of it. What is now excluded is the cheap outcome: PyO3's keyword machinery is not
+free at this scale, so the line does not close on triage and the pyclass control is justified.
+
+RETRY PREDICATE: (1) The gate decision needs its own before/after: raise
+`F64_DIV_NATIVE_MIN_LEN` past 2^20 (or drop the f64 divide native path) and re-measure the
+SHIPPED route, since everything above is replicas-plus-projection, not the route. The decision
+rule from the bead is satisfied — delegating beats native by far more than the controlling null
+half-width at every cell — but a projection is not a landed measurement. (2) Before that, check
+whether the FE-hazard classifier can be fused into the divide pass rather than run as a second
+pass; if it can, the native path may become worth keeping and the gate question changes shape.
+(3) For t4lri, build the two-pyclass control now that the freeze is lifted and price
+default-filling directly; 276 ns is a ceiling for that component and must not be quoted as a
+saving. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED, THE CORRECTION FLIPS THE ARM ORDERING: with neither side allocating, PARALLEL maximum WINS 1.664906x and SERIAL LOSES 0.935461x - the exact opposite of the flattered row, and it REFUTES my own claim that the internal ordering survived (`deadlock-audit-48by6`, `deadlock-audit-hzl1w`)
 
 `RedLynx`. First run of the corrected `bench_maximum_arms_vs_numpy` (fix `e5d5a67d`), on the
