@@ -24,6 +24,79 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - CONFOUND REMOVED, AND MY MECHANISM IS WRONG: interference is a roughly FIXED ~100-125 us disturbance, not a property of the incumbent's regime - so the discount scales as 1/incumbent_duration (`deadlock-audit-48by6`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. The experiment registered one row ago, run. It removes the shadow/size confound I
+flagged, confirms the DIRECTION of the earlier split, and refutes the explanation I gave for it.
+
+**Campaign result class:** maintenance-diagnostic (mechanism identified; supersedes my own account)
+
+```
+bench_elf_sha256=5004742cbf9c954e00587fc275d6e9db8abd9442c12639a6ed0f0de13d8b1780
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307951832 bytes)
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 1min 6.83 before -> 21.15 after; 5min 16.64 -> 17.50. Both bounds sat below the ~32
+  saturation threshold at selection; the 1-min rise is largely this bench's own 64-thread shadow.
+harness=common::run_median_ci_contract  shadow=maximum_parallel HELD CONSTANT, size 2^22 HELD CONSTANT
+
+ incumbent   isolated_ns   shadowed_ns   interference_ns   ratio      ci95                  verdict
+ maximum       5095563       5220263        +124700        1.045420  [1.037544,1.061044]   UNDECIDED
+ remainder    35143899      35241330         +97431        1.001620  [0.998856,1.005907]   UNDECIDED
+```
+
+**THE DIRECTION HOLDS.** With the shadow and the size held constant, `maximum` moves 4.5% and
+`remainder` 0.16%. The earlier split was not an artefact of using different shadows.
+
+**BUT THE ABSOLUTE INTERFERENCE IS NEARLY THE SAME: 124700 ns against 97431 ns — 28% apart across
+incumbents whose durations differ SEVENFOLD (5.1 ms against 35.1 ms).** That is the finding. The
+disturbance our arm inflicts is approximately a FIXED cost — on the order of 100-200 ns per
+thousand, i.e. ~100-200 us of recovery, consistent with refilling caches our 64-thread shadow just
+evicted. It is not proportional to the incumbent's work, and it is not selective about the
+incumbent's regime.
+
+**SO MY COMPUTE-BOUND EXPLANATION IS REFUTED, AND REPLACED BY A SIMPLER ONE.** I claimed the
+discount belonged to whether the incumbent is bandwidth- or compute-bound. The data says it belongs
+to the incumbent's DURATION:
+
+```
+  fractional discount  ~=  ~150 us  /  incumbent_duration
+
+  maximum   2^22   ~150 us / 5.1 ms   ~= 3%     (measured 4.5%, and 6.3%/6.7% in two earlier runs)
+  remainder 2^22   ~150 us / 35.1 ms  ~= 0.4%   (measured 0.16%)
+  remainder 2^21   ~150 us / 17.9 ms  ~= 0.8%   (measured ~0%, CI +-0.3%)
+```
+
+Both of my earlier accounts were wrong in the same way — I reached for a property of the ARMS
+(first the candidate's bandwidth appetite, then the incumbent's regime) when the governing quantity
+is a ratio of a fixed disturbance to a duration. A fast incumbent is penalised proportionally more
+by the same absolute disturbance. That also explains, without any regime story, why the small-n
+rows were correctly excluded: at n=256 nothing large is evicted, so the fixed cost itself is far
+smaller.
+
+**HONEST STATUS OF THE MAXIMUM CELL THIS RUN: UNDECIDED.** Its effect CI excludes unity
+([1.037544,1.061044]) but the gate requires twice the controlling null half-width — 0.047720 against
+an effect distance of 0.045420 — so it misses by 5%. Its null is also biased 0.014831 while
+straddling unity. **This run therefore does not certify the maximum figure**; the two earlier
+direct runs that did (+6.26%, +6.73%) stand, and this row is cited for the MECHANISM, not for a new
+maximum number. The remainder cell's null is clean (half-width 0.004653) and its CI contains unity,
+so its ~0% is solid.
+
+**WHAT THIS MEANS FOR THE LEDGER.** The correction to apply is not a per-regime rule but an
+arithmetic one, and it is small wherever the incumbent is slow. No banked row changes as a result
+of this row: the maximum discount was already applied from the certified runs, the remainder
+discount was already withdrawn, and the n=256 floor rows remain untouched.
+
+RETRY PREDICATE: (1) Certify the maximum cell in a window where the null half-width falls below
+~0.02; three runs now agree in direction (4.5%, 6.3%, 6.7%) but the spread is wide and the gate has
+passed it only twice. (2) Test the fixed-cost account directly by varying the incumbent's DURATION
+while holding shadow, size and incumbent op constant — e.g. the same `numpy.maximum` call at 2^20,
+2^22 and 2^24; the fixed-cost model predicts interference_ns roughly constant and the ratio falling
+with n. (3) Do not reinstate any regime-based rule; two attempts at one have now failed.
+AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - ADDENDUM, AND I QUALIFY MY OWN "INVALIDATES NONE": this harness IS affected at ~6.7% for `maximum`, my test was UNDERPOWERED to see it, and the two results were never in conflict (`deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
 
 `SlateHeron`. My reconciliation row was written before I read `RedLynx`'s in-project evidence, and it
