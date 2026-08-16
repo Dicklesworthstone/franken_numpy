@@ -23,6 +23,64 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - PREDICATE DISCHARGED, `deadlock-audit-t4lri`'s SIGNATURE HALF CLOSES: parameter-count binding cost is 0.0 ns from 3 to 9, and a whole 9-parameter call is 40 ns against the 370 ns it would have to explain (`deadlock-audit-7ocfa`, `deadlock-audit-t4lri`)
+
+`SlateHeron`. `deadlock-audit-7ocfa` rejected the nine-parameter signature as a wrapper-floor suspect
+and named exactly one condition for reopening: a probe showing per-call cost that SCALES with the
+number of declared parameters, at 3, 9 and 20. `deadlock-audit-t4lri` proposes rewriting that signature
+without having discharged it. Discharged here, and the predicate is NOT met.
+
+**Campaign result class:** unmeasured-hypothesis refuted (no production change justified)
+
+**LOADAVG, observed and STABLE:** 14.89/25.49/29.36 before the build, 21.65/24.23/28.32 after it, and
+20.50/23.89/28.16 **identical before and after the measurement**. All three figures under ~30 with the
+1- and 5-minute within 2.6 of each other.
+
+```
+PYO3_PARAM_SCALING worker=thinkstation1 harness=replica_min_of_2001 trials=2001
+  arms=identical_bodies_differing_only_in_declared_parameter_count
+  params_3_ns=40.0  params_9_ns=40.0  params_20_ns=50.0
+  delta_3_to_9_ns=0.0   per_param_3_to_9_ns=0.00
+  delta_9_to_20_ns=10.0 per_param_9_to_20_ns=0.91
+```
+
+bench_elf_sha256=64ab4fc9e2ccf9afffbf8ff1b282cb3dd4940081edafcd066e22d124ffb7c24d, LOCAL build under
+the exported cargo-shim bypass, zero [RCH] lines, no dirty files under `crates/`.
+
+**THE ANSWER: 0.0 ns from 3 to 9 parameters** - and NINE is the size our actual signature declares. The
+predicate asked whether cost scales with declared parameter count across that range. It does not.
+
+**THE 9-to-20 DELTA IS ONE TIMER QUANTUM, NOT A SLOPE.** All three medians are exact multiples of 10 ns
+(40, 40, 50), so the harness resolution here is ~10 ns and the 10 ns difference is a single tick. It is
+also beyond our parameter count entirely. Reporting it as per_param_9_to_20_ns=0.91 and refusing to
+call it a trend is the point: this ledger has three retractions today from treating
+differences-of-nearly-equal-quantities as findings, and this is that shape.
+
+**THE SCALE ARGUMENT IS THE DECISIVE ONE, and it does not depend on resolving 10 ns.** An ENTIRE
+9-parameter call round-trip - PyO3 entry, binding all nine, body, return - costs **40 ns**. The term it
+was supposed to explain, wrapper_residual_ns, is **370 ns**. So the whole signature mechanism can
+account for **at most 10.8%** of the residual, and the marginal cost of the six parameters beyond three
+is zero. **No signature rewrite can reach the 370 ns.**
+
+**WHAT THIS CLOSES.** The signature half of `deadlock-audit-t4lri` is closed with **no production
+change** - which is the valuable outcome, because that rewrite meant hand-parsing the keyword surface
+of every binary ufunc, and this ledger records that exact change previously drifting NumPy's `where=`
+to `where_arg`. A refuted hypothesis that costs one bench group and avoids a keyword-surface regression
+is worth more than a speculative win.
+
+**WHAT IT LEAVES.** wrapper_residual_ns = 370 ns is still 43% of our `multiply` call and now has NO
+named suspect: probes are 91 ns and out of contention, binding is ~40 ns total, the delegation kwargs
+tail was removed by `deadlock-audit-s2fkk`, and the per-call imports went in the four import-removal
+commits. What remains is output construction and the delegation call itself - `deadlock-audit-tmmud`
+priced output construction at 1310 ns pre-fix and it has never been re-measured since the floor fell
+59%.
+
+RETRY PREDICATE: do NOT reopen the signature on a parameter-count argument - this row settles it at our
+size. Reopen only on evidence that PyO3 argument handling costs something at a size we actually use,
+which this measurement excludes. The next target is output construction, re-measured post-fix against
+the current 370 ns residual rather than against `deadlock-audit-tmmud`'s stale 1310 ns.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CONFIRMED: OUR OWN ARM SLOWS THE INCUMBENT IT IS DIVIDED BY - NumPy is 6.26% slower when shadowed by our parallel replica, so every bandwidth-heavy ratio in this ledger is OPTIMISTIC by about that factor (`deadlock-audit-48by6`, `deadlock-audit-322j4`)
 
 `RedLynx`. The hypothesis raised one row ago, tested directly. It holds, it is decidable, and it
