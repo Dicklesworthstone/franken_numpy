@@ -4,6 +4,64 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-15 - TWO LEVERS REFUTED BEFORE A BUILD, and the mechanism of the ~6.6us floor RE-ATTRIBUTED: f64 `multiply` never enters the zerocopy route, it DELEGATES (`deadlock-audit-cydda`)
+
+`TealOak`. `deadlock-audit-isnd2` measured a ~6.6-7 us per-call floor and 7.97x slower than
+NumPy at n=256 (worker=vmi1153651, harness=common::run_dual_null_median_ci_contract). Its retry
+predicate named an attack order. This row kills the first two candidates and corrects where the
+cost can possibly live.
+
+**Campaign result class:** maintenance-self-speedup
+
+**REFUTED (1): the output allocation and its dtype string.** `zerocopy_f64_binary_flat` builds a
+fresh `PyDict` and passes the STRING `"float64"` to `numpy.empty` every call, so caching a dtype
+object was the obvious cheap lever.
+
+  np.empty(256, dtype='float64')     313.6 ns
+  np.empty(256, dtype=<dtype obj>)   204.1 ns
+  np.empty(256, dtype=np.float64)    237.5 ns
+  np.empty(256)                      212.4 ns
+
+Worth ~110 ns against a 6600 ns floor: **1.7%**.
+
+**REFUTED (2): the kwargs delegation path.** `PyUFunc::__call__` always populates `casting`,
+`order` and `subok` into a kwargs dict before calling NumPy, even when every one is at its
+default, which forces NumPy's slow kwargs path instead of its vectorcall fast path.
+
+  np.multiply(a,b)                                        595.9 ns
+  np.multiply(a,b,casting='same_kind',order='K',subok=True) 624.2 ns
+
+Worth ~28 ns: **0.4%**.
+
+PROVENANCE OF THOSE TWO: local numpy-only triage on this dev box, numpy 2.4.3, best-of-5 x 20000
+iterations, NO rch worker and NO fnp code involved. They are deliberately NOT campaign ratios and
+must never be quoted as one — they are hypothesis screening, and their only job was to stop two
+levers from consuming a 20-minute build each. Both did that.
+
+**RE-ATTRIBUTION, which matters more than either refutation.** Reading `PyUFunc::__call__`
+instead of assuming it: the f64 fast-path `binop` match admits Remainder, Power, Maximum, Minimum
+and Divide only. `UFuncKind::Multiply` maps to `None` — the source comment says *"Multiply is NOT
+in the f64 binop set above (f64 mul is SIMD-bound, no parallel win)"*. For f64 `multiply` the
+whole call is therefore: import numpy, check the kwargs are default, decline
+`try_zerocopy_complex_binary` (~5 `getattr`s plus two `String` allocations to compare one
+character of `dtype.kind`), `getattr("multiply")`, build kwargs, call NumPy.
+
+So on `multiply` **we delegate to NumPy and still cost ~6.6 us more than NumPy alone.** None of
+that is kernel work; none of it is the FE-hazard scan; and per the refutations above, ~138 ns of
+it is allocation and kwargs. The remainder is unattributed and is now the whole question.
+
+This also corrects `deadlock-audit-1pt96`, whose control rested on `multiply` and `divide`
+sharing the zerocopy route. They do not. That row has been annotated in place rather than
+rewritten: its numbers stand, its mechanism did not.
+
+RETRY PREDICATE: attribute the remaining ~6.4 us on an rch worker, naming worker and harness, by
+timing `PyUFunc::__call__` against a bare `#[pyfunction]` that does nothing but return its second
+argument — that isolates PyO3 entry, signature handling for the 10-parameter `__call__` (two of
+which are `&str` with defaults that must be materialized and extracted per call), and GIL
+handling, from everything the body does. If that bare floor is already several microseconds, the
+lever is the call signature, not the body, and no amount of route work will reach it.
+AGENT_NAME=TealOak.
+
 ## 2026-08-16 - PROVISIONAL, NOT REPLICATED (do not quote): the `fnp.divide` loss is REGIME-SCOPED - one observation shows a 1.553x WIN above the parallel gate (`deadlock-audit-su0i6`)
 
 `TealOak`. The `fnp.divide` loss row banked earlier measures `DIVIDE_SERIAL_N` = 1<<20,
@@ -142,10 +200,29 @@ n=2^16 where the overhead is 41%, since that is where any lever will show. AGENT
 ## 2026-08-15 - MEASURED, PARTIAL: the fnp binary-ufunc ROUTE loses to NumPy on both hosts, but the divide-specific increment does NOT replicate (72.5% vs 8.4%) (`deadlock-audit-1pt96`)
 
 `TealOak`. `deadlock-audit-su0i6` established that `fnp.divide` is behind `numpy.divide`.
-This asks which part of our route costs it, using `multiply` as the control: same
-`zerocopy_f64_binary_flat` route, same dtype/contiguity sniffing, same `numpy.empty` output
-allocation, same PyO3 dispatch, and NO hazard scan. Both measured against NumPy in ONE
-invocation so the comparison is licensed.
+This asks which part of our route costs it, using `multiply` as the control.
+
+> **CORRECTION 2026-08-15, from reading the dispatch rather than assuming it
+> (`deadlock-audit-cydda`).** This row originally justified the control by saying `multiply`
+> takes the *same* `zerocopy_f64_binary_flat` route, the same `numpy.empty` allocation and the
+> same sniffing as `divide`, differing only by the hazard scan. **That is false.** In
+> `PyUFunc::__call__` the f64 fast-path `binop` match admits only Remainder, Power, Maximum,
+> Minimum and **Divide**; `UFuncKind::Multiply` maps to `None`, and the source says so outright
+> — *"Multiply is NOT in the f64 binop set above (f64 mul is SIMD-bound, no parallel win)"*. So
+> f64 `multiply` never enters that route at all: it runs one declined probe
+> (`try_zerocopy_complex_binary`, which exits after ~5 `getattr`s once it sees a non-complex
+> dtype) and then **delegates to `numpy.multiply`**.
+>
+> The measured NUMBERS below stand — they are what `fnp.multiply` and `fnp.divide` actually
+> cost — but the stated MECHANISM was wrong, and so was the inference built on it. The two arms
+> do not share a compute route, so this pair never isolated the hazard scan the way the row
+> claimed. What the pair does isolate is the part they genuinely do share: `PyUFunc::__call__`
+> dispatch and delegation. That is consistent with, and arguably strengthens,
+> `deadlock-audit-m7tti`/`isnd2` — the floor lives in the wrapper, not in either kernel — but it
+> is a different argument from the one this row originally made, and the original was unsound.
+>
+> It also makes the loss stranger and more actionable: on `multiply` we ultimately **call NumPy**
+> and still finish ~6.6 us later than NumPy would have on its own.
 
 **Campaign result class:** maintenance-self-speedup
 
