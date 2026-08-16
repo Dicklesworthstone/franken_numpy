@@ -1289,6 +1289,10 @@ fn main() {
                 bench_pyo3_signature_binding_cost,
             ),
             (
+                "bench_pyo3_signature_parameter_scaling",
+                bench_pyo3_signature_parameter_scaling,
+            ),
+            (
                 "bench_wrapper_remainder_stages",
                 bench_wrapper_remainder_stages,
             ),
@@ -1351,6 +1355,10 @@ fn main() {
             ),
             ("bench_probe_decline_ordering", bench_probe_decline_ordering),
             ("bench_maximum_arms_vs_numpy", bench_maximum_arms_vs_numpy),
+            (
+                "bench_incumbent_interference_from_candidate",
+                bench_incumbent_interference_from_candidate,
+            ),
         ],
     );
 }
@@ -3420,6 +3428,68 @@ fn probe_nine(
     x1
 }
 
+/// The PARAMETER-COUNT SCALING probe `deadlock-audit-7ocfa` made the condition of its
+/// own reopening (`deadlock-audit-t4lri`).
+///
+/// 7ocfa measured nine-parameter binding against `(*args, **kwargs)` at 0.0 ns and
+/// REJECTED the signature as a wrapper-floor suspect, but wrote an explicit retry
+/// predicate: "Reopen ONLY if a probe shows a per-call cost that scales with the NUMBER
+/// of declared parameters - e.g. the same two probes at 3, 9 and 20 parameters." That
+/// predicate has never been discharged, and `deadlock-audit-t4lri` proposes rewriting
+/// `PyUFunc::__call__`'s signature without discharging it.
+///
+/// WHY IT MATTERS NOW. With the probe chain 83% removed, `wrapper_residual_ns` = 370 ns
+/// is 43% of our `multiply` call and the largest remaining component. The nine-parameter
+/// signature sits inside it. If binding cost is FLAT in parameter count, that half of
+/// t4lri is closed without touching production code - and the rewrite it proposes is the
+/// risky kind, since hand-parsing the keyword surface is what previously drifted NumPy's
+/// `where=` to `where_arg`.
+///
+/// THE CONTROL: three `#[pyfunction]`s with IDENTICAL bodies - each returns its first
+/// argument - differing ONLY in how many parameters they declare. Same binary, same
+/// invocation, same operands.
+#[pyo3::pyfunction]
+#[pyo3(signature = (x1, _x2, /, _out=None))]
+fn probe_three(
+    x1: pyo3::Py<pyo3::PyAny>,
+    _x2: pyo3::Py<pyo3::PyAny>,
+    _out: Option<pyo3::Py<pyo3::PyAny>>,
+) -> pyo3::Py<pyo3::PyAny> {
+    x1
+}
+
+#[pyo3::pyfunction]
+#[pyo3(signature = (
+    x1, _x2, /, _out=None, *, _p1=None, _p2=None, _p3=None, _p4=None, _p5=None, _p6=None,
+    _p7=None, _p8=None, _p9=None, _p10=None, _p11=None, _p12=None, _p13=None, _p14=None,
+    _p15=None, _p16=None, _p17=None
+))]
+#[allow(clippy::too_many_arguments)]
+fn probe_twenty(
+    x1: pyo3::Py<pyo3::PyAny>,
+    _x2: pyo3::Py<pyo3::PyAny>,
+    _out: Option<pyo3::Py<pyo3::PyAny>>,
+    _p1: Option<pyo3::Py<pyo3::PyAny>>,
+    _p2: Option<pyo3::Py<pyo3::PyAny>>,
+    _p3: Option<pyo3::Py<pyo3::PyAny>>,
+    _p4: Option<pyo3::Py<pyo3::PyAny>>,
+    _p5: Option<pyo3::Py<pyo3::PyAny>>,
+    _p6: Option<pyo3::Py<pyo3::PyAny>>,
+    _p7: Option<pyo3::Py<pyo3::PyAny>>,
+    _p8: Option<pyo3::Py<pyo3::PyAny>>,
+    _p9: Option<pyo3::Py<pyo3::PyAny>>,
+    _p10: Option<pyo3::Py<pyo3::PyAny>>,
+    _p11: Option<pyo3::Py<pyo3::PyAny>>,
+    _p12: Option<pyo3::Py<pyo3::PyAny>>,
+    _p13: Option<pyo3::Py<pyo3::PyAny>>,
+    _p14: Option<pyo3::Py<pyo3::PyAny>>,
+    _p15: Option<pyo3::Py<pyo3::PyAny>>,
+    _p16: Option<pyo3::Py<pyo3::PyAny>>,
+    _p17: Option<pyo3::Py<pyo3::PyAny>>,
+) -> pyo3::Py<pyo3::PyAny> {
+    x1
+}
+
 #[pyo3::pyfunction]
 #[pyo3(signature = (*args, **_kwargs))]
 fn probe_varargs(
@@ -3870,6 +3940,112 @@ fn bench_wrapper_remainder_stages(_c: &mut Criterion) {
              two_stages_sum_ns={:.2}",
             measurement_worker(),
             buffers + output,
+        );
+    });
+}
+
+// Discharges `deadlock-audit-7ocfa`'s retry predicate, which `deadlock-audit-t4lri`
+// currently proposes acting against without having discharged it.
+//
+// 7ocfa rejected the nine-parameter signature as a wrapper-floor suspect (binding measured
+// at 0.0 ns against `(*args, **kwargs)`) but named exactly one condition for reopening: a
+// probe showing per-call cost that SCALES with the number of declared parameters, at 3, 9
+// and 20. This is that probe.
+//
+// WHY IT IS WORTH RUNNING NOW rather than earlier: with the probe chain 83% removed
+// (521 -> 91 ns), `wrapper_residual_ns` = 370 ns is 43% of our `multiply` call and the
+// largest remaining term. The signature sits inside it, so this decides whether t4lri's
+// rewrite is justified at all — and that rewrite is the risky kind, since hand-parsing the
+// keyword surface previously drifted NumPy's `where=` to `where_arg`.
+//
+// READ THE RESULT THIS WAY. Three identical bodies differing only in declared parameter
+// count. If the three medians sit within the harness's own resolution, cost is FLAT in
+// parameter count, 7ocfa's predicate is NOT met, and the signature half of t4lri closes
+// with no production change. If they scale, the predicate IS met and t4lri reopens with a
+// measured slope rather than an assumption.
+//
+// The row deliberately reports the raw per-probe medians and the two deltas rather than a
+// verdict: this ledger has three retractions today from differencing nearly-equal measured
+// quantities, and a 3-to-20 delta on sub-microsecond calls is exactly that shape.
+fn bench_pyo3_signature_parameter_scaling(_c: &mut Criterion) {
+    const TRIALS: usize = 2001;
+
+    fn min_ns(trials: usize, mut op: impl FnMut()) -> f64 {
+        let mut best = u128::MAX;
+        for _ in 0..trials {
+            let started = Instant::now();
+            op();
+            best = best.min(started.elapsed().as_nanos());
+        }
+        best as f64
+    }
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let probe_mod = PyModule::new(py, "fnp_param_scaling_probe").expect("probe module");
+        probe_mod
+            .add_function(pyo3::wrap_pyfunction!(probe_three, &probe_mod).expect("wrap three"))
+            .expect("register three");
+        probe_mod
+            .add_function(pyo3::wrap_pyfunction!(probe_nine, &probe_mod).expect("wrap nine"))
+            .expect("register nine");
+        probe_mod
+            .add_function(pyo3::wrap_pyfunction!(probe_twenty, &probe_mod).expect("wrap twenty"))
+            .expect("register twenty");
+        let three = probe_mod.getattr("probe_three").expect("probe_three");
+        let nine = probe_mod.getattr("probe_nine").expect("probe_nine");
+        let twenty = probe_mod.getattr("probe_twenty").expect("probe_twenty");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        py.run(
+            std::ffi::CString::new("a = np.arange(256.0)\nb = np.arange(256.0) + 1\n")
+                .unwrap()
+                .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a");
+        let b = locals.get_item("b").expect("b");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        // Every probe must return its first argument, or the bodies are not identical and
+        // the comparison measures something other than binding.
+        for (name, probe) in [("three", &three), ("nine", &nine), ("twenty", &twenty)] {
+            let out = probe.call1(&args).expect("probe call");
+            assert!(
+                out.is(&a),
+                "probe_{name} must return its FIRST argument unchanged, or the three \
+                 bodies are not identical and this comparison is meaningless"
+            );
+        }
+
+        let three_ns = min_ns(TRIALS, || {
+            black_box(three.call1(&args).expect("probe_three call"));
+        });
+        let nine_ns = min_ns(TRIALS, || {
+            black_box(nine.call1(&args).expect("probe_nine call"));
+        });
+        let twenty_ns = min_ns(TRIALS, || {
+            black_box(twenty.call1(&args).expect("probe_twenty call"));
+        });
+
+        let per_param_3_to_9 = (nine_ns - three_ns) / 6.0;
+        let per_param_9_to_20 = (twenty_ns - nine_ns) / 11.0;
+        println!(
+            "PYO3_PARAM_SCALING worker={} harness=replica_min_of_{TRIALS} trials={TRIALS} \
+             arms=identical_bodies_differing_only_in_declared_parameter_count \
+             params_3_ns={three_ns:.1} params_9_ns={nine_ns:.1} params_20_ns={twenty_ns:.1} \
+             delta_3_to_9_ns={:.1} delta_9_to_20_ns={:.1} \
+             per_param_3_to_9_ns={per_param_3_to_9:.2} per_param_9_to_20_ns={per_param_9_to_20:.2} \
+             discharges=deadlock-audit-7ocfa_retry_predicate \
+             wrapper_residual_reference_ns=370.0",
+            measurement_worker(),
+            nine_ns - three_ns,
+            twenty_ns - nine_ns,
         );
     });
 }
@@ -5013,6 +5189,126 @@ fn maximum_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
 //
 // n=1<<22 sits above the 1<<21 parallel_min, the regime the losing measurements
 // came from — below it the shipped route runs serially anyway.
+/// Does OUR arm slow down the incumbent it is measured against? (`deadlock-audit-48by6`)
+///
+/// On a quiet host the maximum-arms row showed NumPy's own arm getting SLOWER — 4232670
+/// -> 4947948 ns (+17%) and 4111546 -> 4610579 ns (+12%) — while everything else moved
+/// the expected way. The lead recorded there: inside an interleaved ABBAABBA schedule our
+/// candidate runs immediately adjacent to NumPy's sample, and at 2^22 f64 both stream
+/// 32 MB buffers. When our arm is FAST it saturates memory bandwidth harder per unit
+/// time, so the NumPy sample that follows may start with colder caches and a busier
+/// memory subsystem. If that is real, **every ratio in this ledger taken with a
+/// bandwidth-heavy candidate is mildly self-flattering**, because we degrade the
+/// incumbent we are divided by.
+///
+/// WHY THIS NEEDS ITS OWN GROUP RATHER THAN A READ-OFF. The harness already measures the
+/// incumbent alone, in its own A/A null phase, and interleaved, in the effect phase — so
+/// the comparison looks free. It is not: those phases run at DIFFERENT TIMES, the effect
+/// phase runs last, and any load drift during the invocation lands entirely on that
+/// difference. On a rising host the read-off would manufacture exactly the interference
+/// signal it claims to detect. This group instead ALTERNATES the two conditions inside
+/// one ABBAABBA schedule, so drift cancels.
+///
+/// Arm A: `numpy.maximum(a, b, out=)` timed alone.
+/// Arm B: our parallel replica runs first, UNTIMED, then the same NumPy call is timed.
+/// Both arms time exactly the same NumPy work; they differ only in what ran immediately
+/// before. A ratio above 1.0 means NumPy is slower when shadowed, i.e. interference is
+/// real and every affected ratio is optimistic by that factor.
+fn bench_incumbent_interference_from_candidate(_c: &mut Criterion) {
+    const N: usize = 1 << 22;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_obj = locals.get_item("a").expect("a operand");
+        let b_obj = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a_obj, &b_obj]).expect("args");
+        let np_maximum = numpy.getattr("maximum").expect("numpy.maximum");
+        let np_out = numpy
+            .call_method1("empty_like", (&a_obj,))
+            .expect("preallocated numpy output");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &np_out).expect("bind out=");
+
+        let a_vec: Vec<f64> = a_obj
+            .call_method0("tolist")
+            .expect("a list")
+            .extract()
+            .expect("a f64s");
+        let b_vec: Vec<f64> = b_obj
+            .call_method0("tolist")
+            .expect("b list")
+            .extract()
+            .expect("b f64s");
+        let mut shadow_out = vec![0.0_f64; N];
+
+        // Arm A: the incumbent alone. Nothing of ours runs adjacent to it.
+        let isolated = || {
+            let started = Instant::now();
+            let result = np_maximum
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.maximum isolated");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: numpy_divide_checksum(&result, N),
+            }
+        };
+        // Arm B: the SAME incumbent call, but our bandwidth-heavy replica runs first and
+        // is deliberately OUTSIDE the timer. Only NumPy's work is timed in both arms.
+        let shadowed = || {
+            maximum_parallel(&a_vec, &b_vec, &mut shadow_out);
+            let started = Instant::now();
+            let result = np_maximum
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.maximum shadowed");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: numpy_divide_checksum(&result, N),
+            }
+        };
+        let (effect, null) =
+            common::run_median_ci_contract("incumbent_interference", shadowed, isolated);
+
+        let interference_ns = effect.arm_a_median_ns - effect.arm_b_median_ns;
+        println!(
+            "INCUMBENT_INTERFERENCE n={N} numpy_version={numpy_version} worker={} \
+             harness=common::run_median_ci_contract \
+             arms=same_numpy_call_timed_differing_only_in_what_ran_immediately_before \
+             candidate_work_is_outside_the_timer=true \
+             shadowed_ns={:.1} isolated_ns={:.1} interference_ns={interference_ns:.1} \
+             ratio={:.6} ratio_ci95=[{:.6},{:.6}] null={:.6} \
+             above_one_means_our_ratios_are_optimistic_by_this_factor=true",
+            measurement_worker(),
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            null.ratio_median,
+        );
+    });
+}
+
 fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
     const N: usize = 1 << 22;
     Python::initialize();

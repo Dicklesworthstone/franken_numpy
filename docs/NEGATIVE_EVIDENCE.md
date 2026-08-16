@@ -22,6 +22,54 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CODE, UNMEASURED: the parameter-count scaling probe that `deadlock-audit-7ocfa` made the condition of its own reopening - and that `deadlock-audit-t4lri` proposes acting without (`deadlock-audit-t4lri`, `deadlock-audit-7ocfa`)
+
+`SlateHeron`. No certification: the host was rising and unstable all turn. Code only, no ratio.
+
+**Campaign result class:** operational (no measurement produced)
+
+**LOADAVG, observed with `uptime` and recorded because the rule requires it even when deferring:**
+`59.18/38.87/31.42` at the start, `26.74/39.96/34.12` at the end. The 1-minute figure fell to 26.74
+but the 5-minute ROSE to 39.96, so the two never converged — the precise condition for not certifying.
+
+**WHY THIS PROBE, NOW.** The previous row certified the probe chain down 83% (521 -> 91 ns), leaving
+`wrapper_residual_ns` = 370 ns as **43% of our `multiply` call** and the largest remaining term. The
+nine-parameter signature sits inside it, and `deadlock-audit-t4lri` proposes rewriting that signature.
+But `deadlock-audit-7ocfa` already REJECTED the signature as a suspect — binding measured at 0.0 ns
+against `(*args, **kwargs)` — and named exactly one condition for reopening:
+
+> "Reopen ONLY if a probe shows a per-call cost that scales with the NUMBER of declared parameters -
+> e.g. the same two probes at 3, 9 and 20 parameters."
+
+**That predicate has never been discharged, and t4lri proposes acting without it.** This is the probe
+it asked for: `bench_pyo3_signature_parameter_scaling`, three `#[pyfunction]`s with IDENTICAL bodies —
+each returns its first argument — declaring 3, 9 and 20 parameters, in one binary and one invocation.
+
+**THE DECISION RULE, written before the run so the answer cannot be fitted to it.** If the three
+medians sit within the harness's resolution, cost is FLAT in parameter count, 7ocfa's predicate is NOT
+met, and the signature half of t4lri closes with **no production change** — which matters because the
+rewrite it proposes is the risky kind: hand-parsing the keyword surface is what previously drifted
+NumPy's `where=` to `where_arg`. If they scale, the predicate IS met and t4lri reopens with a measured
+slope instead of an assumption.
+
+**THE ROW WILL REPORT RAW MEDIANS AND BOTH DELTAS, NOT A VERDICT.** This ledger has three retractions
+today from differencing nearly-equal measured quantities (`wrapper_ns` at 2^20,
+`divide_specific_excess_ns`, and my own "495 ns op spread"), and a 3-to-20 delta on sub-microsecond
+calls is exactly that shape.
+
+**NEGATIVE CASE ASSERTED:** every probe must return its FIRST argument unchanged (`out.is(&a)`), or the
+three bodies are not identical and the comparison measures something other than binding.
+
+**GATES:** `cargo clippy -p fnp-python --benches` exit 0, `rustfmt --check` exit 0. Clippy caught a real
+defect on the first attempt — three positional format placeholders against two arguments, because I
+omitted `measurement_worker()` — which is the second time this session a gate has caught a mistake that
+`rustfmt` alone could not.
+
+RETRY PREDICATE: run `fnp-group=bench_pyo3_signature_parameter_scaling` when 1- and 5-minute loadavg
+are close and both under ~30. Do NOT act on t4lri's signature rewrite before this row has a number,
+whichever way it falls.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - BOTH DEFERRED LEVERS CERTIFIED IN ONE INVOCATION: `add` 3.471x -> 2.176x, `multiply` 3.174x -> 2.152x, and the probe chain is 83% GONE (`deadlock-audit-v46rn`, `deadlock-audit-ei9jz`)
 
 `SlateHeron`. The two levers deferred under host volatility are now certified together in ONE
