@@ -6,6 +6,86 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - MEASURED, BOTH INSTRUMENT REPAIRS WORK - the partition no longer panics and its correction validates at 0.895x an independent figure; but the first run exposes a flaw in a field I added myself (`deadlock-audit-uj3r3`, `deadlock-audit-kido6`)
+
+`RedLynx`. First run of two repairs written blind during the freeze. Same ELF and invocation
+family as the two rows above.
+
+**Campaign result class:** maintenance-diagnostic (both are instrument repairs, not levers)
+
+```
+bench_elf_sha256=d285003d76596de0d4fd37c23b681c6d78f4cc0f43eda81f2141c0090c2f08d2
+harness_source_matches_disk=true  worker=thinkstation1  numpy 2.4.3  n=256
+load 1min 52.22 (64 logical threads)
+
+PERCALL_FLOOR_STAGES  import_numpy_ns=480.0 import_is_live_route_cost=false
+  dtype_guard_both_operands_ns=170.0 getattr_ndarray_ns=110.0 numpy_empty_ns=390.0
+  accounted_ns=1150.0 accounted_includes_dead_import=true accounted_fraction=0.814
+  live_accounted_ns=670.0 live_unattributed_ns=743.0 live_unattributed_fraction=0.526
+  fnp_multiply_ns=1413.0 numpy_multiply_ns=451.0 fnp_over_numpy=3.133
+
+PERCALL_FLOOR_PARTITION  fnp_multiply_ns=1393.0 probes_skipped_raw_ns=1473.0
+  numpy_kwargs_ns=811.0 pydict_build_ns=270.0 kwargs_overhead_ns=651.0
+  kwargs_overhead_vs_s2fkk_727ns=0.895 correction=deadlock-audit-uj3r3_keyword_tail_cancelled
+  probes_skipped_ns=822.0 numpy_multiply_ns=430.0
+  probe_chain_ns=571.0 wrapper_residual_ns=392.0
+  probe_chain_share=0.410 wrapper_residual_share=0.281 numpy_share=0.309 fnp_over_numpy=3.240
+```
+
+**THE PARTITION REPAIR IS CONFIRMED, AND THE DEFECT IS REPRODUCED IN THE SAME ROW.**
+`probes_skipped_raw_ns` is 1473.0 against `fnp_multiply_ns` 1393.0, so the OLD uncorrected
+subtraction would have produced **-80 ns** and tripped the guard — exactly the failure banked
+earlier. After cancelling the 651 ns keyword tail the probe-skipping arm costs 822 ns and the
+partition is well-formed: probe chain 571 ns, wrapper residual 392 ns, NumPy 430 ns.
+
+**THE CORRECTION IS INDEPENDENTLY VALIDATED.** `kwargs_overhead_ns=651.0` against
+`deadlock-audit-s2fkk`'s 727 ns for the same call shape, measured by a different method on
+another host: a ratio of **0.895**. That agreement is the check I built in rather than asserted,
+and it is close enough that the correction is not mis-scaled.
+
+**AND IT CORROBORATES AN OLDER FIGURE.** `probe_chain_share=0.410` — the declined probe chain is
+41% of a delegating call, against `deadlock-audit-wsd7h`'s independently measured "~40% of a
+delegating call". Two methods, one number.
+
+**THE STAGE-ATTRIBUTION REPAIR WORKS AS DESIGNED**, and the exact-partition assertion I added
+passed silently (670 + 743 = 1413). The misleading figure is now visible beside the honest one:
+`accounted_fraction=0.814` still counts the 480 ns dead import, while
+`live_unattributed_fraction=0.526` does not.
+
+**BUT THE FIRST RUN EXPOSES A FLAW IN A FIELD I ADDED, and it is in the flattering direction
+again.** `live_unattributed_ns=743.0` is computed as `fnp_multiply_ns - live_accounted_ns`, so it
+INCLUDES NumPy's own 451 ns — work any implementation must do and that is not ours to attribute.
+The number that actually matters is the unattributed OVERHEAD:
+
+```
+  our_overhead_ns      = 1413 - 451 = 962
+  named_live_stages_ns =              670   (dtype 170 + ndarray 110 + empty 390)
+  truly_unattributed   =  962 - 670 = 292   (30.4% of our overhead, not 52.6% of the call)
+```
+
+I inherited the divide-by-the-whole-call convention from the original `accounted_fraction` and
+did not question it while writing the fix. The partition group gets this right by reporting
+`numpy_share=0.309` as an explicit third part; the stage group does not. So `live_unattributed`
+is an improvement on `accounted_fraction` and still not the quantity anyone wants.
+
+**THE TWO GROUPS AGREE ON THE TOTAL, which is the useful cross-check.** Stage: 1413 - 451 = 962 ns
+of overhead. Partition: 1393 - 430 = 963 ns. Two harnesses, one invocation family, 0.1% apart.
+Their DECOMPOSITIONS differ in shape and are not subtractable across each other, but the quantity
+being decomposed is the same.
+
+**REVISED PICTURE OF THE WRAPPER at n=256**, from the partition, which is the better-formed of
+the two: NumPy's own work 30.9%, declined probe chain 41.0%, everything else 28.1%. The probe
+chain is now the largest single component of our overhead — larger than the 292 ns the stage
+group cannot name.
+
+RETRY PREDICATE: (1) Add `live_unattributed_overhead_ns` and its fraction to the stage group, or
+emit `numpy_share` there as the partition does; until then quote 292 ns / 30.4%, not 743 ns /
+52.6%. Filed on `deadlock-audit-kido6` rather than fixed here, because it needs its own build and
+this row must not be re-run to change its own definitions. (2) The probe chain at 41% is now the
+biggest named target on this route and `wsd7h` already measured it once — check that bead's retry
+predicate before attacking it again. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED, THE GATE IS WRONG AT EVERY SIZE: delegating beats our native f64 divide at 2^14 through 2^20, so `F64_DIV_NATIVE_MIN_LEN` is not too low, it is admitting a path that never pays - plus the nine-parameter signature priced at 276 ns (`deadlock-audit-q00ev`, `deadlock-audit-t4lri`, `deadlock-audit-0ppym`)
 
 `RedLynx`. First run of two specs written blind during the build freeze, on the first build
