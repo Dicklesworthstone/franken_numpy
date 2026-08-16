@@ -31,6 +31,66 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - MEASURED WIN with CLEAN attribution: two interning/caching levers cut the per-call excess by 27-44% and the worst cell is now 1.855x (`deadlock-audit-ei9jz`)
+
+`RedLynx`. Unlike the previous self-speedup row, this delta is attributable: **only two commits
+touched `crates/fnp-python/src/lib.rs` between the two measurements, and both are mine** —
+`8f4b6372` (five hot routes stop doing a per-call `numpy.getattr("ndarray")`) and `cfad3931`
+(intern the per-call dtype sniff keys). No peer work is in this window.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+BEFORE  bench_elf_sha256=35d903e2c06e8565a3b5bad07403e231cb3431363245aab1bd0a329e10b71dbb
+        LOADAVG 27.86 -> 27.95 (1min); CPU MHz 1429-3988 spread 2.790x median 3484
+AFTER   bench_elf_sha256=5c8877611025c55bb8a1ac3207995de262e092076c62250c6932f79dfd0690ae
+        LOADAVG 25.19 -> 25.19 then 20.33 -> 20.33 (two runs); CPU MHz 1429-4051
+        spread 2.835x median 1895
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+
+ op        before ratio   after ratio (2 runs)      before excess  after excess
+ multiply  0.527187       0.655763 / 0.639626           396           220
+ subtract  0.526882       0.648986 / 0.633914           401           231
+ add       0.533493       0.651703 / 0.654088           386           281
+ divide    0.481064       0.539007 / 0.539052           501           471
+```
+
+**ALL FOUR CELLS REMAIN `DECIDABLE_REGRESSION` and all eight A/A nulls straddle unity** (controlling
+half-widths 0.0051-0.0144). The worst vs-incumbent cell is now **divide at 1.855x**, from 2.079x.
+
+**THE TWO RUNS AGREE, which is what licenses reading the delta.** divide reads 0.539007 and
+0.539052 — 0.008% apart — and multiply/subtract/add agree within 1-2.4%. This is a much tighter
+pair than the 4.8% spread I found on the interference cell, so the after-state is well determined.
+
+**THE EXCESS IS THE STATISTIC TO READ HERE, not the ratio.** NumPy's own arm moved between windows
+(446/441/446/471 ns before against 531/421/421/556 in the first run after), so part of the ratio
+change is the denominator. The excess — our overhead above NumPy — is what the levers touch, and it
+falls 396->220 on multiply (-44%), 401->231 on subtract (-42%), 386->281 on add (-27%) and
+501->471 on divide (-6%).
+
+**THE PER-OP PATTERN MATCHES THE MECHANISM, which is the check that this is not a coincidence of
+windows.** `cfad3931` interns the dtype sniff, which runs on EVERY delegating call — and
+add/subtract/multiply are exactly the ops that delegate at this size (`routes_natively=false`),
+which is where 27-44% came from. `divide` is the one op that takes the NATIVE route here
+(`routes_natively=true`), so it bypasses most of the delegating tail and gains only 6%. A lever
+that helped all four equally, or that helped divide most, would have contradicted its own story.
+
+**WHAT IS NOT CLAIMED.** This is a cross-build before/after, not two arms in one binary, and the
+windows differ (loadavg ~28 before, ~20-25 after). My own load work found this serial-vs-serial
+cell moves ~6-10% under a 4x load change; the change here is ~25% in load against a 27-44% fall in
+excess, so load cannot account for it — but it is not a controlled variable and the figures should
+be read as approximate. The two levers are also not separated from each other; that would need a
+third build at `8f4b6372`.
+
+RETRY PREDICATE: (1) `divide` at 1.855x is now the worst cell by a clear margin and its excess
+(471 ns) barely moved — the next lever belongs on the NATIVE f64 route, not the delegating tail,
+which these two levers have largely cleared. (2) If the two levers need separating, build at
+`8f4b6372` and compare; the delegating/native split above already suggests `cfad3931` carries most
+of it. (3) Do not quote the ratio improvement without the excess: NumPy's arm moved between the
+windows. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - RETRACTION: `wrapper_residual` is NOT 83% output allocation - the delegating route never allocates, and I transferred a stage measurement into a path that does not execute it (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. Withdrawing the central claim of my own attribution row. It was wrong, it was the basis
