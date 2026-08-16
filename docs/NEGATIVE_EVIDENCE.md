@@ -102,6 +102,70 @@ generality. (3) The next named lever is `deadlock-audit-t4lri`: `PyUFunc::__call
 nine-parameter signature, the largest never-priced stage of the remaining ~1000 ns excess.
 AGENT_NAME=RedLynx.
 
+## 2026-08-16 - MEASURED, THE WORST RATIO REPLICATES ON A THIRD WORKER - and 64 rayon threads still LOSE to single-threaded NumPy divide at 2^22 (`deadlock-audit-su0i6`, new parallel row)
+
+`SlateHeron`. `fnp.divide` is the campaign's worst vs-incumbent ratio and it had never been
+measured on this host. Both regimes, one invocation, existing ELF, no build (disk at 43G).
+
+**Campaign result class:** incumbent-loss
+
+```
+DIVIDE_VS_NUMPY n=1048576 worker=thinkstation1 numpy_version=2.4.3
+  harness=common::run_dual_null_median_ci_contract rounds=41 min_of=3
+  incumbent_median_ns=498471.0 candidate_median_ns=591864.0
+  ratio_median=0.845461 ratio_ci95=[0.836298,0.854921] faster_than_numpy=false
+  verdict=DECIDABLE_REGRESSION checksum=eb91d471f37fc5e0
+
+DIVIDE_VS_NUMPY_PARALLEL n=4194304 regime=rayon_arm parallel_min=2097152 rayon_threads=64
+  incumbent_median_ns=6704812.0 candidate_median_ns=7286858.0
+  ratio_median=0.920786 ratio_ci95=[0.891494,0.951850] faster_than_numpy=false
+  verdict=DECIDABLE_REGRESSION checksum=14b3ee049560afbf
+```
+
+Stated as the loss it is: **1.1828x SLOWER at 2^20** (range 1.1697-1.1957x) and **1.0860x SLOWER
+at 2^22** (range 1.0506-1.1217x).
+
+bench_elf_sha256=ef5467cb2a43c00b191011ba4b6a4b56ad1f09ec9506a9df7d7df015083431cd
+HOST_BASELINE host=thinkstation1 AMD_Ryzen_Threadripper_PRO_5975WX_32-Cores 32c/64t governor=powersave, avx2/fma, avx512f=false.
+
+**THE SERIAL ROW REPLICATES THE BANKED LOSS ON A THIRD WORKER.** `deadlock-audit-su0i6` banked
+0.865383 on hetzner2/hz2 (AVX-512) and 0.817054 on vmi1149989 (AVX2). This host reads 0.845461 —
+inside that spread, on a third microarchitecture, and **the checksum `eb91d471f37fc5e0` is
+byte-identical to the one both earlier workers reported**. Three workers, three ISAs, same verdict:
+the loss is a property of the route, not of a host.
+
+**THE PARALLEL ROW IS NEW AND IS THE MORE USEFUL HALF.** NumPy's elementwise divide is
+single-threaded. We put **64 rayon threads** against it above our own `parallel_min` of 2^21 —
+and still lost by 1.0860x. A parallel arm that cannot beat one thread is not losing a threading
+race; it is memory-bound and paying extra traffic the incumbent does not. At 4.19M f64 the
+incumbent moves 32 MB in / 32 MB out in 6.70 ms (~9.4 GB/s of traffic); our arm needs 7.29 ms for
+work that is bounded by exactly the same two streams. The gap is traffic or scheduling overhead,
+not arithmetic, which is why no divide-KERNEL lever has ever moved this row.
+
+**A/A NULL DISCLOSURE — the parallel row's incumbent null is BIASED.** Serial row: both nulls clean
+(incumbent 1.001026 ci95=[0.998053,1.002901], candidate 1.001089 ci95=[0.994899,1.007541]), and the
+effect clears its required 2x delta of 0.015082 by an order of magnitude. Parallel row: the
+candidate null is clean (1.005643 ci95=[0.967446,1.017975], contains unity) but the **incumbent null
+is 1.006625 ci95=[1.001361,1.029159], which EXCLUDES unity** — a 0.66% bias. The gate passed it on
+half-width (effect deviation 0.0792 against required_2x_delta 0.065108), but that margin is 1.2x,
+not 10x. Read the parallel loss as directionally solid and its MAGNITUDE as soft; do not quote
+1.0860x to four figures.
+
+**PRE-FIX ELF, AND WHY IT DOES NOT MATTER HERE.** This ELF predates the four import-removal commits
+(e4cdd808, f8475a76, e42056a3, 5c7735da), so by the provenance row below it cannot describe HEAD in
+general. For THIS row the exposure is bounded and tiny: the whole per-call wrapper floor is 2394 ns,
+which is **0.40% of the 591864 ns serial call and 0.033% of the 7286858 ns parallel call**, and the
+four commits remove only part of that. No plausible wrapper saving moves a 1.18x kernel-side loss.
+This is the one measurement today whose conclusion survives its own provenance defect, and it
+survives it by arithmetic, not by assertion.
+
+RETRY PREDICATE: do not re-run either regime for replication — three workers agree and the checksum
+is identical across all of them. Reopen only on a lever that changes MEMORY TRAFFIC or scheduling on
+the divide route: the parallel row says the arithmetic is not the constraint. Before any such
+attempt, re-measure the parallel row from a committed SHA with a clean incumbent null, because its
+current magnitude rests on a null that excludes unity.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MEASURED, PROVENANCE INVALIDATION: today's three `thinkstation1` rows measured an UNCOMMITTED tree that TWO LATER COMMITS have already superseded - re-measure before any of them is quoted as a property of the library (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. This row exists to stop three of my own numbers from being quoted as facts about
@@ -216,6 +280,26 @@ warm-up in the shorter of the two pairs), then require a finalisation test that 
 drops an interpreter twice with the cache live. Do NOT re-derive the ceiling's SHARE of the floor
 by dividing into a figure from another worker — take the floor from the same ELF and host, as the
 correction above had to.
+
+**PARTIALLY DISCHARGED, same day, and the cache SHIPPED (`e4cdd808`).** The soundness half of this
+predicate is now evidenced rather than argued: `cargo test -p fnp-python --lib cached_numpy` exits 0
+with **3 passed, 0 failed** —
+`cached_numpy_handle_is_reusable_from_a_later_independent_attach`,
+`cached_numpy_handle_is_live_so_a_post_warmup_monkeypatch_is_still_honoured`, and
+`cached_numpy_handle_leaves_the_native_f64_route_byte_identical`. That covers reuse across a fresh
+GIL attach, the monkeypatch-liveness property that made the MODULE the right thing to hold rather
+than a bound callable, and route parity.
+**What those tests do NOT cover, precisely: none of them constructs and drops an interpreter twice**,
+which is what this predicate actually asked for. That gap is answered by construction instead of by
+test — in pyo3 0.28.3 the only route to `Py_Finalize` is the explicitly-`unsafe`
+`with_embedded_python_interpreter`, which this crate never calls, and `Python::initialize()` is a
+`Once`-guarded no-op that does not finalise. An argument from an API surface is stronger than a test
+here, because a test could only demonstrate the paths pyo3 permits; but it is an argument, and if
+pyo3 ever exposes finalisation this is the assumption that breaks.
+Also worth correcting in this bead's framing: holding a process-lifetime handle was called "a
+different risk class", and it is not new in this codebase — `NUMPY_LINALG_CHOLESKY` and
+`NUMPY_NDARRAY_TYPE` were already shipped `PyOnceLock` caches of exactly this shape. The precedent
+existed; the bead priced it as novel.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - MEASURED, THE REAL FINDING: 60.3% of our per-call floor is UNATTRIBUTED - every named stage together is 950 ns of a 2394 ns call, and the worst vs-incumbent ratio is 5.985x at n=256 (`deadlock-audit-ei9jz`, filed from `deadlock-audit-v8nx6`)
