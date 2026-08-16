@@ -22,6 +22,82 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - BOTH DEFERRED LEVERS CERTIFIED IN ONE INVOCATION: `add` 3.471x -> 2.176x, `multiply` 3.174x -> 2.152x, and the probe chain is 83% GONE (`deadlock-audit-v46rn`, `deadlock-audit-ei9jz`)
+
+`SlateHeron`. The two levers deferred under host volatility are now certified together in ONE
+invocation, in a stable window, exactly as the previous row's retry predicate required.
+
+**Campaign result class:** maintenance-self-speedup (both ratios improve; both remain LOSSES)
+
+**LOADAVG, observed with `uptime`/`/proc/loadavg` and STABLE:** `8.72/15.62/26.32` before the build,
+`12.18/15.08/24.65` after it, and `11.53/14.84/24.47` **identical before and after the measurement
+itself**. All three figures under ~30 simultaneously, 1- and 5-minute within 3 of each other, and the
+15-minute below both — a falling, converged window rather than the dip the previous turn declined to
+act on.
+
+bench_elf_sha256=43e21623498683c30bbd79809f6e26da249e3c1454e19db6db1c82f3a1482b39, LOCAL build under
+the exported cargo-shim bypass, executable path from `--message-format=json`, zero `[RCH]` lines, no
+dirty files under `crates/`. host=thinkstation1 5975WX 32c/64t governor=powersave, numpy 2.4.3.
+
+### `add` — the campaign's worst cell, across all four stages
+
+```
+TINY_N_FLOOR op=add  harness=common::run_dual_null_median_ci_contract (ABBAABBA, 41 rounds, min-of-3)
+  n=1    ratio=0.426546  numpy_ns=331  fnp_ns=776  excess_ns=445
+  n=4    ratio=0.425997  numpy_ns=331  fnp_ns=781  excess_ns=450
+  n=16   ratio=0.430218  numpy_ns=336  fnp_ns=782  excess_ns=446
+  n=64   ratio=0.432020  numpy_ns=341  fnp_ns=787  excess_ns=446
+  n=256  ratio=0.459492  numpy_ns=385  fnp_ns=832  excess_ns=447
+```
+
+All five `DECIDABLE_REGRESSION`; **all ten A/A nulls straddle unity.** Excess spans **445-450 ns, a
+1.1% band across a 256x range of n** — the tightest this cell has ever measured.
+
+| stage | excess_ns | ratio | slower by |
+|---|---|---|---|
+| original | 1091 | 0.288114 | 3.471x |
+| + f16 gate | 932 | 0.306031 | 3.268x |
+| + timedelta gate | 536 | 0.429467 | 2.328x |
+| **+ char sniff** | **447** | **0.459492** | **2.176x** |
+
+**644 ns removed, 59% of the original per-call floor, and the worst cell goes 3.471x -> 2.176x.**
+
+### `multiply` — the partition, showing WHERE it went
+
+```
+PERCALL_FLOOR_PARTITION n=256 op=multiply
+  fnp_multiply_ns=861  numpy_multiply_ns=400
+  probe_chain_ns=91  wrapper_residual_ns=370  probe_chain_share=0.106  fnp_over_numpy=2.152
+```
+
+| stage | fnp_ns | probe_chain | wrapper_residual | fnp_over_numpy |
+|---|---|---|---|---|
+| pre-gate | 1333 | 521 | 392 | 3.174 |
+| two-gate | 1212 | 451 | 341 | 2.886 |
+| **three-gate + char** | **861** | **91** | 370 | **2.152** |
+
+**THE PROBE CHAIN IS 83% GONE — 521 ns to 91 ns**, and its share of the call fell from 39.1% to
+**10.6%**. The complex gate is what did it for `multiply`: that op's chain was still 451 ns at the
+two-gate stage precisely because `try_zerocopy_complex_binary` is guarded `Multiply | Divide` and had
+not yet been gated.
+
+**WHAT IS NOW THE DOMINANT TERM.** `wrapper_residual_ns` = 370 ns has barely moved across all four
+stages (392 -> 341 -> 370) because no lever touched it. It is now **43% of our multiply call** and the
+largest remaining component — PyO3 entry, argument binding and the delegation call itself. The probe
+line, which four rows of this campaign treated as the per-call floor, is finished as a target.
+
+**BOTH REMAIN LOSSES.** 2.176x and 2.152x slower are large improvements on 3.471x and 3.174x and are
+NOT wins. The numbers to quote are 2.176x for `add` at n=256 and 2.152x for `multiply`, superseding
+every earlier figure for these cells.
+
+RETRY PREDICATE: do not pursue the probe chain further — 91 ns of 861 ns does not repay another gate,
+and `deadlock-audit-v46rn`'s ceiling is now over-drawn (731 ns priced, 644 ns realised on `add`). The
+next lever must attack `wrapper_residual_ns`, and `deadlock-audit-t4lri`'s nine-parameter signature
+sits inside it — but note `deadlock-audit-7ocfa` measured PyO3 binding at 0.0 ns with an undischarged
+retry predicate, so run 7ocfa's parameter-count scaling probe BEFORE assuming the signature is the
+cost.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MAXIMUM ARMS ON A QUIET HOST: parallel 2.258922x and the SERIAL ARM FLIPS from a decidable LOSS to a decidable WIN (1.226996x) - which softens my own hzl1w correction; plus an UNEXPLAINED incumbent anomaly (`deadlock-audit-48by6`, `deadlock-audit-hzl1w`)
 
 `RedLynx`. Discharges the retry predicate on the allocation-corrected maximum arms row, which
