@@ -937,6 +937,62 @@ NumPy call — the same defect is structural, not specific to `maximum`, and thi
 allocation has silently set an elementwise ratio in this ledger.
 AGENT_NAME=SlateHeron.
 
+## 2026-08-16 - MEASURED, CEILING, AND THE NEGATIVE CASE PASSED: sharing ONE dtype fetch across the probe chain is worth 731 ns - 35.8% of the n=256 per-call floor and 1.78x NumPy's ENTIRE call (`deadlock-audit-v46rn`)
+
+`SlateHeron`. Ceiling control, run on the first build after the freeze. Both arms are ours: it
+prices a prize before anyone edits `PyUFunc::__call__`, exactly as the lookup-hoisting ceiling did.
+
+**Campaign result class:** maintenance-self-speedup (ceiling — NOT a vs-incumbent row)
+
+```
+DTYPE_PROBE_FANOUT_CEILING n=256 numpy_version=2.4.3 worker=thinkstation1
+  harness=replica_min_of_2001 trials=2001 probe_fanout=6
+  fanout_from_static_read_of_pyufunc_call=true
+  repeated_1_ns=160.0  repeated_2_ns=320.0  repeated_n_ns=931.0  hoisted_n_ns=200.0
+  per_fetch_pair_ns=160.0  saved_ns=731.0  scaling_ratio=5.819
+```
+
+bench_elf_sha256=4e95267adbfb12897b831b42e832a81666b3636f36a5baf0a42a50384d3db904,
+built from COMMITTED source at HEAD=7374a9bd with `crates/fnp-python` clean.
+HOST_BASELINE host=thinkstation1 Threadripper PRO 5975WX 32c/64t governor=powersave, numpy 2.4.3.
+
+**THE PRIZE: 731 ns.** That is **35.8% of the 2044 ns per-call floor** measured at n=256, and
+**1.78x NumPy's entire 410 ns call** at that size. It is 1.25x larger than the 586 ns lookup-hoisting
+ceiling, making it the biggest single named item on the wrapper floor.
+
+**THE NEGATIVE CASE PASSED, AND IT IS WHY THIS NUMBER IS TRUSTWORTHY.** The obvious way this
+measurement dies is CPython caching: NumPy caches the dtype descriptor and attribute lookup is a dict
+hit, so repeated `getattr("dtype")` could be nearly free — in which case a small saving would be an
+artefact of the interpreter, not a fact about our route, and a naive bench would report it as a
+finding. The group therefore measures the repeated arm at fanout 1, 2 and 6 and asserts the cost
+SCALES. It does, almost perfectly linearly: 160 → 320 → 931 ns, a **scaling ratio of 5.819 against a
+theoretical 6.000, i.e. 97% linear**. The fetches are real, independent, and uncached. Had this come
+back flat the group would have panicked and declared itself void rather than banking the number.
+
+**A/A NULL — deliberately absent, and this is a design choice rather than an omission.** Both arms
+here are the same operation at different fanouts, so the informative quantity is scaling across k,
+not a ratio against a null; the scaling assertion IS the control. A null on this group would be
+`repeated(k)` against itself, which tests the harness rather than the lever. Groups that DO use the
+dual-null contract now emit `null_straddles_unity` and `null_bias` (`a9f0651f`), and the divide
+isolation row above exercises them.
+
+**WHAT IT LICENSES.** `PyUFunc::__call__` has eleven dtype-fetching predicate/probe call sites on the
+delegating path and nothing shares the fetch. Threading one fetch through them is now justified by a
+measured prize rather than by inspection. **`lib.rs` is a peer's active edit surface — coordinate
+before touching it.**
+
+**WHAT IT DOES NOT SAY.** 731 ns is a CEILING: the hoisted arm holds the dtype in a local, which no
+real refactor can beat and which a refactor must additionally pay for in plumbing (threading a
+`Bound` through eleven call sites is not free). It also does not say the floor falls by 731 ns —
+`excess_ns` at n=256 is 2044 ns and only some probes run for a given op+dtype, so the realisable share
+is bounded above by this and below by nothing yet measured.
+
+RETRY PREDICATE: do not re-run this ceiling — it is decided and its control passed. The next
+measurement is the REAL one: thread a single dtype through the probes and measure `fnp.multiply`
+against `numpy.multiply` at n=256 through the route under the dual-null contract, because only a
+route-level ratio can say how much of the 731 ns survives plumbing.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - ANSWERED, AND THE ANSWER IS BOTH: the f64 divide deficit splits ~50/50 between the normality accumulate (96.4 us) and our divide KERNEL (94.0 us) - `deadlock-audit-vqxoa`'s "close to free" is refuted against the incumbent (`deadlock-audit-0ppym`)
 
 `SlateHeron`. First measurement after the build freeze lifted. `deadlock-audit-0ppym` asked whether
