@@ -1261,12 +1261,20 @@ fn main() {
             bench_divide_vs_numpy_incumbent_parallel,
         ),
         (
+            "bench_percall_floor_stage_attribution",
+            bench_percall_floor_stage_attribution,
+        ),
+        (
             "bench_binary_route_overhead_vs_numpy",
             bench_binary_route_overhead_vs_numpy,
         ),
         (
             "bench_route_floor_size_sweep_vs_numpy",
             bench_route_floor_size_sweep_vs_numpy,
+        ),
+        (
+            "bench_percall_floor_across_ops_vs_numpy",
+            bench_percall_floor_across_ops_vs_numpy,
         ),
     ]);
 }
@@ -2348,6 +2356,120 @@ fn bench_binary_route_overhead_vs_numpy(_c: &mut Criterion) {
 // toward 1.0 as n grows; a proportional cost grows excess_ns with n while the
 // ratio stays flat. Reading the ratio alone cannot tell those apart, which is why
 // the single-size 1pt96 row could not answer it.
+/// Attribute the ~6.6-7 us per-call floor to the STAGES that produce it
+/// (`deadlock-audit-cydda`, following `deadlock-audit-isnd2`).
+///
+/// `isnd2` measured the floor and `cydda` eliminated the first suspect: the output
+/// allocation and its dtype string are worth ~110 ns, i.e. 1.7% of the floor. The
+/// entry path is now traced rather than assumed - `fnp.multiply` resolves to a
+/// `PyUFunc` OBJECT (`m.add("multiply", PyUFunc { .. })`), not to the same-named
+/// `#[pyfunction]`, which is unregistered dead code (`deadlock-audit-uxkqi`). So the
+/// stages below are the ones `PyUFunc::__call__` actually walks before any element
+/// is divided or multiplied.
+///
+/// METHOD AND ITS LIMIT, stated because it bounds what this proves: each stage is a
+/// REPLICA timed standalone in this process, not an instrumentation probe inside the
+/// live route. A standalone `getattr` can be cheaper than the same call inside the
+/// route (branch and cache state differ), so treat the per-stage numbers as a LOWER
+/// BOUND on each stage and the sum as a lower bound on the accounted fraction. What
+/// it can prove is that a stage is EXPENSIVE - a lower bound of several microseconds
+/// is still several microseconds - and that is what aims the next lever.
+fn bench_percall_floor_stage_attribution(_c: &mut Criterion) {
+    const N: usize = 256;
+    const TRIALS: usize = 2001;
+
+    // min-of-TRIALS per stage: these are sub-microsecond operations where the
+    // minimum is the least contaminated estimator on a shared host, and the whole
+    // point is to compare stages against each other inside ONE process.
+    fn min_ns(trials: usize, mut op: impl FnMut()) -> f64 {
+        let mut best = u128::MAX;
+        for _ in 0..trials {
+            let started = Instant::now();
+            op();
+            best = best.min(started.elapsed().as_nanos());
+        }
+        best as f64
+    }
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        let ours = module.getattr("multiply").expect("fnp.multiply");
+        let theirs = numpy.getattr("multiply").expect("numpy.multiply");
+        assert!(
+            !ours.is(&theirs),
+            "fnp.multiply IS numpy's object — there is no candidate arm"
+        );
+
+        // Stage 1: the route re-imports numpy on EVERY call.
+        let import_ns = min_ns(TRIALS, || {
+            black_box(py.import("numpy").expect("numpy import"));
+        });
+        // Stage 2: the f64 dtype guard on both operands.
+        let dtype_ns = min_ns(TRIALS, || {
+            black_box(a.getattr("dtype").expect("a dtype"));
+            black_box(b.getattr("dtype").expect("b dtype"));
+        });
+        // Stage 3: the preamble's ndarray lookup.
+        let ndarray_ns = min_ns(TRIALS, || {
+            black_box(numpy.getattr("ndarray").expect("ndarray"));
+        });
+        // Stage 4: the output allocation, already known cheap - kept so the
+        // accounted sum is complete rather than selectively reported.
+        let empty_ns = min_ns(TRIALS, || {
+            black_box(numpy.call_method1("empty", (N,)).expect("numpy.empty"));
+        });
+        // Stage 5 and the reference: whole calls, same operands.
+        let ours_ns = min_ns(TRIALS, || {
+            black_box(ours.call1(&args).expect("fnp.multiply call"));
+        });
+        let numpy_ns = min_ns(TRIALS, || {
+            black_box(theirs.call1(&args).expect("numpy.multiply call"));
+        });
+
+        let accounted = import_ns + dtype_ns + ndarray_ns + empty_ns;
+        println!(
+            "PERCALL_FLOOR_STAGES n={N} numpy_version={numpy_version} worker={} \
+             harness=stage_replica_min_of_{TRIALS} trials={TRIALS} \
+             stages_are_standalone_replicas=true stage_numbers_are_lower_bounds=true \
+             import_numpy_ns={import_ns:.1} dtype_guard_both_operands_ns={dtype_ns:.1} \
+             getattr_ndarray_ns={ndarray_ns:.1} numpy_empty_ns={empty_ns:.1} \
+             accounted_ns={accounted:.1} fnp_multiply_ns={ours_ns:.1} \
+             numpy_multiply_ns={numpy_ns:.1} accounted_fraction={:.3} \
+             fnp_over_numpy={:.3}",
+            measurement_worker(),
+            accounted / ours_ns,
+            ours_ns / numpy_ns,
+        );
+    });
+}
+
 fn bench_route_floor_size_sweep_vs_numpy(_c: &mut Criterion) {
     Python::initialize();
     Python::attach(|py| {
@@ -2395,6 +2517,68 @@ fn bench_route_floor_size_sweep_vs_numpy(_c: &mut Criterion) {
                  excess_ns_per_element={:.6} at_parity={}",
                 excess_ns / n as f64,
                 hi >= 1.0,
+            );
+        }
+    });
+}
+
+// Is the ~6.6 us per-call floor a property of PyUFunc::__call__ itself, or of
+// whatever each op's body does? Reading the dispatch says f64 `add`, `subtract`
+// and `multiply` all map to `None` in the f64 binop match and DELEGATE to NumPy,
+// while `divide` is in that set and takes the native zerocopy route
+// (deadlock-audit-cydda). So at a size where there is almost no data to touch,
+// a floor that is uniform across all four is a property of the wrapper, and one
+// that tracks which route the op takes is a property of the bodies.
+//
+// n=2^8 deliberately: 2 KiB operands are L1-resident, so the excess is nearly the
+// per-call cost itself rather than an extrapolation. Uses only ops already on the
+// public surface, so nothing is added to the module just to measure it.
+fn bench_percall_floor_across_ops_vs_numpy(_c: &mut Criterion) {
+    let n = 1usize << 8;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        // divide is the one of these four that takes the native f64 route.
+        for (name, routes_natively) in [
+            ("add", false),
+            ("subtract", false),
+            ("multiply", false),
+            ("divide", true),
+        ] {
+            let (ratio, lo, hi, numpy_ns, fnp_ns) =
+                measure_binary_ufunc_vs_numpy(py, &module, &numpy, name, &args, n);
+            println!(
+                "PERCALL_FLOOR op={name} n={n} routes_natively={routes_natively} \
+                 numpy_version={numpy_version} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
+                 numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={:.1}",
+                fnp_ns - numpy_ns,
             );
         }
     });
