@@ -122,6 +122,27 @@ full test binary was run on WORKER vmi1152480 -
 which also re-validates the historical budgets and cross-row invariants the staged
 audit does not cover.
 
+> **THIRD WORKER ADDED 2026-08-16, and it REFUTES my own reading of the loss.**
+> A fourth run on WORKER `vmi1149989` (10 logical threads, same as vmi1227854):
+> `power` 3.797616 [3.677549,3.981001], `floor_divide` 3.072801 [2.903769,3.265923],
+> `maximum` **1.167298 [1.110159,1.215903] — a DECIDABLE WIN**, `minimum` 1.088114
+> [0.991324,1.163212] undecided.
+>
+> I had read the maximum/minimum reversal as a thread-count effect (win on the
+> 8-thread worker, loss on the 10-thread one). That is WRONG: vmi1149989 has the same
+> 10 logical threads as vmi1227854 and `maximum` wins there. What actually separates
+> them is host CONTENTION — fnp's maximum arm read 4.05 ms here and 13.43 ms on the
+> loaded vmi1227854 (3.3x), while NumPy's moved only 4.74 -> 5.71 ms (1.2x).
+>
+> Revised reading: the parallel arm buys a modest 12-17% on a QUIET host and
+> collapses on a contended one. That also weakens the strong form of the
+> compute-vs-bandwidth rule in `deadlock-audit-hzl1w` — if `maximum` were purely
+> bandwidth-bound with no headroom, it would sit at ~1.0 everywhere rather than
+> winning 1.117 and 1.167. Updated worst bounds over 4 runs / 3 workers:
+> `power` **1.982732x** and `floor_divide` **2.903769x**, both still winning 4/4;
+> `maximum` and `minimum` remain NOT CLAIMABLE in either direction, worst 0.392482
+> and 0.429274.
+
 **Retry predicate.** (1) Re-run `FNP_BENCH_GROUPS=bench_native_binary_family_vs_numpy`
 capturing NumPy's `artifact_sha256` and a shared `invocation_id`, then re-bank
 `floor_divide` and `power` as `incumbent-win` with the worst bounds above. (2) For
