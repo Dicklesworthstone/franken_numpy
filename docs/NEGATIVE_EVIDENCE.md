@@ -4,6 +4,52 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-15 - MEASURED, PARTIAL: the fnp binary-ufunc ROUTE loses to NumPy on both hosts, but the divide-specific increment does NOT replicate (72.5% vs 8.4%) (`deadlock-audit-1pt96`)
+
+`TealOak`. `deadlock-audit-su0i6` established that `fnp.divide` is behind `numpy.divide`.
+This asks which part of our route costs it, using `multiply` as the control: same
+`zerocopy_f64_binary_flat` route, same dtype/contiguity sniffing, same `numpy.empty` output
+allocation, same PyO3 dispatch, and NO hazard scan. Both measured against NumPy in ONE
+invocation so the comparison is licensed.
+
+**Campaign result class:** maintenance-self-speedup
+
+harness=common::run_dual_null_median_ci_contract (incumbent A/A + candidate A/A, ABBAABBA, 41 rounds, min-of-3)
+numpy_version=2.4.3, n=1048576 float64, profile `bench` (triage grade). All four arms
+`DECIDABLE_REGRESSION`, every null at unity. Ratio is numpy/fnp, so BELOW 1.0 means we are slower.
+
+  worker=vmi1227854  bench_elf_sha256=03fc30ebe05a6e9499c8847576e52ec15044144878686e427c1790b76bec59c0
+    multiply 0.931251 ci95=[0.921118,0.949075]  numpy 510018 ns  fnp 557209 ns  excess  47191 ns
+    divide   0.736981 ci95=[0.710015,0.823791]  numpy 675917 ns  fnp 847393 ns  excess 171476 ns
+    divide_specific_share_of_divide_excess=0.725  intervals_disjoint=true
+
+  worker=vmi1153651  bench_elf_sha256=2059a12e6f9c07e6323515f3ab585bd71bc10aa60fe84656de6b6ebed760b758
+    multiply 0.950794 ci95=[0.939180,0.962187]  numpy 1695230 ns  fnp 1783221 ns  excess 87991 ns
+    divide   0.937033 ci95=[0.923034,0.944012]  numpy 1729134 ns  fnp 1825164 ns  excess 96030 ns
+    divide_specific_share_of_divide_excess=0.084  intervals_disjoint=false
+
+WHAT IS ESTABLISHED: the ROUTE loses. Both ufuncs are behind NumPy on both workers, all four
+verdicts decided, all four nulls at unity. A 5-7% floor on `multiply` — which computes no hazard
+scan at all — is a cost every fnp binary ufunc pays before any kernel work is considered.
+
+WHAT IS NOT ESTABLISHED, and this is the point of the row: the divide-SPECIFIC increment. One host
+attributes 72.5% of divide's excess to something divide does and multiply does not; the other
+attributes 8.4% and cannot even separate the intervals. That is not a measurement with error bars,
+it is two measurements that disagree about the mechanism. **Do not attack the FE-hazard scan on the
+strength of the vmi1227854 run**, and do not quote 72.5%.
+
+Note vmi1153651's absolute times are ~3.3x vmi1227854's for the same work (numpy multiply 1695230
+vs 510018 ns), so that host was heavily loaded. That is a reason to distrust the pair, not a licence
+to pick the quiet one: load is exactly the axis this repo has measured as NOT predicting ratio error
+(frankenfs, r=-0.35), so "the loaded host is wrong" is an assumption, not a finding.
+
+RETRY PREDICATE: repeat with BOTH arms on one quiet worker, twice on the SAME worker, and require
+the divide-specific share to reproduce within its own interval before believing it. rch placement
+cannot be pinned here, so this needs the drain-one-worker + ssh route. Until then the actionable
+target is the ROUTE floor, not the scan — and the scan lever named by `deadlock-audit-ae85t`
+(widening the fast accept) stays unopened, because nothing here shows it would pay.
+AGENT_NAME=TealOak.
+
 ## 2026-08-15 - UNDECIDED (measured, direction is a LOSS): `fnp.divide` reads 0.905098x vs live `numpy.divide` at 1M f64, and the whole FE-hazard family turns out to have been optimising a route we have never beaten (`deadlock-audit-su0i6`)
 
 `TealOak`. Every previous divide row in this ledger — `deadlock-audit-2nmd1`,
