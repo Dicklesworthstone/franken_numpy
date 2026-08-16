@@ -4,6 +4,108 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - RE-MEASURED FROM COMMITTED PROVENANCE, CONTENDED HOST: the remainder WIN survives (DECIDABLE_WIN, worst bound 2.268x) and the hoisting RATIOS replicate - but absolute ns inflate ~1.6x under load 98, so no point estimate may be compared to the pre-fix ones (`deadlock-audit-322j4`, `deadlock-audit-v8nx6`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. No build - /data at 43G. This re-runs the last TWO of `SlateHeron`'s three invalidated
+groups on the committed-provenance ELF, completing that row's retry predicate. Both ran while this
+host was heavily oversubscribed by other projects, and that fact governs how each may be read.
+
+**Campaign result class:** incumbent-win (remainder) + maintenance-diagnostic (hoisting ceiling)
+
+**HOST CONTENTION, disclosed first because it governs everything below.**
+
+```
+load_average 1min=82.96 -> 98.12 across the two runs (5min 43.33->49.56, 15min 31.89->34.19)
+logical_threads=64, so the box was 1.30x -> 1.53x OVERSUBSCRIBED and load was RISING
+foreign top consumers: python3 2075%, python3 757%, python 367%, gauntlet_lane_s 293%,
+  fp-bench 237%, python 215%, smartedgar 100%  =~ 40.4 cores =~ 63% of the machine
+maximum_observed_busy_fraction ~= 0.63 from foreign processes alone
+LIMITATION: measured AFTER the runs only, not before AND after as the protocol requires.
+```
+
+**ROW 1 - `bench_remainder_vs_numpy_incumbent`, n=2^21, committed ELF.**
+
+```
+REMAINDER_VS_NUMPY n=2097152 log2n=21 above_parallel_threshold=true numpy_version=2.4.3
+  harness=common::run_dual_null_median_ci_contract
+  ratio=4.107151 ratio_ci95=[2.268180,5.672140] numpy_ns=18979383.0 fnp_ns=4432643.0
+  faster_than_numpy=true worst_bound=2.268180  verdict=DECIDABLE_WIN
+  incumbent_null_ci95=[0.995145,1.007851] (cv 2.05%)
+  candidate_null_ci95=[0.960944,1.060264] (cv 16.71%)
+REMAINDER_INCUMBENT_ARM name=NumPy version=2.4.3
+  artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48
+bench_elf_sha256=6766850940f767ebfb2d82734e05d3ace4cd02f1e210e0aae5e10439ca7bd8fd
+```
+
+**THE WIN IS RE-ESTABLISHED ON RECOVERABLE SOURCE.** `deadlock-audit-322j4`'s run 5 (8.037497x)
+came from ELF `ef5467cb2a43c00b`, whose tree was never committed. This run is from
+`6766850940f767eb`, whose compiled bench source matches `git show fd58d09c:...` byte for byte.
+`fnp.remainder` still beats `numpy.remainder` at 2^21, decidably, with a **worst bound of 2.268x**.
+
+**DO NOT READ 8.037x -> 4.107x AS A REGRESSION.** Three reasons, in order of weight:
+
+1. **The candidate arm is PARALLEL and the incumbent is SERIAL.** NumPy's remainder is
+   single-threaded; ours is a 64-thread rayon kernel. On a box carrying ~40 cores of foreign load
+   the parallel arm loses most of its cores and the serial arm barely notices, so the contention is
+   ASYMMETRIC and biases the ratio AGAINST us. NumPy's own arm shows the box was slower for
+   everyone but only mildly: 18.98 ms here against 17.39 ms in run 5, +9%. Ours moved 4.43 ms
+   against 2.16 ms, +105%.
+2. **The candidate A/A null says so in band.** Its CV is 16.71% and its half-width 0.060264 against
+   the incumbent null's 0.007851 - an eightfold asymmetry between two nulls taken in the SAME
+   invocation. That is what a thread-starved rayon kernel looks like, and the effect CI is
+   correspondingly wide ([2.268180,5.672140], CV 49.5%).
+3. **No committed change plausibly explains 2.2 ms.** This session's commits removed per-call
+   `py.import("numpy")` calls worth a few hundred NANOseconds from a 4.4 MILLIsecond call.
+
+The defensible statement is therefore the WORST BOUND, 2.268x, plus the retry predicate below.
+
+**ROW 2 - `bench_python_lookup_hoisting_ceiling`, n=4096, same ELF, same conditions.**
+
+```
+PYTHON_LOOKUP_HOISTING n=4096 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_median_ci_contract rounds=41
+  empty_repeated_ns=466.0  empty_hoisted_ns=220.0  empty_saves_ns=246.0
+    empty_ratio=2.113636 ci95=[2.095455,2.118182] null=1.009980  DECIDABLE_WIN
+  import_repeated_ns=831.0 import_hoisted_ns=160.0 import_saves_ns=671.0
+    import_ratio=5.193750 ci95=[5.193750,5.200000] null=1.001233  DECIDABLE_WIN
+  combined_ceiling_ns=917.0
+```
+
+**THE RATIOS REPLICATE; THE ABSOLUTE NANOSECONDS DO NOT.** Against the pre-fix run of this group:
+
+```
+             ratio now   ratio pre-fix     repeated-arm ns now   pre-fix
+  import     5.193750    5.257426          831                   526
+  empty      2.113636    2.221374          466                   291
+  combined ceiling ns    917                                     586
+```
+
+The two ratios land within 1.2% and 4.9% of their pre-fix values while every absolute figure
+inflates ~1.6x. That is an in-session demonstration of why this campaign banks RATIOS and treats
+absolute ns as host-and-profile-bound: contention that moved the nanoseconds by 60% moved the
+ratios by under 5%, because both arms sat in one binary in one invocation.
+
+**A NULL DEFECT FROM THE PRE-FIX ROW IS RESOLVED.** `SlateHeron` disclosed the `empty` A/A null at
+1.030928 ci95=[1.030405,1.034364], which EXCLUDED unity - a 3.1% bias that forced the empty saving
+to be read as a range. Here it is 1.009980 ci95=[1.000000,1.010081], touching unity at its lower
+bound, so the empty saving may now be read at face value.
+
+**BUT THE COMBINED CEILING IS A HISTORICAL NUMBER, NOT A ROUTE COST.** Its `import_repeated` arm
+models a `py.import("numpy")` the binary ufunc route no longer performs - `e4cdd808`, `f8475a76`
+and `5c7735da` replaced every one with the cached handle. So 917 ns is the ceiling for a lever
+ALREADY TAKEN and must not be added to any current estimate of the wrapper floor. What it does say,
+more strongly than before, is that the import was the expensive half: 5.19x against 2.11x,
+confirming the split that motivated caching the MODULE rather than the bound callable.
+
+RETRY PREDICATE: (1) Re-run `bench_remainder_vs_numpy_incumbent` on a QUIET host - one whose load
+sits well under its thread count - before anyone quotes a point estimate for this cell; until then
+the number is 2.268x, not 4.107x and not 8.037x. (2) The rule this row demonstrates, worth applying
+fleet-wide: when the candidate arm is PARALLEL and the incumbent SERIAL, host load is not symmetric
+noise, it is a DIRECTIONAL BIAS, and the ratio of the two A/A null half-widths is the cheapest
+in-band detector for it - compare the nulls to each other before trusting any point estimate.
+(3) Do not re-run the hoisting ceiling at all; it measures a lever already shipped.
+AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - MEASURED, POST-FIX AT n=2^20: `multiply` reaches PARITY (UNDECIDED) while `divide` stays a DECIDABLE_REGRESSION at 1.0913x - and 78.6% of divide's excess is divide-SPECIFIC, not the shared route floor (`deadlock-audit-0ppym`, `deadlock-audit-ei9jz`)
 
 `RedLynx`. No build - /data at 43G, one gig above the hard stop - so this re-runs the SAME
