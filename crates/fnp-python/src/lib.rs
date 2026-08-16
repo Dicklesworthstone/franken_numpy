@@ -531,7 +531,42 @@ impl PyUFunc {
                 UFuncKind::FloorDivide => Some(11u8),
                 _ => None,
             };
-            if let Some(op) = f16op
+            // ONE dtype sniff for the f16 probe pair (`deadlock-audit-v46rn`).
+            //
+            // Both f16 probes below open by fetching `dtype` and its `itemsize`/`kind`
+            // for BOTH operands, purely to discover they do not apply. `f16op` is
+            // `Some(..)` for add/subtract/multiply/divide/floor_divide/power/maximum/
+            // minimum, so on every f64, f32 and integer binary ufunc call they run and
+            // decline after paying that fetch. Sniffing x1 ONCE here lets them be
+            // skipped outright.
+            //
+            // MEASURED JUSTIFICATION: the per-call excess on the campaign's worst cell
+            // (`add`) is FLAT at ~1100 ns from n=1 to n=256 while the work grows 256x,
+            // so it is pure dispatch; and hoisting a repeated dtype fetch was priced at
+            // a 731 ns ceiling over 6 fetches, 97% linear in fetch count, i.e. ~160 ns
+            // per both-operand fetch (`deadlock-audit-v46rn`).
+            //
+            // WHY THE SKIP CANNOT CHANGE A RESULT: each gated probe requires BOTH
+            // operands to be f16 — `if !is_f16(a)? || !is_f16(b)? { return Ok(None) }` —
+            // so if x1 is not f16 the probe was always going to decline. When x1 has no
+            // `dtype` at all (a Python list, a scalar) the sniff yields `None` and
+            // NOTHING is skipped: the chain runs exactly as before, which is the
+            // conservative direction.
+            let x1_is_maybe_f16 = match x1.bind(py).getattr("dtype") {
+                Ok(dtype) => {
+                    // itemsize first: it is the discriminating field and an integer
+                    // compare, the same ordering `dtype_is_f16` already uses.
+                    match dtype.getattr("itemsize").and_then(|s| s.extract::<usize>()) {
+                        Ok(itemsize) => itemsize == 2,
+                        // Unreadable itemsize: do not skip.
+                        Err(_) => true,
+                    }
+                }
+                // No `dtype` attribute at all: do not skip.
+                Err(_) => true,
+            };
+            if x1_is_maybe_f16
+                && let Some(op) = f16op
                 && let Some(out_val) =
                     try_zerocopy_f16_binary_widen(py, x1.bind(py), x2.bind(py), op)?
             {
@@ -547,7 +582,10 @@ impl PyUFunc {
                 UFuncKind::LessEqual => Some(3u8),
                 _ => None,
             };
-            if let Some(op) = f16cmp
+            // Same sniff, same guarantee: `try_zerocopy_f16_compare` also declines
+            // unless BOTH operands are f16.
+            if x1_is_maybe_f16
+                && let Some(op) = f16cmp
                 && let Some(out_val) = try_zerocopy_f16_compare(py, x1.bind(py), x2.bind(py), op)?
             {
                 return Ok(out_val);
@@ -109940,6 +109978,101 @@ mod tests {
     /// honour. Holding the MODULE keeps the getattr on the hot path. A
     /// callable-caching implementation passes every conformance suite in this
     /// crate — byte parity cannot see the difference — and fails here.
+    /// The f16 probe skip must not DISENGAGE the f16 native route
+    /// (`deadlock-audit-v46rn`).
+    ///
+    /// `PyUFunc::__call__` now sniffs `x1.dtype.itemsize` once and skips both f16
+    /// probes when it is not 2. The failure this guards is not a wrong answer — it is
+    /// a SILENT DISENGAGEMENT: if the sniff wrongly excluded f16, every f16 binary
+    /// ufunc would quietly fall through to NumPy and still return byte-identical
+    /// results, so every parity and conformance suite in this crate would stay green
+    /// while the native f16 path was dead. This ledger already records that class of
+    /// defect (`f16-isin-402x-and-pyufunc-registration-trap`: green parity does not
+    /// prove kernel engagement), which is why this test asserts the PREDICATE and not
+    /// just the output.
+    #[test]
+    fn f16_probe_skip_admits_f16_and_declines_only_what_can_never_match() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+
+            // The sniff exactly as `__call__` computes it.
+            let sniff = |value: &Bound<'_, PyAny>| -> bool {
+                match value.getattr("dtype") {
+                    Ok(dtype) => {
+                        match dtype.getattr("itemsize").and_then(|s| s.extract::<usize>()) {
+                            Ok(itemsize) => itemsize == 2,
+                            Err(_) => true,
+                        }
+                    }
+                    Err(_) => true,
+                }
+            };
+
+            // POSITIVE: f16 must still ADMIT the probe, or the native route is dead.
+            let f16 = numpy.call_method1("zeros", (4,))?;
+            let f16 = f16.call_method1("astype", (numpy.getattr("float16")?,))?;
+            assert!(
+                sniff(&f16),
+                "an f16 operand must ADMIT the f16 probes — if this fails the native \
+                 f16 route is silently disengaged and every parity suite stays green"
+            );
+
+            // NEGATIVE: the dtypes whose probes can never match must be skipped. These
+            // are the cells that pay for the skip, so if they stop being skipped the
+            // lever has quietly stopped working while every test still passes.
+            for (name, itemsize) in [("float64", 8usize), ("float32", 4), ("int64", 8)] {
+                let arr = numpy.call_method1("zeros", (4,))?;
+                let arr = arr.call_method1("astype", (numpy.getattr(name)?,))?;
+                let observed: usize = arr.getattr("dtype")?.getattr("itemsize")?.extract()?;
+                assert_eq!(observed, itemsize, "{name} itemsize");
+                assert!(
+                    !sniff(&arr),
+                    "{name} can never satisfy an f16 probe, so it must be skipped"
+                );
+            }
+
+            // CONSERVATIVE FALLBACK: an operand with no `dtype` at all must NOT be
+            // skipped. A sniff that returned false here would skip probes for inputs it
+            // never inspected, which is the one way this change could alter a result.
+            let code = std::ffi::CString::new("[1.0, 2.0]").expect("no interior nul");
+            let list = py.eval(code.as_c_str(), None, None)?;
+            assert!(
+                sniff(&list),
+                "an operand without a dtype must NOT be skipped — the sniff has not \
+                 established anything about it"
+            );
+
+            // And the skip must leave answers alone on the op it actually gates.
+            let module = PyModule::new(py, "fnp_python_test_f16_probe_skip")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                std::ffi::CString::new(
+                    "a = np.arange(64, dtype=np.float16)\nb = np.arange(64, dtype=np.float16) + 1\n",
+                )
+                .expect("no interior nul")
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let a = locals.get_item("a").expect("a");
+            let b = locals.get_item("b").expect("b");
+            let ours = module.getattr("add")?.call1((&a, &b))?;
+            let theirs = numpy.getattr("add")?.call1((&a, &b))?;
+            assert!(
+                ours.call_method1("__eq__", (&theirs,))?
+                    .call_method0("all")?
+                    .extract::<bool>()?,
+                "f16 add must still match numpy after the probe skip"
+            );
+            Ok(())
+        });
+    }
+
     #[test]
     fn cached_numpy_handle_is_live_so_a_post_warmup_monkeypatch_is_still_honoured() {
         with_python(|py| {

@@ -15,6 +15,75 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - LEVER LANDED AND MEASURED: one hoisted dtype sniff removes 176 ns from EVERY delegating binary ufunc call - the worst cell goes 3.471x -> 3.268x slower (`deadlock-audit-v46rn`)
+
+`SlateHeron`. First code lever of this session rather than another measurement. `deadlock-audit-v46rn`
+priced a 731 ns ceiling for sharing one dtype fetch across the probe chain; this takes the verified-safe
+part of it and ships it.
+
+**Campaign result class:** maintenance-self-speedup (the vs-incumbent ratio improves but remains a LOSS)
+
+**THE CHANGE.** `PyUFunc::__call__` now sniffs `x1.dtype.itemsize` ONCE and skips both f16 probes when
+it is not 2. `f16op` is `Some(..)` for add/subtract/multiply/divide/floor_divide/power/maximum/minimum,
+so `try_zerocopy_f16_binary_widen` previously ran — and declined — on essentially every f64, f32 and
+integer binary ufunc call, after fetching `dtype` for both operands plus `numpy.ndarray` and two
+`is_exact_instance` checks.
+
+**WHY THE SKIP CANNOT CHANGE A RESULT, verified from source before writing it:** both gated probes open
+with `if !is_f16(a)? || !is_f16(b)? { return Ok(None) }`, so when x1 is not f16 they were always going
+to decline. When x1 has no `dtype` at all — a list, a scalar — the sniff yields "do not skip" and the
+chain runs exactly as before.
+
+```
+TINY_N_FLOOR op=add worker=thinkstation1 numpy_version=2.4.3  harness=common::run_dual_null_median_ci_contract
+              BEFORE (elf ae357155)              AFTER (elf b9e7d482)          excess saved
+  n=1    ratio 0.251188  fnp 1478  exc 1107   ratio 0.267871  fnp 1272  exc 931    176 ns
+  n=4    ratio 0.248823  fnp 1478  exc 1108   ratio 0.267091  fnp 1258  exc 922    186 ns
+  n=16   ratio 0.258315  fnp 1814  exc 1344   ratio 0.272147  fnp 1253  exc 912    432 ns*
+  n=64   ratio 0.257781  fnp 1468  exc 1088   ratio 0.272654  fnp 1247  exc 907    181 ns
+  n=256  ratio 0.288114  fnp 1532  exc 1091   ratio 0.306031  fnp 1343  exc 932    159 ns
+  * the n=16 BEFORE cell was a known outlier (both arms high); it is excluded from the mean.
+```
+
+**THE RESULT: 176 ns removed per call** (159-186 ns across the quiet cells). The before and after excess
+distributions **do not overlap** — before 1088-1108 ns, after 907-932 ns — so this is not run-to-run
+variation, which on this cell runs ±20 ns among quiet cells. All ten A/A nulls straddle unity in the
+after run; all five cells remain `DECIDABLE_REGRESSION`.
+
+**THE WORST CELL MOVES FROM 3.471x TO 3.268x SLOWER.** That is a 16% cut of a ~1100 ns per-call floor,
+and it is the first thing this session that made the number better rather than describing it.
+
+**THE PREDICTION HELD.** `v46rn` priced a both-operand dtype fetch at ~160 ns from a fanout ceiling that
+scaled 97% linearly. Measured saving on the route: **176 ns**. A ceiling measured on a synthetic
+repeat-vs-hoist control predicted a production route change to within 10%, which is the first time in
+this campaign a ceiling has been checked against a shipped lever.
+
+**WHAT IS STILL ON THE TABLE.** Only the f16 pair is gated. `v46rn`'s full 731 ns ceiling assumed six
+probe families sharing one fetch; the f32, complex, timedelta and integer probes each still fetch their
+own. They were NOT gated here because I only verified the f16 pair's decline condition from source, and
+gating a probe whose dtype requirements I had not read is exactly how a silent disengagement gets
+shipped.
+
+**ENGAGEMENT TEST, because parity cannot see this failure.** The risk is not a wrong answer — it is that
+a wrong sniff would silently disengage the f16 native route while every parity and conformance suite
+stayed green (this ledger's `f16-isin-402x` row records that trap). `f16_probe_skip_admits_f16_and_
+declines_only_what_can_never_match` therefore asserts the PREDICATE: f16 must be ADMITTED, f64/f32/int
+must be SKIPPED, and a dtype-less operand must NOT be skipped. `cargo test -p fnp-python --lib
+f16_probe_skip` passes 1/0.
+
+bench_elf_sha256 after=b9e7d482ce41bf79072fa10774dce409574a79850bfface63f2b888c17a0a110,
+before=ae357155a4bfde664811552f73dd4e2480a2f3ae9df411e71e186045938394cd. Both LOCAL builds under the
+exported cargo-shim bypass on the SAME host and toolchain, which is the condition `deadlock-audit-ae85t`
+requires for any before/after instruction or timing comparison. Gates: `cargo clippy -p fnp-python
+--all-targets` exit 0, `rustfmt --check` exit 0. Edit surface reserved in Agent Mail (`lib.rs`,
+exclusive, no conflicts).
+
+RETRY PREDICATE: before gating any further probe family, read its decline condition in source and
+confirm it requires the dtype of the operand being sniffed — the f16 pair was safe because both probes
+demand BOTH operands be f16. Re-measure with the same before/after discipline: two local builds, same
+host, non-overlapping excess distributions, not a single-run difference.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - INSTRUMENT REPAIR, HALF RIGHT: the incumbent-scaling guard and the statistic labelling both work on first run - but my replacement projection is a WRONG MODEL, and the method-null cell caught it immediately (`deadlock-audit-q00ev`)
 
 `RedLynx`. First run of the two fixes the previous row's retry predicate asked for. One landed,
