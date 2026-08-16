@@ -1359,6 +1359,10 @@ fn main() {
                 "bench_incumbent_interference_from_candidate",
                 bench_incumbent_interference_from_candidate,
             ),
+            (
+                "bench_incumbent_interference_remainder_route",
+                bench_incumbent_interference_remainder_route,
+            ),
         ],
     );
 }
@@ -5189,6 +5193,109 @@ fn maximum_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
 //
 // n=1<<22 sits above the 1<<21 parallel_min, the regime the losing measurements
 // came from — below it the shipped route runs serially anyway.
+/// The same interference test, but for the REMAINDER cell and using the SHIPPED ROUTE as
+/// the shadow (`deadlock-audit-48by6`).
+///
+/// The measured 6.26% interference factor was obtained with `maximum_parallel` shadowing
+/// `numpy.maximum`. I then applied it to discount the remainder row from 6.967606x to
+/// ~6.557x — which is precisely the cross-candidate application that row's own scope
+/// paragraph warned against. This gives remainder its own factor instead of borrowing
+/// one, and it shadows with `fnp.remainder` itself rather than a replica, so the number
+/// describes the cell as actually measured.
+///
+/// Arm A: `numpy.remainder(a, b, out=)` timed alone.
+/// Arm B: `fnp.remainder(a, b)` runs first, UNTIMED, then the same NumPy call is timed.
+fn bench_incumbent_interference_remainder_route(_c: &mut Criterion) {
+    const N: usize = 1 << 21;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_obj = locals.get_item("a").expect("a operand");
+        let b_obj = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a_obj, &b_obj]).expect("args");
+        let np_remainder = numpy.getattr("remainder").expect("numpy.remainder");
+        let fnp_remainder = module.getattr("remainder").expect("fnp.remainder");
+        assert!(
+            !fnp_remainder.is(&np_remainder),
+            "fnp.remainder IS numpy's object — there is no candidate to shadow with"
+        );
+        let np_out = numpy
+            .call_method1("empty_like", (&a_obj,))
+            .expect("preallocated numpy output");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &np_out).expect("bind out=");
+
+        let isolated = || {
+            let started = Instant::now();
+            let result = np_remainder
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.remainder isolated");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: numpy_divide_checksum(&result, N),
+            }
+        };
+        let shadowed = || {
+            // The shipped route, deliberately OUTSIDE the timer.
+            black_box(
+                fnp_remainder
+                    .call1(&args)
+                    .expect("fnp.remainder shadow call"),
+            );
+            let started = Instant::now();
+            let result = np_remainder
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.remainder shadowed");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: numpy_divide_checksum(&result, N),
+            }
+        };
+        let (effect, null) =
+            common::run_median_ci_contract("incumbent_interference_remainder", shadowed, isolated);
+
+        let interference_ns = effect.arm_a_median_ns - effect.arm_b_median_ns;
+        println!(
+            "INCUMBENT_INTERFERENCE_REMAINDER n={N} numpy_version={numpy_version} worker={} \
+             harness=common::run_median_ci_contract shadow=fnp_remainder_SHIPPED_ROUTE \
+             candidate_work_is_outside_the_timer=true \
+             shadowed_ns={:.1} isolated_ns={:.1} interference_ns={interference_ns:.1} \
+             ratio={:.6} ratio_ci95=[{:.6},{:.6}] null={:.6} \
+             discount_for_the_remainder_row_only=true",
+            measurement_worker(),
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            null.ratio_median,
+        );
+    });
+}
+
 /// Does OUR arm slow down the incumbent it is measured against? (`deadlock-audit-48by6`)
 ///
 /// On a quiet host the maximum-arms row showed NumPy's own arm getting SLOWER — 4232670

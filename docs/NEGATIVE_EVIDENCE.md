@@ -23,6 +23,79 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - THE INTERFERENCE DISCOUNT DOES NOT TRANSFER: `maximum` replicates at 1.067x but `remainder` shows NONE (0.999024, CI contains unity) - so I WITHDRAW the discount I applied to the remainder row one row ago (`deadlock-audit-48by6`, `deadlock-audit-322j4`)
+
+`RedLynx`. The previous row measured a 6.26% interference factor with `maximum_parallel` shadowing
+`numpy.maximum`, then used it to discount the remainder row from 6.967606x to ~6.557x — the exact
+cross-candidate application its own scope paragraph warned against. This measures remainder's own
+factor. There isn't one.
+
+**Campaign result class:** methodology (withdraws a correction I made; replicates the other half)
+
+```
+bench_elf_sha256=b9138bafd366dd37caaf50471361862607cbde945a30cfea487685219c459500
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 1min 11.34 before -> 15.08 after; 5min 18.38 -> 18.30 (converged window: at selection
+  time 1-min 24.71 against 5-min 24.40, 1.3% apart)
+harness=common::run_median_ci_contract, both groups in ONE invocation
+
+  MAXIMUM   n=2^22  shadow=maximum_parallel replica
+    isolated 4172393  shadowed 4354671  interference +182278 ns
+    ratio=1.067266 ci95=[1.033078,1.093997]  DECIDABLE   null [0.968423,1.019372]
+
+  REMAINDER n=2^21  shadow=fnp.remainder SHIPPED ROUTE
+    isolated 17903723  shadowed 17859006  interference -44717 ns
+    ratio=0.999024 ci95=[0.995418,1.001931]  UNDECIDED   null [0.998314,1.005844]
+```
+
+**THE MAXIMUM FACTOR REPLICATES.** 1.067266 here against 1.062643 in the previous invocation —
+0.4% apart, both decidable, on different ELFs and at different loads. That factor is real and the
+discount on the maximum rows stands.
+
+**THE REMAINDER CELL SHOWS NO INTERFERENCE AT ALL.** Its ratio is 0.999024 with a CI of
+[0.995418, 1.001931] — **tight, ±0.3%, and containing unity**. This is not a failure to resolve: the
+null half-width is 0.005844 and the interval excludes anything beyond ±0.5%. So **the ~6.3%
+discount I applied to the remainder row is withdrawn, and 6.967606x stands undiscounted.**
+
+**WHY I GOT IT WRONG, precisely.** I generalised on the wrong variable. My scope paragraph said the
+factor must not be applied to small-n cells because "nothing streams" — so I took the criterion to
+be *is the candidate bandwidth-heavy*. Both candidates here are bandwidth-heavy: a 64-thread
+parallel kernel over 16-32 MB. The criterion is instead **is the INCUMBENT bandwidth-BOUND**:
+
+```
+  numpy.maximum   at 2^22 = 4.17 ms for 32 MB   ~= memory-bound, one trivial op per element
+  numpy.remainder at 2^21 = 17.90 ms for 16 MB  ~= compute-bound, an fmod per element
+```
+
+NumPy's `maximum` is limited by how fast it can stream; a candidate that just saturated the memory
+subsystem therefore slows it. NumPy's `remainder` is limited by libm arithmetic and is nearly
+indifferent to cache and bandwidth state, so the same shadow costs it nothing. The discount belongs
+to the INCUMBENT's regime, not the candidate's.
+
+**THIS IS A TWO-POINT INFERENCE and is offered as the best explanation, not a law.** Two cells is
+enough to refute "any bandwidth-heavy candidate implies a discount" — one counterexample does that
+— and enough to make the compute-bound-incumbent story the leading account, but not enough to
+establish it. A third cell with a compute-bound incumbent and a bandwidth-heavy candidate would
+confirm it; a bandwidth-bound incumbent with a light candidate would test the other direction.
+
+**CORRECTED LEDGER POSITIONS after this row:**
+
+```
+  remainder 2^21      6.967606x   NO discount   (was wrongly shown as ~6.557x)
+  maximum parallel    2.258922x   discount to ~2.116x using 1.067266
+  maximum serial      1.226996x   discount to ~1.150x
+  n=256 per-call floor rows       untouched, as previously stated
+```
+
+RETRY PREDICATE: (1) Before discounting ANY row for interference, measure that row's own factor —
+this row exists because I did not. The group takes one invocation. (2) Classify the INCUMBENT as
+bandwidth- or compute-bound first; only bandwidth-bound incumbents are candidates for a discount.
+(3) A third cell would settle the mechanism; `divide` at 2^20 has a compute-bound incumbent and a
+parallel candidate and would be the cheapest test. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - PREDICATE DISCHARGED, `deadlock-audit-t4lri`'s SIGNATURE HALF CLOSES: parameter-count binding cost is 0.0 ns from 3 to 9, and a whole 9-parameter call is 40 ns against the 370 ns it would have to explain (`deadlock-audit-7ocfa`, `deadlock-audit-t4lri`)
 
 `SlateHeron`. `deadlock-audit-7ocfa` rejected the nine-parameter signature as a wrapper-floor suspect
