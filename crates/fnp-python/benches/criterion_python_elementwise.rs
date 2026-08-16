@@ -1256,6 +1256,10 @@ fn main() {
             "bench_divide_vs_numpy_incumbent",
             bench_divide_vs_numpy_incumbent,
         ),
+        (
+            "bench_binary_route_overhead_vs_numpy",
+            bench_binary_route_overhead_vs_numpy,
+        ),
     ]);
 }
 
@@ -2105,6 +2109,147 @@ fn bench_divide_vs_numpy_incumbent(_c: &mut Criterion) {
             candidate_null.ratio_median,
             effect.ratio_ci_low > 1.0,
             effect.checksum,
+        );
+    });
+}
+
+/// Times one fnp binary ufunc against its NumPy counterpart under the dual-null
+/// contract and returns (ratio_median, ci_low, ci_high, incumbent_ns,
+/// candidate_ns). Ratio is incumbent/candidate, so BELOW 1.0 means we are
+/// slower.
+fn measure_binary_ufunc_vs_numpy(
+    py: Python<'_>,
+    module: &pyo3::Bound<'_, PyModule>,
+    numpy: &pyo3::Bound<'_, PyModule>,
+    name: &str,
+    args: &pyo3::Bound<'_, PyTuple>,
+    n: usize,
+) -> (f64, f64, f64, f64, f64) {
+    let ours = module.getattr(name).expect("fnp ufunc");
+    let theirs = numpy.getattr(name).expect("numpy ufunc");
+    assert!(
+        !ours.is(&theirs),
+        "fnp.{name} IS numpy's object — there is no candidate arm"
+    );
+    let ours_probe = ours.call1(args).expect("fnp probe");
+    let theirs_probe = theirs.call1(args).expect("numpy probe");
+    assert_eq!(
+        numpy_divide_checksum(&ours_probe, n),
+        numpy_divide_checksum(&theirs_probe, n),
+        "fnp.{name} and numpy.{name} disagree on these operands"
+    );
+    let _ = py;
+
+    let incumbent = || {
+        let started = Instant::now();
+        let result = theirs.call1(args).expect("numpy ufunc call");
+        let elapsed = started.elapsed();
+        let checksum = numpy_divide_checksum(&result, n);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let candidate = || {
+        let started = Instant::now();
+        let result = ours.call1(args).expect("fnp ufunc call");
+        let elapsed = started.elapsed();
+        let checksum = numpy_divide_checksum(&result, n);
+        common::ContractObservation { elapsed, checksum }
+    };
+    let (effect, _incumbent_null, _candidate_null) = common::run_dual_null_median_ci_contract(
+        &format!("{name}_f64_1m_vs_numpy_route"),
+        incumbent,
+        candidate,
+    );
+    (
+        effect.ratio_median,
+        effect.ratio_ci_low,
+        effect.ratio_ci_high,
+        effect.arm_a_median_ns,
+        effect.arm_b_median_ns,
+    )
+}
+
+// Separates the two candidate causes of the divide loss measured by
+// deadlock-audit-su0i6. `multiply` takes the SAME zerocopy_f64_binary_flat
+// route, the same dtype/contiguity sniffing, the same numpy.empty output
+// allocation and the same PyO3 dispatch as `divide` — and computes NO hazard
+// scan. Measuring both in ONE invocation on ONE worker is what makes the
+// comparison mean anything: multiply near unity while divide loses puts the cost
+// in the scan, and both losing by a similar margin puts it in the route, which
+// no divide-kernel lever can reach (deadlock-audit-1pt96).
+fn bench_binary_route_overhead_vs_numpy(_c: &mut Criterion) {
+    let n = DIVIDE_SERIAL_N;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let (mul_ratio, mul_lo, mul_hi, mul_inc, mul_cand) =
+            measure_binary_ufunc_vs_numpy(py, &module, &numpy, "multiply", &args, n);
+        let (div_ratio, div_lo, div_hi, div_inc, div_cand) =
+            measure_binary_ufunc_vs_numpy(py, &module, &numpy, "divide", &args, n);
+
+        // The verdict is stated from the intervals, not the point estimates: if
+        // multiply's CI reaches unity while divide's does not, the scan is
+        // implicated; if neither reaches unity, the route is.
+        let multiply_is_at_parity = mul_hi >= 1.0;
+        let divide_is_at_parity = div_hi >= 1.0;
+        // "Both lose" is NOT the same finding as "both lose equally", and the
+        // first draft of this label conflated them. Separation of the two
+        // intervals is what says the divide carries a cost the shared route does
+        // not explain; without it, one number could be doing all the work.
+        let divide_loses_more = div_hi < mul_lo;
+        let verdict = match (
+            multiply_is_at_parity,
+            divide_is_at_parity,
+            divide_loses_more,
+        ) {
+            (true, false, _) => "scan_implicated_route_is_at_parity",
+            (false, false, true) => "route_floor_PLUS_larger_divide_specific_cost",
+            (false, false, false) => "route_overhead_only_both_arms_lose_alike",
+            (true, true, _) => "no_loss_reproduced_in_this_invocation",
+            (false, true, _) => "inconsistent_multiply_loses_while_divide_does_not",
+        };
+        // Attribute the excess in nanoseconds as well as in ratio: a ratio alone
+        // cannot say how much of the divide's loss the route already explains,
+        // because numpy's own divide is intrinsically dearer than its multiply.
+        let multiply_excess_ns = mul_cand - mul_inc;
+        let divide_excess_ns = div_cand - div_inc;
+        let divide_specific_excess_ns = divide_excess_ns - multiply_excess_ns;
+        println!(
+            "BINARY_ROUTE_OVERHEAD n={n} numpy_version={numpy_version} \
+             harness=common::run_dual_null_median_ci_contract \
+             multiply_ratio={mul_ratio:.6} multiply_ci95=[{mul_lo:.6},{mul_hi:.6}] \
+             multiply_numpy_ns={mul_inc:.1} multiply_fnp_ns={mul_cand:.1} \
+             divide_ratio={div_ratio:.6} divide_ci95=[{div_lo:.6},{div_hi:.6}] \
+             divide_numpy_ns={div_inc:.1} divide_fnp_ns={div_cand:.1} \
+             multiply_excess_ns={multiply_excess_ns:.1} divide_excess_ns={divide_excess_ns:.1} \
+             divide_specific_excess_ns={divide_specific_excess_ns:.1} \
+             divide_specific_share_of_divide_excess={:.3} \
+             intervals_disjoint={divide_loses_more} same_invocation=true verdict={verdict}",
+            divide_specific_excess_ns / divide_excess_ns,
         );
     });
 }
