@@ -4,6 +4,116 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - WIN (KEEP, maintenance-self-speedup) + A CORRECTION TO MY OWN ARITHMETIC: the no-op reshape costs 200 ns, not the ~1.1 us I inferred by subtracting across two workers (`deadlock-audit-6twge`)
+
+`TealOak`. `try_zerocopy_f64_binary` called `reshape((n,))` on an output that already
+had shape `(n,)`. For 1-D operands the flat buffer IS the target shape, so the call
+allocated a tuple, did an attribute lookup and made a Python call to hand back the
+array it was given. It now returns the flat array directly; only the 0-D branch,
+which reshapes to `()` so `get_item(())` can extract the scalar, still reshapes.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+HOST_BASELINE host=vmi1293453 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=8 logical_threads=8 online_cpus=0:1:2:3:4:5:6:7 allowed_logical_threads=8 allowed_cpus=0:1:2:3:4:5:6:7 governor=unavailable
+bench_elf_sha256=e6f298457705fe1b275f583b028ee0ba95c18c77ecd996ae62a7f33267e2221b
+MEDIAN_CI_GATE row=noop_reshape_cost_n256 verdict=DECIDABLE_WIN effect_ratio=1.940625 effect_ci95=[1.911628,1.953488] effect_ci_excludes_one=true null_ci95=[0.995068,1.007622] null_half_width=0.007622 required_2x_delta=0.015244 cv_is_provenance_only=true
+NOOP_RESHAPE_COST n=256 numpy_version=2.4.3 worker=vmi1293453 harness=common::run_median_ci_contract rounds=41 arms=numpy_empty_only_no_fnp_code with_reshape_ns=415.0 without_reshape_ns=215.0 ratio_median=1.940625 ratio_ci95=[1.911628,1.953488] null_ratio_median=1.007184 null_ci95=[0.995068,1.007622] reshape_cost_ns=200.0 skipping_is_faster=true
+```
+
+**THE CORRECTION, and it matters more than the win.** When I filed this lever I said
+the reshape cost ~1.1 us. I got that by subtracting `deadlock-audit-cydda`'s 220 ns
+`numpy.empty` from `deadlock-audit-tmmud`'s 1310 ns `empty` + `reshape`. Those two
+numbers come from DIFFERENT WORKERS (`vmi1149989` and `vmi1152480`) measured with
+DIFFERENT HARNESSES (min-of-2001 single calls versus batched min-of-401 minus an
+empty loop). That is exactly the cross-row arithmetic the fleet's worker-provenance
+rule exists to forbid - a passing A/A null in each row licenses neither row against
+the other - and it **overstated this lever by 5.5x**. Measured properly, in one
+invocation with both arms in one binary, it is 200 ns. The bead description and the
+source comment both carried the wrong figure and both are corrected in place.
+
+**What survives the correction:** the lever is real and decidable - ratio 1.940625
+with the CI excluding 1.0 and the A/A null at 1.007184 - and 200 ns is still a
+meaningful slice of a per-call floor on a route whose whole purpose is to beat a
+~700 ns NumPy call. It is simply four-fifths smaller than advertised.
+
+**PARITY:** `cargo test -p fnp-python --test conformance_ufunc_edge` on WORKER
+vmi1152480, 71 passed 0 failed. Returning the flat array instead of a reshaped view
+of identical shape cannot change dtype, shape or values; the 0-D scalar-extraction
+path is untouched and still reshapes.
+
+**Profile:** `bench-fast` (triage grade). Both arms share one binary and one profile
+so the RATIO is fair; absolute ns are not ship-grade.
+
+**Retry predicate / SCOPE STILL OPEN.** This fixed ONE call site. The identical
+reshape-to-current-shape block appears at **28 sites** in
+`crates/fnp-python/src/lib.rs` (exact-text match). Extracting a shared helper that
+performs the `len() == 1` skip plus the 0-D handling, then routing all 28 through it,
+is the class fix; it is filed separately rather than smuggled in here. Re-measure per
+site only if a site's shape can be non-1-D in the common case - otherwise the 200 ns
+figure above transfers, and the risk is entirely in the 0-D branch each site must
+keep.
+
+## 2026-08-16 - WIN (KEEP, INCUMBENT-WIN): `fnp.remainder` beats `numpy.remainder` at 2^21 - worst bound 1.121225x, best 2.950744x, four runs on two workers all DECIDABLE_WIN (`deadlock-audit-322j4`)
+
+`TealOak`. This campaign's numpy ledger held ONE vs-incumbent row and it was a loss. This is the
+op the f64 fast-path set was built for: NumPy runs floored-mod single-threaded and it is
+compute-heavy (fmod + floor + correction per element), and our route parallelizes it.
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** incumbent A/A ratio_median 0.994405 ci95=[0.980408,1.008402] and candidate A/A ratio_median 0.991217 ci95=[0.956195,1.026238] on the cross-worker run; all four runs carried both nulls and every one sat on unity (widest controlling half-width 0.052589).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48 invocation_id=000000000000000018cc3a1dd869c59f-0021c6b3 measured_ratio=1.299521x
+
+**Incumbent isolation proof:** candidate=fnp.remainder incumbent=numpy.remainder shared_timed_component=none
+
+harness=common::run_dual_null_median_ci_contract (incumbent A/A + candidate A/A, ABBAABBA, 41 rounds, min-of-3)
+profile `release` via `cargo test --release --bench` — see the AGENTS.md note; `cargo bench` cannot
+complete on this fleet. Both arms sit in one binary, so the RATIOS are fair; absolute ns are not
+ship-grade. n=2097152 float64 C-contiguous, numpy 2.4.3.
+
+run 1  worker=vmi1227854  ratio=2.642599 ci95=[2.560861,2.785726] numpy_ns=14076883 fnp_ns=5324975 DECIDABLE_WIN
+       bench_elf_sha256=4dc56b7ba6adfea23fbb8a3054be4bab2a1ef2d878a442f786c35fc4e0ee3bad
+run 2  worker=vmi1227854  ratio=2.738191 ci95=[2.626320,2.823174] numpy_ns=13636818 fnp_ns=5061813 DECIDABLE_WIN
+       bench_elf_sha256=d34d3e580ed7925397bf9557e713ed227b1c1dcee6a7095b5b4e03ff24fd5e60
+run 3  worker=vmi1227854  ratio=2.950744 ci95=[2.871684,3.073150] numpy_ns=13620577 fnp_ns=4658265 DECIDABLE_WIN
+       bench_elf_sha256=05aa169215b813f2c945cb1509a4517cb67c8bf2d8d42f9bee68f4737e11b689
+run 4  worker=vmi1153651  ratio=1.299521 ci95=[1.121225,1.381368] numpy_ns=19547288 fnp_ns=15602553 DECIDABLE_WIN
+       bench_elf_sha256=99d45b3fe7d5b85824830c8b410772f1b97117253ad5f4bb2c47b427c28fbc79
+       harness_contract_source_sha256=0b980265f5757b898355e6ca52d4730e4b503ee5d9952eb1d4f879d62502fe38 harness_source_matches_disk=true covers=common/mod.rs+bench_file
+HOST_BASELINE host=vmi1153651 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+
+**QUOTE THE WORST BOUND: 1.121225x.** The four runs do not agree on magnitude and are NOT pooled.
+Three landed on `vmi1227854` (rch keeps returning to a warm pool and placement cannot be pinned)
+and one on `vmi1153651`, where BOTH arms were slower in absolute terms — NumPy 19.5 ms against
+13.6-14.1 ms, and our arm 15.6 ms against 4.7-5.3 ms. Our arm degraded ~3x on that host while
+NumPy's degraded ~1.4x, which is what compresses the ratio: a parallel kernel loses more to a busy
+box than a single-threaded one does. The direction and the verdict replicate on both workers; the
+magnitude is worker-scoped, and 2.95x must never be quoted as the result.
+
+**WHY n=2^21 IS LOAD-BEARING.** `parallel_min` for Remainder is exactly 1<<21. Below it the native
+path runs SERIAL and the parallel win cannot appear. Every earlier elementwise row in this ledger
+measured at 2^20 or smaller — strictly under the threshold — which is why a remainder row did not
+already exist. This is not a new kernel; it is the first measurement of an existing one at a size
+where it can work.
+
+**ENGAGEMENT PROOF.** A 1.12-2.95x speedup is itself proof the native path ran: had the route
+declined and delegated, the ratio would sit at unity. Dispatch is additionally asserted at runtime
+inside the measured binary — `fnp.remainder` is checked not to BE NumPy's object and the incumbent
+module's `__name__` is checked to be `numpy`. Both arms' results are checksum-compared before
+timing and again every round by the contract, so a divergence fails the measurement rather than
+winning it.
+
+**WHAT THIS DOES NOT SAY.** It does not lift the wrapper floor: `deadlock-audit-isnd2` measured
+~6.6-7 us of per-call overhead, amortised to nothing at this size but leaving us 7.97x SLOWER at
+n=256. remainder wins where the kernel dominates and loses where the wrapper does. It says nothing
+about `divide`, which remains a replicated loss.
+
+RETRY PREDICATE: re-measure on a quiet host and on a >=16-core worker before quoting anything above
+the worst bound; the spread here is host-driven and the top of the range came from the warm pool.
+AGENT_NAME=TealOak.
+
 ## 2026-08-16 - MEASURED, SEARCH CLOSED: output construction is the dominant wrapper stage at 1310 ns - 1.8x NumPy's ENTIRE add call - and the reshape, not the allocation, is the expensive half (`deadlock-audit-tmmud`)
 
 `TealOak`. Third and last stage of the wrapper-floor hunt. Everything else named has
