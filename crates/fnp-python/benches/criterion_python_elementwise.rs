@@ -1314,6 +1314,10 @@ fn main() {
                 bench_percall_floor_across_ops_vs_numpy,
             ),
             (
+                "bench_percall_floor_across_sizes_vs_numpy",
+                bench_percall_floor_across_sizes_vs_numpy,
+            ),
+            (
                 "bench_divide_size_gate_vs_numpy",
                 bench_divide_size_gate_vs_numpy,
             ),
@@ -3637,6 +3641,101 @@ fn bench_delegation_kwargs_shape(_c: &mut Criterion) {
             effect.arm_a_median_ns - effect.arm_b_median_ns,
             effect.ratio_ci_low > 1.0,
         );
+    });
+}
+
+/// The DELEGATING CONTROL the divide-gate decision needs (`deadlock-audit-q00ev`).
+///
+/// `deadlock-audit-qapyb` set `F64_DIV_NATIVE_MIN_LEN = 1 << 14`. Three sizes measured
+/// post-fix show the native divide is at its WORST just above that gate — 28.4% overhead
+/// at 2^16 against 5.4% at 2^20 — which raises the question of whether the gate admits a
+/// band where DELEGATING would be cheaper than our own kernel.
+///
+/// THAT QUESTION CANNOT BE ANSWERED FROM THOSE THREE ROWS, and the reason is the whole
+/// point of this group. Answering it needs the WRAPPER cost at each size, and the wrapper
+/// is NOT constant in n: `multiply` delegates at every size here and its excess grew 6.2x
+/// between n=256 and n=2^20. Carrying the small-n wrapper figure upward is exactly the
+/// cross-size subtraction that overstated `deadlock-audit-6twge` by 5.5x.
+///
+/// So both ops are measured at EVERY size in ONE invocation. `multiply` delegates
+/// throughout, so its excess IS the wrapper cost at that size; `divide` goes native above
+/// the gate. Every subtraction below is therefore WITHIN a size and WITHIN an invocation.
+///
+/// THE METHOD CARRIES ITS OWN NULL. At 2^12 — below the gate — BOTH ops delegate, so they
+/// pay the same wrapper and `divide_specific_excess_ns` must come out near zero. If it does
+/// not, the subtraction is contaminated and no row from this group may be believed. That
+/// cell exists to be checked, not to be reported as a finding.
+fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        // 2^12 is BELOW the 1<<14 gate and is the method null; 2^14 sits at it; the rest
+        // are above it. Four cells above the gate locate the worst band instead of
+        // inferring it from the two the existing size-gate group happens to carry.
+        for exponent in [12u32, 14, 16, 18, 20] {
+            let n = 1usize << exponent;
+            let below_gate = n < (1usize << 14);
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a = locals.get_item("a").expect("a operand");
+            let b = locals.get_item("b").expect("b operand");
+            let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+            // `multiply` first and `divide` second, both in this invocation, both against
+            // their own NumPy arm. The order is fixed across sizes so any drift is common.
+            let (mul_ratio, mul_lo, mul_hi, mul_numpy_ns, mul_fnp_ns) =
+                measure_binary_ufunc_vs_numpy(py, &module, &numpy, "multiply", &args, n);
+            let (div_ratio, div_lo, div_hi, div_numpy_ns, div_fnp_ns) =
+                measure_binary_ufunc_vs_numpy(py, &module, &numpy, "divide", &args, n);
+
+            // multiply always delegates, so ITS excess is the wrapper cost at this size.
+            let wrapper_ns = mul_fnp_ns - mul_numpy_ns;
+            let divide_excess_ns = div_fnp_ns - div_numpy_ns;
+            let divide_specific_excess_ns = divide_excess_ns - wrapper_ns;
+
+            // What would divide cost if it DELEGATED at this size? NumPy's own divide plus
+            // the same wrapper multiply pays. That is the counterfactual the gate turns on.
+            let projected_delegating_fnp_ns = div_numpy_ns + wrapper_ns;
+            let projected_delegating_ratio = div_numpy_ns / projected_delegating_fnp_ns;
+            // Strictly a POINT comparison: both sides carry CI, and the verdict field below
+            // is a lead for a decision bench, not the decision itself.
+            let delegating_looks_better = projected_delegating_ratio > div_ratio;
+
+            println!(
+                "PERCALL_FLOOR_SIZES n={n} log2n={exponent} below_gate={below_gate} \
+                 is_method_null_cell={below_gate} numpy_version={numpy_version} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 multiply_ratio={mul_ratio:.6} multiply_ci95=[{mul_lo:.6},{mul_hi:.6}] \
+                 multiply_numpy_ns={mul_numpy_ns:.1} multiply_fnp_ns={mul_fnp_ns:.1} \
+                 divide_ratio={div_ratio:.6} divide_ci95=[{div_lo:.6},{div_hi:.6}] \
+                 divide_numpy_ns={div_numpy_ns:.1} divide_fnp_ns={div_fnp_ns:.1} \
+                 wrapper_ns={wrapper_ns:.1} divide_excess_ns={divide_excess_ns:.1} \
+                 divide_specific_excess_ns={divide_specific_excess_ns:.1} \
+                 projected_delegating_fnp_ns={projected_delegating_fnp_ns:.1} \
+                 projected_delegating_ratio={projected_delegating_ratio:.6} \
+                 delegating_looks_better={delegating_looks_better} same_invocation=true"
+            );
+        }
     });
 }
 
