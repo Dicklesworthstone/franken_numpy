@@ -1294,6 +1294,10 @@ fn main() {
                 "bench_divide_size_gate_vs_numpy",
                 bench_divide_size_gate_vs_numpy,
             ),
+            (
+                "bench_remainder_vs_numpy_incumbent",
+                bench_remainder_vs_numpy_incumbent,
+            ),
         ],
     );
 }
@@ -2965,5 +2969,62 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
                 fnp_ns - numpy_ns,
             );
         }
+    });
+}
+
+// `remainder` above its parallel threshold — the op the f64 fast-path set exists
+// for. NumPy runs floored-mod single-threaded and it is compute-heavy (fmod +
+// floor + correction per element); our route parallelizes it.
+//
+// n=1<<21 is load-bearing, not arbitrary: `parallel_min` for Remainder is exactly
+// 1<<21, so at any smaller size the native path runs SERIAL and the parallel win
+// cannot appear at all. Every earlier elementwise row in this ledger measured at
+// 2^20 or below, i.e. strictly under the threshold (deadlock-audit-322j4).
+//
+// Unlike divide, remainder carries no per-element FE-hazard scan here: it defers
+// wholesale on a zero divisor, and these operands never produce one
+// (b = 1.25 + (i%997)/997).
+fn bench_remainder_vs_numpy_incumbent(_c: &mut Criterion) {
+    const N: usize = 1 << 21;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        let (ratio, lo, hi, numpy_ns, fnp_ns) =
+            measure_binary_ufunc_vs_numpy(py, &module, &numpy, "remainder", &args, N);
+        println!(
+            "REMAINDER_VS_NUMPY n={N} log2n=21 above_parallel_threshold=true \
+             numpy_version={numpy_version} \
+             harness=common::run_dual_null_median_ci_contract \
+             ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
+             numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} \
+             faster_than_numpy={} worst_bound={:.6}",
+            lo > 1.0,
+            lo,
+        );
     });
 }
