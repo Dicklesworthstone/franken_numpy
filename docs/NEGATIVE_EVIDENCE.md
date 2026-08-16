@@ -10,6 +10,83 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - THE WORST CELL UNDER 4x LOAD: the settled ~3.4-3.8x figure is ROBUST to contention - and my own directional-bias rule needed narrowing, because a SERIAL-vs-SERIAL cell is biased too, just 8x less (`deadlock-audit-ei9jz`, `deadlock-audit-322j4`)
+
+`RedLynx`. The worst vs-incumbent cell run ABBA in one invocation with load as the INDEPENDENT
+VARIABLE. This is not a seventh sample of a settled number: the small-n rows are decided and their
+retry predicates say so. It is a test of the load-bias rule those rows depend on, and the adverse
+host is what makes it possible.
+
+**Campaign result class:** decidable-regression (all four cells) + methodology
+
+```
+bench_elf_sha256=04cdb2f447f8336615022e40f6c5c3b51961c7e91e04b4ae62d3b87b90e4f8bf
+harness_source_matches_disk=true  built from committed source (zero hunks vs HEAD at build time)
+worker=thinkstation1 (5975WX 32P/64L, powersave)  numpy 2.4.3  profile=bench  n=256
+load 1min 81.72 before AND after (64 logical threads) — 1.28x oversubscribed
+foreign: python3 ~2790%, fp-bench ~1535%, frankensearch_q ~485%, rust-lld ~390% (~48 cores)
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+```
+
+```
+ op        ratio      ci95                    verdict               numpy_ns  fnp_ns  excess
+ add       0.269680   [0.267803,0.274396]     DECIDABLE_REGRESSION     716     2660    1944
+ subtract  0.272119   [0.269514,0.273962]     DECIDABLE_REGRESSION     726     2665    1939
+ divide    0.307853   [0.306738,0.308524]     DECIDABLE_REGRESSION     742     2414    1672
+ multiply  0.318410   [0.316962,0.319778]     DECIDABLE_REGRESSION     701     2194    1493
+```
+
+**ALL EIGHT NULLS STRADDLE UNITY AND ARE TIGHT — half-widths 0.0014 to 0.0072 — AT LOAD 82.**
+That is itself a finding. The 2^20 cell measured one row above had an incumbent null half-width of
+**0.123** at load 41-50, while these cells hold ~0.005 at load 82. **Null width tracks the ARM's
+contention sensitivity, not the host's load number.** Short serial arms stay tight on a busy box;
+long parallel ones do not. An agent reading only the load average would have predicted the
+opposite.
+
+**THE HEADLINE: THE SETTLED FIGURE SURVIVES A 4x LOAD SWING.** Against the quiet-host run
+(load ~20):
+
+```
+ op        quiet ratio  loaded ratio  numpy inflation  fnp inflation  ratio change
+ add        0.295995     0.269680        1.642x           1.806x         -8.9%
+ subtract   0.290514     0.272119        1.685x           1.791x         -6.3%
+ multiply   0.348983     0.318410        1.590x           1.732x         -8.8%
+ divide     0.340014     0.307853        1.575x           1.758x         -9.5%
+```
+
+Both arms inflate by 1.58-1.81x while the ratio moves only 6-10%. `add` at 0.269680 is **1/0.269680
+= 3.708x**, which sits INSIDE the spread already observed across the seven quiet-host measurements
+(0.262606-0.295995). So load did not push the cell outside its natural variation, and the banked
+**~3.4-3.8x at n=256 holds under contention** — which strengthens every small-n row rather than
+adding a sample to them.
+
+**BUT MY OWN RULE WAS TOO NARROW, AND THIS NARROWS IT.** `deadlock-audit-322j4` states the bias as
+a property of PARALLEL-candidate against SERIAL-incumbent. This cell is serial against serial —
+NumPy's tight C loop against our Python-level wrapper, neither threaded — and it is **still biased,
+in the same direction, for all four ops**: our arm inflates 1.73-1.81x against NumPy's 1.58-1.69x,
+so the ratio degrades 6-10% under load. The rule generalises:
+
+> Contention biases the comparison against whichever arm does more CONTENTION-SENSITIVE work per
+> call, not specifically against a parallel arm. Parallelism is the extreme case (the remainder
+> cell moved 4.107 -> 6.994, ~70%); a wrapper that makes more allocations and attribute lookups
+> than a tight C loop is the mild case (~9%). Both are directional and both run against us.
+
+The 8x difference in magnitude between the two cases is what makes the parallel case worth its own
+warning, and the mild case worth disclosing load endpoints even on serial-vs-serial rows.
+
+**WHY THIS RUN WAS MADE AT ALL, given the small-n cell is settled.** The two open items on this
+cell were (a) parity at 2^20/2^24, which needs a QUIET host and was therefore unreachable at load
+82, and (b) a second worker, banked as unreachable from this pane. Re-sampling a decided number
+would have been noise; using the adverse condition to test the rule that all the banked numbers
+rely on is not. The load is the variable, not the nuisance.
+
+RETRY PREDICATE: (1) Do NOT treat this as a seventh estimate of the n=256 ratio — quote the
+quiet-host figure, and cite this row only for robustness. (2) Rows whose arms differ in work
+PROFILE, not just in threading, should carry load endpoints; the ~9% here is small but systematic
+and always against us. (3) The 2^20/2^24 parity question still needs a quiet host and is untouched
+by this row. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - THE 2^24 CELL RE-RUN WITH A CLEAN NULL: `add` is NOT shown to miss parity - the defective-null reading that suggested otherwise does not survive its own retry predicate (`deadlock-audit-ei9jz`, `deadlock-audit-7xcq2`)
 
 `RedLynx`. Discharges the retry predicate of the size-axis row above, which said: *"re-run ONLY
