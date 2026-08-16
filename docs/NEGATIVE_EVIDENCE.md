@@ -58,6 +58,17 @@ because subtracting across rows is what overstated `deadlock-audit-6twge` by 5.5
 Every number above is from ONE invocation on ONE worker, so its subtractions are
 legitimate. It is NOT replicated on a second worker; the retry predicate says so.
 
+**A SECOND LEVER FELL OUT OF THIS ROW AND IS NOT TAKEN HERE:**
+`getattr_empty_ns=110.09`. Every call does `numpy.call_method("empty", ..)`, which is
+an attribute lookup plus a call, and the lookup alone is **110.09 ns - 29% of the
+372.23 ns shaped allocation**. Caching the bound `empty` callable would remove it, but
+that needs process-lifetime state holding a `Py<PyAny>` across GIL acquisitions, which
+is a different risk class from moving an argument. Filed as `deadlock-audit-v8nx6`
+rather than bundled in, so it gets its own before/after instead of hiding inside this
+one. Note `deadlock-audit-cydda` separately measured the per-call `py.import("numpy")`
+at 310 ns; the two share a mechanism (repeated Python attribute/module lookups on the
+hot path) and should be attacked together or not at all.
+
 **Retry predicate.** (1) Replicate on a second worker before quoting 445.65 ns as a
 fleet figure - one worker fixes the arithmetic, not the generality. (2) Gate the code:
 `cargo test -j2 -p fnp-python --test conformance_ufunc_edge`, which now carries
