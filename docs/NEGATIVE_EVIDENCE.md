@@ -9,6 +9,74 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - THE 2^24 CELL RE-RUN WITH A CLEAN NULL: `add` is NOT shown to miss parity - the defective-null reading that suggested otherwise does not survive its own retry predicate (`deadlock-audit-ei9jz`, `deadlock-audit-7xcq2`)
+
+`RedLynx`. Discharges the retry predicate of the size-axis row above, which said: *"re-run ONLY
+the 2^24 cell until its incumbent null straddles unity, then read `at_parity`."* This is that
+re-run. The whole sweep is reported because the group runs it, but only the 2^24 cell is new
+evidence.
+
+**Campaign result class:** decidable-regression at small n; undecided (not parity-proven) at large n
+
+```
+bench_elf_sha256=04cdb2f447f8336615022e40f6c5c3b51961c7e91e04b4ae62d3b87b90e4f8bf
+elf_path=target/release/deps/criterion_python_elementwise-b3bfa783f49ff1ab (307525528 bytes)
+harness_contract_source_sha256=2188f288f6e7775520b371d4c09d6d6ef298b22979d7e43aa54af69ff38eeaae
+harness_source_matches_disk=true covers=common/mod.rs+bench_file
+built from COMMITTED source: the bench file was byte-identical to HEAD at build time (git diff
+  HEAD -- <bench> reported zero hunks), local build under the cargo-shim bypass, zero [RCH] lines,
+  executable path taken from --message-format=json
+worker=thinkstation1 (5975WX 32P/64L, powersave) numpy 2.4.3 profile=bench
+load 1min 41.18 before -> 49.63 after (64 logical threads) — a BUSIER host than the rows above
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+```
+
+```
+ n        ratio      ci95                    verdict               incumbent null        candidate null
+ 256      0.279121   [0.275693,0.281071]     DECIDABLE_REGRESSION  [0.993017,1.014556]   [0.980354,1.011650]
+ 4096     0.529630   [0.528216,0.531656]     DECIDABLE_REGRESSION  [0.996947,1.006161]   [0.994119,1.001457]
+ 65536    0.911309   [0.910584,0.912427]     DECIDABLE_REGRESSION  [0.998887,1.000817]   [0.998901,1.001101]
+ 2^20     1.000359   [0.931995,1.036632]     UNDECIDED             [0.964025,1.123369]   [0.974639,1.023589]
+ 2^24     0.995314   [0.986365,1.009281]     UNDECIDED             [0.988480,1.025424]   [0.945928,1.057730]
+```
+
+**ALL TEN NULLS STRADDLE UNITY THIS RUN**, including the one that was defective. The row above
+recorded `incumbent_null_straddles_unity=false` on the 2^24 cell and correctly refused to read
+`at_parity` from it. Here that cell's incumbent null is [0.988480,1.025424] — it contains 1.0, so
+the control is sound and the cell can be read.
+
+**AND READ WITH A SOUND CONTROL, IT REVERSES THE PROVISIONAL ANSWER.** The earlier cell gave
+ci95 [0.993635,0.999127], an upper bound sitting 0.0009 below unity, which looked like `add`
+failing to reach parity even at 2^24 — a different and worse problem than multiply's small-n
+floor. With a clean null the same cell reads ci95 **[0.986365,1.009281], which CONTAINS unity**,
+and the verdict is UNDECIDED. **So `add` is not shown to miss parity at 2^24**, and the worse-
+problem hypothesis is not supported.
+
+**WHAT UNDECIDED DOES NOT MEAN, and this run is a good example of why it matters.** It does not
+mean parity is proven. The host was busier here (load 41-50 against 19-21 for the small-n rows
+above), and it shows in the controls: the 2^20 incumbent null has a half-width of **0.123369**,
+so that cell had no resolving power at all this run and must not be quoted in either direction.
+The 2^24 candidate null half-width is 0.057730 — better, but still an order of magnitude wider
+than the small-n cells' ~0.001. The honest reading is: **at 2^24 the effect is smaller than this
+run could resolve**, which is consistent with parity and does not establish it.
+
+**THE SMALL-n CELL IS NOW MEASURED SIX TIMES ACROSS TWO AGENTS.** `add` at n=256: 0.275034,
+0.282413, 0.295995 (mine) and 0.275225, 0.262606, 0.285809 (the rows above), plus 0.279121 here.
+Every one is a DECIDABLE_REGRESSION and the spread is ~4-12%. **~3.4-3.8x slower at n=256 is the
+settled figure for this cell**, and it is not going to move by measuring it again.
+
+**THE SHAPE ACROSS SIZES IS THEREFORE: a per-call floor, not a scaling defect.** 3.58x at 256,
+1.89x at 4096, 1.10x at 65536, unresolvable at 2^20 and 2^24. That is a fixed cost amortising
+away, which is what the wrapper decomposition rows predict; it is NOT a cost that grows with the
+data.
+
+RETRY PREDICATE: (1) Do NOT re-run the small-n cells; six measurements is enough and a seventh is
+noise. (2) If anyone wants parity at 2^20/2^24 ESTABLISHED rather than merely unrefuted, it needs
+a quiet host — controlling null half-widths of 0.123 and 0.058 cannot decide a sub-1% effect. Take
+the load endpoints as the rows above do. (3) The open item on this cell remains a SECOND WORKER,
+which the row below records as unreachable from a foreground-limited pane. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - RETRY PREDICATE DISCHARGED: `add` DOES reach parity at 2^24 - the earlier `at_parity=false` was riding on a defective null, and the ratio never moved (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. My own retry predicate said: re-run ONLY the 2^24 cell until its incumbent null
