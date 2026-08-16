@@ -14811,6 +14811,18 @@ explicitly allowed.
 
 ## 2026-07-12 - GATES FORMALIZED (both WIN): f64 floor_divide 4.553x and int64 array-q percentile 1.338x under the 20-obs interleaved ABBA gate - the two coarse-AB debts are paid; sweep #4 declared DRY
 
+> **SCOPE POINTER added 2026-08-16 (`deadlock-audit-dtdz5`).** The 4.553x here is a
+> KERNEL-ARM figure under that era's 20-observation interleaved-ABBA gate. It is sound
+> for what it measured and its number is unchanged. It is NOT an end-to-end
+> vs-NumPy claim and must not be quoted as one. The first end-to-end measurement of
+> f64 `floor_divide` through the Python surface against a live NumPy, under
+> `run_dual_null_median_ci_contract`, is the 2026-08-16 row at the top of this file
+> (`deadlock-audit-4j5ba`): worst lower CI **3.335249x** across three runs on two
+> workers. The two legitimately differ because the end-to-end path additionally pays
+> the PyUFunc wrapper floor, operand marshalling and output construction — a kernel
+> 4.5x faster inside a route with fixed per-call overhead yields a smaller
+> end-to-end ratio.
+
 `cc_fnp` / FuchsiaStream. A permanent in-probe 20-observation gate (ABBA/BAAB
 alternation, medians, numpy A/A null, WIN = effect > 1.2 with null in
 0.85..1.15) now covers the two rows shipped on coarse evidence:
@@ -15393,6 +15405,14 @@ f16 diff widen kernel (2.81x coarse, one warning-parity fix in) sits in stash
 `f16-parked` - next f16-permitted session can land it from there.
 
 ## 2026-07-12 - WIN (kernel-engaged, coarse-AB): f64 floor_divide ufunc arm 4.35x (43.9 vs 191.1ms at 8M) - the 54b905d6 pending-gate predicate is PAID
+
+> **SCOPE POINTER added 2026-08-16 (`deadlock-audit-dtdz5`).** 4.35x is the UFUNC ARM,
+> measured coarse-AB, and the heading already says so — this note exists because the
+> number is now easy to misread beside a newer one. The end-to-end row for the same op
+> is 2026-08-16 (`deadlock-audit-4j5ba`), worst lower CI **3.335249x**, three runs on
+> two workers under the dual-null contract with both A/A nulls. Neither figure
+> supersedes the other; they answer different questions (kernel arm versus whole call
+> through the Python surface). Quote the end-to-end one for any vs-NumPy claim.
 
 `cc_fnp`. One foreground run on vmi1149989: conformance batteries green (random/
 near-multiple/extreme grids byte-exact, hazard classes inf-a/zero-b/nan-a defer
