@@ -25,6 +25,79 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - THE FIXED-COST MODEL IS ALSO WRONG: the ratio falls with incumbent duration as predicted, but the implied disturbance GROWS 170 -> 325 -> 512 us - plus my verified load window closed during the build, and this group repeats a statistic mismatch I already fixed elsewhere (`deadlock-audit-48by6`)
+
+`RedLynx`. The test registered one row ago, run. It supports the prediction's direction and
+refutes its content, which makes this the third account of this effect I have had to withdraw.
+
+**Campaign result class:** maintenance-diagnostic (model refuted; measurement carries three caveats)
+
+```
+bench_elf_sha256=5aecaa726dbcffaf38e08e216fb493c71d16a4ace4c13aa014fa34003858d9f3
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench
+shadow=maximum_parallel PINNED at 2^22 for every cell; only the incumbent's size varies
+harness=common::run_median_ci_contract  ABBAABBA, A/A null first
+
+ n      incumbent_dur  ratio      ci95                  interference_ns  null                verdict
+ 2^20     0.71 ms      1.240411  [1.200035,1.328548]      +219997       [1.008557,1.043982]  DECIDABLE
+ 2^22     4.22 ms      1.076637  [1.061208,1.086476]      +353779       [0.972469,1.021638]  DECIDABLE
+ 2^24    19.70 ms      1.025715  [0.989698,1.030653]      -366765       [0.987763,1.003798]  UNDECIDED
+```
+
+**CAVEAT 1, AND IT IS A PROCESS FAILURE: THE VERIFIED WINDOW CLOSED DURING THE BUILD.** I checked
+`uptime` and got 1-min 14.13, 5-min 22.21, 15-min 23.11 — converged and under threshold — then
+spent 3m24s compiling. **LOADAVG at run start was 69.63, rising to 76.62 by the end.** The
+measurement is a within-invocation alternation so drift largely cancels, but this is not the window
+I certified against and I am not going to present it as one. The lesson is concrete: verify load
+IMMEDIATELY BEFORE THE RUN, not before the build, whenever a build sits between them.
+
+**THE DIRECTION HOLDS.** The ratio falls monotonically as the incumbent gets slower — 1.240411,
+1.076637, 1.025715 across durations of 0.71, 4.22 and 19.70 ms — with the shadow identical in every
+cell. A slower incumbent absorbs the same class of disturbance into a larger denominator.
+
+**BUT THE CONTENT IS REFUTED. The implied disturbance is NOT constant:**
+
+```
+  C = (ratio - 1) x incumbent_duration
+  2^20   0.240411 x 0.71 ms  =  170 us
+  2^22   0.076637 x 4.22 ms  =  325 us
+  2^24   0.025715 x 19.70 ms =  512 us
+```
+
+A fixed cost would give the same C three times. It grows about 3x while n grows 16x — sublinear,
+roughly n^0.45. So the disturbance scales with the INCUMBENT's footprint (8 MB / 32 MB / 128 MB)
+even though the shadow's footprint is pinned, which a fixed-cost account cannot produce. **Neither
+"fixed cost" nor "proportional cost" is right**; the honest statement is that the disturbance grows
+sublinearly with the incumbent's working set while its duration grows linearly, so the fractional
+discount falls with n but more slowly than 1/n.
+
+**THIS IS THE THIRD MECHANISM I HAVE PROPOSED AND WITHDRAWN** — the candidate's bandwidth appetite,
+then the incumbent's regime, now a fixed cost. Each was refuted by the next measurement. I am not
+proposing a fourth from three points; what is established empirically is the TABLE, and rows should
+cite the measured discount for their own size rather than any model of it.
+
+**CAVEAT 2 - THE 2^20 CELL HAS A BIASED NULL.** `null_straddles_unity=false`, ci
+[1.008557,1.043982], bias 0.028981 (`deadlock-audit-7xcq2`). That is the cell with the largest
+ratio and therefore the one doing most of the work in the trend above, and its own control is off
+unity by 2.9%. Treat 1.240411 as the least trustworthy of the three.
+
+**CAVEAT 3 - THIS GROUP REPEATS A DEFECT I ALREADY FIXED ELSEWHERE.** `interference_ns` is computed
+from ARM MEDIANS while `ratio` is a MEDIAN OF PAIRED RATIOS, and at 2^24 they disagree in SIGN:
+-366765 ns against a ratio of +2.57%. I fixed exactly this in
+`bench_percall_floor_across_sizes_vs_numpy` two days' worth of rows ago and then wrote the same bug
+into a new group. **The C column above is derived from `ratio`, not from `interference_ns`**, so
+the analysis is unaffected — but the emitted field is misleading and must be fixed before anyone
+reads it.
+
+RETRY PREDICATE: (1) Fix `interference_ns` in this group to derive from `ratio`, as
+`wrapper_from_ratio_ns` already does elsewhere; until then ignore that column. (2) Re-run all three
+cells in a window verified IMMEDIATELY BEFORE the run, and require the 2^20 null to straddle unity
+before quoting its ratio. (3) Do not propose a fourth mechanism without at least five sizes and
+clean nulls; cite the measured per-size discount instead. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - THE LAST UNEXPLAINED TERM IS LOCATED: `wrapper_residual` is 83% OUTPUT ALLOCATION, and 88 ns of it is a getattr that MUST stay live for monkeypatch correctness (`deadlock-audit-ei9jz`, `deadlock-audit-tmmud`)
 
 `SlateHeron`. `deadlock-audit-tmmud` priced output construction at 1310 ns PRE-FIX and it had never

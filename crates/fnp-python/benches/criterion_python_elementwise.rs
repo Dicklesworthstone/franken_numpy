@@ -1367,6 +1367,10 @@ fn main() {
                 "bench_incumbent_interference_shadow_held_constant",
                 bench_incumbent_interference_shadow_held_constant,
             ),
+            (
+                "bench_interference_vs_incumbent_duration",
+                bench_interference_vs_incumbent_duration,
+            ),
         ],
     );
 }
@@ -5197,6 +5201,136 @@ fn maximum_parallel(a: &[f64], b: &[f64], out: &mut [f64]) {
 //
 // n=1<<22 sits above the 1<<21 parallel_min, the regime the losing measurements
 // came from — below it the shipped route runs serially anyway.
+/// Does the interference scale as a FIXED cost divided by the incumbent's duration?
+/// (`deadlock-audit-48by6`)
+///
+/// The previous row found the ABSOLUTE disturbance nearly equal across two incumbents whose
+/// durations differ sevenfold — 124700 ns against 97431 ns — and proposed that the discount
+/// is simply `fixed_cost / incumbent_duration`. That replaced two earlier accounts of mine
+/// that both appealed to a property of the ARMS and both failed.
+///
+/// This tests the replacement directly, and the design matters: **the SHADOW is pinned at
+/// 2^22 for every cell** so the disturbance it inflicts is constant by construction, while
+/// the INCUMBENT's size sweeps 2^20 / 2^22 / 2^24. A naive sweep that grew both together
+/// would confound the disturbance with the duration and could not decide anything.
+///
+/// PRE-REGISTERED PREDICTION: `interference_ns` stays roughly constant across the three
+/// cells while `ratio` falls monotonically as the incumbent gets slower. If instead
+/// `interference_ns` grows with the incumbent's size, the cost is proportional rather than
+/// fixed and the 1/duration model is wrong too.
+fn bench_interference_vs_incumbent_duration(_c: &mut Criterion) {
+    const SHADOW_N: usize = 1 << 22;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let np_maximum = numpy.getattr("maximum").expect("numpy.maximum");
+
+        // The shadow, pinned at 2^22 for every cell below.
+        let shadow_locals = PyDict::new(py);
+        shadow_locals.set_item("np", &numpy).expect("bind numpy");
+        shadow_locals.set_item("n", SHADOW_N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\nsa = 1.0 + (i % 1000) / 1000.0\nsb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&shadow_locals),
+            Some(&shadow_locals),
+        )
+        .expect("build shadow operands");
+        let sa: Vec<f64> = shadow_locals
+            .get_item("sa")
+            .expect("sa")
+            .call_method0("tolist")
+            .expect("sa list")
+            .extract()
+            .expect("sa f64s");
+        let sb: Vec<f64> = shadow_locals
+            .get_item("sb")
+            .expect("sb")
+            .call_method0("tolist")
+            .expect("sb list")
+            .extract()
+            .expect("sb f64s");
+        let mut shadow_out = vec![0.0_f64; SHADOW_N];
+
+        for exponent in [20u32, 22, 24] {
+            let n = 1usize << exponent;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            py.run(
+                std::ffi::CString::new("i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n")
+                    .unwrap()
+                    .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build incumbent operands");
+            let a_obj = locals.get_item("a").expect("a operand");
+            let b_obj = locals.get_item("b").expect("b operand");
+            let args = PyTuple::new(py, [&a_obj, &b_obj]).expect("args");
+            let np_out = numpy
+                .call_method1("empty_like", (&a_obj,))
+                .expect("preallocated numpy output");
+            let out_kwargs = PyDict::new(py);
+            out_kwargs.set_item("out", &np_out).expect("bind out=");
+
+            let isolated = || {
+                let started = Instant::now();
+                let result = np_maximum
+                    .call(&args, Some(&out_kwargs))
+                    .expect("numpy.maximum isolated");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: numpy_divide_checksum(&result, n),
+                }
+            };
+            let shadowed = || {
+                maximum_parallel(&sa, &sb, &mut shadow_out);
+                let started = Instant::now();
+                let result = np_maximum
+                    .call(&args, Some(&out_kwargs))
+                    .expect("numpy.maximum shadowed");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: numpy_divide_checksum(&result, n),
+                }
+            };
+            let (effect, null) = common::run_median_ci_contract(
+                &format!("interference_duration_2p{exponent}"),
+                shadowed,
+                isolated,
+            );
+            let interference_ns = effect.arm_a_median_ns - effect.arm_b_median_ns;
+            println!(
+                "INTERFERENCE_VS_DURATION incumbent=maximum n={n} log2n={exponent} \
+                 shadow_n={SHADOW_N} shadow_size_PINNED=true numpy_version={numpy_version} \
+                 worker={} harness=common::run_median_ci_contract \
+                 shadowed_ns={:.1} isolated_ns={:.1} interference_ns={interference_ns:.1} \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] null={:.6} \
+                 fixed_cost_model_predicts_interference_ns_constant=true",
+                measurement_worker(),
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                null.ratio_median,
+            );
+        }
+    });
+}
+
 /// THE CONFOUND-FREE interference experiment: hold the SHADOW constant, vary only the
 /// incumbent (`deadlock-audit-48by6`).
 ///
