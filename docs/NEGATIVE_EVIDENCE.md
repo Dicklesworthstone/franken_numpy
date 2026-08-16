@@ -4,6 +4,54 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, NARROWS THE ROW BELOW: four named stages inside the `PyUFunc::__call__` wrapper are only 700 ns, so >=90% of the wrapper floor is argument binding and result construction (`deadlock-audit-cydda`)
+
+`TealOak`. The row below establishes that the floor is a WRAPPER property and does not
+decompose it - "whatever they pay, they pay in `PyUFunc::__call__`". This bounds four of
+the stages inside that wrapper, which is what its lever (b) needs. Complementary, not a
+second attempt at the same measurement.
+
+**Campaign result class:** maintenance-diagnostic
+
+```
+HOST_BASELINE host=vmi1149989 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 online_cpus=0:1:2:3:4:5:6:7:8:9 allowed_logical_threads=10 allowed_cpus=0:1:2:3:4:5:6:7:8:9 governor=unavailable
+PERCALL_FLOOR_STAGES n=256 numpy_version=2.4.3 worker=vmi1149989 harness=stage_replica_min_of_2001 trials=2001 stages_are_standalone_replicas=true stage_numbers_are_lower_bounds=true import_numpy_ns=310.0 dtype_guard_both_operands_ns=100.0 getattr_ndarray_ns=70.0 numpy_empty_ns=220.0 accounted_ns=700.0 fnp_multiply_ns=2364.0 numpy_multiply_ns=300.0 accounted_fraction=0.296 fnp_over_numpy=7.880
+```
+
+**RULED OUT, with numbers.** Re-importing numpy on every call (310 ns), the f64 dtype
+guard on both operands (100 ns), the preamble's `getattr("ndarray")` (70 ns) and the
+output allocation (220 ns) sum to **700 ns**. Caching the numpy handle, the dtype object
+and the ndarray type are the obvious cheap levers and the first ones a reader reaches
+for; together they cannot buy more than 700 ns against a wrapper floor of 6968-8375 ns.
+That is **<=10%**. Do not spend a build on them.
+
+**SO THE WRAPPER FLOOR IS SOMETHING ELSE**, and the prime suspect is argument binding:
+`PyUFunc::__call__` takes NINE parameters - `x1, x2, out, where, casting, order, dtype,
+subok, signature` - six optional with defaults, all bound by PyO3 on every call before
+any arithmetic. That is consistent with the row below's finding that three ops which
+merely DELEGATE still pay 6968-8375 ns: delegation shares the signature, not the kernel.
+
+**DIFFERENT HARNESS, DIFFERENT ESTIMATOR - do not pool these numbers with the row
+below.** This is min-of-2001 standalone replicas (best case) and reports
+`fnp_multiply_ns=2364`; the row below is a dual-null contract median and reports 7930 for
+the same op. Min-of and median of the same quantity are not comparable, and the workers
+differ (`vmi1149989` here, `vmi1153651` there). What travels between them is the RATIO:
+`fnp_over_numpy=7.880` here against 7.97x there, on different workers and different
+harnesses, which is a genuine independent reproduction of the headline.
+
+**METHOD LIMIT.** Each stage is a replica timed standalone in-process, not an
+instrumentation probe inside the live route, so each stage number is a LOWER BOUND. That
+asymmetry is safe for the conclusion drawn - a lower bound can only understate, and the
+finding is that these stages are SMALL. It would not be safe for the opposite claim, so
+no stage here is declared expensive.
+
+**Retry predicate.** Reopen when a lever targets argument binding in
+`PyUFunc::__call__` (a fast path binding only `x1`/`x2` when no keyword is supplied, or a
+leaner signature), then re-run
+`FNP_BENCH_GROUPS=bench_percall_floor_stage_attribution` on a NAMED worker and compare
+`fnp_multiply_ns` only against a run on that same worker. The four stages above are
+bounded and need not be re-measured.
+
 ## 2026-08-15 - MEASURED (attribution complete): the per-call floor is a PyUFunc::__call__ WRAPPER property (~7-8.4 us on three delegating ops), and the native f64 route COSTS 4 us MORE than delegating at n=256 (`deadlock-audit-cydda`)
 
 `TealOak`. `deadlock-audit-isnd2` measured a ~6.6-7 us floor; this attributes it. Reading the
