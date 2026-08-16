@@ -2162,8 +2162,14 @@ fn measure_binary_ufunc_vs_numpy(
         let checksum = numpy_divide_checksum(&result, n);
         common::ContractObservation { elapsed, checksum }
     };
+    // The row name carries the ACTUAL element count. It used to hardcode "1m",
+    // which was true only while every caller passed DIVIDE_SERIAL_N; the parallel
+    // group measures 1<<22 and the row would otherwise have published
+    // `divide_f64_1m_vs_numpy_route` for a 4,194,304-element array. A row that
+    // misstates its own size cannot be compared to anything, and this family's
+    // ratio is REGIME-DEPENDENT on exactly that size.
     let (effect, _incumbent_null, _candidate_null) = common::run_dual_null_median_ci_contract(
-        &format!("{name}_f64_1m_vs_numpy_route"),
+        &format!("{name}_f64_n{n}_vs_numpy_route"),
         incumbent,
         candidate,
     );
@@ -2355,7 +2361,10 @@ fn bench_route_floor_size_sweep_vs_numpy(_c: &mut Criterion) {
             .extract::<String>()
             .expect("numpy version is a string");
 
-        for exponent in [16u32, 20, 24] {
+        // Down to 2^8 (2 KiB, L1-resident) where the kernel has essentially
+        // nothing to do, so excess_ns there is very nearly the per-call cost
+        // itself rather than an extrapolation (deadlock-audit-isnd2).
+        for exponent in [8u32, 12, 16, 20, 24] {
             let n = 1usize << exponent;
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");
