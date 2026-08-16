@@ -54,10 +54,23 @@ fn run_ripgrep(pattern: &str, extra_globs: &[&str]) -> usize {
 }
 
 /// Default ripgrep helper used by the stub-marker / TODO / unimplemented tests.
-/// Excludes the `fuzz/` tree and this test file itself (the patterns it
-/// matches against would otherwise self-match).
+/// Excludes the `fuzz/` tree and the two GATE FILES that necessarily quote the
+/// very markers they enforce, which would otherwise self-match.
+///
+/// `ledger_hygiene.rs` earned its exclusion the hard way: its worker/harness
+/// provenance gates define a `PLACEHOLDERS` list (`unavailable`, `unknown`,
+/// `n/a`, ...) so a row cannot satisfy them with a non-answer, and the doc
+/// comments explaining that rule used the word "placeholder" in prose. That
+/// turned `no_stub_comments` red on main for a false positive — the file
+/// contains no stub code, it contains a definition OF placeholders. Excluding a
+/// second gate file for the same self-match reason is not a weakening of the
+/// stub rule; renaming the concept to dodge a grep would have been the worse
+/// change.
 fn grep_pattern(pattern: &str) -> usize {
-    run_ripgrep(pattern, &["!fuzz/", "!codebase_hygiene.rs"])
+    run_ripgrep(
+        pattern,
+        &["!fuzz/", "!codebase_hygiene.rs", "!ledger_hygiene.rs"],
+    )
 }
 
 #[test]
@@ -193,5 +206,66 @@ fn no_arch_intrinsics_in_crate_sources() {
     assert_eq!(
         count, 0,
         "found {count} core/std::arch intrinsic references (excluding is_x86_feature_detected!) — use portable safe SIMD or scalar fallbacks instead"
+    );
+}
+
+/// A ufunc-named `#[pyfunction]` must never be REGISTERED under a name that
+/// `fnp_python` also binds to a `PyUFunc` object.
+///
+/// Seventeen ops in `fnp-python` carry both: an `#[allow(dead_code)]`
+/// `#[pyfunction]` (e.g. `fn divide`) and `m.add("divide", Py::new(py, PyUFunc {
+/// .. })?)`. The module attribute wins, so the pyfunction body is unreachable from
+/// Python. That is fine as long as it stays unregistered — the danger is the
+/// reverse: those bodies LOOK like optimisation targets
+/// (`native_binary_divide_or_passthrough` copies both operands and scans the whole
+/// divisor, roughly 3x NumPy's traffic) while moving no measured number. It has
+/// already cost two reading cycles, the second while hunting the live 1.16-1.22x
+/// `fnp.divide` deficit against `numpy.divide`. Beads `deadlock-audit-uxkqi` and
+/// `deadlock-audit-su0i6`.
+///
+/// This test fails if anyone wires one of them up for real, which would make the
+/// same name resolve two ways depending on registration order and silently change
+/// which code the benchmarks measure.
+#[test]
+fn no_ufunc_shadowed_pyfunction_is_registered() {
+    const UFUNC_BOUND_NAMES: [&str; 20] = [
+        "add",
+        "bitwise_and",
+        "bitwise_or",
+        "bitwise_xor",
+        "divide",
+        "equal",
+        "floor_divide",
+        "greater",
+        "greater_equal",
+        "less",
+        "less_equal",
+        "logical_and",
+        "logical_or",
+        "logical_xor",
+        "maximum",
+        "minimum",
+        "multiply",
+        "not_equal",
+        "power",
+        "subtract",
+    ];
+
+    let mut registered: Vec<&str> = Vec::new();
+    for name in UFUNC_BOUND_NAMES {
+        // `wrap_pyfunction!(divide, m)` is the only way a pyfunction reaches the
+        // module, so its absence is what makes the shadowed body unreachable.
+        let pattern = format!(r"wrap_pyfunction!\(\s*{name}\s*,");
+        if run_ripgrep(&pattern, &["!fuzz/", "!codebase_hygiene.rs"]) > 0 {
+            registered.push(name);
+        }
+    }
+
+    assert!(
+        registered.is_empty(),
+        "these ops are bound as PyUFunc objects AND registered as pyfunctions, so the \
+         attribute now resolves by registration order and the benchmarks may be measuring \
+         a different body than the one you read: {registered:?}. Either drop the \
+         wrap_pyfunction! call, or remove the PyUFunc binding — do not ship both."
     );
 }

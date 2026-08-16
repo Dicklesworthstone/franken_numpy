@@ -97629,7 +97629,29 @@ fn conj(
         .unbind())
 }
 
-// Arithmetic aliases / ufunc variants
+// Arithmetic aliases / ufunc variants.
+//
+// UNREACHABLE FROM THE PYTHON SURFACE — DO NOT OPTIMISE THESE. Every `#[pyfunction]`
+// below carries a dead-code allow attribute because it is never registered: `grep -c
+// 'wrap_pyfunction!(divide'` returns 0, and the module attribute of the same name is
+// bound to a UFUNC OBJECT instead, `m.add("divide", Py::new(py, PyUFunc { kind:
+// UFuncKind::Divide })?)`. A call to `fnp.divide(a, b)` therefore lands in
+// `PyUFunc::__call__`, which routes f64 through the zero-copy
+// `try_zerocopy_f64_binary` — it never extracts and never pre-scans the divisor.
+// Seventeen names are shadowed this way: add, bitwise_and, bitwise_or, bitwise_xor,
+// divide, equal, floor_divide, greater, greater_equal, less, less_equal, logical_and,
+// logical_or, logical_xor, maximum, minimum, multiply, not_equal, power, subtract —
+// see `no_ufunc_shadowed_pyfunction_is_registered` in fnp-conformance's
+// `codebase_hygiene.rs`, which fails CI if one of these is ever wired up for real.
+//
+// This matters because the bodies below look like prime optimisation targets and are
+// not. `native_binary_divide_or_passthrough` calls `extract_precise_numeric_array`
+// twice (each COPIES the whole array into a Vec) and then scans the entire divisor in
+// `contains_zero_divisor` — roughly 3x NumPy's memory traffic. Speeding that up moves
+// no measured number. It has already cost two reading cycles; the second was while
+// hunting the live 1.16-1.22x `fnp.divide` deficit against `numpy.divide`
+// (`deadlock-audit-su0i6`), whose remaining gap is in the zero-copy kernel's
+// result-buffer classifier, not here. Tracked by `deadlock-audit-uxkqi`.
 #[allow(dead_code)]
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
