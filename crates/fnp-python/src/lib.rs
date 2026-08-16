@@ -458,10 +458,16 @@ impl PyUFunc {
                 } else {
                     false
                 };
+                // The f64 question is answered by one cheap `dtype.char` read per operand
+                // - NOT by `numpy_dtype_is_f64`, which imports numpy and runs a full `asarray`
+                // round-trip PER OPERAND. On this path that cost was paid only to decline:
+                // `divide` at n=256 sits below `F64_DIV_NATIVE_MIN_LEN` and delegates, and
+                // its measured excess (471 ns) was more than double `multiply`'s (220 ns),
+                // which skips this block entirely because `Multiply` maps to `None` above.
                 if !zero_divisor
+                    && dtype_char_of(a) == Some('d')
+                    && dtype_char_of(b) == Some('d')
                     && f64_binary_route_is_worth_taking(op, a)
-                    && numpy_dtype_is_f64(py, a)
-                    && numpy_dtype_is_f64(py, b)
                     && let Some(out_val) = try_zerocopy_f64_binary(py, a, b, op)?
                 {
                     return Ok(out_val);
@@ -9657,6 +9663,30 @@ fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
 /// Delegating is safe by construction: it is the incumbent's own implementation,
 /// so the values are NumPy's and the FE-hazard deferral question does not arise.
 const F64_DIV_NATIVE_MIN_LEN: usize = 1 << 14;
+
+/// The dtype typechar of an operand, read directly and cheaply (`deadlock-audit-ei9jz`).
+///
+/// WHY THIS EXISTS: `numpy_dtype_is_f64` answers the same question by round-tripping the
+/// operand through `numpy.asarray` - `py.import("numpy")`, a full `asarray` CALL, then
+/// `dtype`, `kind` (extracted into a heap `String`) and `itemsize`. That is ~6 Python
+/// operations INCLUDING an array conversion, per operand, twice per call, purely to
+/// discover that a plain f64 ndarray is a plain f64 ndarray. On the delegating path it is
+/// paid only to DECLINE.
+///
+/// OUTCOME-EQUIVALENT, and strictly earlier: the asarray form answers `true` for things
+/// that are not ndarrays at all (a Python list of floats converts), but every caller that
+/// acts on the answer then requires an exact ndarray and a buffer, so such an input
+/// declines a few operations later regardless. Reading `dtype.char` declines it
+/// immediately instead. `f64_gate_declines_non_ndarray_and_non_f64` pins that the observable
+/// result is unchanged for lists, f32 and f64.
+fn dtype_char_of(value: &Bound<'_, PyAny>) -> Option<char> {
+    let py = value.py();
+    value
+        .getattr(intern!(py, "dtype"))
+        .and_then(|dtype| dtype.getattr(intern!(py, "char")))
+        .and_then(|c| c.extract::<char>())
+        .ok()
+}
 
 fn f64_binary_route_is_worth_taking(op: BinaryOp, a: &Bound<'_, PyAny>) -> bool {
     if !matches!(op, BinaryOp::Div) {
@@ -110371,6 +110401,78 @@ mod tests {
                 ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
                 theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
                 "cached descriptor must leave the native f64 divide bytes unchanged"
+            );
+            Ok(())
+        });
+    }
+
+    /// The f64 gate must decline the same inputs it declined before (`deadlock-audit-ei9jz`).
+    ///
+    /// The gate used to ask `numpy_dtype_is_f64`, which round-trips each operand through
+    /// `numpy.asarray`. That answers TRUE for things that are not ndarrays - a Python list
+    /// of floats converts - so the route entered the block and declined a few operations
+    /// later, at the exact-ndarray or buffer check. Reading `dtype.char` answers FALSE for
+    /// the list and declines immediately.
+    ///
+    /// The two paths must be OUTCOME-equivalent, and only a result comparison can show it:
+    /// a wrong narrowing here would not raise, it would send an input down a different
+    /// route and could return a differently-typed or differently-valued array. This checks
+    /// the three classes that cross the gate differently - a list (no dtype at all), f32
+    /// (dtype present, wrong char) and f64 above the native threshold (engages) - against
+    /// NumPy's own answer.
+    #[test]
+    fn f64_gate_declines_non_ndarray_and_non_f64() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_f64_gate")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("divide")?;
+            let theirs = numpy.getattr("divide")?;
+
+            // 1) Python lists carry no `dtype` at all.
+            let la = vec![1.0_f64, 2.0, 3.0];
+            let lb = vec![2.0_f64, 4.0, 8.0];
+            assert_eq!(
+                repr_string(&ours.call1((la.clone(), lb.clone()))?),
+                repr_string(&theirs.call1((la, lb))?),
+                "a list pair must produce numpy's own result whichever way the gate declines"
+            );
+
+            // 2) float32: dtype present, wrong typechar.
+            let n = F64_DIV_NATIVE_MIN_LEN.max(4096);
+            let f32_kwargs = PyDict::new(py);
+            f32_kwargs.set_item("dtype", "float32")?;
+            let a32 = numpy.call_method("arange", (n,), Some(&f32_kwargs))?;
+            let b32 = numpy.call_method("full", (n, 7.5_f32), Some(&f32_kwargs))?;
+            assert_eq!(
+                ours.call1((&a32, &b32))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                theirs
+                    .call1((&a32, &b32))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                "float32 must decline the f64 block and still match numpy byte for byte"
+            );
+
+            // 3) float64 above the native threshold: the gate must still ADMIT this, or the
+            //    narrowing has silently disabled the fast path it was meant to speed up.
+            let a64 = numpy
+                .call_method1("arange", (n,))?
+                .call_method1("astype", ("float64",))?;
+            let b64 = numpy.call_method1("full", (n, 7.5_f64))?;
+            assert_eq!(
+                ours.call1((&a64, &b64))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                theirs
+                    .call1((&a64, &b64))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                "float64 above the gate must stay byte-identical to numpy"
             );
             Ok(())
         });
