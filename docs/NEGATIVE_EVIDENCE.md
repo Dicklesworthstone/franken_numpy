@@ -506,6 +506,53 @@ generality. (3) The next named lever is `deadlock-audit-t4lri`: `PyUFunc::__call
 nine-parameter signature, the largest never-priced stage of the remaining ~1000 ns excess.
 AGENT_NAME=RedLynx.
 
+## 2026-08-16 - AUDIT COMPLETE, THE DEFECT WAS NOT SYSTEMIC: exactly TWO of 247 vs-NumPy groups pair a Rust replica against NumPy, one was the known defect (now fixed) and the other was correct by design (`deadlock-audit-48by6`)
+
+`SlateHeron`. I filed `48by6` as P0 on the assumption that an allocation asymmetry found in one group
+was structural. Enumerated build-free across all bench files: **it was not**. Recording that the
+alarming version of my own bead was wrong is the point of this row.
+
+**Campaign result class:** maintenance-diagnostic
+
+```
+total bench groups                                     273
+groups that time a NumPy callable                      247
+groups whose CANDIDATE is a Rust replica handed a &mut buffer   2
+```
+
+| group | status |
+|---|---|
+| `bench_maximum_arms_vs_numpy` | WAS the defect; fixed in `e5d5a67d` — incumbent now gets `numpy.empty_like` + `out=`, neither side allocates |
+| `bench_divide_accumulate_isolation_vs_numpy` | correct by construction (`b0107749`) — incumbent given a preallocated `out=` deliberately |
+| `bench_f64_exp_log_probe` | flagged, then cleared: its `vec![0.0; n]` zero-init is a DELIBERATE handicap, stated in-source, and it biases AGAINST us — a win it reports is understated |
+
+The other 245 vs-NumPy groups call the real `fnp` route, which allocates its output via `numpy.empty`
+exactly as NumPy does. Both arms pay the buffer, so the asymmetry cannot arise there by construction.
+
+**WHY THE P0 FRAMING WAS WRONG.** I generalised from one instance to "the defect is structural, not
+specific to `maximum`" without counting. The mechanism reasoning was right and the fix was right —
+`e5d5a67d` landed within minutes — but the SCOPE claim was asserted, not measured, and it was the
+part that set the priority. One confirmed instance is a bug; it is not an epidemic until someone
+enumerates.
+
+**METHOD, AND ITS LIMITS, because this audit is only as good as its detector.** Groups were split on
+`fn bench_*` and classified by whether a bench-local replica is handed a `&mut` buffer in the body.
+Known limits: (1) my first detector MISSED the one confirmed case, because a peer had already fixed
+it — a detector that cannot find the known instance is worthless, which is why the pass was redone;
+(2) it matched a scalar predicate helper, `bench_divide_fast_accepts_without_fp_error`, as a false
+positive from body-bleed — it is not a registered group (registration count 0); (3) it keys on the
+`(&a, &b, &mut out)` call shape and would MISS a replica whose loop is written inline in the closure
+or that takes buffers differently. The 2-of-247 figure is a floor on the clean groups, not a proof of
+zero.
+
+RETRY PREDICATE: do not re-run this enumeration for its own sake — it is done and the count is
+recorded. Re-open only if a group is added whose candidate is a Rust replica, and the cheap standing
+check for that is `set_item("out"` present whenever a bench-local replica appears in the same group.
+The one item this does NOT discharge is re-deciding `deadlock-audit-hzl1w` on corrected numbers: the
+existing ELF predates `e5d5a67d`, so the fixed maximum arms have never been run. That needs a build
+and is blocked by the freeze.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - INVALIDATES A SHIPPED DECISION: `bench_maximum_arms_vs_numpy` compares an ALLOCATION-FREE replica against an ALLOCATING NumPy call - the same op reads 2.43x WIN there and 0.91x LOSS on the real route, same host, same ELF, same session (`deadlock-audit-48by6`; the `deadlock-audit-hzl1w` decision rests on the flattered number)
 
 `SlateHeron`. Two groups in ONE binary disagree about `maximum` by 2.7x in the ratio. That cannot
