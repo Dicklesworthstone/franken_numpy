@@ -9,6 +9,67 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - REPLICATED: `add` IS the worst cell (3.633x then 3.808x) - but the "495 ns op-dependent spread" I banked one commit ago does NOT replicate and is partly CORRECTED here (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. The worst-cell claim had been measured exactly once. Given this session already produced
+a same-host cell that reversed on a second run, I re-ran it rather than re-banking it. The ranking
+holds; one of my own secondary claims does not.
+
+**Campaign result class:** incumbent-loss
+
+```
+PERCALL_FLOOR n=256 worker=thinkstation1 numpy_version=2.4.3  elf 4e95267a...  (both runs)
+  harness=common::run_dual_null_median_ci_contract  (ABBAABBA, 41 rounds, min-of-3)
+
+            run 1                                run 2
+  add       0.275225  numpy 526 fnp 1898 exc 1372   0.262606  numpy 401 fnp 1533 exc 1132
+  subtract  0.278898  numpy 416 fnp 1492 exc 1076   0.267225  numpy 406 fnp 1523 exc 1117
+  divide    0.319027  numpy 446 fnp 1393 exc  947   0.316066  numpy 420 fnp 1332 exc  912
+  multiply  0.324240  numpy 421 fnp 1298 exc  877   0.314220  numpy 406 fnp 1293 exc  887
+```
+
+All four cells `DECIDABLE_REGRESSION` in both runs. **Run 2's eight A/A nulls ALL straddle unity** —
+including `subtract`'s candidate null, which was the one defective null in run 1 (bias 0.003374). Its
+magnitude is therefore better supported now than when I flagged it.
+
+**WHAT REPLICATES: `add` is the worst vs-incumbent cell**, at 3.633x then **3.808x** slower. The
+ordering is identical across both runs — add worst, then subtract, then divide/multiply. The
+worst-cell claim stands and is now measured twice.
+
+**WHAT DOES NOT REPLICATE, AND IT IS MY OWN CLAIM FROM ONE COMMIT AGO.** `daf72dd6` called a "495 ns
+spread across ops that supposedly take an identical path" the finding worth more than the headline.
+Re-measured:
+
+| gap | run 1 | run 2 |
+|---|---|---|
+| add − multiply excess | 495 ns | **245 ns** |
+| add − subtract excess | 296 ns | **15 ns** |
+
+The add-versus-subtract difference collapses from 296 ns to 15 ns, so **the monotonic four-op spread I
+described is not a real structure** — much of it was run-to-run variation concentrated in the `add`
+cell, whose absolute numbers moved most between runs (fnp 1898 → 1533, numpy 526 → 401).
+
+**WHAT SURVIVES OF IT, in weaker and better-specified form:** there are TWO clusters, not a gradient.
+`{add, subtract}` cost 1076-1372 ns of excess and `{multiply, divide}` cost 877-947 ns, in BOTH runs,
+with no overlap between the clusters across four measurements. That ~200-400 ns cluster gap is the
+replicated part; the within-cluster ordering is noise and must not be quoted.
+
+**THE METHODOLOGICAL POINT, which is the reason this row exists:** ratios here are stable to ~5%
+across runs, but DERIVED DIFFERENCES between cells are not — `excess_ns` is `fnp_ns − numpy_ns`, and
+differencing two of those compounds the instability. This is the third time today a subtraction of
+nearly-equal measured quantities has produced a number that did not survive re-measurement (the others
+being `wrapper_ns` at 2^20 and `divide_specific_excess_ns`). **A single-run difference-of-differences
+should not be banked as a finding**, and I banked one.
+
+bench_elf_sha256=4e95267adbfb12897b831b42e832a81666b3636f36a5baf0a42a50384d3db904, identical binary
+for both runs. Built from COMMITTED source: zero files under `crates/` changed since the build, tree
+clean. host=thinkstation1 5975WX 32c/64t governor=powersave, rayon_pool_threads=64.
+
+RETRY PREDICATE: the worst-cell ranking is settled — do not re-run it a third time. Before quoting any
+cell-to-cell DIFFERENCE from this family, require two independent invocations to agree to within the
+smaller of 20% or 100 ns; neither of my two op-spread numbers would have passed that bar.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - THE TRUE WORST vs-INCUMBENT CELL IS `add`, NOT `multiply`: 3.633x SLOWER at n=256 with PERFECT nulls - and three ops that all delegate differ by 600 ns in OUR cost (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. I banked `multiply` at n=256 as my worst ratio last turn. It is not the worst. Sweeping
