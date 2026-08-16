@@ -1252,6 +1252,10 @@ fn main() {
             "bench_divide_fe_hazard_fused_parallel",
             bench_divide_fe_hazard_fused_parallel,
         ),
+        (
+            "bench_divide_vs_numpy_incumbent",
+            bench_divide_vs_numpy_incumbent,
+        ),
     ]);
 }
 
@@ -1987,5 +1991,120 @@ fn bench_divide_fe_hazard_fused_parallel(_c: &mut Criterion) {
         assert!(!hazard, "operands must be hazard-free for this measurement");
         let checksum = divide_checksum(&share_out);
         common::ContractObservation { elapsed, checksum }
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// fnp.divide vs numpy.divide — deadlock-audit-su0i6
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every other divide row in this file is maintenance-self-speedup: our own code
+// before vs after. This is the only arm that asks whether the route we have been
+// optimising is ahead of or behind the incumbent, so it is the only one whose
+// number may ever be quoted against NumPy — and only if it clears the
+// incumbent-win contract, which is why the dispatch and parity traps below are
+// checked at runtime rather than assumed.
+fn bench_divide_vs_numpy_incumbent(_c: &mut Criterion) {
+    let n = DIVIDE_SERIAL_N;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        let ours = module.getattr("divide").expect("fnp.divide");
+        let theirs = numpy.getattr("divide").expect("numpy.divide");
+        // TRAP 1 (dispatch). franken_networkx published a 2.6x whose baseline was
+        // already their own code. Assert identity at runtime, inside the measured
+        // binary, before any timing.
+        assert!(
+            !ours.is(&theirs),
+            "fnp.divide IS numpy's object — there is no candidate arm here"
+        );
+        assert!(
+            numpy
+                .getattr("__name__")
+                .expect("numpy.__name__")
+                .extract::<String>()
+                .expect("numpy name is a string")
+                == "numpy",
+            "the incumbent module must be genuine numpy"
+        );
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        // TRAP 2 (parity). Both arms must compute the same thing, or the ratio is
+        // between two different jobs. Checked once up front on the real results,
+        // and again every round by the contract's cross-arm checksum assertion.
+        let ours_probe = ours.call1(&args).expect("fnp.divide probe");
+        let theirs_probe = theirs.call1(&args).expect("numpy.divide probe");
+        let ours_checksum = numpy_divide_checksum(&ours_probe, n);
+        let theirs_checksum = numpy_divide_checksum(&theirs_probe, n);
+        assert_eq!(
+            ours_checksum, theirs_checksum,
+            "fnp.divide and numpy.divide disagree on these operands — fix parity before timing"
+        );
+
+        let incumbent = || {
+            let started = Instant::now();
+            let result = theirs.call1(&args).expect("numpy.divide");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let candidate = || {
+            let started = Instant::now();
+            let result = ours.call1(&args).expect("fnp.divide");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+
+        // Ratio is incumbent/candidate, so ABOVE 1.0 means we are faster. The dual
+        // null runs a numpy/numpy A/A and an fnp/fnp A/A, so a verdict has to clear
+        // BOTH envelopes rather than one.
+        let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_vs_numpy",
+            incumbent,
+            candidate,
+        );
+        println!(
+            "DIVIDE_VS_NUMPY n={n} numpy_version={numpy_version} worker={} \
+             harness=common::run_dual_null_median_ci_contract rounds={} \
+             incumbent_median_ns={:.1} candidate_median_ns={:.1} ratio_median={:.6} \
+             ratio_ci95=[{:.6},{:.6}] incumbent_null_median={:.6} candidate_null_median={:.6} \
+             faster_than_numpy={} checksum={:016x}",
+            measurement_worker(),
+            common::CONTRACT_ROUNDS,
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            incumbent_null.ratio_median,
+            candidate_null.ratio_median,
+            effect.ratio_ci_low > 1.0,
+            effect.checksum,
+        );
     });
 }
