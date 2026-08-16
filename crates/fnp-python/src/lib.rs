@@ -449,24 +449,6 @@ impl PyUFunc {
                     return Ok(out_val);
                 }
             }
-            // COMPLEX multiply / divide (complex128 & complex64): numpy runs both single-threaded
-            // and compute-heavy. fnp had no complex binary path, so they delegated. Native parallel
-            // FMA multiply / Smith divide is bit-identical (verified vs numpy incl specials); divide
-            // defers on a zero complex divisor so numpy's div-by-zero recovery surfaces. Multiply is
-            // NOT in the f64 binop set above (f64 mul is SIMD-bound, no parallel win), so this is
-            // the only native complex multiply path.
-            if matches!(self.kind, UFuncKind::Multiply | UFuncKind::Divide) {
-                let cop = if matches!(self.kind, UFuncKind::Multiply) {
-                    ComplexBinOp::Multiply
-                } else {
-                    ComplexBinOp::Divide
-                };
-                if let Some(out_val) =
-                    try_zerocopy_complex_binary(py, numpy, x1.bind(py), x2.bind(py), cop)?
-                {
-                    return Ok(out_val);
-                }
-            }
             // ONE dtype sniff for the whole probe run below (`deadlock-audit-v46rn`).
             // Hoisted ABOVE the first gated probe so every gate can read it.
             // ONE fetch serving every gate below. `kind` costs one extra getattr here and
@@ -495,6 +477,31 @@ impl PyUFunc {
                 Some((kind, _)) => kind == 'M' || kind == 'm',
                 None => true,
             };
+            // `try_zerocopy_complex_binary` declines unless BOTH operands carry kind
+            // 'c', so a non-complex x1 guaranteed a decline there too.
+            let x1_is_maybe_complex = match x1_dtype_probe {
+                Some((kind, _)) => kind == 'c',
+                None => true,
+            };
+
+            // COMPLEX multiply / divide (complex128 & complex64): numpy runs both single-threaded
+            // and compute-heavy. fnp had no complex binary path, so they delegated. Native parallel
+            // FMA multiply / Smith divide is bit-identical (verified vs numpy incl specials); divide
+            // defers on a zero complex divisor so numpy's div-by-zero recovery surfaces. Multiply is
+            // NOT in the f64 binop set above (f64 mul is SIMD-bound, no parallel win), so this is
+            // the only native complex multiply path.
+            if x1_is_maybe_complex && matches!(self.kind, UFuncKind::Multiply | UFuncKind::Divide) {
+                let cop = if matches!(self.kind, UFuncKind::Multiply) {
+                    ComplexBinOp::Multiply
+                } else {
+                    ComplexBinOp::Divide
+                };
+                if let Some(out_val) =
+                    try_zerocopy_complex_binary(py, numpy, x1.bind(py), x2.bind(py), cop)?
+                {
+                    return Ok(out_val);
+                }
+            }
 
             // f64 floor_divide: numpy's DOUBLE npy_floor_divide loop is single-threaded
             // and compute-heavy (fmod + floor + correction per element, ~300ms@8M on hz1;
@@ -110100,6 +110107,36 @@ mod tests {
                 );
             }
 
+            // The COMPLEX gate, same shape and the same disengagement risk: complex64
+            // and complex128 must still ADMIT `try_zerocopy_complex_binary`, or the
+            // native complex multiply/divide route dies silently while NumPy keeps
+            // returning correct complex answers.
+            let complex_sniff = |value: &Bound<'_, PyAny>| -> bool {
+                match value.getattr("dtype") {
+                    Ok(dtype) => match dtype.getattr("kind").and_then(|k| k.extract::<char>()) {
+                        Ok(kind) => kind == 'c',
+                        Err(_) => true,
+                    },
+                    Err(_) => true,
+                }
+            };
+            for name in ["complex128", "complex64"] {
+                let arr = numpy.call_method1("zeros", (4,))?;
+                let arr = arr.call_method1("astype", (numpy.getattr(name)?,))?;
+                assert!(
+                    complex_sniff(&arr),
+                    "{name} must ADMIT the complex probe — if this fails the native \
+                     complex multiply/divide route is silently disengaged"
+                );
+            }
+            for name in ["float64", "float32", "int64", "float16"] {
+                let arr = numpy.call_method1("zeros", (4,))?;
+                let arr = arr.call_method1("astype", (numpy.getattr(name)?,))?;
+                assert!(
+                    !complex_sniff(&arr),
+                    "{name} can never satisfy the complex probe, so it must be skipped"
+                );
+            }
             // CONSERVATIVE FALLBACK: an operand with no `dtype` at all must NOT be
             // skipped by EITHER gate. A sniff that returned false here would skip probes
             // for inputs it never inspected, which is the one way this could alter a
@@ -110114,6 +110151,10 @@ mod tests {
             assert!(
                 temporal_sniff(&list),
                 "an operand without a dtype must NOT be skipped by the temporal gate either"
+            );
+            assert!(
+                complex_sniff(&list),
+                "an operand without a dtype must NOT be skipped by the complex gate either"
             );
 
             // And the skip must leave answers alone on the op it actually gates.

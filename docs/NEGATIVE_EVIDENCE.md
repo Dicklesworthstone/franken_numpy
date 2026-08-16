@@ -19,6 +19,70 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - MEASURED (two-gate state) + CERTIFICATION DEFERRED UNDER LOAD: `multiply` 3.174x -> 2.886x, and `add`'s probe chain is now EMPTY while `multiply`'s is not (`deadlock-audit-v46rn`)
+
+`SlateHeron`. Two separate things, kept apart deliberately: a partition measured under recorded low
+load, and a third gate landed as code whose certification was DEFERRED because the host went busy.
+
+**Campaign result class:** maintenance-self-speedup (measured part) + operational (deferred part)
+
+### 1. MEASURED — partition of the two-gate build, load recorded
+
+**LOADAVG observed with `/proc/loadavg`:** `before = 10.05 / 14.86 / 21.87`,
+`after = 10.05 / 14.86 / 21.87`. Both ends well under the ~30 threshold; unchanged across the run.
+
+```
+PERCALL_FLOOR_PARTITION n=256 op=multiply worker=thinkstation1 numpy_version=2.4.3
+  elf a5aca8c972da9b4a3eb8b032e390e5c887efef1455ffc4eb9e0406503cce07ed  (f16 + timedelta gates)
+  fnp_multiply_ns=1212  numpy_multiply_ns=420  kwargs_overhead_ns=541
+  probe_chain_ns=451  wrapper_residual_ns=341
+  probe_chain_share=0.372  wrapper_residual_share=0.281  fnp_over_numpy=2.886
+```
+
+| | pre-gate | two-gate |
+|---|---|---|
+| fnp_multiply_ns | 1333 | **1212** |
+| probe_chain_ns | 521 | **451** |
+| wrapper_residual_ns | 392 | **341** |
+| fnp_over_numpy | 3.174 | **2.886** |
+
+**THE STRUCTURAL FINDING: `add` and `multiply` no longer have the same probe chain.** Reading the
+guards, `add`'s chain is now EMPTY — the complex probe is guarded `Multiply | Divide`, the three
+floor_divide probes are guarded `FloorDivide`, and the f16 and timedelta probes are gated by the
+sniff. That is why the second gate paid 3x the first on `add` (≈360 ns vs 176 ns): it removed the LAST
+probe on that op's path. `multiply` still pays 451 ns of chain because the complex probe runs for it.
+So the per-call floor is NOT one constant shared across ops, as the earlier floor rows assumed — it is
+op-dependent through the kind guards, and the remaining chain cost is concentrated in whichever probes
+a given op's `UFuncKind` still admits.
+
+### 2. LANDED BUT UNMEASURED — the complex gate, certification deferred
+
+`try_zerocopy_complex_binary` declines unless BOTH operands carry kind 'c'
+(`is_ok_and(|kind| kind == 'c')` on each), so a non-complex x1 always meant a decline. It is now gated
+on the same hoisted sniff, which had to move ABOVE the complex probe's call site to do it.
+
+**NO RATIO IS CLAIMED FOR THIS GATE.** Certification was deferred under the load protocol: `uptime`
+read **38.33 / 37.12 / 29.19** immediately after the build and **75.59 / 59.74 / 39.78** by the end of
+the turn, against a ~30 threshold. The top consumers were another project's `rustc` and two
+`smartedgar` processes, not this pane. Per the standing rule, a failure to certify under load is NOT a
+loss and is not recorded as one — the code is landed, gated, and carries no number.
+
+Gates on the three-gate build: `cargo test -p fnp-python --lib f16_probe_skip` 1 passed 0 failed,
+`cargo clippy -p fnp-python --all-targets` exit 0, `rustfmt --check` exit 0, release build exit 0 with
+zero `[RCH]` lines. The engagement test now covers all three gates: complex128/complex64 ADMITTED,
+f64/f32/int64/f16 SKIPPED, dtype-less operand skipped by NONE of the three.
+
+Two ordering defects were caught and fixed before building, both in my own edits: the sniff was
+defined AFTER the complex probe's call site (use-before-definition), and the test asserted
+`complex_sniff(&list)` before `list` was declared.
+
+RETRY PREDICATE: certify the complex gate on `multiply` and `divide` — NOT on `add`, which does not
+run that probe and will show nothing. Require `uptime` under ~30 at both ends and record it. Expected
+effect is bounded by the 451 ns chain measured above, and `deadlock-audit-v46rn`'s ceiling arithmetic
+has already been shown to over-predict the tail: two gates took 75% of a 731 ns ceiling, so the third
+should be sized against the measured 451 ns, not against what remains of the ceiling.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - REPLICATED INDEPENDENTLY, AND THE WORST CELL HAS MOVED: `v46rn` halved `add`/`subtract` but left `multiply`/`divide` untouched, so the campaign's worst ratio is now `divide` at 3.051x, NOT the 2.328x banked for `add` (`deadlock-audit-v46rn`, `deadlock-audit-ei9jz`)
 
 `RedLynx`. Independent certification of the `deadlock-audit-v46rn` lever (`a04d7f64`) on the
