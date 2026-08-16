@@ -22,6 +22,76 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+
+## 2026-08-16 - CONFIRMED: OUR OWN ARM SLOWS THE INCUMBENT IT IS DIVIDED BY - NumPy is 6.26% slower when shadowed by our parallel replica, so every bandwidth-heavy ratio in this ledger is OPTIMISTIC by about that factor (`deadlock-audit-48by6`, `deadlock-audit-322j4`)
+
+`RedLynx`. The hypothesis raised one row ago, tested directly. It holds, it is decidable, and it
+explains the anomaly that produced it.
+
+**Campaign result class:** methodology (a correction that applies ACROSS this ledger, not to one cell)
+
+```
+bench_elf_sha256=a75404207dfc775454fee99a6a825edad266f5b85e7bce75d415371a31427d1c
+harness_source_matches_disk=true  built from committed source, local, zero [RCH] lines,
+  executable path from --message-format=json
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=2^22 f64 (32 MB buffers)
+LOADAVG 1min 12.97 before -> 21.56 after; 5min 31.08 -> 31.80 (the rise is partly this bench)
+harness=common::run_median_ci_contract  ABBAABBA, A/A null first
+
+  isolated_ns   = 4310677     numpy.maximum(a, b, out=) timed ALONE
+  shadowed_ns   = 4560520     the SAME call, timed, after our parallel replica ran
+  interference_ns = 249843
+  ratio=1.062643 ci95=[1.038815,1.073415]  DECIDABLE
+  null=0.992301 ci95=[0.970347,1.008072]  straddles unity, half-width 0.029653
+  candidate_work_is_outside_the_timer=true
+```
+
+**THE RESULT: NumPy's identical call is 6.26% SLOWER when our replica ran immediately before it**
+(worst bound 3.88%). Our arm's work sits OUTSIDE the timer in the shadowed arm — only NumPy's call
+is timed in both — so this is not measurement leakage, it is one arm degrading the machine state
+the other is then measured in. At 2^22 f64 both stream 32 MB, and a 64-thread fan-out leaves the
+memory subsystem and caches in a worse state for whatever runs next.
+
+**IT EXPLAINS THE ANOMALY EXACTLY.** The previous row could not account for NumPy's arm being
+SLOWER on a quiet host — 4232670 -> 4947948 ns (+17%) and 4111546 -> 4610579 ns (+12%). The
+mechanism is now measured: on the quiet host OUR arm was faster (2560894 -> 2182599 ns), so it
+saturated bandwidth harder per unit time and interfered MORE. Quieting the host did not slow NumPy
+down; speeding US up did. That is a genuinely counter-intuitive coupling and it was invisible until
+the candidate's work was moved outside the timer.
+
+**THE CORRECTION, AND ITS SCOPE.** In an interleaved schedule the incumbent's measured cost is
+inflated by this factor, and the ratio is `numpy/fnp`, so **our published ratios are optimistic by
+roughly 6.3% wherever the candidate is bandwidth-heavy at this scale**. Applying it to the two
+affected rows in this ledger:
+
+```
+  maximum parallel  2.258922x  ->  ~2.126x    (worst bound 2.184629 -> ~2.106x)
+  maximum serial    1.226996x  ->  ~1.155x
+  remainder 2^21    6.967606x  ->  ~6.557x
+```
+
+All three remain decidable wins; none of the conclusions flip. The point is that the FIGURES need
+this discount, not that the wins were false.
+
+**WHAT THIS DOES NOT LICENSE.** The 6.26% is measured for ONE candidate (`maximum_parallel`) at ONE
+size (2^22 f64) against ONE incumbent call. It is not a universal constant and must not be applied
+to small-n cells: at n=256 the buffers are 2 KB, nothing streams, and there is no reason to expect
+bandwidth coupling at all. **The n=256 per-call floor rows — the campaign's worst ratio — are
+untouched by this.** Nor does it apply to the delegating route rows, whose candidate IS NumPy plus
+a wrapper rather than an independent kernel.
+
+**THE MARGIN IS REAL BUT NOT LARGE.** The effect distance from unity is 0.0626 against a
+`required_2x_delta` of 0.0593 — it clears the gate by 5.6%, not by orders of magnitude, and the
+null half-width is 0.0297. So 3.88% (the worst bound) is the number to quote when a conservative
+figure is wanted, and 6.26% when a point estimate is.
+
+RETRY PREDICATE: (1) Re-run on a quiet host with a tighter null before treating 6.26% as precise;
+the worst bound 3.88% is safe today. (2) Measure the same way for the OTHER bandwidth-heavy
+candidates before discounting their rows individually — the factor is candidate-specific and this
+row licenses only the three cells named above. (3) Any FUTURE row whose candidate streams large
+buffers should either carry this discount explicitly or run its incumbent isolated; the group is
+`bench_incumbent_interference_from_candidate` and costs one invocation. AGENT_NAME=RedLynx.
+
 ## 2026-08-16 - CODE, UNMEASURED: the parameter-count scaling probe that `deadlock-audit-7ocfa` made the condition of its own reopening - and that `deadlock-audit-t4lri` proposes acting without (`deadlock-audit-t4lri`, `deadlock-audit-7ocfa`)
 
 `SlateHeron`. No certification: the host was rising and unstable all turn. Code only, no ratio.
