@@ -8,6 +8,71 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CONFLICT, DO NOT DROP THE NATIVE DIVIDE PATH YET: two same-host runs with clean nulls disagree IN DIRECTION at 2^20 (0.890373 vs 1.099069) while the kernel SOURCE is byte-identical (`deadlock-audit-q00ev`)
+
+`SlateHeron`. I was asked to decide whether the native f64 divide path survives, on the basis of
+`3470db0f`, which found `delegating_looks_better` TRUE at every size 2^14..2^20. Re-running the same
+group returns the same answer at 2^14, 2^16 and 2^18 — and the OPPOSITE answer at 2^20. **The
+decision cannot be taken on this evidence, and that is the finding.**
+
+**Campaign result class:** maintenance-diagnostic
+
+```
+                      3470db0f (elf d285003d, 13:08)      this run (elf 4e95267a)
+2^20 multiply_ratio            0.992288                        0.990259     <- AGREE
+2^20 divide_ratio              0.890373                        1.106503 / 1.099069  <- OPPOSITE
+2^20 wrapper_ns                    3096                           10084
+2^20 divide_specific_excess_ns   +65294                          -52193
+2^20 delegating_looks_better       true                           false
+```
+
+Both on **worker=thinkstation1**. My two invocations agree with each other (1.106503 then 1.099069,
+both `DECIDABLE_WIN`, effect_ci95=[1.060956,1.121751]), and **all ten A/A nulls straddle unity**
+(`incumbent_null_straddles_unity=true candidate_null_straddles_unity=true` on all five sizes, biases
+≤0.002333). So neither row is internally unstable.
+
+**THE SOURCE IS IDENTICAL, WHICH REMOVES THE EASY EXPLANATION.** Every one of the 33 crate commits
+today touches `crates/fnp-python/benches/`; **none touches `src/`**. The divide kernel that
+`d285003d` measured and the one `4e95267a` measures are the same code. So this is not a peer landing
+a divide fix between the builds.
+
+**WHAT IT LEAVES.** The two ELFs differ, the source does not, and `multiply` — which delegates and is
+therefore insensitive to OUR codegen — AGREES across both runs to within 0.2%, while `divide` — which
+runs native and is sensitive to our codegen — diverges by 24%. That pattern points at the BUILD, not
+the host or the harness, and this ledger already records the hazard by name: `deadlock-audit-ae85t`
+warns that local and remote toolchains here emit DIFFERENT code for identical source (local read 2211
+instructions where every remote build read 2207). My ELF was built locally under the cargo-shim
+bypass with the repo's `+avx2` config; I cannot establish how `d285003d` was built, and that is
+exactly the provenance field a perf row needs and neither of us recorded.
+
+**A SECOND, INDEPENDENT REASON NOT TO TRUST EITHER 2^20 CELL.** `wrapper_ns` at 2^20 is
+`multiply_fnp_ns - multiply_numpy_ns` — a difference of two ~380 000 ns quantities. It reads 3096 in
+one run and 10084 in the other: a 3.3x swing in a derived quantity whose inputs agree to 0.2%.
+`divide_specific_excess_ns` subtracts that noisy term again, which is how it lands at +65294 in one
+run and −52193 in the other. **The derived columns at 2^20 are differences of large nearly-equal
+numbers and carry no useful precision**, whatever the raw ratios do. The group's design is sound at
+small n, where the wrapper is a large fraction of the call; at 2^20 it is measuring cancellation.
+
+**WHAT SURVIVES AND IS SAFE TO ACT ON.** At 2^14, 2^16 and 2^18 both runs agree that delegating is
+cheaper, the effects are large (`divide_specific_excess_ns` 2947 / 4037 / 7164 ns against a method
+null of 114-135 ns), and every null is clean. **The gate `F64_DIV_NATIVE_MIN_LEN = 1 << 14` admits a
+band where the native path does not pay, and raising it is justified today.** What is NOT justified
+is `3470db0f`'s stronger conclusion — dropping the f64 divide native path outright — because that
+rests on the 2^20 cell, which reverses.
+
+**THE METHOD NULL, honestly reported:** the 2^12 cell (both ops delegate, so
+`divide_specific_excess_ns` must be ~0) reads 114 ns and 135 ns across the two runs against a wrapper
+of 917-953 ns. That is not zero. It is 20-60x smaller than the effects at 2^14-2^18, so the sign
+conclusions there hold, but no `divide_specific_excess_ns` below ~135 ns means anything — the same
+floor `3470db0f` set at ~310 ns by the same reasoning.
+
+RETRY PREDICATE: before ANY decision to drop or re-gate the native divide path, settle the 2^20 cell
+by building BOTH halves in the SAME environment and recording the build method as a provenance field
+(`ae85t`'s warning, which this row is the second instance of). Do not re-run the derived columns at
+2^20 expecting resolution — they are cancellation noise; use the raw `divide_ratio` with its CI, which
+is what actually disagrees. And do not quote either 2^20 cell, in either direction, until then.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - MEASURED, THE WORST vs-INCUMBENT CELL ON THE QUIETEST HOST OF THE SESSION: `subtract` at n=256 is 3.596x slower than NumPy (worst bound 3.608x) - and `add`/`subtract` are the SAME cell within resolution, so naming a winner between them over-reads 5 ns (`deadlock-audit-ei9jz`, `deadlock-audit-7xcq2`)
 
 `RedLynx`. The campaign's worst vs-incumbent ratio, re-measured ABBA in one invocation on a
