@@ -4,6 +4,56 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-08-16 - MEASURED, SIGN AGREES ON TWO WORKERS: declining on `dtype.kind` first is 1.353519x cheaper (worst bound) - and it SUPERSEDES the cross-build false positive (`deadlock-audit-bpxn6`)
+
+`TealOak`. `deadlock-audit-80uph` asked whether the complex probe's decline ordering matters and
+could not answer it: measured as a cross-build pair, `vmi1227854` said the reorder was clearly
+better (1.403108 -> 1.333774, disjoint CIs, invariant control arm) and `vmi1152480` said it was
+clearly worse (1.396597 -> 1.428706, also disjoint). Both cannot be true of the code. Its retry
+predicate demanded both arms in ONE binary, two workers, and the sign required to agree. This is
+that measurement.
+
+**Campaign result class:** maintenance-self-speedup
+
+Both orderings are bench-local replicas of the probe's DECLINE path, interleaved in one binary —
+the idiom this file already uses for the divide kernel. Ratio is legacy/dtype_first, so ABOVE 1.0
+means declining on the dtype first is cheaper. The DECISION is folded into the contract checksum,
+so an ordering that decided differently would fail the measurement rather than win it; both were
+also asserted to decline on these f64 operands before any timing.
+
+harness=common::run_dual_null_median_ci_contract, n=256 f64, numpy 2.4.3, profile `release`, both
+nulls on unity in both runs.
+
+run 1  worker=vmi1152480  ratio=1.360065 ci95=[1.353519,1.371287]  legacy_ns=836 dtype_first_ns=612 saved=224 ns  DECIDABLE_WIN
+       bench_elf_sha256=c26d348ff23462f2b145fd89100714d97f0f79490c3bae12e2d096b89041cc23
+run 2  worker=vmi1227854  ratio=1.406250 ci95=[1.375000,1.406250]  legacy_ns=226 dtype_first_ns=160 saved= 66 ns  DECIDABLE_WIN
+       bench_elf_sha256=1b655cafa8189123374b6d65367eb2a7da03d214363f60ee54c4ce4522e06b6b
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 governor=unavailable
+
+**QUOTE THE WORST BOUND: 1.353519x.** The SIGN agrees on both workers and both verdicts are
+decidable, which is what `80uph`'s retry predicate required. The absolute saving does not
+transfer — 224 ns against 66 ns, on a host where the legacy arm itself was 836 ns against 226 —
+so the fraction is the durable quantity and the nanoseconds are worker-scoped, exactly as
+`deadlock-audit-wsd7h` found for the chain as a whole.
+
+**THE METHOD IS THE RESULT HERE.** The cross-build pair did not merely fail to detect the effect:
+on `vmi1152480` it reported the OPPOSITE SIGN, with disjoint CIs, an invariant control arm, and
+nulls on unity — every health indicator a reader would check. The same worker, measured with both
+arms in one binary, now shows dtype-first 1.36x cheaper. So `80uph`'s UNDECIDED verdict stands as
+a true statement about the cross-build METHOD and is superseded on the substantive question by
+this row. Anyone reading `80uph` should read this one.
+
+**WHAT IT DOES NOT CLAIM.** These are replicas of the decline path, not the shipped probe
+end-to-end, so this measures what the sequence of Python operations costs — the same scope limit
+`jw7vk` recorded for the divide kernel replicas. And 66-224 ns is small against a 2000-6000 ns
+delegating call: this is a component result that supports keeping the shipped reorder, not an
+end-to-end lever on the wrapper floor.
+
+RETRY PREDICATE: the remaining delegation overhead is not in this ordering. `wsd7h` bounded the
+whole declined chain at ~40% of a delegating call and this component is a fraction of that; the
+larger remainder sits in PyO3 entry and the delegation tail, and needs its own same-binary control
+rather than another pass at the probes. AGENT_NAME=TealOak.
+
 ## 2026-08-16 - MEASURED (four native f64 binary routes, first op-level rows): `floor_divide` and `power` beat NumPy on every run; `maximum` and `minimum` LOSE and are UNSTABLE - one flipped 0.872 to 0.424 on the SAME worker (`deadlock-audit-4j5ba`)
 
 `TealOak`. Five binary ufuncs take a native f64 route. Only `divide` had an op-level

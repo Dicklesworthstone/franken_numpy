@@ -1309,6 +1309,7 @@ fn main() {
                 "bench_delegating_probe_chain_cost",
                 bench_delegating_probe_chain_cost,
             ),
+            ("bench_probe_decline_ordering", bench_probe_decline_ordering),
         ],
     );
 }
@@ -3311,6 +3312,164 @@ fn bench_delegating_probe_chain_cost(_c: &mut Criterion) {
             effect.arm_a_median_ns - effect.arm_b_median_ns,
             probed_null.ratio_median,
             skipped_null.ratio_median,
+            effect.ratio_ci_low > 1.0,
+            effect.ratio_ci_low,
+        );
+    });
+}
+
+// Replica of the complex probe's DECLINE path in its LEGACY order: prove the
+// operand is an exact ndarray first, then look at the dtype. Returns the decision
+// so the caller can fold it into a checksum.
+#[inline(never)]
+fn probe_decline_legacy_order(
+    numpy: &pyo3::Bound<'_, PyModule>,
+    a: &pyo3::Bound<'_, pyo3::PyAny>,
+    b: &pyo3::Bound<'_, pyo3::PyAny>,
+) -> bool {
+    let Ok(ndarray_type) = numpy.getattr("ndarray") else {
+        return false;
+    };
+    if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
+        return false;
+    }
+    let (Ok(dta), Ok(dtb)) = (a.getattr("dtype"), b.getattr("dtype")) else {
+        return false;
+    };
+    dta.getattr("kind")
+        .and_then(|kind| kind.extract::<char>())
+        .is_ok_and(|kind| kind == 'c')
+        && dtb
+            .getattr("kind")
+            .and_then(|kind| kind.extract::<char>())
+            .is_ok_and(|kind| kind == 'c')
+}
+
+// The same decision in the SHIPPED order: decline on the discriminating dtype
+// first, and only reach the ndarray type check for an operand that is actually
+// complex.
+#[inline(never)]
+fn probe_decline_dtype_first(
+    numpy: &pyo3::Bound<'_, PyModule>,
+    a: &pyo3::Bound<'_, pyo3::PyAny>,
+    b: &pyo3::Bound<'_, pyo3::PyAny>,
+) -> bool {
+    let (Ok(dta), Ok(dtb)) = (a.getattr("dtype"), b.getattr("dtype")) else {
+        return false;
+    };
+    let complex_kinds = dta
+        .getattr("kind")
+        .and_then(|kind| kind.extract::<char>())
+        .is_ok_and(|kind| kind == 'c')
+        && dtb
+            .getattr("kind")
+            .and_then(|kind| kind.extract::<char>())
+            .is_ok_and(|kind| kind == 'c');
+    if !complex_kinds {
+        return false;
+    }
+    let Ok(ndarray_type) = numpy.getattr("ndarray") else {
+        return false;
+    };
+    a.is_exact_instance(&ndarray_type) && b.is_exact_instance(&ndarray_type)
+}
+
+// Both orderings of the complex probe's decline path, interleaved in ONE binary
+// under the dual-null contract (deadlock-audit-bpxn6).
+//
+// This exists because measuring the same question as a cross-build pair produced
+// a false positive that looked entirely healthy: on vmi1227854 the reorder read
+// 1.403108 -> 1.333774 with disjoint CIs and an invariant control arm, and the
+// replication on vmi1152480 REVERSED the sign (1.396597 -> 1.428706, also
+// disjoint). Both cannot be true of the code, so the effect is smaller than the
+// harness's cross-worker spread and only a same-binary A/B can see it
+// (deadlock-audit-80uph).
+//
+// SCOPE: these are replicas of the decline path, not the shipped probe. They
+// measure what the sequence of Python operations costs — the same limitation
+// jw7vk recorded for the divide kernel replicas. That is the question here.
+//
+// Ratio is legacy/dtype_first, so ABOVE 1.0 means declining on the dtype first is
+// cheaper. The DECISION is folded into the checksum, so an ordering that decided
+// differently would fail the contract rather than win it.
+fn bench_probe_decline_ordering(_c: &mut Criterion) {
+    const N: usize = 1 << 8;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+
+        // Both must reach the SAME decision on these f64 operands (decline), or the
+        // two orderings are not the same predicate and the ratio is meaningless.
+        assert!(
+            !probe_decline_legacy_order(&numpy, &a, &b),
+            "f64 operands must decline the complex probe in the legacy order"
+        );
+        assert!(
+            !probe_decline_dtype_first(&numpy, &a, &b),
+            "f64 operands must decline the complex probe in the dtype-first order"
+        );
+
+        let legacy = || {
+            let started = Instant::now();
+            let admitted = probe_decline_legacy_order(&numpy, &a, &b);
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(admitted),
+            }
+        };
+        let dtype_first = || {
+            let started = Instant::now();
+            let admitted = probe_decline_dtype_first(&numpy, &a, &b);
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: u64::from(admitted),
+            }
+        };
+
+        let (effect, legacy_null, dtype_first_null) = common::run_dual_null_median_ci_contract(
+            "probe_decline_ordering_n256",
+            legacy,
+            dtype_first,
+        );
+        println!(
+            "PROBE_DECLINE_ORDERING n={N} numpy_version={numpy_version} \
+             harness=common::run_dual_null_median_ci_contract \
+             arms=legacy_ndarray_first_over_dtype_kind_first same_binary=true \
+             ratio={:.6} ratio_ci95=[{:.6},{:.6}] \
+             legacy_ns={:.1} dtype_first_ns={:.1} saved_ns={:.1} \
+             legacy_null={:.6} dtype_first_null={:.6} \
+             dtype_first_is_cheaper={} worst_bound={:.6}",
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.arm_a_median_ns - effect.arm_b_median_ns,
+            legacy_null.ratio_median,
+            dtype_first_null.ratio_median,
             effect.ratio_ci_low > 1.0,
             effect.ratio_ci_low,
         );
