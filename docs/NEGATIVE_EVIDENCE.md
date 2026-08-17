@@ -32,6 +32,69 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CERTIFIED, AND IT GENERALISES: ALL THREE ~0.91 cells become WINS with `out=` - maximum 1.756669, minimum 1.687567, divide 1.800915 - while divide's SERIAL cell still loses (`deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+
+`SlateHeron`. The two untested cells, run in the same invocation as the two already certified. The
+sign-flip is not specific to `maximum`, and the one cell that does NOT flip says why.
+
+**Campaign result class:** incumbent-win (three cells) + incumbent-loss (one cell), one invocation
+
+**LOADAVG AND CPU MHz, per-run:** before `16.21/17.88/20.85` at **MHz max 4032**, after
+`28.89/20.92/21.74` at **MHz max 4168**. The 1-minute rises during the run because the candidate arm
+is itself rayon-parallel - the benchmark generates the load it is measured under, which is expected
+and is why the pre-run figure is the admission check. All three figures stayed under 30 throughout.
+
+```
+OUT_KWARG_VS_NUMPY worker=thinkstation1 numpy_version=2.4.3
+  harness=common::run_dual_null_median_ci_contract  both_arms_preallocate_their_own_out=true
+  op=divide  n=2^20  ratio=0.787849 ci95=[0.775774,0.798781]  DECIDABLE_REGRESSION
+  op=maximum n=2^22  ratio=1.756669 ci95=[1.713335,1.790754]  DECIDABLE_WIN
+  op=minimum n=2^22  ratio=1.687567 ci95=[1.652335,1.706860]  DECIDABLE_WIN
+  op=divide  n=2^22  ratio=1.800915 ci95=[1.741884,1.836871]  DECIDABLE_WIN
+```
+
+**A/A null control (same invocation):** all eight nulls straddle unity, machine-checked via the
+`*_straddles_unity` fields.
+
+**THE GENERALISATION IS CONFIRMED. All three ~0.91 cells flip:**
+
+| cell | route-level (both allocate) | with `out=` (neither allocates) |
+|---|---|---|
+| maximum 2^22 | 0.907848 LOSS | **1.756669 WIN** |
+| minimum 2^22 | 0.913424 LOSS | **1.687567 WIN** |
+| divide 2^22 | 0.920786 LOSS | **1.800915 WIN** |
+
+`minimum` and `divide`@2^22 had never been tested this way; the previous row deliberately refused to
+transfer `maximum`'s result to them. They were measured, and they flip - so the refusal cost one turn
+and bought a fact instead of an assumption.
+
+**THE CELL THAT DOES NOT FLIP IS THE INFORMATIVE ONE.** `divide` at **2^20** reads 0.787849, still a
+decidable LOSS, while the SAME OP at 2^22 wins 1.800915. The difference is the parallel threshold:
+2^20 is below `BinaryOp::Div`'s `parallel_min` of 2^21, so it runs the serial kernel. **So the flip is
+REGIME-specific, not op-specific** - the parallel arm beats NumPy once it stops allocating; the serial
+arm does not, and its deficit is the accumulate-plus-codegen split measured earlier (96398 / 93987 ns),
+which allocation was never part of.
+
+**WHAT MUST NOW BE RESTATED.** The three ~0.91 rows describe a route that allocates, not a kernel that
+loses. **Read them as "loses WHEN ALLOCATING"** - with the caller's buffer the same kernels are
+1.69-1.80x FASTER than NumPy. The allocation, not the arithmetic, was burying them.
+
+**PER-ARM CPU WITNESS.** Four of the five effect phases ran `same_core=true` with arm clock spreads of
+1.0002-1.0184. **One did not**: the `minimum` cell reports `same_core=false`, arm_a on cpu 10 against
+arm_b on cpu 12, spread **1.0311**. Disclosed rather than buried: a 3.1% clock gap cannot manufacture a
+1.688x win, so the verdict stands, but `minimum`'s magnitude carries that slack and should not be
+quoted to four figures. The other three cells are clean.
+
+bench_elf_sha256=ea160143484b18d509de0cb675de21c55f469dcfed8d224b844d538ba8a3a91c, LOCAL build under
+the exported cargo-shim bypass, zero `[RCH]` lines, no dirty files under `crates/`.
+
+RETRY PREDICATE: the three ~0.91 rows should be edited in place to say "loses when allocating" with a
+pointer here - do NOT leave them reading as kernel losses. Re-run the `minimum` cell for a
+`same_core=true` witness before quoting 1.687567 precisely. The open question this opens is whether the
+same flip applies BELOW the parallel threshold for maximum/minimum, which this row does not test: only
+divide was measured at both sizes.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CORRECTION + FIX: `eac4d567` did NOT change the f32 binary route - a file-wide first-occurrence replace hit the UNARY writer, and my test passed trivially because it exercised the untouched path (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. The f32 binary route is now actually fixed, and the row that claimed it already was is
