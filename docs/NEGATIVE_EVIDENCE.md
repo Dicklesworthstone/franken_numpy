@@ -48571,3 +48571,73 @@ RETRY PREDICATE: do not attempt to lower `F64_ACCUMULATE_NATIVE_MIN_LEN` again �
 decidable regression, not an estimate. The bracketing sizes 2^11 and 2^13 are now permanent in
 `bench_accumulate_size_crossover_vs_numpy` so the next reader sees the crossover directly.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - RECONCILING TWO OF MY OWN ROWS THAT DISAGREE IN SIGN: divide at 2^20 is 1.0038x FASTER as a route and 1.1706x SLOWER as a kernel. Both are fair; they differ in whether ALLOCATION is in the timed region - which means the kernel deficit is being MASKED at route level (`deadlock-audit-6y5wp`, `deadlock-audit-48by6`)
+
+`AzureCarp`. No build. A contradiction between two banked rows, run down to its cause.
+
+**Campaign result class:** reconciliation of two rows + a hypothesis with the measurement that settles it
+
+### The contradiction
+
+```
+  divide, n=2^20, both banked by me this session
+    ROUTE   (bench_divide_size_gate)          ratio 1.003772   -> 1.0038x FASTER than NumPy
+    KERNEL  (numpy-buffer re-take of 0ppym)   ratio 0.854234   -> 1.1706x SLOWER than NumPy
+```
+
+Same operation, same size, opposite sign. One of them being wrong would matter a great deal — the
+route figure is part of what justified raising `F64_DIV_NATIVE_MIN_LEN`.
+
+### Neither is wrong; they time different regions
+
+I checked the harness rather than guessing. `measure_binary_ufunc_vs_numpy`'s incumbent arm is
+`theirs.call1(args)` — **NumPy allocating its own output** — and our arm is `ours.call1(args)`, which
+allocates too. That is a fair ROUTE comparison: allocation on both sides.
+
+The kernel re-take used `numpy.divide(a, b, out=out)` against an in-place Rust loop: **no allocation
+on either side.** Also fair, at the KERNEL level.
+
+So the two rows are answering different questions, and the gate decision is unaffected — it compared
+native-route against delegating-control within one harness, both arms allocating.
+
+### What the difference implies, as a HYPOTHESIS
+
+```
+  route  2^20   numpy 453,094   ours 444,332   ours faster by  8,762 ns
+  kernel 2^20   numpy 354,387   ours 414,859   ours slower by 60,472 ns
+
+  implied allocation cost:  numpy ~98,707 ns    ours ~29,473 ns    ratio ~3.3x
+```
+
+**If that holds, our output allocation is ~3.3x cheaper than NumPy's ufunc output allocation at 2^20,
+and it more than pays for a 60 us kernel deficit.**
+
+**THAT ARITHMETIC IS CROSS-ROW, CROSS-ELF AND CROSS-WINDOW, AND I AM LABELLING IT AS INDICATIVE
+RATHER THAN BANKING IT AS A MEASUREMENT.** It is exactly the subtraction `deadlock-audit-q00ev`
+refused to make for the gate question, and refusing it there was right. Two of the four numbers come
+from different binaries measured hours apart.
+
+### Why it matters even as a hypothesis
+
+**A route-level win does not certify the kernel.** `divide` at 2^20 reads as a win through the route,
+and `deadlock-audit-6y5wp`'s kernel deficit is real underneath it — the two coexist because the
+allocation term is large and runs the other way. Anyone reading "divide wins at 2^20" as evidence
+that the divide kernel is healthy would be wrong, and `6y5wp` should not be closed on a route row.
+
+It also sharpens `deadlock-audit-48by6`, which flagged that timing a Rust replica against an
+ALLOCATING NumPy call flatters us. The same asymmetry appears here with the sign reversed: at ROUTE
+level both sides allocate and we look good; at KERNEL level neither allocates and we look bad. **The
+allocation term is worth more than the entire kernel gap at this size**, so which region a row times
+decides its sign.
+
+COUNTED_MECHANISM: none claimed — this row takes no new measurement. It rests on two banked rows and
+a read of `measure_binary_ufunc_vs_numpy`, which confirms the incumbent arm allocates.
+
+A/A NULL CONTROLS: not applicable; the rows being reconciled carry their own.
+
+RETRY PREDICATE: the settling measurement is divide at 2^20 with BOTH regions timed in ONE invocation
+— route-with-allocation and kernel-with-`out=` — which turns the ~3.3x allocation ratio from
+inference into a number. Until then do not quote 98,707 / 29,473 / 3.3x as measurements. Do not close
+`6y5wp` on the strength of the route row: the kernel deficit it names is real and merely masked.
+AGENT_NAME=AzureCarp.
