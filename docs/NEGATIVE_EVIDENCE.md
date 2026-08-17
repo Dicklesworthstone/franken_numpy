@@ -50182,3 +50182,49 @@ future build - the estimator cannot resolve a 0.15% term against a 10-14% spread
 arithmetic, not tuning. Use the direct `divide_vs_numpy` ratio there instead. The four runs recorded
 here must never be counted toward the sign test; it needs seven fresh QUALIFYING invocations.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - SIGN TEST QUALIFICATION LEDGER, 1 of 7: the host spiked from loadavg 20.40 to 53.15 mid-batch and disqualified three of four invocations. Recording which runs count BEFORE any of them is read, so the sample cannot be assembled to taste (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build. Bookkeeping row, deliberately short. ELF
+`f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (shared-buffer build,
+`release-perf`, `thinkstation1`).
+
+**Campaign result class:** accounting for a pre-registered test that is BLOCKED on host conditions
+
+```
+  run  pre-run loadavg          proj_builds  1min<=5min  CPU MHz   QUALIFIES
+  Q1   20.40 / 20.52 / 18.94         0          yes       2916      YES
+  Q2   26.20 / 21.91 / 19.43         0          NO        2961      no
+  Q3   36.59 / 24.41 / 20.30         0          NO        3993      no
+  Q4   53.15 / 29.58 / 22.13         0          NO        3300      no
+```
+
+The load climb was entirely external - `proj_builds` was 0 before every invocation, so no build of the
+ELF under test was running at any point; other panes took the 1-minute average from 20.40 to 53.15
+inside four runs. Amended rule 1 requires 1-min at or below 5-min at the START of each invocation, so
+Q2-Q4 are disqualified and **the pre-registered sign test stands at 1 of 7.**
+
+**NONE OF Q1-Q4 HAS BEEN READ.** Not the signs, not the ratios. That is deliberate: a sequential test
+whose continuation depends on interim results leaks its own error rate, and the fastest way to turn a
+p = 1/128 design into nothing is to peek, then decide whether to keep going. The accounting is
+therefore written down before the data is, and the six remaining qualifying invocations will be taken
+in later windows and read only when seven exist.
+
+Earlier the same day, four other invocations of this ELF were disqualified for a build running in this
+project; those were used ONLY for the non-preregistered question of whether the buffer fix worked, and
+their signs were likewise not inspected. **Eight disqualified invocations and one qualifying one is the
+honest state of this test.**
+
+COUNTED_MECHANISM: none claimed - this row reports no effect. Its content is an accounting of 4
+invocations of which 1 satisfies the pre-registered preconditions and 3 do not, with the 1-minute
+loadavg rising 20.40 -> 53.15 across them.
+
+A/A NULL CONTROLS: not applicable and not quoted; no measurement in this row has been read.
+
+RETRY PREDICATE: the test needs 6 further QUALIFYING invocations (`proj_builds` = 0 and 1-min <= 5-min
+at the start of each). Do not lower the bar to finish it, do not count Q2-Q4 or the four
+buffer-validation runs, and do not read any of the accumulated output until seven qualifying runs
+exist. If this host never affords seven such windows, the correct outcome is that the `out=` gate
+question is UNDECIDABLE HERE and should be handed to a quieter worker, not answered on a degraded
+sample.
+AGENT_NAME=AzureCarp.
