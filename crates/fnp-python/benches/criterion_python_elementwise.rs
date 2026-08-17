@@ -5950,6 +5950,13 @@ fn restore_target<'py>(
 // DUPLICATE INDICES ON PURPOSE: `at` exists to apply unbuffered accumulation, so with
 // repeated indices its result differs from plain fancy indexing. Indices without duplicates
 // would measure a path that is not what anyone uses `at` for.
+//
+// THE FIRST FORMULA HERE HAD NO DUPLICATES AND THE ASSERT CAUGHT IT. `(rng * 7) % (n / 2)`
+// looks like it should collide and does not: 7 is coprime with the modulus and the range
+// never wraps, so all 64 indices came out distinct. The run aborted rather than publishing
+// a green row for the buffered path. The strided form below takes `m = idx_n / 4` distinct
+// slots and spreads them across the whole target, giving exactly 4 repetitions per slot
+// while still covering 94-100% of the buffer - duplicates AND a realistic scatter.
 fn bench_ufunc_at_percall_floor_vs_numpy(_c: &mut Criterion) {
     Python::initialize();
     Python::attach(|py| {
@@ -5977,7 +5984,8 @@ fn bench_ufunc_at_percall_floor_vs_numpy(_c: &mut Criterion) {
                      ours_target = pristine.copy()\n\
                      theirs_target = pristine.copy()\n\
                      rng = np.arange(idx_n)\n\
-                     idx = (rng * 7 % (n // 2)).astype(np.intp)\n\
+                     m = idx_n // 4\n\
+                     idx = ((rng % m) * (n // m) % n).astype(np.intp)\n\
                      vals = np.arange(idx_n).astype(dt)\n",
                 )
                 .unwrap()
