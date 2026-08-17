@@ -46034,3 +46034,83 @@ attacking it needs the floor lever, not another probe fix. (2) The i64 large cel
 quoted to better than ~1.03-1.06x. (3) Macro-generated probes remain unaudited as a class; this
 one was found by measuring a cell, not by reading the sweep. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - The VOIDED `accumulate` cell gets a VALID row at last: 1.2593x over six runs with 6/6 admissible nulls - and the biased null that voided it did NOT reproduce, which is evidence AGAINST hard-failing on straddle (`deadlock-audit-v46rn`, `deadlock-audit-7xcq2`)
+
+`AzureCarp`. Six runs, no build required.
+
+**Campaign result class:** a cell restored from VOID to measured (still a regression) + a
+false-positive-rate datapoint for the straddle veto
+
+### Why this was owed
+
+`6a87cc68` certified `reduceat` and, in the same invocation, VOIDED `accumulate`: its incumbent A/A
+null read `ci95=[0.993844,0.999316]`, which EXCLUDES unity, and the gate passed the row anyway. That
+left the cell with no admissible number at all. `reduceat`'s wall clock has since been certified one
+row up; `accumulate`'s could not be, because a cell with no valid control has nothing to be compared
+against.
+
+### Six runs, and the void did not reproduce
+
+```
+UFUNC_METHOD_FLOOR method=accumulate n=256 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract  delegates_unconditionally=false
+  bench_elf_sha256=088de5c0b67f816c532fe9e417f78509fa918172a5bc84ddf1ddff3d64d8aefb
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+
+  run   ratio      incumbent A/A null ci95        loadavg              cpu  MHz a/b
+  0   0.798619   [0.996486,1.002831] admissible   27.53/25.26/28.64    -    -
+  1   0.785920   [0.997085,1.000000] admissible   21.63/24.03/28.12   11   4291.0/4291.0
+  2   0.798619   [0.999274,1.002913] admissible   21.63/24.03/28.12    8   4206.0/4205.8
+  3   0.789534   [0.999266,1.003682] admissible   21.63/24.03/28.12    4   4214.4/4214.3
+  4   0.789279   [0.996398,1.000726] admissible   20.94/23.85/28.04    9   4130.6/4130.6
+  5   0.801020   [0.996486,1.000000] admissible   20.94/23.85/28.04   10   3933.3/3937.0
+
+  median 0.794076   min 0.785920   max 0.801020
+  6/6 incumbent nulls admissible, 0/6 excluding unity
+```
+
+**`accumulate` at n=256 is 1.2593x SLOWER than NumPy** (worst run 1.2724x). That is the cell's first
+admissible number since it was voided.
+
+**AND THE VOID DID NOT REPRODUCE — 0 of 6.** The biased null in `6a87cc68` was a real sighting and
+voiding that row was right, but six controlled repetitions of the same cell on the same ELF put no
+null outside unity. Combined with the earlier ledger audit — **2 of 34 banked `null_ci95` rows
+exclude unity** — this says the straddle condition is an OCCASIONAL sampling event at a rate of a few
+percent, not a structural property of this cell or this harness. **That is an argument against
+`deadlock-audit-7xcq2`'s tempting next step of hard-failing rows on straddle:** at a few percent
+false-positive rate, a hard fail would void roughly one row in twenty at random, and voiding good
+rows is not free. Emit the field, void by hand when it fires, and re-run — which is exactly what
+happened here and it worked.
+
+### The method family as it now stands
+
+```
+  method       ratio      deficit      routing
+  outer      0.847269    1.1803x       delegates unconditionally
+  reduce     0.828506    1.2070x       delegates unconditionally
+  reduceat   0.816553    1.2247x       routes
+  accumulate 0.794076    1.2593x       routes
+```
+
+The routing/delegating split that `RedLynx` first spotted as a ~450 ns correlation has NARROWED to
+0.03 in ratio and no longer separates the two classes cleanly — `reduce` (delegating) and `reduceat`
+(routing) are now 0.012 apart. Consistent with the counted finding that there is no shared routing
+prologue.
+
+### What this does NOT say
+
+This is **not** a before/after for `accumulate` and no credit for any lever is claimed from it.
+`6a87cc68`'s pre-lever accumulate figure came from the very cell it voided, so there is still no
+admissible before-row, and there cannot be one now that the lever is committed and the tree is
+shared. `accumulate`'s counted improvement (3810 -> 2520 excess insns/call) stands on the counters
+alone and is not corroborated here.
+
+A/A NULL CONTROLS: tabulated in full above — six incumbent nulls, all admissible, the tightest
+`[0.999266,1.003682]` and the widest `[0.996398,1.000726]`.
+
+RETRY PREDICATE: `accumulate` at n=256 is 1.2593x and no longer VOID; quote that, not `6a87cc68`'s
+0.646704/0.733201, both of which came from the voided cell. Do not make the straddle veto a hard
+fail on this evidence — 0/6 here plus 2/34 banked argues for reporting and manual voiding. A valid
+before/after for `accumulate` is now unobtainable and should stop being treated as owed.
+AGENT_NAME=AzureCarp.
