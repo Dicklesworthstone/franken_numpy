@@ -44685,3 +44685,80 @@ refuted above. The next step is to give the Rust arms numpy-allocated buffers (v
 the shipped route already has) and re-measure both dTLB misses and the ratio; if the dTLB gap
 collapses, `0ppym`'s kernel numbers are an allocator artefact and must be re-taken.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-16 - NEW WORST CELL FOUND AND HALF-FIXED: `add.accumulate` on 256 f64 was 4.76x SLOWER than NumPy because the native route had NO size gate. Gated at the measured crossover, it is 2.22x - and the residual names the next lever (`deadlock-audit-v46rn`)
+
+`RedLynx`. Found by extending the ufunc-METHOD group to `accumulate`, which row38 had flagged
+as unmeasured. It was much worse than anything else in this campaign.
+
+**Campaign result class:** maintenance-self-speedup (cell remains a regression) + a new lead
+
+```
+worker=thinkstation1  numpy 2.4.3  profile=bench  f64 `add.accumulate`
+harness=common::run_dual_null_median_ci_contract, one contract PER SIZE
+group=bench_accumulate_size_crossover_vs_numpy (registered; selected_groups echoed)
+
+PRE-GATE  elf=11f24568fb586218c50186c9103a85ea4bbed8c04a9ecde0a7c1ce9d08613c9d
+          LOADAVG 18.31/14.65/17.20 -> 17.56/14.61/17.16
+          CPU MHz min 1429 max 4217 median 3144 spread 2.951x
+          PER-ARM: arm_a_cpu==arm_b_cpu, same_core=true, 4211-4248 MHz, spread 1.0000-1.0001
+
+POST-GATE elf=f2823158a0db653c768695d03df40d8a8d3e720c91bff2c8defa53458e1950dd
+          LOADAVG 47.58/35.09/24.82 -> 44.21/34.79/24.83   <-- SEE WINDOW CAVEAT
+          CPU MHz min 1429 max 3918 median 3343 spread 2.742x
+
+   n      PRE ratio   PRE numpy/fnp ns    POST ratio  POST numpy/fnp ns
+  2^8     0.210258     1397 /  6652        0.450164    1483 /  3286
+  2^10    0.503727     3707 /  7374        0.672109    3993 /  5941
+  2^12    1.326448    12734 /  9604        1.302701   13491 / 10349
+  2^14    2.516695    49259 / 19648        2.506733   51763 / 20589
+  2^16    3.433153   195766 / 57138        3.425689  204583 / 59713
+  2^18    3.809996   782894 /204693        2.360146  861778 /366480
+  2^20    3.882718  3107239 /797883        3.794495 3245636 /856443
+
+Both runs: 2 DECIDABLE_REGRESSION (2^8, 2^10) and 5 DECIDABLE_WIN; all nulls straddle unity.
+```
+
+**THE DEFECT. `add`/`multiply.accumulate` on float/complex/timedelta routed into fnp's native
+cumsum/cumprod dispatch with NO SIZE GATE at all.** `divide` has carried
+`F64_DIV_NATIVE_MIN_LEN` for precisely this shape - a native route that wins large and loses
+small - and this route had nothing. At n=256 that cost **4.76x versus simply delegating**, which
+makes it the worst cell this campaign has measured.
+
+**WHY IT WAS INVISIBLE.** Every per-call row so far goes through `PyUFunc::__call__`.
+`accumulate` is a separate `#[pymethods]` entry point with its own prologue and its own routing,
+so no existing row could see it. It surfaced only because row38's retry predicate said the
+methods that took the cached-handle lever were unmeasured and each needed its own arm.
+
+**THE FIX AND ITS THRESHOLD** (landed as `95ed2802`, with the two bench groups in `5026121c` -
+both authored here and committed by a peer from the shared working tree). `F64_ACCUMULATE_NATIVE_MIN_LEN = 1 << 12`, chosen as **the
+smallest size that MEASURED a decidable win** rather than the estimated crossing point, which
+sits near 2^11. Gating conservatively gives up part of the 2^11 band rather than risking a regime
+that measured as a loss. n=2^8 improves 0.210258 -> 0.450164 and n=2^10 0.503727 -> 0.672109;
+every winning size is untouched, as intended.
+
+**WINDOW CAVEAT, AND IT IS MINE: the POST-GATE run is NOT from a comparable window.** My own
+3m40s rebuild drove loadavg from ~14 to 47.6, and the run went out into that. NumPy's arm moved
+5-10% across the two runs (1397 -> 1483 at 2^8, 782894 -> 861778 at 2^18), and 2^18's ratio moved
+3.81 -> 2.36, which is far more than a gate that cannot fire at that size could explain - it is
+window noise on a parallel path. **What survives the caveat is the gated sizes**: 0.210 -> 0.450
+at 2^8 is a 2.1x improvement against a ~6% incumbent drift. The winning sizes should be re-read
+quiet before anyone quotes them from this row; the pre-gate column is the better source for them.
+
+**THE RESIDUAL IS THE NEXT LEVER, AND IT IS LARGER THAN THE FLOOR.** Gated, n=256 still carries
+1803 ns of excess over NumPy - delegation alone should cost roughly the ~210-320 ns wrapper floor
+the other method rows measure. The candidate is `try_zerocopy_int_cumsum`, which runs for
+`Add` BEFORE the float route and must decline for f64; a decline that costs ~1500 ns is the
+"cold extract then fall back" shape this file has hit before (its own comment records int64
+input once running a cold extract Vec and falling through, ~180-200x slower). **Not verified -
+named as the leading candidate.**
+
+RETRY PREDICATE: (1) Re-run this group in a quiet window before quoting ANY of the winning
+sizes from the post-gate column. (2) Price the f64 decline path of `try_zerocopy_int_cumsum`
+directly before assuming it is the 1803 ns; if it is not, the cost is in the method prologue and
+the whole `accumulate` entry needs the treatment `__call__` got. (3) `reduceat` and `at` are
+STILL unmeasured and are the same class of entry point - `accumulate` was 4.76x off and nobody
+knew, so absence of a row is not evidence of health. (4) The integer cumsum route deliberately
+kept its old behaviour here because only the float route was measured; it needs its own crossover
+row before being gated. AGENT_NAME=RedLynx.
+
