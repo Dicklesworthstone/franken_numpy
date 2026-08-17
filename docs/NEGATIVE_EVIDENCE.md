@@ -51828,3 +51828,84 @@ pyo3 signature, which is the same shape but not the same function. Anyone wantin
 better than ~10% should price the binding in situ. Do NOT quote the 91/370 wall-clock split again
 without the kb correction, and do not quote my 4.119 ratio at all.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — I RETRACT LAST ROW'S RECONCILIATION: I converted instructions to ns with a rate built from ANOTHER HOST'S wall-clock number, which my own standing orders forbid. Measured directly, kb is 86.5 ns not 209.3 (deadlock-audit-ei9jz)
+
+**Campaign result class:** retraction of my own correction + a measured route rate that replaces it
+
+Cleanest window of the session and the first wall-clock measurement I have taken all day:
+LOADAVG 11.55/13.11/15.30 -> 11.50/13.07/15.28, CPU idle 86% -> 85%, iowait 0, 2267 MHz,
+/data 204G, no neighbouring bench. Same ELF (`4858590a...`, committed `52b78eb3`), threading
+pinned, 400,000 calls/arm, 5 reps, arms INTERLEAVED so drift cancels.
+
+### What I did wrong
+
+Last row I wrote that correcting both instruments for `kb` reconciles them to 0.9%, and recommended
+reading the banked wall-clock partition's 91/370 ns split as ~300/161. **The 209.3 ns I used for
+`kb` was not measured. It was `831.6 insns / 3.97 insns per ns`, and that 3.97 came from dividing MY
+counted excess (1831.3 insns/call, this host) by ANOTHER AGENT'S partition total (461 ns, a
+different host under different load).** Mixing a counted measurement from one host with a timed
+measurement from another to manufacture a conversion rate is precisely the cross-entry comparison
+this project's standing orders forbid, and I did it while quoting those orders in the same session.
+
+### The measurement that replaces it
+
+Both currencies, same arms, same runs, quiet host:
+
+```
+  WHOLE-ROUTE EXCESS  fnp_plain - numpy_plain
+    instructions   1830.5 insns/call     spreads 0.086% / 0.080%
+    wall clock      262.0 ns/call        spreads 4.8%   / 6.1%
+    route rate        6.99 insns/ns
+
+  KEYWORD BINDING  kwbind_keyword - kwbind_positional
+    instructions    832.2 insns/call     spreads 0.027% / 0.064%
+    wall clock       86.5 ns/call
+    kb rate           9.63 insns/ns   =  1.38x the route rate
+```
+
+`kb` is **86.5 ns/call**, not 209.3. My figure was 2.4x too high, and the error decomposes exactly:
+1.76x from the inflated ns baseline (461 vs 262 for the same quantity) and 1.38x from assuming the
+keyword path runs at the route's average rate when it runs 1.38x faster. 1.76 x 1.38 = 2.43.
+
+### Two things this establishes, and one it does not
+
+**ESTABLISHED 1 — per-component rates differ, so a single blended insns->ns rate is invalid even
+within one host.** The keyword path retires 9.63 insns/ns against the route's 6.99. A lever that
+removes N instructions from a high-rate component buys less time than N instructions from a low-rate
+one, so the counted split and the time split are NOT interchangeable and must not be converted into
+each other with one number. This is the general lesson and it invalidates the method of my last row,
+not merely its arithmetic.
+
+**ESTABLISHED 2 — the counted split is untouched.** probe_chain 1189.4 and wrapper_residual 641.9
+insns/call involve no conversion at all; they are differences of measured instruction counts on one
+ELF. The refutation of my registered sign test stands, and so does the reversal: the probe chain is
+the larger half in instructions.
+
+**NOT ESTABLISHED — the split in nanoseconds.** I cannot state it. It needs per-component ns
+measurements on one host, and I have that only for `kb`. Last row's "read 91/370 as ~300/161" is
+WITHDRAWN; do not use it. What survives is the weaker and still useful claim that the partition
+omits `kb` entirely and is therefore wrong in the direction of understating the probe chain.
+
+### An unresolved discrepancy I am registering rather than explaining away
+
+The same quantity - the route's whole non-NumPy excess - reads **461 ns** in the banked partition
+(91 + 370) and **262.0 ns** here. That is 1.76x, on a quantity both claim to measure. Candidate
+causes, none of which I have tested: different host and load; the partition times ONE call per trial
+between two `Instant::now()` calls while this measures 400,000 calls in a loop and amortises timer
+overhead to nothing; min-of-N versus mean. I am not picking one. It matters because several rows
+quote the partition's absolute ns, and a 1.76x question mark over them should be visible.
+
+COUNTED_MECHANISM: 1830.5 insns/call and 262.0 ns/call for the same excess on the same runs (rate
+6.99); 832.2 insns/call and 86.5 ns/call for kb (rate 9.63); ratio of rates 1.38.
+
+A/A NULL CONTROLS: none, and their absence is the point - this row's wall-clock figures carry
+4.8-6.1% run-to-run spread against 0.08% for the counted figures on the SAME runs, which is the
+cleanest side-by-side demonstration in this ledger of why the counted currency was chosen. No
+competitive ratio is published here, so no null gate applies.
+
+RETRY PREDICATE: to state the probe/wrapper split in nanoseconds, measure the probe chain and
+wrapper residual in ns on ONE host with the kb term included, rather than converting the counted
+split. Until then quote the split in instructions only. Do not reuse my 3.97 insns/ns; the measured
+route rate is 6.99 and it is not constant across components.
+AGENT_NAME=SlateFinch.
