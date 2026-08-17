@@ -8326,9 +8326,24 @@ fn zerocopy_f64_unary_flat<'py>(
     // loop below (and parallelized), so the common all-nonnegative case is a single pass.
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
-    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    // Allocate at the FINAL shape, positionally - the same two levers the f32 sibling
+    // took in `eac4d567`, which this route was left out of (`deadlock-audit-ei9jz`).
+    //
+    // THIS IS ALSO THE FIX FOR A LIVE REGRESSION. `eac4d567` removed the `reshape` from
+    // `try_zerocopy_f64_unary` on the stated grounds that the flat helper now allocated
+    // at the final shape - but the commit changed `zerocopy_f32_unary_flat`, not this
+    // one, so every f64 unary through that caller returned a FLATTENED array: shape [8]
+    // where numpy gives [2, 4]. `deg2rad`, `fix` and `native_unary_f64_boundary` caught
+    // it. Making the claim true here is the fix, and it keeps the lever rather than
+    // restoring the reshape.
+    //
+    // Rank 1 passes a bare int, skipping a one-element tuple.
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1("empty", (*only, "float64"))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1("empty", (&output_shape, "float64"))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -8974,8 +8989,11 @@ fn try_zerocopy_f64_unary(
     let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? else {
         return Ok(None);
     };
-    // No reshape: `zerocopy_f32_binary_flat` now allocates at the final shape, so the
-    // buffer arrives with the right rank at every rank (`deadlock-audit-ei9jz`).
+    // No reshape: `zerocopy_f64_unary_flat` allocates at the final shape, so the buffer
+    // arrives with the right rank at every rank (`deadlock-audit-ei9jz`). The name in
+    // this comment used to be `zerocopy_f32_binary_flat`, which is in neither path -
+    // and the f64 helper had not in fact been changed, which is how the flattening
+    // regression got in.
     let output = flat.unbind();
     if shape.is_empty() {
         return Ok(Some(output.bind(py).get_item(())?.unbind()));
@@ -55294,8 +55312,8 @@ fn native_unary_elementwise(
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Bit-identical to
     // the direct output path below; all other inputs fall through unchanged.
     if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        // No reshape: the helper allocates at the final shape (`deadlock-audit-ei9jz`).
+        let output = flat.unbind();
         if shape.is_empty() {
             return Ok(output.bind(py).get_item(())?.unbind());
         }
@@ -55454,8 +55472,8 @@ fn native_unary_promoting(
     // (which this promoting path widens to float) are not float64 ndarrays, so
     // they correctly fall through unchanged.
     if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        // No reshape: the helper allocates at the final shape (`deadlock-audit-ei9jz`).
+        let output = flat.unbind();
         if shape.is_empty() {
             return Ok(output.bind(py).get_item(())?.unbind());
         }
@@ -110590,6 +110608,63 @@ mod tests {
                 repr_string(&theirs.call1((la, lb))?),
                 "a list must still decline at the dtype read, not slip through the size default"
             );
+            Ok(())
+        });
+    }
+
+    /// The f64 unary route must return the INPUT'S RANK, at every rank
+    /// (`deadlock-audit-ei9jz`).
+    ///
+    /// A live regression made this necessary. `eac4d567` removed the `reshape` from
+    /// `try_zerocopy_f64_unary`, justified by the flat helper allocating at the final
+    /// shape - but the commit changed the f32 helper, not the f64 one, so f64 unary
+    /// results came back FLAT: `numpy.deg2rad` on a 2x4 gave shape [8].
+    ///
+    /// Three existing tests caught it, which is why this is a regression test rather
+    /// than a new guarantee. It exists because none of them says WHY in one place, and
+    /// because the failure is rank-shaped: rank 1 is the one rank where flattening is
+    /// invisible, and it is also the rank most fixtures use. Ranks 0, 2 and 3 are the
+    /// ones that discriminate, so this walks all four against NumPy - both the shape
+    /// and the values, since a shape-only check would pass on a transposed buffer.
+    #[test]
+    fn f64_unary_route_preserves_rank_at_every_rank() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_unary_rank")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            // One op per family that reaches this route: a pure map, a rounding op and
+            // a scaling op (the one the regression surfaced on).
+            for name in ["negative", "floor", "deg2rad", "sqrt"] {
+                let ours = module.getattr(name)?;
+                let theirs = numpy.getattr(name)?;
+                for shape in [vec![], vec![8_usize], vec![2, 4], vec![2, 2, 2]] {
+                    let flat = numpy
+                        .call_method1("arange", (8,))?
+                        .call_method1("astype", ("float64",))?;
+                    let x = if shape.is_empty() {
+                        numpy.call_method1("float64", (1.5,))?
+                    } else {
+                        let t = PyTuple::new(py, shape.iter().copied())?;
+                        flat.call_method1("reshape", (&t,))?
+                    };
+                    let got = ours.call1((&x,))?;
+                    let want = theirs.call1((&x,))?;
+                    assert_eq!(
+                        got.getattr("shape")?.extract::<Vec<usize>>()?,
+                        want.getattr("shape")?.extract::<Vec<usize>>()?,
+                        "{name} at shape {shape:?} must keep the input's rank"
+                    );
+                    assert_eq!(
+                        got.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        want.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "{name} at shape {shape:?} must match numpy byte for byte"
+                    );
+                }
+            }
             Ok(())
         });
     }
