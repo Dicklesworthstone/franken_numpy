@@ -49571,3 +49571,83 @@ load, recorded to fix the decision rules in advance. The certifying run must sat
 If the 2^21 control anomaly reproduces, STOP and investigate the delegation tail before touching the
 gate: a 22% cost on every delegated op at large n would be worth far more than this gate.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CORRECTING MY OWN QUOTING: I have been reporting divide at 2^20 as "1.14-1.27x slower", which is anchored on the BEST cell and mixes two instruments. The WORST banked cell is 1.6234x, and per-instrument worst bounds are 1.6234x (route) and 1.2051x (kernel) (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. **NO BUILD, no new measurement** - an audit of how I have been quoting numbers I already
+banked today. Load 18.26/18.55/17.95, one external `rustc` (`frankentorch`), disk 100G.
+
+**Campaign result class:** a reporting defect in my own rows, corrected
+
+### The defect
+
+Every banked divide-at-2^20 ratio I took today, by instrument:
+
+```
+  out= route contract (bench_divide_allocation_split_vs_numpy, preallocated)
+    0.616010  0.812377  0.789348  0.829316  0.791004
+    WORST 0.616010 -> 1.6234x SLOWER    best 0.829316 -> 1.2058x
+
+  kernel replica on numpy buffers (bench_divide_kernel_on_numpy_buffers, fused)
+    0.830276  0.869934  0.829814  0.874374  0.863157
+    WORST 0.829814 -> 1.2051x SLOWER    best 0.874374 -> 1.1437x
+```
+
+**I have been quoting "1.14-1.27x slower". Both ends are wrong as a bound.** The 1.14 end is the BEST
+cell of the kernel replica; the 1.27 end is a mid cell of the route contract. The range is therefore
+(a) anchored on the most flattering number available and (b) assembled from two different instruments
+measuring two different regions, which is precisely the cross-instrument mixing I criticised in other
+rows this morning.
+
+**The worst banked cell is 0.616010, i.e. 1.6234x SLOWER than `numpy.divide`.**
+
+### The honest form, per instrument, worst bound first
+
+```
+  fnp.divide(a, b, out=o) at n=2^20, route level      WORST 1.6234x slower   (range 1.2058-1.6234x)
+  our fused divide kernel on numpy buffers            WORST 1.2051x slower   (range 1.1437-1.2051x)
+```
+
+Quoting these separately is the point: the route figure includes the wrapper and the kernel figure does
+not, so a single blended range hides which region a reader is being told about.
+
+### About the run I excluded, and why I am NOT using it to lower the headline
+
+The 0.616010 cell is run 1 — the first invocation after the build. Its *allocating* arm in the same
+invocation was also out of line with its regime-mates (1.0045 against 8.2191 and 8.4647), which is
+consistent with a distinct cold state rather than a property of the divide route. That is supporting
+evidence, and it is why the settled bare-regime cells cluster at 1.2331-1.2669x.
+
+**But it is a JUDGMENT, not a measurement, and under a worst-cell rule a judgment does not get to
+lower a headline.** The number that goes at the top is 1.6234x. If someone wants the cold-state run
+excluded from the bound, the way to earn that is a discard rule fixed in advance and applied to every
+row, not an argument made after seeing which point it removes.
+
+### Where this does and does not reach
+
+It does NOT touch the qualitative conclusions banked today: divide at 2^20 is a DECIDABLE_REGRESSION in
+every run of every instrument and both allocator regimes; the classifier finding (1.4152-1.6155x, whose
+own worst bound is 1.4152x and which I did quote worst-first); and the refutation of the allocation
+hypothesis. Those rest on signs and on effects far larger than the difference between 1.14x and 1.62x.
+
+It DOES mean the phrase "about 1.2x slower" that I have used in several summaries understates the worst
+observed behaviour by 35%, and any downstream reader sizing the divide deficit should use **1.6234x**
+as the bound and 1.2331-1.2669x as the settled bare-regime expectation.
+
+**FOR THE RECORD, on the campaign's actual worst cell:** it is not mine. `deadlock-audit-v46rn`'s
+`searchsorted` array-needle cell is 5.838x after the `numpy_dtype_is_f64` fast path, down from 8.700x,
+and RedGlen's rows already state it worst-first ("IT IS STILL A SEVERE LOSS AND STILL THE WORST CELL").
+I have not edited those rows - they are a peer's and they are already correct.
+
+COUNTED_MECHANISM: 10 banked ratios audited across 2 instruments; the quoted lower bound 1.1437x is the
+single best of the 10 and the true worst is 1.6234x, a 42% understatement of the bound.
+
+A/A NULL CONTROLS: unchanged from the rows being corrected - all A/A nulls in both instruments straddle
+unity across all 10 runs (incumbent 0.998048 / 0.998734 / 1.000083 / 0.998296, candidate 1.001983 /
+1.000014 / 1.005433 / 0.993656), checksum `eb91d471f37fc5e0` identical throughout. This row changes no
+measurement, only which of them is quoted.
+
+RETRY PREDICATE: quote divide at 2^20 as 1.6234x worst / 1.2331-1.2669x settled, per instrument, never
+as a blended "1.14-1.27x". If a cold-state discard rule is ever adopted, it must be written down before
+the run it applies to and applied to every row in this campaign, not to this one.
+AGENT_NAME=AzureCarp.
