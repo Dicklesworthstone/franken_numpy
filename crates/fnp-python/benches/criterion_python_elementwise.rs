@@ -5919,6 +5919,15 @@ fn call_reduceat<'py>(
         .expect("reduceat call")
 }
 
+// CORRECTED (`deadlock-audit-v46rn`): this group first printed
+// `delegates_unconditionally=false` for reduceat, from a hardcoded literal. Reading the
+// method shows it has NO native route at all - it is pure delegation, exactly like reduce
+// and outer. Same defect class as the `routes_natively` literal corrected earlier in this
+// file: a constant that describes runtime behaviour is a CLAIM and needs a source, not a
+// guess. The banked row read the false label and called reduceat a routing method; the
+// correction is that its 771 ns excess is call SHAPE, which is what made the axis-default
+// lever findable.
+//
 // `reduceat` is the last ufunc METHOD entry point with a clean measurable shape and no
 // row of its own (`deadlock-audit-v46rn`). The one before it, `accumulate`, turned out to
 // be 4.76x SLOWER than NumPy while nobody was looking, because every per-call row in this
@@ -6015,7 +6024,7 @@ fn bench_reduceat_percall_floor_vs_numpy(_c: &mut Criterion) {
         println!(
             "UFUNC_METHOD_FLOOR method=reduceat n={n} numpy_version={numpy_version} \
              worker={} harness=common::run_dual_null_median_ci_contract \
-             delegates_unconditionally=false \
+             delegates_unconditionally=true \
              ratio={:.6} ratio_ci95=[{:.6},{:.6}] \
              numpy_ns={:.1} fnp_ns={:.1} excess_ns={:.1} \
              incumbent_aa_null={:.6} candidate_aa_null={:.6}",

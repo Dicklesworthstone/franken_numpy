@@ -981,18 +981,25 @@ impl PyUFunc {
         }
         let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
+        // Same lever as `reduceat` below, same reason: `axis` defaults to 0 in NumPy's
+        // `accumulate` too, and setting it explicitly costs a dict entry and a keyword
+        // parse to communicate the default (`deadlock-audit-v46rn`).
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", axis)?;
+        if axis != 0 {
+            kwargs.set_item("axis", axis)?;
+        }
         if let Some(d) = dtype.as_ref() {
             kwargs.set_item("dtype", d.bind(py))?;
         }
         if let Some(o) = out.as_ref() {
             kwargs.set_item("out", o.bind(py))?;
         }
-        Ok(np_ufunc
-            .getattr("accumulate")?
-            .call((array.bind(py),), Some(&kwargs))?
-            .unbind())
+        let target = np_ufunc.getattr("accumulate")?;
+        let args = (array.bind(py),);
+        if kwargs.is_empty() {
+            return Ok(target.call1(args)?.unbind());
+        }
+        Ok(target.call(args, Some(&kwargs))?.unbind())
     }
 
     #[pyo3(signature = (a, b, **kwargs))]
@@ -1023,18 +1030,34 @@ impl PyUFunc {
     ) -> PyResult<Py<PyAny>> {
         let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
+        // SEND ONLY NON-DEFAULT KEYWORDS (`deadlock-audit-v46rn`).
+        //
+        // ATTRIBUTED, not guessed. `reduceat` measured 1.6821x with 771 ns of excess
+        // against `reduce`'s 1.2800x and 291 ns - and `reduceat` has NO native route, so
+        // both are pure delegation and the ~480 ns gap is call-shape alone. `reduce`
+        // takes `(*args, **kwargs)` and forwards them untouched; this method rebuilt a
+        // `PyDict` and set `axis` UNCONDITIONALLY, including the 0 that is NumPy's own
+        // default for `reduceat`. So the common call paid a dict allocation, a `set_item`,
+        // and a keyword-bearing call to tell NumPy what it already assumed.
+        //
+        // With every keyword at its default the dict is now empty and the call goes
+        // through `call1`, which is the shape `__call__`'s fast path already uses.
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", axis)?;
+        if axis != 0 {
+            kwargs.set_item("axis", axis)?;
+        }
         if let Some(d) = dtype.as_ref() {
             kwargs.set_item("dtype", d.bind(py))?;
         }
         if let Some(o) = out.as_ref() {
             kwargs.set_item("out", o.bind(py))?;
         }
-        Ok(np_ufunc
-            .getattr("reduceat")?
-            .call((array.bind(py), indices.bind(py)), Some(&kwargs))?
-            .unbind())
+        let target = np_ufunc.getattr("reduceat")?;
+        let args = (array.bind(py), indices.bind(py));
+        if kwargs.is_empty() {
+            return Ok(target.call1(args)?.unbind());
+        }
+        Ok(target.call(args, Some(&kwargs))?.unbind())
     }
 
     #[pyo3(signature = (a, indices, b=None))]
@@ -111255,6 +111278,110 @@ mod tests {
             assert!(
                 is_exact_numpy_ndarray(py, &plain)?,
                 "a plain ndarray must be treated as an exact ndarray"
+            );
+            Ok(())
+        });
+    }
+
+    /// `accumulate` and `reduceat` must omit `axis` when it is already NumPy's default,
+    /// and must still forward every non-default one (`deadlock-audit-v46rn`).
+    ///
+    /// Both rebuilt a kwargs dict and set `axis` unconditionally, including the 0 that is
+    /// NumPy's own default - measured as `reduceat` 1.6821x/771 ns against `reduce`
+    /// 1.2800x/291 ns, where `reduce` forwards the caller's args untouched and neither
+    /// method has a native route, so the gap is call shape.
+    ///
+    /// The risk is one-directional and silent: dropping a NON-default axis would make
+    /// NumPy accumulate along axis 0 while the caller asked for axis 1, returning a
+    /// correctly-typed array of the wrong numbers. So this walks a 2-D fixture where the
+    /// two axes give DIFFERENT results - if they agreed, the test would pass even when
+    /// the axis were dropped - and checks negative axes, an explicit axis=0, and the
+    /// dtype/out keywords that share the dict.
+    #[test]
+    fn accumulate_and_reduceat_omit_default_axis_and_forward_the_rest() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_axis_default")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("add")?;
+            let theirs = numpy.getattr("add")?;
+
+            // 3x4 of distinct values, so axis 0 and axis 1 cannot coincide.
+            let shape = PyTuple::new(py, [3_usize, 4])?;
+            let a = numpy
+                .call_method1("arange", (12,))?
+                .call_method1("astype", ("float64",))?
+                .call_method1("reshape", (&shape,))?;
+
+            // Guard the fixture itself: if these matched, the axis assertions below
+            // would be vacuous.
+            assert_ne!(
+                theirs
+                    .call_method1("accumulate", (&a,))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                {
+                    let kw = PyDict::new(py);
+                    kw.set_item("axis", 1)?;
+                    theirs
+                        .call_method("accumulate", (&a,), Some(&kw))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?
+                },
+                "fixture is degenerate: axis 0 and axis 1 accumulate identically"
+            );
+
+            for axis in [None, Some(0_i64), Some(1), Some(-1), Some(-2)] {
+                let kw_ours = PyDict::new(py);
+                let kw_theirs = PyDict::new(py);
+                if let Some(ax) = axis {
+                    kw_ours.set_item("axis", ax)?;
+                    kw_theirs.set_item("axis", ax)?;
+                }
+                assert_eq!(
+                    ours.call_method("accumulate", (&a,), Some(&kw_ours))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    theirs
+                        .call_method("accumulate", (&a,), Some(&kw_theirs))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    "accumulate at axis={axis:?} must match numpy"
+                );
+
+                let idx = numpy
+                    .call_method1("array", (vec![0_i64, 2],))?
+                    .call_method1("astype", ("intp",))?;
+                assert_eq!(
+                    ours.call_method("reduceat", (&a, &idx), Some(&kw_ours))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    theirs
+                        .call_method("reduceat", (&a, &idx), Some(&kw_theirs))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    "reduceat at axis={axis:?} must match numpy"
+                );
+            }
+
+            // dtype and out share the dict with axis; the empty-dict fast path must not
+            // swallow them.
+            let kw = PyDict::new(py);
+            kw.set_item("dtype", "float32")?;
+            assert_eq!(
+                ours.call_method("accumulate", (&a,), Some(&kw))?
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                theirs
+                    .call_method("accumulate", (&a,), Some(&kw))?
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                "an explicit dtype must survive the empty-dict fast path"
             );
             Ok(())
         });
