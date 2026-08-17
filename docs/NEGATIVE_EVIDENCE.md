@@ -46508,3 +46508,74 @@ vectorcall alone. The per-lever numbers are 795 and 808 insns/call. Do not re-ru
 what would still be worth having is a same-window pre-interning row for `outer`, which is no longer
 buildable from the shared tree.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - PREDICTION REFUTED: the arity branch bought `at` only 55 ns, not the ~190 predicted - so the rest of its cost is PROLOGUE, not call shape, and the refutation names the remainder (`deadlock-audit-v46rn`)
+
+`RedLynx`. The measurement the previous row registered a specific number for. It did not land
+on it, and that is the result.
+
+**Campaign result class:** maintenance-self-speedup (smaller than predicted) + a refuted
+prediction that locates the remainder
+
+```
+BEFORE elf=aa84de7f0d2da73e158e07062bfc1fe5db79f762206eb2062ff702a380b03493
+AFTER  elf=f0b7943d343da32f813f820a2fbafaeb33fb08e9ee16026cf9227760cf9a3c61
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 13.80/16.86/19.74 -> 14.44/16.90/19.72 across the block (low, converged)
+CPU MHz system-wide min 1429 max 4217 median 3368 spread 2.951x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on every phase, same_core=true;
+  4182.7/4182.1 (1.0001), 3787.5/3775.2 (1.0033), 4169.1/4168.5 (1.0002),
+  4134.5/4134.5 (1.0000), 4167.4/4167.4 (1.0000), 4165.8/4165.8 (1.0000)
+
+  cell             BEFORE excess   AFTER excess      BEFORE ratio   AFTER ratio
+  at (f64) n=2^8       316          321 260 261       1.2879x       1.2260x
+  at (i64) n=2^20     4785         6659 5676 16045    1.0294x       ~1.05x (noisy)
+
+All six f64 A/A nulls admit unity.
+```
+
+**THE PREDICTION, AND WHAT ACTUALLY HAPPENED.** The previous row registered: *"at's f64 excess
+should fall from ~316 ns toward reduceat's ~125 ns, since after the arity branch they differ only
+in arity. If it does not, the remaining cost is in at's own prologue rather than its call
+shape."*
+
+**It fell to 261 ns.** The lever is real - 1.2879x -> 1.2260x, ~55 ns - but it is a third of what
+I predicted, and the stated premise ("they differ only in arity") was **wrong**.
+
+**WHAT THEY ACTUALLY DIFFER BY, which the refutation forces me to look up rather than assume.**
+`at` runs a probe that `reduceat` has no equivalent of: the cheap pre-decline in
+`try_parallel_int_scatter_at`, which reads `dtype.kind` off the target on every call. For f64 it
+declines there - correctly, and far more cheaply than the four-arm probe it replaced - but it is
+still two `getattr`s and an extract that `reduceat` never pays. `at` also carries a third
+operand. **261 - 125 = 136 ns is the size of that difference**, and it is now the named
+remainder rather than an unexplained gap.
+
+**I SHOULD HAVE CAUGHT THE PREMISE BEFORE REGISTERING THE NUMBER.** I wrote the pre-decline into
+`try_parallel_int_scatter_at` myself, two rows earlier, and then predicted `at` would converge
+with a method that has no such probe. The prediction was falsifiable and cheap, which is why it
+was worth making - but "they differ only in arity" was checkable at the time and I did not check
+it.
+
+**THE i64 CELL IS TOO NOISY TO READ AND I AM NOT READING IT.** Excess 6659/5676/16045 against a
+NumPy arm moving 141448-153274 ns (±8%); its nulls are also the widest in the run
+([0.984943,1.081276]). It is somewhere near parity and this row does not pin it further.
+
+**THE FAMILY NOW READS:**
+
+```
+  outer       1.0798x   excess 155 ns
+  reduceat    1.1246x   excess 125 ns
+  accumulate  1.1977x   excess 285 ns
+  reduce      1.2016x   excess 231 ns
+  at (f64)    1.2260x   excess 261 ns
+```
+
+RETRY PREDICATE: (1) `at`'s remaining 136 ns over `reduceat` is the scatter pre-decline plus one
+operand - measurable by timing an `at` call on an INT target, where the pre-decline passes and
+the native route engages, against the f64 one where it declines. Do that before assuming the
+probe is the cost. (2) `accumulate` (285) and `reduce` (231) are now worse than `at` and neither
+has been attacked since the vectorcall work; `reduce` is still off the vectorcall path entirely.
+(3) Register predictions only after checking what the two cells being compared actually differ
+by - this one named a number that a two-minute source read would have corrected.
+AGENT_NAME=RedLynx.
+
