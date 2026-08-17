@@ -46801,3 +46801,79 @@ prologue at sizes below its own gate, where the routing decision is pure overhea
 point prediction for its size: my last three predictions on this family missed by 5-8x low, 5-8x low
 and 1.8x high, so the honest prior is the range 400-800 insns/call.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - `accumulate`'s routing prologue costs 770 insns/call, attributed BY DIFFERENCE against two independent baselines that agree to 2 - and the obvious reorder that would remove it is REJECTED without spending a build, because it removes nothing (`deadlock-audit-v46rn`)
+
+`AzureCarp`. No build. Attribution from the same-window family snapshot one row up, plus a static
+read that refutes the lever it suggests.
+
+**Campaign result class:** attribution of a named cost + a REJECTED lever (refuted before a build)
+
+### The attribution, and why the subtraction is legitimate
+
+`accumulate` is the ONLY method in the family that routes; `reduce`, `outer` and `reduceat` delegate
+unconditionally. All four excesses are wrapper cost over NumPy measured on one ELF in one window, so
+differencing them compares wrapper against wrapper:
+
+```
+  accumulate 2,026  -  reduce   1,256  =    770 insns/call of routing prologue
+  accumulate 2,026  -  outer    1,254  =    772
+  accumulate 2,026  -  reduceat   993  =  1,033
+```
+
+**`reduce` and `outer` agree to within 2 instructions per call**, from independent cells, which is
+the cross-check that makes this worth banking. `reduceat` sits lower because it retires fewer
+instructions than either (993), so it is the weaker baseline; `reduce` is the closest analogue — one
+operand, no extra arguments in the measured shape. **Call it ~770 insns/call.** The ceiling, if the
+prologue vanished outright, is `accumulate` moving from 1.2159x to roughly `reduce`'s 1.1624x.
+
+### The lever that suggests itself, and why it is REJECTED
+
+The prologue at n=256 for f64 is three Python attribute operations:
+
+1. `is_exact_numpy_ndarray` — cached-type identity check, inside `try_zerocopy_int_cumsum`'s
+   pre-decline;
+2. `dtype_kind_of` — `getattr("dtype")` + `getattr("kind")`, same pre-decline;
+3. `accumulate_native_route_is_worth_taking` — `getattr("size")` + extract.
+
+The obvious lever is to read `dtype.kind` ONCE at the top of the `Add`/`Multiply` block and branch on
+it, so floats never enter the integer probe at all. **It saves nothing at this size, and the reason
+is that the ordering is already right.** `accumulate_native_route_is_worth_taking` is the FIRST term
+of the float route's `&&` chain, so at n=256 it short-circuits both the second
+`is_exact_numpy_ndarray` and the `dtype`→`kind`→`String` read behind it. The three operations above
+are all that execute, and the reordered form executes exactly the same three: one identity check, one
+`dtype.kind`, one `size`. Same cost, more code.
+
+**Nor can the order be changed to skip any of them.** Integers route at ANY size, so the size gate
+cannot be hoisted above the dtype read; and floats need the size gate, so the dtype read cannot be
+skipped for them. Each of the three answers a question the other two do not.
+
+**I checked this before building rather than after.** The last three levers on this family cost a
+build each; this one would have cost a build to measure a saving of zero.
+
+### What would actually be needed, stated so nobody re-derives it
+
+Reducing this prologue requires fusing the three reads into fewer Python round-trips, not reordering
+them — e.g. one `__array_interface__` fetch carrying typestr and shape, or metadata off a `PyBuffer`.
+Both are speculative and one is known-expensive: `PyBuffer` acquisition was measured at 303 ns on
+this route, which is worse than the prologue it would replace. **No lever is proposed.**
+
+**NOTED, not proposed:** the float route's `getattr("dtype")`/`getattr("kind")` at the engaged sizes
+are still bare `&str` rather than `intern!`. They are short-circuited at n=256 so they cost nothing
+at the floor, and at n>=4096 where they do run the kernel dominates, so interning them is consistent
+but not measurable. Recorded so the next reader does not mistake them for an opportunity.
+
+COUNTED_MECHANISM: `accumulate`'s wrapper excess 2,026 insns/call against `reduce` 1,256 and `outer`
+1,254 — both unconditional delegators, agreeing to 2 insns/call — isolating 770 insns/call of routing
+prologue, from one ELF (8be4764d) in one window.
+
+A/A NULL CONTROLS: not applicable — this row is a difference of hardware-counter totals from matched
+single-arm probes, carrying no schedule. The wall-clock figures it references carry their own dual
+nulls in the row above.
+
+RETRY PREDICATE: do not implement the read-dtype-once reorder for `accumulate` — it is refuted above
+on a static read of the short-circuit order, and it would cost a build to measure zero. Do not treat
+the bare-`&str` getattrs on the engaged float route as a floor lever; they do not execute at the
+floor. If someone does attack the 770 ns, it must be by fusing attribute reads, and the fused form
+has to beat three interned getattrs, which is a higher bar than it sounds.
+AGENT_NAME=AzureCarp.
