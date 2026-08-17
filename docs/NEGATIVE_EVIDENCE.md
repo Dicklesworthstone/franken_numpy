@@ -48813,3 +48813,140 @@ replaced it. (3) The searchsorted array-needle cell is still 5.838x and still un
 the `numpy_dtype_is_f64` fast path; the 11-declining-probe chain in row 59 remains the leading
 structural candidate and is untested. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - THE SETTLING MEASUREMENT WAS TAKEN AND IT REFUTES ITS OWN PREMISE: divide's "route-level win" at 2^20 is NumPy's ALLOCATOR CHURN, not our kernel. Same ELF, same host, three back-to-back invocations read 1.0045 / 8.2191 / 8.4647 with ALL A/A NULLS PASSING; under a `MALLOC_MMAP_THRESHOLD_` control it reads 0.8263 / 0.8400 - a LOSS. I am CORRECTING the mechanism I published yesterday (`deadlock-audit-6y5wp`, `deadlock-audit-48by6`, `deadlock-audit-q00ev`)
+
+`AzureCarp`. One build (`cargo build --profile release-perf -p fnp-python --bench criterion_python_elementwise`), five measured invocations, no second build.
+
+**Campaign result class:** REFUTED hypothesis (my own, from one row up) + a MECHANISM PROVEN by a control + a MEASUREMENT-VALIDITY defect that voids a banked row of mine
+
+### What I predicted, in writing, before measuring
+
+The row immediately above this one reconciled two of my rows that disagreed in sign for `divide` at
+n=2^20 — 1.0038x FASTER as a route, 1.1706x SLOWER as a kernel — and offered this hypothesis, which I
+explicitly labelled indicative and refused to bank:
+
+> implied allocation cost: numpy ~98,707 ns, ours ~29,473 ns, ratio ~3.3x
+> If that holds, our output allocation is ~3.3x cheaper than NumPy's ufunc output allocation at 2^20
+> and more than pays for a 60 us kernel deficit.
+
+Its retry predicate named the settling measurement exactly: *divide at 2^20 with BOTH regions timed in
+ONE invocation — route-with-allocation and kernel-with-`out=`.* That instrument is now
+`bench_divide_allocation_split_vs_numpy`, and refusing to bank the 3.3x was the right call, because
+**the hypothesis is refuted.**
+
+### The instrument
+
+Two dual-null contracts, same operands (`DIVIDE_SERIAL_N`, the same constant the kernel row used), same
+invocation:
+
+```
+  allocating    numpy.divide(a, b)          vs  fnp.divide(a, b)
+  preallocated  numpy.divide(a, b, out=o1)  vs  fnp.divide(a, b, out=o2)
+```
+
+`divide` is on the native `out=` route (`UFuncKind::Divide -> BinaryOp::Div` in the `out=` block of
+`PyUFunc::__call__`), so the preallocated arm exercises our kernel rather than a delegation. Each
+`out=` arm is checked before timing: the returned object must BE the buffer passed in (identity, not
+equality) and must match the allocating result bit for bit — because if `out=` were swallowed, that
+arm would allocate after all and the difference would collapse toward zero, reporting "allocation is
+free" precisely when the instrument is broken.
+
+### The measurement, five invocations of ONE ELF on ONE host
+
+```
+DIVIDE_ALLOCATION_SPLIT  n=1048576  numpy 2.4.3  worker=thinkstation1
+  bench_elf_sha256=5f1e6f4e991b1891016b131fd9c60a46b54781c9b43f6eb1a4a8db70da55580d
+  profile=release-perf  harness=common::run_dual_null_median_ci_contract
+  loadavg 17.31/17.22/16.60 -> 16.83/16.83/16.54 across the series, CPU 2741-3403 MHz mean / 4118-4236 max
+  CPU_WITNESS same_core=true on every phase, arm_mhz_spread 1.0000-1.0043
+
+ run  allocator env      allocating ratio        preallocated ratio      numpy_alloc_ns  fnp_alloc_ns
+  1   bare (cold)        1.004467  UNDECIDED     0.616010  REGRESSION        142,705      -102,469
+  2   bare               8.219059  DECID. WIN    0.812377  REGRESSION     11,883,825       935,648
+  3   bare               8.464689  DECID. WIN    0.789348  REGRESSION     12,384,307       981,654
+  4   MALLOC_MMAP_ctrl   0.826345  REGRESSION    0.829316  REGRESSION         46,662        53,407
+  5   MALLOC_MMAP_ctrl   0.839996  REGRESSION    0.791004  REGRESSION         56,733        39,660
+
+  control = MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=1073741824
+```
+
+### Three things this settles
+
+**1. The 3.3x-cheaper-allocation hypothesis is REFUTED.** Run 1 returns a fnp allocation cost of
+**-102,469 ns** — a negative allocation cost, which is impossible, and is the instrument telling me the
+model "route = kernel + allocation, with the same kernel either way" is false. Under the control,
+allocation costs are 46,662 / 56,733 ns (NumPy) against 53,407 / 39,660 ns (ours): the same order, with
+no consistent sign, let alone a 3.3x advantage. **The number I refused to bank was not merely
+unbanked-because-cross-window; it was wrong.**
+
+**2. MECHANISM PROVEN: the "route-level win" is NumPy's allocator churning, not our kernel.**
+NumPy's allocating arm costs 12,787,767 ns bare and 490,078 ns under the control — a **26x collapse**
+from one environment variable, at an 8 MB output buffer, which is the large-buffer mmap-churn regime
+already banked repo-wide. Our arm barely moves. So the apparent 8.2-8.5x win is a measurement of
+NumPy's allocator returning 8 MB to the OS and re-faulting 2048 pages every call, and it is not
+attributable to any code of ours.
+
+**3. THE ALLOCATING REGION IS NOT A MEASURABLE QUANTITY HERE, AND THE A/A NULL DOES NOT CATCH IT.**
+Three back-to-back invocations of the *same binary* on the *same host* read 1.0045, 8.2191 and 8.4647
+— an 8.4x spread — and **every one of those runs passed both A/A nulls** (`incumbent_null_straddles_unity=true`,
+`candidate_null_straddles_unity=true`, biases 0.000000-0.001455). The null is a within-phase control;
+this is a between-invocation allocator regime, and the null is structurally blind to it. This is a new
+member of the "a passing null does not license the comparison" family, and the first one I have seen
+where the failure is between invocations of one ELF rather than across workers.
+
+### CORRECTION TO MY OWN ROW, one entry up
+
+That row's **mechanism was wrong**: I wrote that our allocation is ~3.3x cheaper than NumPy's and that
+this pays for the kernel deficit. It does not; allocation is near parity once churn is controlled, and
+the asymmetry I attributed to our allocator was NumPy's churn.
+
+That row's **load-bearing conclusion was right, and is now stronger**: *a route-level win does not
+certify the kernel*, and `deadlock-audit-6y5wp` must not be closed on a route row. Under the control
+the route and kernel figures converge (0.826 vs 0.829 in run 4) — the deficit was never absent at
+route level, it was buried under an artifact.
+
+### THE ROBUST FACT, and it is a LOSS
+
+The `out=` route allocates nothing on either side and is therefore immune to all of the above. It is a
+**DECIDABLE_REGRESSION in all five runs**: 0.616010, 0.812377, 0.789348, 0.829316, 0.791004. Taking the
+two controlled runs as the quotable pair, **`fnp.divide` at n=2^20 is 1.2058-1.2647x SLOWER than
+`numpy.divide`**, and the controlled allocating arm agrees independently at 1.1905-1.2102x slower.
+Two regions, different code paths, same answer.
+
+### CONSEQUENCE FOR A BANKED ROW AND FOR THE SIZE GATE
+
+The route row `ratio 1.003772` for divide at 2^20 is **VOID for competitive purposes**: the same
+comparison, on one ELF, reads 8.2-8.5x uncontrolled and 0.83 controlled. It measured an allocator
+regime. It may not be quoted as evidence that divide wins at 2^20; under the only regime carrying a
+stated allocator control, divide at 2^20 LOSES.
+
+This reaches `F64_DIV_NATIVE_MIN_LEN` (raised 1<<14 -> 1<<19 this session). That crossover was measured
+native-route against delegating-control inside one harness — but the delegating control is *NumPy
+allocating* while the native arm is *ours allocating*, which is precisely the asymmetric pair the churn
+distorts. **I am not reverting the gate on this row**: that needs its own measurement, and the gate is
+currently set conservatively (more delegation, not less), so an incorrect gate here costs opportunity
+rather than correctness. But the crossover is now UNCERTIFIED.
+
+COUNTED_MECHANISM: NumPy's allocating `divide` arm at n=2^20 costs 12,787,767 ns with the default glibc
+allocator and 490,078 ns under `MALLOC_MMAP_THRESHOLD_=1073741824` — a 26.1x collapse from an
+environment variable that changes no code in either project, isolating the cost to mmap/munmap churn
+and page re-faulting on the 8 MB output buffer. Our arm moves 1,506,304 -> 496,536 ns over the same
+change. The bare-regime `allocating_ratio` of 8.46 therefore attributes to our kernel a cost that
+belongs to NumPy's allocator.
+
+A/A NULL CONTROLS: both nulls straddle unity in all five invocations and in both contracts
+(`both_nulls=true`, `incumbent_null_straddles_unity=true`, `candidate_null_straddles_unity=true`;
+biases 0.000000-0.001455). **This is recorded as a null-gate LIMITATION, not as a pass that licenses
+the allocating comparison** — see point 3: the nulls passed on the runs that disagree 8.4x with each
+other.
+
+RETRY PREDICATE: (a) Do NOT quote `allocating_ratio` from this group without the `MALLOC_MMAP_THRESHOLD_`
+control, and do not quote the ~3.3x allocation figure at all — it is refuted. (b) The next real question
+is why our `out=` kernel is ~1.21x slower than NumPy's at 2^20 with no allocation on either side; that
+is `6y5wp`'s deficit standing in the open, and it is now the cleanest cell to attack because the
+allocator no longer confounds it. (c) Re-measure the `F64_DIV_NATIVE_MIN_LEN` crossover under the
+allocator control before treating 1<<19 as certified. (d) The `out=` identity assert proves `out=` was
+honoured but does NOT prove OUR native route engaged — NumPy's own `out=` returns the same object too;
+an engagement proof (contrast against an op that takes `_ => None`, e.g. `add`) is still owed.
+AGENT_NAME=AzureCarp.

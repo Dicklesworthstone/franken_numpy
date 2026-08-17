@@ -1412,6 +1412,10 @@ fn main() {
                 bench_signature_shape_pyclass_control,
             ),
             (
+                "bench_divide_allocation_split_vs_numpy",
+                bench_divide_allocation_split_vs_numpy,
+            ),
+            (
                 "bench_divide_size_gate_vs_numpy",
                 bench_divide_size_gate_vs_numpy,
             ),
@@ -7168,6 +7172,235 @@ fn bench_percall_floor_across_ops_vs_numpy(_c: &mut Criterion) {
 // the gate: 2^8 and 2^12 now DELEGATE to NumPy, 2^16 and 2^20 still take the
 // native route (deadlock-audit-qapyb). A gate that helps below the threshold and
 // hurts above it is a REJECT, and only measuring both sides can say which it is.
+// SPLITTING ALLOCATION OUT OF THE DIVIDE COMPARISON, in ONE invocation
+// (`deadlock-audit-6y5wp`, `deadlock-audit-48by6`).
+//
+// Two rows banked for divide at 2^20 disagree in SIGN: as a ROUTE it is 1.0038x
+// FASTER than NumPy, as a KERNEL it is 1.1706x SLOWER. Neither is wrong - the route
+// arms both ALLOCATE their output and the kernel arms both write into a preallocated
+// buffer, so they time different regions. Subtracting those two rows suggested our
+// allocation is ~3.3x cheaper than NumPy's, which would more than pay for a ~60 us
+// kernel deficit - but that subtraction is cross-row, cross-ELF and cross-window, and
+// it is exactly the arithmetic `deadlock-audit-q00ev` refused for the gate question. I
+// labelled it indicative and did not bank it.
+//
+// This group turns it into a measurement. Both regions, same operands, same size
+// constant, same invocation, same window:
+//
+//   allocating    numpy.divide(a, b)          vs  fnp.divide(a, b)
+//   preallocated  numpy.divide(a, b, out=o1)  vs  fnp.divide(a, b, out=o2)
+//
+// Each side's allocation cost is then a WITHIN-INVOCATION difference of two contracts
+// rather than a difference of two banked rows. `divide` is on the `out=` native route
+// (`UFuncKind::Divide -> BinaryOp::Div` in the out= block of `PyUFunc::__call__`), so
+// the preallocated arm measures OUR kernel, not a delegation to NumPy.
+//
+// THE NEGATIVE CASE, and it is the one that would silently void the whole row: if
+// `out=` were ignored by either side, that arm would allocate after all, the
+// "preallocated" contract would measure the same region as the allocating one, and the
+// difference would collapse toward zero - reporting "allocation is free" precisely when
+// the instrument is broken. A zero difference is therefore NOT self-evidently a
+// finding, so each `out=` arm is checked before any timing: the returned object must BE
+// the buffer passed in (identity, not equality), and its contents must match the
+// allocating result bit for bit.
+//
+// WHAT IT MEASURED, and it refutes the hypothesis it was built to test. Five invocations
+// of one ELF on one host (`thinkstation1`, numpy 2.4.3):
+//
+//   run  allocator env      allocating           preallocated         numpy_alloc  fnp_alloc
+//    1   bare (cold)        1.004467 UNDECIDED   0.616010 REGRESSION     142,705   -102,469
+//    2   bare               8.219059 DECID.WIN   0.812377 REGRESSION  11,883,825     935,648
+//    3   bare               8.464689 DECID.WIN   0.789348 REGRESSION  12,384,307     981,654
+//    4   MALLOC_MMAP ctrl   0.826345 REGRESSION  0.829316 REGRESSION      46,662      53,407
+//    5   MALLOC_MMAP ctrl   0.839996 REGRESSION  0.791004 REGRESSION      56,733      39,660
+//
+// Run 1 returns a NEGATIVE allocation cost, which is impossible and is the instrument
+// reporting that "route = kernel + allocation with the same kernel either way" is false.
+// Runs 2-3 read an 8.2-8.5x WIN on the allocating arm; run 4 turns that into a LOSS by
+// setting ONE environment variable. NumPy's allocating arm costs 12,787,767 ns bare and
+// 490,078 ns under `MALLOC_MMAP_THRESHOLD_` - a 26.1x collapse - so the "win" was NumPy's
+// allocator returning an 8 MB buffer to the OS and re-faulting 2048 pages every call.
+//
+// AND EVERY ONE OF THOSE FIVE RUNS PASSED BOTH A/A NULLS. The null is a within-phase
+// control; the allocator regime shifts BETWEEN invocations, so the null is structurally
+// blind to it. A passing null does not license the allocating comparison here.
+//
+// The `out=` contract allocates on neither side and is immune to all of it: DECIDABLE
+// REGRESSION in all five runs, i.e. our divide kernel is ~1.21x SLOWER than NumPy's at
+// this size. That is the quotable number from this group.
+fn bench_divide_allocation_split_vs_numpy(_c: &mut Criterion) {
+    // The same constant the kernel row used, so the two rows are provably at one size
+    // rather than at two literals that happen to be equal today.
+    let n = DIVIDE_SERIAL_N;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        // Byte-identical to `divide_hazard_free_operands`, the generator both rows used.
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\no1 = np.empty(n)\no2 = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_py = locals.get_item("a").expect("a operand");
+        let b_py = locals.get_item("b").expect("b operand");
+        let o1_py = locals.get_item("o1").expect("numpy out buffer");
+        let o2_py = locals.get_item("o2").expect("fnp out buffer");
+        let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
+        let numpy_divide = numpy.getattr("divide").expect("numpy.divide");
+        let fnp_divide = module.getattr("divide").expect("fnp divide");
+
+        let numpy_kwargs = PyDict::new(py);
+        numpy_kwargs.set_item("out", &o1_py).expect("bind o1");
+        let fnp_kwargs = PyDict::new(py);
+        fnp_kwargs.set_item("out", &o2_py).expect("bind o2");
+
+        // Parity and the no-swallow gate, both before any timing starts.
+        let reference = numpy_divide
+            .call1(&args)
+            .expect("numpy allocating reference");
+        let expected = numpy_divide_checksum(&reference, n);
+
+        let numpy_written = numpy_divide
+            .call(&args, Some(&numpy_kwargs))
+            .expect("numpy out= probe");
+        assert!(
+            numpy_written.is(&o1_py),
+            "numpy.divide(out=) returned a different object - that arm would be \
+             ALLOCATING after all and the allocation split would collapse to zero"
+        );
+        assert_eq!(
+            numpy_divide_checksum(&numpy_written, n),
+            expected,
+            "numpy.divide(out=) did not reproduce the allocating result bit for bit"
+        );
+
+        let fnp_written = fnp_divide
+            .call(&args, Some(&fnp_kwargs))
+            .expect("fnp out= probe");
+        assert!(
+            fnp_written.is(&o2_py),
+            "fnp.divide(out=) returned a different object - the native out= route \
+             declined and this arm is allocating, which voids the split"
+        );
+        assert_eq!(
+            numpy_divide_checksum(&fnp_written, n),
+            expected,
+            "fnp.divide(out=) did not reproduce numpy's result bit for bit"
+        );
+
+        let allocating_incumbent = || {
+            let started = Instant::now();
+            let result = numpy_divide.call1(&args).expect("numpy allocating");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let allocating_candidate = || {
+            let started = Instant::now();
+            let result = fnp_divide.call1(&args).expect("fnp allocating");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (allocating, allocating_incumbent_null, allocating_candidate_null) =
+            common::run_dual_null_median_ci_contract(
+                "divide_f64_2e20_allocating_vs_numpy",
+                allocating_incumbent,
+                allocating_candidate,
+            );
+
+        let preallocated_incumbent = || {
+            let started = Instant::now();
+            let result = numpy_divide
+                .call(&args, Some(&numpy_kwargs))
+                .expect("numpy out=");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let preallocated_candidate = || {
+            let started = Instant::now();
+            let result = fnp_divide.call(&args, Some(&fnp_kwargs)).expect("fnp out=");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (preallocated, preallocated_incumbent_null, preallocated_candidate_null) =
+            common::run_dual_null_median_ci_contract(
+                "divide_f64_2e20_preallocated_vs_numpy",
+                preallocated_incumbent,
+                preallocated_candidate,
+            );
+
+        // Arm A is the incumbent (numpy), arm B the candidate (ours); the contract's
+        // ratio is arm_a/arm_b, so >1 reads as our win. Both terms of each difference
+        // come from THIS invocation.
+        let numpy_allocation_ns = allocating.arm_a_median_ns - preallocated.arm_a_median_ns;
+        let fnp_allocation_ns = allocating.arm_b_median_ns - preallocated.arm_b_median_ns;
+        // The allocating arms are only interpretable with the churn control set; without
+        // it this group has read both 1.00 and 8.46 for the same comparison on the same
+        // binary. Emit the tunable's actual value so no row can be quoted without its
+        // allocator regime attached, and say so in words on a bare run.
+        let mmap_threshold = std::env::var("MALLOC_MMAP_THRESHOLD_")
+            .unwrap_or_else(|_| "unset".to_owned());
+        if mmap_threshold == "unset" {
+            println!(
+                "DIVIDE_ALLOCATION_SPLIT_WARNING allocator_churn_control=ABSENT \
+                 the allocating_ratio below is NOT a competitive number - re-run with \
+                 MALLOC_MMAP_THRESHOLD_=1073741824 before quoting it; only \
+                 preallocated_ratio is regime-independent"
+            );
+        }
+        println!(
+            "DIVIDE_ALLOCATION_SPLIT n={n} numpy_version={numpy_version} worker={} \
+             malloc_mmap_threshold={mmap_threshold} \
+             harness=common::run_dual_null_median_ci_contract \
+             both_regions_one_invocation=true out_arms_verified_in_place=true \
+             allocating_ratio={:.6} allocating_ci95=[{:.6},{:.6}] \
+             preallocated_ratio={:.6} preallocated_ci95=[{:.6},{:.6}] \
+             numpy_allocating_ns={:.1} numpy_preallocated_ns={:.1} \
+             fnp_allocating_ns={:.1} fnp_preallocated_ns={:.1} \
+             numpy_allocation_ns={numpy_allocation_ns:.1} \
+             fnp_allocation_ns={fnp_allocation_ns:.1} \
+             allocating_incumbent_null={:.6} allocating_candidate_null={:.6} \
+             preallocated_incumbent_null={:.6} preallocated_candidate_null={:.6}",
+            measurement_worker(),
+            allocating.ratio_median,
+            allocating.ratio_ci_low,
+            allocating.ratio_ci_high,
+            preallocated.ratio_median,
+            preallocated.ratio_ci_low,
+            preallocated.ratio_ci_high,
+            allocating.arm_a_median_ns,
+            preallocated.arm_a_median_ns,
+            allocating.arm_b_median_ns,
+            preallocated.arm_b_median_ns,
+            allocating_incumbent_null.ratio_median,
+            allocating_candidate_null.ratio_median,
+            preallocated_incumbent_null.ratio_median,
+            preallocated_candidate_null.ratio_median,
+        );
+    });
+}
+
 fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
     Python::initialize();
     Python::attach(|py| {
