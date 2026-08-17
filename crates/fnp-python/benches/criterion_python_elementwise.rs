@@ -1385,6 +1385,11 @@ fn main() {
                 "bench_binary_counter_multiply_empty_loop",
                 bench_binary_counter_multiply_empty_loop,
             ),
+            (
+                "bench_counter_kwbind_positional",
+                bench_counter_kwbind_positional,
+            ),
+            ("bench_counter_kwbind_keyword", bench_counter_kwbind_keyword),
             ("bench_reduce_counter_fnp", bench_reduce_counter_fnp),
             ("bench_reduce_counter_numpy", bench_reduce_counter_numpy),
             ("bench_outer_counter_fnp", bench_outer_counter_fnp),
@@ -7139,6 +7144,138 @@ fn bench_binary_counter_multiply_empty_loop(_c: &mut Criterion) {
              anchors_the_per_process_constant_S=true"
         );
     });
+}
+
+// PRICING THE LAST UNKNOWN IN THE ei9jz SPLIT: what PyO3 charges to BIND one keyword
+// (`deadlock-audit-ei9jz`).
+//
+// The six-arm split left one term unmeasured and therefore left its results as bounds:
+//
+//   probe_chain      = pydict_replica + kb - 1217.9   -> a LOWER bound while kb is unknown
+//   wrapper_residual = 1831.3 - probe_chain           -> an UPPER bound, correspondingly
+//
+// where kb is everything the `casting="unsafe"` arm pays that the plain arm does not, ABOVE
+// the PyDict construction already replicated: the caller handing over a kwargs dict, CPython
+// routing it through the pyo3 trampoline, and pyo3 extracting a `&str` out of it.
+//
+// THE PROBE: one `#[pyfunction]` whose signature MIRRORS `PyUFunc::__call__`'s nine
+// parameters exactly - same arity, same defaults, same `&str` for casting/order - called two
+// ways with a body that does nothing but return its first argument. Positional versus one
+// keyword. Everything else about the two arms is identical, including setup, so the
+// per-process constant cancels between them and the difference is kb and nothing else.
+//
+// Mirroring the real signature matters: pyo3 generates its argument-extraction code from the
+// declared signature, so a three-parameter stand-in would price a different function. The
+// nine-parameter shape is also the one `deadlock-audit-7ocfa` already cleared of any
+// per-parameter scaling cost (3->9 params measured 0.0 ns), which is why the count this
+// probe returns can be attributed to the KEYWORD rather than to the arity.
+#[pyo3::pyfunction]
+#[pyo3(signature = (
+    x1, x2, /, out=None, *, r#where=None, casting="same_kind", order="K", dtype=None,
+    subok=true, signature=None
+))]
+#[allow(clippy::too_many_arguments)]
+fn probe_ufunc_sig(
+    x1: pyo3::Py<pyo3::PyAny>,
+    x2: pyo3::Py<pyo3::PyAny>,
+    out: Option<pyo3::Py<pyo3::PyAny>>,
+    r#where: Option<pyo3::Py<pyo3::PyAny>>,
+    casting: &str,
+    order: &str,
+    dtype: Option<pyo3::Py<pyo3::PyAny>>,
+    subok: bool,
+    signature: Option<pyo3::Py<pyo3::PyAny>>,
+) -> pyo3::Py<pyo3::PyAny> {
+    // Consume every parameter so none is optimised away before it has been bound, and so
+    // the arm is not accidentally measuring a signature pyo3 could elide.
+    black_box(&(
+        &x2,
+        &out,
+        &r#where,
+        casting.len(),
+        order.len(),
+        &dtype,
+        subok,
+        &signature,
+    ));
+    x1
+}
+
+fn kwbind_probe(use_keyword: bool) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let probe_mod = PyModule::new(py, "fnp_kwbind_probe").expect("probe module");
+        probe_mod
+            .add_function(pyo3::wrap_pyfunction!(probe_ufunc_sig, &probe_mod).expect("wrap probe"))
+            .expect("register probe");
+        let target = probe_mod.getattr("probe_ufunc_sig").expect("probe fn");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", 256usize).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+        let args = PyTuple::new(py, [&a, &b]).expect("args");
+
+        // Hoisted, exactly as the PyDict replica hoists its dict: what the diff must see is
+        // the keyword-PASSING path, not repeated dict construction, which is already priced
+        // separately and would otherwise be counted twice.
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("casting", "unsafe").expect("bind casting");
+
+        // Both arms must return the FIRST argument, or the bodies are not identical and the
+        // difference is measuring something other than the binding.
+        let check = if use_keyword {
+            target.call(&args, Some(&kwargs)).expect("probe call")
+        } else {
+            target.call1(&args).expect("probe call")
+        };
+        assert!(
+            check.is(&a),
+            "the kwbind probe must return its FIRST argument unchanged, or the two arms are \
+             not the same function and their difference is not a binding cost"
+        );
+
+        for _ in 0..ACCUMULATE_COUNTER_CALLS {
+            let r = if use_keyword {
+                target.call(&args, Some(&kwargs)).expect("probe call")
+            } else {
+                target.call1(&args).expect("probe call")
+            };
+            black_box(&r);
+        }
+        println!(
+            "BINARY_COUNTER_PROBE op=kwbind arm={} casting={} n=256 \
+             calls={ACCUMULATE_COUNTER_CALLS} setup_matches_sibling_probe=true \
+             run_this_under_perf_stat=true prices=pyo3_keyword_binding_only",
+            if use_keyword { "keyword" } else { "positional" },
+            if use_keyword {
+                "unsafe"
+            } else {
+                "default_same_kind"
+            },
+        );
+    });
+}
+
+fn bench_counter_kwbind_positional(_c: &mut Criterion) {
+    kwbind_probe(false);
+}
+
+fn bench_counter_kwbind_keyword(_c: &mut Criterion) {
+    kwbind_probe(true);
 }
 
 fn bench_binary_counter_divide_fnp(_c: &mut Criterion) {
