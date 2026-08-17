@@ -49059,3 +49059,113 @@ WITH and WITHOUT the classification, on identical NumPy buffers, both timed in o
 before spending that build: beads `2nmd1 -> jw7vk -> ae85t -> vqxoa` already optimised this
 classification and the route is still behind, so the classification may not be the gap either.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - THE CLASSIFIER QUESTION IS UNDECIDED, AND ITS PRE-REGISTERED DECISION RULE IS UNUSABLE AS WRITTEN: the accumulate-free arm reads 0.566 bare and 0.922 under the allocator control, which selects OPPOSITE branches of the rule. Plus a QUALIFICATION I owe on my own row from earlier today: `MALLOC_MMAP_THRESHOLD_` is NOT a side-effect-free control - it slowed arms that allocate NOTHING by up to 1.52x (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. **NO BUILD** - five invocations of the ELF built earlier today. Load falling throughout
+(14.16/16.42/16.56 -> 12.68/15.44/16.20, iowait 0, one external `rustc`), CPU mean 2649-3345 MHz.
+
+**Campaign result class:** an UNDECIDED question correctly left undecided + a qualification on a row I
+banked four hours earlier + one robust confirmation
+
+### The instrument already existed, which is the first useful outcome
+
+My previous row's retry predicate named the next probe as "our serial divide loop WITH and WITHOUT the
+classification, on identical NumPy buffers, both timed in one invocation". Before building it I checked
+whether it existed. **It does**: `bench_divide_kernel_on_numpy_buffers` already runs
+`divide_former_serial` (a plain divide, no hazard test) and `divide_fused_serial` (the shipped form)
+against `numpy.divide(a,b,out=)` in one invocation, on NumPy-allocated buffers, with a decision rule
+already written into the source:
+
+> If the accumulate-free arm lands near multiply's 0.9656 the accumulate is the cost and
+> `deadlock-audit-vqxoa`'s "close to free" is refuted against the incumbent. If it still reads ~0.845
+> the accumulate is innocent and the cost is our divide codegen — a different lever.
+
+**A build was budgeted for this and not spent.** Checking for the existing instrument first is what
+saved it.
+
+### The measurement, five invocations, two allocator regimes
+
+```
+DIVIDE_KERNEL_ON_NUMPY_BUFFERS  n=2^20  numpy 2.4.3  worker=thinkstation1
+  elf 5f1e6f4e991b1891016b131fd9c60a46b54781c9b43f6eb1a4a8db70da55580d  profile=release-perf
+  harness=common::run_dual_null_median_ci_contract, rounds=41 min_of=3, checksum eb91d471f37fc5e0 throughout
+  all four A/A nulls straddle unity in every run
+
+  run  regime   accumulate-free      fused (SHIPPED)
+   1   bare     0.573780 REGRESSION  0.830276 REGRESSION
+   2   bare     0.538487 REGRESSION  0.869934 REGRESSION
+   4   bare     0.586355 REGRESSION  0.829814 REGRESSION
+   3   ctrl     0.931599 REGRESSION  0.874374 REGRESSION
+   5   ctrl     0.912665 REGRESSION  0.863157 REGRESSION
+
+  ctrl = MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=1073741824
+```
+
+**The rule cannot be applied.** Its first branch wants ~0.9656 and its second wants ~0.845; the
+accumulate-free arm delivers **0.566 bare and 0.922 controlled**. Bare, the accumulate-free arm is far
+WORSE than the fused one, which would say the classifier is actively beneficial. Controlled, it is
+slightly BETTER, which would say the classifier costs something. **The two regimes select opposite
+conclusions, so the classifier's cost is UNDECIDED and I am not resolving it in either direction.**
+
+I nearly published the bare-only reading. Run 1 alone said "removing the classifier costs 1.45x", the
+direction was surprising, and I replicated - the replication under the control reversed it. Three
+points with one condition difference is the attribution error I keep catching in this campaign, so I
+alternated conditions until the split was legible.
+
+### THE QUALIFICATION I OWE ON MY OWN EARLIER ROW
+
+Earlier today I banked the `MALLOC_MMAP_THRESHOLD_` control as the regime in which divide's numbers may
+be quoted. **That control is not side-effect-free, and this run measures how far from free it is.**
+Per-arm medians, runs 4 (bare) and 5 (control), from arms that ALLOCATE NOTHING on either side:
+
+```
+  arm                          bare        control     change
+  numpy.divide(out=)  contract 1   0.297202 ms  0.452010 ms   1.52x SLOWER
+  numpy.divide(out=)  contract 2   0.309696 ms  0.453228 ms   1.46x SLOWER
+  ours, fused (shipped)            0.375926 ms  0.524046 ms   1.39x SLOWER
+  ours, accumulate-free            0.507851 ms  0.494757 ms   unchanged
+```
+
+Raising the mmap threshold moves long-lived buffers from independent `mmap` regions onto the `brk`
+heap, which changes page backing, huge-page eligibility and TLB behaviour for **operands that were
+allocated once at setup and are never freed**. So the variable does not only remove allocation churn;
+it re-lays-out memory for every arm.
+
+**What this does and does not touch in the earlier row.** It does NOT overturn the 26.1x collapse of
+NumPy's *allocating* arm (12,787,767 -> 490,078 ns): an effect that large on an arm that allocates an
+8 MiB buffer per call is churn, and the conclusion that the "8.2-8.5x route win" is an allocator
+artifact stands. It DOES mean the phrase "the controlled regime is the one where the comparison is
+meaningful" was too strong: **controlled is not the same as clean**, ratios from the two regimes are
+not interchangeable, and any row quoting one must name it. I am recording that rather than letting the
+earlier row read as an endorsement of the control as ground truth.
+
+### WHAT IS ROBUST ACROSS EVERYTHING MEASURED TODAY
+
+The shipped fused kernel against NumPy, five runs, both regimes: **0.830276, 0.869934, 0.829814,
+0.874374, 0.863157** — a 5.4% spread that straddles no boundary. Combined with today's `out=` route
+contract (0.616010, 0.812377, 0.789348, 0.829316, 0.791004), **`fnp.divide` at n=2^20 is between 1.14x
+and 1.27x slower than `numpy.divide`, and that finding is regime-independent.** It is the one divide
+number that has survived every instrument, buffer provenance and allocator regime tried today.
+
+COUNTED_MECHANISM: 4 arms that perform NO allocation, 3 of which move 1.39-1.52x under an environment
+variable whose stated purpose is to change allocation behaviour — numpy.divide(out=) 0.297202 -> 0.452010 ms
+and 0.309696 -> 0.453228 ms, ours fused 0.375926 -> 0.524046 ms, ours accumulate-free 0.507851 -> 0.494757 ms
+unchanged. No mechanism is claimed for the classifier question itself; that it remains unattributed is the
+point of this row.
+
+A/A NULL CONTROLS: all four A/A nulls straddle unity in all five invocations — incumbent 0.998048 / 0.998734 / 1.000083 / 0.998296, candidate 1.001983 / 1.000014 / 1.005433 / 0.993656
+(`divide_..._null_incumbent_aa` 0.998048/0.998734/1.000083/0.998296 and `..._null_candidate_aa`
+1.001983/1.000014/1.005433/0.993656 in the two runs quoted in full), checksum `eb91d471f37fc5e0`
+identical across every arm and run, so both arms computed the same quotients throughout. **The nulls
+passing did NOT protect the accumulate-free ratio from swinging 0.538 to 0.932** — the same
+null-blindness recorded earlier today, now reproduced on a second statistic.
+
+RETRY PREDICATE: to decide the classifier question, (a) fix and DECLARE the page-backing regime rather
+than treating `MALLOC_MMAP_THRESHOLD_` as a neutral control, and (b) re-register the rule as a
+comparison of our two arms against EACH OTHER inside one regime and one contract order — the current
+form compares each arm to NumPy in separate contracts, so contract order and NumPy's own regime
+sensitivity both leak into the answer. Do NOT quote 0.566 or 0.922 as "the" accumulate-free number;
+each is a number for its regime only. Do NOT re-derive the three mechanisms eliminated in the addendum
+above (vectorisation, ISA width, non-temporal stores) — those remain settled on this host.
+AGENT_NAME=AzureCarp.
