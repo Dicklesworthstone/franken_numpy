@@ -60110,7 +60110,14 @@ fn linalg_vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyR
     let vecdot_fn = numpy.getattr("linalg")?.getattr("vecdot")?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", axis)?;
+        // numpy's default axis for vecdot is -1. `inspect.signature` reports NO default
+        // for it - it is a gufunc, so the audit could not clear this site the way it
+        // cleared the other 22 - so it was confirmed EMPIRICALLY instead: omitting axis
+        // equals axis=-1 and differs from axis=0, on both np.vecdot and
+        // np.linalg.vecdot (`deadlock-audit-v46rn`).
+        if axis != -1 {
+            kwargs.set_item("axis", axis)?;
+        }
         Ok(vecdot_fn
             .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
             .unbind())
@@ -64864,7 +64871,12 @@ fn permute_dims(py: Python<'_>, a: Py<PyAny>, axes: Py<PyAny>) -> PyResult<Py<Py
 fn vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("axis", axis)?;
+    // Same empirically-confirmed default as `linalg_vecdot` above: numpy's vecdot
+    // defaults to axis=-1, and `inspect.signature` cannot say so because it is a gufunc
+    // (`deadlock-audit-v46rn`).
+    if axis != -1 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("vecdot")?
         .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
@@ -111665,6 +111677,7 @@ mod tests {
                        'linspace': np.linspace, 'geomspace': np.geomspace,\n\
                        'logspace': np.logspace, 'unstack': np.unstack,\n\
                        'lexsort': np.lexsort, 'unwrap': np.unwrap,\n\
+                       'vecdot': np.vecdot, 'linalg_vecdot': np.linalg.vecdot,\n\
                        'fft': np.fft.fft, 'ifft': np.fft.ifft, 'rfft': np.fft.rfft,\n\
                        'irfft': np.fft.irfft, 'hfft': np.fft.hfft, 'ihfft': np.fft.ihfft,\n\
                        'chebder': np.polynomial.chebyshev.chebder,\n\
@@ -111683,6 +111696,7 @@ mod tests {
                        'geomspace': (np.ones(3), np.full(3, 8.0), 4),\n\
                        'logspace': (np.zeros(3), np.ones(3), 4),\n\
                        'unstack': (a2,), 'lexsort': (keys,), 'unwrap': (a2,),\n\
+                       'vecdot': (a2, c2), 'linalg_vecdot': (a2, c2),\n\
                        'fft': (a2,), 'ifft': (a2,), 'rfft': (a2,),\n\
                        'irfft': (a2,), 'hfft': (a2,), 'ihfft': (a2,),\n\
                      }\n\
@@ -111701,7 +111715,7 @@ mod tests {
             let args_tbl = locals.get_item("ARGS")?.expect("ARGS table");
 
             // (name, default the callee already uses, a NON-default axis to force)
-            let cases: [(&str, i64, i64); 22] = [
+            let cases: [(&str, i64, i64); 24] = [
                 ("linspace", 0, 1),
                 ("geomspace", 0, 1),
                 ("logspace", 0, 1),
@@ -111724,6 +111738,10 @@ mod tests {
                 ("ihfft", -1, 0),
                 ("lexsort", -1, 0),
                 ("unwrap", -1, 0),
+                // Cleared empirically rather than by introspection - see the note at the
+                // call sites. numpy reports no signature default for a gufunc's axis.
+                ("vecdot", -1, 0),
+                ("linalg_vecdot", -1, 0),
             ];
 
             for (name, default_axis, other_axis) in cases {
