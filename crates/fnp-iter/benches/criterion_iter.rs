@@ -202,10 +202,80 @@ fn report_pair(row: &str, stats: PairStats) {
     );
 }
 
-fn report_median_ci_gate(row: &str, effect: PairStats, null: PairStats) {
-    let null_half_width = (null.ratio_ci_low - 1.0)
+fn null_half_width_of(null: PairStats) -> f64 {
+    (null.ratio_ci_low - 1.0)
         .abs()
-        .max((null.ratio_ci_high - 1.0).abs());
+        .max((null.ratio_ci_high - 1.0).abs())
+}
+
+/// Does this A/A null's 95% CI actually contain 1.0? (`deadlock-audit-7xcq2`)
+///
+/// An A/A null runs the SAME arm against ITSELF, so its ratio must be 1.0. A CI that
+/// EXCLUDES unity means the harness systematically favoured one position in the
+/// schedule, and the effect measured in that same position inherits the bias.
+///
+/// THIS IS A VISIBILITY FIELD, NOT A VETO, and the distinction is worth stating because
+/// the reasoning that first motivated it was wrong. The claim was that the gate is BLIND
+/// to bias, on the theory that it scales its threshold by the null's half-width, so a
+/// biased-but-TIGHT null would slip through on a small threshold. False:
+/// `null_half_width_of` measures the distance from **1.0** to the furthest CI bound, not
+/// the width of the interval, so a displaced null yields a LARGER half-width and a
+/// STRICTER threshold. The gate already charges the bias.
+///
+/// What was actually missing is that nothing in the emitted line SAID a null was biased.
+/// Both instances observed on 2026-08-16 were banked with hand-written prose caveats
+/// instead of a machine-readable flag, and the ledger carries 116 prose `ci95=` mentions
+/// against ZERO pasted null rows - so nobody can count how often this happens. These
+/// fields make that population exist from here on.
+fn null_straddles_unity(null: PairStats) -> bool {
+    null.ratio_ci_low <= 1.0 && null.ratio_ci_high >= 1.0
+}
+
+/// How far the null's CENTRE sits from unity - the quantity the half-width misses.
+fn null_bias(null: PairStats) -> f64 {
+    (null.ratio_median - 1.0).abs()
+}
+
+/// The verdict `fnp-python`'s canonical `contract_gate_verdict` would return for this pair.
+///
+/// THE DIVERGENCE THIS EXISTS TO EXPOSE (`deadlock-audit-7xcq2`): the local rule in
+/// `report_median_ci_gate` below never consults the EFFECT's own CI - only its median,
+/// against the null envelope. The canonical rule in
+/// `crates/fnp-python/benches/common/mod.rs` additionally requires
+/// `effect.ratio_ci_low > 1.0` for a WIN (and `ratio_ci_high < 1.0` for a REGRESSION).
+/// So a row whose effect CI STRADDLES unity - an effect not statistically distinguishable
+/// from no-change - is stamped DECIDABLE_WIN by this file and UNDECIDED by `fnp-python`,
+/// from identical numbers. `verify_median_ci_gate_semantics` pins a worked instance.
+///
+/// NOTE WHICH CI THIS IS. The bead that opened this line looked for the hole in the
+/// NULL's CI and correctly found none - the null's bias is already charged into the
+/// threshold. The hole is in the EFFECT's CI, and it is not in `fnp-python` at all; it is
+/// in the three crates (fnp-io, fnp-iter, fnp-random) that carry this byte-identical weak
+/// copy of the gate.
+///
+/// EMITTED ALONGSIDE the local verdict rather than replacing it. An unknown number of
+/// banked rows rest on the weak rule - unknown precisely because gate lines are almost
+/// never pasted into the ledger - so silently reversing them is worse than flagging them.
+/// Harmonising the rule is a separate decision that needs its own registration and a
+/// re-run, not a side effect of adding a field.
+fn strict_gate_verdict(effect: PairStats, null: PairStats) -> &'static str {
+    let required_delta = (2.0 * null_half_width_of(null)).max(0.01);
+    let effect_delta = effect.ratio_median - 1.0;
+    let effect_ci_above_one = effect.ratio_ci_low > 1.0;
+    let effect_ci_below_one = effect.ratio_ci_high < 1.0;
+    let above_null_envelope = effect.ratio_median > null.ratio_ci_high;
+    let below_null_envelope = effect.ratio_median < null.ratio_ci_low;
+    if effect_ci_above_one && above_null_envelope && effect_delta >= required_delta {
+        "DECIDABLE_WIN"
+    } else if effect_ci_below_one && below_null_envelope && effect_delta <= -required_delta {
+        "DECIDABLE_REGRESSION"
+    } else {
+        "UNDECIDED"
+    }
+}
+
+fn report_median_ci_gate(row: &str, effect: PairStats, null: PairStats) {
+    let null_half_width = null_half_width_of(null);
     let required_delta = (2.0 * null_half_width).max(0.01);
     let effect_delta = effect.ratio_median - 1.0;
     let outside_null_ci =
@@ -219,9 +289,109 @@ fn report_median_ci_gate(row: &str, effect: PairStats, null: PairStats) {
     };
     println!(
         "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
+         effect_ci95=[{:.6},{:.6}] effect_ci_excludes_one={} \
          null_ci95=[{:.6},{:.6}] null_half_width={:.6} required_2x_delta={required_delta:.6} \
+         null_straddles_unity={} null_bias={:.6} verdict_strict={} \
          cv_is_provenance_only=true",
-        effect.ratio_median, null.ratio_ci_low, null.ratio_ci_high, null_half_width,
+        effect.ratio_median,
+        effect.ratio_ci_low,
+        effect.ratio_ci_high,
+        effect.ratio_ci_low > 1.0 || effect.ratio_ci_high < 1.0,
+        null.ratio_ci_low,
+        null.ratio_ci_high,
+        null_half_width,
+        null_straddles_unity(null),
+        null_bias(null),
+        strict_gate_verdict(effect, null),
+    );
+}
+
+/// Builds a `PairStats` carrying only the four fields the gate reads, for the self-check.
+fn gate_probe_stats(median: f64, ci_low: f64, ci_high: f64) -> PairStats {
+    PairStats {
+        arm_a_median_ns: 1000.0,
+        arm_b_median_ns: 1000.0,
+        ratio_median: median,
+        ratio_ci_low: ci_low,
+        ratio_ci_high: ci_high,
+        ratio_cv_pct: 0.0,
+        ratio_mad: 0.0,
+        checksum: 0x7c02,
+    }
+}
+
+/// Pins the null-quality fields and the local-vs-canonical verdict divergence
+/// (`deadlock-audit-7xcq2`).
+///
+/// Runs from `main`, not as a `#[test]`: this bench sets `harness = false`, so a `#[test]`
+/// here would never execute on any real run and would prove nothing.
+fn verify_median_ci_gate_semantics() {
+    // A null displaced off unity but TIGHT, against one centred on unity but WIDER. Both
+    // sets of bounds are the two instances observed on thinkstation1 on 2026-08-16.
+    let biased_tight = gate_probe_stats(1.030928, 1.030405, 1.034364);
+    let healthy_wide = gate_probe_stats(1.000000, 0.976336, 1.032376);
+    assert!(
+        !null_straddles_unity(biased_tight),
+        "a null CI of [1.030405,1.034364] excludes unity and must be flagged"
+    );
+    assert!(
+        null_straddles_unity(healthy_wide),
+        "a null CI of [0.976336,1.032376] contains unity and must not be flagged"
+    );
+    assert!(
+        null_straddles_unity(gate_probe_stats(1.0005, 1.000000, 1.001000)),
+        "a CI whose bound is exactly 1.0 must count as straddling"
+    );
+    // PINS THE CORRECTED MECHANISM: half_width is the distance from 1.0 to the furthest
+    // bound, NOT the interval width, so the displaced-but-tight null yields the LARGER
+    // threshold. If a later edit redefines it as interval width, this fails and forces the
+    // author to re-read why these fields exist - rather than silently opening the hole
+    // that was once wrongly claimed to be here already.
+    assert!(
+        null_half_width_of(biased_tight) > null_half_width_of(healthy_wide),
+        "displaced-but-tight null must yield the LARGER half-width: {} vs {}",
+        null_half_width_of(biased_tight),
+        null_half_width_of(healthy_wide)
+    );
+    assert!(
+        null_bias(biased_tight) > null_bias(healthy_wide),
+        "only null_bias distinguishes a displaced null from a merely noisy one"
+    );
+
+    // THE DIVERGENCE, worked. A clean tight null, and an effect whose median clears both
+    // the null envelope and the 2x threshold while its OWN CI still contains 1.0.
+    let null = gate_probe_stats(1.000000, 0.990000, 1.010000);
+    let wide_effect = gate_probe_stats(1.100000, 0.950000, 1.250000);
+    assert_eq!(
+        strict_gate_verdict(wide_effect, null),
+        "UNDECIDED",
+        "an effect whose own CI contains 1.0 is not distinguishable from no-change"
+    );
+    // ...and the LOCAL rule calls those same numbers a win. This is the defect in
+    // executable form: median 1.100000 clears null_ci_high 1.010000 and the 0.02
+    // threshold, so `report_median_ci_gate` emits DECIDABLE_WIN where `fnp-python` emits
+    // UNDECIDED. If someone harmonises the two rules, this assertion fails and points at
+    // the banked rows that need re-reading.
+    let local_required = (2.0 * null_half_width_of(null)).max(0.01);
+    assert!(
+        wide_effect.ratio_median > null.ratio_ci_high
+            && wide_effect.ratio_median - 1.0 >= local_required,
+        "the local rule certifies this pair on median alone: {} vs envelope {} / delta {}",
+        wide_effect.ratio_median,
+        null.ratio_ci_high,
+        local_required
+    );
+    // A properly separated effect must still WIN under the strict rule, or the strict
+    // verdict is merely rejecting everything and carries no information.
+    assert_eq!(
+        strict_gate_verdict(gate_probe_stats(1.100000, 1.050000, 1.150000), null),
+        "DECIDABLE_WIN",
+        "an effect CI clear of unity and outside the null envelope must still win"
+    );
+    assert_eq!(
+        strict_gate_verdict(gate_probe_stats(0.900000, 0.850000, 0.950000), null),
+        "DECIDABLE_REGRESSION",
+        "the mirrored regression case must survive the effect-CI requirement"
     );
 }
 
@@ -506,6 +676,7 @@ criterion_group! {
 
 fn main() {
     report_bench_identity();
+    verify_median_ci_gate_semantics();
     run_c_order_contract();
     benches();
     Criterion::default().configure_from_args().final_summary();

@@ -50491,3 +50491,123 @@ re-run this test to a different answer - it is closed. If the decline band is im
 result means the route must still ENGAGE below the band, so a plain `>=` threshold is the wrong shape
 and an interval is required.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — THREE OF THE FOUR GATE EMITTERS CARRY A WEAKER VERDICT RULE THAN `fnp-python`, and the hole is in the EFFECT's CI, not the null's (deadlock-audit-7xcq2)
+
+`deadlock-audit-7xcq2` opened on the theory that the A/A-null gate was blind to a biased null. That
+theory was correctly withdrawn in `01fedccc`: `null_half_width` is the distance from **1.0** to the
+furthest CI bound, not the interval width, so a displaced null already yields a LARGER half-width and
+a STRICTER threshold. The gate charges the bias. No hole.
+
+**There is a hole, and it is one file away from where the bead looked.** `MEDIAN_CI_GATE` is emitted
+by FOUR crates, not one:
+
+```
+  crates/fnp-python/benches/common/mod.rs     canonical  contract_gate_verdict
+  crates/fnp-io/benches/criterion_io.rs       weak copy  report_median_ci_gate
+  crates/fnp-iter/benches/criterion_iter.rs   weak copy  report_median_ci_gate
+  crates/fnp-random/benches/random_ops.rs     weak copy  report_median_ci_gate
+```
+
+The three weak copies were byte-identical to each other and DIVERGE from the canonical rule. The
+canonical rule requires the EFFECT's own CI to exclude unity:
+
+```
+  canonical:  effect_ci_above_one && above_null_envelope && effect_delta >=  required_delta
+              where effect_ci_above_one = effect.ratio_ci_low > 1.0
+  weak copy:  outside_null_ci      && effect_delta >= required_delta
+              (the effect's CI is never consulted at all — only its MEDIAN, against the null envelope)
+```
+
+So a row whose effect CI STRADDLES unity — an effect not statistically distinguishable from
+no-change — is stamped `DECIDABLE_WIN` by those three files and `UNDECIDED` by `fnp-python`, from
+identical numbers. Worked instance, now pinned in `verify_median_ci_gate_semantics` in all three:
+
+```
+  null   median 1.000000  ci95=[0.990000,1.010000]  half_width 0.010000  required_2x_delta 0.020000
+  effect median 1.100000  ci95=[0.950000,1.250000]
+    weak:      median 1.100000 > null_ci_high 1.010000, delta 0.100000 >= 0.020000  -> DECIDABLE_WIN
+    canonical: effect.ratio_ci_low 0.950000 is NOT > 1.0                            -> UNDECIDED
+```
+
+Note this is the bead's own stated negative case — "widening the CI must NOT make a row pass" —
+landing in the CI the bead did not examine. In these three crates widening the EFFECT's CI genuinely
+does not prevent a pass, because that CI is not read.
+
+### What I did NOT do, deliberately
+
+I did not harmonise the rule. An unknown number of banked rows rest on the weak copy — unknown
+precisely because of `f9859b06`'s finding that gate lines are almost never pasted into this ledger
+(116 prose `ci95=` mentions against zero pasted null rows). Silently reversing historical verdicts is
+worse than flagging them, per this bead's own instruction to report and not hard-fail. The three
+files now emit BOTH verdicts: the local `verdict=` unchanged, plus `verdict_strict=` computed by the
+canonical rule. Harmonisation is a separate decision needing its own registration and a re-run.
+
+Added to all three gate lines: `effect_ci95`, `effect_ci_excludes_one`, `null_straddles_unity`,
+`null_bias`, `verdict_strict`. No threshold and no existing verdict changed — verified by inspection
+of the diff, which leaves the `verdict` expression byte-identical and only hoists `null_half_width`
+into a named helper.
+
+### THE DIVERGENCE DID NOT FIRE ON LIVE DATA — 10 rows, 0 divergences
+
+This is the part that keeps the finding in proportion, and it cuts against the headline:
+
+```
+  MEDIAN_CI_GATE rows observed          10
+  verdict == verdict_strict             10   (5 WIN->WIN, 3 UNDECIDED->UNDECIDED, 1 REGRESSION->REGRESSION,
+                                              plus 1 further UNDECIDED->UNDECIDED)
+  DIVERGENT rows                         0
+  null_straddles_unity=true             10   (every null in the sample is admissible)
+  effect_ci_excludes_one=false           1
+```
+
+The single row with a straddling effect CI was `loadtxt_usecols_scatter_resurrection`
+(effect 1.020894 ci95=[0.974418,1.036892], null ci95=[0.987248,1.023704]). It is **not** a near
+miss: it failed the weak rule on two independent counts — its median 1.020894 sits INSIDE the null
+envelope, and its delta 0.020894 is below `required_2x_delta` 0.047408. To diverge, a row needs a
+median clearing 1.047408 while its lower CI bound still sits under 1.0, i.e. an effect half-width
+above ~0.047. Constructible, and unobserved here.
+
+So: **a latent hazard in three harnesses, not a demonstrated contaminator of any banked row.** Nobody
+may cite this row as evidence that a specific past result was wrong. What it licenses is counting the
+population from here on, which was the whole point of the bead after the retrospective audit was
+abandoned.
+
+COUNTED_MECHANISM: 3 of 4 `MEDIAN_CI_GATE` emitters omitted the `effect.ratio_ci_low > 1.0` /
+`effect.ratio_ci_high < 1.0` conjunct present in the canonical rule; 5 fields added per gate line in
+each; 10 live rows emitted the new fields with 0 verdict divergences.
+
+VERIFICATION, all exit codes captured DIRECTLY and never through a pipe (a piped `cargo fmt --check`
+reports exit 0 while failing):
+```
+  cargo fmt -p fnp-io -p fnp-iter -p fnp-random --check       exit 0   (local)
+  cargo check  -p fnp-io -p fnp-iter -p fnp-random --benches  exit 0   (rch remote vmi1227854)
+  cargo clippy -p fnp-io -p fnp-iter -p fnp-random --benches  exit 0   (rch remote vmi1227854, no -D warnings,
+                                                                        which under-counts)
+```
+ENGAGEMENT PROOF, and it is the part a green compile cannot give: the self-check is called as the
+statement immediately after `report_bench_identity()` in each `main()`, so it cannot be skipped by an
+env gate or a group filter. All three ELFs were built and RUN on rch worker vmi1153651 and all three
+printed their identity line and proceeded into their benchmarks with 0 `panicked`/`assertion failed`
+occurrences — so the assertions executed and passed, in three distinct ELFs:
+```
+  benches/criterion_io.rs     bench_elf_sha256=270b0613f09320a68afa59fe7a3a838cbbd938a1582683a9268b4cba29d2998d
+  benches/criterion_iter.rs   bench_elf_sha256=0c46b0e932d6a6f922afcb085dd016bbdacffe4870635abeec413fceb7629384
+  benches/random_ops.rs       bench_elf_sha256=ece57086441782068efa4f5965a49a3b833f23edf08e8da33a1ab05a2b5726ac
+```
+A/A NULL CONTROLS / HOST DISCIPLINE: **this row publishes no ratio and no speedup, so it needs
+neither.** The 10 gate lines above are incidental output used ONLY to prove field emission and
+verdict agreement; they were produced on a shared rch worker whose loadavg and CPU MHz I did not
+record, and they are therefore NOT banked as perf rows. Do not cite any ratio from them. The local
+host was at loadavg 21.76 with a peer's criterion ELF at 761% CPU throughout, which is exactly why
+this turn's work was chosen to be build-and-assert rather than measurement.
+
+RETRY PREDICATE: the open question is whether to harmonise the three weak copies onto the canonical
+rule. That needs (a) a count of divergent rows over a full elementwise+io+iter+random sweep, now
+obtainable because `verdict_strict` is emitted, and (b) a decision registered BEFORE the sweep on
+what to do with divergent historical rows. If a full sweep shows zero divergences, the honest move is
+to harmonise anyway — a rule that never fires costs nothing to correct — but that is a decision, not
+a measurement. The bead's own DELETION CONDITION applies to `null_straddles_unity`: if a full sweep
+shows zero nulls excluding unity, delete it; this sample is 10/10 admissible, which is evidence
+toward deletion but nowhere near a sweep.
+AGENT_NAME=SlateFinch.
