@@ -52350,3 +52350,65 @@ re-anchored so it still exercises the arm it was written for. State in that comm
 and with it today's bitmask win, retreats to `out=` below 2^14. Do not ship the raise without doing
 that reading.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — LOADAVG IS THE WRONG QUIETNESS GATE ON THIS 64-CORE HOST: loadavg 30.5 coexists with 87% idle and only 6-9 runnable tasks, so windows are being declined that are actually clean
+
+**Campaign result class:** measurement-methodology note (no perf claim)
+
+The standing orders say to prefer a quiet window before certifying and to record loadavg on every
+row. Both are right. But loadavg alone has been read as "busy" on this host at moments when the CPU
+was 87% idle, and that costs measurement windows.
+
+Measured directly, thinkstation1, 64 cores, two consecutive `vmstat` samples plus a process census:
+
+```
+  loadavg                       30.51 / 27.21 / 20.59
+  vmstat idle                   87%, 87%     (two consecutive 1 s samples, stable)
+  vmstat iowait                 1%
+  vmstat r (runnable)           9, 6, 7      out of 64 cores
+  vmstat b (blocked)            1, 1, 2
+  ps state census               591 S, 395 I, 6 R, 1 D, 1 Z
+  user / sys                    11-20% / 2-3%
+```
+
+**Six to nine runnable tasks on 64 cores is 10-14% occupancy, and the idle figure agrees at 85-87%.
+The loadavg of 30 is a decaying average of builds that have already finished** - the 5- and 15-minute
+figures (27.21, 20.59) are BELOW the 1-minute here only because load was still falling, and on this
+box a burst of `cargo`/`rustc` inflates the 1-minute number for minutes after the CPUs go quiet.
+
+### Why this matters and what to use instead
+
+Linux loadavg counts tasks in RUNNABLE *and* UNINTERRUPTIBLE-sleep states, and it is an
+exponentially-decayed average, not an instantaneous occupancy. On a 64-core machine running a build
+fleet, it is a poor proxy for "are my measurements going to be contended".
+
+```
+  gate                         verdict on this sample     useful?
+  loadavg 1-min  = 30.51       "half the box is busy"     NO  - lagging, and not normalised to cores
+  vmstat idle    = 87%         "the box is quiet"         YES - instantaneous, directly the quantity
+  vmstat r       = 6-9 of 64   "10-14% occupied"          YES - normalise r against core count
+```
+
+RECOMMENDED DISCLOSURE for a row that certifies anything on this host: report `vmstat` idle AND the
+runnable count against the core count, alongside loadavg. Loadavg still belongs in the row - it is
+what the orders ask for and it is a useful trend - but it must not be the thing that decides whether
+to certify. Two agents reading the same instant reported "load 40, idle 49%" and "load 30.5, idle
+87%" within minutes of each other today; the idle figures are reconcilable as different instants,
+the conclusions drawn from loadavg alone were not.
+
+CAVEAT, and it cuts against using idle alone too: a high idle figure does NOT license a wall-clock
+certification by itself. This session measured 4.8-6.1% run-to-run spread on wall-clock arms at
+idle 82-86%, and a ~10% batch-to-batch drift on the same quantity at similar idle. Quietness is
+necessary and nowhere near sufficient; the counted currency held 0.08% across the same runs. Use
+idle to decide whether to START a timed measurement, and replication to decide whether to BELIEVE
+it.
+
+COUNTED_MECHANISM: loadavg 30.51 against vmstat r=6-9 of 64 cores and idle=87% on two consecutive
+samples; 1 task in D state, so the loadavg is not being inflated by uninterruptible I/O either.
+
+A/A NULL CONTROLS: not applicable - no ratio published.
+
+RETRY PREDICATE: none; this is a disclosure about instrument reading. If a future host shows high
+loadavg WITH a large D-state population, the diagnosis is different (blocked I/O, not decay) and the
+window may genuinely be bad - check `ps -eo state=` before concluding either way.
+AGENT_NAME=SlateFinch.
