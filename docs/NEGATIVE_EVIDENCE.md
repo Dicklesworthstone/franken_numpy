@@ -47935,3 +47935,86 @@ three checksum-placement figures or the `same_kind` +10 as values — say "below
 banking any future counter delta under ~180 insns/call, run the identical-source null and report it
 alongside, or do not bank the number at all.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - ANSWERED, with the exact control `q00ev` said was missing: at 2^16 the NATIVE f64 divide route costs 4628 ns of excess against the delegating control's 457 ns - **10.1x** - so `F64_DIV_NATIVE_MIN_LEN` admits a band where routing is strictly worse than delegating (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. One build. The measurement `q00ev` specified and could not take.
+
+**Campaign result class:** answered open question + a gate shown to be wrong (no gate change landed yet)
+
+### The question, and why it needed exactly this instrument
+
+`q00ev` found the native divide path at its worst just above its own gate (1.286x at 2^16 against
+1.091x at 2^20) and asked whether the gate is simply wrong — whether DELEGATING at 2^16 would beat
+routing. It refused to answer by arithmetic, and its reasoning was right: the wrapper's cost is not
+constant in n (`multiply`'s excess grows 6.2x between 2^8 and 2^20), so subtracting the 938 ns
+measured at 2^8 would repeat a cross-size subtraction error that once overstated a row by 5.5x. It
+named what was missing: **`multiply` measured AT 2^16, in the same invocation, as the delegating
+control** — and recorded that the cell did not exist because the group hardcoded `n = 1<<8`.
+
+`bench_divide_size_gate_vs_numpy` now measures both ops at both sizes.
+
+```
+DIVIDE_SIZE_GATE  numpy 2.4.3  worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract
+  bench_elf_sha256=0445fa77638dc6f5f4bacd775373d464525e078539176064f089f6b009157c64
+  loadavg 23.57/25.64/35.16 throughout; per-arm same_core=true on every phase,
+  arm_mhz_spread 1.0000-1.0017, arms 3455.3-4071.3 MHz
+  DISCLOSURE: three peer cargo builds were running. Both arms of every contract are
+  interleaved in one invocation and saw the same host, which is why this comparison
+  survives that; the absolute ns should not be quoted against another window.
+
+  n      op         route        ratio      numpy_ns    fnp_ns   excess_ns
+  2^8    divide     delegates   0.652975        461       711        250
+  2^8    multiply   delegates   0.649390        426       656        230
+  2^16   divide     NATIVE      0.903755      20109     24737       4628
+  2^16   multiply   delegates   0.976168      19141     19598        457
+```
+
+**At 2^16 the native route's excess is 4628 ns against the delegating control's 457 ns — 10.1x.**
+
+### The fixture guard passed, which is what makes the contrast readable
+
+At 2^8 BOTH ops delegate, so their excesses must agree to within the block-entry cost that divide
+alone pays. They do: **250 ns against 230 ns, a 20 ns difference**, comfortably inside the 48 ns
+that entering the f64 block was independently measured to cost. The two arms are comparable, so the
+2^16 contrast is a property of the ROUTE and not of the ops.
+
+### What follows
+
+Divide delegating at 2^16 would pay the control's 457 ns plus its own ~48 ns block entry, ~505 ns:
+
+```
+  projected if it delegated   1.0251x slower
+  actual, taking the route    1.1065x slower
+```
+
+**The gate admits a band where the native route is strictly worse than doing nothing.** That is
+`q00ev`'s hypothesis, now measured rather than inferred, with the control taken at the size in
+question exactly as it demanded.
+
+### What I have NOT done, deliberately
+
+**No gate change is landed.** Raising `F64_DIV_NATIVE_MIN_LEN` past 2^16 requires knowing where the
+native route actually starts winning, and I do not know that it ever does — `q00ev` has it still
+losing at 2^20 (1.091x), and the same delegating-control comparison has NOT been taken there. Picking
+a new threshold from one measured size would be guessing at the crossover, which is how the current
+value came to be questionable.
+
+**And I am not repeating q00ev's warning as an error.** The tempting move is to take the ledger's
+"multiply excess 5190 ns at 2^20" and subtract it there. That is precisely the cross-size,
+cross-invocation arithmetic q00ev refused, and refusing it was correct. 2^20 needs the same
+in-invocation control, and the group can now provide it by adding the size.
+
+COUNTED_MECHANISM: at n=2^16 in one invocation, the native f64 divide route costs 4628 ns of excess
+over NumPy while the always-delegating `multiply` control costs 457 ns at the same size, a 10.1x
+ratio; at n=2^8, where both delegate, the same two ops agree at 250 and 230 ns.
+
+A/A NULL CONTROLS: every row above is a `run_dual_null_median_ci_contract` row the gate admitted.
+
+RETRY PREDICATE: the immediate next measurement is this same group with 2^20 added, giving the
+delegating control at that size too — that decides whether the native divide route ever wins, and
+therefore whether the fix is to raise the gate or to remove the route. Do NOT set a new
+`F64_DIV_NATIVE_MIN_LEN` from the 2^16 cell alone, and do NOT subtract a `multiply` excess measured
+in another invocation or at another size.
+AGENT_NAME=AzureCarp.

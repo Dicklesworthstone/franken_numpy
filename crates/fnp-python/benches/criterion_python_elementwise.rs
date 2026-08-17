@@ -7065,17 +7065,47 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
             let a = locals.get_item("a").expect("a operand");
             let b = locals.get_item("b").expect("b operand");
             let args = PyTuple::new(py, [&a, &b]).expect("args");
-            let (ratio, lo, hi, numpy_ns, fnp_ns) =
-                measure_binary_ufunc_vs_numpy(py, &module, &numpy, "divide", &args, n);
-            println!(
-                "DIVIDE_SIZE_GATE op=divide n={n} log2n={exponent} \
-                 delegates_under_gate={} numpy_version={numpy_version} \
-                 harness=common::run_dual_null_median_ci_contract \
-                 ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
-                 numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={:.1}",
-                n < (1usize << 14),
-                fnp_ns - numpy_ns,
-            );
+
+            // MULTIPLY IS THE DELEGATING CONTROL, AND IT IS THE WHOLE POINT OF THIS
+            // ADDITION (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`).
+            //
+            // `q00ev` found the native divide path at its worst just above its own gate
+            // - 1.286x at 2^16 against 1.091x at 2^20 - and asked whether the gate is
+            // simply wrong, i.e. whether DELEGATING at 2^16 would beat routing. It could
+            // not answer that, and said so precisely: the arithmetic needs the wrapper's
+            // cost AT 2^16, and subtracting the 938 ns measured at 2^8 would repeat a
+            // cross-size subtraction error that once overstated a row by 5.5x. The
+            // wrapper cost is not constant in n - `multiply`'s excess grew 6.2x between
+            // 2^8 and 2^20.
+            //
+            // So the control has to be MEASURED at the same size, not extrapolated to it.
+            // `multiply` delegates at every size (it hits the `_ => None` arm and never
+            // enters the f64 block), so at 2^16 it is exactly "what divide would cost if
+            // it delegated", up to the block-entry cost measured separately at ~48 ns.
+            // Running both in ONE invocation is what makes the difference readable: the
+            // two arms see the same host, the same window and the same operands.
+            //
+            // THE FIXTURE GUARD: at 2^8 BOTH ops delegate, so their excesses must agree
+            // to within roughly that block-entry cost. If they do not, the pair is not
+            // comparable and the 2^16 contrast means nothing - so the 2^8 row is not
+            // decoration, it is the control's control.
+            for op in ["divide", "multiply"] {
+                let (ratio, lo, hi, numpy_ns, fnp_ns) =
+                    measure_binary_ufunc_vs_numpy(py, &module, &numpy, op, &args, n);
+                let routes_natively = op == "divide" && n >= (1usize << 14);
+                println!(
+                    "DIVIDE_SIZE_GATE op={op} n={n} log2n={exponent} \
+                     routes_natively={routes_natively} \
+                     delegates_under_gate={} is_delegating_control={} \
+                     numpy_version={numpy_version} \
+                     harness=common::run_dual_null_median_ci_contract \
+                     ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
+                     numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={:.1}",
+                    n < (1usize << 14),
+                    op == "multiply",
+                    fnp_ns - numpy_ns,
+                );
+            }
         }
     });
 }
