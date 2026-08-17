@@ -1428,6 +1428,10 @@ fn main() {
                 bench_signature_shape_pyclass_control,
             ),
             (
+                "bench_out_kwarg_shared_buffer_control",
+                bench_out_kwarg_shared_buffer_control,
+            ),
+            (
                 "bench_divide_out_route_delegation_sweep",
                 bench_divide_out_route_delegation_sweep,
             ),
@@ -7382,6 +7386,183 @@ fn bench_percall_floor_across_ops_vs_numpy(_c: &mut Criterion) {
 // Both ops use `out=` on both arms, so nothing allocates inside any timed region and the
 // mmap-churn regime that voided this route's earlier numbers cannot reach these ratios.
 // The allocator regime is printed anyway - absolute nanoseconds here DO move with it.
+// DOES THE SEPARATE-BUFFER ARTIFACT REACH THE CERTIFIED `out=` CELLS? Measured
+// within ONE invocation, separate against shared (`deadlock-audit-6y5wp`,
+// `deadlock-audit-ei9jz`, `deadlock-audit-48by6`).
+//
+// `bench_out_kwarg_vs_numpy` produced the campaign's certified `out=` headline - `maximum`
+// at 2^22 flipping 0.907848 (loss, both sides allocating) to 1.501804 (win, caller's
+// buffer), generalised to `minimum` and `divide` at the same size. It allocates `out_np`
+// and `out_fnp` as TWO SEPARATE arrays, and at 2^22 those are 32 MiB each.
+//
+// That is the configuration proved today to manufacture error: at 8 MiB, pointing two arms
+// at one shared buffer moved the worst divide cell 0.5904 -> 0.7798 and cut its run-to-run
+// spread 0.1948 -> 0.0506, while sizes below cache moved by at most 0.02. Whichever buffer
+// is better resident wins its arm, and that has nothing to do with the code.
+//
+// THIS GROUP DOES NOT TOUCH THAT ONE. `ei9jz` and `48by6` are not my beads and their row is
+// certified; editing the instrument under someone else's certified result is worse than
+// measuring alongside it. So this is a separate control that answers the question directly.
+//
+// THE DESIGN, and why it needs no cross-campaign arithmetic: each op is measured TWICE in
+// the same invocation, on the same operands, microseconds apart -
+//
+//   separate  numpy.op(a, b, out=o_np)  vs  fnp.op(a, b, out=o_fnp)   <- the certified shape
+//   shared    numpy.op(a, b, out=o)     vs  fnp.op(a, b, out=o)       <- the corrected shape
+//
+// and `separate_over_shared` is how much the buffer configuration alone moves the answer.
+// A value near 1 CLEARS the certified cells; a value away from 1 says they must be requoted
+// at the shared figure. Both outcomes are useful and the second is not an accusation - the
+// bias can flatter either arm, so this may well make those wins bigger.
+fn bench_out_kwarg_shared_buffer_control(_c: &mut Criterion) {
+    const N: usize = 1 << 22; // the size the certified cells used: 32 MiB per buffer
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let mmap_threshold =
+            std::env::var("MALLOC_MMAP_THRESHOLD_").unwrap_or_else(|_| "unset".to_owned());
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout_np = np.empty(n)\nout_fnp = np.empty(n)\nout_shared = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_py = locals.get_item("a").expect("a operand");
+        let b_py = locals.get_item("b").expect("b operand");
+        let out_np = locals.get_item("out_np").expect("numpy-only out buffer");
+        let out_fnp = locals.get_item("out_fnp").expect("fnp-only out buffer");
+        let out_shared = locals.get_item("out_shared").expect("shared out buffer");
+        let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
+
+        let np_separate = PyDict::new(py);
+        np_separate.set_item("out", &out_np).expect("bind out_np");
+        let fnp_separate = PyDict::new(py);
+        fnp_separate
+            .set_item("out", &out_fnp)
+            .expect("bind out_fnp");
+        let shared = PyDict::new(py);
+        shared
+            .set_item("out", &out_shared)
+            .expect("bind out_shared");
+
+        for op_name in ["maximum", "minimum", "divide"] {
+            let theirs = numpy.getattr(op_name).expect("numpy op");
+            let ours = module.getattr(op_name).expect("fnp op");
+
+            // Parity and the no-swallow gate for every arm, before timing. If any `out=`
+            // were ignored the arm would allocate and the whole contrast would be measuring
+            // the wrong thing.
+            let reference = theirs
+                .call(&args, Some(&np_separate))
+                .expect("numpy reference");
+            let expected = numpy_divide_checksum(&reference, N);
+            for (label, target, kwargs, buffer) in [
+                ("numpy/separate", &theirs, &np_separate, &out_np),
+                ("fnp/separate", &ours, &fnp_separate, &out_fnp),
+                ("numpy/shared", &theirs, &shared, &out_shared),
+                ("fnp/shared", &ours, &shared, &out_shared),
+            ] {
+                let written = target
+                    .call(&args, Some(kwargs))
+                    .unwrap_or_else(|_| panic!("{op_name} {label} out= probe failed"));
+                assert!(
+                    written.is(buffer),
+                    "{op_name} {label} returned a different object - that arm is ALLOCATING \
+                     and this contrast would be measuring allocation, not buffer residency"
+                );
+                assert_eq!(
+                    numpy_divide_checksum(&written, N),
+                    expected,
+                    "{op_name} {label} did not reproduce numpy's result bit for bit"
+                );
+            }
+
+            let sep_incumbent = || {
+                let started = Instant::now();
+                let r = theirs
+                    .call(&args, Some(&np_separate))
+                    .expect("numpy separate");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&r, N);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let sep_candidate = || {
+                let started = Instant::now();
+                let r = ours.call(&args, Some(&fnp_separate)).expect("fnp separate");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&r, N);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let (separate, _sin, _scn) = common::run_dual_null_median_ci_contract(
+                &format!("{op_name}_2e22_out_SEPARATE_buffers_vs_numpy"),
+                sep_incumbent,
+                sep_candidate,
+            );
+
+            let shd_incumbent = || {
+                let started = Instant::now();
+                let r = theirs.call(&args, Some(&shared)).expect("numpy shared");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&r, N);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let shd_candidate = || {
+                let started = Instant::now();
+                let r = ours.call(&args, Some(&shared)).expect("fnp shared");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&r, N);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let (shared_stats, _hin, _hcn) = common::run_dual_null_median_ci_contract(
+                &format!("{op_name}_2e22_out_SHARED_buffer_vs_numpy"),
+                shd_incumbent,
+                shd_candidate,
+            );
+
+            let separate_over_shared = separate.ratio_median / shared_stats.ratio_median;
+            println!(
+                "OUT_KWARG_BUFFER_CONTROL op={op_name} n={N} numpy_version={numpy_version} \
+                 worker={} malloc_mmap_threshold={mmap_threshold} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 bytes_per_buffer={} both_contracts_one_invocation=true \
+                 separate_ratio={:.6} separate_ci95=[{:.6},{:.6}] \
+                 shared_ratio={:.6} shared_ci95=[{:.6},{:.6}] \
+                 separate_over_shared={separate_over_shared:.6} \
+                 numpy_separate_ns={:.1} fnp_separate_ns={:.1} \
+                 numpy_shared_ns={:.1} fnp_shared_ns={:.1}",
+                measurement_worker(),
+                N * 8,
+                separate.ratio_median,
+                separate.ratio_ci_low,
+                separate.ratio_ci_high,
+                shared_stats.ratio_median,
+                shared_stats.ratio_ci_low,
+                shared_stats.ratio_ci_high,
+                separate.arm_a_median_ns,
+                separate.arm_b_median_ns,
+                shared_stats.arm_a_median_ns,
+                shared_stats.arm_b_median_ns,
+            );
+        }
+    });
+}
+
 fn bench_divide_out_route_delegation_sweep(_c: &mut Criterion) {
     Python::initialize();
     Python::attach(|py| {
