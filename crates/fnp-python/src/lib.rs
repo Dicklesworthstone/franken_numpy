@@ -99709,8 +99709,10 @@ fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     // 117 call sites reach this, and the probe below is the expensive shape this campaign
     // has measured repeatedly: `py.import("numpy")`, a full `asarray` CALL, then `dtype`,
     // `kind` extracted into a HEAP STRING and `itemsize`. `try_zerocopy_f64_searchsorted`
-    // alone pays it TWICE per call, on the array-needle path that measures 8.700x slower
-    // than NumPy.
+    // alone pays it TWICE per call, on the array-needle path that measured 8.700x slower
+    // than NumPy BEFORE this fast path and 5.838x AFTER it (`deadlock-audit-v46rn`).
+    // 5.838x is the CURRENT figure and the campaign's worst known cell; quote that one,
+    // not the 8.700x this paragraph starts from.
     //
     // Anything that already HAS a `dtype` answers from it with no conversion, and that
     // answer is the same one `asarray` would give: `asarray` is the identity on an ndarray,
@@ -113075,7 +113077,8 @@ mod tests {
     /// 117 call sites reach this predicate and it used to answer by importing NumPy and
     /// running a full `asarray` conversion, extracting `kind` into a heap `String`.
     /// `try_zerocopy_f64_searchsorted` pays it twice per call on the array-needle path that
-    /// measures 8.700x slower than NumPy.
+    /// measured 8.700x slower than NumPy BEFORE this fast path and 5.838x AFTER it
+    /// (`deadlock-audit-v46rn`) - 5.838x being the current figure and the worst cell.
     ///
     /// Changing a predicate that 117 callers depend on is where a narrowing does the most
     /// damage, so this compares against an INDEPENDENT oracle rather than a copy of the old
