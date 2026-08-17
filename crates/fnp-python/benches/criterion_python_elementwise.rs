@@ -1353,6 +1353,10 @@ fn main() {
                 bench_accumulate_counter_numpy,
             ),
             (
+                "bench_reduceat_percall_floor_vs_numpy",
+                bench_reduceat_percall_floor_vs_numpy,
+            ),
+            (
                 "bench_accumulate_size_crossover_vs_numpy",
                 bench_accumulate_size_crossover_vs_numpy,
             ),
@@ -5901,6 +5905,131 @@ fn call_ufunc_method<'py>(
             .call_method1(method, (operand,))
             .expect("ufunc method call")
     }
+}
+
+/// Explicit lifetimes for the same reason `call_ufunc_method` needs them: a closure ties
+/// the returned `Bound` to the borrow of `target` instead of to the interpreter.
+fn call_reduceat<'py>(
+    target: &pyo3::Bound<'py, pyo3::PyAny>,
+    a: &pyo3::Bound<'py, pyo3::PyAny>,
+    idx: &pyo3::Bound<'py, pyo3::PyAny>,
+) -> pyo3::Bound<'py, pyo3::PyAny> {
+    target
+        .call_method1("reduceat", (a, idx))
+        .expect("reduceat call")
+}
+
+// `reduceat` is the last ufunc METHOD entry point with a clean measurable shape and no
+// row of its own (`deadlock-audit-v46rn`). The one before it, `accumulate`, turned out to
+// be 4.76x SLOWER than NumPy while nobody was looking, because every per-call row in this
+// campaign goes through `PyUFunc::__call__` and the methods have their own prologue and
+// their own routing. Absence of a row is not evidence of health, so this adds the row.
+//
+// n is small on purpose, as with the other method rows: NumPy's own reduceat over 256
+// elements is fast enough that a wrapper prologue is a large fraction of it, which is the
+// regime where the last two defects were found. A large n would hide exactly what this is
+// looking for.
+//
+// `at` is deliberately NOT measured here. It mutates its target in place and returns None,
+// so under an interleaved ABBA schedule each arm would accumulate a different number of
+// applications and the two arms' checksums would legitimately diverge - the contract would
+// be comparing different states, not different implementations. It needs a harness that
+// restores the target outside the timed region, and that is a separate piece of work
+// rather than something to bolt on here and get quietly wrong.
+fn bench_reduceat_percall_floor_vs_numpy(_c: &mut Criterion) {
+    let n = 1usize << 8;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\n\
+                 a = 1.0 + (i % 1000) / 1000.0\n\
+                 idx = np.arange(0, n, 16, dtype=np.intp)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let idx = locals.get_item("idx").expect("idx operand");
+
+        let ours = module.getattr("add").expect("fnp add");
+        let theirs = numpy.getattr("add").expect("numpy add");
+        assert!(
+            !ours.is(&theirs),
+            "fnp.add IS numpy's object - there is no candidate arm"
+        );
+
+        let checksum_of = |result: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            result
+                .call_method0("sum")
+                .expect("reduceat result sums")
+                .extract::<f64>()
+                .expect("sum is f64")
+                .to_bits()
+        };
+
+        assert_eq!(
+            checksum_of(&call_reduceat(&ours, &a, &idx)),
+            checksum_of(&call_reduceat(&theirs, &a, &idx)),
+            "fnp.add.reduceat and numpy.add.reduceat disagree on these operands"
+        );
+
+        let incumbent = || {
+            let started = Instant::now();
+            let result = call_reduceat(&theirs, &a, &idx);
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let candidate = || {
+            let started = Instant::now();
+            let result = call_reduceat(&ours, &a, &idx);
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+
+        let row = format!("add_reduceat_n{n}_vs_numpy_method_route");
+        let (effect, incumbent_null, candidate_null) =
+            common::run_dual_null_median_ci_contract(&row, incumbent, candidate);
+        println!(
+            "UFUNC_METHOD_FLOOR method=reduceat n={n} numpy_version={numpy_version} \
+             worker={} harness=common::run_dual_null_median_ci_contract \
+             delegates_unconditionally=false \
+             ratio={:.6} ratio_ci95=[{:.6},{:.6}] \
+             numpy_ns={:.1} fnp_ns={:.1} excess_ns={:.1} \
+             incumbent_aa_null={:.6} candidate_aa_null={:.6}",
+            measurement_worker(),
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.arm_b_median_ns - effect.arm_a_median_ns,
+            incumbent_null.ratio_median,
+            candidate_null.ratio_median,
+        );
+    });
 }
 
 // `add.accumulate` on f64 routes into fnp's native cumsum dispatch with NO SIZE GATE,

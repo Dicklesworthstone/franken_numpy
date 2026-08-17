@@ -45177,3 +45177,69 @@ buffers is the real kernel deficit and is what any future divide lever must atta
 explained by packing, unroll depth, classifier shape, or buffer provenance, all four of which are
 now measured or refuted.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-16 - `add.reduceat` gets its first row and it is 1.6821x SLOWER than NumPy - the last method entry point with a clean shape, measured because the previous unmeasured one was 4.76x off (`deadlock-audit-v46rn`)
+
+`RedLynx`. Discharges retry predicate (3) of the accumulate row: `reduceat` and `at` were the
+remaining never-measured method entry points. This measures `reduceat` and explains why `at`
+is deliberately not measured with this harness.
+
+**Campaign result class:** incumbent-win (a first measurement, no lever applied yet)
+
+```
+bench_elf_sha256=775b5c68aeb4563ba3c07da32631805fd3083e441cff5bec8d38d71254389488
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256  f64
+group=bench_reduceat_percall_floor_vs_numpy (registered; selected_groups=1 echoed)
+harness=common::run_dual_null_median_ci_contract
+LOADAVG 15.31/21.71/27.83 before AND after the run (unchanged, 1-min well below both
+  longer averages). The reading was 46.05 fifteen minutes earlier; the 4m19s build sat
+  between, and load fell across it - which is why the run was taken after re-checking
+  rather than on the earlier number.
+CPU MHz system-wide min 1429 max 4043 median 2514 spread 2.829x
+PER-ARM (CPU_WITNESS, effect phases): arm_a_cpu==arm_b_cpu on both, same_core=true,
+  4167.4/4167.4 spread 1.0000 and 3604.6/3600.7 spread 1.0011
+
+  verdict=DECIDABLE_REGRESSION  ratio=0.594538  ci95=[0.591741,0.595880]
+  numpy_ns=1122.0  fnp_ns=1893.0  excess_ns=771.0
+  incumbent A/A null ci95=[1.000000,1.001122]  candidate A/A null ci95=[0.996673,1.006008]
+  controlling_null_half_width=0.006008; both straddle unity
+```
+
+**`fnp.add.reduceat` is 1.6821x SLOWER than `numpy.add.reduceat`** at n=256 with 16 segments.
+
+**WHERE IT SITS IN THE METHOD FAMILY**, all at n=256, all measured this session:
+
+```
+  reduce      1.2800x   excess 291 ns   delegates unconditionally
+  outer       1.1804x   excess 321 ns   delegates unconditionally
+  accumulate  1.5464x   excess 767 ns   routes natively above 2^12, gated below
+  reduceat    1.6821x   excess 771 ns   routes (delegates_unconditionally=false)
+```
+
+**The two ROUTING methods carry ~770 ns and the two pure-delegating ones ~300 ns.** That is a
+clean split and it is the most useful thing in this row: the extra ~450 ns on `accumulate` and
+`reduceat` is what their routing machinery costs before it decides, and it is the same ~450 ns
+that the accumulate row could not attribute after its probe fix. Two independent cells now show
+the same residual, which makes it a property of the routing prologue rather than of one method.
+**This is a correlation across two cells, not a mechanism** - it says where to look, not what is
+there.
+
+**`at` IS NOT MEASURED AND THE OMISSION IS DELIBERATE.** It mutates its target in place and
+returns None, so under an interleaved ABBA schedule each arm accumulates a different number of
+applications and the arms' checksums diverge legitimately - the contract would be comparing two
+different states rather than two implementations. It needs a harness that restores the target
+outside the timed region. Bolting that onto this group would have produced a green row measuring
+the wrong thing, which this ledger has enough of. **`at` therefore remains unmeasured and must
+not be assumed healthy** - `accumulate` was 4.76x off under exactly that assumption.
+
+**NO LEVER IS CLAIMED HERE.** The 78-site probe sweep (`b7acbe0d`) is in this ELF and is still
+unmeasured; this row does not certify it, because `reduceat` has no before-figure to compare
+against. It is a first measurement of a cell that never had one.
+
+RETRY PREDICATE: (1) `reduceat`'s 771 ns is now the joint-largest method excess and its routing
+prologue is the named suspect - attribute it from source before writing anything, as the
+accumulate residual was. (2) Build the restore-outside-the-timer harness for `at` before
+claiming anything about it; it is the last method with no row. (3) This ELF also contains the
+unmeasured 78-site sweep - a tranche measurement is still owed and this row does not supply it.
+AGENT_NAME=RedLynx.
+
