@@ -17565,11 +17565,47 @@ where
 // Otherwise these extracted to an f64 Vec and rebuilt (~50x slower, lossy for
 // wide ints). Returns None for a non-integer dtype, an explicit per-axis multi-
 // dim cumsum, or a non-ndarray input.
+/// The dtype KIND of an operand ('i', 'u', 'b', 'f', 'c', 'm', 'M', ...), read through
+/// interned keys and returned as a `char` (`deadlock-audit-v46rn`).
+///
+/// DELIBERATELY NOT [`dtype_char_of`]. `dtype.kind` and `dtype.char` disagree in exactly
+/// the way that would break a caller which confused them: bool is kind `'b'` but char
+/// `'?'`, while int8 is kind `'i'` but char `'b'`. A probe that swapped one for the other
+/// would send int8 down a bool branch and read its bytes as 0/1 flags, silently.
+///
+/// The `String` form this replaces allocated on the heap once per call to answer a
+/// single-character question.
+fn dtype_kind_of(value: &Bound<'_, PyAny>) -> Option<char> {
+    let py = value.py();
+    value
+        .getattr(intern!(py, "dtype"))
+        .and_then(|dtype| dtype.getattr(intern!(py, "kind")))
+        .and_then(|k| k.extract::<char>())
+        .ok()
+}
+
 fn try_zerocopy_int_cumsum(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    // CHEAP PRE-DECLINE (`deadlock-audit-v46rn`).
+    //
+    // `accumulate` calls this on EVERY invocation, for every dtype, before the float route
+    // is even considered - and for f64 it exists only to say no. The decline below costs a
+    // `py.import("numpy")`, a `getattr("ndarray")`, and a `dtype.kind` extracted into a
+    // heap `String`: the probe-to-decline shape measured at 656 ns on the ufunc methods,
+    // paid here to learn that a float array is not an integer array.
+    //
+    // This answers the same question from a cached type object and two interned getattrs.
+    // Everything below is left byte-identical - the redundant work still runs, but only for
+    // operands that will actually be ROUTED, where a real accumulation amortises it.
+    if !is_exact_numpy_ndarray(py, a)? {
+        return Ok(None);
+    }
+    if !matches!(dtype_kind_of(a), Some('i' | 'u' | 'b')) {
+        return Ok(None);
+    }
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) {
@@ -18629,6 +18665,23 @@ fn try_zerocopy_int_cumprod(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
+    // CHEAP PRE-DECLINE (`deadlock-audit-v46rn`).
+    //
+    // `accumulate` calls this on EVERY invocation, for every dtype, before the float route
+    // is even considered - and for f64 it exists only to say no. The decline below costs a
+    // `py.import("numpy")`, a `getattr("ndarray")`, and a `dtype.kind` extracted into a
+    // heap `String`: the probe-to-decline shape measured at 656 ns on the ufunc methods,
+    // paid here to learn that a float array is not an integer array.
+    //
+    // This answers the same question from a cached type object and two interned getattrs.
+    // Everything below is left byte-identical - the redundant work still runs, but only for
+    // operands that will actually be ROUTED, where a real accumulation amortises it.
+    if !is_exact_numpy_ndarray(py, a)? {
+        return Ok(None);
+    }
+    if !matches!(dtype_kind_of(a), Some('i' | 'u' | 'b')) {
+        return Ok(None);
+    }
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) {
@@ -109954,7 +110007,7 @@ mod tests {
         accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, cached_float64_dtype, cached_numpy, ceil_native, choose,
         compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
-        diagflat, diagonal, digitize, extract, extract_numeric_array,
+        diagflat, diagonal, digitize, dtype_kind_of, extract, extract_numeric_array,
         extract_precise_numeric_array, f64_binary_route_is_worth_taking,
         f64_divide_fast_accepts_without_fp_error, f64_divide_non_fast_raises_fp_error,
         f64_divide_quotient_bits_are_normal, f64_divide_raises_fp_error, fill_diagonal,
@@ -111128,6 +111181,88 @@ mod tests {
                         .extract::<Vec<u8>>()?,
                     "add.accumulate at n={n} must be byte-identical to numpy on both sides \
                      of the gate"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    /// The cheap pre-decline in the int cumsum/cumprod probes must agree EXACTLY with the
+    /// probe it short-circuits (`deadlock-audit-v46rn`).
+    ///
+    /// `accumulate` runs those probes on every call for every dtype, and for floats they
+    /// run only to decline - at the cost of an import, a `getattr("ndarray")` and a heap
+    /// `String`. The pre-decline answers from a cached type and interned keys.
+    ///
+    /// The hazard is a KIND/CHAR confusion, and it is silent rather than loud:
+    /// `dtype.kind` is `'b'` for BOOL while `dtype.char` is `'b'` for INT8, so a
+    /// pre-decline written against the wrong attribute would admit int8 into the bool
+    /// branch - which views the buffer as uint8 0/1 flags - and produce plausible wrong
+    /// numbers instead of an error. This walks every routed dtype plus the float and
+    /// complex ones that must decline, for BOTH add (cumsum) and multiply (cumprod), and
+    /// compares values and dtype against NumPy.
+    #[test]
+    fn cumsum_pre_decline_agrees_with_the_probe_it_replaces() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_cumsum_predecline")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            for op in ["add", "multiply"] {
+                let ours = module.getattr(op)?;
+                let theirs = numpy.getattr(op)?;
+                for dt in [
+                    "int8",
+                    "int16",
+                    "int32",
+                    "int64",
+                    "uint8",
+                    "uint16",
+                    "uint32",
+                    "uint64",
+                    "bool",
+                    "float32",
+                    "float64",
+                    "complex128",
+                ] {
+                    // 1..=5 rather than 0.. so multiply.accumulate is not all zeros,
+                    // which would pass even if the route were wrong.
+                    let a = numpy
+                        .call_method1("arange", (1, 6))?
+                        .call_method1("astype", (dt,))?;
+                    let got = ours.call_method1("accumulate", (&a,))?;
+                    let want = theirs.call_method1("accumulate", (&a,))?;
+                    assert_eq!(
+                        got.getattr("dtype")?.str()?.extract::<String>()?,
+                        want.getattr("dtype")?.str()?.extract::<String>()?,
+                        "{op}.accumulate on {dt} must keep numpy's result dtype"
+                    );
+                    assert_eq!(
+                        got.call_method0("tolist")?.str()?.extract::<String>()?,
+                        want.call_method0("tolist")?.str()?.extract::<String>()?,
+                        "{op}.accumulate on {dt} must match numpy's values"
+                    );
+                }
+            }
+
+            // And the kind helper itself, since the whole argument rests on it.
+            for (dt, kind) in [
+                ("int8", 'i'),
+                ("bool", 'b'),
+                ("uint8", 'u'),
+                ("float64", 'f'),
+                ("complex128", 'c'),
+            ] {
+                let a = numpy
+                    .call_method1("arange", (2,))?
+                    .call_method1("astype", (dt,))?;
+                assert_eq!(
+                    dtype_kind_of(&a),
+                    Some(kind),
+                    "{dt} must report dtype.kind {kind:?}, not its typechar"
                 );
             }
             Ok(())
