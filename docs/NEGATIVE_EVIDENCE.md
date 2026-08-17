@@ -51992,3 +51992,91 @@ Do not retry this with more reps alone: the problem is the 23% spread on the loa
 difference that is 0.3% of the quantities being subtracted, which more reps of the same design will
 not fix.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - POST-SHIP VERIFICATION: the gate's ROUTING is confirmed on the real allocating route (divide tracks the delegating control to 0.1% below the gate and diverges at it), but the VALUE at 2^19 is UNDECIDED - 1.0740/1.0691/0.8752/0.9650/1.0550, stdev 0.0863. Also pinning the REACHABLE SURFACE of today's two ships, which interact (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. One build (`release-perf`, 7m31s, `df` 203G immediately before, `proj_builds` = 0), five
+invocations of ELF `67c61c442e9e45e7...`, worker `thinkstation1`, numpy 2.4.3.
+
+```
+  S1  load 19.99/14.00/14.48  idle 81%  3174 MHz  proj_builds=0
+  S2  load 17.41/14.00/14.46  idle 84%  2748 MHz  proj_builds=0
+  S3  load 17.69/14.12/14.50  idle 72%  3196 MHz  proj_builds=0
+  S4  load 17.69/14.12/14.50  idle 82%  2450 MHz  proj_builds=0
+  S5  load 17.72/14.18/14.51  idle 75%  2533 MHz  proj_builds=0
+```
+
+**ALL FIVE FAIL the 1-min <= 5-min precondition** - load rose from 10 to ~18 across my own build and
+runs. The routing conclusion below rests on a WITHIN-invocation comparison, which that instability
+cannot reach; the magnitude conclusion is explicitly left undecided because it cannot.
+
+**Campaign result class:** routing VERIFIED, magnitude UNDECIDED, plus a scope correction on my own ship
+
+### THE REACHABLE SURFACE, because my two ships interact
+
+`zerocopy_f64_binary_flat` is a one-line wrapper over `zerocopy_f64_binary_flat_with_out(.., None)`, so
+the allocating and `out=` routes share ONE serial Div arm - the arm the bitmask accumulator landed in.
+With `F64_DIV_NATIVE_MIN_LEN` = 1<<19, the `out=` decline band = [1<<14, 1<<21), and Div's rayon
+threshold = 1<<21, the bitmask change is reachable on:
+
+```
+  allocating route  `fnp.divide(a, b)`          n in [2^19, 2^21)   <- where the 4.04% was measured
+  out= route        `fnp.divide(a, b, out=o)`   n < 2^14
+```
+
+**and nowhere else.** Above 2^21 both routes take the parallel arm, which I deliberately left on the
+boolean form. My ship commit said the change recovers "about half the parity tax" without stating this
+surface; the measurement at n=2^20 IS inside the allocating route's native serial range, so the number
+is honest, but the surface is narrower than that phrasing implies and is recorded here.
+
+### ROUTING: confirmed, by tracking a delegating control
+
+`multiply` maps to `_ => None` and cannot route natively, so it is pure delegation at every size and
+prices the wrapper in the same invocation.
+
+```
+  n      divide, 5 runs                                   multiply mean   divide/multiply
+  2^17   0.9870 0.9892 0.9890 0.9892 0.9888               0.9896          0.9990   tracks -> delegating
+  2^18   0.9938 0.9940 0.9936 0.9941 0.9936               0.9940          0.9998   tracks -> delegating
+  2^19   1.0667 1.0616 0.8708 0.9600 1.0511               0.9945          1.0076   DIVERGES -> native
+```
+
+**The gate routes exactly where it says it does**: divide is indistinguishable from the delegating
+control at 2^17 and 2^18 (0.9990, 0.9998) and departs from it at 2^19, which is `F64_DIV_NATIVE_MIN_LEN`.
+
+### VALUE at 2^19: UNDECIDED, and the first run would have said otherwise
+
+Run 1 alone read `divide 1.066736 DECIDABLE_WIN` against a delegating control at 0.9933 - a clean 7.4%
+win for taking the native route. **It does not replicate:** per-run native-over-delegating reads
+1.0740, 1.0691, 0.8752, 0.9650, 1.0550, mean 1.0076 with a between-run stdev of **0.0863** and two of
+five below unity.
+
+This is the allocation-inclusive regime, which I established this morning is mmap-churn dominated and
+read 1.0045 / 8.2191 / 8.4647 for one comparison on one ELF. I predicted before running that a single
+allocating number would not be trustworthy, and it was not. **The bitmask ship's benefit is not
+measurable through this route**, which is why it was measured on the `out=`-style kernel replica where
+the regime is controlled and it passed the variance guard at stdev 0.0030.
+
+### A limitation of the tracking test worth recording
+
+At 2^8 divide/multiply reads 0.9550, which a naive threshold would call "native" - but 2^8 is far below
+the gate and both ops delegate. The divergence is because the fixed wrapper is a large fraction of a
+256-element call and that fraction differs between two ops with different NumPy costs. **The tracking
+test needs the two ops to be comparable in per-call cost**, which holds at 2^17-2^19 (ratios 0.9990,
+0.9998) and fails at tiny n. Do not apply it below ~2^12 without a same-op control.
+
+COUNTED_MECHANISM: divide tracks the delegating `multiply` control to within 0.0010 and 0.0002 at 2^17
+and 2^18 and departs from it at 2^19, confirming the 1<<19 gate; at 2^19 the same statistic has a
+between-run stdev of 0.0863 across 5 runs with 2 of 5 below unity, which is 86x the 0.0010 agreement
+seen one octave down.
+
+A/A NULL CONTROLS: the route contracts' nulls straddle unity throughout. They are not load-bearing
+here: the routing claim rests on a within-invocation identity and the magnitude claim is being
+DECLINED, not asserted.
+
+RETRY PREDICATE: do not quote 1.0667 or any single allocating-route number for divide at 2^19 - the
+regime cannot resolve it, and this is the third time today an allocating measurement has failed to
+replicate. To decide whether taking the native route at 2^19 is worth it, use an `out=` instrument
+where nothing allocates. Do NOT extend the bitmask accumulator to the parallel arm without measuring at
+n >= 2^21. Two of the five audited 2^20 groups remain unconverted.
+AGENT_NAME=AzureCarp.
