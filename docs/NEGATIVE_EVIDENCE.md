@@ -50694,3 +50694,55 @@ drift. The remaining open item in this lane is unchanged: `bench_divide_kernel_o
 gives its two replica arms separate 8 MiB buffers, so the classifier finding it produced stays
 UNPROVEN until those arms share one output with the `&mut` slices re-derived per call.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — PRE-REGISTERED, BEFORE THE COUNTS EXIST: what the four multiply counter arms must show (deadlock-audit-ei9jz)
+
+Registered while the ELF is still compiling, so the reading cannot be fitted to the result. The
+instrument is `7b8b93e8`: four matched single-arm probes (`fnp`/`numpy` x `plain`/`casting="unsafe"`)
+on `multiply` at n=256, to be run one process per arm under `perf stat -e instructions:u`, with
+
+```
+  wrapper_residual = fnp_unsafe  - numpy_unsafe
+  probe_chain      = (fnp_plain  - numpy_plain) - wrapper_residual
+```
+
+**WHAT THIS IS TESTING.** `bench_percall_floor_partition` split the same call in WALL CLOCK as
+numpy 420 ns + probe chain 521 ns + wrapper residual 392 ns, and after the probe chain was cut 83%
+(521 -> 91 ns) the wrapper residual (370 ns) became 43% of the call and this bead's open question.
+This is the same split taken in a currency that does not move with host load — the machine is at
+loadavg 40.18 as this is written and has swung between 8 and 525 today.
+
+**PREDICTION 1, the only one I will treat as decisive — a SIGN, not a magnitude.** Signs replicate
+across runs on this host where magnitudes do not, so: `wrapper_residual_insns > probe_chain_insns`,
+strictly. This follows from 370 ns vs 91 ns only if instructions per ns are comparable between the
+two components, which is itself the assumption under test; if the sign REVERSES, the wall-clock
+partition and the counted partition disagree about which half is larger and the 370 ns figure must
+not be quoted until that is resolved.
+
+**PREDICTION 2, a range I expect to be wrong in magnitude and am recording anyway so it can be.**
+At ~3 GHz and interpreter-typical IPC 1-2, 370 ns is ~1100-2200 insns/call and 91 ns is ~270-550.
+I predict `wrapper_residual_insns` in 1000-2500 and `probe_chain_insns` in 200-600. A result outside
+those bands is not a failure of the instrument — it means IPC differs materially between our wrapper
+and NumPy's inner loop, which is itself worth knowing and would be the finding.
+
+**PREDICTION 3, the ratio, which is the instrument-independent form.**
+`wrapper_residual_insns / probe_chain_insns` ~ 4.1, from 370/91. I will treat 2.0-8.0 as
+CORROBORATING the wall-clock partition and anything outside it as a DISAGREEMENT between two
+instruments that must be reported as such rather than averaged.
+
+**THE CONTROL THAT CAN INVALIDATE THE WHOLE FORM, registered now so it cannot be quietly dropped:**
+`numpy_unsafe - numpy_plain` must be SMALL and NON-NEGATIVE. It is NumPy paying the keyword-parsing
+tail that our arm also pays, and it is the term whose cancellation the whole four-arm design rests
+on. If it comes out negative, or large relative to the wrapper residual, the keyword path does not
+cancel, and `wrapper_residual` computed this way is not a wrapper cost. In that case the row is
+VOID and must be reported as void, not repaired by switching to a three-arm difference against
+`numpy_plain` — that is the very substitution the four-arm design exists to prevent.
+
+**WHAT WOULD MAKE ME NOT BANK IT AT ALL:** any arm whose `BENCH_GROUP_SELECTION selected_groups` is
+not exactly 1, or whose checksum assertion against NumPy's plain oracle does not fire, or any arm
+reporting a different `calls=` than its siblings. Each arm is a separate process, so `perf stat`
+totals are only comparable if the four processes did the same amount of everything except the thing
+under test.
+
+No ratio is published in this row. It registers what the next row is permitted to say.
+AGENT_NAME=SlateFinch.
