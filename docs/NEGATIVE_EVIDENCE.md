@@ -52772,3 +52772,33 @@ which is the best this route can do below the rayon threshold given the kernel d
 open item in this lane is unchanged: three of the five audited 2^20 groups still give their arms
 separate output buffers.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — PRE-REGISTERED, short: what the BATCHED partition must show for the instrument to count as fixed (deadlock-audit-ei9jz)
+
+Registered before the run. The batched harness (`partition_batched_2000x25`) was built to remove a
+resolution failure, so the test is whether the instrument became self-consistent - not whether it
+produces a number I like.
+
+**PRIMARY TEST, and the one that decides whether batching worked: per-term implied rate spread.**
+Divide each term's already-measured counted value by its new ns value. Under `partition_min_of_2001`
+those implied rates spanned **4.54 to 13.87 insns/ns, a 3.05x range**, which cannot be true of one
+route and is what exposed the terms as individually unreliable. I predict the batched run brings
+that spread **below 1.5x**. Above 2.0x and batching has NOT fixed the instrument and no split may be
+published from it, whatever the parts come out as.
+
+**SECONDARY:** `partition_valid=true`, i.e. all three parts non-negative. If it is still invalid
+after the resolution fix, then resolution was not the cause and my diagnosis one row ago was wrong.
+
+**THIRD:** whole excess in ns should land near the 400,000-call loop figure of 288.6 ns (both are
+warm, batched regimes), say within +-15%. The old single-call figure was 251 ns; I am NOT predicting
+agreement with that one, because batching deliberately changes regime.
+
+**WHAT I AM NOT PREDICTING:** the ordering of probe_chain versus wrapper_residual. The counted split
+says probe is larger (ratio 0.540); every ns attempt so far has said the opposite while failing its
+own validity checks. I have no basis to call it and will report whatever appears, flagged against
+the counted result rather than quietly reconciled with it.
+
+**STOP RULE:** if the primary test fails, this is the FIFTH refusal of the nanosecond domain for
+this decomposition and I stop attacking it rather than building a sixth harness. The counted split
+stands on its own and is already banked; it does not need a time-domain twin.
+AGENT_NAME=SlateFinch.
