@@ -52548,3 +52548,79 @@ RETRY PREDICATE: none. If a fourth collision happens after adopting pathspec com
 NOT the index and the diagnosis should start elsewhere - most likely two agents editing the same
 file, which pathspec commits cannot and should not paper over.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — PRE-REGISTERED before the diagnostic run: the partition's negative wrapper is predicted to be ONE uncancelled `Instant::now()` overhead, injected by the only STANDALONE replica term (deadlock-audit-ei9jz)
+
+**Campaign result class:** registered prediction (no measurement in this row)
+
+The corrected partition aborts with `wrapper_residual_ns = -80.0 ns` and the diagnostic emission
+that would show the other terms is built but not yet run. Registering the explanation now so the
+numbers cannot be fitted to it afterwards.
+
+### The counted domain says the wrapper is POSITIVE
+
+The same identity, evaluated entirely in retired instructions on one ELF, gives a positive wrapper:
+
+```
+  numpy_kw (numpy_unsafe - numpy_plain)          1501.2 insns/call
+  pydict replica (pydict - empty_loop)           1575.7
+  keyword binding (kb_keyword - kb_positional)    832.2
+  ------------------------------------------------------
+  kwargs_overhead                                3909.1
+  skipped_raw - numpy  (fnp_unsafe - numpy_plain) 4549.6
+  wrapper_residual                                640.5  POSITIVE
+```
+
+So the identity is not intrinsically broken. Something in the ns instrument, and not in the algebra,
+turns +640 into -80.
+
+### The predicted mechanism: T cancels in DIFFERENCES but not in the STANDALONE term
+
+`min_ns` times ONE call between two `Instant::now()` calls and takes the minimum, so every term it
+returns carries one timer overhead `T` on top of the work. Write each measured term as its true
+value plus `T`:
+
+```
+  whole_ns = W+T   skipped_ns = S+T   numpy_ns = N+T   numpy_kwargs_ns = NK+T   pydict_build_ns = P+T
+
+  kwargs_overhead = (NK+T) - (N+T)  +  (P+T)  +  [(KB_kw+T) - (KB_pos+T)]
+                  =   (NK-N)        +  P + T  +   KB                       = true_overhead + T
+  skipped_fast_tail = (S+T) - (true_overhead + T)                          = S - true_overhead
+  wrapper           = (S - true_overhead) - (N+T)                    = true_wrapper - T
+```
+
+**Two of the three correction terms are DIFFERENCES of two `min_ns` measurements, so their timer
+overhead cancels. `pydict_build_ns` is the only STANDALONE one, and its `+T` survives into the
+correction. The wrapper residual is therefore biased low by exactly one `T`.**
+
+### The registered predictions, falsifiable two ways
+
+1. **`pydict_build_ns` will read materially ABOVE its counted equivalent.** The counted replica is
+   1575.7 insns/call; at the directly measured keyword-path rate of 9.62 insns/ns that is ~164 ns of
+   real work. I predict the partition reports `pydict_build_ns` well above that, and that the excess
+   is `T`. If `pydict_build_ns` comes in at or below ~164 ns, this mechanism is REFUTED and the
+   negative wrapper has another cause.
+2. **The deficit is ONE `T`, not three.** `true_wrapper - 80.0 = T`. If the counted wrapper of
+   640.5 insns/call is worth ~67 ns at 9.62 insns/ns, then `T` ~ 147 ns; if it is worth ~101 ns at
+   the 6.34 insns/ns route rate, then `T` ~ 181 ns. So I predict a timer overhead in the
+   **100-200 ns** band. A `T` outside that band, or a deficit that scales with three timers rather
+   than one, refutes the specific algebra above even if the general direction survives.
+
+**WHAT WOULD MAKE ME DROP IT ENTIRELY:** if the diagnostic shows `skipped_raw_ns - numpy_ns` far
+from the counted 4549.6-insn equivalent, the problem is in the arms rather than the correction and
+this whole account is wrong.
+
+### Why this matters beyond one bench
+
+If it holds, then EVERY standalone `min_ns` replica term in this file carries an uncancelled timer
+overhead, and any correction built by SUMMING such terms accumulates one `T` per standalone term.
+`PERCALL_FLOOR_STAGES` names its harness `batched_min_of_N_minus_empty_loop`, i.e. it already
+subtracts an empty loop and is protected; the partition's harness string is `partition_min_of_N`,
+with no such subtraction. The fix would be to subtract an empty-timer baseline inside `min_ns`, and
+it would move every standalone replica figure this file has ever published.
+
+RETRY PREDICATE: run the diagnostic, read `pydict_build_ns` against ~164 ns, and measure `T`
+directly with an empty `min_ns(TRIALS, || {})` before changing anything. Do NOT adjust the partition
+to make the wrapper positive without measuring `T` first - that would be tuning until the sign is
+convenient, which is the failure this bead has already recorded twice today.
+AGENT_NAME=SlateFinch.
