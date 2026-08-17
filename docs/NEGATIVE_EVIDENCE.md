@@ -51229,3 +51229,107 @@ tidier and would remove that scatter, but it is not a correctness matter and mus
 one. The five 2^20 groups remain the exposed ones and keep the priority. Do not requote the certified
 1.501804 upward from the 1.7541 measured here - different host, different day, cross-campaign.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — THE SPLIT RESOLVES INSIDE THE REGISTERED WINDOW: probe chain >= 357.7 and wrapper residual <= 1473.5 insns/call, and the counted ratio 4.119 lands 1.3% from the wall clock's 4.066 (deadlock-audit-ei9jz)
+
+Counters only. Six matched single-arm probes, one process per arm, `perf stat -e instructions:u`,
+`n=256`, 400,000 calls per arm, three reps each, ALL FROM ONE ELF.
+
+```
+  worker=thinkstation1  elf bench_elf_sha256=a88cb0680ae4821f27f80e730f82ab26977686811aa7fe9d8bc8a4c66be5d84f
+  committed source = 5aa6b001   profile=release-perf
+  RUSTFLAGS="-Z threads=4 -C target-feature=+avx2 -C force-frame-pointers=yes"
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+  LOADAVG 16.75/24.61/27.14 -> 16.70/24.21/26.97   CPU idle 84->88%, iowait 1%, 2355 MHz
+  every arm: BENCH_GROUP_SELECTION selected_groups=1, checksum asserted, 0 panics
+
+  arm            median insns (400k calls)  spread
+  numpy_plain          3,192,737,302        0.053%
+  fnp_plain            3,925,251,124        0.183%
+  numpy_unsafe         3,793,226,521        0.159%
+  fnp_unsafe           5,012,905,081        0.524%
+  pydict_build         1,868,177,153        0.371%
+  empty_loop           1,237,915,540        0.059%   <- the per-process constant S
+```
+
+### The decomposition
+
+```
+  whole-route excess     fnp_plain - numpy_plain        = 1831.3 insns/call   EXACT (S cancels)
+  NumPy keyword parse    numpy_unsafe - numpy_plain     = 1501.2              control >= 0: PASS
+  our keyword path       fnp_unsafe - fnp_plain         = 2719.1
+  our_kwargs - probe                                    = 1217.9
+  PyDict replica         (pydict_build - empty_loop)/N  = 1575.7              LOWER bound
+  ----------------------------------------------------------------------------------------
+  probe_chain      = 1575.7 - 1217.9                    =  357.7 insns/call   LOWER bound
+  wrapper_residual = 1831.3 -  357.7                    = 1473.5 insns/call   UPPER bound
+  ratio wrapper/probe                                   =   4.12              UPPER bound
+```
+
+**THE BOUNDS ARE DIRECTIONAL AND MUST TRAVEL WITH THE NUMBERS.** The replica prices our `PyDict`
+construction but NOT our PyO3 keyword binding, so it is a LOWER bound on `our_kwargs_cost`; that
+makes `probe_chain` a lower bound and `wrapper_residual` an upper bound. `wrapper_residual` is
+therefore a CEILING on what the wrapper costs, which is the conservative direction for anyone
+proposing to attack it — you cannot win more than 1473.5 insns/call there, and probably less.
+
+### Every pre-registered check, evaluated
+
+```
+  pydict replica > 1198.1  (else probe chain NEGATIVE -> row VOID)   1575.7   PASS
+  pydict replica < 2126.2  (else the registered SIGN TEST fails)     1575.7   PASS
+  SIGN TEST  wrapper_residual > probe_chain                      1473.5>357.7 PASS
+  RATIO in registered band 2.0-8.0 (point prediction ~4.1)             4.12   PASS
+  CONTROL  numpy_unsafe - numpy_plain >= 0                          +1501.2   PASS
+```
+
+The window was registered BEFORE the replica was built and could have refuted me from either side.
+It did not. I note without embarrassment that the point prediction (~4.1, taken as 370/91 from the
+wall clock) and the measured 4.12 agreeing this closely is partly luck — the bounds above are wider
+than that agreement suggests.
+
+### The cross-instrument result, which is the part worth keeping
+
+The wall-clock partition independently puts probe chain at 91 ns and wrapper residual at 370 ns.
+
+```
+                    counted (insns/call)   wall clock (ns)   implied insns/ns
+  probe chain              357.7                 91               3.93
+  wrapper residual        1473.5                370               3.98
+  whole excess            1831.3                461               3.97
+  ratio wrapper/probe      4.119              4.066            1.3% apart
+```
+
+Two instruments built on different principles — one immune to host load, one badly exposed to it —
+agree on the ratio to 1.3%, and, more tellingly, imply the SAME rate (3.93 / 3.98 / 3.97 insns per
+ns) for each component INDEPENDENTLY. A single blended agreement could be a coincidence of totals;
+matching per-component rates is much harder to get by accident, and it is the strongest evidence
+this ledger has that the wall-clock partition's 91/370 split is real and not an artifact of
+differencing nearly-equal timed quantities.
+
+### What this closes and what it does not
+
+CLOSES: `deadlock-audit-ei9jz`'s live question. The per-call floor of the delegating `multiply`
+route is 1831.3 insns/call over NumPy, split into a probe chain of >= 357.7 and a wrapper residual
+of <= 1473.5. Nothing is unattributed. The bead's original acceptance (`accounted_fraction > 0.9`)
+was already documented by its own author as tautological for a partition, so this row does not claim
+it; the corroboration above is what carries the weight.
+
+DOES NOT CLOSE: what the 1473.5 IS. Its known contents are PyO3 entry for the nine-parameter
+signature (REFUTED as a scaling cost: 3->9 params measured 0.0 ns), the `cached_numpy` lookup, the
+interned `getattr`, the argument tuple build, and the delegation call itself. Caching the bound
+callable instead of the module is NOT available - a live test pins that a post-warmup monkeypatch of
+`numpy.multiply` must still be honoured.
+
+COUNTED_MECHANISM: 6 arms x 3 reps x 400,000 calls, one ELF, max spread 0.524%; S anchored at
+1,237,915,540 instructions by an empty-loop arm of identical setup and trip count.
+
+A/A NULL CONTROLS: not applicable - counter differences, not a ratio between timed arms. The
+reproducibility evidence is the 0.053-0.524% spreads, the `selected_groups=1` and checksum gates on
+every arm, and the whole-route excess replicating at 1856.2 / 1824.3 / 1831.3 insns/call across
+THREE separately built ELFs (1.7% total span) at loadavg 16-31.
+
+RETRY PREDICATE: to convert the bounds into point estimates, price PyO3's keyword binding for one
+`&str` keyword directly. The sign test survives unless that binding alone exceeds 557.9 insns/call,
+so a refutation has a specific, checkable shape. Do NOT attack the wrapper residual on the strength
+of the 1473.5 figure alone - it is a ceiling.
+AGENT_NAME=SlateFinch.
