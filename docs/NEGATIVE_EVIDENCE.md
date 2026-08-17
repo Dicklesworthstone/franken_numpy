@@ -48306,3 +48306,59 @@ in-invocation delegating control at the size being admitted, which is exactly wh
 lacked. Do not re-derive the crossover - it is bracketed to (2^18, 2^19] and the endpoints are
 banked. If the divide kernel is ever made faster at small n, this constant is the thing to re-measure.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CERTIFIED: the `numpy_dtype_is_f64` fast path takes the campaign's worst cell from 8.700x to 5.838x, and the three cells that do NOT use that predicate did not move (`deadlock-audit-v46rn`)
+
+`RedLynx`. One change to one predicate, measured against row 57's figures on the same host and
+in the same group - which already contained three cells that cannot take the lever.
+
+**Campaign result class:** maintenance-self-speedup (cell remains a severe regression vs NumPy)
+
+```
+BEFORE elf=9b6b25bae13c467338824b5d2133379ab789d31616e4f113b562c9a2ab1b6a21 (row 57, 3 runs)
+AFTER  elf=2a2f3aef04db3d8935d912ac45942a8d484cb7c769d23b86c8db1c24b49978c3 (3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 17.10/17.35/15.68 before the build; 21.33/18.50/16.36 identical BEFORE and
+  AFTER the measuring block. Row 57's block ran at 12.38 - a BUSIER window here, which
+  matters for reading this row and is why the ratio, not the excess, is the statistic.
+CPU MHz system-wide min 1429 max 4115 median 1820 spread 2.880x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on all twelve phases, same_core=true;
+  spreads 1.0000-1.0013
+
+  case              uses predicate   BEFORE ratio   AFTER ratio (3 runs)         BEFORE   AFTER
+  ss_array_needle   YES (x2/call)    0.114919       0.171288/0.174624/0.168283   8.700x   5.838x
+  ss_scalar_needle  no               0.459236       0.456536/0.471859/0.466404   2.178x   2.144x
+  clip_one_sided    no               0.908936       0.896961/0.911994/0.906177   1.0999x  1.1035x
+  clip_two_sided    no               0.611845       0.602324/0.596335/0.592912   1.6345x  1.6771x
+
+ALL 24 A/A nulls admit unity.
+```
+
+**THE CAMPAIGN'S WORST CELL GOES 8.700x -> 5.838x.** `fnp.searchsorted` with an array needle
+costs 33% less relative to NumPy than it did, from one change to one predicate.
+
+**THE THREE CELLS THAT CANNOT TAKE THE LEVER DID NOT MOVE, AND THAT IS WHAT LICENSES THE READ.**
+`try_zerocopy_f64_searchsorted` calls `numpy_dtype_is_f64` twice per call - haystack and needle -
+and it is the only cell of the four on that path. The scalar-needle probe reads `dtype.kind` and
+`itemsize` directly; neither `clip` cell touches the predicate at all. Those three moved by
+-1.6%, +0.3% and +2.6%, in a window that was BUSIER than the before-window (loadavg 21.3 against
+12.4), so if anything they should have drifted the other way. The one cell on the path moved 49%.
+
+**THE EXCESS IS NOT THE STATISTIC HERE AND I AM NOT QUOTING IT.** NumPy's own `searchsorted` arm
+read 1233-1237 ns in row 57 and 1262-1994 ns here - it moved up to 60% between runs in this
+busier window. The dual-null contract's paired ratio is computed within the interleaved schedule
+and is robust to that; the raw excess is not. **A row quoting "9503 ns -> 7675 ns" here would be
+reporting the window.**
+
+**IT IS STILL A SEVERE LOSS AND STILL THE WORST CELL.** 5.838x means NumPy is nearly six times
+faster. The predicate was ~1.3 us of a ~9.5 us excess by the estimate in its own commit, and the
+measured improvement is consistent with that being most of what one predicate could give - the
+rest of the array-needle path remains unread.
+
+RETRY PREDICATE: (1) Keep reading the array-needle path; ~5.8x remains and no mechanism is
+attributed for it. The probes that run and decline BEFORE the f64 path engages are the next thing
+to price - there are roughly six of them, each with its own dtype reads and buffer gets. (2) Do
+not compare this row's excess figures with row 57's; the windows differ by 70% in loadavg and
+NumPy's own arm moved 60%. Compare ratios. (3) `clip_two_sided` at 1.6771x is now the
+second-worst cell here and nothing has been attributed to it at all. AGENT_NAME=RedLynx.
+
