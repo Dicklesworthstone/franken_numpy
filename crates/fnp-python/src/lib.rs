@@ -110454,8 +110454,8 @@ mod tests {
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
         sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
         trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
-        try_native_lstsq_tsqr, unravel_index, where_py, wide_int_table_bounds,
-        zerocopy_f64_binary_flat,
+        try_native_lstsq_tsqr, try_zerocopy_f64_binary_into, unravel_index, where_py,
+        wide_int_table_bounds, zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -162689,6 +162689,158 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 f64_binary_route_is_worth_taking(BinaryOp::Div, &not_an_array),
                 "an operand without `size` must not be declined by the size gate"
             );
+        });
+    }
+
+    /// The `out=` route ENGAGES below the size gate that the allocating route
+    /// obeys (`deadlock-audit-6y5wp`). This test PINS the asymmetry; it does not
+    /// endorse it.
+    ///
+    /// `f64_binary_route_is_worth_taking` has exactly ONE call site — the
+    /// allocating branch of `PyUFunc::__call__`. The `out=` branch reaches
+    /// `try_zerocopy_f64_binary_into` without consulting it, so the native divide
+    /// kernel runs at EVERY size on the `out=` path while the allocating path
+    /// concedes to NumPy below `F64_DIV_NATIVE_MIN_LEN`.
+    ///
+    /// Why this deserves a test rather than a shrug: the gate exists because the
+    /// native divide LOSES to NumPy below its threshold, and on 2026-08-17 the
+    /// `out=` kernel measured a DECIDABLE REGRESSION in five independent runs at
+    /// n=2^20 — 0.616010, 0.812377, 0.789348, 0.829316, 0.791004, i.e. ~1.21x
+    /// SLOWER than `numpy.divide` — so the gate's own rationale plainly reaches
+    /// this path too.
+    ///
+    /// NOT FIXED HERE, ON PURPOSE. `F64_DIV_NATIVE_MIN_LEN`'s 1<<19 crossover is
+    /// itself UNCERTIFIED: it was measured against a NumPy-ALLOCATING control, in
+    /// an allocator regime later shown to inflate NumPy's allocating arm by up to
+    /// 26.1x. Propagating an uncertified constant to a second route would spread
+    /// that uncertainty rather than contain it. This test makes the asymmetry
+    /// impossible to change silently, so whoever certifies the crossover has to
+    /// decide this path deliberately — in either direction, this test is what
+    /// they must edit.
+    ///
+    /// `Some` IS the engagement proof at this level. A route-level identity check
+    /// cannot distinguish our kernel from NumPy's, because `numpy.divide(a, b,
+    /// out=o)` also returns `o`; calling the helper directly does distinguish
+    /// them, since `None` is precisely the decline that falls through to NumPy.
+    #[test]
+    fn out_route_divide_engages_below_the_gate_the_allocating_route_obeys() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(numpy) => numpy,
+                // Same reasoning as the gate test above: without numpy there is no
+                // ndarray to route, so skip rather than fake a pass.
+                Err(_) => return,
+            };
+            let below_len = 1024usize;
+            assert!(
+                below_len < F64_DIV_NATIVE_MIN_LEN,
+                "the fixture must sit BELOW the gate or this test asserts nothing"
+            );
+            let a = numpy
+                .call_method1("arange", (1.0f64, below_len as f64 + 1.0))
+                .expect("numpy.arange for the numerator");
+            let b = numpy
+                .call_method1("arange", (2.0f64, below_len as f64 + 2.0))
+                .expect("numpy.arange for the divisor");
+            let out = numpy
+                .call_method1("empty", (below_len,))
+                .expect("numpy.empty for the caller buffer");
+
+            // The allocating route declines at this size ...
+            assert!(
+                !f64_binary_route_is_worth_taking(BinaryOp::Div, &a),
+                "the fixture is not actually below the gate"
+            );
+
+            // ... and the out= route takes it regardless.
+            let engaged = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div)
+                .expect("the out= route must not error on a plain f64 pair")
+                .expect(
+                    "the out= divide route must ENGAGE below the size gate; if it now \
+                     declines, the asymmetry this test pins is gone and the rationale \
+                     above is stale — update both together",
+                );
+            assert!(
+                engaged.bind(py).is(&out),
+                "the out= route must return the caller's buffer, not a fresh array"
+            );
+
+            let expected = numpy
+                .call_method1("divide", (&a, &b))
+                .expect("numpy.divide oracle");
+            assert!(
+                numpy
+                    .call_method1("array_equal", (&out, &expected))
+                    .and_then(|equal| equal.extract::<bool>())
+                    .expect("numpy.array_equal"),
+                "the native out= kernel diverged from numpy.divide BELOW the gate — this is \
+                 exactly the size range where the allocating route delegates, so no test that \
+                 exercises the allocating path could have caught it"
+            );
+        });
+    }
+
+    /// The native `out=` divide kernel must agree with NumPy on BOTH sides of
+    /// `F64_DIV_NATIVE_MIN_LEN` (`deadlock-audit-6y5wp`).
+    ///
+    /// The two routes differ in COVERAGE precisely at this boundary: below it the
+    /// allocating route hands the work to NumPy, so NumPy's own answer is the only
+    /// one a caller of `fnp.divide(a, b)` ever sees there — while `fnp.divide(a, b,
+    /// out=…)` runs OUR kernel at that same size. A divergence introduced below the
+    /// gate is therefore invisible to every test that goes through the allocating
+    /// path, which is what makes the small sizes here load-bearing rather than
+    /// decorative.
+    #[test]
+    fn out_route_divide_matches_numpy_on_both_sides_of_the_size_gate() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(numpy) => numpy,
+                Err(_) => return,
+            };
+            for len in [
+                7usize,
+                1024,
+                F64_DIV_NATIVE_MIN_LEN - 1,
+                F64_DIV_NATIVE_MIN_LEN,
+                F64_DIV_NATIVE_MIN_LEN + 1,
+            ] {
+                let a = numpy
+                    .call_method1("arange", (1.0f64, len as f64 + 1.0))
+                    .expect("numpy.arange for the numerator");
+                let b = numpy
+                    .call_method1("arange", (2.0f64, len as f64 + 2.0))
+                    .expect("numpy.arange for the divisor");
+                let out = numpy
+                    .call_method1("empty", (len,))
+                    .expect("numpy.empty for the caller buffer");
+
+                let engaged = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div)
+                    .expect("the out= route must not error")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "the out= divide route declined at len={len}, so this size is \
+                                silently served by NumPy and the row claiming our kernel runs \
+                                at every size is wrong"
+                        )
+                    });
+                assert!(
+                    engaged.bind(py).is(&out),
+                    "len={len}: the out= route must return the caller's buffer"
+                );
+
+                let expected = numpy
+                    .call_method1("divide", (&a, &b))
+                    .expect("numpy.divide oracle");
+                assert!(
+                    numpy
+                        .call_method1("array_equal", (&out, &expected))
+                        .and_then(|equal| equal.extract::<bool>())
+                        .expect("numpy.array_equal"),
+                    "len={len}: the native out= kernel diverged from numpy.divide"
+                );
+            }
         });
     }
 }
