@@ -1362,12 +1362,12 @@ fn main() {
                 bench_binary_counter_divide_numpy,
             ),
             (
-                "bench_binary_counter_multiply_fnp",
-                bench_binary_counter_multiply_fnp,
+                "bench_binary_counter_multiply_fnp_plain",
+                bench_binary_counter_multiply_fnp_plain,
             ),
             (
-                "bench_binary_counter_multiply_numpy",
-                bench_binary_counter_multiply_numpy,
+                "bench_binary_counter_multiply_numpy_plain",
+                bench_binary_counter_multiply_numpy_plain,
             ),
             (
                 "bench_binary_counter_multiply_fnp_unsafe",
@@ -6947,11 +6947,20 @@ fn bench_binary_counter_add_numpy(_c: &mut Criterion) {
 // The four arms that split `multiply`'s excess (`deadlock-audit-ei9jz`). `multiply` and not
 // `add`/`divide` because `multiply` is NOT in the fast-path binop set, so it exercises the
 // DELEGATING route the 370 ns wrapper residual actually belongs to.
-fn bench_binary_counter_multiply_fnp(_c: &mut Criterion) {
+//
+// THE `_plain` SUFFIX IS LEAD-BEARING - DO NOT "TIDY" IT AWAY. `FNP_BENCH_GROUPS` and
+// `fnp-group=` select by SUBSTRING (`group_enabled_with_spec`), so if these were named
+// `..._multiply_fnp` and `..._multiply_numpy` they would be PREFIXES of their own `_unsafe`
+// siblings and no selector could pick either one alone: `..._multiply_fnp` would admit both
+// the plain and the unsafe arm into ONE process, and `perf stat` counts a PROCESS. The four
+// arms must each be a unique substring or the split cannot be measured at all. Each arm
+// prints `BENCH_GROUP_SELECTION ... selected_groups=`, which must read exactly 1; anything
+// else means the selector admitted a sibling and the count is of two arms, not one.
+fn bench_binary_counter_multiply_fnp_plain(_c: &mut Criterion) {
     binary_counter_probe("multiply", true);
 }
 
-fn bench_binary_counter_multiply_numpy(_c: &mut Criterion) {
+fn bench_binary_counter_multiply_numpy_plain(_c: &mut Criterion) {
     binary_counter_probe("multiply", false);
 }
 
