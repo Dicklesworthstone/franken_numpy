@@ -1293,6 +1293,29 @@ fn try_parallel_int_scatter_at(
     indices: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<()>> {
+    // CHEAP PRE-DECLINE (`deadlock-audit-v46rn`).
+    //
+    // Every arm below requires the TARGET's dtype kind to be 'i' or 'u'. Without this,
+    // a float `add.at` runs all FOUR arms (i64, u64, i32, u32), and each one does its own
+    // `numpy.getattr("ndarray")` plus a per-operand `is_exact_instance`, `dtype`, `kind`
+    // extracted into a HEAP STRING, `itemsize` and `ndim` - failing on the first operand
+    // every time. Four `ndarray` getattrs, four dtype reads and four String allocations,
+    // purely to say no.
+    //
+    // Measured: `add.at` on f64 at n=2^8 is 2.3909x slower than NumPy with 1664 ns of
+    // excess, against a ~300 ns floor on the delegating methods. One `dtype.kind` read
+    // answers for all four arms.
+    //
+    // `dtype_kind_of` and NOT `dtype_char_of`: kind is 'b' for bool where char is 'b' for
+    // int8, and this predicate must not admit bool into an integer scatter.
+    //
+    // A missing/unreadable dtype falls through to the arms, which decline on their own
+    // checks - the conservative direction.
+    if let Some(k) = dtype_kind_of(a)
+        && !matches!(k, 'i' | 'u')
+    {
+        return Ok(None);
+    }
     match kind {
         UFuncKind::Add => try_parallel_int_add_at(py, numpy, a, indices, b),
         UFuncKind::Subtract => try_parallel_int_sub_at(py, numpy, a, indices, b),
@@ -111763,6 +111786,91 @@ mod tests {
                          {default_axis}, so omitting it must be a no-op and forcing \
                          {other_axis} must still be forwarded)"
                     );
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// The `at` scatter pre-decline must not change which inputs route
+    /// (`deadlock-audit-v46rn`).
+    ///
+    /// `ufunc.at` ran four scatter arms in sequence for every call, each re-probing the
+    /// operands and each failing on the first one for a float target - four
+    /// `getattr("ndarray")`, four dtype reads and four heap `String`s to decline. Measured
+    /// at 1664 ns of excess on f64, the worst cell in the method family. One `dtype.kind`
+    /// read on the target now answers for all four.
+    ///
+    /// `at` MUTATES and returns None, so a routing mistake here does not raise - it leaves
+    /// the target holding different numbers. And the kind/char collision is live: bool is
+    /// kind 'b' while int8 is CHAR 'b', so a predicate written against the wrong attribute
+    /// would admit bool into an integer scatter. This applies the same operation through
+    /// fnp and through NumPy on identical copies and compares the mutated buffers, across
+    /// the integer widths the arms accept, bool, and the float/complex kinds that must
+    /// decline - with DUPLICATE indices, since unbuffered accumulation is the whole point
+    /// of `at` and unique indices would not exercise it.
+    #[test]
+    fn at_scatter_pre_decline_does_not_change_routing() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_at_predecline")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            for op in ["add", "subtract", "maximum", "minimum"] {
+                let ours = module.getattr(op)?;
+                let theirs = numpy.getattr(op)?;
+                for dt in [
+                    "int64",
+                    "uint64",
+                    "int32",
+                    "uint32",
+                    "int16",
+                    "int8",
+                    "bool",
+                    "float64",
+                    "float32",
+                    "complex128",
+                ] {
+                    let locals = PyDict::new(py);
+                    locals.set_item("np", &numpy)?;
+                    locals.set_item("dt", dt)?;
+                    py.run(
+                        std::ffi::CString::new(
+                            "base = (np.arange(32) % 7 + 1).astype(dt)\n\
+                             ours_t = base.copy()\n\
+                             theirs_t = base.copy()\n\
+                             idx = ((np.arange(24) % 6) * 5).astype(np.intp)\n\
+                             vals = (np.arange(24) % 3 + 1).astype(dt)\n",
+                        )
+                        .unwrap()
+                        .as_c_str(),
+                        Some(&locals),
+                        Some(&locals),
+                    )?;
+                    let ours_t = locals.get_item("ours_t")?.expect("ours target");
+                    let theirs_t = locals.get_item("theirs_t")?.expect("theirs target");
+                    let idx = locals.get_item("idx")?.expect("idx");
+                    let vals = locals.get_item("vals")?.expect("vals");
+
+                    let got = ours.call_method1("at", (&ours_t, &idx, &vals));
+                    let want = theirs.call_method1("at", (&theirs_t, &idx, &vals));
+                    match (got, want) {
+                        (Ok(_), Ok(_)) => assert_eq!(
+                            ours_t.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                            theirs_t.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                            "{op}.at on {dt} must leave the target byte-identical to numpy"
+                        ),
+                        (Err(_), Err(_)) => {}
+                        (Ok(_), Err(e)) => {
+                            panic!("{op}.at on {dt}: numpy raised {e} and we succeeded")
+                        }
+                        (Err(e), Ok(_)) => {
+                            panic!("{op}.at on {dt}: numpy succeeded and we raised {e}")
+                        }
+                    }
                 }
             }
             Ok(())

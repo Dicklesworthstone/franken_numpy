@@ -45968,3 +45968,69 @@ RETRY PREDICATE: do not quote the 426 -> 186 ns drop as the size of this lever â
 1.333x between those windows. Quote 1.3509x -> 1.2247x. `accumulate`'s wall-clock consequence remains
 unmeasured and is blocked on a fresh before-row for a VOID cell, not on this lever.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CERTIFIED: one `dtype.kind` read removes ~1315 ns from `add.at` on f64 - 2.3909x -> 1.2879x, landing exactly in the delegating-method floor band the prediction named. Three of six cells VOID on biased nulls and all are disclosed (`deadlock-audit-v46rn`)
+
+`RedLynx`. The lever the previous row attributed from source, landed and measured in the same
+window against a before-figure taken on this host minutes earlier.
+
+**Campaign result class:** maintenance-self-speedup (cell remains a regression vs NumPy)
+
+```
+BEFORE elf=47749b439f5e3080dbc21456107e7c1c1496d11e956c26302ac105fd34830f42
+       LOADAVG 35.36/32.61/35.41 unchanged across the run
+AFTER  elf=7aad8d7cdb96f4c044c6c24b05b71f459dad6ff6789b2d36eb80ba8eae0ec44f
+       LOADAVG run1 28.41 -> 31.98; runs 2 and 3 at 27.43/24.76/29.13
+       CPU MHz min 3861 max 3920 median 3893 spread 1.015x (unusually uniform)
+       PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu, same_core=true,
+         4006.2/4005.8 spread 1.0001 and 3997.8/3998.0 spread 1.0000
+worker=thinkstation1  numpy 2.4.3  profile=bench
+harness=common::run_dual_null_median_ci_contract, restore outside the timed region
+
+  add.at f64 n=2^8      excess   ratio      admissible?
+    BEFORE                1664   0.418246   yes
+    AFTER run 1            542   0.785600   NO - incumbent null [0.991770,0.999480]
+    AFTER run 2            351   0.770557   yes - inc [1.000000,1.007739] cand [0.993498,1.006609]
+    AFTER run 3            346   0.776486   yes - inc [0.995697,1.003367] cand [0.996728,1.010013]
+
+  add.at i64 n=2^20     excess   ratio      admissible?
+    BEFORE                5336   0.968433   yes
+    AFTER run 1          11912   0.940877   NO - candidate null [0.995002,0.999069]
+    AFTER run 2           6097   0.963653   yes
+    AFTER run 3           9873   0.939689   NO - incumbent null [0.987748,0.998259]
+```
+
+**THE RESULT, on admissible cells only: `add.at` on f64 goes 2.3909x -> 1.2977x and 1.2879x,
+removing ~1315 ns per call.** The incumbent is the control and it is stable: NumPy's arm reads
+1192 ns before and 1172/1197 after, within 2% across three builds.
+
+**THE PREDICTION LANDED ON ITS NUMBER.** The previous row predicted the f64 excess would fall
+"from 1664 ns toward the ~300 ns floor the delegating methods carry". It reads **351 and 346 ns**,
+inside the 291-345 ns band those methods measure. The mechanism was read from source before the
+fix: four scatter arms each doing `getattr("ndarray")`, a per-operand `is_exact_instance`,
+`dtype`, `kind` extracted into a HEAP STRING, `itemsize` and `ndim` - all failing on the first
+operand for a float target. One `dtype.kind` read on the target now answers for all four.
+
+**THE i64 CELL IS UNCHANGED, WHICH IS THE OTHER HALF OF THE PREDICTION.** 0.968433 before against
+0.963653 on the one admissible after-run - the pre-decline cannot fire for an integer target, so
+the routed path must not move, and it does not. A lever that had "improved" the routed cell would
+have meant it was changing routing, not skipping a probe.
+
+**THREE OF SIX AFTER-CELLS ARE VOID, AND I RAN THREE TIMES ON PURPOSE.** Run 1 failed on both
+cells and runs 2-3 on one each; the pattern is the same one this ledger recorded two rows ago -
+an A/A null whose interval sits wholly below 1.0 while the gate still returns DECIDABLE. **Every
+run is printed above, including the ones I discarded, because discarding runs by their null is
+only honest if the discarded ones are visible.** The admissible f64 pair agree to 1.4% (351 vs
+346), which is what licenses reading them.
+
+**BIASED NULLS ARE NOT RARE HERE.** That is now three sightings in three sessions of measurement
+(the accumulate cell, and both of these). It remains telemetry rather than a gate veto, per the
+decision recorded at `report_median_gate_pair` - but an analyst reading only the verdict line
+would have banked run 1's 542 ns as fact.
+
+RETRY PREDICATE: (1) The remaining 346-351 ns is the shared wrapper floor, not `at`-specific -
+attacking it needs the floor lever, not another probe fix. (2) The i64 large cell moves 5336 ->
+6097 -> 9873 across runs with NumPy's arm moving 15%; it is noisy at that size and should not be
+quoted to better than ~1.03-1.06x. (3) Macro-generated probes remain unaudited as a class; this
+one was found by measuring a cell, not by reading the sweep. AGENT_NAME=RedLynx.
+
