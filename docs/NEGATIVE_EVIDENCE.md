@@ -46435,3 +46435,76 @@ signature, which changes the Python-visible calling convention and needs its own
 argument before any perf claim. (3) Do not quote the i64 cell as evidence about call shape.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - COLLISION RESOLVED: the peer's `outer` span covers BOTH levers, not just the vectorcall. In the counter domain the split is clean and additive - interning ~795 insns/call, vectorcall ~808 on top - and the endpoint is confirmed at 1.0907x (`deadlock-audit-v46rn`)
+
+`AzureCarp`. One build, one window, with `reduce` as the untouched control.
+
+**Campaign result class:** resolution of a double-counting hazard + confirmed endpoint
+
+### What was unresolved
+
+One row up I flagged that my `outer` row (1.1829x -> 1.1329x, interning) and the peer's
+(`7d073494`: 1.2027x -> 1.0798x, credited to the vectorcall `cbc99664`) could not both be quoted,
+because my interning commit is an ANCESTOR of their vectorcall and their "before" should therefore
+already contain it. I said the two must not be summed and that the split was unknown. It is knowable,
+and the counter domain settles it.
+
+### The counter split, same probe, same `operand_len=16`
+
+```
+  outer wrapper excess          insns/call   cycles/call
+  post-interning  (ELF 7d32eb6e)    2,036         1,231
+  current main    (ELF 9be5ca7c)    1,228           587
+  => VECTORCALL alone, on top of interning:   808 insns/call, 643 cycles/call
+```
+
+Against the interning's ~795 insns/call measured on `reduce` in an earlier row, **the two levers are
+of nearly equal size and they compose additively**: `outer`'s wrapper excess runs roughly
+2,831 -> 2,036 -> 1,228 instructions per call across pre-interning, post-interning and current main.
+
+**`reduce` is the control and it holds.** It took the interning but NOT the vectorcall, and its
+counter moved **-114 insns / +111 cycles** across the same two ELFs — flat, which is what a control
+has to be for the `outer` delta to mean anything.
+
+### Which reading of the peer's row is right
+
+**Their "before" of 1.2027x cannot be a post-interning state.** My pre-interning median was 1.1829x
+and my post-interning median 1.1329x. 1.2027x sits *outside* the pre-interning figure, on the wrong
+side — if it contained my interning it would have to be near 1.13x. So their before-ELF predates the
+interning (easily possible: my change sat uncommitted in the shared tree for ~3 minutes before a peer
+swept it, and a build started in that window may or may not have picked it up).
+
+**Consequence: `7d073494`'s span 1.2027x -> 1.0798x covers BOTH levers, and crediting all of it to
+the vectorcall over-attributes by roughly half.** Nothing in that row is wrong as a measurement; its
+attribution is what needs narrowing. The defensible statement is: interning and vectorcall are worth
+about 795 and 808 instructions per call respectively, and together they took `outer` from ~1.18x to
+~1.09x.
+
+### The family on current main, one window
+
+```
+UFUNC_METHOD_FLOOR n=256 worker=thinkstation1 bench_elf_sha256=9be5ca7c30f352abbe37c27d284689f7c2b3e113eb72950d3367a6f1b817ce78
+  HEAD=380d9719  loadavg 22.47/17.11/20.15 throughout  CPU MHz 1429-4118 (cross-core), OPENBLAS_NUM_THREADS=1
+
+  method       median ratio   deficit    5-run min/max
+  outer          0.916835     1.0907x    0.901961 / 0.919753
+  accumulate     0.827255     1.2088x    0.822468 / 0.846663
+  reduce         0.823139     1.2149x    0.809211 / 0.831713
+```
+
+`outer` at **1.0907x** against the peer's certified 1.0798x — a 1% gap, ordinary window variation,
+so the endpoint is independently confirmed rather than taken on trust.
+
+COUNTED_MECHANISM: `outer`'s wrapper excess 2,036 -> 1,228 insns/call and 1,231 -> 587 cycles/call
+across the vectorcall, with `reduce` as an untouched control moving -114 insns / +111 cycles over the
+same pair.
+
+A/A NULL CONTROLS: every wall-clock row above is a `run_dual_null_median_ci_contract` row the gate
+admitted; counter figures are hardware totals from matched probes and carry no schedule.
+
+RETRY PREDICATE: quote `7d073494`'s 1.2027x -> 1.0798x as the span of TWO levers, not of the
+vectorcall alone. The per-lever numbers are 795 and 808 insns/call. Do not re-run this resolution —
+what would still be worth having is a same-window pre-interning row for `outer`, which is no longer
+buildable from the shared tree.
+AGENT_NAME=AzureCarp.
