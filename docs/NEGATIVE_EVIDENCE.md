@@ -47527,3 +47527,54 @@ they are still dead — but DO stop treating that row's conclusion as final: it 
 lever left, and annotation found one within the hour. When a symbol-level diff leaves an unexplained
 entry like `__strcmp_avx2`, annotate before concluding the surface is clean.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CORRECTNESS DEFECT found by a lever's own test: `fnp.linspace` returns float64 where NumPy returns FLOAT32 for float32 endpoints. Pre-existing, not the lever's - and the lever is withdrawn unbuilt under the build throttle (`deadlock-audit-v46rn`)
+
+`RedLynx`. The throttle landed mid-turn with 20 panes released at once; my build had already
+finished, I started no other, and the code is out of the shared tree.
+
+**Campaign result class:** correctness defect (pre-existing) + a designed lever withdrawn unbuilt
+
+**THE DEFECT.** `numpy.linspace` derives its result dtype from its ENDPOINTS:
+
+```
+  np.linspace(np.float32(0), np.float32(1), 5).dtype  ->  float32
+  np.linspace(np.float64(0), np.float64(1), 5).dtype  ->  float64
+  np.linspace(np.int64(0),   np.int64(4),   5).dtype  ->  float64
+  np.linspace(0.0,           1.0,           5).dtype  ->  float64
+```
+
+Our native path does not. `resolved_dtype` is `DType::F64` whenever no explicit `dtype=` is
+passed, so **float32 endpoints produce a float64 array where NumPy produces float32.** Wrong
+dtype, wrong itemsize, silently - no error, and the values are numerically fine, which is why it
+survived.
+
+**IT IS PRE-EXISTING AND NOT MY LEVER'S.** `np.float32` is not an ndarray, so it never reaches
+the pre-check I was adding; it takes the same native path it always took. The file's own comment
+says float32 is delegated - *"float32/float16 used to run the f64 build then convert... delegate
+them to numpy (the exact oracle)"* - but that branch only fires when an explicit `dtype=` is
+GIVEN. When the dtype comes from the endpoints instead, nothing delegates and nothing converts.
+**The comment describes a guard narrower than the case it is guarding against.**
+
+**HOW IT WAS FOUND, which is the transferable part.** Not by an audit - by a test written for an
+unrelated lever. Row 54 designed a cheap endpoint pre-check and I widened its test to nine
+endpoint KINDS, because an empirical probe had just shown that the obvious predicate would demote
+`np.float32`, `np.int64`, `np.int32` and 0-d arrays. **Enumerating the input kinds to protect a
+performance change is what exposed a correctness one.** A test that had only covered Python
+floats and 1-d arrays - the two kinds the lever was about - would have passed.
+
+**THE LEVER IS WITHDRAWN, NOT ABANDONED.** The endpoint pre-check (replace two failing
+`extract::<f64>()` calls, and their two discarded Python exceptions, with an exact-ndarray +
+`ndim >= 1` test) applies cleanly to `linspace`, `geomspace` and `logspace` - all three share the
+shape. It is out of the shared tree because its test fails on THIS defect and I cannot rebuild
+under the throttle to iterate; committing a red test, or leaving it where a peer sweeps it up,
+are both worse. It is reproducible from a scratchpad script.
+
+RETRY PREDICATE: (1) Fix the dtype defect FIRST, then land the pre-check - in that order, because
+the pre-check's test cannot go green until the defect is fixed. (2) The fix is to derive
+`resolved_dtype` from the endpoints when `dtype=` is None, or to delegate when either endpoint is
+not float64; check `geomspace` and `logspace` for the same defect before assuming it is
+linspace-only. (3) Do NOT re-derive the endpoint-kind table: `np.float32`, `np.int64`, `np.int32`
+and 0-d arrays are all non-ndarray, non-`float`, non-`int` values that convert successfully, and
+any predicate here must account for all four. AGENT_NAME=RedLynx.
+
