@@ -49226,3 +49226,126 @@ this specific lever would be a searchsorted call whose haystack is a LIST - it m
 than the clip cells and costs one bench cell. (3) Do not add further micro-gates to this
 dispatcher without a measurement; four attempts, one payer. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - THE CLASSIFIER QUESTION IS NOW DECIDED, WITHOUT THE BUILD I BUDGETED FOR IT: removing the FE-hazard classifier is a 1.42-1.62x REGRESSION in the DEFAULT allocator regime. That REFUTES a conclusion written in our own source comment ("the 4x-unrolled arm is the SLOWEST of the three"), which holds only under the mmap control. And the bitmask classifier shape is NOT certified - one run read a DECIDABLE_WIN of 1.0416 that five runs reduce to a marginal 1.0311 (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
+
+`AzureCarp`. **NO BUILD** - re-analysis of the five kernel runs banked one row up, plus five fresh
+invocations of the same ELF. Load flat throughout (14.01/14.52/15.70 -> 16.10/15.40/15.93, iowait 0,
+2-6 external `rustc`), CPU mean 2872-3751 MHz.
+`bench_elf_sha256=5f1e6f4e991b1891016b131fd9c60a46b54781c9b43f6eb1a4a8db70da55580d`, profile
+`release-perf`, worker `thinkstation1`.
+
+**Campaign result class:** a previously-UNDECIDED question DECIDED + a source-comment conclusion
+REFUTED + a candidate lever REJECTED on replication + a reusable calibration of the method that did it
+
+### The build I said this needed, it did not need
+
+The row above left the classifier question undecided and its retry predicate asked for the two arms
+compared "against EACH OTHER inside one regime and one contract order", which I said needed a new
+instrument. **It does not.** NumPy is the incumbent in BOTH contracts of
+`bench_divide_kernel_on_numpy_buffers`, so the published per-contract ratios already divide each of our
+arms by a NumPy timing taken in that same contract. Their **ratio-of-ratios cancels NumPy** and yields
+the head-to-head, drift-corrected, from data already on disk:
+
+```
+  run   regime   raw former/fused   numpy cross-contract drift   DRIFT-CORRECTED fused/former
+  kern1  bare        1.3877                 0.9895                        1.4470
+  kern2  bare        1.6797                 1.0958                        1.6155
+  kern4  bare        1.3509                 0.9597                        1.4152
+  kern3  ctrl        1.1645                 1.2875                        0.9386
+  kern5  ctrl        0.9441                 0.9973                        0.9458
+```
+
+The correction validates itself on `kern3`, the run with 28.7% contract drift: raw it reads 1.1645 and
+disagrees with `kern5`'s 0.9441, and corrected it reads 0.9386 against `kern5`'s 0.9458 — **agreement
+to 0.8%.** The method demonstrably removes the confound it targets.
+
+**DECIDED: in the DEFAULT allocator regime the shipped fused form is 1.4152-1.6155x FASTER than the
+accumulate-free form.** Removing the classifier is a large regression, not a saving.
+`deadlock-audit-vqxoa`'s "the accumulate is close to free" is not merely confirmed against the
+incumbent — in the default regime it is an understatement, because the accumulate is better than free.
+Under the mmap control the two arms sit within 6% (0.9386, 0.9458) with the sign reversed, so the
+effect is regime-dependent, but the regime users actually run in is the bare one.
+
+### THIS REFUTES A CONCLUSION IN OUR OWN SOURCE COMMENT
+
+`bench_divide_accumulate_isolation_vs_numpy` carries a static census and draws a conclusion from it:
+
+```
+  loop                                     insns/iter  doubles/iter  unroll
+  numpy DOUBLE_divide_X86_V3 @0x523e00         10           8         2x ymm
+  ours divide_former_serial  @0x700e20          6           4         1x ymm
+  ours divide_fused_serial   @0x6feda0         43          16         4x ymm
+```
+
+> the 4x-unrolled arm is the SLOWEST of the three while the 2x arm is the fastest, so "wider unroll"
+> is refuted too
+
+**The census is confirmed on my ELF** (`divide_former_serial` 1 `vdivpd`, `divide_fused_serial` 5;
+1x versus 4x unroll). **The conclusion drawn from it is false in the default regime.** The 4x-unrolled
+fused arm executes **2.69 instructions per double against the 1x arm's 1.50** — 1.8x more work per
+element — and is nonetheless **1.42-1.62x faster**. "Wider unroll is dead for f64 divide" is
+REGIME-SCOPED, not general; in the bare regime unroll is POSITIVELY correlated with speed here, which
+is the opposite of what the fleet note says. Anyone reaching for that note to reject an unroll-related
+lever on this route must first state which regime they mean.
+
+INDICATIVE, not banked: the plausible mechanism is that 16 doubles in flight hide `vdivpd`'s latency
+on Zen 3 better than 4 do, and the classifier's dependency chain is not on the critical path. No lever
+may be justified on that sentence alone.
+
+### THE BITMASK CLASSIFIER SHAPE IS NOT CERTIFIED - REJECTED ON REPLICATION
+
+`bench_divide_classifier_accumulator_form` already contains a DIRECT interleaved head-to-head of the
+boolean accumulator against the bitmask one (static census: numpy 20, boolean 43, bitmask 35
+instructions per 16 doubles). Its first run looked like a shippable lever:
+
+```
+  run   head_to_head_ratio   ci95                    verdict on that run
+   1        1.041587         [1.028542,1.057969]     DECIDABLE_WIN
+   2        1.003167         [0.979833,1.009827]     straddles unity
+   3        1.010598         [0.993828,1.019849]     straddles unity
+   4        1.041266         [1.032438,1.049618]     excludes unity
+   5        1.058671         [1.032985,1.073254]     excludes unity
+
+  mean 1.0311, between-run stdev 0.0233, within-run CI half-widths 0.007-0.014
+```
+
+**Run 1 alone would have shipped a false 4.2% win.** Across five runs the effect is a marginal ~3.1%
+whose between-run spread is 2-3x its within-run CI, and two of five runs straddle unity outright. This
+is the banked rule "one dual-null run cannot decide a sub-5% effect" earning its keep for the second
+time in this campaign, on a fresh statistic. **The bitmask shape is not rejected as an idea — it is
+rejected as certified**, and it must not be routed into `zerocopy_f64_binary_flat_with_out` on this
+evidence.
+
+### A CALIBRATION OF THE RATIO-OF-RATIOS METHOD, from a pair that has both
+
+The bitmask group is the one place holding BOTH a direct head-to-head contract and two
+against-NumPy contracts for the same pair, so the method used at the top of this row can be scored
+against ground truth. Ratio-of-ratios gives 0.792203/0.835316 = **0.948**; the direct interleaved
+contract on run 1 gives **1.0416**. **A 9.4% discrepancy, with the sign reversed.**
+
+So: **ratio-of-ratios is usable for effects far above 10% and must NOT be used below it.** The
+classifier finding at the top (42-62%) clears that bar by a wide margin; anything in the few-percent
+range needs a direct interleaved contract. Recording the number rather than the impression, so the
+next user of this method knows its resolution.
+
+COUNTED_MECHANISM: static instruction census on elf `5f1e6f4e`, confirmed by disassembly —
+`divide_former_serial` 1 `vdivpd` (1x ymm unroll, 6 insns per 4 doubles = 1.50 per double),
+`divide_fused_serial` 5 `vdivpd` (4x ymm, 43 insns per 16 doubles = 2.69 per double), numpy
+`DOUBLE_divide_X86_V3` 10 insns per 8 doubles = 1.25 per double. The arm executing 1.8x more
+instructions per element is 1.42-1.62x faster, which is what refutes the unroll conclusion.
+
+A/A NULL CONTROLS: all A/A nulls straddle unity across all ten invocations used here; the five kernel
+runs carry incumbent nulls 0.998048 / 0.998734 / 1.000083 / 0.998296 and candidate nulls 1.001983 /
+1.000014 / 1.005433 / 0.993656, checksum `eb91d471f37fc5e0` identical across every arm and run. **As
+recorded twice already today, nulls passing did not stop the bitmask head-to-head ranging 1.0032 to
+1.0587 across runs** — the null bounds within-run noise, not between-run regime.
+
+RETRY PREDICATE: (a) Do NOT re-attempt removing or bypassing the FE-hazard classifier on the serial f64
+divide route — it is worth 1.42-1.62x in the default regime and removing it is a regression; this is
+settled on this host. (b) Do NOT cite "wider unroll is dead for f64 divide" without naming a regime;
+it is false in the bare regime. (c) The bitmask shape may be re-attempted only with a
+direct interleaved contract replicated at least five times, reporting between-run stdev alongside the
+CI; a single DECIDABLE_WIN on it is known to be unreliable. (d) Ratio-of-ratios across contracts has a
+measured resolution of ~9.4% on this route and may not decide sub-10% effects.
+AGENT_NAME=AzureCarp.
