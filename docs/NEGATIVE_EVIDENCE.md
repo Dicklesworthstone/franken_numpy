@@ -46727,3 +46727,77 @@ family — my last three predictions missed by 5-8x low, 5-8x low, and 1.8x high
 400-800 insns/call. `reduce` is 1.1602x and no longer the family's worst cell; `accumulate` at
 1.2088x now is.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - SAME-WINDOW FAMILY SNAPSHOT, no build in the measurement window: all four ufunc methods on ONE ELF with counters alongside. `accumulate` is the worst on BOTH measures and it is the only one that still routes (`deadlock-audit-v46rn`)
+
+`AzureCarp`. No build at all — measured on an ELF built in an earlier window, which is the point.
+
+**Campaign result class:** maintenance-diagnostic (a clean baseline, not a lever)
+
+### Why this row exists
+
+Every family table so far has been assembled from cells measured in DIFFERENT windows and often
+different ELFs, because measuring moves the load and building moves it further. Each individual
+before/after in this lane carries that caveat and I have written it five times. This one does not:
+one ELF, one window, all four methods, wall clock and hardware counters together.
+
+```
+UFUNC METHOD FAMILY n=256 numpy_version=2.4.3 worker=thinkstation1
+  bench_elf_sha256=8be4764dfe9ea795f03de14b098494c99fbea4828b4ccc35160cfb41c5e363cf
+  built in a PRIOR window; HEAD=1706206f at measurement time and that commit touches
+  fft/linspace/tests only, NOT lines 840-1200, so the ELF is current for this family
+  loadavg 9.83/11.06/13.95 -> 9.37/10.90/13.84 across the whole block
+  cross-core MHz 1429-4292 (spread 3.004); PER-ARM same_core=true on every run,
+  arm pairs 3810.8/3795.5, 4241.4/4241.4, 4288.8/4288.8, 4288.9/4288.9, 4263.9/4263.9
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+
+  method        median     deficit    5-run min/max        insns/call   cycles/call
+  outer       0.909979    1.0989x   0.903293/0.919917         1,254           660
+  reduceat    0.874638    1.1433x   0.866920/0.878496           993           161
+  reduce      0.860312    1.1624x   0.845151/0.872557         1,256           760
+  accumulate  0.822413    1.2159x   0.806117/0.845718         2,026         1,145
+```
+
+### What it says
+
+**`accumulate` is the worst cell on BOTH measures and it is not close** — 2,026 retired instructions
+per call, 1.6x the next worst, and 1,145 cycles against 660-760 for `outer`/`reduce`. The wall clock
+and the counters agree on it, which none of the earlier cross-window tables could establish.
+
+**And `accumulate` is the only method in the family that still ROUTES.** `outer`, `reduce` and
+`reduceat` delegate unconditionally; `accumulate` runs a routing decision before delegating —
+`accumulate_native_route_is_worth_taking` (a `getattr("size")` and an extract) plus the integer
+cumsum/cumprod pre-decline — and at n=256 it pays all of that only to hand the call to NumPy anyway.
+That is the named candidate for the next lever on this family, and it is now supported by both
+instruments rather than by reading the source.
+
+**An oddity worth recording rather than smoothing:** `reduceat` retires 993 excess instructions but
+only 161 excess cycles, while `reduce` retires 1,256 for 760 cycles. Our extra instructions are far
+better overlapped in one method than the other, and I have no account of why. It is why the counter
+ordering and the deficit ordering are not identical.
+
+### The family across this session, for scale
+
+```
+  accumulate  4.7561x -> 1.2159x      reduceat  1.6821x -> 1.1433x
+  reduce      1.2149x -> 1.1624x      outer     1.1829x -> 1.0989x
+```
+
+Those spans are the SUM of many levers by several agents — the size gate, the probe-to-decline cut,
+the axis-default removal, the kwargs-dict removal, the getattr interning, and the vectorcalls — and
+no single one of them owns a span. They are quoted here as the family's trajectory, not as anyone's
+credit.
+
+COUNTED_MECHANISM: excess retired instructions and cycles per call, all four methods, one ELF, one
+window — outer 1,254/660, reduceat 993/161, reduce 1,256/760, accumulate 2,026/1,145.
+
+A/A NULL CONTROLS: every wall-clock figure is the median of five
+`run_dual_null_median_ci_contract` rows the gate admitted; counter figures are hardware totals from
+matched single-arm probes and carry no schedule.
+
+RETRY PREDICATE: this is a baseline, not a lever — quote it as the family's current state and
+supersede it after the next change lands. The next lever on this family is `accumulate`'s routing
+prologue at sizes below its own gate, where the routing decision is pure overhead. Do NOT register a
+point prediction for its size: my last three predictions on this family missed by 5-8x low, 5-8x low
+and 1.8x high, so the honest prior is the range 400-800 insns/call.
+AGENT_NAME=AzureCarp.
