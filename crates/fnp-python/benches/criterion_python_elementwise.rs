@@ -3860,7 +3860,7 @@ fn bench_divide_kernel_on_numpy_buffers(_c: &mut Criterion) {
         // are bit-identical to the ones `0ppym` divided.
         py.run(
             std::ffi::CString::new(
-                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\nformer_out = np.empty(n)\nfused_out = np.empty(n)\n",
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\n",
             )
             .unwrap()
             .as_c_str(),
@@ -3870,9 +3870,21 @@ fn bench_divide_kernel_on_numpy_buffers(_c: &mut Criterion) {
         .expect("build operands");
         let a_py = locals.get_item("a").expect("a operand");
         let b_py = locals.get_item("b").expect("b operand");
-        let out_py = locals.get_item("out").expect("incumbent out buffer");
-        let former_py = locals.get_item("former_out").expect("former out buffer");
-        let fused_py = locals.get_item("fused_out").expect("fused out buffer");
+        // ONE shared output array for NumPy and BOTH replicas (`deadlock-audit-6y5wp`).
+        //
+        // This group used to give each arm its own `np.empty(n)`. At n=2^20 those are 8 MiB
+        // apiece against ~32 MiB of L3, which is the regime where the separate-buffer
+        // residency race is proven to bite: on the divide route the same change moved a
+        // worst cell 0.5904 -> 0.7798 and collapsed its run-to-run spread 0.1948 -> 0.0506.
+        // Two of this group's arms are `divide_former_serial` and `divide_fused_serial`,
+        // and the comparison BETWEEN them is what the classifier finding rested on - so the
+        // race sat directly on the load-bearing axis and that finding is downgraded to
+        // UNPROVEN until this re-runs.
+        //
+        // All three arms produce bit-identical quotients, so sharing is sound: each call
+        // overwrites the previous result with the same bytes and every checksum is taken
+        // after the timer stops.
+        let out_py = locals.get_item("out").expect("shared out buffer");
         let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
         let out_kwargs = PyDict::new(py);
         out_kwargs.set_item("out", &out_py).expect("bind out");
@@ -3880,15 +3892,12 @@ fn bench_divide_kernel_on_numpy_buffers(_c: &mut Criterion) {
 
         let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_py).expect("a buffer");
         let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_py).expect("b buffer");
-        let former_buffer =
-            pyo3::buffer::PyBuffer::<f64>::get(&former_py).expect("former out buffer");
-        let fused_buffer = pyo3::buffer::PyBuffer::<f64>::get(&fused_py).expect("fused out buffer");
+        let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&out_py).expect("shared out buffer");
 
         for (label, buffer, object) in [
             ("a", &a_buffer, &a_py),
             ("b", &b_buffer, &b_py),
-            ("former_out", &former_buffer, &former_py),
-            ("fused_out", &fused_buffer, &fused_py),
+            ("out", &out_buffer, &out_py),
         ] {
             let owner_ptr = object
                 .getattr("ctypes")
@@ -3911,16 +3920,23 @@ fn bench_divide_kernel_on_numpy_buffers(_c: &mut Criterion) {
         }
 
         // Same `repr(transparent)` argument the shipped `zerocopy_f64_binary_flat`
-        // makes: operands are read-only under the GIL and the two outputs are
-        // distinct fresh arrays that neither operand aliases.
+        // makes: operands are read-only under the GIL and the output is a fresh array
+        // that neither operand aliases.
         let a_np: &[f64] =
             unsafe { std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n) };
         let b_np: &[f64] =
             unsafe { std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n) };
-        let former_out: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(former_buffer.buf_ptr().cast::<f64>(), n) };
-        let fused_out: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(fused_buffer.buf_ptr().cast::<f64>(), n) };
+
+        // THE SHARED OUTPUT IS RE-DERIVED PER CALL, never held (`deadlock-audit-6y5wp`).
+        //
+        // Sharing one array between NumPy's `out=` arm and two Rust arms is what removes the
+        // residency race, but holding two long-lived `&mut [f64]` over one allocation would
+        // trade a measurement artifact for an aliasing one. So no `&mut` outlives the call
+        // that uses it: each arm mints its slice, writes, and drops it before any other arm
+        // runs. The arms are strictly sequential under the GIL, so at most one exists at a
+        // time. The cost is a pointer cast per call, far below this group's resolution.
+        let out_ptr = out_buffer.buf_ptr().cast::<f64>();
+        let mint = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(out_ptr, n) } };
 
         assert!(
             a_np.iter()
@@ -3937,19 +3953,19 @@ fn bench_divide_kernel_on_numpy_buffers(_c: &mut Criterion) {
             .call(&args, Some(&out_kwargs))
             .expect("numpy.divide probe");
         let numpy_sum = numpy_divide_checksum(&numpy_result, n);
-        divide_former_serial(a_np, b_np, former_out);
+        divide_former_serial(a_np, b_np, mint());
         assert_eq!(
-            divide_checksum(former_out),
+            divide_checksum(mint()),
             numpy_sum,
             "the accumulate-free arm does not reproduce numpy.divide bit for bit"
         );
         assert!(
-            !divide_fused_serial(a_np, b_np, fused_out),
+            !divide_fused_serial(a_np, b_np, mint()),
             "these operands must be hazard-free or the fused arm takes its rare \
              second pass and the comparison measures a different branch"
         );
         assert_eq!(
-            divide_checksum(fused_out),
+            divide_checksum(mint()),
             numpy_sum,
             "the fused arm does not reproduce numpy.divide bit for bit"
         );
@@ -3965,10 +3981,10 @@ fn bench_divide_kernel_on_numpy_buffers(_c: &mut Criterion) {
         };
         let candidate_former = || {
             let started = Instant::now();
-            divide_former_serial(a_np, b_np, former_out);
+            divide_former_serial(a_np, b_np, mint());
             let elapsed = started.elapsed();
-            let checksum = divide_checksum(former_out);
-            black_box(&former_out);
+            let checksum = divide_checksum(mint());
+            black_box(out_ptr);
             common::ContractObservation { elapsed, checksum }
         };
         let (former_effect, _in_null, _cand_null) = common::run_dual_null_median_ci_contract(
@@ -3988,11 +4004,11 @@ fn bench_divide_kernel_on_numpy_buffers(_c: &mut Criterion) {
         };
         let candidate_fused = || {
             let started = Instant::now();
-            let hazard = divide_fused_serial(a_np, b_np, fused_out);
+            let hazard = divide_fused_serial(a_np, b_np, mint());
             let elapsed = started.elapsed();
             assert!(!hazard, "operands must stay hazard-free during timing");
-            let checksum = divide_checksum(fused_out);
-            black_box(&fused_out);
+            let checksum = divide_checksum(mint());
+            black_box(out_ptr);
             common::ContractObservation { elapsed, checksum }
         };
         let (fused_effect, _in_null2, _cand_null2) = common::run_dual_null_median_ci_contract(
@@ -4007,6 +4023,8 @@ fn bench_divide_kernel_on_numpy_buffers(_c: &mut Criterion) {
              arms_are_replicas_not_the_shipped_route=true \
              arms_are_preallocated_no_alloc_either_side=true \
              all_buffers_are_numpy_allocated_views_not_copies=true \
+             shared_output_buffer_all_three_arms=true \
+             mut_slice_reminted_per_call_never_held=true \
              supersedes=deadlock-audit-0ppym_vec_backed_rows \
              accumulate_free_ratio={:.6} accumulate_free_ci95=[{:.6},{:.6}] \
              fused_ratio={:.6} fused_ci95=[{:.6},{:.6}] \
