@@ -48641,3 +48641,60 @@ RETRY PREDICATE: the settling measurement is divide at 2^20 with BOTH regions ti
 inference into a number. Until then do not quote 98,707 / 29,473 / 3.3x as measurements. Do not close
 `6y5wp` on the strength of the route row: the kernel deficit it names is real and merely masked.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - REFUTED: my `clip` bound pre-check is worth NOTHING measurable. A/B on the same host, both arms admissible, and the two cells read 0.9057 against 0.9062 (`deadlock-audit-v46rn`)
+
+`RedLynx`. The A/B row 57 said was owed and row 59 said was blocked. Tree came clean, so it ran.
+The lever it tested is one I landed and argued for; it does not pay.
+
+**Campaign result class:** REJECT (a landed lever measured at zero on the cells that motivated it)
+
+```
+BEFORE elf=df7ee46ef9a9d10f... (clip pre-check REMOVED by a targeted edit, 2 runs)
+AFTER  elf=2a2f3aef04db3d89... (row 58, pre-check present, 3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 15.53/17.46/17.28 at the start; 13.35/17.50/17.75 at the before-arm;
+  21.33/18.50/16.36 for the after-arm block
+CPU MHz system-wide min 1429 max 4115 median 1820 spread 2.880x (after-arm block)
+
+  case              BEFORE ratio (no pre-check)   AFTER ratio (pre-check)              verdict
+  clip_one_sided    0.908664 / 0.902844           0.896961 / 0.911994 / 0.906177       NO CHANGE
+  clip_two_sided    0.593781 / 0.600128           0.602324 / 0.596335 / 0.592912       NO CHANGE
+  ss_array_needle   0.170030 / 0.170793           0.171288 / 0.174624 / 0.168283       control, unchanged
+  ss_scalar_needle  0.465616 / 0.473977           0.456536 / 0.471859 / 0.466404       control, unchanged
+```
+
+**THE PREDICTION AND THE RESULT.** The commit registered: *"a one-sided clip should improve where
+a two-sided scalar clip does not move at all, since only the former was raising."* The two-sided
+half is right and vacuous - it never raised. **The one-sided half is REFUTED: 0.9057 before
+against 0.9062 after, inside the run-to-run spread of either arm.**
+
+**THE CONTROLS CONFIRM THE A/B ITSELF WAS SOUND.** Only the `clip` pre-check was removed; the
+`searchsorted` cells were untouched and read 0.1700/0.1708 against 0.1713/0.1746/0.1683 - the same.
+So the before-arm differs from the after-arm in exactly one thing, and that thing did nothing.
+
+**WHY THE MECHANISM ARGUMENT WAS WRONG.** I reasoned that `float(None)` raises, therefore
+`np.clip(a, 0, None)` pays a constructed-and-discarded exception per call, therefore removing it
+should show. The first two steps are true. The third does not follow: `clip_one_sided`'s TOTAL
+excess over NumPy is ~350-400 ns, and an exception costs 130-390 ns by this ledger's own probes -
+**if the exception were really on that path it would be most of the cell, and removing it could
+not have left the ratio unchanged to four significant figures.** The honest conclusion is that
+the one-sided call does not reach those extracts at all, and I asserted a path without tracing
+it.
+
+**WHAT I AM NOT DOING.** I am not removing the pre-check. It is correct, it is tested across ten
+bound kinds, and it removes a real exception on whatever path does reach those extracts. But its
+measured value on the cells that motivated it is **zero**, and it must not be cited as a win.
+
+**AND IT DOES NOT GENERALISE TO THE CLASS.** The same shape measured 390 ns on the spaced
+builders, where the failing extracts were on the only path array endpoints could take. Two
+instances of one class, one worth 390 ns and one worth nothing - **the class has no
+characteristic value, and each instance needs its own trace before its own claim.**
+
+RETRY PREDICATE: (1) Do NOT extrapolate the 390 ns spaced-builder figure to other
+exception-as-control-flow sites; this row is the counterexample. (2) Before claiming an exception
+is on a path, TRACE the call to it - `clip_one_sided`'s 350 ns total excess was visible in row 57
+and already ruled out a 130-390 ns exception on that path, which I did not check. (3) The
+`searchsorted` pre-check's own A/B is still unmeasured; its commit's prediction is untested and
+should not be quoted either. AGENT_NAME=RedLynx.
+
