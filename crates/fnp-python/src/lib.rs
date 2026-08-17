@@ -847,7 +847,10 @@ impl PyUFunc {
     ) -> PyResult<Py<PyAny>> {
         let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
-        Ok(np_ufunc.getattr("reduce")?.call(args, kwargs)?.unbind())
+        Ok(np_ufunc
+            .getattr(intern!(py, "reduce"))?
+            .call(args, kwargs)?
+            .unbind())
     }
 
     #[pyo3(signature = (array, axis=0, dtype=None, out=None))]
@@ -984,20 +987,33 @@ impl PyUFunc {
         // Same lever as `reduceat` below, same reason: `axis` defaults to 0 in NumPy's
         // `accumulate` too, and setting it explicitly costs a dict entry and a keyword
         // parse to communicate the default (`deadlock-audit-v46rn`).
+        //
+        // DO NOT BUILD THE DICT TO THEN DISCARD IT (`deadlock-audit-v46rn`). The previous
+        // form allocated a `PyDict` on EVERY call, filled nothing on the common
+        // all-defaults path, and only then asked `kwargs.is_empty()` and took `call1`.
+        // The allocation happened regardless. Symbol-attributed instruction counts on
+        // this cell show `_int_malloc` at +165 instructions per call against NumPy's own
+        // `accumulate`, which is the shape of exactly this: a heap allocation on a path
+        // whose fast case never uses it. Deciding FIRST and allocating second leaves the
+        // slow path byte-identical and removes the allocation from the fast one.
+        //
+        // The predicate is the same one `kwargs.is_empty()` computed, written out: the
+        // dict was empty precisely when axis was NumPy's default and neither `dtype` nor
+        // `out` was supplied.
+        let target = np_ufunc.getattr(intern!(py, "accumulate"))?;
+        let args = (array.bind(py),);
+        if axis == 0 && dtype.is_none() && out.is_none() {
+            return Ok(target.call1(args)?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if axis != 0 {
-            kwargs.set_item("axis", axis)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         if let Some(d) = dtype.as_ref() {
-            kwargs.set_item("dtype", d.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), d.bind(py))?;
         }
         if let Some(o) = out.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
-        }
-        let target = np_ufunc.getattr("accumulate")?;
-        let args = (array.bind(py),);
-        if kwargs.is_empty() {
-            return Ok(target.call1(args)?.unbind());
+            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(target.call(args, Some(&kwargs))?.unbind())
     }
@@ -1040,22 +1056,26 @@ impl PyUFunc {
         // default for `reduceat`. So the common call paid a dict allocation, a `set_item`,
         // and a keyword-bearing call to tell NumPy what it already assumed.
         //
-        // With every keyword at its default the dict is now empty and the call goes
-        // through `call1`, which is the shape `__call__`'s fast path already uses.
+        // With every keyword at its default the call goes through `call1`, which is the
+        // shape `__call__`'s fast path already uses — and the dict is no longer built
+        // just to be found empty. See the note on `accumulate`: allocating a `PyDict`
+        // unconditionally and then testing `is_empty()` paid a heap allocation on the
+        // path that never uses it, which is what `_int_malloc` at +165 instructions per
+        // call was measuring. Decide first, allocate second.
+        let target = np_ufunc.getattr(intern!(py, "reduceat"))?;
+        let args = (array.bind(py), indices.bind(py));
+        if axis == 0 && dtype.is_none() && out.is_none() {
+            return Ok(target.call1(args)?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if axis != 0 {
-            kwargs.set_item("axis", axis)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         if let Some(d) = dtype.as_ref() {
-            kwargs.set_item("dtype", d.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), d.bind(py))?;
         }
         if let Some(o) = out.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
-        }
-        let target = np_ufunc.getattr("reduceat")?;
-        let args = (array.bind(py), indices.bind(py));
-        if kwargs.is_empty() {
-            return Ok(target.call1(args)?.unbind());
+            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(target.call(args, Some(&kwargs))?.unbind())
     }
@@ -1090,7 +1110,7 @@ impl PyUFunc {
             Some(b_val) => PyTuple::new(py, [a.bind(py), indices.bind(py), b_val.bind(py)])?,
             None => PyTuple::new(py, [a.bind(py), indices.bind(py)])?,
         };
-        Ok(np_ufunc.getattr("at")?.call1(args)?.unbind())
+        Ok(np_ufunc.getattr(intern!(py, "at"))?.call1(args)?.unbind())
     }
 }
 
@@ -111382,6 +111402,119 @@ mod tests {
                     .str()?
                     .extract::<String>()?,
                 "an explicit dtype must survive the empty-dict fast path"
+            );
+            Ok(())
+        });
+    }
+
+    /// The all-defaults fast path no longer builds a `PyDict` and asks whether it is
+    /// empty — it decides up front on `axis == 0 && dtype.is_none() && out.is_none()`
+    /// (`deadlock-audit-v46rn`). Those two predicates must agree exactly, and the way
+    /// they can silently disagree is by dropping a keyword that should have forced the
+    /// slow path.
+    ///
+    /// The sibling test above covers `axis` on both methods and `dtype` on `accumulate`.
+    /// This covers what it does not, and `out` is the dangerous one: an implementation
+    /// that checked only `axis == 0` would take the fast path, hand NumPy no `out=`, get
+    /// a freshly allocated array back, and return it. The call LOOKS right at the call
+    /// site — the returned values are even correct — while the caller's buffer is never
+    /// written. Identity is therefore asserted, not just contents.
+    #[test]
+    fn accumulate_and_reduceat_fast_path_forwards_out_and_reduceat_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_fast_path_kwargs")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("add")?;
+            let theirs = numpy.getattr("add")?;
+
+            // 1-D, so `axis` sits at its default 0 and the fast path is the one under
+            // test. Values are distinct and non-zero so a running sum is not degenerate.
+            let a = numpy
+                .call_method1("arange", (6,))?
+                .call_method1("astype", ("float64",))?;
+
+            // ---- accumulate(out=) -------------------------------------------------
+            let sentinel = -1.0_f64;
+            let out = numpy.call_method1("full", (6, sentinel))?;
+            let expected = theirs.call_method1("accumulate", (&a,))?;
+            // Guard the fixture: if the sentinel already equalled the answer, "it was
+            // written" would be unfalsifiable.
+            assert_ne!(
+                out.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                expected.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "fixture is degenerate: the sentinel already equals the accumulate result"
+            );
+            let kw_out = PyDict::new(py);
+            kw_out.set_item("out", &out)?;
+            let returned = ours.call_method("accumulate", (&a,), Some(&kw_out))?;
+            assert!(
+                returned.is(&out),
+                "accumulate(out=) must return the caller's buffer, not a fresh array - a \
+                 dropped `out` keyword returns correct VALUES in the wrong object"
+            );
+            assert_eq!(
+                out.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                expected.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "accumulate(out=) must write into the caller's buffer"
+            );
+
+            // ---- reduceat(dtype=) and reduceat(out=) ------------------------------
+            let idx = numpy
+                .call_method1("array", (vec![0_i64, 2, 4],))?
+                .call_method1("astype", ("intp",))?;
+            let kw_dtype = PyDict::new(py);
+            kw_dtype.set_item("dtype", "float32")?;
+            assert_eq!(
+                ours.call_method("reduceat", (&a, &idx), Some(&kw_dtype))?
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                theirs
+                    .call_method("reduceat", (&a, &idx), Some(&kw_dtype))?
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                "an explicit dtype must survive reduceat's fast path"
+            );
+
+            let out2 = numpy.call_method1("full", (3, sentinel))?;
+            let expected2 = theirs.call_method1("reduceat", (&a, &idx))?;
+            assert_ne!(
+                out2.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                expected2.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "fixture is degenerate: the sentinel already equals the reduceat result"
+            );
+            let kw_out2 = PyDict::new(py);
+            kw_out2.set_item("out", &out2)?;
+            let returned2 = ours.call_method("reduceat", (&a, &idx), Some(&kw_out2))?;
+            assert!(
+                returned2.is(&out2),
+                "reduceat(out=) must return the caller's buffer, not a fresh array"
+            );
+            assert_eq!(
+                out2.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                expected2.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "reduceat(out=) must write into the caller's buffer"
+            );
+
+            // ---- and the fast path itself still matches NumPy ---------------------
+            assert_eq!(
+                ours.call_method1("accumulate", (&a,))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                expected.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "the all-defaults accumulate fast path must match numpy"
+            );
+            assert_eq!(
+                ours.call_method1("reduceat", (&a, &idx))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                expected2.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "the all-defaults reduceat fast path must match numpy"
             );
             Ok(())
         });
