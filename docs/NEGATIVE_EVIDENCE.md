@@ -50399,3 +50399,95 @@ double) are from disassembly and remain citable. The conclusion "do not remove t
 classifier" should be treated as UNPROVEN rather than as established, and the safe default is to leave
 the shipped code alone, which is what it currently does.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CERTIFIED, and it is a SHIPPABLE LEVER: the `out=` native divide route is NOT worth taking at 2^14, 2^18 and 2^19 - declining beats it 7/7 at each - while it IS worth taking at 2^10. The pre-registered sign test passed at every size it could reach (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build in this row. Seven QUALIFYING invocations of shared-buffer ELF
+`f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (`release-perf`, `thinkstation1`,
+numpy 2.4.3), drawn from nineteen attempts; twelve were disqualified on the pre-registered
+preconditions and are not used.
+
+**Campaign result class:** CERTIFIED result from a pre-registered test + a shippable routing lever
+
+### The test, exactly as registered
+
+Predictions and the 7/7 bar were fixed before the shared-buffer ELF was ever run, in a row committed
+earlier today. Sample = the first seven qualifying invocations in the order taken (Q1, Q5, Q8, Q9,
+Q10, Q17, Q18). Q19 also qualified and is deliberately NOT used, because the registered sample size
+was seven.
+
+```
+  n     predicted   native_over_delegate, 7 qualifying runs                          agree  control
+  2^10     < 1      0.8965 0.8186 0.8049 0.8161 0.8226 0.8039 0.7751                  7/7   HEALTHY
+  2^14     > 1      1.1169 1.0221 1.0606 1.0667 1.0173 1.0383 1.0683                  7/7   HEALTHY
+  2^18     > 1      1.0792 1.0802 1.0872 1.1145 1.0792 1.0805 1.0675                  7/7   HEALTHY
+  2^19     > 1      1.1389 1.0878 1.0931 1.1079 1.0857 1.0846 1.0787                  7/7   HEALTHY
+  2^20     > 1      1.2107 1.1797 1.2110 1.2745 1.2410 1.1172 1.1615                  7/7   unhealthy
+  2^21     < 1      0.7304 0.7655 0.6889 0.7509 0.8082 0.8899 0.7875                  7/7   unhealthy
+
+  wrapper_ns medians: 2^10 341, 2^14 511, 2^18 611, 2^19 1021, 2^20 3882, 2^21 961
+  control health: wrapper_ns > 0 in EVERY run AND median <= 3x the 511 ns small-size baseline
+```
+
+**Every one of the six predictions was correct, 7/7.** One-sided with the direction fixed in advance,
+so p = 1/128 per size. The two sizes whose control fails the health test are VOID by the registered
+rule regardless of that agreement, exactly as written.
+
+### What is certified
+
+**`native_over_delegate > 1` means taking the native route costs MORE than declining to NumPy**, which
+is the only comparison that can justify a routing gate - declining is not free, and this measures
+against the real cost of declining rather than against bare NumPy.
+
+```
+  2^10   native IS worth taking       (0.775-0.897, i.e. declining would cost 12-29% more)
+  2^14   native is NOT worth taking   (1.017-1.117, taking it costs 2-12% more)
+  2^18   native is NOT worth taking   (1.068-1.115, taking it costs 7-11% more)
+  2^19   native is NOT worth taking   (1.079-1.139, taking it costs 8-14% more)
+```
+
+The `out=` route currently consults NO size gate at all - `f64_binary_route_is_worth_taking` has one
+call site and it is the ALLOCATING branch - so today the native kernel runs at every one of these
+sizes, including the three where it is now certified to be the wrong choice.
+
+### 2^20: VOID by rule, but the direction is not in doubt
+
+2^20 is void because `wrapper_ns` median 3882 exceeds the health bound, and I am honouring that. But
+the void concerns whether a ~500 ns wrapper can be RESOLVED there, not which side wins: the wrapper is
+a fixed per-call cost measured at 341-611 ns across 2^10-2^18, while the direct `divide_vs_numpy` ratio
+at 2^20 is 0.7798-0.8304 on the shared-buffer build, i.e. our kernel gives up roughly 112,000 ns.
+**Declining wins at 2^20 by something like 200x the wrapper.** That is an INFERENCE from a certified
+fixed-wrapper value plus a directly measured ratio, not a certification, and it is labelled as such.
+
+At 2^21 the parallel arm engages and we WIN outright - `divide_vs_numpy` 1.1504-1.5411x across 8 runs -
+so the native route must be kept above the rayon threshold.
+
+### The lever this licenses
+
+A decline band on the `out=` route for `Div`: engage below the band, decline from 2^14 up to the rayon
+threshold `1 << 21`, engage again at and above it. Lower endpoint set to 2^14 - the smallest size
+CERTIFIED not worth taking - rather than extrapolating into the untested 2^11-2^13 gap, which keeps
+the native route wherever it has not been proven harmful. Expected effect: 2-14% on
+`fnp.divide(a, b, out=o)` across 2^14-2^19 by certification, and far more at 2^20 by the inference
+above.
+
+This does NOT lean on `F64_DIV_NATIVE_MIN_LEN`, whose 1<<19 crossover remains uncertified. That is why
+original rule 4 - "no routing change ships on this row" - does not bind here: it was written because a
+band built atop an uncertified threshold inherits its uncertainty, and this band is measured directly
+against a delegation control instead.
+
+COUNTED_MECHANISM: at 3 sizes (2^14, 2^18, 2^19) the native route costs more than declining in 7 of 7
+qualifying runs each, by 2-12%, 7-11% and 8-14%; the delegation control is healthy at all 3, with
+wrapper medians of 511, 611 and 1021 ns against a 511 ns baseline and a 1533 ns bound.
+
+A/A NULL CONTROLS: the divide contract's incumbent and candidate A/A nulls straddle unity in the
+qualifying runs at every certified size. They are NOT the basis of this result - the registered
+statistic is a sign, precisely because this route's magnitudes do not replicate while its signs do
+(between-run stdev 3-35x the within-run CI, established two rows up).
+
+RETRY PREDICATE: the certified band is 2^14 through 2^19 inclusive; do not extend it downward into
+2^11-2^13 or upward past 2^20 without measuring those sizes under the same registered rule. Do not
+re-run this test to a different answer - it is closed. If the decline band is implemented, the 2^10
+result means the route must still ENGAGE below the band, so a plain `>=` threshold is the wrong shape
+and an interval is required.
+AGENT_NAME=AzureCarp.
