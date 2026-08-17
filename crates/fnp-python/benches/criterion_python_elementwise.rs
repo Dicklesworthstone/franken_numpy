@@ -1332,6 +1332,10 @@ fn main() {
             ),
             ("bench_out_kwarg_vs_numpy", bench_out_kwarg_vs_numpy),
             (
+                "bench_ufunc_method_percall_floor_vs_numpy",
+                bench_ufunc_method_percall_floor_vs_numpy,
+            ),
+            (
                 "bench_percall_floor_across_ops_vs_numpy",
                 bench_percall_floor_across_ops_vs_numpy,
             ),
@@ -5211,6 +5215,144 @@ fn bench_signature_keyword_binding_cost(_c: &mut Criterion) {
             effect.ratio_ci_high,
             null.ratio_median,
         );
+    });
+}
+
+/// Calls a ufunc METHOD with the arity that method takes. A closure cannot express
+/// this: it would tie the returned `Bound` to the borrow of `target` rather than to
+/// the interpreter lifetime, which is what the elided form gets wrong.
+fn call_ufunc_method<'py>(
+    target: &pyo3::Bound<'py, pyo3::PyAny>,
+    method: &str,
+    operand: &pyo3::Bound<'py, pyo3::PyAny>,
+) -> pyo3::Bound<'py, pyo3::PyAny> {
+    if method == "outer" {
+        target
+            .call_method1(method, (operand, operand))
+            .expect("ufunc method call")
+    } else {
+        target
+            .call_method1(method, (operand,))
+            .expect("ufunc method call")
+    }
+}
+
+// The per-call floor of the ufunc METHOD path, which `bench_percall_floor_across_ops_vs_numpy`
+// does NOT reach: that group calls `fnp.add(a, b)`, i.e. `PyUFunc::__call__`, while
+// `reduce`/`accumulate`/`outer`/`reduceat`/`at` are separate `#[pymethods]` with their own
+// prologue. `__call__` was converted to the cached numpy module handle when the import was
+// priced at 310 ns per call; the methods were not converted until `deadlock-audit-v46rn`, so
+// this group exists to measure that conversion on the path that actually changed.
+//
+// `reduce` is the right method to measure it on: it delegates UNCONDITIONALLY (no native fast
+// path can absorb the call), so what is timed is the wrapper prologue plus NumPy's own work,
+// which is exactly the quantity the lever moves. n is deliberately small - at 256 elements
+// NumPy's reduce is a few hundred ns, so a 310 ns prologue is a large fraction and visible;
+// at 2^20 it would be swamped by the reduction itself and the row would say nothing.
+fn bench_ufunc_method_percall_floor_vs_numpy(_c: &mut Criterion) {
+    let n = 1usize << 8;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new("i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\n")
+                .unwrap()
+                .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operand");
+        let a = locals.get_item("a").expect("a operand");
+
+        for method in ["reduce", "outer"] {
+            let ours = module.getattr("add").expect("fnp add");
+            let theirs = numpy.getattr("add").expect("numpy add");
+            assert!(
+                !ours.is(&theirs),
+                "fnp.add IS numpy's object - there is no candidate arm"
+            );
+
+            // `outer` on n=256 builds a 256x256 result, so it is timed on a SHORTER
+            // operand to keep the call-shape cost visible rather than the O(n^2) work.
+            let operand = if method == "outer" {
+                a.get_item(pyo3::types::PySlice::new(py, 0, 16, 1))
+                    .expect("short operand")
+            } else {
+                a.clone()
+            };
+
+            // A scalar (reduce) and an array (outer) need different checksums; both must
+            // read the RESULT, or the timer could be measuring a call that returned nothing.
+            let checksum_of = |result: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+                match result.extract::<f64>() {
+                    Ok(scalar) => scalar.to_bits(),
+                    Err(_) => result
+                        .call_method0("sum")
+                        .expect("array result sums")
+                        .extract::<f64>()
+                        .expect("sum is f64")
+                        .to_bits(),
+                }
+            };
+
+            assert_eq!(
+                checksum_of(&call_ufunc_method(&ours, method, &operand)),
+                checksum_of(&call_ufunc_method(&theirs, method, &operand)),
+                "fnp.add.{method} and numpy.add.{method} disagree"
+            );
+
+            let incumbent = || {
+                let started = Instant::now();
+                let result = call_ufunc_method(&theirs, method, &operand);
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let candidate = || {
+                let started = Instant::now();
+                let result = call_ufunc_method(&ours, method, &operand);
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+
+            let row = format!("add_{method}_n{n}_vs_numpy_method_route");
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract(&row, incumbent, candidate);
+            let numpy_ns = effect.arm_a_median_ns;
+            let fnp_ns = effect.arm_b_median_ns;
+            println!(
+                "UFUNC_METHOD_FLOOR method={method} n={n} numpy_version={numpy_version} \
+                 worker={} harness=common::run_dual_null_median_ci_contract \
+                 delegates_unconditionally={} \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={:.1} \
+                 incumbent_aa_null={:.6} candidate_aa_null={:.6}",
+                measurement_worker(),
+                method == "reduce" || method == "outer",
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                fnp_ns - numpy_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
     });
 }
 

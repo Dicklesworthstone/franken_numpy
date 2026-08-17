@@ -44528,3 +44528,78 @@ banked from ONE dual-null contract at an effect size under 5%, because the betwe
 (stdev 0.0159) is larger than the CI those rows carry. Do pin `OPENBLAS_NUM_THREADS=1` in every
 future run of this bench.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-16 - CERTIFIED A/B IN ONE WINDOW: dropping the per-call `py.import("numpy")` from the ufunc METHODS removes 656-686 ns per call - `add.reduce` goes 1.9132x -> 1.2800x and `add.outer` 1.5724x -> 1.1804x (`deadlock-audit-v46rn`)
+
+`RedLynx`. The lever landed in `4344de97` and this measures it, both arms built and run
+minutes apart on one host, with the incumbent as the drift control.
+
+**Campaign result class:** maintenance-self-speedup (both cells remain regressions vs NumPy)
+
+```
+BEFORE bench_elf_sha256=16f9ebb842cfd95b88576c6b632ba014c0c70b68d372b564265c512fe9439375
+       (HEAD lib.rs with 4344de97 REVERSE-APPLIED, then restored; tree verified
+        byte-identical to HEAD afterwards via an empty `git diff`)
+       LOADAVG 12.66/15.54/19.83 unchanged across the run
+AFTER  bench_elf_sha256=cb8c5da47af77eb1e8d8a5ae409e7906f9cc105646613b9c187a90da4cf37d67
+       LOADAVG 15.60/17.59/21.25 unchanged across the run
+       CPU MHz system-wide min 1429 max 4174 median 3144 spread 2.921x
+       PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu, same_core=true,
+         reduce 4208.4/4208.7 MHz spread 1.0001; outer 4223.3/4223.3 spread 1.0000
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256
+harness=common::run_dual_null_median_ci_contract, new group
+  `bench_ufunc_method_percall_floor_vs_numpy` (registered; selected_groups=1 echoed)
+
+  method   arm      ratio     ci95                   numpy_ns  fnp_ns  excess_ns
+  reduce   BEFORE   0.522681  [0.520527,0.525202]      1037     1984      947
+  reduce   AFTER    0.781227  [0.778351,0.783321]      1052     1343      291
+  outer    BEFORE   0.635971  [0.634773,0.639040]      1778     2785     1007
+  outer    AFTER    0.847182  [0.843156,0.850409]      1768     2089      321
+
+All four cells verdict=DECIDABLE_REGRESSION, effect_ci_excludes_one=true.
+All eight A/A nulls straddle unity; half-widths 0.0025-0.0048.
+```
+
+**THE RESULT: 656 ns removed from `reduce` and 686 ns from `outer`, per call.** In ratio terms
+`add.reduce` moves from **1.9132x slower to 1.2800x** and `add.outer` from **1.5724x to 1.1804x`.
+
+**THE INCUMBENT IS THE CONTROL, AND IT IS FLAT.** NumPy's own arm reads 1037 -> 1052 ns on reduce
+(+1.4%) and 1778 -> 1768 ns on outer (-0.6%) across the two builds. A 656-686 ns effect against
+~1% incumbent drift is not a window artifact.
+
+**THE TWO BUILDS DIFFER BY MORE THAN MY LEVER, AND I WILL NOT PRETEND OTHERWISE.** A peer commit
+(`397ca9c3`, 21:12:32) added 367 lines - an unrelated new group - to the same bench FILE between
+my two arms, so the binaries differ in layout as well as in the lever. That is exactly the
+cross-build comparison this ledger warns about. Three things make the attribution safe anyway:
+the incumbent arm above is flat to ~1%; both arms of each ratio run inside ONE binary, so layout
+affects them together; and the effect is two orders of magnitude larger than the drift. A reader
+who wants it airtight should re-run both arms with the bench file held fixed.
+
+**WHY THE EFFECT IS BIGGER THAN THE 310 ns THE IMPORT WAS PRICED AT.** `__call__`'s comment
+records `py.import("numpy")` at 310 ns, and I expected roughly that. The measured removal is
+~2x it. I do not have a decomposition and will not invent one; the honest statement is that the
+methods' prologue cost more than a single priced import, and the candidates are that `py.import`
+is dearer in this call shape than where it was first priced, or that `accumulate`'s gate - which
+also did `getattr("ndarray")` on the imported module every call, and which this lever replaced
+with the cached type object - was not the only site paying twice. **The direction and magnitude
+are certified; the decomposition is not.**
+
+**THE NEW GROUP EXISTS BECAUSE THE OLD ONE COULD NOT SEE THIS.**
+`bench_percall_floor_across_ops_vs_numpy` calls `fnp.add(a, b)` - `PyUFunc::__call__` - which was
+converted to the cached handle long ago. `reduce`/`outer` are separate `#[pymethods]` with their
+own prologue, so no existing row could have caught a 950-1000 ns regression sitting in them. n=256
+is deliberate: NumPy's own reduce is ~1 us there, so a prologue of this size is a large fraction
+and visible, where at 2^20 it would be swamped.
+
+**STILL A LOSS.** 1.2800x and 1.1804x mean NumPy is faster on both. This records that two cells
+nobody had measured were much worse than believed and are now much better, not that they are won.
+
+RETRY PREDICATE: (1) The remaining excess is 291 ns (reduce) and 321 ns (outer) - close to the
+206-221 ns floor the `__call__` rows measure, which suggests what is left is the shared wrapper
+floor rather than anything method-specific. Check that before looking for further method-local
+levers. (2) `accumulate`, `reduceat` and `at` took the same lever in the same commit and are NOT
+measured here - they have native fast paths that may absorb the call, so each needs its own arm
+before any figure is quoted for them. (3) There are ~1459 `py.import("numpy")` sites in
+`lib.rs` and this commit converted 7; if a 656 ns prologue was hiding in the ufunc methods, the
+same audit is owed to the other per-call entry points. AGENT_NAME=RedLynx.
+
