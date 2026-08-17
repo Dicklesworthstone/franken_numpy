@@ -51333,3 +51333,86 @@ RETRY PREDICATE: to convert the bounds into point estimates, price PyO3's keywor
 so a refutation has a specific, checkable shape. Do NOT attack the wrapper residual on the strength
 of the 1473.5 figure alone - it is a ceiling.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - RE-DECIDED ON THE CORRECTED INSTRUMENT: the FE-hazard classifier COSTS 7.9%, 5/5 runs. My earlier "the fused form is 1.4152-1.6155x BETTER" was the buffer artifact, and the mmap-control reading I distrusted was the one telling the truth (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
+
+`AzureCarp`. One build (`release-perf`, 3m13s, `df` 210G immediately before, `proj_builds` = 0), five
+qualifying invocations of ELF
+`48b2972dc8a08ccfa4cb16beec44c065e4efe77431660401fc35d32644c08823`, worker `thinkstation1`, numpy
+2.4.3, n=2^20.
+
+```
+  per-run provenance (pre-run)
+    K1  load 18.19/22.47/24.82  idle 81%  2765 MHz  proj_builds=0
+    K2  load 16.27/21.58/24.45  idle 83%  2590 MHz  proj_builds=0
+    K3  load 16.33/21.51/24.41  idle 76%  3272 MHz  proj_builds=0
+    K4  load 16.78/21.51/24.39  idle 55%  3241 MHz  proj_builds=0
+    K5  load 17.28/21.54/24.39  idle 60%  3519 MHz  proj_builds=0
+  all five satisfy 1-min <= 5-min with no build of the ELF under test
+```
+
+**Campaign result class:** a finding of mine REVERSED by fixing the instrument that produced it
+
+### The measurement, on one shared per-call-reminted output buffer
+
+```
+  accumulate-free vs numpy   0.9727 0.8971 0.8983 0.9095 0.9083    mean 0.9172   WORST 0.8971
+  fused (shipped) vs numpy   0.9073 0.8401 0.8453 0.8225 0.8370    mean 0.8504   WORST 0.8225
+
+  fused / accumulate-free    0.9328 0.9364 0.9410 0.9044 0.9216
+                             mean 0.9272   stdev 0.0146   5 of 5 below unity
+```
+
+**The FE-hazard classifier costs 7.9% of this kernel.** The effect is five times its own between-run
+stdev and unanimous in direction, which is the standard this campaign has been unable to meet on this
+route all day - and it is met here only because the instrument stopped fighting itself.
+
+### What this reverses, and what it vindicates
+
+**REVERSED - my own row.** I banked "in the DEFAULT allocator regime the shipped fused form is
+1.4152-1.6155x FASTER than the accumulate-free form" and used it to argue that removing the classifier
+would be a large regression and that "wider unroll is dead for f64 divide" is regime-scoped. On the
+corrected instrument the fused form is 7.9% SLOWER. That row is now VOID; the 1.42-1.62x was the
+residency race between `former_out` and `fused_out`, two 8 MiB buffers against ~32 MiB of L3.
+
+**VINDICATED - the reading I distrusted.** Under `MALLOC_MMAP_THRESHOLD_` the same comparison gave
+0.9386 and 0.9458, and I treated the mmap control as a suspicious confound because it also perturbed
+arms that allocate nothing. It was closer to the truth than the bare regime was: the control changed
+page backing in a way that partly neutralised the residency race. **Two independent corrections -
+allocator tunable and shared buffer - converge on ~0.93**, from opposite methodological directions.
+That agreement is the strongest evidence here, stronger than either measurement alone.
+
+**PARTLY CORRECTED - `deadlock-audit-vqxoa`.** Its claim that the fused accumulate is "close to free"
+overstated the case: 7.9% is not free. But it is bounded and modest, and vqxoa's design decision stands
+- the fusion is still far cheaper than the second full pass over the output it replaced.
+
+### What does NOT follow
+
+**This is not a licence to remove the classifier.** `divide_former_serial` carries the source's own
+"THIS ARM MUST NEVER SHIP" warning: it has no FE-hazard deferral, so routing it would reintroduce the
+six divergence rows `deadlock-audit-2nmd1` closed, because NumPy raises a RuntimeWarning we would not.
+The 7.9% is the measured PRICE OF PARITY, not an available saving. What it does buy is an attributed
+number where there was an artifact.
+
+### The group's standing versus NumPy also moved
+
+Both arms sit closer to NumPy than the separate-buffer instrument reported: fused was 0.830-0.874 and
+now reads 0.8225-0.9073. Quoted worst-first, our fused kernel replica is **1.2158x slower than NumPy**
+at 2^20 (worst cell 0.8225) and the accumulate-free replica **1.1147x** (worst 0.8971).
+
+COUNTED_MECHANISM: with both replica arms on ONE shared output buffer, fused/accumulate-free reads
+0.9328, 0.9364, 0.9410, 0.9044, 0.9216 across 5 runs - mean 0.9272, stdev 0.0146, unanimous - against
+the separate-buffer instrument's 1.4152-1.6155 in the bare regime and 0.9386/0.9458 under the mmap
+control; the 2 corrections agree to within 2% and the uncorrected figure differs from both by ~50%.
+
+A/A NULL CONTROLS: both A/A nulls straddle unity in both contracts across all five runs. As
+established repeatedly today they did NOT flag the artifact this row removes, which is why the
+converging-corrections argument above carries the weight rather than the nulls.
+
+RETRY PREDICATE: quote the classifier's cost as ~7.9% (worst run 0.9410, best 0.9044) from the
+shared-buffer instrument only; the 1.4152-1.6155x figure is VOID and must not be requoted, including
+from the source comment in `bench_divide_accumulate_isolation_vs_numpy`, which still carries my
+correction asserting the 4x-unrolled arm is faster - that assertion falls with this row and the
+comment needs updating. Do NOT read this as licence to drop the classifier: `divide_former_serial`
+must never ship. Three of the five audited 2^20 groups remain unconverted.
+AGENT_NAME=AzureCarp.
