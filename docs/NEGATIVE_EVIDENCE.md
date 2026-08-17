@@ -50109,3 +50109,76 @@ ELF (`7dd037723ee6ae91...`); it is superseded by the shared-buffer build. Re-tak
 shared-buffer pattern before quoting their large-n rows. The sign test above must be run on 7 fresh
 invocations and may not be re-run to a better answer.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - THE BUFFER FIX WORKED AND EXTENDED THE USABLE BAND TO 2^19 (18,840 ns -> ~600 ns), but the residual unphysical wrapper at 2^20+ is NOT an asymmetry - it is the estimator having no resolution there, which makes the delegation comparison permanently unavailable above 2^19. Four runs taken were RULE-DISQUALIFIED and used only for instrument validation (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build in this row. Four invocations of the shared-buffer ELF
+`f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (release-perf, `thinkstation1`),
+load 17.90/18.15/17.66 rising to 32.84/22.19/19.07, CPU mean 2942-3537 MHz.
+
+**Campaign result class:** instrument validated + a structural limit identified + four runs discarded
+under my own rule
+
+### THE FOUR RUNS ARE DISQUALIFIED, and I am not using them for the hypothesis
+
+`pgrep` reported **a build running in franken_numpy for all four invocations**, and by the third the
+1-minute loadavg (29.46) had risen above the 5-minute (20.86). Amended rule 1 requires no build in this
+project and 1-min at or below 5-min at the start of each invocation. **Both halves failed, so these
+runs cannot count toward the pre-registered sign test**, which still needs seven qualifying
+invocations.
+
+They are used here for one thing only, and it is a question that was never pre-registered and carries
+no error budget: **did the shared-buffer fix do what it was supposed to?** I did not inspect their
+signs before disqualifying them.
+
+### The fix worked, and it bought a whole octave
+
+```
+  n      wrapper_ns, separate buffers (old ELF)         wrapper_ns, shared buffer (new ELF)
+  2^10     330    471    356    430    356                326    345    341    361
+  2^14     847    517    480    677    902                391    421    686    411
+  2^18     966    611   3455    816    417                486    637    590    746
+  2^19   25343    752  18840  21732    551                672    657    396    702      <- FIXED
+  2^20   30970  -3967  11661  36385  -6087               -922  10069  -5090   9367
+  2^21    5229 -170488 -269286 -516965  -8205          -45040  21510  -3712  63456
+```
+
+**2^19 went from a median of 18,840 ns that grew with n to a flat ~600 ns indistinguishable from
+2^10-2^18** — which is what a fixed per-call wrapper should look like. The residency race was real and
+removing it extended the control's healthy band from 2^18 to **2^19**, which happens to be exactly
+where `F64_DIV_NATIVE_MIN_LEN` sits, so this is the octave the gate question actually turns on.
+
+### The residual at 2^20 and above is a RESOLUTION LIMIT, not a bug to fix
+
+Magnitudes at 2^21 shrank by roughly an order of magnitude (-516,965 to -45,040) but the sign still
+flips. The reason is not another asymmetry: **at 2^20 the wrapper is ~600 ns against a ~400,000 ns
+call, i.e. about 0.15% of the quantity being differenced.** `wrapper_ns` is a difference of two large
+noisy numbers, and this route's between-run spread is 10-14% — four orders of magnitude larger than
+the signal. No amount of buffer hygiene rescues an estimator asked to resolve 0.15% from data with 10%
+spread.
+
+**So the delegation comparison is structurally unavailable above 2^19 and should not be attempted
+there again.** That is a permanent boundary on this instrument, not a defect awaiting a fix. It does
+NOT affect the raw `divide_vs_numpy` ratio at those sizes, which is a direct comparison and needs no
+subtraction — that is the statistic to use at 2^20 and beyond.
+
+### What remains to be done
+
+The pre-registered sign test stands unchanged and unrun: seven qualifying invocations, predictions
+already fixed (2^10 `<1`; 2^14, 2^18, 2^19 `>1`), 7/7 agreement required at a control-healthy size.
+On this evidence the certifiable band is **2^10 through 2^19** — four sizes, including the two that
+bracket the gate.
+
+COUNTED_MECHANISM: the 2^19 wrapper median falls from 18840 ns to 657 ns after the buffer fix, a 28.7x
+reduction bringing it within 1.2x of the 2^18 value of 590 ns; and at 2^20 the ~600 ns wrapper is
+0.15% of a ~400000 ns call against a measured between-run spread of 10-14%.
+
+A/A NULL CONTROLS: not load-bearing here and deliberately not quoted — these four runs are
+disqualified, and quoting their A/A nulls would lend them a standing this row denies them. The sign
+test's nulls will be reported with its seven qualifying runs.
+
+RETRY PREDICATE: do not attempt a delegation-based comparison at 2^20 or above on this route in any
+future build - the estimator cannot resolve a 0.15% term against a 10-14% spread, and that is
+arithmetic, not tuning. Use the direct `divide_vs_numpy` ratio there instead. The four runs recorded
+here must never be counted toward the sign test; it needs seven fresh QUALIFYING invocations.
+AGENT_NAME=AzureCarp.
