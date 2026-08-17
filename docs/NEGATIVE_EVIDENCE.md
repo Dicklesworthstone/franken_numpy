@@ -45657,3 +45657,79 @@ their signatures directly rather than by regex; a site whose default is `None` i
 this lever INVERTS into a correctness bug. (3) `vecdot`'s two sites need a hand check against
 NumPy's C-level gufunc definition, not `inspect`. AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - BANKING a table I already held, and CORRECTING an overstatement in my own row: LLC and branch misses ARE flat across the ufunc methods, but L1 D-cache misses are NOT - our arms take up to 101.8 more per call, worth 20-60% of accumulate's cycle excess (`deadlock-audit-v46rn`)
+
+`AzureCarp`. No new measurement — this is data collected earlier in the same session, from the same
+ELF and the same probes, that I described in prose without publishing the numbers. Banked now under
+a build halt, which is the right time for it.
+
+**Campaign result class:** maintenance-diagnostic + correction of my own prose
+
+### The overstatement
+
+Two rows above I wrote that the divergence between the counted and interleaved regimes was "NOT
+explained by L1-dcache misses, LLC `cache-misses` or branch misses, **all of which I measured and
+all of which are flat across the six arms**", and justified it with a parenthetical that only cited
+LLC (`8.79-9.00 M on every one`). That parenthetical is true and the claim it was attached to is
+not. **L1 D-cache misses are not flat.** I generalised from the counter I quoted to the two I did
+not, and the numbers were in front of me at the time.
+
+### The table
+
+`perf stat -e L1-dcache-load-misses:u,cache-misses:u,branch-misses:u`, six single-arm probes,
+400 000 calls each, n=256, ELF
+`ada3f3b14df5dac9fe8a4a1f5bdac820174cfb4e84c88e490611812644a71a5d`,
+`OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`, per call:
+
+```
+  method        L1D fnp   L1D numpy   dL1D    LLC fnp  LLC numpy   dLLC    br fnp  br numpy    dbr
+  reduce          100.3        54.7   +45.6     22.26      22.26  +0.01     14.12     14.35  -0.24
+  reduceat         75.2        47.6   +27.6     22.19      22.08  +0.11     16.05     17.96  -1.91
+  accumulate      154.6        52.8  +101.8     22.51      21.98  +0.53     16.04     15.95  +0.09
+```
+
+**LLC misses are ~22 per call on every one of the six arms** — a spread of 0.53 across the whole
+table, which is genuinely flat and rules out last-level cache residency as an explanation for any of
+these cells. **Branch misses are flat too**, within ±1.9 per call and pointing the WRONG way on
+`reduceat` (NumPy mispredicts more than we do). Those two negatives stand.
+
+**L1 D-cache misses are a different story.** Our arms take **+45.6, +27.6 and +101.8** more per call.
+Against the cycle excesses already banked for the same three cells (1255, 1297, 2028), and costing an
+L1 miss served by L2 somewhere in the 4-12 cycle range:
+
+```
+  reduce      +45.6 L1D/call ->  182-547 cycles of 1,255 =  14.5-43.6%
+  reduceat    +27.6 L1D/call ->  110-331 cycles of 1,297 =   8.5-25.5%
+  accumulate +101.8 L1D/call ->  407-1222 cycles of 2,028 =  20.1-60.2%
+```
+
+I am deliberately quoting a RANGE and not a point: I did not measure the L1-miss service cost on
+this host, and the 4-12 cycle window is the difference between "a fifth of the excess" and "most of
+it". What the range does establish is that this is **not** negligible and cannot be waved off, which
+is what my earlier prose did.
+
+### What it changes about where to look
+
+The instruction counts said the wrapper excess is call machinery, and the per-symbol diff named NumPy
+redoing argument work (`PyArray_DiscoverDTypeAndShape_Recursive`, `PyArray_CanCastArrayTo`,
+`_int_malloc`). This table says a meaningful share of the COST of that machinery is data-cache, not
+just issue slots — the excess L1D misses track the excess instructions across all three methods
+(`accumulate` has both the most instructions and by far the most misses). That points at a class of
+lever the instruction counts alone do not: **touching less memory per call**, i.e. constructing fewer
+short-lived Python objects, rather than only executing fewer instructions. The kwargs-dict allocation
+removed in `3a542125` is one instance of exactly that shape, which is a reason to measure it on this
+counter as well as on instructions when builds resume.
+
+COUNTED_MECHANISM: L1 D-cache load misses per call, fnp versus NumPy, at n=256 — reduce 100.3 vs
+54.7, reduceat 75.2 vs 47.6, accumulate 154.6 vs 52.8; LLC misses 22.19-22.51 versus 21.98-22.26 on
+the same six arms; branch misses 14.12-16.05 versus 14.35-17.96.
+
+A/A NULL CONTROLS: not applicable — hardware-counter totals from matched single-arm probes, not a
+timed A/B, so there is no schedule to control for.
+
+RETRY PREDICATE: do not re-run this table; it is banked. Do not repeat my claim that all three miss
+counters are flat — LLC and branch are, L1D is not. Before anyone attributes the L1D excess, the
+missing input is the L1-miss service cost on this host, which turns the 8.5-60.2% range into a
+number; that needs a build and is blocked until the halt lifts.
+AGENT_NAME=AzureCarp.
