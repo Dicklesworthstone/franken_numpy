@@ -49007,3 +49007,55 @@ unattributed beyond the `numpy_dtype_is_f64` fast path, and the entry body's eag
 the haystack - run on EVERY call before any dispatch - has never been priced.
 AGENT_NAME=RedLynx.
 
+
+### ADDENDUM, same session, NO BUILD: three candidate mechanisms for the ~1.21x `out=` deficit ELIMINATED by static inspection of the ELF I had already built
+
+With the allocator confound removed, `6y5wp`'s kernel deficit is the open question. At n=2^20 the
+serial arm is what runs (`parallel_min = 1 << 21` for `BinaryOp::Div`), so the target is the serial
+fused divide loop in `zerocopy_f64_binary_flat_with_out`. Three hypotheses were checkable against the
+existing ELF and the installed NumPy without spending a build. **All three are refuted.**
+
+**1. "The serial arm iterates `Cell<f64>` via `.get()`/`.set()` rather than `&[f64]`, so unlike the
+parallel arm it never vectorises." REFUTED.** Disassembling
+`fnp_python::zerocopy_f64_binary_flat_with_out` (symbol at `0x14e5360`, elf `5f1e6f4e`):
+
+```
+  vdivpd  x2   operands %ymm    <- 256-bit packed, 4 doubles per instruction, 2x unrolled
+  vdivsd  x1   operand  %xmm    <- scalar remainder tail
+```
+
+The `Cell` iteration does not inhibit the vectoriser; `ReadOnlyCell<f64>`/`Cell<f64>` are
+`repr(transparent)` over `f64` and LLVM sees through them. The fusion comment's premise — that the
+normality accumulate rides beside a *vectorised* divide — holds on the serial arm too.
+
+**2. "NumPy dispatches AVX-512 (`%zmm`, 8 doubles) while our build is capped at AVX2 (`%ymm`, 4), and
+the deficit is ISA width." REFUTED on this host.** `thinkstation1` is an **AMD Ryzen Threadripper PRO
+5975WX (Zen 3), `grep -c avx512f /proc/cpuinfo` = 0.** Neither side can issue 512-bit FP; both are
+AVX2. This is the same trap recorded fleet-wide as "ISA gates here encode core count, not ISA", and it
+is checked rather than assumed here.
+
+**3. "NumPy uses non-temporal stores on the 8 MiB output and avoids read-for-ownership traffic; we use
+ordinary stores and pay an extra 8 MiB of reads." REFUTED.** `grep -cE "vmovnt|movnt"` returns **0 in
+our kernel and 0 in NumPy's `_multiarray_umath.cpython-313-x86_64-linux-gnu.so`.** Neither side issues
+a non-temporal store, so RFO traffic is symmetric and cannot be the asymmetry. The predicted 32/24 =
+1.333x from this mechanism was attractively close to the observed 1.21x, which is exactly why it
+needed checking rather than adopting.
+
+INDICATIVE ONLY, not banked: at 1,048,576 elements with `vdivpd`/`%ymm` on Zen 3 the divide unit alone
+accounts for roughly 250 us against measured arms of 360-443 us (NumPy) and 457-538 us (ours), so this
+cell looks divide-throughput-bound rather than bandwidth-bound. That is an order-of-magnitude sanity
+check from published instruction throughputs, not a measurement, and no lever may be justified by it.
+
+COUNTED_MECHANISM: none claimed for the addendum — it eliminates rather than attributes. The
+eliminations rest on instruction censuses of a named ELF (`5f1e6f4e`, symbol `0x14e5360`), the
+installed NumPy shared object, and `/proc/cpuinfo` on the named worker.
+
+RETRY PREDICATE: do NOT re-attempt these three on `thinkstation1` — vectorisation, ISA width and
+non-temporal stores are each settled by instruction census, and re-testing them costs a build for a
+known answer. Elimination 2 is HOST-SCOPED: on an `avx512f` host (`hz2` is the only one on this fleet)
+the ISA-width hypothesis is live again and must be re-checked, not inherited. The live candidate is the
+fused normality classification's integer work in the serial arm; the probe is our serial divide loop
+WITH and WITHOUT the classification, on identical NumPy buffers, both timed in one invocation. Note
+before spending that build: beads `2nmd1 -> jw7vk -> ae85t -> vqxoa` already optimised this
+classification and the route is still behind, so the classification may not be the gap either.
+AGENT_NAME=AzureCarp.
