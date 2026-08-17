@@ -46946,3 +46946,79 @@ question - it sits behind a native path this fallback is reached through, and th
 been read. (3) Do not quote 400 ns per keyword entry as a measured constant; it is a difference of
 differences across two cells. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - WORST-CELL RELOCATION: the ufunc METHOD family is no longer where the worst ratio lives. The BINARY ROUTE floor at n=256 is 1.4567-1.5578x, and `divide` is worst because it alone ENTERS the f64 block only to decline - 48 ns, named and isolated (`deadlock-audit-v46rn`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build — measured on an ELF built in a prior window, five runs, one window.
+
+**Campaign result class:** maintenance-diagnostic (worst-cell relocation + a named, isolated cost)
+
+### Why I went looking
+
+The method family has converged to 1.0989-1.2159x and its next lever is refuted (row above). The
+standing instruction when a lane converges is to find the worst vs-incumbent ratio rather than keep
+widening a won lane. It is not in the methods.
+
+```
+PERCALL_FLOOR n=256 f64 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract
+  bench_elf_sha256=8be4764dfe9ea795f03de14b098494c99fbea4828b4ccc35160cfb41c5e363cf
+  loadavg 11.97/11.50/12.92 -> 12.14/11.54/12.93; per-arm same_core=true every phase,
+  arm_mhz_spread 1.0000, arms 4225.7-4292.2 MHz; all forty nulls straddle unity
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+
+  op         median     deficit   5-run min/max        excess_ns   enters_f64_binary_block
+  multiply  0.686469   1.4567x   0.671031/0.707155        191              false
+  add       0.678218   1.4745x   0.672668/0.708819        197              false
+  subtract  0.668863   1.4951x   0.659091/0.696486        200              false
+  divide    0.641921   1.5578x   0.637574/0.671033        245              TRUE
+```
+
+**The binary route floor is a worse lane than the entire method family** — 1.4567-1.5578x against
+1.0989-1.2159x. `divide` at n=256 is **1.5578x**, the worst cell I can currently measure, and it
+matches the 1.5613x this campaign banked for it before the method work started, so the lane has not
+moved while the methods were being worked.
+
+### The one structural difference, and it is already isolated
+
+Three of the four ops report `enters_f64_binary_block=false`. **`divide` reports TRUE** — it enters
+the f64 binary block at n=256 and then declines, because 256 is far below
+`native_route_min_len=16384`. The bench prints that flag itself, so this is read off the
+instrument rather than inferred from source.
+
+```
+  non-divide excess (median of three)   197 ns
+  divide excess                         245 ns
+  => entering the f64 binary block only to decline:  48 ns
+```
+
+**48 ns is the whole of divide's disadvantage against its three siblings**, and the three siblings
+agree with each other to within 9 ns, which is what makes the subtraction worth trusting. This is the
+same shape as `accumulate`'s routing prologue one row up — a block entered at a size where it cannot
+possibly route — but here it is smaller (48 ns against ~770 insns/call) and it sits on a much worse
+cell.
+
+### What this does and does not license
+
+It does NOT say the 48 ns is easy to remove: the entry condition is what decides whether to route,
+and the same argument that refuted the `accumulate` reorder may apply — the gate has to read
+something to know it should decline. I have not checked the f64 block's entry order, and I am not
+claiming it is reducible until I have.
+
+It DOES say where the remaining 197 ns lives: in the shared per-call floor that all four ops pay
+equally, which is `deadlock-audit-ei9jz`'s territory, not divide's. **Divide is only 48 ns worse than
+a floor that is itself 1.46x.** Anyone attacking `divide` specifically is attacking the smaller half.
+
+COUNTED_MECHANISM: excess-over-NumPy at n=256, medians of five — multiply 191 ns, add 197 ns,
+subtract 200 ns, divide 245 ns; the three that do not enter the f64 block agree within 9 ns and the
+one that does is 48 ns above them.
+
+A/A NULL CONTROLS: all forty nulls across the five runs straddle unity; the widest biases in the run
+were divide's incumbent 0.009302 and candidate 0.007452, both admitted.
+
+RETRY PREDICATE: stop treating the ufunc method family as the worst lane — it is 1.0989-1.2159x and
+the binary route floor is 1.4567-1.5578x. Do not attack `divide` as though its gap were the whole
+story: 197 of its 245 ns is the shared floor every binary op pays. The next question is whether the
+f64 block's entry test can decline without paying 48 ns, and that needs the entry order read the way
+`accumulate`'s was before anyone builds for it.
+AGENT_NAME=AzureCarp.
