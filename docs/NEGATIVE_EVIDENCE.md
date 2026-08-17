@@ -45589,3 +45589,71 @@ unmeasured. When a shared-tree peer commit lands between two of your runs, the t
 controlled pair: check `git log` against your build times before attributing a delta to your own
 change. The routing-prologue refutation stands and does not need re-running.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-16 - AUDIT (build-free, host at loadavg 525): 22 of 116 `axis` forwards send NumPy its OWN default, verified against the installed interpreter - and a BLANKET rule would be wrong, because the callee default is not the same everywhere (`deadlock-audit-v46rn`)
+
+`RedLynx`. No build, no measurement - the host is in I/O saturation. This is source analysis
+plus interpreter introspection, which needs neither.
+
+**Campaign result class:** lead (a verified site list; NO code landed and NO ratio claimed)
+
+**WHY THIS AUDIT.** The `axis=0` omission on `accumulate`/`reduceat` (`e19b9dfe`) was measured by
+a peer at **2003 instructions/call** (`ed514f49`). That was one instance. This asks how many more
+there are, and the answer required checking each callee rather than pattern-matching, for a
+reason worth stating first.
+
+**THE HAZARD THAT MAKES A BLANKET SWEEP WRONG: the callee's default is not uniform.**
+
+```
+  ufunc.reduce / accumulate / reduceat   axis default = 0
+  np.sum / np.cumsum / np.mean           axis default = None
+  np.fft.fft / lexsort / unwrap          axis default = -1
+```
+
+So "omit axis when it is 0" is correct for the ufunc methods and **WRONG** for `np.sum`, where
+omitting an explicit 0 would silently reduce over the whole array instead of the first axis. Any
+sweep of this class has to be per-callee. That is why this row is a site list and not a patch.
+
+**METHOD.** Parse `kwargs.set_item("axis", <ident>)` out of `lib.rs` at HEAD, find each site's
+enclosing `#[pyo3(signature = ...)]` default for the identifier being sent, keep the sites where
+the preceding line is not a guard, then check the CORRESPONDING NumPy function's own default with
+`inspect.signature` against the **installed** interpreter (numpy 2.4.3), not the vendored oracle.
+
+```
+  116  set_item("axis", <ident>) sites in lib.rs
+   85  enclosing signature default NOT parsed by this script - UNAUDITED, see below
+   14  declared default 0    -> all 14 confirmed redundant
+   10  declared default -1   -> 8 confirmed redundant, 2 UNKNOWN
+```
+
+**CONFIRMED REDUNDANT, default 0** (NumPy's own default is 0 for every one):
+`linspace`, `geomspace`, `logspace`, `unstack`, `chebder`, `chebint`, `hermder`, `hermint`,
+`hermeder`, `hermeint`, `lagder`, `lagint`, `legder`, `legint`.
+
+**CONFIRMED REDUNDANT, default -1**: `fft`, `ifft`, `rfft`, `irfft`, `hfft`, `ihfft`, `lexsort`,
+`unwrap`.
+
+**NOT CLEARED - `vecdot` and `linalg_vecdot`.** `np.vecdot` is a gufunc and
+`inspect.signature` reports no default for `axis` at all, so introspection cannot confirm what
+omitting it would mean. **Two sites remain UNKNOWN and must not be swept with the rest** - the
+same care the `dtype.kind` vs `dtype.char` collision needed.
+
+**THE 85 UNAUDITED SITES ARE THE HONEST WEAK POINT.** My parser did not find an enclosing
+signature default for them, and I read that count off a `Counter` that printed the Python value
+`None` - which I nearly banked as "85 sites default to None". It means "not parsed", not "defaults
+to None", and the difference matters exactly here, since `None` IS the correct default for the
+`np.sum` family where the lever must not be applied. **Those 85 are unaudited, not cleared.**
+
+**VALUE, STATED HONESTLY AND LOWER THAN THE HEADLINE.** The measured instance was on
+`accumulate`/`reduceat`, which are per-element-op entry points. These 22 are `linspace`, the
+polynomial derivative/integral family and the FFT wrappers - COLD paths whose own work dwarfs a
+dict entry. The same saving per call buys far less of the total, so **do not extrapolate 2003
+instructions/call to these**. This ledger has already measured tranches of one class differing by
+65x (656 ns for the ufunc methods against 10 ns for the signature shape).
+
+RETRY PREDICATE: (1) Land the 22 confirmed sites as one mechanical change with a per-callee test,
+then measure ONE of them before touching the `vecdot` pair or the 85. (2) Audit the 85 by reading
+their signatures directly rather than by regex; a site whose default is `None` is the case where
+this lever INVERTS into a correctness bug. (3) `vecdot`'s two sites need a hand check against
+NumPy's C-level gufunc definition, not `inspect`. AGENT_NAME=RedLynx.
+
