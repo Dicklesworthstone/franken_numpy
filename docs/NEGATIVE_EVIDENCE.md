@@ -50311,3 +50311,91 @@ shared-buffer builds. `bench_divide_allocation_split_vs_numpy` and `bench_divide
 still use separate per-arm buffers and every large-n row from them remains suspect until they are
 converted; that conversion is the next code change in this lane.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - THE CLASSIFIER FINDING SHARES THE DEFECT THAT VOIDED MY WORST CELLS: `divide_former_serial` and `divide_fused_serial` write to DIFFERENT 8 MiB buffers, so the 1.4152-1.6155x I certified for the fused form is not established. Flagging my own banked result before anyone builds on it (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
+
+`AzureCarp`. No build, no new measurement. A consequence of the buffer artifact, traced into a result I
+banked as DECIDED earlier today. Load 14.84/20.93/21.45 rising to 30.99/25.75/23.23, `proj_builds` = 0
+throughout, CPU mean 2794-4041 MHz, disk 93G.
+
+**Campaign result class:** a banked finding of mine downgraded from DECIDED to SUSPECT
+
+### The chain
+
+Two rows ago I established that giving each arm its own `out=` buffer produces a residency race above
+cache, and that it inflated the 2^19 and 2^20 worst cells (0.6398 -> 0.8320, 0.5904 -> 0.7798, spreads
+collapsing 2.4x and 3.9x). The fix was one shared buffer.
+
+**`bench_divide_kernel_on_numpy_buffers` has the same structure and I did not notice it when I used
+it.** Its arms write to `former_out` and `fused_out` - two distinct `np.empty(n)` arrays at
+`DIVIDE_SERIAL_N` = 2^20, i.e. **8 MiB each**, with NumPy's own `out` a third. That is precisely the
+size regime where the race bites.
+
+The finding I drew from it was that the shipped fused classifier is **1.4152-1.6155x FASTER** than the
+accumulate-free form in the bare allocator regime, which I recorded as DECIDING a question the row
+before had left undecided, and which I used to argue that removing the classifier would be a
+regression and that "wider unroll is dead for f64 divide" is regime-scoped.
+
+**That comparison is between two arms writing to two different 8 MiB buffers.** My drift-correction
+cancelled NumPy, which was the confound I knew about; it cannot cancel a residency difference between
+`former_out` and `fused_out`, because that difference lives in the candidate arms themselves.
+
+### What is and is not affected
+
+**SUSPECT:** the magnitude 1.4152-1.6155x, and therefore the strength of "removing the classifier is a
+large regression". Also the claim that the effect reverses under the mmap control (0.9386, 0.9458) -
+that reversal is exactly the kind of thing a buffer race manufactures, since the control changes page
+backing.
+
+**NOT affected:** the instruction-census facts, which come from disassembly and not from timing -
+`divide_former_serial` is 1x-unrolled at 6 insns per 4 doubles and `divide_fused_serial` is 4x at 43
+per 16. Those stand regardless.
+
+**UNCLEAR and important:** whether the correction to this file's own census comment - which I committed
+today, asserting the 4x arm is FASTER in the default regime - rests on contaminated timing. It does.
+The comment is left in place because it also states the census facts, but the timing claim inside it
+inherits this suspicion and must be re-taken before being relied on.
+
+### Why I am not fixing it in this row
+
+The fix is not the one-line change it was for the sweep. There both arms are Python calls with an
+`out=` kwarg, so pointing them at one array is trivial. Here the candidate arms are Rust loops holding
+`&mut [f64]` derived from `PyBuffer` via `from_raw_parts_mut`, and NumPy's incumbent writes a third
+array. Pointing two Rust `&mut` slices and a NumPy `out=` at one allocation needs the slices re-derived
+per call rather than held across the contract, or it trades a measurement artifact for an aliasing
+one. That is a careful change and it deserves its own build and its own verification, not a rushed
+edit at the end of a tick.
+
+### Sign-test accounting, now 5 of 7
+
+```
+  run   pre-run loadavg          proj_builds  1min<=5min  CPU MHz   QUALIFIES
+  Q8    14.84 / 20.93 / 21.45         0          yes       3095      YES
+  Q9    18.26 / 21.39 / 21.60         0          yes       3529      YES
+  Q10   20.27 / 21.62 / 21.66         0          yes       3120      YES
+  Q11   23.03 / 22.35 / 21.92         0          NO        2794      no
+  Q12   22.42 / 22.26 / 21.90         0          NO        3712      no
+  Q13   29.44 / 23.87 / 22.43         0          NO        3428      no
+  Q14   26.39 / 23.81 / 22.47         0          NO        4041      no
+  Q15   26.62 / 24.14 / 22.61         0          NO        3224      no
+  Q16   31.92 / 25.58 / 23.13         0          NO        3368      no
+```
+
+Sixteen attempts, five qualifying (Q1, Q5, Q8, Q9, Q10). `native_over_delegate` remains unread in every
+one of them.
+
+COUNTED_MECHANISM: the 2 candidate arms of `bench_divide_kernel_on_numpy_buffers` write to 2 distinct
+arrays of 8 MiB each at n=2^20, the same configuration that moved a worst cell from 0.5904 to 0.7798
+and cut its spread from 0.1948 to 0.0506 when replaced by 1 shared buffer.
+
+A/A NULL CONTROLS: every A/A null in the runs behind the 1.4152-1.6155x figure straddled unity. As with
+the voided worst cells, that is recorded as further evidence the nulls do not detect this class of
+defect, not as support for the figure.
+
+RETRY PREDICATE: do not cite 1.4152-1.6155x, nor the 0.9386/0.9458 reversal under the mmap control,
+until `bench_divide_kernel_on_numpy_buffers` puts both replica arms on ONE shared output buffer with the
+`&mut` slices re-derived per call. The census facts (1x versus 4x unroll, 6/4 versus 43/16 insns per
+double) are from disassembly and remain citable. The conclusion "do not remove the FE-hazard
+classifier" should be treated as UNPROVEN rather than as established, and the safe default is to leave
+the shipped code alone, which is what it currently does.
+AGENT_NAME=AzureCarp.
