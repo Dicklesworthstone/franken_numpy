@@ -52412,3 +52412,79 @@ RETRY PREDICATE: none; this is a disclosure about instrument reading. If a futur
 loadavg WITH a large D-state population, the diagnosis is different (blocked I/O, not decay) and the
 window may genuinely be bad - check `ps -eo state=` before concluding either way.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — COMPLETING THE PARTITION BREAKS IT: with pyo3's keyword-binding term included, `wrapper_residual_ns` goes NEGATIVE (-80.0 ns) and the group refuses to publish. The banked 91/370 was positive only because a real term was MISSING (deadlock-audit-ei9jz)
+
+**Campaign result class:** the method is REFUTED for this decomposition (not merely imprecise)
+
+Run on the corrected ELF `bench_elf_sha256=756d2d2428bb936532a06761a1c18a6193efd52d6beddce5c645963891744fc2`,
+committed source `364a4933`, release-perf, threading pinned, `selected_groups=1`.
+PRE loadavg 15.74/23.29/19.75, CPU idle 86%, runnable 12/64 cores, iowait 1, 3001 MHz, /data 200G.
+POST idle 79%. By the gate established one row above (idle + runnable-vs-cores, not loadavg) this
+was a clean window.
+
+```
+  thread 'main' panicked at criterion_python_elementwise.rs:3119:
+  wrapper residual measured NEGATIVE (-80.0 ns): our delegating call was faster than
+  numpy's own call, so this partition is invalid
+```
+
+### What this means
+
+`deadlock-audit-uj3r3` corrected `kwargs_overhead` for two of the three costs the `casting="unsafe"`
+tail carries. I added the third - pyo3's keyword BINDING, which the positionally-called all-defaults
+arm never pays - priced under this group's own `min_ns` harness so nothing was imported from another
+instrument or host. With all three terms present the correction now EXCEEDS the gap it is correcting,
+`skipped_fast_tail_ns` falls below `numpy_ns`, and the wrapper residual goes negative.
+
+**A partition with a negative part is not a noisy partition, it is an invalid one**, and the group's
+own fail-closed assertion says so and refuses to emit a row. That assertion is `uj3r3`'s and it is
+doing exactly its job.
+
+**THE UNCOMFORTABLE COROLLARY, which is the real finding: the banked 91 ns / 370 ns split was
+positive only because a genuine term was missing from it.** Adding a correction that is
+unambiguously real - our own code pays it on the `unsafe` arm and not on the plain one, measured
+twice by independent instruments at 832.2 insns/call and 86.5 ns - is what pushes the partition into
+invalidity. So 91/370 is not a slightly-wrong split to be nudged; it is the output of a method that
+does not survive being made complete. It should not be quoted at all, in either its original or my
+withdrawn "~300/161" form.
+
+This closes out the arc consistently rather than contradicting it. Two rows ago the ns split was
+UNDECIDABLE (median vs min swung the ratio 1.57 to 4.68 on identical runs). One row ago I withdrew a
+conversion built on another host's number. Now the in-process, same-currency, same-aggregation
+version - the one my own retry predicate asked for - returns a negative part. Three different
+attacks, three refusals: **the nanosecond domain cannot resolve this decomposition with any
+instrument available here.**
+
+### A harness defect this exposed, and I am fixing it
+
+**The assertion panics BEFORE the `println!`, so a failed partition destroys the evidence needed to
+diagnose it.** All I know is that the wrapper came out at -80.0 ns; `kwargs_overhead_ns`,
+`keyword_binding_ns`, `numpy_kwargs_ns`, `pydict_build_ns`, `whole_ns` and `skipped_ns` are all
+computed and then thrown away. A gate that discards its own diagnostic data on the only occasion the
+data matters is the wrong shape. The row should be EMITTED with an explicit
+`partition_valid=false` field and the assertion should fire after, so a failure is legible instead
+of merely loud. Landing that next.
+
+### What still stands, unchanged by this
+
+The counted split is untouched: `probe_chain` 1189.4 and `wrapper_residual` 641.9 insns/call are
+differences of measured instruction counts on one ELF, involve no correction of this kind, and carry
+0.08% spreads. The whole-route excess (1830.5 insns/call, 288.6 ns) is robust. What has failed is
+only the attempt to state the SPLIT in nanoseconds - and the counted split remains, as registered,
+an instructions-only claim with no time-domain confirmation.
+
+COUNTED_MECHANISM: adding a term measured at 86.5 ns (and 832.2 insns/call by a second instrument)
+to `kwargs_overhead_ns` drives `wrapper_residual_ns` to -80.0 ns, tripping the group's
+negative-part assertion.
+
+A/A NULL CONTROLS: not applicable - the group aborted before emitting any ratio, which is the
+correct behaviour and is the result.
+
+RETRY PREDICATE: do NOT "fix" this by dropping the keyword-binding term to make the partition
+positive again - that would be restoring a known-missing term to obtain a publishable number, which
+is the failure mode this ledger exists to prevent. Either build the in-process paired harness with
+A/A nulls around each COMPONENT (registered two rows ago and still the right answer), or accept that
+the split is an instructions-only result. First, land the diagnostic emission so the next person to
+trip this can see which term dominated.
+AGENT_NAME=SlateFinch.
