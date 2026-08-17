@@ -47445,3 +47445,85 @@ exception was not the only thing the pre-check skipped. (2) Grep for the same sh
 -flow wherever it appears, and this file has one confirmed instance. (3) Do not quote 106 ns as
 our cost; it is a Python-level proxy for a Rust-level operation. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - FOUND BY ANNOTATION, NOT BY READING: `PyUFunc::__call__`'s hottest instruction is a `movabs` of "same_kin" - the wrapper string-compares "same_kind" on EVERY binary ufunc call. The fix is in `34a67fdc` and is UNCOMPILED (`deadlock-audit-ei9jz`)
+
+`AzureCarp`. The code landed inside a peer's emergency-preservation commit whose message says
+"UNVERIFIED, not mine", so this row is the only record of what that change IS and why. No build — the
+disk was at 12-29G against a 42G floor throughout.
+
+**Campaign result class:** attributed lever, LANDED UNCOMPILED (not a certified win)
+
+### Why this one matters methodologically
+
+Four candidate levers this session were checked by STATIC READ and every one was already taken or
+load-bearing: the reorder of `accumulate`'s routing prologue, the reorder of the f64 block's entry
+condition, hoisting `x1_dtype_char`, and vectorcalling `__call__`'s delegation. I banked that sweep
+as "swept and clean" and concluded the floor's remaining cost was structural.
+
+**That conclusion was wrong, and reading could not have shown it.** `perf annotate` inside
+`PyUFunc::__call__`:
+
+```
+  hottest single instruction in the function, 17.93% of its samples:
+      movabs $0x6e696b5f656d6173,%rdx
+  0x6e696b5f656d6173 little-endian = 73 61 6d 65 5f 6b 69 6e = "same_kin"
+```
+
+That is the 9-byte literal **"same_kind"** being loaded on every binary ufunc call, for
+`casting == "same_kind"` — a string comparison against a PyO3 signature default. It is also where
+`__strcmp_avx2` (99 insns/call in the earlier symbol diff) was coming from, which I had recorded as
+"real but unexplained, recorded not diagnosed" two rows ago. It is now diagnosed. `order == "K"` sits
+beside it and is the same shape.
+
+**The lesson: a symbol-level diff said `__strcmp_avx2` existed; only an instruction-level annotation
+said WHY.** The sweep that declared this surface clean was reading source, and the source looks
+innocent — `casting == "same_kind"` is not obviously a hot-path cost until you see the constant load
+sitting at 17.93%.
+
+### The change (in `34a67fdc`, not compiled)
+
+`casting` and `order` become `Option<&str>` defaulting to `None`, so the common call — one that
+passes neither keyword — tests a null instead of comparing nine bytes. Three fast-path gates become
+`casting.is_none_or(|c| c == "same_kind")` / `order.is_none_or(|o| o == "K")`; the two forwarding
+sites become `if let Some(x) = .. && x != default`, which preserves the old behaviour exactly (a
+caller passing the default explicitly is still not forwarded, because NumPy assumes it anyway).
+
+**The reported signature is unaffected**, which is the safety argument: `__signature__` is built
+separately and sets `default` to `"same_kind"` and `"K"` explicitly, so `inspect.signature(fnp.add)`
+still shows the NumPy-matching defaults. Only the internal representation of "caller said nothing"
+changes. That matters because this repo has a 647-signature parity audit.
+
+**The test** — `casting_and_order_defaults_are_none_without_swallowing_non_defaults` — pins the
+silent failure. An implementation that tested `is_none()` and forgot `Some(non_default)` would take
+the native fast path for a call asking for different casting or memory order, never forward the
+keyword, and return a correctly-shaped, plausibly-valued, WRONG answer. It asserts both directions:
+defaults still match NumPy, `order='F'` still changes `f_contiguous`, and `casting='no'` on
+int8+float64 still RAISES rather than returning an array — with both fixtures guarded first so
+neither assertion can pass vacuously.
+
+### VERIFICATION OWED — this is not a win yet
+
+Nothing has run: no `cargo check`, no `clippy --all-targets`, no execution of the new test. Then the
+measurement, against the binary counter probes whose baseline is **1,796 insns/call** excess for
+`fnp.add` over `numpy.add` at n=256.
+
+**PREDICTION, registered now so it cannot be fitted afterwards:** the `movabs` is 17.93% of
+`__call__`'s 363 insns/call (~65) plus some share of `__strcmp_avx2`'s 99, so expect roughly
+**100-160 insns/call off a 1,796 floor — about 6-9%**. My last three predictions on this codebase
+missed 5-8x low, 5-8x low and 1.8x high, so that is a range and not a number, and it may well be
+wrong in either direction.
+
+COUNTED_MECHANISM: a `movabs` of the 8-byte constant `0x6e696b5f656d6173` ("same_kin") carries 17.93%
+of `PyUFunc::__call__`'s instruction samples — the single hottest instruction in a 1155-instruction
+function — and `__strcmp_avx2` carries 99 insns/call of the route's 1,796 insns/call excess.
+
+A/A NULL CONTROLS: not applicable — an instruction-level annotation of one symbol, no timed A/B and
+no schedule.
+
+RETRY PREDICATE: do not treat `34a67fdc` as verified; it is uncompiled and its commit message
+disclaims it. Do not re-run the four static-read candidates recorded in the "swept and clean" row —
+they are still dead — but DO stop treating that row's conclusion as final: it said the surface had no
+lever left, and annotation found one within the hour. When a symbol-level diff leaves an unexplained
+entry like `__strcmp_avx2`, annotate before concluding the surface is clean.
+AGENT_NAME=AzureCarp.
