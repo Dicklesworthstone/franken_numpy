@@ -32,6 +32,61 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CODE: the complex writer was the LAST flat-then-reshape instance - audited f16 (already clean), fixed complex, pattern now closed across every f64/f32/f16/complex writer (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. Load peaked at 78.6 and read `34.25/42.08/33.86` at the gate, so nothing was certified.
+This lands the change my own f32 retry predicate named: *"the remaining unapplied instance of this
+pattern, if any, is in the f16 and complex writers, which should be checked before anyone assumes they
+are clean."* Checked, and one of them was not clean.
+
+**Campaign result class:** capability (no ratio claimed)
+
+**LOADAVG AND CPU MHz, observed:** `34.25/42.08/33.86` at the gate, the 5-minute above the 1-minute -
+rising, not a window. CPU MHz deliberately NOT re-read: a frequency sampled at this load describes the
+contention rather than the route, which `a7be8cf1` established.
+
+**THE AUDIT RESULT, all three writers checked rather than assumed:**
+
+| writer | allocation | verdict |
+|---|---|---|
+| `try_zerocopy_f16_binary_widen` | `empty(a_shape, dtype=..)` | already at final shape - CLEAN |
+| `try_zerocopy_f16_compare` | `empty(a_shape, dtype=..)` | already at final shape - CLEAN |
+| `try_zerocopy_complex_binary` | `empty(n, dtype=..)` then `reshape` at rank >= 2 | **the pattern** |
+
+So the predicate's "if any" mattered: two of the three were already clean and only complex needed the
+change. Reporting the clean ones is the point of having checked.
+
+**WHAT CHANGED IN THE COMPLEX WRITER.** It now allocates at the final shape, positionally, with a bare
+int at rank 1, and the reshape is gone at every rank. Both levers are already measured on the f64
+route - allocate-at-final-shape worth **305.34 ns** (`empty_at_final_shape` 307.50 against
+`empty_plus_real_reshape` 612.84) and positional dtype removing a per-call `PyDict`.
+
+**WHY IT IS SAFE AT ANY RANK, which is the non-obvious part.** The writer takes a REAL-typed view of
+the complex buffer and writes `2n` reals linearly. A C-contiguous complex array viewed as its real
+dtype stays C-contiguous at every rank - shape `(r, c)` views as `(r, 2c)` - so `as_mut_slice` still
+yields `2n` contiguous reals and the linear loop is unchanged. That is the same argument the f64 writer
+already records: contiguity is required, `ndim == 1` is not.
+
+**THE TEST COVERS BOTH MACRO INSTANTIATIONS.** The allocation lives inside a `macro_rules!` expanded
+once for complex128 and once for complex64, so a test exercising one dtype would leave half the change
+unverified. It runs rank 1 and rank 2 at BOTH dtypes and asserts rank and shape FIRST, then dtype, then
+values - because with the reshape removed a rank-2 result could come back FLAT while holding the right
+values in the right order, which an elementwise comparison would pass.
+
+**GATES:** `cargo test -p fnp-python --lib complex_route_preserves` 1 passed 0 failed; `cargo clippy -p
+fnp-python --all-targets` exit 0 with zero warnings; `rustfmt --check` exit 0.
+
+**NO RATIO IS CLAIMED.** 305.34 ns is the figure this change earned on the **f64** route. Complex
+allocations are 16 bytes per element rather than 8 and the saving here is unmeasured. Stating a
+sibling route's number as this route's result is the error retracted twice today, so it is the MOTIVE
+for the change, not its outcome.
+
+RETRY PREDICATE: the flat-then-reshape pattern is now CLOSED across the f64, f32, f16 and complex
+binary writers - do not re-audit it. If a saving is wanted, measure complex multiply at rank 2 against
+NumPy under the dual-null contract; rank 1 will show nothing, because rank 1 never paid the reshape in
+any of these writers.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CODE: the `out=` group now covers ALL THREE ~0.91 cells, so the sign-flip can be decided per cell instead of transferred from `maximum` (`deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
 
 `SlateHeron`. Load was 74.45 at the 1-minute mark, so nothing was certified. This lands the

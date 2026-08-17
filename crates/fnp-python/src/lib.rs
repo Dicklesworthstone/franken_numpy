@@ -54840,9 +54840,25 @@ fn try_zerocopy_complex_binary(
             {
                 return Ok(None);
             }
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", $cplx)?;
-            let out = numpy.call_method("empty", (n,), Some(&kwargs))?;
+            // Allocate at the FINAL shape, positionally - the two levers already measured
+            // on the f64 route and applied to f32 (`deadlock-audit-ei9jz`). The complex
+            // path was the last writer still doing `empty(n, dtype=...)` FLAT and then
+            // reshaping at rank >= 2; the output decomposition measured that reshape at
+            // 305.34 ns on f64 (`empty_at_final_shape` 307.50 vs
+            // `empty_plus_real_reshape` 612.84), and the kwargs dict is pure overhead
+            // because `numpy.empty` takes dtype as its SECOND POSITIONAL parameter.
+            //
+            // SAFE AT ANY RANK for the write below: a C-contiguous complex array viewed
+            // as its real dtype stays C-contiguous at every rank - shape (r, c) views as
+            // (r, 2c) - so `PyBuffer::as_mut_slice` still yields 2n contiguous reals and
+            // the linear write loop is unchanged. This is the same argument the f64
+            // writer records: contiguity is required, ndim == 1 is not.
+            let out = if let [only] = shape.as_slice() {
+                numpy.call_method1("empty", (*only, $cplx))?
+            } else {
+                let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+                numpy.call_method1("empty", (&alloc_shape, $cplx))?
+            };
             {
                 let out_view = out.call_method1("view", (&real_dtype,))?;
                 let Ok(ob) = PyBuffer::<$ty>::get(&out_view) else {
@@ -54895,12 +54911,8 @@ fn try_zerocopy_complex_binary(
                         }
                     });
             }
-            if shape.len() == 1 {
-                Ok(Some(out.unbind()))
-            } else {
-                let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-                Ok(Some(out.call_method1("reshape", (&shape_tuple,))?.unbind()))
-            }
+            // No reshape at any rank: the buffer was allocated at its final shape above.
+            Ok(Some(out.unbind()))
         }};
     }
 
@@ -110704,6 +110716,87 @@ mod tests {
     /// defect (`f16-isin-402x-and-pyufunc-registration-trap`: green parity does not
     /// prove kernel engagement), which is why this test asserts the PREDICATE and not
     /// just the output.
+    /// The complex route now allocates at its FINAL shape, so rank must survive without a
+    /// reshape - at BOTH complex dtypes (`deadlock-audit-ei9jz`).
+    ///
+    /// This is the last writer that still did `empty(n, dtype=...)` flat and reshaped at
+    /// rank >= 2. The f16 writers were audited at the same time and were already
+    /// allocating at shape, so complex was the only remaining instance of the pattern.
+    ///
+    /// THE FAILURE THIS GUARDS IS RANK, NOT SPEED, and it is invisible to a value check:
+    /// with the reshape removed the buffer must arrive already shaped, and if it did not,
+    /// a rank-2 result would come back FLAT while holding the right values in the right
+    /// order - so an elementwise comparison against NumPy would pass and only `.shape`
+    /// would show it.
+    ///
+    /// It also covers BOTH macro instantiations. The allocation lives inside a
+    /// `macro_rules!` expanded once for complex128 and once for complex64, so a test that
+    /// exercised only one dtype would leave half the change unverified.
+    #[test]
+    fn complex_route_preserves_rank_and_dtype_without_a_reshape() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_complex_final_shape")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            let code = std::ffi::CString::new(
+                "n = 4096\nre = (np.arange(n, dtype=np.float64) % 17.0) + 1.0\nim = (np.arange(n, dtype=np.float64) % 7.0) + 2.0\nz128 = (re + 1j * im).astype(np.complex128)\nw128 = (im + 1j * re).astype(np.complex128)\nz64 = z128.astype(np.complex64)\nw64 = w128.astype(np.complex64)\nz128_2 = z128.reshape(64, 64)\nw128_2 = w128.reshape(64, 64)\nz64_2 = z64.reshape(64, 64)\nw64_2 = w64.reshape(64, 64)\n",
+            )
+            .expect("no interior nul");
+            py.run(code.as_c_str(), Some(&locals), Some(&locals))?;
+            let get = |name: &str| {
+                locals
+                    .get_item(name)
+                    .expect("dict lookup")
+                    .expect("binding present")
+            };
+
+            // multiply is the op that reaches try_zerocopy_complex_binary (its guard is
+            // Multiply | Divide); divide would decline on a zero divisor, which these
+            // operands avoid, but multiply keeps the test independent of that.
+            let fnp_multiply = module.getattr("multiply")?;
+            let np_multiply = numpy.getattr("multiply")?;
+
+            for (an, bn, want_rank) in [
+                ("z128", "w128", 1usize),
+                ("z128_2", "w128_2", 2),
+                ("z64", "w64", 1),
+                ("z64_2", "w64_2", 2),
+            ] {
+                let (a, b) = (get(an), get(bn));
+                let ours = fnp_multiply.call1((&a, &b))?;
+                let theirs = np_multiply.call1((&a, &b))?;
+
+                let our_shape: Vec<usize> = ours.getattr("shape")?.extract()?;
+                let their_shape: Vec<usize> = theirs.getattr("shape")?.extract()?;
+                assert_eq!(
+                    our_shape.len(),
+                    want_rank,
+                    "{an}: complex route must return rank {want_rank} without a reshape"
+                );
+                assert_eq!(
+                    our_shape, their_shape,
+                    "{an}: complex route shape must match numpy exactly"
+                );
+                assert!(
+                    ours.getattr("dtype")?.eq(theirs.getattr("dtype")?)?,
+                    "{an}: complex route must preserve the input complex dtype"
+                );
+                assert!(
+                    ours.call_method1("__eq__", (&theirs,))?
+                        .call_method0("all")?
+                        .extract::<bool>()?,
+                    "{an}: complex multiply must match numpy elementwise"
+                );
+            }
+            Ok(())
+        });
+    }
+
     /// The f32 route now allocates at its FINAL shape, so rank must survive without a
     /// reshape (`deadlock-audit-ei9jz`).
     ///
