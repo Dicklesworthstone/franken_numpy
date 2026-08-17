@@ -47787,3 +47787,76 @@ variance. Do not pick a lever from an annotation percentage on a cheap instructi
 asking whether that instruction can cost what is attributed to it; this one could not, and a build
 was spent finding that out. When an effect is under ~200 insns/call, measure OUR ARM ONLY.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - REVERTED the "same_kind" lever, and the revert exposed the instrument's NOISE FLOOR: identical source reproduces to only +92.6 insns/call, so the "+10.4" I quoted for the lever was never measurable (`deadlock-audit-ei9jz`)
+
+`AzureCarp`. One build. The revert was planned; what it measured was not.
+
+**Campaign result class:** reverted lever + a correction to my own row one back + a bound on the
+instrument
+
+### The revert
+
+`34a67fdc`'s rationale was refuted (skid, banked one row up), so the string defaults are back.
+Verified complete: signature, both parameter types, three fast-path gates and both forwarding sites
+restored; `__call__`'s code now diffs clean against the pre-lever commit `8280ec5d` ignoring
+comments. The two remaining `casting: Option<&str>` in the file are on other functions and predate
+all of this. **The test is retained** — it pins that `casting`/`order` are not swallowed, which is
+worth having for the `&str` form too, and it still passes.
+
+Reverting was justified on two grounds independent of the measurement below: the rationale is gone,
+and the string defaults state NumPy's actual defaults directly, where the `Option` form only
+recovered them via the separately built `__signature__`.
+
+### What the revert accidentally measured, and it invalidates my own precision
+
+Three builds of our arm. **Builds 1 and 3 have byte-identical `__call__` code:**
+
+```
+  cell        pre-lever          lever         reverted (identical source to pre-lever)
+  add     3,583,079,882   3,587,220,949   3,620,102,997
+  divide  3,661,039,889   3,663,361,028   3,652,901,635
+
+  add     lever vs pre  +10.4/call    REVERTED vs pre  +92.6/call
+  divide  lever vs pre   +5.8/call    REVERTED vs pre  -20.3/call
+```
+
+**Identical source reproduces to only +92.6 / -20.3 instructions per call.** The lever's measured
+effect was +10.4 and +5.8 — **two to nine times SMALLER than the noise between two builds of the same
+code.**
+
+**So I withdraw the number, not the verdict.** One row up I wrote that the lever "costs +10
+insns/call". That figure is not supported: it sits well inside a floor I had not measured. The REJECT
+stands and is in fact stronger — the lever's effect is not merely small, it is *unmeasurable by this
+instrument* — but "+10 insns/call" should not be quoted, by me or anyone.
+
+### The bound this puts on a whole class of work
+
+I banked, one row up, "for effects under ~200 insns/call, measure OUR ARM ONLY", implying our-arm
+counts were precise enough to resolve small levers. **They are not.** Our-arm retired-instruction
+totals on this probe carry roughly **±90 insns/call** across builds, most likely from CPython
+allocator and GC state varying across 400 000 calls rather than from codegen.
+
+Corrected rule: **this probe cannot validate a wrapper lever worth less than ~200 insns/call at all.**
+Excess-over-NumPy is worse still (the incumbent arm moved 42-84/call between runs). Anything smaller
+needs either a different instrument or many more repetitions than one build affords — and on this
+host, "many more builds" is not a thing that reliably happens.
+
+That is a real constraint on the remaining wrapper lane, whose floor is ~1,796 insns/call: **levers
+worth under ~11% of it are below this instrument's resolution.** The three refuted reorder levers,
+the 48 ns block entry and this string compare are all in that band. It is not that the wrapper has no
+small costs left; it is that this method cannot tell whether removing one helped.
+
+COUNTED_MECHANISM: two builds with byte-identical `PyUFunc::__call__` source produced our-arm totals
+differing by +92.6 insns/call on `add` and -20.3 on `divide` over 400 000 calls each, bounding the
+probe's reproducibility; the lever under test moved +10.4 and +5.8, inside that bound.
+
+A/A NULL CONTROLS: the identical-source pair above IS the null for this instrument, and it does not
+come out at zero — which is the finding.
+
+RETRY PREDICATE: do not quote "+10 insns/call" for the `same_kind` lever; it is unmeasurable, and the
+reject rests on that rather than on a cost. Do not use these counter probes to validate any wrapper
+lever worth under ~200 insns/call — run the identical-source null first if you intend to try. The
+`same_kind` change is reverted and must not be re-landed without a new mechanism, since the
+annotation that motivated it was skid.
+AGENT_NAME=AzureCarp.
