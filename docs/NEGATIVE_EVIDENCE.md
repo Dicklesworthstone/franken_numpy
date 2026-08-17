@@ -50974,3 +50974,67 @@ reading is retracted and must not be requoted. Prioritise converting the five 2^
 2^22 ones; that is where the artifact is proven large. Do not treat "bigger buffer" as "worse
 artifact" - the ordering is by proximity to L3, not by size.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — AMENDING MY OWN PRE-REGISTRATION BEFORE THE COUNTS EXIST: the four-arm form is BIASED, and the bias is the one `uj3r3` already found and fixed in wall clock (deadlock-audit-ei9jz)
+
+Two rows ago I registered a four-arm counted split and its decision rules. Reading
+`PyUFunc::__call__`'s delegation tail before running it, the form is wrong, and I am amending it
+here rather than discovering it in the numbers or quietly repairing it afterwards.
+
+**THE DEFECT.** `casting="unsafe"` is not a clean "skip the probes" knob. The tail is asymmetric:
+
+```
+  all defaults  ->  np_ufunc.call1((x1, x2))            NO kwargs dict is ever built
+  casting=unsafe ->  kwargs = PyDict::new(py);          a PyDict is allocated PER CALL,
+                     kwargs.set_item("casting", ...);   set_item'd, and NumPy then parses it
+                     np_ufunc.call(args, Some(&kwargs))
+```
+
+So the `_unsafe` arm pays a per-call heap allocation and a keyword parse that the plain arm never
+pays. `fnp_unsafe - numpy_unsafe` therefore measures `our_entry + our_keyword_binding +
+our_pydict_build`, not the fast-tail wrapper residual, and it OVERSTATES the residual the 370 ns
+figure refers to. The probe chain, computed as the complement, is understated by the same amount.
+
+**THIS IS NOT A NEW DISCOVERY AND I SHOULD NOT PRESENT IT AS ONE.** `deadlock-audit-uj3r3` found
+exactly this in the wall-clock partition and fixed it: "the probe block is gated on ALL SEVEN of
+out/where/dtype/signature being absent and casting/order/subok being at their defaults... so 'probes
+engaged' and 'no keyword tail' are not two knobs, they are one". Once the per-call imports were
+removed from the probes, the uncorrected kwargs term DOMINATED and drove `probe_chain_ns` NEGATIVE
+(-40.0 ns), tripping that bench's own guard. My four-arm form reproduces the pre-fix bug in a new
+currency. The correction there is
+
+```
+  kwargs_overhead      = (numpy_with_kwargs - numpy_plain) + pydict_build
+  skipped_fast_tail    = skipped - kwargs_overhead
+  wrapper_residual     = skipped_fast_tail - numpy_plain
+  probe_chain          = whole - skipped_fast_tail
+```
+
+**WHAT MY FOUR ARMS ALREADY COVER AND WHAT THEY DO NOT.** `numpy_unsafe - numpy_plain` IS the first
+half of `kwargs_overhead` — NumPy's own parse of the keyword our tail forwards, taken on NumPy's
+ufunc so no probe chain is involved. The second half, our `PyDict` construction, has no arm. One
+more probe is needed: a standalone replica that builds the same dict our tail builds and does
+nothing else. Replica-based, therefore a LOWER BOUND on the correction and so an UPPER BOUND on the
+wrapper residual — the same caveat `uj3r3` carries, stated here so the row inherits it explicitly
+rather than silently.
+
+**AMENDED DECISION RULES, replacing those in the pre-registration row.**
+1. The SIGN test stands unchanged: `wrapper_residual_insns > probe_chain_insns`, computed on the
+   CORRECTED quantities, not the raw differences. Computed on the raw four-arm differences the sign
+   test is not merely noisy, it is biased toward the outcome I predicted, which is the worst kind of
+   test to leave standing.
+2. The ratio band 2.0-8.0 applies to the CORRECTED ratio. If the correction cannot be measured, no
+   ratio is published at all.
+3. NEW, and it is the guard `uj3r3` learned the hard way: if the corrected `probe_chain_insns` comes
+   out NEGATIVE, the row is VOID and reports as void. A negative probe chain means the kwargs
+   correction exceeded the raw difference, which is a statement about the instrument, not about the
+   route.
+4. The keyword-cancellation control registered earlier (`numpy_unsafe - numpy_plain` small and
+   non-negative) is RETAINED and its role is now explicit: it is the measured first half of the
+   correction, not merely a sanity check.
+
+**COST OF THE AMENDMENT:** one more bench arm and one incremental rebuild of the bench target
+against a now-cached lib. Cheaper than publishing a biased number and cheaper than retracting one.
+
+No counts exist yet. This row changes only what the next row is permitted to say.
+AGENT_NAME=SlateFinch.
