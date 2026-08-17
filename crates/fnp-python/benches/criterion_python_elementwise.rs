@@ -1381,6 +1381,10 @@ fn main() {
                 "bench_binary_counter_multiply_pydict_build",
                 bench_binary_counter_multiply_pydict_build,
             ),
+            (
+                "bench_binary_counter_multiply_empty_loop",
+                bench_binary_counter_multiply_empty_loop,
+            ),
             ("bench_reduce_counter_fnp", bench_reduce_counter_fnp),
             ("bench_reduce_counter_numpy", bench_reduce_counter_numpy),
             ("bench_outer_counter_fnp", bench_outer_counter_fnp),
@@ -7038,6 +7042,67 @@ fn bench_binary_counter_multiply_pydict_build(_c: &mut Criterion) {
              calls={ACCUMULATE_COUNTER_CALLS} checksum={sink:016x} \
              setup_matches_sibling_probe=true run_this_under_perf_stat=true \
              this_is_a_replica_so_a_LOWER_BOUND_on_the_correction=true"
+        );
+    });
+}
+
+// THE SETUP ANCHOR, without which the replica above cannot be converted to a per-call cost
+// (`deadlock-audit-ei9jz`).
+//
+// `perf stat` counts a PROCESS. Every arm's total is `S + calls * per_call`, where `S` is the
+// per-process constant: interpreter start, `numpy` import, module registration, operand
+// construction. Among the four MULTIPLY arms `S` cancels exactly, because all four run the
+// same number of multiply calls with the same setup — which is why the whole-route excess
+// needs no anchor and is already banked.
+//
+// The `pydict_build` replica breaks that symmetry: it runs no multiply calls at all, so
+// differencing it against a multiply arm leaves `pydict_build - numpy_multiply`, which is one
+// unknown short. Measured, that difference is -3318.4 insns/call — a number that cannot be
+// interpreted without `S`.
+//
+// This arm supplies it: byte-identical setup, and a loop of the same trip count doing only
+// what the replica's loop does MINUS the dict work. Then
+//
+//   pydict_build_per_call = (pydict_arm - empty_arm) / ACCUMULATE_COUNTER_CALLS
+//
+// with `S` cancelling exactly rather than being estimated. `PERCALL_FLOOR_STAGES` already
+// carries an `empty_loop_ns` term for the same reason in the wall-clock decomposition; this is
+// that term in the counted currency.
+fn bench_binary_counter_multiply_empty_loop(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", 256usize).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+
+        let mut sink = 0usize;
+        for _ in 0..ACCUMULATE_COUNTER_CALLS {
+            sink += 1;
+            black_box(&sink);
+        }
+        assert_eq!(
+            sink, ACCUMULATE_COUNTER_CALLS,
+            "the empty loop must make the same number of trips as the replica it anchors"
+        );
+        println!(
+            "BINARY_COUNTER_PROBE op=multiply arm=empty_loop_setup_anchor casting=n/a n=256 \
+             calls={ACCUMULATE_COUNTER_CALLS} checksum={sink:016x} \
+             setup_matches_sibling_probe=true run_this_under_perf_stat=true \
+             anchors_the_per_process_constant_S=true"
         );
     });
 }
