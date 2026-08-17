@@ -45893,3 +45893,78 @@ remove all four probes at once for non-integer input. Predicted to take the f64 
 one; they exercise different routes. (3) Audit for other MACRO-generated probes before assuming
 the 78-site sweep closed this class. AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - CERTIFIED at the wall clock: `add.reduceat` on 256 f64 goes 1.3509x -> 1.2247x after the kwargs-dict + interning lever, and the counted cycles PREDICTED it once each run is converted at its own clock (`deadlock-audit-v46rn`)
+
+`AzureCarp`. Five runs, no build required — the ELF already carried both the lever and the group.
+
+**Campaign result class:** CERTIFIED self-speedup (the cell remains a regression vs NumPy)
+
+### The rows
+
+```
+UFUNC_METHOD_FLOOR method=reduceat n=256 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract  delegates_unconditionally=true
+  bench_elf_sha256=088de5c0b67f816c532fe9e417f78509fa918172a5bc84ddf1ddff3d64d8aefb
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+
+  run   ratio      ci95                   loadavg               cpu  MHz a/b        same_core
+  1   0.817708  [0.813084,0.821181]   16.25/23.25/30.95     8   4076.0/4075.9   true
+  2   0.816553  [0.813084,0.819277]   16.25/23.25/30.95     9   4129.8/4129.8   true
+  3   0.811996  [0.810298,0.816473]   16.25/23.25/30.95    15   4282.9/4282.9   true
+  4   0.824640  [0.820856,0.827586]   16.25/23.25/30.95     9   4234.8/4234.7   true
+  5   0.813067  [0.808569,0.816773]   16.25/23.25/30.95    15   4266.7/4266.7   true
+  median 0.816553   min 0.811996   max 0.824640   spread 1.0156
+
+  a sixth run for the ns detail: ratio=0.828365 numpy_ns=911 fnp_ns=1097 excess_ns=186
+```
+
+All six DECIDABLE_REGRESSION. All twelve nulls straddle unity, biases 0.000000-0.005605. Every arm
+pair on the SAME core with the two MHz readings agreeing to four figures. The 1.6% spread across
+five runs is the tightest this lane has produced.
+
+**Deficit: 1.3509x -> 1.2247x median (1.2315x on the worst run).**
+
+### The ns figure is NOT clean, and the ratio is what should be quoted
+
+Excess falls 426 ns -> 186 ns, and that looks better than it is. Reconstructing the before-row's
+incumbent from its own banked ratio and excess gives `numpy_ns` ~1214 there against **911** here:
+**NumPy's own arm is 1.333x faster in my window**, because this window sat at 4076-4283 MHz. A
+cross-run ns comparison across that is a frequency ratio wearing a costume. The RATIO is
+within-invocation on both sides and is the statistic that survives; the ns pair is reported for
+provenance, not as the result.
+
+### The counted cycles predicted this, which is the part worth keeping
+
+Converting each excess at its own run's clock closes the loop between the counter row and the wall
+clock:
+
+```
+  before   426 ns at ~3.0 GHz = 1,278 cycles     (counted excess before the lever: 1,297)
+  after    186 ns at ~4.2 GHz =   781 cycles     (counted excess after  the lever:   626)
+```
+
+1,278 against a counted 1,297 is a 1.5% agreement; 781 against 626 is looser but the same direction
+and magnitude, and the counter measures a warm repeated-call loop where the contract interleaves.
+**The instruction/cycle counters and the dual-null wall clock are telling the same story about the
+same lever**, which is the first time in this lane the two regimes have been reconciled rather than
+merely disagreeing.
+
+### What it does not say
+
+`reduceat` at n=256 is still **1.2247x SLOWER than NumPy**. This is a self-speedup on a losing cell,
+not a crossing. `accumulate` is NOT certified here: that cell is VOID (`6a87cc68`, its A/A null
+excludes unity) and needs a fresh before-row before its wall-clock consequence can be measured at
+all — its counted improvement (3810 -> 2520 insns/call) stands on the counters alone.
+
+COUNTED_MECHANISM: excess retired instructions per call 2541 -> 1539 and excess cycles 1297 -> 626
+for `reduceat` (banked one row up), against a wall-clock deficit moving 1.3509x -> 1.2247x here.
+
+A/A NULL CONTROLS: twelve nulls across six runs, every one straddling unity; run 4's pair read
+incumbent ci95=[0.998904,1.004410] bias 0.000000 and candidate ci95=[0.999093,1.000000] bias
+0.000000.
+
+RETRY PREDICATE: do not quote the 426 -> 186 ns drop as the size of this lever — the incumbent moved
+1.333x between those windows. Quote 1.3509x -> 1.2247x. `accumulate`'s wall-clock consequence remains
+unmeasured and is blocked on a fresh before-row for a VOID cell, not on this lever.
+AGENT_NAME=AzureCarp.
