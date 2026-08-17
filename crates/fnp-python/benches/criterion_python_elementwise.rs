@@ -1278,6 +1278,10 @@ fn main() {
                 bench_divide_accumulate_isolation_vs_numpy,
             ),
             (
+                "bench_divide_classifier_accumulator_form",
+                bench_divide_classifier_accumulator_form,
+            ),
+            (
                 "bench_dtype_probe_fanout_ceiling",
                 bench_dtype_probe_fanout_ceiling,
             ),
@@ -1663,6 +1667,115 @@ fn divide_fused_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
             .zip(b.iter())
             .zip(out.iter())
             .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
+}
+
+/// The same classifier, re-expressed so the reduction is one `OR` chain over
+/// exponent evidence instead of a boolean OR over per-lane comparisons
+/// (`deadlock-audit-6y5wp`).
+///
+/// WHY THIS SHAPE. Disassembled from a local release ELF, the fused loop above
+/// costs SEVEN vector ops per 4 doubles to carry the flag — `vandpd`, `vpaddq`,
+/// `vpxor`, `vpcmpgtq`, `vextracti128`, `vpackssdw`, `vpor` — of which the last
+/// three exist only to narrow a 4-lane compare mask down to a `bool`, and
+/// `vextracti128` is cross-lane. Accumulating a `u64` keeps the reduction inside
+/// one lane-local `vpor` chain, so the narrowing disappears.
+///
+/// ISOMORPHISM PROOF. Let `e = bits & EXPONENT_MASK`, so `e` is exactly one of
+/// `{0, 0x0010…, 0x0020…, …, 0x7ff0…}`.
+///   * `e.wrapping_sub(1)` has bit 63 set  <=>  `e == 0`.
+///     For `e >= 0x0010…` we get `e - 1 <= 0x7fef_ffff_ffff_ffff < 2^63`;
+///     for `e == 0` we get `0xffff_ffff_ffff_ffff`.
+///   * `e.wrapping_add(EXPONENT_STEP)` has bit 63 set  <=>  `e == 0x7ff0…`.
+///     For `e <= 0x7fe0…` we get at most `0x7ff0… < 2^63`;
+///     for `e == 0x7ff0…` we get exactly `0x8000_0000_0000_0000`.
+///
+/// `bench_divide_quotient_is_normal` is false exactly when `e` is `0` or
+/// `0x7ff0…`, so OR-ing both terms over every element and testing bit 63 once at
+/// the end decides the identical predicate as OR-ing the per-element booleans.
+/// The rare exact second pass is unchanged, so a hazard verdict is unchanged too.
+///
+/// THE NEGATIVE CASE. Dropping the `wrapping_add` term still catches `±0` and
+/// subnormal quotients, so an implementation missing it looks correct on the
+/// obvious inputs and silently stops deferring on `inf`/`nan` — the exact
+/// divergence class `deadlock-audit-2nmd1` closed.
+/// `assert_bitmask_classifier_matches_boolean_classifier` pins both halves.
+#[inline(never)]
+fn divide_bitmask_fused_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+    const EXPONENT_MASK: u64 = 0x7ff0_0000_0000_0000;
+    const EXPONENT_STEP: u64 = 0x0010_0000_0000_0000;
+    let mut evidence: u64 = 0;
+    for ((slot, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        let quotient = x / y;
+        *slot = quotient;
+        let exponent = quotient.to_bits() & EXPONENT_MASK;
+        evidence |= exponent.wrapping_sub(1) | exponent.wrapping_add(EXPONENT_STEP);
+    }
+    evidence >> 63 != 0
+        && a.iter()
+            .zip(b.iter())
+            .zip(out.iter())
+            .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
+}
+
+/// Pins the bitmask accumulator against the boolean one it replaces, on operand
+/// pairs chosen so that each non-normal exponent class is the ONLY thing that
+/// separates a case from an all-normal control (`deadlock-audit-6y5wp`).
+///
+/// The `inf`/`nan` cases are the load-bearing ones: an accumulator built from
+/// `e.wrapping_sub(1)` alone passes every zero/subnormal case and fails only
+/// these, which is why they are here and why this assertion runs before timing.
+fn assert_bitmask_classifier_matches_boolean_classifier() {
+    // (numerator, divisor, what the quotient's exponent field exercises)
+    let cases: &[(f64, f64, &str)] = &[
+        (6.0, 3.0, "normal control"),
+        (1.0, 0.0, "+inf quotient: exponent all ones"),
+        (-1.0, 0.0, "-inf quotient: exponent all ones"),
+        (0.0, 0.0, "nan quotient: exponent all ones"),
+        (f64::INFINITY, f64::INFINITY, "nan from inf/inf"),
+        (0.0, 4.0, "+0 quotient: exponent zero"),
+        (-0.0, 4.0, "-0 quotient: exponent zero"),
+        (f64::MIN_POSITIVE, 4.0, "subnormal quotient: exponent zero"),
+        (5e-324, 2.0, "subnormal flushed toward zero"),
+        (f64::MAX, 0.5, "+inf by overflow"),
+        (f64::MIN_POSITIVE, 1.0, "min normal stays normal"),
+        (f64::MAX, 1.0, "max normal stays normal"),
+    ];
+    for (numerator, divisor, what) in cases {
+        // One exceptional pair embedded in an otherwise all-normal run, so the
+        // accumulators must survive being OR-ed with many normal quotients.
+        let mut a = vec![6.0_f64; 37];
+        let mut b = vec![3.0_f64; 37];
+        a[17] = *numerator;
+        b[17] = *divisor;
+        let mut boolean_out = vec![0.0_f64; a.len()];
+        let mut bitmask_out = vec![0.0_f64; a.len()];
+        let boolean_verdict = divide_fused_serial(&a, &b, &mut boolean_out);
+        let bitmask_verdict = divide_bitmask_fused_serial(&a, &b, &mut bitmask_out);
+        assert_eq!(
+            boolean_verdict, bitmask_verdict,
+            "bitmask accumulator disagrees with the boolean classifier on {what}"
+        );
+        assert!(
+            boolean_out
+                .iter()
+                .zip(bitmask_out.iter())
+                .all(|(l, r)| l.to_bits() == r.to_bits()),
+            "bitmask accumulator changed the quotients on {what}"
+        );
+    }
+    // A run with NO exceptional element must report no hazard from either form,
+    // or the assertion above would be satisfied by two arms that both say `true`.
+    let a = vec![6.0_f64; 37];
+    let b = vec![3.0_f64; 37];
+    let mut out = vec![0.0_f64; a.len()];
+    assert!(
+        !divide_fused_serial(&a, &b, &mut out),
+        "the all-normal control must not report a hazard"
+    );
+    assert!(
+        !divide_bitmask_fused_serial(&a, &b, &mut out),
+        "the all-normal control must not report a hazard under the bitmask form"
+    );
 }
 
 /// Same chunking the kernel uses: `n.div_ceil(rayon::current_num_threads())`.
@@ -3051,6 +3164,260 @@ fn bench_divide_accumulate_isolation_vs_numpy(_c: &mut Criterion) {
             former_effect.arm_a_median_ns,
             former_effect.arm_b_median_ns,
             fused_effect.arm_b_median_ns,
+        );
+    });
+}
+
+// Is the shipped divide classifier expensive because of what it COMPUTES, or
+// because of the SHAPE its reduction is lowered to? (`deadlock-audit-6y5wp`)
+//
+// WHY THIS GROUP EXISTS, and why it is not another guess. `deadlock-audit-6y5wp`
+// listed three candidate levers for the 94.0 us kernel gap — restore packing,
+// split the accumulate out of the hot loop, wider unroll. A static census of the
+// three loops involved, taken from a local release ELF and from the numpy the
+// same host imports, closes two of them:
+//
+//   loop                                     insns/iter  doubles/iter  unroll
+//   numpy DOUBLE_divide_X86_V3 @0x523e00         10           8         2x ymm
+//   ours divide_former_serial  @0x700e20          6           4         1x ymm
+//   ours divide_fused_serial   @0x6feda0         43          16         4x ymm
+//
+// Every one of the three is packed `vdivpd` on ymm, so "restore packing" is
+// refuted (RedLynx reached the same conclusion from the shipped route). And the
+// 4x-unrolled arm is the SLOWEST of the three while the 2x arm is the fastest,
+// so "wider unroll" is refuted too: LLVM already unrolls our fused arm twice as
+// wide as numpy's and it does not help.
+//
+// What the census DOES leave standing is the third candidate, sharpened. Of the
+// fused arm's 43 instructions per 16 doubles, 4 are divides (each taking its
+// divisor straight from memory), 8 are the numerator loads and quotient stores
+// every arm pays, 3 are loop control — and the remaining 28 are the classifier,
+// seven vector ops per 4 doubles: `vandpd`, `vpaddq`, `vpxor`, `vpcmpgtq`,
+// `vextracti128`, `vpackssdw`, `vpor`. The last three are not arithmetic at all;
+// they narrow a 4-lane compare mask into the `bool` that `saw_non_normal |= …`
+// asks for, and `vextracti128` is cross-lane. `divide_bitmask_fused_serial`
+// computes the identical predicate with an OR over exponent evidence, which needs
+// no narrowing (proof on that function).
+//
+// WHAT WOULD MAKE THIS LEVER DEAD, registered BEFORE the run: at n=2^20 this loop
+// issues 262144 `vdivpd`, and if the 256-bit divider is the binding constraint
+// then the classifier's ops are already hidden underneath it, removing eight of
+// them per 16 doubles buys nothing, and the head-to-head ratio moves by less than
+// the null spread.
+//
+// THAT IS WHAT HAPPENED, and the group is kept to say so. The bitmask arm does
+// emit the codegen it was designed to emit — 35 instructions per 16 doubles
+// against the boolean arm's 43, classifier ops 28 -> 20, and no cross-lane
+// `vextracti128` left inside the loop — and it is still not measurably faster:
+// `head_to_head_ratio=1.010865 ci95=[0.993078,1.021850]`, UNDECIDED, against a
+// `required_2x_delta` of 0.031989. Eight fewer vector ops per 16 doubles is worth
+// at most ~1%, indistinguishable from zero. The classifier is already in the
+// divider's shadow, so the shipped `zerocopy_f64_binary_flat` arm was NOT changed:
+// the reduction-shape lever is REJECTED and the divide deficit lives somewhere
+// this group cannot reach. Do not re-propose it; see `deadlock-audit-6y5wp` in
+// docs/NEGATIVE_EVIDENCE.md.
+//
+// The vs-numpy rows are why the head-to-head is here at all. On the first run the
+// two candidates' ratios looked cleanly separated (0.750216 vs 0.820084, CIs
+// disjoint) — but the two contracts are different schedules, numpy itself drifted
+// 383021 -> 398134 ns between them, and on the re-run with the head-to-head added
+// the same two ratios came back OVERLAPPING (0.799745 vs 0.811567). The apparent
+// separation was the host. Only the same-schedule head-to-head decides this.
+//
+// BOTH ARMS ARE REPLICAS, not the shipped route, and neither allocates: numpy is
+// handed a preallocated `out=` and both replicas write into preallocated Vecs.
+// The two candidate ratios are measured against the SAME incumbent in the SAME
+// invocation, which is the only thing that makes their difference readable.
+fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
+    assert_divide_hazard_replica_matches_contract();
+    assert_bitmask_classifier_matches_boolean_classifier();
+    let n = DIVIDE_SERIAL_N;
+    let (a_vec, b_vec) = divide_hazard_free_operands(n);
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_py = locals.get_item("a").expect("a operand");
+        let b_py = locals.get_item("b").expect("b operand");
+        let out_py = locals.get_item("out").expect("out buffer");
+        let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &out_py).expect("bind out");
+        let numpy_divide = numpy.getattr("divide").expect("numpy.divide");
+
+        // Parity gate before any timing, on the real operands rather than the
+        // crafted ones: a replica whose quotients are not numpy's bit for bit
+        // produces a meaningless ratio.
+        let numpy_result = numpy_divide
+            .call(&args, Some(&out_kwargs))
+            .expect("numpy.divide probe");
+        let numpy_sum = numpy_divide_checksum(&numpy_result, n);
+        let mut probe_out = vec![0.0_f64; n];
+        let fused_hazard = divide_fused_serial(&a_vec, &b_vec, &mut probe_out);
+        assert!(
+            !fused_hazard,
+            "these operands must be hazard-free or an arm takes its rare second \
+             pass and the comparison measures a different branch"
+        );
+        assert_eq!(
+            divide_checksum(&probe_out),
+            numpy_sum,
+            "the fused replica does not reproduce numpy.divide bit for bit"
+        );
+        let bitmask_hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, &mut probe_out);
+        assert!(
+            !bitmask_hazard,
+            "the bitmask arm must agree with the fused arm that these operands are \
+             hazard-free"
+        );
+        assert_eq!(
+            divide_checksum(&probe_out),
+            numpy_sum,
+            "the bitmask replica does not reproduce numpy.divide bit for bit"
+        );
+
+        let mut fused_out = vec![0.0_f64; n];
+        let mut bitmask_out = vec![0.0_f64; n];
+
+        let incumbent_fused = || {
+            let started = Instant::now();
+            let result = numpy_divide
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.divide call");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let candidate_fused = || {
+            let started = Instant::now();
+            let hazard = divide_fused_serial(&a_vec, &b_vec, &mut fused_out);
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(&fused_out);
+            black_box(&fused_out);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (fused_effect, _in_null, _cand_null) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_boolean_classifier_vs_numpy",
+            incumbent_fused,
+            candidate_fused,
+        );
+
+        let incumbent_bitmask = || {
+            let started = Instant::now();
+            let result = numpy_divide
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.divide call");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let candidate_bitmask = || {
+            let started = Instant::now();
+            let hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, &mut bitmask_out);
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(&bitmask_out);
+            black_box(&bitmask_out);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (bitmask_effect, _in_null2, _cand_null2) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_bitmask_classifier_vs_numpy",
+            incumbent_bitmask,
+            candidate_bitmask,
+        );
+
+        // THE HEAD-TO-HEAD, and it is here because the two ratios above are NOT
+        // enough to size the lever. Each is internally valid — its two arms are
+        // interleaved on one core in one schedule — but the two contracts are
+        // different schedules, so subtracting one candidate median from the other
+        // straddles whatever the host did in between. On the first run that
+        // mattered: numpy itself read 383021 ns in the boolean contract and
+        // 398134 ns in the bitmask contract, a 3.9% drift that flatters the
+        // second candidate's ratio without either arm changing. Putting the two
+        // shapes in ONE schedule against each other is the only way to say how
+        // much of the ratio movement is the lever.
+        //
+        // This arm is a self-speedup and is labelled as one: it attributes the
+        // change, it does not license a vs-incumbent claim. The vs-numpy rows
+        // above remain the only competitive statement this group makes.
+        let mut boolean_head = vec![0.0_f64; n];
+        let mut bitmask_head = vec![0.0_f64; n];
+        let boolean_arm = || {
+            let started = Instant::now();
+            let hazard = divide_fused_serial(&a_vec, &b_vec, &mut boolean_head);
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(&boolean_head);
+            black_box(&boolean_head);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let bitmask_arm = || {
+            let started = Instant::now();
+            let hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, &mut bitmask_head);
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(&bitmask_head);
+            black_box(&bitmask_head);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (head_to_head, _in_null3, _cand_null3) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_bitmask_over_boolean_classifier",
+            boolean_arm,
+            bitmask_arm,
+        );
+
+        let classifier_shape_saving_ns =
+            head_to_head.arm_a_median_ns - head_to_head.arm_b_median_ns;
+        println!(
+            "DIVIDE_CLASSIFIER_SHAPE n={n} numpy_version={numpy_version} worker={} \
+             harness=common::run_dual_null_median_ci_contract \
+             arms_are_replicas_not_the_shipped_route=true \
+             arms_are_preallocated_no_alloc_either_side=true \
+             static_census_numpy_insns_per_16_doubles=20 \
+             static_census_boolean_insns_per_16_doubles=43 \
+             static_census_bitmask_insns_per_16_doubles=35 \
+             boolean_ratio={:.6} boolean_ci95=[{:.6},{:.6}] \
+             bitmask_ratio={:.6} bitmask_ci95=[{:.6},{:.6}] \
+             numpy_ns_in_boolean_contract={:.1} numpy_ns_in_bitmask_contract={:.1} \
+             boolean_ns={:.1} bitmask_ns={:.1} \
+             head_to_head_is_a_self_speedup_not_a_win=true \
+             head_to_head_ratio={:.6} head_to_head_ci95=[{:.6},{:.6}] \
+             classifier_shape_saving_ns={classifier_shape_saving_ns:.1}",
+            measurement_worker(),
+            fused_effect.ratio_median,
+            fused_effect.ratio_ci_low,
+            fused_effect.ratio_ci_high,
+            bitmask_effect.ratio_median,
+            bitmask_effect.ratio_ci_low,
+            bitmask_effect.ratio_ci_high,
+            fused_effect.arm_a_median_ns,
+            bitmask_effect.arm_a_median_ns,
+            head_to_head.arm_a_median_ns,
+            head_to_head.arm_b_median_ns,
+            head_to_head.ratio_median,
+            head_to_head.ratio_ci_low,
+            head_to_head.ratio_ci_high,
         );
     });
 }

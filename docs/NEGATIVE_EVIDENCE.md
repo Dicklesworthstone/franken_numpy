@@ -44297,3 +44297,134 @@ call shapes. (3) The remaining floor is now unattributed by everything measured 
 row above the multiply-as-control trick CANNOT price it, since the floor is exactly what every op
 shares - a new control has to come first. AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - REJECT the classifier's reduction SHAPE, and REFUTE "wider unroll" before anyone spends a build on it: the three loops `6y5wp` treats as comparable have THREE different unroll factors and the WIDEST is the SLOWEST (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. Two results, one static and one measured, both from the same local ELF.
+
+**Campaign result class:** REJECTED LEVER (measured) + static census (build-free)
+
+### 1. STATIC CENSUS - "restore packing" and "wider unroll" are both dead
+
+`deadlock-audit-6y5wp` named three candidate levers for its 94.0 us kernel gap: restore packing,
+split the accumulate out of the hot loop, wider unroll. RedLynx's first step refuted "restore
+packing" from the shipped route and closed with the next step being to disassemble NUMPY's loop the
+same way, "a gap between two packed loops". They are not two loops of the same shape - there are
+three, and they differ.
+
+```
+CENSUS  all four loops read from artefacts on this host, main loop only
+  numpy DOUBLE_divide_X86_V3   10 insns /  8 doubles   2x ymm
+  ours  divide_former_serial    6 insns /  4 doubles   1x ymm
+  ours  divide_fused_serial    43 insns / 16 doubles   4x ymm
+  ours  divide_bitmask_...     35 insns / 16 doubles   4x ymm
+```
+
+The numpy half is `_multiarray_umath.cpython-313-x86_64-linux-gnu.so` from the SAME interpreter the
+bench imports, and the dispatched target was confirmed rather than assumed:
+`numpy.lib.introspect.opt_func_info(func_name="divide", signature="d")` returns
+`{"divide": {"ddd": {"current": "X86_V3", "available": "X86_V3 baseline(X86_V2)"}}}`, so
+`DOUBLE_divide_X86_V3` at 0x523e00 is the loop that runs here and the baseline `DOUBLE_divide` at
+0x328fe0 does not. The three fnp loops come from
+bench_elf_sha256=b064c19849a1ca55331c58970dfbf75b3e0ea3338a17119673ebbe74edde57f4, the same ELF that
+produced the ratios in section 2 - census and timings share one artefact, which is the whole point
+of ae85t's environment warning (local and remote toolchains here emit different code for identical
+source).
+
+**UNROLL FACTOR IS ANTI-CORRELATED WITH SPEED across these arms**: 4x is the slowest, 2x the
+fastest, 1x in between. LLVM already unrolls our fused arm twice as wide as numpy unrolls its own.
+"Wider unroll" is refuted, and it cost no build to refute it.
+
+**AND IT CORRECTS HOW `0ppym`'s 50/50 SPLIT SHOULD BE READ.** The two arms that split the deficit
+are not two versions of one loop - they are 4x-unrolled WITH the classifier and 1x-unrolled WITHOUT
+it. Removing the accumulate changed the unroll factor as a side effect, so `accumulate_cost_ns=96398`
+prices (classifier + a change of unroll factor), not the classifier alone. The 50/50 headline
+survives in direction; the two halves are not separable at the precision it was quoted to.
+
+### 2. MEASURED REJECT - the surviving candidate, and it does not pay
+
+The census left one candidate standing. Of the fused arm's 43 instructions per 16 doubles, 4 are
+divides, 8 are the numerator loads and quotient stores every arm pays, 3 are loop control, and the
+remaining **28 are the classifier** - seven vector ops per 4 doubles: `vandpd`, `vpaddq`, `vpxor`,
+`vpcmpgtq`, `vextracti128`, `vpackssdw`, `vpor`. Only the first four compute anything; the last
+three narrow a 4-lane compare mask into the `bool` that `saw_non_normal |= ...` asks for, and
+`vextracti128` is cross-lane. So: same predicate, no narrowing. `divide_bitmask_fused_serial`
+accumulates a u64 of exponent evidence, `evidence |= (e-1) | (e + 0x0010…)`, and tests bit 63 once
+at the end.
+
+ISOMORPHISM (proved on the function, asserted in the group): with `e = bits & 0x7ff0…`, `e-1` has
+bit 63 set iff `e == 0`, and `e + 0x0010…` has bit 63 set iff `e == 0x7ff0…`. A quotient is
+non-normal exactly when `e` is 0 or 0x7ff0…, so the OR-accumulator decides the identical predicate.
+
+**IT EMITTED EXACTLY THE CODEGEN IT WAS DESIGNED TO EMIT** - 35 insns per 16 doubles against 43,
+classifier ops 28 -> 20, no cross-lane op left inside the loop - **and it is still not measurably
+faster.**
+
+```
+DIVIDE_CLASSIFIER_SHAPE n=1048576 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract
+  arms_are_replicas_not_the_shipped_route=true arms_are_preallocated_no_alloc_either_side=true
+  boolean_ratio=0.799745 boolean_ci95=[0.789865,0.817705]
+  bitmask_ratio=0.811567 bitmask_ci95=[0.769646,0.830583]
+  numpy_ns_in_boolean_contract=357948.0 numpy_ns_in_bitmask_contract=375381.0
+  boolean_ns=447423.0 bitmask_ns=443260.0
+  head_to_head_ratio=1.010865 head_to_head_ci95=[0.993078,1.021850]
+  classifier_shape_saving_ns=4163.0
+MEDIAN_CI_GATE row=divide_f64_1m_bitmask_over_boolean_classifier verdict=UNDECIDED
+  effect_ci_excludes_one=false required_2x_delta=0.031989 both_nulls=true
+  incumbent_null_straddles_unity=true candidate_null_straddles_unity=true
+```
+
+COUNTED_MECHANISM: main-loop instructions per 16 doubles 43 -> 35, classifier vector ops 28 -> 20,
+cross-lane `vextracti128` inside the loop 4 -> 0, `vdivpd` unchanged at 4. The mechanism the lever
+claimed is present and counted; it simply does not show up in time.
+
+A/A NULL CONTROLS for the head-to-head this REJECT rests on, both clean and both straddling unity:
+incumbent A/A ratio_median=0.998390 ci95=[0.992355,1.015995]; candidate A/A ratio_median=0.991542
+ci95=[0.988442,1.000228]. The two vs-numpy contracts in the same invocation carried their own A/A
+pairs as well, and one of them did NOT come out clean - see the disclosure below.
+
+bench_elf_sha256=b064c19849a1ca55331c58970dfbf75b3e0ea3338a17119673ebbe74edde57f4, built LOCALLY
+with `RCH_CARGO_WRAPPER_BYPASS=1` (no `[RCH]` line in the build output), path taken from
+`--message-format=json`. HOST_BASELINE host=thinkstation1 Threadripper PRO 5975WX 32c/64t
+governor=powersave, allowed_logical_threads=16, runtime avx512f=false, numpy 2.4.3.
+**LOAD AND CLOCK:** loadavg 15.75 / 23.68 / 25.64 at start, 15.37 / 23.47 / 25.56 at end - a stable
+window. Every arm pair ran on the SAME core with `arm_mhz_spread` between 1.0000 and 1.0063; the
+head-to-head effect phase read cpu=8 at 3902.2 / 3877.6 MHz. Cross-core spread on this host was
+2.881x at the same instant, which is exactly why the same-core witness matters.
+
+**THE DECISION RULE WAS REGISTERED BEFORE THE RUN** and is in the group's own comment: if the
+256-bit divider is the binding constraint, the classifier's ops are already hidden underneath it and
+removing eight per 16 doubles moves the ratio by less than the null spread. Effect deviation is
+0.010865 against `required_2x_delta` 0.031989 - it does not clear it by a factor of three. **REJECT.
+The shipped `zerocopy_f64_binary_flat` arm was NOT touched.**
+
+### 3. THE METHOD FAULT THIS RUN CAUGHT IN ITSELF, which is the more portable lesson
+
+The first run of this group had NO head-to-head arm, and it looked like a win: boolean 0.750216
+ci95=[0.733012,0.769153] against bitmask 0.820084 ci95=[0.793144,0.840076] - **disjoint CIs, a clean
+9.3% separation.** It was not real. The two candidates sat in DIFFERENT schedules, and numpy itself
+drifted 383021 -> 398134 ns between them; the ratio moved because the incumbent moved. Adding a
+same-schedule head-to-head and re-running returned the two vs-numpy ratios OVERLAPPING (0.799745 vs
+0.811567) and the direct comparison UNDECIDED. The boolean arm's own vs-numpy ratio moved 0.750216
+-> 0.799745, 6.6%, between two runs three minutes apart.
+
+**Two candidates measured against a common incumbent in the same INVOCATION are not thereby in the
+same SCHEDULE, and the difference of their ratios is not a measurement of the difference between
+them.** That is the trap this group would have walked into, and every future two-candidate group
+here should carry the head-to-head arm.
+
+Also worth recording for `deadlock-audit-7xcq2`: the new `null_straddles_unity` field earned its
+keep unprompted. Run 2's `divide_f64_1m_boolean_classifier_vs_numpy` candidate null came back
+`ci95=[0.988319,0.998373] straddles_unity=false bias=0.007249` - it EXCLUDES unity, so that row's
+0.799745 is soft. The head-to-head this REJECT rests on has both nulls clean, which is why the
+verdict stands.
+
+RETRY PREDICATE: do not re-propose "restore packing", "wider unroll", or any reformulation of the
+normality classifier's REDUCTION SHAPE for f64 divide - all three are now measured or statically
+refuted. `bench_divide_classifier_accumulator_form` is registered and re-runnable if someone wants
+to re-decide it on another host. What remains unexplained is the ~1.25x between our 4x-unrolled
+divide loop and numpy's 2x-unrolled one with the classifier's cost shown to be nearly free, which
+means the deficit is NOT in the instructions beside the divide and the next lever must come from
+somewhere else entirely.
+AGENT_NAME=AzureCarp.
