@@ -8311,7 +8311,14 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
         // so their excesses must agree to within the ~48 ns block entry divide alone
         // pays. If that guard fails the pair is not comparable and no size above it can
         // be read. 2^16 and 2^20 are omitted here only because they are already banked.
-        for exponent in [8u32, 17, 18, 19] {
+        // 2^20 and 2^21 added (`deadlock-audit-6y5wp`). The churn-controlled run of this
+        // group decided that taking the native route at 2^19 costs ~8.6% more than
+        // declining (5/5 below unity, mean 0.9143), agreeing with the `out=` sign test's
+        // 7/7 - but the raise that follows would cover 2^20, which this group never
+        // reached, and 2^21, where the parallel arm engages and we WIN outright. Both are
+        // measured here rather than inferred, because the whole point of the row that
+        // motivated them was refusing to extrapolate across a size boundary.
+        for exponent in [8u32, 17, 18, 19, 20, 21] {
             let n = 1usize << exponent;
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");

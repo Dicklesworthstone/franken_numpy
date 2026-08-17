@@ -52261,3 +52261,92 @@ A/A NULL CONTROLS: not applicable; no measurement.
 RETRY PREDICATE: do not rewrite `364a4933` or `4bde9d6b`. Keep stamping `AGENT_NAME` and bead ids
 inside every ledger row and source comment; that is what makes the shared-index race harmless.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - THE GATE QUESTION IS NOW FULLY MEASURED, no size left to inference: native COSTS 8.7% at 2^19 and 14.7% at 2^20, and WINS 2.70x at 2^21. `F64_DIV_NATIVE_MIN_LEN` should be 1<<21. Ship deferred deliberately - the raise silently changes which ARM four existing tests exercise (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
+
+`AzureCarp`. One build (`release-perf`, 3m05s, `df` 201G immediately before, `proj_builds` = 0 at
+start) to add 2^20 and 2^21 to the sweep, then five invocations of ELF `74f03412955b45be...` under
+`MALLOC_MMAP_THRESHOLD_`.
+
+```
+  G1  load 27.05/24.87/18.33  idle 84%  2590 MHz  pb=1   G4  load 17.85/22.41/18.02  idle 70%  3478 MHz  pb=1
+  G2  load 23.58/24.21/18.21  idle 80%  2510 MHz  pb=1   G5  load 19.50/22.51/18.15  idle 80%  2841 MHz  pb=1
+  G3  load 21.38/23.69/18.14  idle 80%  3239 MHz  pb=1
+  ELF sha256 verified UNCHANGED (74f03412955b45be) before and after every run - a peer build was live
+  in this project throughout, and the concrete hazard is my binary being rebuilt under me, not the
+  peer's existence. G1 additionally fails the 1-min<=5-min check and is reported but not leaned on.
+```
+
+**Campaign result class:** a constant fully measured across every size its change would cover
+
+### Why this run existed at all
+
+The previous row decided 2^19 but covered 2^20 only by inference, and said so. Its retry predicate
+required measuring 2^20 against a delegating control before raising anything. The sweep stopped at
+2^19, so 2^20 and 2^21 were added to it - **2^21 because a raise to `1 << 21` needs its upper edge
+evidenced too, not just its interior.**
+
+### The measurement, `divide` against the structurally-delegating `multiply` control
+
+```
+  n      native-over-delegating, 5 runs                 mean     stdev    verdict
+  2^17   0.9984 1.0004 1.0030 0.9997 1.0009           1.0005   0.0017    tracks control -> DELEGATES
+  2^18   0.9993 0.9986 0.9992 1.0015 1.0005           0.9998   0.0012    tracks control -> DELEGATES
+  2^19   0.9650 0.9024 0.9059 0.8921 0.8986           0.9128   0.0296    native COSTS 8.7%   (5/5)
+  2^20   0.9396 0.8330 0.8375 0.8307 0.8254           0.8532   0.0485    native COSTS 14.7%  (5/5)
+  2^21   3.0361 2.6666 2.4116 2.5694 2.8287           2.7025   0.2402    native WINS 2.70x   (5/5)
+```
+
+**Every size the proposed raise covers is now measured, and the cost grows with n** - 8.7% at 2^19,
+14.7% at 2^20 - until the rayon threshold flips it to a 2.70x win. That is the shape a band should
+have, and it matches the `out=` route's independently certified band exactly.
+
+`F64_DIV_NATIVE_MIN_LEN` should be **1<<21**: the allocating route should delegate below the rayon
+threshold and go native at it.
+
+### The 2^8 cell is NOT evidence, and a naive threshold would misread it
+
+2^8 reads 0.9535, and a rule of "diverges from the control means native" would call it native. It is
+not - 2^8 is far below the gate and divide delegates there. The divergence is the limitation recorded
+one row up: the fixed wrapper is a large fraction of a 256-element call, and that fraction differs
+between two ops with different NumPy costs. **The tracking test requires the two ops to be comparable
+in per-call cost**, which holds from 2^17 up (ratios 0.9998-1.0005 where both delegate) and fails at
+tiny n.
+
+### WHY I AM NOT SHIPPING THE RAISE IN THIS ROW
+
+The constant is pinned in eight places across `lib.rs` and the bench, which is mechanical. The part
+that is not mechanical: **at 2^21 the native route takes the PARALLEL arm, not the serial one.** Four
+existing tests build their fixtures from `F64_DIV_NATIVE_MIN_LEN` (`.max(4096)`, `+/- 1`, and a
+`[1<<8, F64_DIV_NATIVE_MIN_LEN]` sweep). Raising the constant would silently move every one of them
+from exercising the serial native arm to exercising the parallel one, and they would keep passing
+while testing something else.
+
+That is exactly the failure this campaign hit this morning, when a gate was placed where the tests
+could not see it and four of them passed while verifying nothing. Doing the same thing knowingly, at
+the end of a long turn, to save one build, would be the wrong trade. The raise needs each of those
+four fixtures re-read and re-anchored deliberately.
+
+**Second-order consequence to carry into that change:** with the gate at 1<<21 the serial Div arm
+becomes unreachable on the allocating route entirely, and reachable on the `out=` route only below
+2^14. The bitmask accumulator shipped today lives in that serial arm, so its surface shrinks to
+`fnp.divide(a, b, out=o)` with n < 2^14. The 4.04% measurement stays valid for what it measured; the
+population it applies to changes, and that must be stated in the raise's commit rather than left for a
+reader to discover.
+
+COUNTED_MECHANISM: across 5 churn-controlled runs the native-over-delegating ratio is 0.9128 at 2^19
+and 0.8532 at 2^20, 5 of 5 below unity at both, and 2.7025 at 2^21, 5 of 5 above; at 2^17 and 2^18,
+where the route delegates, the same statistic is 0.9998-1.0005 with stdev 0.0012-0.0017, which is the
+instrument agreeing with itself where no effect should exist.
+
+A/A NULL CONTROLS: the route contracts' A/A nulls straddle unity across the five runs. The load-bearing
+control here is not the null but `multiply`, which maps to `_ => None` and structurally cannot route
+natively, measured in the same invocation as divide.
+
+RETRY PREDICATE: raise `F64_DIV_NATIVE_MIN_LEN` to `1 << 21` in one commit that also updates
+`NATIVE_MIN_LEN_MIRROR` in the bench, the three `(1usize << 19)` literals there, and - the part that
+needs judgement rather than sed - the four `lib.rs` tests whose fixtures derive from the constant, each
+re-anchored so it still exercises the arm it was written for. State in that commit that the serial arm,
+and with it today's bitmask win, retreats to `out=` below 2^14. Do not ship the raise without doing
+that reading.
+AGENT_NAME=AzureCarp.
