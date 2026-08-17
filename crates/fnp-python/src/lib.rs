@@ -34373,7 +34373,23 @@ fn try_zerocopy_scalar_searchsorted(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    // DECIDE ON THE NEEDLE FIRST (`deadlock-audit-v46rn`).
+    //
+    // This probe only handles a SCALAR needle, and `np.searchsorted(a, v)` with an ARRAY
+    // `v` is ordinary usage - so for that case everything below is wasted: an `ndim`
+    // getattr, a dtype fetch with `kind` and `itemsize` extracted, and then an
+    // `extract::<T>()` that fails and leaves a constructed-and-discarded Python exception
+    // behind. Asking about the needle first skips the whole body, not just the exception.
+    //
+    // Same narrow predicate as the spaced builders and `clip`: only an EXACT ndarray with
+    // `ndim >= 1` cannot be a scalar, so 0-d arrays and every NumPy scalar width keep the
+    // native path they have today.
+    if arg_cannot_be_scalar(py, v) {
+        return Ok(None);
+    }
+    // Cached module handle: this probe is not a `#[pyfunction]`, so the wrapper sweep did
+    // not reach it, and a per-call `py.import` measured 656 ns on the ufunc methods.
+    let numpy = cached_numpy(py)?;
     if a.getattr("ndim")?.extract::<usize>()? != 1 {
         return Ok(None); // numpy searchsorted requires a 1-D haystack
     }
@@ -112834,6 +112850,75 @@ mod tests {
                         want.call_method0("tobytes")?.extract::<Vec<u8>>()?,
                         "clip({target}, {name}) must match numpy byte for byte"
                     );
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// `searchsorted` must give NumPy's answer for scalar AND array needles after the
+    /// needle pre-check (`deadlock-audit-v46rn`).
+    ///
+    /// The scalar probe used to discover an array needle by running its whole body - an
+    /// `ndim` getattr, a dtype fetch with `kind` and `itemsize`, then an `extract` that
+    /// fails and leaves a discarded Python exception - before declining. An array needle is
+    /// ordinary usage, so that was the common path for it.
+    ///
+    /// The risk is demoting a needle that DOES convert, which would silently route a scalar
+    /// query to the delegating path. This checks both needle shapes across the haystack
+    /// dtypes the probe dispatches on (f64, i64, u64), both `side` values, and the 0-d
+    /// needle that the narrow predicate must still admit - against NumPy's own answer.
+    #[test]
+    fn searchsorted_needle_precheck_matches_numpy_for_scalar_and_array() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_searchsorted")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("searchsorted")?;
+            let theirs = numpy.getattr("searchsorted")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                std::ffi::CString::new(
+                    "HAY = {\n\
+                       'f64': np.arange(0.0, 20.0, 2.0),\n\
+                       'i64': np.arange(0, 20, 2).astype(np.int64),\n\
+                       'u64': np.arange(0, 20, 2).astype(np.uint64),\n\
+                     }\n\
+                     NEEDLE = {\n\
+                       'scalar': 7,\n\
+                       'np_scalar': np.int64(7),\n\
+                       'zero_d': np.array(7),\n\
+                       'array': np.array([1, 7, 19]),\n\
+                     }\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let hay = locals.get_item("HAY")?.expect("HAY");
+            let needle = locals.get_item("NEEDLE")?.expect("NEEDLE");
+
+            for h in ["f64", "i64", "u64"] {
+                let a = hay.get_item(h)?;
+                for n in ["scalar", "np_scalar", "zero_d", "array"] {
+                    let v = needle.get_item(n)?;
+                    for side in ["left", "right"] {
+                        let kw = PyDict::new(py);
+                        kw.set_item("side", side)?;
+                        let got = ours.call((&a, &v), Some(&kw))?;
+                        let want = theirs.call((&a, &v), Some(&kw))?;
+                        assert_eq!(
+                            got.str()?.extract::<String>()?,
+                            want.str()?.extract::<String>()?,
+                            "searchsorted(hay={h}, needle={n}, side={side}) must match numpy"
+                        );
+                    }
                 }
             }
             Ok(())
