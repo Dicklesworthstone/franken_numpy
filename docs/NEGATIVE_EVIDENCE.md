@@ -49169,3 +49169,60 @@ sensitivity both leak into the answer. Do NOT quote 0.566 or 0.922 as "the" accu
 each is a number for its regime only. Do NOT re-derive the three mechanisms eliminated in the addendum
 above (vectorisation, ISA width, non-temporal stores) — those remain settled on this host.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - UNDECIDED: the `asarray` skip moves `searchsorted` +1.6% and +4.5%, but a CONTROL moved +2.9% in the same runs. Not separable, and I am not claiming it (`deadlock-audit-v46rn`)
+
+`RedLynx`. Fourth consecutive A/B on my own levers. This one is not a refutation - the sign is
+right and the mechanism is real - but the noise floor in this window is as large as the effect.
+
+**Campaign result class:** UNDECIDED (measured; effect not separable from the control's movement)
+
+```
+BEFORE elf=2a2f3aef04db3d89... (row 58, 3 runs)
+AFTER  elf=54a18cef608f9a1e... (3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 12.46/15.35/16.17 before the build; 14.63/17.09/16.86 identical BEFORE and AFTER
+  the measuring block
+CPU MHz system-wide min 1429 max 4297 median 3428 spread 3.007x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on all twelve phases, same_core=true,
+  spreads 1.0000-1.0021
+
+  case              on the path   BEFORE     AFTER (3 runs)                 change
+  ss_scalar_needle  YES           0.466404   0.487612/0.482478/0.497585     +4.5%
+  ss_array_needle   YES           0.171288   0.178243*/0.175960/0.172242    +1.6%
+  clip_two_sided    no (CONTROL)  0.596335   0.596413/0.616155/0.613595     +2.9%
+  clip_one_sided    no (CONTROL)  0.906177   0.919274/0.904925/0.910808     +0.5%
+
+  * ss_array run 1's candidate null reads [0.996636,0.999279] - excludes unity - VOID.
+```
+
+**WHY THIS IS NOT A RESULT.** `clip_two_sided` does not touch `searchsorted`'s dispatcher and
+cannot take this lever, and it moved **+2.9%** - most of what the target cells moved. With a
+control moving that far, a +1.6% and a +4.5% are not separable from whatever moved the control.
+**The lever may well be worth something; this measurement cannot say so.**
+
+**THE TWO CONTROLS DISAGREE, WHICH IS ITSELF INFORMATION.** `clip_one_sided` moved +0.5% and
+`clip_two_sided` +2.9% in the same runs on the same host. If this were uniform window drift they
+would move together. They did not, so the 2.9% is not simply "the window" - it is per-cell
+variability at a scale this group has not shown before, and any future row using these cells as
+controls has to account for it.
+
+**THE MECHANISM IS STILL SOUND AND THE CODE STAYS.** `numpy.asarray` on an object that is already
+an exact ndarray returns that same object; skipping it is exact, and unlike the three micro-gates
+rows 60/62/63 killed, nothing else in the function guards it - it genuinely ran on every call.
+The change is correct and tested across six haystack kinds including an ndarray subclass. **What
+is missing is a measurement that separates it, not a reason to believe in it.**
+
+**FOUR A/Bs ON MY OWN LEVERS, FOUR NON-WINS**: `clip` pre-check zero, `searchsorted` needle
+pre-check zero (dead code), the row-59 probe-gating proposal withdrawn before landing, and this
+one undecided. The one lever in this stretch that DID measure - the `numpy_dtype_is_f64` fast
+path, 8.700x -> 5.838x - was the one that changed something running unconditionally on the hot
+path, which is the only shape that has paid here.
+
+RETRY PREDICATE: (1) Re-run this A/B in a window where the clip controls agree with each other to
+better than 1%; the effect is at most ~4% and needs a floor below that. (2) A cleaner control for
+this specific lever would be a searchsorted call whose haystack is a LIST - it must still take
+`asarray`, so it should not move while the ndarray cells do. That is a better designed control
+than the clip cells and costs one bench cell. (3) Do not add further micro-gates to this
+dispatcher without a measurement; four attempts, one payer. AGENT_NAME=RedLynx.
+
