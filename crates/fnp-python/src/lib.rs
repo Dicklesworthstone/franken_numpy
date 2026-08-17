@@ -34217,6 +34217,19 @@ fn searchsorted(
     }
     // LARGE integer haystack + LARGE integer query array: same sort-merge cache-miss lever as
     // the f64/f32 paths, but simpler because integer ordering is total.
+    // AND PASS THE ALREADY-CONVERTED HAYSTACK (`deadlock-audit-v46rn`).
+    //
+    // These probes received `a` - the ORIGINAL object - while `a_arr` has held the
+    // converted array since the top of the function. For an ndarray the two are the same
+    // object, so nothing changes. For a LIST they are not: the list paid `asarray` at the
+    // top, then failed the exact-ndarray check in every probe, then reached the cold path
+    // which converts it AGAIN. `ss_list_haystack` measures 2.19x and row 69 flagged that
+    // path as never read; this is what it was doing.
+    //
+    // The fallbacks are untouched and still capture the ORIGINAL `a`, so any deferral
+    // hands NumPy the exact call the caller made - which is the property the comment above
+    // `a_arr` was protecting, and it never required the FAST paths to re-read `a`.
+    //
     // GATE ON THE KIND ALREADY IN HAND (`deadlock-audit-v46rn`). Unlike the probes row 63
     // caught - which were already gated on `a_kind` and where a further gate would have
     // done nothing - the NUMERIC probes are ungated: for an f64 haystack both integer
@@ -34228,7 +34241,7 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && matches!(a_kind, 'i' | 'u' | 'b')
-        && let Some(out) = try_zerocopy_int_searchsorted_merge(py, a.bind(py), v_bound, side)?
+        && let Some(out) = try_zerocopy_int_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
@@ -34237,7 +34250,7 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && matches!(a_kind, 'i' | 'u' | 'b')
-        && let Some(out) = try_zerocopy_int_searchsorted(py, a.bind(py), v_bound, side)?
+        && let Some(out) = try_zerocopy_int_searchsorted(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
@@ -34252,7 +34265,7 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && a_kind == 'f'
-        && let Some(out) = try_zerocopy_f64_searchsorted_merge(py, a.bind(py), v_bound, side)?
+        && let Some(out) = try_zerocopy_f64_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
@@ -34261,7 +34274,7 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && a_kind == 'f'
-        && let Some(out) = try_zerocopy_f64_searchsorted(py, a.bind(py), v_bound, side)?
+        && let Some(out) = try_zerocopy_f64_searchsorted(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
@@ -34271,7 +34284,7 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && a_kind == 'f'
-        && let Some(out) = try_zerocopy_f32_searchsorted_merge(py, a.bind(py), v_bound, side)?
+        && let Some(out) = try_zerocopy_f32_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
@@ -34280,7 +34293,7 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && a_kind == 'f'
-        && let Some(out) = try_zerocopy_f32_searchsorted(py, a.bind(py), v_bound, side)?
+        && let Some(out) = try_zerocopy_f32_searchsorted(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
@@ -113215,6 +113228,8 @@ mod tests {
                        'list': [0.0, 2.0, 4.0, 6.0, 8.0],\n\
                        'tuple': (0.0, 2.0, 4.0, 6.0, 8.0),\n\
                        'noncontig': np.arange(0.0, 40.0, 2.0)[::2],\n\
+                       'int_list': [0, 2, 4, 6, 8],\n\
+                       'mixed_list': [0, 2.5, 4, 6.5, 8],\n\
                      }\n\
                      NEEDLE = {'scalar': 7.0, 'array': np.array([1.0, 7.0, 19.0])}\n",
                 )
@@ -113233,6 +113248,12 @@ mod tests {
                 "list",
                 "tuple",
                 "noncontig",
+                // A list haystack now reaches the NATIVE probes instead of declining to
+                // the cold path, so the list forms are what could newly diverge: an int
+                // list and a mixed int/float list convert differently
+                // (`deadlock-audit-v46rn`).
+                "int_list",
+                "mixed_list",
             ] {
                 let a = hay.get_item(h)?;
                 for n in ["scalar", "array"] {
