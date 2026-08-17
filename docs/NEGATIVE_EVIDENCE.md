@@ -48163,3 +48163,62 @@ and 2^19 with the same in-invocation control, which locates the crossover and gi
 `F64_DIV_NATIVE_MIN_LEN` a measured value instead of the current 1<<14, which is now known to be
 below the crossover.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - NEW WORST CELL OF THE CAMPAIGN: `fnp.searchsorted` with an ARRAY needle is 8.700x SLOWER than NumPy. And two-sided scalar `clip` is 1.6345x - worse than the one-sided case it was supposed to be better than (`deadlock-audit-v46rn`)
+
+`RedLynx`. Cells written to check two levers' predictions. They could not check them - there
+is no before-figure - but they found two regressions far larger than the levers they were for.
+
+**Campaign result class:** incumbent-win (first measurement of four cells)
+
+```
+bench_elf_sha256=9b6b25bae13c467338824b5d2133379ab789d31616e4f113b562c9a2ab1b6a21
+worker=thinkstation1  numpy 2.4.3  profile=bench
+group=bench_predecline_levers_vs_numpy (registered)
+LOADAVG 12.38/14.55/11.80 before -> 12.83/14.61/11.83 after (quiet, converged)
+CPU MHz system-wide min 1429 max 4292 median 3433 spread 3.004x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on all twelve phases,
+  same_core=true, spread 1.0000 on eleven and 1.0013 on the twelfth
+
+  case              lever  ratio (3 runs)              numpy_ns     fnp_ns       excess
+  clip_one_sided    yes    0.907104/0.917926/0.901779  3426-3562    3792-3882      349
+  clip_two_sided    no     0.607095/0.610610/0.617831  3617-3667    5921-6031     2314
+  ss_array_needle   yes    0.115149/0.114619/0.114985  1233-1237   10721-10766    9503
+  ss_scalar_needle  no     0.454933/0.460233/0.462542  1383-1393    2995-3041     1631
+
+11 of 12 cells admissible. `clip_two_sided` run 2's INCUMBENT null reads
+[1.000282,1.005872] - excludes unity from ABOVE - so that cell is VOID.
+```
+
+**`fnp.searchsorted(hay, array_needle)` IS 8.700x SLOWER THAN NUMPY** - 10.7 us against 1.2 us,
+**9503 ns of excess**. That is the worst cell this campaign has measured, by a wide margin: the
+previous worst was `add.accumulate` at 4.76x, and every method entry point now sits at 1.08-1.35x.
+It is also extremely stable - three runs agree to 0.5%, and all six of its nulls admit unity.
+
+**`fnp.clip(a, 0.0, 3000.0)` - a plain two-sided scalar clip - IS 1.6345x SLOWER**, with 2314 ns
+of excess against 349 ns for the one-sided form.
+
+**THE CONTROLS FOUND THIS, WHICH IS THE DESIGN POINT.** Both cells labelled `lever=false` exist
+only because a lever needs something that must NOT move. Neither took the pre-check: a two-sided
+scalar clip never raised, and a scalar needle takes the native path. **They were included to be
+boring, and they are the two worst numbers on the board.**
+
+**NO ATTRIBUTION TO MY LEVERS IS CLAIMED, and the shapes forbid it.** There is no before-figure
+for any of these four cells. The lever cells are the better two, but they are also *different
+calls* - one-sided versus two-sided bounds, array versus scalar needle - so the comparison across
+the pairs measures the call, not the change. **`clip_one_sided` being 4.7x better than
+`clip_two_sided` says nothing about the pre-check.**
+
+**WHAT IT MEANS FOR THE `searchsorted` PRE-CHECK, precisely.** That lever made the scalar probe
+decline early for array needles. It cannot be the cause of 9503 ns - it removed work - but it
+also clearly did not help much, because whatever runs after the decline is what costs 10.7 us.
+**The array-needle path is the lead, and it has never been read.**
+
+RETRY PREDICATE: (1) Read what `searchsorted` does for an ARRAY needle after the scalar probe
+declines - 8.700x with a 0.5% run-to-run spread is a structural cost, not noise, and it is the
+largest single target on the board. (2) Read the two-sided scalar `clip` path; it is 6.6x the
+one-sided form's excess and the difference is NOT the pre-check. (3) These four cells have no
+before-figure, so the `clip` and `searchsorted` commits' predictions remain UNCHECKED - an A/B
+against those commits is still owed if anyone wants the levers' own numbers.
+AGENT_NAME=RedLynx.
+

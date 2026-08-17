@@ -1376,6 +1376,10 @@ fn main() {
                 bench_ufunc_at_percall_floor_vs_numpy,
             ),
             (
+                "bench_predecline_levers_vs_numpy",
+                bench_predecline_levers_vs_numpy,
+            ),
+            (
                 "bench_axis_default_wrappers_vs_numpy",
                 bench_axis_default_wrappers_vs_numpy,
             ),
@@ -5485,7 +5489,7 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
         // inferring it from the two the existing size-gate group happens to carry.
         for exponent in [12u32, 14, 16, 18, 20] {
             let n = 1usize << exponent;
-            let below_gate = n < (1usize << 14);
+            let below_gate = n < (1usize << 19);
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");
             locals.set_item("n", n).expect("bind n");
@@ -6132,6 +6136,134 @@ fn call_reduceat<'py>(
 // correction is that its 771 ns excess is call SHAPE, which is what made the axis-default
 // lever findable.
 //
+// The two remaining exception-as-control-flow levers, each paired with its OWN control in
+// the same group (`deadlock-audit-v46rn`). Their commits registered sharp predictions and
+// neither had a cell to check them against.
+//
+//   clip          `np.clip(a, 0, None)` raised on every call, because float(None) raises.
+//                 A TWO-SIDED scalar clip never raised, so it must NOT move. If both move,
+//                 the lever is not what is being measured.
+//   searchsorted  an ARRAY needle ran the whole scalar probe - ndim, dtype, kind, itemsize -
+//                 and then raised. A SCALAR needle took the native path and must not move.
+//
+// A lever whose control moves with it is measuring the window, not the change. That is why
+// each pair is here rather than in two separate groups: same binary, same run, same window.
+fn bench_predecline_levers_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        py.run(
+            std::ffi::CString::new(
+                "a = np.arange(4096.0)\n\
+                 hay = np.arange(0.0, 8192.0, 2.0)\n\
+                 needle_arr = np.array([1.0, 777.0, 8191.0])\n\
+                 CASES = {\n\
+                   'clip_one_sided': ('clip', (a, 0.0, None)),\n\
+                   'clip_two_sided': ('clip', (a, 0.0, 3000.0)),\n\
+                   'ss_array_needle': ('searchsorted', (hay, needle_arr)),\n\
+                   'ss_scalar_needle': ('searchsorted', (hay, 777.0)),\n\
+                 }\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let cases = locals.get_item("CASES").expect("CASES");
+
+        for (label, takes_lever) in [
+            ("clip_one_sided", true),
+            ("clip_two_sided", false),
+            ("ss_array_needle", true),
+            ("ss_scalar_needle", false),
+        ] {
+            let case = cases.get_item(label).expect("case");
+            let fn_name = case
+                .get_item(0)
+                .expect("fn name")
+                .extract::<String>()
+                .expect("fn name is a string");
+            let args = case
+                .get_item(1)
+                .expect("args")
+                .cast_into::<PyTuple>()
+                .expect("args tuple");
+
+            let ours = module.getattr(fn_name.as_str()).expect("fnp fn");
+            let theirs = numpy.getattr(fn_name.as_str()).expect("numpy fn");
+            assert!(
+                !ours.is(&theirs),
+                "fnp.{fn_name} IS numpy's object - there is no candidate arm"
+            );
+
+            let checksum_of = |r: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+                r.call_method0("sum")
+                    .expect("sum")
+                    .extract::<f64>()
+                    .expect("f64 sum")
+                    .to_bits()
+            };
+            assert_eq!(
+                checksum_of(&ours.call1(&args).expect("fnp probe")),
+                checksum_of(&theirs.call1(&args).expect("numpy probe")),
+                "{label}: fnp and numpy disagree"
+            );
+
+            let incumbent = || {
+                let started = Instant::now();
+                let r = theirs.call1(&args).expect("numpy call");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&r),
+                }
+            };
+            let candidate = || {
+                let started = Instant::now();
+                let r = ours.call1(&args).expect("fnp call");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&r),
+                }
+            };
+
+            let row = format!("{label}_predecline_vs_numpy");
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract(&row, incumbent, candidate);
+            println!(
+                "PREDECLINE_LEVER case={label} takes_lever={takes_lever} \
+                 numpy_version={numpy_version} worker={} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 numpy_ns={:.1} fnp_ns={:.1} excess_ns={:.1} \
+                 incumbent_aa_null={:.6} candidate_aa_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.arm_b_median_ns - effect.arm_a_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
 // The axis-default tranche has never been measured, and its own ledger row says it must be
 // before anyone extrapolates to it (`deadlock-audit-v46rn`). 24 wrappers stopped forwarding
 // an `axis` NumPy already defaults to; the measured instance of that lever was 2003
@@ -7002,7 +7134,7 @@ fn bench_percall_floor_across_ops_vs_numpy(_c: &mut Criterion) {
         // this mirror changing, the LABEL goes stale, not the measurement - the lib
         // test `f64_div_native_min_len_is_mirrored_in_the_percall_floor_bench` fails
         // and names this line.
-        const NATIVE_MIN_LEN_MIRROR: usize = 1 << 14;
+        const NATIVE_MIN_LEN_MIRROR: usize = 1 << 19;
         for (name, enters_f64_block) in [
             ("add", false),
             ("subtract", false),
@@ -7048,14 +7180,23 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
         // four-cell sweep did not fit rch's 1800 s SSH ceiling - that constraint is on
         // REMOTE runs; these are built and measured locally, where six contracts fit.
         //
-        // 2^20 is here because 2^16 alone cannot decide the gate
-        // (`deadlock-audit-q00ev`). At 2^16 the native route measured 10.1x the
-        // delegating control's excess, which says the gate admits a losing band - but
-        // whether the fix is to RAISE the threshold or to REMOVE the route depends on
-        // whether native ever wins, and 2^20 is where its proportional overhead was
-        // smallest (5.4%). If native loses to its own control at 2^20 as well, then the
-        // route has no winning band that has ever been measured.
-        for exponent in [8u32, 16, 20] {
+        // LOCATING THE CROSSOVER (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`).
+        //
+        // Already settled: at 2^16 the native route costs several times its delegating
+        // control's excess, and at 2^20 it BEATS that control by ~10.7 us. So the route
+        // is worth keeping and `F64_DIV_NATIVE_MIN_LEN = 1<<14` is set below the
+        // crossover - but the crossover itself is only bracketed as (2^16, 2^20].
+        //
+        // 2^17, 2^18 and 2^19 are the unmeasured interior. Measuring them gives the gate
+        // a MEASURED value instead of a bracket, which is the whole reason the current
+        // 1<<14 became questionable: it was chosen without a control at the sizes it
+        // admits.
+        //
+        // 2^8 stays as the FIXTURE GUARD, not for its own sake: there both ops delegate,
+        // so their excesses must agree to within the ~48 ns block entry divide alone
+        // pays. If that guard fails the pair is not comparable and no size above it can
+        // be read. 2^16 and 2^20 are omitted here only because they are already banked.
+        for exponent in [8u32, 17, 18, 19] {
             let n = 1usize << exponent;
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");
@@ -7100,7 +7241,7 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
             for op in ["divide", "multiply"] {
                 let (ratio, lo, hi, numpy_ns, fnp_ns) =
                     measure_binary_ufunc_vs_numpy(py, &module, &numpy, op, &args, n);
-                let routes_natively = op == "divide" && n >= (1usize << 14);
+                let routes_natively = op == "divide" && n >= (1usize << 19);
                 println!(
                     "DIVIDE_SIZE_GATE op={op} n={n} log2n={exponent} \
                      routes_natively={routes_natively} \
@@ -7109,7 +7250,7 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
                      harness=common::run_dual_null_median_ci_contract \
                      ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
                      numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={:.1}",
-                    n < (1usize << 14),
+                    n < (1usize << 19),
                     op == "multiply",
                     fnp_ns - numpy_ns,
                 );
