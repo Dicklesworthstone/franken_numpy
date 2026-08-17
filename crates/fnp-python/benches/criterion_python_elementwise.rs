@@ -1348,6 +1348,10 @@ fn main() {
             ),
             ("bench_out_kwarg_vs_numpy", bench_out_kwarg_vs_numpy),
             ("bench_accumulate_counter_fnp", bench_accumulate_counter_fnp),
+            ("bench_reduce_counter_fnp", bench_reduce_counter_fnp),
+            ("bench_reduce_counter_numpy", bench_reduce_counter_numpy),
+            ("bench_reduceat_counter_fnp", bench_reduceat_counter_fnp),
+            ("bench_reduceat_counter_numpy", bench_reduceat_counter_numpy),
             (
                 "bench_accumulate_counter_numpy",
                 bench_accumulate_counter_numpy,
@@ -6112,17 +6116,23 @@ fn accumulate_counter_probe(use_fnp: bool) {
             .expect("sum is f64")
             .to_bits();
 
-        let mut last = 0u64;
+        // Checksum OUTSIDE the loop — see the note on `method_counter_probe`. A
+        // per-iteration `.sum()` only cancels out of the excess if it costs the
+        // same on both arms, which is an assumption about the result objects and
+        // not a fact about them.
+        let mut last_result = None;
         for _ in 0..ACCUMULATE_COUNTER_CALLS {
             let result = call_ufunc_method(target, "accumulate", &a);
             black_box(&result);
-            last = result
-                .call_method0("sum")
-                .expect("result sums")
-                .extract::<f64>()
-                .expect("sum is f64")
-                .to_bits();
+            last_result = Some(result);
         }
+        let last = last_result
+            .expect("the loop ran at least once")
+            .call_method0("sum")
+            .expect("result sums")
+            .extract::<f64>()
+            .expect("sum is f64")
+            .to_bits();
         assert_eq!(
             last, oracle,
             "the counted probe did not reproduce NumPy's accumulate, so its \
@@ -6143,6 +6153,142 @@ fn bench_accumulate_counter_fnp(_c: &mut Criterion) {
 
 fn bench_accumulate_counter_numpy(_c: &mut Criterion) {
     accumulate_counter_probe(false);
+}
+
+// TURNING THE ROUTING-PROLOGUE CORRELATION INTO A COUNTED MECHANISM
+// (`deadlock-audit-v46rn`).
+//
+// The method family at n=256 now reads:
+//     reduce      1.2800x  excess 291 ns   delegates unconditionally
+//     outer       1.1804x  excess 321 ns   delegates unconditionally
+//     accumulate  1.5464x  excess 767 ns   routes natively above 2^12
+//     reduceat    1.6821x  excess 771 ns   routes
+// The two ROUTING methods carry ~770 ns and the two pure-DELEGATING ones ~300 ns.
+// `RedLynx` banked that ~450 ns gap explicitly as a CORRELATION across two cells
+// and refused to call it a mechanism — "it says where to look, not what is
+// there". These probes are what converts it, and they do it in retired
+// INSTRUCTIONS, which do not move with host load the way a 450 ns wall-clock
+// difference does.
+//
+// WHY THE COMPARISON IS LEGITIMATE ACROSS METHODS. Each probe pair yields
+// `excess(M) = fnp_instructions(M) - numpy_instructions(M)`. Both arms of a pair
+// run the identical checksum step for that method, so its cost cancels inside
+// each excess even though it differs BETWEEN methods (a `reduce` returns a scalar,
+// an `accumulate` an array). Comparing `excess(accumulate)` against
+// `excess(reduce)` therefore compares two WRAPPER costs and not two workloads,
+// which is exactly the quantity the ns table above is made of.
+//
+// `reduce` is the delegating control and `reduceat` the worst cell; `accumulate`
+// already has its pair above. If the routing prologue is real, the two routing
+// methods should carry a common block of instructions that `reduce` does not, and
+// the per-symbol diff should name it.
+//
+// NEGATIVE CASE: a probe that returned early, or accumulated a degenerate operand,
+// would report a flatteringly small instruction count. Every probe checksums its
+// LAST result and asserts it against NumPy's answer for the same operand before
+// printing, so a wrong or absent route fails instead of counting fast.
+fn method_counter_probe(method: &str, use_fnp: bool) {
+    const N: usize = 256;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nidx = np.arange(0, n, 16, dtype=np.intp)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let idx = locals.get_item("idx").expect("idx operand");
+
+        // Both handles resolved in both arms so the getattr work matches.
+        let ours = module.getattr("add").expect("fnp add");
+        let theirs = numpy.getattr("add").expect("numpy add");
+        let target = if use_fnp { &ours } else { &theirs };
+
+        // `reduce` yields a scalar, `accumulate`/`reduceat` an array. Extract
+        // covers the first, `sum()` the second; whichever runs is the same on both
+        // arms of a pair, so it cancels out of the excess.
+        let checksum_of = |result: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            if let Ok(scalar) = result.extract::<f64>() {
+                return scalar.to_bits();
+            }
+            result
+                .call_method0("sum")
+                .expect("result sums")
+                .extract::<f64>()
+                .expect("sum is f64")
+                .to_bits()
+        };
+        // A named fn rather than a closure: the closure form cannot express that
+        // the returned `Bound` borrows the same `'py` as its inputs.
+        fn invoke<'py>(
+            method: &str,
+            t: &pyo3::Bound<'py, pyo3::PyAny>,
+            a: &pyo3::Bound<'py, pyo3::PyAny>,
+            idx: &pyo3::Bound<'py, pyo3::PyAny>,
+        ) -> pyo3::Bound<'py, pyo3::PyAny> {
+            if method == "reduceat" {
+                call_reduceat(t, a, idx)
+            } else {
+                call_ufunc_method(t, method, a)
+            }
+        }
+
+        let oracle = checksum_of(&invoke(method, &theirs, &a, &idx));
+        // THE CHECKSUM IS OUTSIDE THE LOOP, and that placement is load-bearing.
+        // Checksumming per iteration assumed `.sum()` costs the same on both arms
+        // so it would cancel out of the excess. It does not have to: the two arms
+        // may hand back differently-constructed result objects even when the
+        // VALUES are bit-identical, and then the excess includes a difference in
+        // the checksum rather than in the call under test. The first version of
+        // this probe did exactly that and reported a `reduceat` excess 2.2x below
+        // the banked wall-clock row. Only the call is in the loop now.
+        let mut last_result = None;
+        for _ in 0..ACCUMULATE_COUNTER_CALLS {
+            let result = invoke(method, target, &a, &idx);
+            black_box(&result);
+            last_result = Some(result);
+        }
+        let last = checksum_of(&last_result.expect("the loop ran at least once"));
+        assert_eq!(
+            last, oracle,
+            "the counted probe for `{method}` did not reproduce NumPy's answer, so \
+             its instruction count describes the wrong computation"
+        );
+        println!(
+            "METHOD_COUNTER_PROBE method={method} arm={} n={N} \
+             calls={ACCUMULATE_COUNTER_CALLS} checksum={last:016x} \
+             setup_matches_sibling_probe=true run_this_under_perf_stat=true",
+            if use_fnp { "fnp" } else { "numpy" }
+        );
+    });
+}
+
+fn bench_reduce_counter_fnp(_c: &mut Criterion) {
+    method_counter_probe("reduce", true);
+}
+
+fn bench_reduce_counter_numpy(_c: &mut Criterion) {
+    method_counter_probe("reduce", false);
+}
+
+fn bench_reduceat_counter_fnp(_c: &mut Criterion) {
+    method_counter_probe("reduceat", true);
+}
+
+fn bench_reduceat_counter_numpy(_c: &mut Criterion) {
+    method_counter_probe("reduceat", false);
 }
 
 fn bench_accumulate_size_crossover_vs_numpy(_c: &mut Criterion) {
