@@ -47860,3 +47860,78 @@ lever worth under ~200 insns/call — run the identical-source null first if you
 `same_kind` change is reverted and must not be re-landed without a new mechanism, since the
 annotation that motivated it was skid.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - AUDIT of every counter claim I banked, against the ±90 insns/call floor I measured yesterday: eight survive with margin, four are BELOW the floor and one of those was load-bearing in an argument (`deadlock-audit-ei9jz`, `deadlock-audit-v46rn`)
+
+`AzureCarp`. No build — an audit of banked rows against a bound established after most of them were
+written.
+
+**Campaign result class:** ledger-integrity audit (no new measurement, no lever)
+
+### Why this audit, and why now
+
+The revert one row up measured the counter probe's reproducibility for the first time: two builds
+with byte-identical `__call__` source differ by **+92.6 / -20.3 insns/call** on our own arm. That
+floor did not exist when I banked most of this session's counter numbers, so several were quoted at a
+precision the instrument does not have. Auditing them is cheaper than leaving a reader to discover it
+the way I did.
+
+```
+  floor: ±90 insns/call (identical source, our arm, 400 000 calls)
+
+  banked claim                          insns/call   verdict
+  peer's axis=0 fix                          2,003   SAFE   (>2x floor)
+  bitmask classifier, instructions cut       1,600   SAFE
+  interning: accumulate                      1,290   SAFE
+  interning: reduceat                        1,002   SAFE
+  vectorcall: outer                            808   SAFE
+  interning: reduce                            795   SAFE
+  vectorcall: reduce                           449   SAFE
+  divide block-entry (divide minus add)        379   SAFE
+  ------------------------------------------------------------
+  checksum placement: reduceat                  80   BELOW FLOOR
+  checksum placement: reduce                    58   BELOW FLOOR
+  checksum placement: accumulate                53   BELOW FLOOR
+  same_kind lever                               10   BELOW FLOOR (already withdrawn)
+```
+
+**Eight of twelve clear twice the floor and stand unchanged.** Every lever this session that was
+reported as a win — the interning, both vectorcalls, the peer's axis fix — is comfortably outside the
+noise, which is the reassuring half of the audit and the reason the family's 4.76x→1.22x trajectory
+is not in question.
+
+### The four that are not measurements, and the one that mattered
+
+The three "checksum placement" figures (+53, +58, -80) were quoted in my retraction of 2026-08-16 to
+argue that moving the checksum out of the timed loop was worth "±80 insns/call — noise". **That
+argument reached the right conclusion by luck: the numbers supporting it were themselves inside the
+noise floor and could not have distinguished ±80 from zero.**
+
+What actually carried that retraction was the OTHER number in it — the peer's `axis=0` fix at
+**2,003 insns/call**, which is 22x the floor and unambiguous. The retraction's finding ("the checksum
+was not the contaminant; a peer's commit landing between my runs was") is therefore intact. Only its
+supporting precision was never real. I am correcting the precision, not the conclusion.
+
+`same_kind` at +10 was already withdrawn one row up for the same reason.
+
+### The operative rule going forward
+
+**A counter delta under ~180 insns/call (2x the floor) is not evidence.** State such a result as
+"below this instrument's resolution", never as a small number — a small number invites arithmetic,
+and I did that arithmetic twice today. Above ~180, the probe has been reliable: every SAFE row above
+was independently corroborated where a wall-clock row existed for the same cell (`reduceat`'s
+1,297→626 cycles against a 1.3509x→1.2247x dual-null ratio, and the divide block-entry's 379
+insns/call against 48 ns measured on a different instrument).
+
+COUNTED_MECHANISM: none new — this row re-reads banked figures against the ±90 insns/call floor
+measured from two builds of byte-identical source, and reclassifies four of twelve as
+below-resolution.
+
+A/A NULL CONTROLS: the identical-source pair that established the floor is itself the counter
+probe's null, and it does not come out at zero. That is why this audit exists.
+
+RETRY PREDICATE: do not re-derive the eight SAFE rows; they clear 2x the floor. Do not quote the
+three checksum-placement figures or the `same_kind` +10 as values — say "below resolution". Before
+banking any future counter delta under ~180 insns/call, run the identical-source null and report it
+alongside, or do not bank the number at all.
+AGENT_NAME=AzureCarp.
