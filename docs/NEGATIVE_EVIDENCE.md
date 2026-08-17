@@ -43929,3 +43929,99 @@ nanoseconds or more decimals — the four-decimal ms format makes every small-n 
 meaningless and that is worth a one-line change. (3) Do not use the A/A-versus-effect read-off as a
 contamination test at any n without first correcting for phase-time drift. AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - CERTIFIED, and the prediction was registered BEFORE the run: divide's extra per-call cost is gone. Its excess-over-multiply falls 2.14x -> 1.14-1.22x WITHIN one invocation, and the worst cell moves 1.855x -> 1.5613x (`deadlock-audit-v46rn`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. Discharges the falsifiable prediction banked with the retraction row earlier today.
+
+**Campaign result class:** maintenance-self-speedup (the cell remains a regression vs NumPy)
+
+```
+bench_elf_sha256=6b5ec4ad0b6f326986374687edfdae3d57b8893a44c2e1985b5d9b9459a0274e
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256  nproc=64
+built with `env -u CARGO_TARGET_DIR`, executable path from --message-format=json
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+group selector echoed by the ELF: selected_groups=1
+
+LOADAVG per run (1/5/15):  run1 31.87/29.57/28.48   run2 37.21/31.79/29.32   run3 35.11/31.45/29.22
+CPU MHz system-wide before run1: min 1429 max 4018 median 3214 spread 2.812x
+                     after  run1: min 1429 max 4190 median 3334 spread 2.932x
+PER-ARM (CPU_WITNESS, sampled outside the timed region), divide effect phase:
+  arm_a_cpu=22 arm_b_cpu=22 same_core=true arm_a_mhz_mean=4037.2 arm_b_mhz_mean=4037.3
+  arm_mhz_spread=1.0000    (every phase in the run reads same_core=true, spread 1.0000-1.0010)
+
+  op        run1 ratio  run2 ratio  run3 ratio    run1 exc  run2 exc  run3 exc
+  add       0.667183    0.638205    0.669670        215       255       216
+  subtract  0.666151    0.626437    0.673716        216       260       220
+  multiply  0.672387    0.633411    0.679583        210       311       215
+  divide    0.640449    0.603627    0.660194        257       307       245
+
+ALL TWELVE cells verdict=DECIDABLE_REGRESSION, effect_ci_excludes_one=true.
+ALL TWENTY-FOUR A/A nulls straddle unity; controlling half-widths 0.0069-0.0155.
+divide run1: effect 0.640449 [0.634986,0.642458], required_2x_delta=0.017544 against an
+effect distance of 0.3596 - it clears the gate by ~20x.
+```
+
+**THE WORST CELL IS NOW 1.5613x** (1/0.640449, run1 median), from **1.855x**. Taking the
+three-run median of divide's ratio gives 0.640449 and the same figure.
+
+**THE ATTRIBUTION STATISTIC IS WITHIN-INVOCATION, WHICH IS WHY IT SURVIVES THE MOVING WINDOW.**
+Cross-window excess comparison is confounded here - NumPy's own arm reads 431-460 ns in these runs
+against 421-556 ns in the runs the prediction was made from, and run2 was taken at loadavg 37.2,
+above the ~32 saturation threshold established for this box, and is visibly depressed in all four
+ops. So the figure to read is **divide's excess divided by multiply's excess, both measured in the
+SAME invocation**: multiply is the op that maps to `_ => None`, never enters the f64 binary block,
+and therefore serves as an internal control for everything the two ops share.
+
+```
+  BEFORE (row of 2026-08-16, same host, same harness)   471 / 220 = 2.14x
+  AFTER  run1                                           257 / 210 = 1.22x
+         run2 (loadavg 37.2)                            307 / 311 = 0.99x
+         run3                                           245 / 215 = 1.14x
+```
+
+**Divide used to cost 2.14 times what multiply cost above NumPy; it now costs 1.0-1.2 times.** The
+surcharge divide alone paid - the f64 block's dtype probes, entered and then declined at the size
+gate - is substantially gone. That is exactly what the three levers targeted:
+
+```
+  d1a6612e  the gate answers from `dtype.char` instead of a per-operand `numpy.asarray` round-trip
+  (in eac4d567) the size predicate moved ahead of the dtype reads, so a small divide declines first
+  e5914860  x1's sniff hoisted above the block, so its typechar is free at the gate
+```
+
+**THE PREDICTION, AND THE HALF OF IT THAT IS REFUTED.** The registered prediction was: *"divide's
+excess should fall toward the 220-281 ns band of the ops that skip the block, while
+add/subtract/multiply should not move at all, since they never entered it. A lever that moves all
+four refutes the account."*
+
+- **Confirmed:** divide's excess fell 471 -> 245-257, landing inside the stated band.
+- **REFUTED as stated:** the other three did move - add 281 -> 215/216 (-23%), subtract 231 ->
+  216/220 (-5%), multiply 220 -> 210/215 (-3%). I wrote "not at all" and that was too strong.
+
+The refutation is of my phrasing, not of the mechanism: the correct control was never the
+cross-window absolute, which carries NumPy's drift and the load difference, but the within-run
+ratio above - and by that measure the three ops that skip the block moved together while divide
+converged onto them. Had I written the prediction in terms of the internal control I would not have
+had to withdraw half of it. **The lesson is to register predictions in the statistic that will
+actually be read.**
+
+**WHAT IS NOT CLAIMED.** This is not an isolation of the three levers from each other, and the
+tree also carries peer commits landed the same day (an f32 allocate-at-final-shape lever and an
+`out=` native route). Neither touches this path - `out=` is not passed here and f32 is a different
+dtype - but they are in the ELF and I do not certify their absence by argument alone. The
+within-invocation control is what makes the divide-specific claim robust to that: a peer change on
+a shared path moves divide and multiply together and cannot produce a fall in their RATIO.
+
+**And the cell is still a loss.** 1.5613x means NumPy is faster here; this row records that the
+worst known per-call cell narrowed, not that it was won.
+
+RETRY PREDICATE: (1) The remaining divide surcharge over multiply is 0-47 ns, consistent with the
+two reads still on that path - x2's `dtype.char` and the `getattr("size")`. Hoisting an x2 sniff
+would remove the first, but must be measured against the ops that would newly pay for it, since
+unlike x1's there is no existing x2 sniff to share. (2) Do NOT compare excess across windows
+without the internal control; run2 here is a worked example of how a 5-point loadavg difference
+moves every absolute in the table while leaving the ratio intact. (3) The floor common to all four
+(~210-220 ns) is now the target, and it is a different lever family from this one: it is paid by
+ops that never enter the block. AGENT_NAME=RedLynx.
+
