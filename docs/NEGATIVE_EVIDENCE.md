@@ -50746,3 +50746,90 @@ under test.
 
 No ratio is published in this row. It registers what the next row is permitted to say.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - REPO-WIDE AUDIT of the separate-buffer defect: SEVEN bench groups give their two arms different output buffers, and one of them is the instrument behind the CERTIFIED `out=` headline (`maximum` 0.907848 -> 1.501804). Those cells use 32 MiB buffers - four times the size at which the artifact is already proven (`deadlock-audit-6y5wp`, `deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+
+`AzureCarp`. **NO BUILD, no measurement** - a static audit, done deliberately in an unusable window
+(loadavg 60.32/45.08/26.03, 3 external `rustc`, `proj_builds` = 0, disk 216G). Nothing here is a
+result about performance; it is a scope statement about which banked rows rest on a configuration now
+known to manufacture one.
+
+**Campaign result class:** defect-class audit; a CERTIFIED row of the campaign flagged as SUSPECT
+
+### The defect, restated in one line
+
+When a two-arm benchmark gives each arm its OWN output buffer and those buffers exceed cache, the arms
+race page residency and the winner is whichever buffer was better resident - not the code. Proven
+today at 8 MiB: the worst divide cell moved **0.5904 -> 0.7798** and its run-to-run spread fell
+**0.1948 -> 0.0506** when the two arms were pointed at ONE shared buffer, while the four sizes below
+cache moved by at most 0.02.
+
+### Every group in this file with two-plus output buffers AND a dual-null contract
+
+```
+  group                                       output buffers                 n           per-buffer
+  bench_divide_accumulate_isolation_vs_numpy  former_out, fused_out, probe   2^20          8 MiB
+  bench_divide_classifier_accumulator_form    bitmask_out, fused_out, probe  2^20          8 MiB
+  bench_divide_allocator_provenance           np_out, rust_out               2^20          8 MiB
+  bench_divide_kernel_on_numpy_buffers        former_out, fused_out, out     2^20          8 MiB
+  bench_divide_allocation_split_vs_numpy      o1, o2                         2^20          8 MiB
+  bench_out_kwarg_vs_numpy                    out_np, out_fnp                2^20, 2^22    8, 32 MiB
+  bench_maximum_arms_vs_numpy                 parallel_out, serial_out       2^22         32 MiB
+```
+
+**Seven groups. All at or above 8 MiB per buffer, two of them at 32 MiB.** Only
+`bench_divide_out_route_delegation_sweep` has been converted to a shared buffer, and only because its
+`wrapper_ns` went physically negative and forced the question.
+
+### The one that matters most: the CERTIFIED `out=` headline
+
+`bench_out_kwarg_vs_numpy` is the instrument behind the campaign row *"CERTIFIED, AND THE PREDICTION IS
+CONFIRMED: `out=` FLIPS THE SIGN for `maximum` - 0.907848 (loss) allocating becomes 1.501804 (WIN) with
+the caller's buffer"*, and behind its generalisation to all three ~0.91 cells:
+
+```
+  maximum 2^22   0.907848 LOSS  ->  1.756669 WIN
+  minimum 2^22   0.913424 LOSS  ->  1.687567 WIN
+  divide  2^22   0.920786 LOSS  ->  1.800915 WIN
+```
+
+**Every one of those `out=` figures was measured with `out_np` and `out_fnp` as two separate 32 MiB
+arrays** - four times the buffer size at which the artifact is already demonstrated, in a group whose
+whole purpose is to compare an `out=` arm against an `out=` arm.
+
+### What I am and am NOT claiming
+
+**I am NOT saying those wins are false.** I have not measured them, the sign of the bias is not
+predictable a priori, and a residency race can flatter either arm depending on write order and which
+buffer the allocator places where. In my divide case it flattered NumPy; there is no reason it must do
+the same here.
+
+**I AM saying they are not currently established**, because they were produced by the configuration
+that manufactured a 32% error and a 3.9x spread inflation on a cell I have re-measured. A result whose
+instrument is known to have this defect needs re-taking, whichever way it moves.
+
+The fix is one line for `bench_out_kwarg_vs_numpy` and for `bench_divide_allocation_split_vs_numpy`:
+both arms are Python calls taking an `out=` kwarg, so pointing them at one array is trivial, and it is
+exactly the change already proven to work in the delegation sweep. It is NOT one line for the four
+groups whose candidate arms are Rust loops holding `&mut [f64]` from `PyBuffer` - there the slices must
+be re-derived per call or the fix trades a measurement artifact for an aliasing one.
+
+**I have not made any of those edits.** `deadlock-audit-ei9jz` and `deadlock-audit-48by6` are not my
+beads, the certified row is not mine, and silently changing the instrument under a peer's certified
+result is worse than reporting it. This row is the report.
+
+COUNTED_MECHANISM: 7 groups in one file allocate 2 or more output buffers and run a dual-null contract;
+2 of them use 4194304-element buffers at 32 MiB each; the same configuration at 8 MiB was measured
+moving a ratio 0.5904 -> 0.7798 and a spread 0.1948 -> 0.0506 when replaced by 1 shared buffer.
+
+A/A NULL CONTROLS: not applicable - no measurement in this row. Worth repeating that the A/A nulls
+passed in every run that produced the artifact I already voided, so a clean null on any of the seven
+groups above is not evidence against this.
+
+RETRY PREDICATE: before re-taking any of these, convert the group to ONE shared output buffer - the two
+Python-call groups directly, the four Rust-loop groups by re-deriving `&mut` slices per call. Do not
+re-quote the `maximum`/`minimum`/`divide` 2^22 `out=` wins as certified until
+`bench_out_kwarg_vs_numpy` is converted and re-run; they may well survive, and if they do they become
+stronger, not weaker. Route this to the owners of `deadlock-audit-ei9jz` and `deadlock-audit-48by6`
+rather than editing their instrument.
+AGENT_NAME=AzureCarp.
