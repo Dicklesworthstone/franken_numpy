@@ -49780,3 +49780,58 @@ RETRY PREDICATE: the certifying run must satisfy amended rules 1-3 plus original
 is voided by the stdev guard, it stays UNDECIDED and the route keeps current behaviour - do not retry
 it by simply running more times until the spread narrows.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CORRECTION TO MY OWN QUOTING: `numpy_dtype_is_f64` is worth 33% on its BEST cell and NOTHING on its worst three. The same is true of my other two recent wins - all three are SINGLE-CELL levers and I headlined them as if they were broad (`deadlock-audit-v46rn`)
+
+`RedLynx`. No build. Re-reading my own banked tables rather than measuring anything new.
+
+**Campaign result class:** methodology (corrects the framing of three certified rows; no figure
+in them changes)
+
+**THE FAULT.** Row 58's heading reads *"the `numpy_dtype_is_f64` fast path takes the campaign's
+worst cell from 8.700x to 5.838x"*. Its own table, four cells measured in the same runs:
+
+```
+  case              uses predicate   BEFORE     AFTER      effect
+  ss_array_needle   YES (x2/call)    8.700x     5.838x     -33%   <- the cell I headlined
+  ss_scalar_needle  no               2.178x     2.144x      ~0
+  clip_one_sided    no               1.0999x    1.1035x     ~0 (slightly worse)
+  clip_two_sided    no               1.6345x    1.6771x     ~0 (slightly worse)
+```
+
+**On its WORST measured cell the fast path is worth nothing, and on two of them the cell came out
+marginally worse.** The heading quotes the single cell where it paid. The predicate has 117 call
+sites; four cells were measured; one moved.
+
+**AND THE SAME IS TRUE OF THE OTHER TWO WINS IN THIS STRETCH**, which I did not notice until I
+applied the same test to them:
+
+```
+  lever                        best cell                    worst cells (same runs)
+  numpy_dtype_is_f64 (117)     ss_array   8.700x -> 5.838x   three cells ~0
+  searchsorted 7 probe heads   ss_array   5.730x -> 3.262x   ss_list +2.0%, ss_scalar +0.3%
+  136 probe-head sweep         clip_two   1.6791x -> 1.18x   four cells -0.03% to -2.2%
+```
+
+**Every one of them is a single-cell win.** That is not a defect in the levers - a change to a
+path only helps calls that take that path, and the flat controls are exactly what made each
+result decidable. **It is a defect in how I headlined them.** "Takes the campaign's worst cell
+from X to Y" reads as a property of the change; the honest form is "worth Z on the one cell that
+routes through it, and nothing on the others measured".
+
+**THE 8.700x FIGURE NEEDS PARTICULAR CARE** because it is a BEFORE state, not an achievement. It
+was the cell's condition when first measured; quoting it beside a lever makes the lever sound
+addressed to an 8.700x problem when the lever is worth 33% and the cell was still 5.838x after.
+The cell has since reached 3.262x across three separate levers, none of which individually did
+more than a third of the distance.
+
+**WHAT DOES NOT CHANGE.** No measurement, control, null or void in rows 58, 66 or 67 is affected.
+The controls were designed, the arms were interleaved, the voids were disclosed. This corrects the
+sentence at the top of each, not the evidence underneath it.
+
+RETRY PREDICATE: (1) Quote a lever at its WORST measured cell and name the cells where it did
+nothing; the best cell belongs in the body, not the heading. (2) Never headline a BEFORE state as
+though it were the lever's reach - "8.700x" is where the cell started, not what the change was
+worth. (3) When a lever's controls are flat, that is evidence FOR the attribution and evidence
+AGAINST breadth at the same time; say both. AGENT_NAME=RedLynx.
+
