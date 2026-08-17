@@ -51632,3 +51632,103 @@ test of the same predicate. Quote the win as 4.04% (worst run 1.0356), a self-sp
 kernel, NOT a vs-numpy claim - the vs-numpy rows in this group are Vec-backed replicas carrying the
 buffer-provenance tax. Two of the five audited 2^20 groups remain unconverted.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — THE MULTIPLY EXCESS IS DIFFUSE: no single symbol carries it, only ~26% lives in code that exists solely on our path, and that is WHY seven named stage-levers all failed (deadlock-audit-ei9jz)
+
+**Campaign result class:** attribution of an already-measured cost + a negative result that closes a
+line of attack
+
+Counters and sampled profiles only; no wall-clock certification. Same ELF as the banked six-arm row
+(`bench_elf_sha256=a88cb068...`, committed source `5aa6b001`, release-perf, threading pinned).
+Host: LOADAVG 10.81/13.42/17.20 -> 11.98/14.15/17.70, CPU idle 79-82%, iowait 0, 2755 MHz,
+/data 204G. No build was needed for any of this - the ELF already existed.
+
+### The question this answers
+
+The six-arm row split the route's 1831.3 insns/call excess into a probe chain (>= 357.7) and a
+wrapper residual (<= 1473.5) but explicitly left open "what the 1473.5 IS". `perf record` on the
+`fnp_plain` and `numpy_plain` arms, differenced per symbol, answers it.
+
+### FIRST, THE INSTRUMENT'S OWN PRECISION, because it is worse than it looks
+
+Both arms make 400,000 identical NumPy multiply calls, so any symbol inside NumPy's own call must be
+EQUAL between them. That gives a free noise floor, and it is not small:
+
+```
+  symbol (must be equal)                         fnp     numpy    delta
+  DOUBLE_multiply_X86_V3                       201.2     200.3      0.8
+  PyArray_NewFromDescr_int                      99.1     113.3    -14.2
+  ufunc_generic_fastcall                       426.9     471.7    -44.9
+  fetestexcept                                 176.6     127.7     48.9
+  PyUFunc_DefaultLegacyInnerLoopSelector       165.8     106.2     59.7
+  -> per-symbol precision bound ~60 insns/call
+```
+
+**A FIRST RECORDING AT DEFAULT FREQUENCY SAMPLING WAS WRONG BY 2x AND I ALMOST BANKED IT.** Default
+`-F` gave ~3,600 samples over the whole run and attributed 440.6 insns/call to our wrapper body. At
+a fixed period (`-c 50000`, ~78,500 samples) the same symbol reads 227.7, and three further
+recordings give 262.9 / 240.4 / 270.8 - median ~251, spread 17%. The 440.6 was sample starvation,
+not cost. This ledger already contains one retraction from reading sampling skid as cost; the rule
+that catches it is to set an explicit period and REPLICATE the headline symbol before quoting it.
+
+Listed-symbol coverage is 87.5% (fnp) / 86.5% (numpy), and the summed per-symbol deltas reconstruct
+1675.7 against the counted 1831.3 - an 8.5% residual, which is the honest accuracy of the whole
+attribution.
+
+### The robust core: symbols that exist ONLY on our path
+
+These cannot be explained by a shared-symbol sampling artifact, because NumPy's arm never executes
+them at all:
+
+```
+   insns/call  dso        symbol
+        ~251   OURS       <fnp_python::PyUFunc>::__pymethod___call____   (4 reps: 227.7/262.9/240.4/270.8)
+        72.6   OURS       pyo3 FunctionDescription::extract_arguments
+        40.2   OURS       <char as pyo3::FromPyObject>::extract          (the complex probe's kind char)
+        35.3   OURS       pyo3 extract_pyclass_ref::<PyUFunc>
+        23.6   libpython  PyMember_GetOne
+        19.6   OURS       fnp_python::interned_ufunc_name
+        14.7   libpython  PyDescr_IsData
+        12.8   OURS       pyo3 trampoline::trampoline
+        10.8   libpython  PyUnicode_AsUTF8AndSize
+         9.8   OURS       pyo3 trampoline::ternaryfunc
+         5.9   libc       __gconv_transform_internal_utf8
+  ---------------------------------------------------------------
+       ~473    TOTAL ours-only  =  26% of the 1831.3 excess
+```
+
+### THE FINDING: there is no hot symbol to attack
+
+**Not one SHARED symbol shows a delta above twice the noise floor.** The other ~74% of the excess -
+roughly 1358 insns/call - is spread across ordinary CPython and NumPy machinery (attribute lookup,
+tuple allocation, type lookup, malloc) in increments each individually below ~60 insns/call. Our
+wrapper body itself, the single largest identifiable item, is only ~14% of the excess.
+
+This is a NEGATIVE result and it is the useful kind. This bead was opened because seven named stage
+levers had each been priced and none moved the floor, and it asked what the unattributed remainder
+was. The answer is that the remainder is not a thing: it is the diffuse cost of making a Python call
+through a PyO3 wrapper and then making a second Python call to NumPy. There is no eighth stage
+hiding, which is exactly what the bead suspected when it said "a stage replica can only price a
+stage someone already suspected".
+
+CONSEQUENCE FOR ANYONE PLANNING WORK HERE: a micro-lever on this route can only reach the ~473
+insns/call of ours-only code, and realistically only the ~251 in our own `__call__` body plus the
+~130 of PyO3 argument machinery. Removing ALL of our own wrapper body - which is not possible, it
+has to do the dispatch - would win 14% of the excess. The remaining 74% is only reachable by not
+making the second call at all, i.e. by a native route rather than delegation. That is a different
+class of change from anything this bead has priced, and it is the honest recommendation.
+
+COUNTED_MECHANISM: 1831.3 insns/call excess (counted, 6 arms x 3 reps); ~473 insns/call in
+ours-only symbols; 0 shared symbols above 2x the 60 insns/call noise floor; wrapper body ~251
+replicated over 4 recordings.
+
+A/A NULL CONTROLS: not applicable - no ratio between timed arms is published. The controls that do
+apply are the must-be-equal symbol set (bounding per-symbol precision at ~60 insns/call) and the
+8.5% reconstruction residual against the independently counted total.
+
+RETRY PREDICATE: do NOT re-attempt a micro-lever on the delegating multiply route on the strength of
+a single symbol reading. Anyone who does must first set an explicit `perf record -c` period and
+replicate the symbol across >= 3 recordings, because default frequency sampling read this route's
+top symbol 2x too high. The open question that remains worth money is the native-route class, not
+another stage.
+AGENT_NAME=SlateFinch.
