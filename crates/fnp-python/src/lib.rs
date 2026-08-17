@@ -9844,6 +9844,41 @@ fn try_zerocopy_f64_isclose(
 // `benches/criterion_python_elementwise.rs`, which the bench asserts before it
 // times anything. Change an arm of this predicate and both must move, or the
 // bench silently measures a branch we do not ship.
+/// Non-normality evidence for ONE quotient, shaped so a whole run can be OR-ed
+/// together and tested once (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`).
+///
+/// Same predicate as `f64_divide_quotient_bits_are_normal`, in the form a loop wants.
+/// The boolean version answers per element, so the compiler must collapse a 4-lane
+/// vector compare into a `bool` on every iteration - `vextracti128`, `vpackssdw`,
+/// `vpor`, three ops that are not arithmetic and one of which is cross-lane. OR-ing raw
+/// evidence instead keeps the accumulator in the vector domain and tests it once at the
+/// end: 35 instructions per 16 doubles against 43, measured at a 4.04% kernel win over
+/// five runs (mean 1.0404, between-run stdev 0.0030 against a within-run CI half-width
+/// of 0.0088 - the first statistic on this route to pass that guard).
+///
+/// EQUIVALENCE, by exponent class rather than by sampling. Let `e` be the biased
+/// exponent field, a multiple of `EXPONENT_STEP` in `0..=0x7ff0_..`:
+///   e == 0            (zero/subnormal) -> `e.wrapping_sub(1)` is all ones      -> bit 63 SET
+///   e == 0x7ff0_..    (inf/nan)        -> `e.wrapping_add(STEP)` is 0x8000_..  -> bit 63 SET
+///   otherwise         (normal)         -> both terms stay below 2^63           -> bit 63 CLEAR
+/// So bit 63 of the OR is set exactly when some quotient was non-normal, which is what
+/// `saw_non_normal` meant. `assert_bitmask_classifier_matches_boolean_classifier` in the
+/// bench pins the same claim over twelve cases chosen so each non-normal exponent class
+/// is the ONLY thing separating a case from an all-normal control.
+#[inline]
+fn f64_divide_quotient_non_normal_evidence(bits: u64) -> u64 {
+    const EXPONENT_MASK: u64 = 0x7ff0_0000_0000_0000;
+    const EXPONENT_STEP: u64 = 0x0010_0000_0000_0000;
+    let exponent = bits & EXPONENT_MASK;
+    exponent.wrapping_sub(1) | exponent.wrapping_add(EXPONENT_STEP)
+}
+
+/// True when the accumulated evidence says some quotient was non-normal.
+#[inline]
+fn f64_divide_evidence_saw_non_normal(evidence: u64) -> bool {
+    evidence >> 63 != 0
+}
+
 #[inline]
 fn f64_divide_quotient_bits_are_normal(bits: u64) -> bool {
     // A binary64 is normal exactly when its biased exponent lies in 1..0x7ff.
@@ -10379,13 +10414,25 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // Same fusion as the parallel arm above: accumulate the cheap
             // normality flag beside the divide rather than streaming the whole
             // output a second time to find it.
-            let mut saw_non_normal = false;
+            //
+            // BITMASK EVIDENCE, not a boolean (`deadlock-audit-6y5wp`). The boolean form
+            // forced a 4-lane compare mask down to a `bool` every iteration; OR-ing raw
+            // evidence keeps the accumulator in the vector domain and tests it once. See
+            // `f64_divide_quotient_non_normal_evidence` for the exponent-class equivalence
+            // argument. Measured 4.04% on this arm, 5/5 runs, stdev 0.0030.
+            //
+            // THE PARALLEL ARM ABOVE DELIBERATELY KEEPS THE BOOLEAN FORM. The 4.04% was
+            // measured at n=2^20, which is BELOW the `1 << 21` rayon threshold, so it says
+            // nothing about the parallel arm. The transformation is semantics-preserving
+            // there too, but its ratio is unmeasured and this campaign does not ship
+            // extrapolations - converting it needs its own measurement at n >= 2^21.
+            let mut evidence: u64 = 0;
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
                 let quotient = a_cell.get() / b_cell.get();
                 slot.set(quotient);
-                saw_non_normal |= !f64_divide_quotient_bits_are_normal(quotient.to_bits());
+                evidence |= f64_divide_quotient_non_normal_evidence(quotient.to_bits());
             }
-            if saw_non_normal
+            if f64_divide_evidence_saw_non_normal(evidence)
                 && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
                     |((slot, a_cell), b_cell)| {
                         f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), slot.get())
@@ -110624,8 +110671,9 @@ mod tests {
         compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
         diagflat, diagonal, digitize, dtype_kind_of, extract, extract_numeric_array,
         extract_precise_numeric_array, f64_binary_route_is_worth_taking,
-        f64_divide_fast_accepts_without_fp_error, f64_divide_non_fast_raises_fp_error,
-        f64_divide_quotient_bits_are_normal, f64_divide_raises_fp_error,
+        f64_divide_evidence_saw_non_normal, f64_divide_fast_accepts_without_fp_error,
+        f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
+        f64_divide_quotient_non_normal_evidence, f64_divide_raises_fp_error,
         f64_out_route_is_worth_taking, fill_diagonal, flatnonzero, flip, fliplr, flipud,
         floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name, interp,
         is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native, isneginf_native,
@@ -162976,6 +163024,62 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                  exercises the allocating path could have caught it"
             );
         });
+    }
+
+    /// The bitmask evidence accumulator must agree with the boolean predicate it
+    /// replaced, on every exponent class (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`).
+    ///
+    /// The bench carries this assertion too, but the bench is not run by CI and the
+    /// shipped serial divide arm now depends on the equivalence. The cases are chosen so
+    /// that each non-normal exponent class is the ONLY thing separating it from an
+    /// all-normal control, and the inf/nan ones are load-bearing: an accumulator built
+    /// from `wrapping_sub(1)` alone passes every zero and subnormal case and fails only
+    /// these.
+    #[test]
+    fn bitmask_evidence_matches_the_boolean_normality_predicate() {
+        let cases: &[(f64, &str)] = &[
+            (2.0, "normal control"),
+            (f64::INFINITY, "+inf: exponent all ones"),
+            (f64::NEG_INFINITY, "-inf: exponent all ones"),
+            (f64::NAN, "nan: exponent all ones"),
+            (0.0, "+0: exponent zero"),
+            (-0.0, "-0: exponent zero"),
+            (f64::MIN_POSITIVE / 2.0, "subnormal: exponent zero"),
+            (5e-324, "smallest subnormal"),
+            (f64::MIN_POSITIVE, "min normal stays normal"),
+            (f64::MAX, "max normal stays normal"),
+            (-f64::MAX, "max negative normal"),
+        ];
+        for (value, what) in cases {
+            let bits = value.to_bits();
+            let boolean_says_non_normal = !f64_divide_quotient_bits_are_normal(bits);
+            let evidence = f64_divide_quotient_non_normal_evidence(bits);
+            assert_eq!(
+                f64_divide_evidence_saw_non_normal(evidence),
+                boolean_says_non_normal,
+                "{what}: the bitmask accumulator disagrees with the boolean predicate"
+            );
+        }
+
+        // The accumulator must also survive being OR-ed with many normal quotients -
+        // that is how the loop uses it, and a form that only works in isolation would
+        // pass the per-value checks above.
+        let mut evidence: u64 = 0;
+        for _ in 0..37 {
+            evidence |= f64_divide_quotient_non_normal_evidence(6.0_f64.to_bits());
+        }
+        assert!(
+            !f64_divide_evidence_saw_non_normal(evidence),
+            "an all-normal run must not report non-normal evidence"
+        );
+        evidence |= f64_divide_quotient_non_normal_evidence(f64::INFINITY.to_bits());
+        for _ in 0..37 {
+            evidence |= f64_divide_quotient_non_normal_evidence(6.0_f64.to_bits());
+        }
+        assert!(
+            f64_divide_evidence_saw_non_normal(evidence),
+            "one non-normal quotient embedded in a normal run must still be seen"
+        );
     }
 
     /// The `out=` decline band engages outside itself and declines inside it, at the
