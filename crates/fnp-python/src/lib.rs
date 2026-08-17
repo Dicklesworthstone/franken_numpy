@@ -10814,11 +10814,10 @@ fn try_zerocopy_f16_argextreme_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -11012,11 +11011,10 @@ fn try_zerocopy_f16_minmax_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -11205,11 +11203,10 @@ fn try_zerocopy_f16_ptp_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -11402,11 +11399,10 @@ fn try_zerocopy_f16_nanextreme_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -13932,11 +13928,10 @@ fn try_zerocopy_int_clip(
     a_min: &Bound<'_, PyAny>,
     a_max: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -15248,11 +15243,10 @@ fn try_zerocopy_f64_roll(
     shift: &Bound<'_, PyAny>,
     axis: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(shift_scalar) = shift.extract::<i64>() else {
         return Ok(None);
     };
@@ -15322,11 +15316,10 @@ fn try_zerocopy_any_roll(
     shift: &Bound<'_, PyAny>,
     axis: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(shift_scalar) = shift.extract::<i64>() else {
         return Ok(None);
     };
@@ -15419,11 +15412,10 @@ fn try_zerocopy_f64_roll_axis(
     shift_scalar: i64,
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -15509,11 +15501,10 @@ fn try_zerocopy_any_roll_axis(
     shift_scalar: i64,
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let a_dtype = a.getattr("dtype")?;
     // Complex already has an efficient fallback; skip it (and zero-itemsize).
     if a_dtype.getattr("kind")?.extract::<String>()? == "c" {
@@ -15699,11 +15690,10 @@ fn try_zerocopy_any_roll_2d_multi(
     shifts: &[i64],
     axes: &[i64],
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
@@ -17412,11 +17402,10 @@ fn try_zerocopy_f64_cumsum(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -17606,11 +17595,10 @@ fn try_zerocopy_int_cumsum(
     if !matches!(dtype_kind_of(a), Some('i' | 'u' | 'b')) {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -17729,11 +17717,10 @@ fn try_zerocopy_f64_cumprod(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -17781,11 +17768,10 @@ fn try_zerocopy_f64_nancumsum(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -17832,11 +17818,10 @@ fn try_zerocopy_f64_nancumprod(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -17898,11 +17883,10 @@ fn try_zerocopy_f64_cumulative_axis(
     is_prod: bool,
     skip_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -18243,11 +18227,10 @@ fn try_zerocopy_int_cumsum_axis(
     a: &Bound<'_, PyAny>,
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -18354,11 +18337,10 @@ fn try_zerocopy_f32_cumsum(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -18387,11 +18369,10 @@ fn try_zerocopy_f32_cumsum_axis(
     a: &Bound<'_, PyAny>,
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -18423,11 +18404,10 @@ fn try_zerocopy_f16_cumulative_axis(
     skip_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const CUM_AXIS_PARALLEL_MIN: usize = 1 << 18;
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 2
@@ -18612,11 +18592,10 @@ fn try_zerocopy_f32_nancumulative_axis(
     axis: isize,
     is_prod: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -18682,11 +18661,10 @@ fn try_zerocopy_int_cumprod(
     if !matches!(dtype_kind_of(a), Some('i' | 'u' | 'b')) {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -18754,11 +18732,10 @@ fn try_zerocopy_int_cumprod_axis(
     a: &Bound<'_, PyAny>,
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -18865,11 +18842,10 @@ fn try_zerocopy_f32_cumprod(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -18898,11 +18874,10 @@ fn try_zerocopy_f32_cumprod_axis(
     a: &Bound<'_, PyAny>,
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -18937,11 +18912,10 @@ fn try_zerocopy_f64_tile(
     if reps.len() != 1 {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -19009,11 +18983,10 @@ fn try_zerocopy_any_tile(
     if reps.is_empty() {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
     if shape.len() != 1 {
         return Ok(None);
@@ -19124,11 +19097,10 @@ fn try_zerocopy_any_tile_multidim(
     if reps.is_empty() {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let a_shape: Vec<usize> = a.getattr("shape")?.extract()?;
     if a_shape.len() < 2 {
         return Ok(None);
@@ -19279,11 +19251,10 @@ fn try_zerocopy_f64_diff1d(
     if n != 1 || !(axis == -1 || axis == 0) {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -19356,11 +19327,10 @@ fn try_zerocopy_f64_diff_axis(
     if n != 1 {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -19622,11 +19592,10 @@ fn try_zerocopy_int_diff(
     if n != 1 {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -19667,11 +19636,10 @@ fn try_zerocopy_f32_diff(
     if n != 1 {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -23203,11 +23171,10 @@ fn try_parallel_nonzero_2d(
 }
 
 fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     // Large contiguous supported dtypes take the parallel two-pass kernel;
     // 1-D-or-any-shape is fine here because flatnonzero ravels by definition.
     if let Some(out) = try_parallel_flatnonzero(py, &numpy, a)? {
@@ -23395,11 +23362,10 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
 // though fnp's own nonzero is at parity). Returns None (caller falls through) for
 // complex/other dtypes, 0-d, or non-contiguous / non-ndarray input.
 fn try_zerocopy_argwhere(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let shape: Vec<usize> = a.getattr("shape")?.extract::<Vec<usize>>()?;
     if shape.is_empty() {
         return Ok(None); // 0-d: numpy's (1,0)/(0,0) shaping — defer
@@ -23743,11 +23709,10 @@ fn try_zerocopy_count_nonzero(
     if keepdims {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -24258,11 +24223,10 @@ fn try_zerocopy_any_all(
     axis: Option<isize>,
     is_all: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     let shape: Vec<usize> = a.getattr("shape")?.extract::<Vec<usize>>()?;
     match kind.as_str() {
@@ -25738,11 +25702,14 @@ fn try_native_repeat_scalar(
     axis: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const REPEAT_PARALLEL_MIN: usize = 1 << 22; // output bytes (~4MB)
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
+    // Rebound rather than replaced: the use below is `is_instance`, not
+    // `is_exact_instance`, so it deliberately admits ndarray SUBCLASSES and the
+    // cached exact-type check would silently narrow it (`deadlock-audit-v46rn`).
+    let ndarray_type = numpy.getattr("ndarray")?;
     // Scalar integer count only (a per-element repeats array won't extract to i64 -> defer).
     if a.getattr("ndim")?.extract::<usize>()? == 0 {
         return Ok(None);
@@ -28088,11 +28055,10 @@ fn try_native_int_matrix_power(
     power: u64,
 ) -> PyResult<Option<Py<PyAny>>> {
     const NATIVE_INT_MATPOW_MIN_DIM: usize = 64;
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
     if shape.len() != 2 || shape[0] != shape[1] || shape[0] < NATIVE_INT_MATPOW_MIN_DIM {
         return Ok(None);
@@ -33555,11 +33521,10 @@ fn try_zerocopy_int_choose(
     if mode != "raise" {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let a_kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if a_kind != "i" && a_kind != "u" {
         return Ok(None);
@@ -33582,7 +33547,7 @@ fn try_zerocopy_int_choose(
     // All choices must be ndarrays of a's shape and one shared integer dtype.
     // Guard items[0] before reading its dtype, else array_like (Python list)
     // choices raise AttributeError here instead of deferring to numpy.
-    if !items[0].is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, &items[0])? {
         return Ok(None);
     }
     let c0_dtype = items[0].getattr("dtype")?;
@@ -33592,7 +33557,7 @@ fn try_zerocopy_int_choose(
         return Ok(None);
     }
     for c in &items {
-        if !c.is_exact_instance(&ndarray_type)
+        if !is_exact_numpy_ndarray(py, c)?
             || c.getattr("shape")?.extract::<Vec<usize>>()? != a_shape
         {
             return Ok(None);
@@ -34223,11 +34188,10 @@ fn try_zerocopy_scalar_searchsorted(
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     if a.getattr("ndim")?.extract::<usize>()? != 1 {
         return Ok(None); // numpy searchsorted requires a 1-D haystack
     }
@@ -35733,11 +35697,10 @@ fn try_zerocopy_histogram(
     a: &Bound<'_, PyAny>,
     nbins: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     // np.histogram operates on the FLATTENED input; for a C-contiguous N-D
     // ndarray the ravel is a ZERO-COPY reshape view, so normalize to 1-D and
     // let the typed kernels (which gate shape.len() == 1) serve it — the N-D
@@ -38214,11 +38177,10 @@ fn try_zerocopy_any_put(
     ind: &Bound<'_, PyAny>,
     v: &Bound<'_, PyAny>,
 ) -> PyResult<Option<()>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let a_dtype = a.getattr("dtype")?;
     let kind = a_dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -41469,11 +41431,10 @@ fn try_zerocopy_f64_nansum_axis(
     a: &Bound<'_, PyAny>,
     axis_obj: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -42101,11 +42062,10 @@ fn try_zerocopy_f64_nansum_flat(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -42634,11 +42594,10 @@ fn try_zerocopy_f16_sum_lastaxis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -42728,11 +42687,10 @@ fn try_zerocopy_f16_average_lastaxis(
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
     const F16_AVERAGE_AXIS_PARALLEL_MIN: usize = 1 << 20;
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 2
@@ -42836,11 +42794,10 @@ fn try_zerocopy_f16_nanmean_lastaxis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -42937,11 +42894,10 @@ fn try_zerocopy_f16_sum_nonlast_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -43038,11 +42994,10 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -43150,11 +43105,10 @@ fn try_zerocopy_f16_nanvar_nonlast_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -43283,11 +43237,10 @@ fn try_zerocopy_f16_nanvar_lastaxis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -44029,11 +43982,10 @@ fn try_zerocopy_f64_nanprod_axis(
     a: &Bound<'_, PyAny>,
     axis_obj: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -44315,11 +44267,10 @@ fn try_zerocopy_f64_nanextreme(
     a: &Bound<'_, PyAny>,
     take_max: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -44364,11 +44315,10 @@ fn try_zerocopy_f64_nanextreme_axis(
     axis_obj: &Bound<'_, PyAny>,
     take_max: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -44736,11 +44686,10 @@ fn try_zerocopy_f64_nanmean_axis(
     a: &Bound<'_, PyAny>,
     axis_obj: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -45016,11 +44965,10 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
     axis_obj: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -45248,11 +45196,10 @@ fn try_zerocopy_f64_nanvar_axis(
     take_sqrt: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -45374,11 +45321,10 @@ fn try_zerocopy_f32_nanmean_last_axis(
     axis_obj: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -45490,11 +45436,10 @@ fn try_zerocopy_f32_nanvar_last_axis(
     take_sqrt: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -45933,11 +45878,10 @@ fn try_zerocopy_f32_var_nonlast_axis(
     take_sqrt: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -46289,11 +46233,10 @@ fn try_zerocopy_f32_nanvar_nonlast_axis(
     take_sqrt: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -56652,11 +56595,10 @@ fn try_zerocopy_narrow_shift(
     b: &Bound<'_, PyAny>,
     is_left: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -64096,11 +64038,10 @@ fn try_zerocopy_f64_average_axis(
     axis_obj: &Bound<'_, PyAny>,
     returned: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let is_f64 = |x: &Bound<'_, PyAny>| -> PyResult<bool> {
         let dt = x.getattr("dtype")?;
         Ok(dt.getattr("kind")?.extract::<String>()? == "f"
@@ -82327,11 +82268,10 @@ fn try_zerocopy_int_minmax(
     keepdims: bool,
     take_min: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind == "b" {
@@ -85896,11 +85836,10 @@ fn try_zerocopy_f64_argextreme(
     if axis.is_some() {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -86094,11 +86033,10 @@ fn try_zerocopy_lastaxis_argextreme(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     if !a
         .getattr("flags")?
         .getattr("c_contiguous")?
@@ -86254,11 +86192,10 @@ fn try_zerocopy_f64_argextreme_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -86542,11 +86479,10 @@ fn try_zerocopy_int_argextreme_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -94767,11 +94703,10 @@ fn einsum_native(
 // unique unreliable; the fleet conformance workers are AVX2.)
 fn try_native_f16_unique_flat(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     const UNIQUE_MIN: usize = 1 << 17;
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -103335,11 +103270,10 @@ where
 // (v>0) - (v<0). Otherwise these extracted to an f64 Vec (~80x slower, lossy for
 // wide ints). Returns None for non-integer / non-ndarray inputs.
 fn try_zerocopy_int_sign(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -103515,11 +103449,10 @@ fn try_zerocopy_int_prod(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -103688,11 +103621,10 @@ fn try_zerocopy_int_argextreme(
     if axis.is_some() {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -103773,11 +103705,10 @@ fn try_zerocopy_int_ptp(
     if axis.is_some() {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -103985,11 +103916,10 @@ fn try_zerocopy_int_ptp_axis(
     a: &Bound<'_, PyAny>,
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -104059,11 +103989,10 @@ fn try_zerocopy_f64_ptp_axis(
     a: &Bound<'_, PyAny>,
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -105017,11 +104946,10 @@ fn try_zerocopy_f32_around(
     a: &Bound<'_, PyAny>,
     decimals: i32,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -105133,11 +105061,10 @@ fn try_zerocopy_int_around(
     a: &Bound<'_, PyAny>,
     decimals: i32,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
         return Ok(None);
@@ -105180,11 +105107,10 @@ fn try_zerocopy_f16_around(
     if decimals == 0 || decimals.unsigned_abs() > 4 {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    let numpy = py.import("numpy")?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -110012,16 +109938,17 @@ mod tests {
         f64_divide_fast_accepts_without_fp_error, f64_divide_non_fast_raises_fp_error,
         f64_divide_quotient_bits_are_normal, f64_divide_raises_fp_error, fill_diagonal,
         flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices,
-        interned_ufunc_name, interp, isfinite_native, isinf_native, isnan_native, isneginf_native,
-        isposinf_native, ix_, ldexp, logaddexp, logaddexp2, masked_pairwise_parallel,
-        masked_pairwise_streamed, meshgrid, modf, nan_to_num, narrow_bitmap_setop, nextafter,
-        place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
-        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate,
-        radians_native, ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted,
-        select, sign, signbit_native, sinc, solve_triangular, spacing, take, take_along_axis,
-        tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from,
-        triu_indices, triu_indices_from, trunc_native, try_native_lstsq_tsqr, unravel_index,
-        where_py, wide_int_table_bounds, zerocopy_f64_binary_flat,
+        interned_ufunc_name, interp, is_exact_numpy_ndarray, isfinite_native, isinf_native,
+        isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
+        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
+        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
+        required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
+        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
+        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
+        try_native_lstsq_tsqr, unravel_index, where_py, wide_int_table_bounds,
+        zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -111265,6 +111192,70 @@ mod tests {
                     "{dt} must report dtype.kind {kind:?}, not its typechar"
                 );
             }
+            Ok(())
+        });
+    }
+
+    /// The cached exact-ndarray check must agree with the `numpy.ndarray` instance check
+    /// it replaced across this tranche (`deadlock-audit-v46rn`).
+    ///
+    /// 78 probe functions opened with `py.import("numpy")` + `getattr("ndarray")` +
+    /// `is_exact_instance`, and most of them exist to DECLINE - that is the shape measured
+    /// at 1036 ns in the one instance on the accumulate path. The sweep hoists
+    /// `is_exact_numpy_ndarray`, which answers from a cached `PyType`, and defers the
+    /// import past the decline so a declining call pays neither.
+    ///
+    /// The whole sweep rests on those two checks being the same predicate, and "exact" is
+    /// the load-bearing word: an ndarray SUBCLASS must answer FALSE, or a probe would
+    /// claim a subclass's buffer and silently drop whatever the subclass adds. This
+    /// compares the two forms directly on the cases that separate them.
+    #[test]
+    fn cached_exact_ndarray_check_matches_the_instance_check_it_replaced() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let ndarray_type = numpy.getattr("ndarray")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                std::ffi::CString::new(
+                    "class Sub(np.ndarray):\n    pass\n\
+                     plain = np.arange(4.0)\n\
+                     sub = plain.view(Sub)\n\
+                     zerod = np.float64(1.5)\n\
+                     lst = [1.0, 2.0]\n\
+                     scalar = 1.0\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )?;
+
+            for name in ["plain", "sub", "zerod", "lst", "scalar"] {
+                let value = locals.get_item(name)?.expect("fixture");
+                let expected = value.is_exact_instance(&ndarray_type);
+                assert_eq!(
+                    is_exact_numpy_ndarray(py, &value)?,
+                    expected,
+                    "{name}: cached check disagrees with numpy.ndarray is_exact_instance"
+                );
+            }
+
+            // Spelled out, because it is the property a mistake would quietly break.
+            let sub = locals.get_item("sub")?.expect("sub fixture");
+            assert!(
+                !is_exact_numpy_ndarray(py, &sub)?,
+                "an ndarray SUBCLASS must not be treated as an exact ndarray"
+            );
+            let plain = locals.get_item("plain")?.expect("plain fixture");
+            assert!(
+                is_exact_numpy_ndarray(py, &plain)?,
+                "a plain ndarray must be treated as an exact ndarray"
+            );
             Ok(())
         });
     }
