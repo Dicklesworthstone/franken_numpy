@@ -44603,3 +44603,85 @@ before any figure is quoted for them. (3) There are ~1459 `py.import("numpy")` s
 `lib.rs` and this commit converted 7; if a 656 ns prologue was hiding in the ufunc methods, the
 same audit is owed to the other per-call entry points. AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - NEW LEAD, with two mechanisms already REFUTED: our divide replicas take 10.5x numpy's dTLB LOAD MISSES while taking the SAME L1-dcache misses - identical cache-line traffic, wildly different address translation (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. Hardware counters, `bench_divide_accumulate_isolation_vs_numpy` (someone else's group,
+unmodified - I only profiled it), replicated in my own group.
+
+**Campaign result class:** maintenance-diagnostic + two refuted mechanisms
+
+### The measurement
+
+`perf record` over a full run, attributed by symbol, normalised per UNIT of work (numpy is the
+incumbent in BOTH contracts so it runs 6 units; each Rust arm is the candidate in one, so 3 - the
+raw percentages are NOT comparable without this):
+
+```
+DIVIDE_COUNTER_ATTRIBUTION worker=thinkstation1 group=bench_divide_accumulate_isolation_vs_numpy
+  arm      cyc/unit(M)   L1miss/unit(M)   dTLBmiss/unit(M)
+  numpy         846.6           214.39              0.314
+  fused        1110.0           221.49              3.316
+  former        970.0           211.45              3.305
+  fused/numpy    cycles 1.311   L1 1.033   dTLB 10.57x
+  former/numpy   cycles 1.146   L1 0.986   dTLB 10.53x
+```
+
+**The L1 data-cache miss counts are the same to within 3.3%** - both sides stream the identical
+24 MB and touch the identical number of cache lines, which is the strongest evidence yet that the
+loops really are doing equal memory work. **The dTLB load-miss counts differ by 10.5x.**
+
+Single-event run, `-e dTLB-load-misses:u -F 4999`, 12K samples, so this is NOT a multiplexing
+artefact - the first three-event run showed the same split and I re-ran it alone to remove the
+doubt. The effect is identical for both Rust arms (10.57x and 10.53x), i.e. it is a property of the
+BUFFERS, not of either loop body - which also explains why it does not separate the fused arm from
+the accumulate-free one.
+
+### Two mechanisms tested and REFUTED, so nobody re-runs them
+
+1. **Transparent huge pages: NO.** The obvious story is that numpy madvises `MADV_HUGEPAGE` on large
+   allocations and Rust's `Vec` does not. numpy does own that switch - `numpy._core.multiarray.
+   _set_madvise_hugepage` exists and returns `True`, so it is on by default - but a 32 MB
+   `numpy.empty`, faulted and repeatedly touched, reports `AnonHugePages: 0 kB` in
+   `/proc/self/smaps` with the switch ON **and** OFF. THP on this host is `madvise`-mode and nothing
+   is being collapsed. Refuted.
+2. **My own group's extra buffers: NO.** My `bench_divide_classifier_accumulator_form` adds two more
+   8 MB Vecs, so I profiled the OLDER, smaller `bench_divide_accumulate_isolation_vs_numpy` as a
+   control. It has fewer buffers and shows the ratio at least as strongly (10.5x per unit there
+   against ~4x of raw share in mine). Refuted.
+
+### How much it can possibly explain - stated as a range, because I did not measure page-walk cost
+
+Excess over numpy is **263.4 M cycles/unit** and **3.003 M dTLB misses/unit**:
+
+| page walk costs | dTLB explains |
+|---|---|
+| 5 cycles | 5.7% |
+| 10 cycles | 11.4% |
+| 20 cycles | 22.8% |
+| 40 cycles | 45.6% |
+
+So this is a real contributor and **not** the whole story at any plausible cost. I am deliberately
+not quoting a single number: I did not measure the walk cost on this host.
+
+### Why this matters beyond the counter
+
+The replicas allocate Rust `Vec<f64>`. The SHIPPED route does not - `zerocopy_f64_binary_flat`
+reads two numpy arrays and writes into a `numpy.empty` output, i.e. it runs on **numpy-allocated
+memory**, the same allocator whose buffers show 10.5x fewer dTLB misses here. If any part of this
+gap is an allocator property rather than a kernel property, then every replica-based divide kernel
+number - including `0ppym`'s 1.2652x and 1.5372x - is measuring our ALLOCATOR against numpy's and
+attributing it to our loop. That is a testable claim and it is the next thing to do.
+
+COUNTED_MECHANISM: dTLB load misses per unit 0.314 M (numpy) vs 3.316 M (ours), a 10.57x ratio, at
+L1-dcache misses of 214.39 M vs 221.49 M, a 1.033x ratio. Same lines, 10x the translations.
+
+A/A NULL CONTROLS: not applicable and deliberately so - this row reports hardware-counter ratios
+from symbol attribution, not a timed A/B, so there is no schedule to control for. The timed rows
+this profile was taken alongside carry their own dual nulls and are recorded above.
+
+RETRY PREDICATE: do not re-test transparent huge pages or buffer count for this gap - both are
+refuted above. The next step is to give the Rust arms numpy-allocated buffers (via `PyBuffer`, as
+the shipped route already has) and re-measure both dTLB misses and the ratio; if the dTLB gap
+collapses, `0ppym`'s kernel numbers are an allocator artefact and must be re-taken.
+AGENT_NAME=AzureCarp.
