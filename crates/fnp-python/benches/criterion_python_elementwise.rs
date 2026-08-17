@@ -1348,6 +1348,19 @@ fn main() {
             ),
             ("bench_out_kwarg_vs_numpy", bench_out_kwarg_vs_numpy),
             ("bench_accumulate_counter_fnp", bench_accumulate_counter_fnp),
+            ("bench_binary_counter_add_fnp", bench_binary_counter_add_fnp),
+            (
+                "bench_binary_counter_add_numpy",
+                bench_binary_counter_add_numpy,
+            ),
+            (
+                "bench_binary_counter_divide_fnp",
+                bench_binary_counter_divide_fnp,
+            ),
+            (
+                "bench_binary_counter_divide_numpy",
+                bench_binary_counter_divide_numpy,
+            ),
             ("bench_reduce_counter_fnp", bench_reduce_counter_fnp),
             ("bench_reduce_counter_numpy", bench_reduce_counter_numpy),
             ("bench_outer_counter_fnp", bench_outer_counter_fnp),
@@ -6153,8 +6166,14 @@ fn bench_axis_default_wrappers_vs_numpy(_c: &mut Criterion) {
                 "start = np.zeros(4)\n\
                  stop = np.ones(4)\n\
                  sig = np.arange(64.0)\n\
-                 NPFN = {'linspace': np.linspace, 'fft': np.fft.fft}\n\
-                 ARGS = {'linspace': (start, stop, 8), 'fft': (sig,)}\n",
+                 coef = np.arange(1.0, 9.0)\n\
+                 one = np.ones(4)\n\
+                 eight = np.full(4, 8.0)\n\
+                 NPFN = {'linspace': np.linspace, 'fft': np.fft.fft,\n\
+                         'chebder': np.polynomial.chebyshev.chebder,\n\
+                         'geomspace': np.geomspace}\n\
+                 ARGS = {'linspace': (start, stop, 8), 'fft': (sig,),\n\
+                         'chebder': (coef,), 'geomspace': (one, eight, 4)}\n",
             )
             .unwrap()
             .as_c_str(),
@@ -6165,7 +6184,10 @@ fn bench_axis_default_wrappers_vs_numpy(_c: &mut Criterion) {
         let npfn = locals.get_item("NPFN").expect("NPFN");
         let argtbl = locals.get_item("ARGS").expect("ARGS");
 
-        for name in ["linspace", "fft"] {
+        // chebder and geomspace are the two cells row 52 asked for - swept wrappers that
+        // are NOT linspace or fft, to test whether the ~656 ns figure transfers within the
+        // family or was specific to the two cells that produced it.
+        for name in ["linspace", "fft", "chebder", "geomspace"] {
             let ours = module.getattr(name).expect("fnp wrapper");
             let theirs = npfn.get_item(name).expect("numpy callable");
             assert!(
@@ -6596,6 +6618,106 @@ fn method_counter_probe(method: &str, use_fnp: bool) {
             if use_fnp { "fnp" } else { "numpy" }
         );
     });
+}
+
+// COUNTING THE BINARY ROUTE'S SHARED FLOOR (`deadlock-audit-ei9jz`,
+// `deadlock-audit-6y5wp`).
+//
+// The binary route at n=256 is the worst lane measured: multiply 1.4567x, add
+// 1.4745x, subtract 1.4951x, divide 1.5578x, against a method family that has
+// converged to 1.0989-1.2159x. Of divide's 245 ns excess, 197 ns is the floor every
+// binary op pays and 48 ns is divide alone entering the f64 block only to decline.
+// Both figures are wall-clock, and a static sweep found no wrapper lever left in the
+// floor - so the open question is what that 197 ns IS, which is `ei9jz`'s bead.
+//
+// These probes count it. Retired instructions do not move with host load, which is
+// what makes them usable on a machine that has swung between loadavg 8 and 525
+// today, and the per-symbol diff names where the instructions go rather than
+// leaving them unattributed.
+//
+// `add` and `divide` are both here on purpose. `add` reports
+// `enters_f64_binary_block=false` and `divide` reports TRUE at this size, so the
+// DIFFERENCE between their excesses is the block-entry cost measured a second way,
+// in a load-independent currency, against the 48 ns the wall clock gave.
+//
+// NEGATIVE CASE: a probe that returned early, or that compared against the wrong
+// oracle, would report a flatteringly small count. Each probe checksums its LAST
+// result - outside the timed loop, because a per-iteration checksum is only free if
+// it costs the same on both arms, which is an assumption about the result objects
+// rather than a fact - and asserts it against NumPy's answer for the same operands.
+fn binary_counter_probe(op: &str, use_fnp: bool) {
+    const N: usize = 256;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a = locals.get_item("a").expect("a operand");
+        let b = locals.get_item("b").expect("b operand");
+
+        // Both handles resolved in both arms so the getattr work matches.
+        let ours = module.getattr(op).expect("fnp ufunc");
+        let theirs = numpy.getattr(op).expect("numpy ufunc");
+        let target = if use_fnp { &ours } else { &theirs };
+
+        let checksum_of = |r: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            r.call_method0("sum")
+                .expect("result sums")
+                .extract::<f64>()
+                .expect("sum is f64")
+                .to_bits()
+        };
+        let oracle = checksum_of(&theirs.call1((&a, &b)).expect("oracle call"));
+
+        let mut last = None;
+        for _ in 0..ACCUMULATE_COUNTER_CALLS {
+            let r = target.call1((&a, &b)).expect("binary call");
+            black_box(&r);
+            last = Some(r);
+        }
+        let last = checksum_of(&last.expect("the loop ran at least once"));
+        assert_eq!(
+            last, oracle,
+            "the binary counter probe for `{op}` did not reproduce NumPy's answer, so \
+             its instruction count describes the wrong computation"
+        );
+        println!(
+            "BINARY_COUNTER_PROBE op={op} arm={} n={N} calls={ACCUMULATE_COUNTER_CALLS} \
+             checksum={last:016x} setup_matches_sibling_probe=true \
+             run_this_under_perf_stat=true",
+            if use_fnp { "fnp" } else { "numpy" }
+        );
+    });
+}
+
+fn bench_binary_counter_add_fnp(_c: &mut Criterion) {
+    binary_counter_probe("add", true);
+}
+
+fn bench_binary_counter_add_numpy(_c: &mut Criterion) {
+    binary_counter_probe("add", false);
+}
+
+fn bench_binary_counter_divide_fnp(_c: &mut Criterion) {
+    binary_counter_probe("divide", true);
+}
+
+fn bench_binary_counter_divide_numpy(_c: &mut Criterion) {
+    binary_counter_probe("divide", false);
 }
 
 fn bench_reduce_counter_fnp(_c: &mut Criterion) {

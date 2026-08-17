@@ -47243,3 +47243,87 @@ recorded so they are not re-walked. Do not hoist `x1_dtype_char`: it has three c
 `binop` block. The floor's remaining 197 ns needs measurement of what it IS, not another sweep for
 what it might contain.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - THE BINARY FLOOR IS ATTRIBUTED, and the 48 ns block-entry cost is CONFIRMED BY A SECOND INSTRUMENT at 49 ns: ~929 insns/call is our own wrapper code and ~564 is CPython attribute machinery (`deadlock-audit-ei9jz`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. New counter probes for the binary route, built in one window and measured in another.
+
+**Campaign result class:** attribution of a named cost (this is `ei9jz`'s deliverable for this route)
+
+### The cross-check first, because it validates the instrument
+
+The wall clock put divide's block-entry cost — entering the f64 block at n=256 only to decline — at
+**48 ns**, by differencing divide against three siblings that agree within 9 ns. The new counters,
+which do not move with host load, put it at **49 ns**:
+
+```
+  op       excess insns/call   excess cycles/call   ns@4.2GHz   wall-clock excess
+  add                  1,796                1,192         284         197 ns
+  divide               2,175                1,398         333         245 ns
+  divide - add           379                  206          49          48 ns
+```
+
+**Two independent instruments, 2% apart, on a quantity neither was built to measure.** The absolute
+columns do not agree — the counters read 284/333 ns where the wall clock reads 197/245 — and that is
+expected rather than troubling: the dual-null harness reports a median of min-of-3, i.e. a best case,
+while `perf stat` totals every iteration including the tail. The DIFFERENCE cancels that, which is
+why it is the difference that agrees.
+
+### Where the floor's instructions go
+
+`perf record -e instructions:u`, symbol-attributed, `fnp.add` against `numpy.add`, differenced per
+call (excess 1,921 insns/call in this run against 1,796 in the `perf stat` run, a 7% run-to-run
+spread):
+
+```
+  delta/call      fnp    numpy   symbol
+         363      363        0   <fnp_python::PyUFunc>::__call__
+         228      278       51   _PyType_LookupRef
+         186      202       16   _PyObject_GenericGetAttrWithDict
+         150      150        0   PyObject_GetAttr
+         124      124        0   <fnp_python::PyUFunc>::__pymethod___call____
+         109      109        0   <pyo3 FunctionDescription>::extract_arguments
+         104      171       67   __libc_malloc2
+          99      175       77   __strcmp_avx2
+          65       65        0   <char as pyo3::FromPyObject>::extract
+          64      205      141   fetestexcept
+          54       64       11   PyDict_GetItemRef
+          53      209      155   PyContextVar_Get
+          53       61        8   _PyObject_MakeTpCall
+          52       64       12   _PyType_GetDict
+
+  our own code (fnp_python + pyo3 symbols):   929 insns/call
+  CPython attribute machinery:                564 insns/call
+```
+
+**Two thirds of the floor is not attribute work.** The single largest item is
+`PyUFunc::__call__` itself at 363 insns/call — the routing logic, not a lookup — with the PyO3 method
+shim at 124 and argument extraction at 109 behind it. The attribute family totals 564, and that is
+the price of the ONE shared `dtype`/`char` read that four consumers use; the previous sweep
+established it cannot be removed, and this prices what cannot be removed.
+
+**This is what `ei9jz` asked for on this route** — every instruction landing in a named symbol rather
+than in an unattributed remainder. It does not close that bead, which is scoped to `multiply` at
+n=256 with an `accounted_fraction` acceptance on a different harness, but it answers the same
+question for the binary route with no unaccounted majority left.
+
+### What it does NOT say
+
+`__strcmp_avx2` at 99 and `PyContextVar_Get` at 53 are real but unexplained — I did not chase either,
+and a string comparison on a route whose attribute names are all interned is the kind of thing that
+usually has a boring cause and occasionally does not. Recorded, not diagnosed.
+
+COUNTED_MECHANISM: `fnp.add` retires 1,796-1,921 more instructions per call than `numpy.add` at
+n=256, of which ~929 are `fnp_python`/`pyo3` symbols and ~564 are CPython attribute lookup;
+`fnp.divide` retires 379 more than `fnp.add`, which is 206 cycles and 49 ns at 4.2 GHz against the
+48 ns the dual-null wall clock independently measured.
+
+A/A NULL CONTROLS: not applicable to the counter rows — hardware totals from matched single-arm
+probes, no schedule. The 48 ns figure they corroborate carries its own dual nulls two rows above.
+
+RETRY PREDICATE: quote the DIFFERENCE columns when comparing these counters to a wall-clock row, not
+the absolutes — min-of-3 medians and `perf stat` totals are different statistics and disagree by
+~40% on this route by construction. Do not look for a lever in the 564 ns attribute family; the
+sweep already refuted that. If anyone attacks the floor it is the 363 insns/call inside
+`PyUFunc::__call__` itself, which is routing logic and is the only item here large enough to matter.
+AGENT_NAME=AzureCarp.
