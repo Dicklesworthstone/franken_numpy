@@ -52624,3 +52624,86 @@ directly with an empty `min_ns(TRIALS, || {})` before changing anything. Do NOT 
 to make the wrapper positive without measuring `T` first - that would be tuning until the sign is
 convenient, which is the failure this bead has already recorded twice today.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — MY REGISTERED MECHANISM IS REFUTED: `Instant::now()` overhead is 20.0 ns, not the 100-200 ns I predicted. The real diagnosis is that the partition's terms are 2-12 timer-ticks large, so the -80 ns wrapper is BELOW the instrument's resolution (deadlock-audit-ei9jz)
+
+**Campaign result class:** my own registered prediction refuted, replaced by a measured diagnosis
+
+The diagnostic emission committed one row ago did its job on first use: a run that previously
+aborted with one number now prints every term. LOADAVG 25.39/28.78/23.65, CPU idle 65% -> 80%,
+**iowait 0%**, runnable 13/64, 2531 MHz, /data 190G. `partition_valid=false`, as designed.
+
+```
+  whole_ns          671.0     numpy_ns           420.0
+  skipped_raw_ns    961.0     numpy_kwargs_ns    751.0
+  pydict_build_ns   230.0     keyword_binding_ns  60.0  (kb_keyword 100.0 - kb_positional 40.0)
+  kwargs_overhead   621.0  =  (751-420) + 230 + 60
+  skipped_fast_tail 340.0  =  961 - 621
+  probe_chain_ns    331.0     wrapper_residual_ns -80.0
+```
+
+### The refutation
+
+I registered two falsifiable predictions. Measured with a standalone `rustc -O` probe replicating
+`min_ns` exactly, 2001 trials x 9 reps:
+
+```
+  TIMER_OVERHEAD_PROBE  T_min=20.0  T_median=20.0  T_max=20.0 ns
+  SMALL_OP_PROBE (64 wrapping adds)  min=median=max=40.0 ns
+```
+
+**PREDICTION 2 IS REFUTED. `T` is 20.0 ns, not 100-200 ns.** One uncancelled timer overhead accounts
+for 20 ns of an 80 ns deficit, not for it. The "+one T from the standalone `pydict_build_ns` term"
+algebra was correct as algebra and far too small to matter.
+
+PREDICTION 1 is directionally consistent but I will not claim it: `pydict_build_ns` reads 230.0 ns
+against the ~164 ns I derived, but that reference was itself an instructions-to-ns conversion of
+exactly the kind I retracted two rows ago, so it cannot adjudicate anything.
+
+### What the numbers actually say
+
+Converting each term's counted equivalent by its own ns reading gives implied rates that cannot all
+be true of the same route:
+
+```
+  term            counted insns    this ns run    implied insns/ns
+  whole excess          1830.5         251.0            7.29
+  numpy keyword         1501.2         331.0            4.54
+  keyword binding        832.2          60.0           13.87
+  pydict replica        1575.7         230.0            6.85
+  our keyword path      2719.1         290.0            9.38
+```
+
+**A 3x spread in implied rate across five terms of one route is not credible as real IPC variation;
+it is the signature of ns terms that are individually unreliable.** The reason is visible in the raw
+values: against a measured 20.0 ns timer overhead, `kb_positional_ns` is 40.0 (two overheads) and
+`kb_keyword_ns` is 100.0 (five). The identity combines seven such measurements, so its accumulated
+error is comfortably the size of the -80.0 ns it produced. Independent confirmation: `kb` reads
+60.0 ns here and 86.5 ns by the 400,000-call loop method - 44% apart, on the term I have measured
+most carefully.
+
+**So the wrapper residual is not negative in any physical sense. It is below the resolution of the
+instrument computing it.** That is a stronger and more useful statement than my registered mechanism,
+and it is the fourth independent refusal of the nanosecond domain for this decomposition: aggregator
+choice swung it 3x, a cross-host conversion was withdrawn, the completed partition went negative,
+and now the terms are shown to sit at the timer's floor.
+
+### The harness fix earns its keep immediately
+
+The diagnostic emission is the reason this row exists. The previous run said only
+`wrapper residual measured NEGATIVE (-80.0 ns)` and discarded seven terms; this one printed all of
+them and let the cause be identified in one pass without another build. **A fail-closed gate should
+emit before it aborts** - that generalises beyond this bench.
+
+COUNTED_MECHANISM: T = 20.0 ns (min=median=max over 9 reps of 2001 trials); identity terms range
+40.0-961.0 ns, i.e. 2-48 timer overheads, with the two smallest at 2 and 5; implied insns/ns across
+five terms spans 4.54-13.87, a 3.05x range; kb disagrees 60.0 vs 86.5 ns between instruments.
+
+A/A NULL CONTROLS: not applicable - the group emitted no certified row and asserts itself invalid.
+
+RETRY PREDICATE: the ns split needs an instrument whose per-term measurements are many multiples of
+20 ns - i.e. batch each replica over thousands of calls inside ONE timed region, the way the counted
+probes already batch 400,000 calls, rather than timing single calls with `min_ns`. Until such a
+harness exists the split stays an instructions-only result. Do NOT tune the partition to make the
+wrapper positive; the term that would have to move is smaller than the instrument's error.
+AGENT_NAME=SlateFinch.
