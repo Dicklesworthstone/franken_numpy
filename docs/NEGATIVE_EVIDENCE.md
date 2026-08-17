@@ -48018,3 +48018,65 @@ therefore whether the fix is to raise the gate or to remove the route. Do NOT se
 `F64_DIV_NATIVE_MIN_LEN` from the 2^16 cell alone, and do NOT subtract a `multiply` excess measured
 in another invocation or at another size.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CERTIFIED: not raising to decide is worth 390-574 ns per call, MORE than the 212 ns I predicted - and the prediction said so, because the probe was a stated LOWER BOUND. `fft` and `chebder` are untouched controls in the same runs (`deadlock-audit-v46rn`)
+
+`RedLynx`. The endpoint pre-check, measured in the quietest window of the campaign against
+row 53's figures on the same host.
+
+**Campaign result class:** maintenance-self-speedup (cells remain regressions vs NumPy)
+
+```
+BEFORE elf=6050409c1e8ab29d165b095c970c000aa57b41e5f6141ea49cf36ca0d6fb3f52 (row 53, 2 runs)
+AFTER  elf=597a4b825132136e22c8cbd5b3f021c1df068aeb526a3ef8d7c6fadf3b5dc359 (3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 9.00/7.92/6.57 before the build, 14.67/10.71/7.83 before the block,
+  14.70/10.78/7.87 after it - the quietest sustained window of the campaign
+CPU MHz system-wide min 1429 max 4306 median 3144 spread 3.014x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on all twelve phases, same_core=true;
+  4290.5/4290.4 (1.0000), 4211.6/4211.6 (1.0000), 3999.9/3995.5 (1.0011),
+  3932.2/3943.4 (1.0028), 4051.8/4060.8 (1.0022), 3613.5/3619.3 (1.0016),
+  4085.4/4085.7 (1.0001), 4083.2/4083.3 (1.0000), 4094.7/4094.5 (1.0000),
+  4197.5/4197.3 (1.0000), 4288.8/4288.8 (1.0000), 4212.1/4207.9 (1.0010)
+
+  fn          took lever   BEFORE excess   AFTER excess          BEFORE     AFTER
+  linspace    YES            1553 / 1522   1196 / 1127 / 1142    1.1516x    1.1177x
+  geomspace   YES            2471 / 2726   2104 / 1944 / VOID    1.0945x    1.0798x
+  fft         no              757 /  747    731 /  702 /  662    1.1194x    1.1289x
+  chebder     no              987 /  877    276 / 1007 /  952    1.0657x    1.0740x
+
+11 of 12 cells admissible. geomspace run 3's CANDIDATE null reads
+[0.994629,0.998474] - excludes unity - so that cell is VOID and is marked above.
+```
+
+**~390 ns removed from `linspace` and ~574 ns from `geomspace`, for replacing two failed
+`extract::<f64>()` calls with two cheap checks.**
+
+**THE CONTROLS DID NOT MOVE, AND THEY ARE IN THE SAME RUNS.** `fft` and `chebder` share the
+group, the binary and the window but never took the pre-check - neither has scalar endpoints to
+test. `fft` reads 747 -> 702 ns and `chebder` 877 -> 952; both are inside their own run-to-run
+spread (chebder alone spans 276-1007 across three runs). The two cells that took the lever moved
+by 390 and 574 ns; the two that did not moved by tens.
+
+**THE PREDICTION UNDERSHOT, AND IT SAID IT WOULD.** Row 54 measured a caught `float()` failure at
+129 ns against 23 ns for a type test, put two of them at **~212 ns**, and banked that explicitly
+as *"a Python-level proxy and a LOWER BOUND, not our number"* because `pyo3`'s `extract`
+additionally constructs a Rust-side `PyErr` around the CPython error. The measured 390 ns is
+1.8x the proxy. **The caveat was the load-bearing part of that row** - quoting 212 ns as the
+expected saving would have made this look like an over-delivery rather than a confirmation.
+
+**WHY `geomspace` GAINS MORE THAN `linspace` IS NOT ESTABLISHED.** Both replace the same two
+extracts. 574 against 390 could be its noisier baseline (2471 vs 2726 before, and one of its three
+after-cells is void), or something else its fallback does; **two cells cannot separate those and
+this row does not try**.
+
+**STILL LOSSES.** 1.0798-1.1289x across the four wrappers - NumPy remains faster on all of them.
+What has gone is the part that was spent deciding rather than computing.
+
+RETRY PREDICATE: (1) `clip` and `searchsorted` took the same class of lever and have NO bench
+cell; both need one before their commits' predictions can be checked - `clip`'s in particular is
+falsifiable and sharp (a one-sided clip should move, a two-sided scalar clip should not). (2) Do
+not quote 212 ns as this class's cost; it is a lower-bound proxy and the measured figure is
+390 ns for two sites. (3) geomspace's advantage over linspace is unexplained and should not be
+built on. AGENT_NAME=RedLynx.
+
