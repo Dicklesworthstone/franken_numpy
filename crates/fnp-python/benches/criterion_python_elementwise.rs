@@ -1282,6 +1282,10 @@ fn main() {
                 bench_divide_classifier_accumulator_form,
             ),
             (
+                "bench_divide_kernel_on_numpy_buffers",
+                bench_divide_kernel_on_numpy_buffers,
+            ),
+            (
                 "bench_divide_allocator_provenance",
                 bench_divide_allocator_provenance,
             ),
@@ -3706,6 +3710,233 @@ fn bench_divide_allocator_provenance(_c: &mut Criterion) {
             provenance.ratio_ci_high,
             provenance.arm_a_median_ns,
             provenance.arm_b_median_ns,
+        );
+    });
+}
+
+/// `deadlock-audit-0ppym`'s two banked kernel ratios, kept as constants so the
+/// re-take below prints what it supersedes on the same line rather than asking a
+/// reader to go and find them. They were measured with Rust `Vec` buffers.
+const OPPYM_VEC_ACCUMULATE_FREE_RATIO: f64 = 0.790499;
+const OPPYM_VEC_FUSED_RATIO: f64 = 0.764919;
+
+// RE-TAKING `deadlock-audit-0ppym`'s divide kernel rows on the memory the SHIPPED
+// route actually uses (`deadlock-audit-ascyl`).
+//
+// WHY THESE ROWS NEED RE-TAKING RATHER THAN ADJUSTING. `bench_divide_allocator_
+// provenance` certified that the identical divide loop runs a MEDIAN 1.072x faster
+// (range 1.011-1.157 over five runs) on numpy-allocated buffers than on Rust
+// `Vec`s, with a counted mechanism: 5.96x the dTLB load misses at identical L1D
+// misses and identical instruction counts, paid at 55 cycles per excess miss.
+// `0ppym` timed Rust-`Vec` replicas against an `out=`-fed `numpy.divide`, so its
+// 1.2652x (accumulate-free) and 1.5372x (fused) each carry a provenance tax that
+// `zerocopy_f64_binary_flat` never pays — it reads two numpy arrays and writes a
+// `numpy.empty` output. Dividing the old ratios by 1.072 would be arithmetic on
+// two numbers from different windows; this group MEASURES the corrected pair
+// instead, both arms against the same incumbent in the same invocation.
+//
+// WHAT IS HELD FIXED. The loop bodies are the byte-identical
+// `divide_former_serial` and `divide_fused_serial` that `0ppym` timed — not
+// re-implementations — so the only difference from that row is where the bytes
+// live. Neither side allocates during timing: NumPy is handed a preallocated
+// `out=` and both replicas write into preallocated NUMPY arrays.
+//
+// THE NEGATIVE CASE, and it is the one that would quietly void the whole group:
+// `PyBuffer` returns a COPY for a non-contiguous or wrong-dtype array, and a copy
+// is memory WE allocate — which is exactly the provenance being corrected for, so
+// the group would silently re-measure `0ppym` and "confirm" it. Every buffer is
+// therefore asserted to be a view (`buf_ptr()` equals the array's own
+// `ctypes.data`), C-contiguous, and of the expected length, and both arms are
+// asserted to reproduce `numpy.divide` bit for bit before any timing.
+//
+// THIS IS STILL A REPLICA COMPARISON, not the shipped route: it prices the KERNEL
+// under the shipped memory configuration. It does not license a claim about
+// `fnp.divide` as called from Python, which carries the wrapper floor on top.
+fn bench_divide_kernel_on_numpy_buffers(_c: &mut Criterion) {
+    assert_divide_hazard_replica_matches_contract();
+    let n = DIVIDE_SERIAL_N;
+    let (a_vec, b_vec) = divide_hazard_free_operands(n);
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        // The same generator `divide_hazard_free_operands` uses, so the operands
+        // are bit-identical to the ones `0ppym` divided.
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\nformer_out = np.empty(n)\nfused_out = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_py = locals.get_item("a").expect("a operand");
+        let b_py = locals.get_item("b").expect("b operand");
+        let out_py = locals.get_item("out").expect("incumbent out buffer");
+        let former_py = locals.get_item("former_out").expect("former out buffer");
+        let fused_py = locals.get_item("fused_out").expect("fused out buffer");
+        let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &out_py).expect("bind out");
+        let numpy_divide = numpy.getattr("divide").expect("numpy.divide");
+
+        let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_py).expect("a buffer");
+        let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_py).expect("b buffer");
+        let former_buffer =
+            pyo3::buffer::PyBuffer::<f64>::get(&former_py).expect("former out buffer");
+        let fused_buffer = pyo3::buffer::PyBuffer::<f64>::get(&fused_py).expect("fused out buffer");
+
+        for (label, buffer, object) in [
+            ("a", &a_buffer, &a_py),
+            ("b", &b_buffer, &b_py),
+            ("former_out", &former_buffer, &former_py),
+            ("fused_out", &fused_buffer, &fused_py),
+        ] {
+            let owner_ptr = object
+                .getattr("ctypes")
+                .and_then(|c| c.getattr("data"))
+                .and_then(|d| d.extract::<usize>())
+                .expect("numpy array exposes ctypes.data");
+            assert_eq!(
+                buffer.buf_ptr() as usize,
+                owner_ptr,
+                "PyBuffer handed back a COPY for `{label}` - the arms would then run \
+                 on memory we allocated, which is the very provenance this group \
+                 exists to correct for"
+            );
+            assert!(
+                buffer.is_c_contiguous(),
+                "`{label}` is not C-contiguous, so the loop would not walk numpy's \
+                 buffer the way the shipped route does"
+            );
+            assert_eq!(buffer.item_count(), n, "`{label}` has the wrong length");
+        }
+
+        // Same `repr(transparent)` argument the shipped `zerocopy_f64_binary_flat`
+        // makes: operands are read-only under the GIL and the two outputs are
+        // distinct fresh arrays that neither operand aliases.
+        let a_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n) };
+        let b_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n) };
+        let former_out: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(former_buffer.buf_ptr().cast::<f64>(), n) };
+        let fused_out: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(fused_buffer.buf_ptr().cast::<f64>(), n) };
+
+        assert!(
+            a_np.iter()
+                .zip(a_vec.iter())
+                .all(|(l, r)| l.to_bits() == r.to_bits())
+                && b_np
+                    .iter()
+                    .zip(b_vec.iter())
+                    .all(|(l, r)| l.to_bits() == r.to_bits()),
+            "the numpy operands are not bit-identical to the ones `0ppym` divided"
+        );
+
+        let numpy_result = numpy_divide
+            .call(&args, Some(&out_kwargs))
+            .expect("numpy.divide probe");
+        let numpy_sum = numpy_divide_checksum(&numpy_result, n);
+        divide_former_serial(a_np, b_np, former_out);
+        assert_eq!(
+            divide_checksum(former_out),
+            numpy_sum,
+            "the accumulate-free arm does not reproduce numpy.divide bit for bit"
+        );
+        assert!(
+            !divide_fused_serial(a_np, b_np, fused_out),
+            "these operands must be hazard-free or the fused arm takes its rare \
+             second pass and the comparison measures a different branch"
+        );
+        assert_eq!(
+            divide_checksum(fused_out),
+            numpy_sum,
+            "the fused arm does not reproduce numpy.divide bit for bit"
+        );
+
+        let incumbent_former = || {
+            let started = Instant::now();
+            let result = numpy_divide
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.divide call");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let candidate_former = || {
+            let started = Instant::now();
+            divide_former_serial(a_np, b_np, former_out);
+            let elapsed = started.elapsed();
+            let checksum = divide_checksum(former_out);
+            black_box(&former_out);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (former_effect, _in_null, _cand_null) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_accumulate_free_on_numpy_buffers_vs_numpy",
+            incumbent_former,
+            candidate_former,
+        );
+
+        let incumbent_fused = || {
+            let started = Instant::now();
+            let result = numpy_divide
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.divide call");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let candidate_fused = || {
+            let started = Instant::now();
+            let hazard = divide_fused_serial(a_np, b_np, fused_out);
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(fused_out);
+            black_box(&fused_out);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (fused_effect, _in_null2, _cand_null2) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_fused_on_numpy_buffers_vs_numpy",
+            incumbent_fused,
+            candidate_fused,
+        );
+
+        println!(
+            "DIVIDE_KERNEL_ON_NUMPY_BUFFERS n={n} numpy_version={numpy_version} worker={} \
+             harness=common::run_dual_null_median_ci_contract \
+             arms_are_replicas_not_the_shipped_route=true \
+             arms_are_preallocated_no_alloc_either_side=true \
+             all_buffers_are_numpy_allocated_views_not_copies=true \
+             supersedes=deadlock-audit-0ppym_vec_backed_rows \
+             accumulate_free_ratio={:.6} accumulate_free_ci95=[{:.6},{:.6}] \
+             fused_ratio={:.6} fused_ci95=[{:.6},{:.6}] \
+             numpy_ns={:.1} accumulate_free_ns={:.1} fused_ns={:.1} \
+             vec_backed_accumulate_free_ratio_for_reference={OPPYM_VEC_ACCUMULATE_FREE_RATIO:.6} \
+             vec_backed_fused_ratio_for_reference={OPPYM_VEC_FUSED_RATIO:.6}",
+            measurement_worker(),
+            former_effect.ratio_median,
+            former_effect.ratio_ci_low,
+            former_effect.ratio_ci_high,
+            fused_effect.ratio_median,
+            fused_effect.ratio_ci_low,
+            fused_effect.ratio_ci_high,
+            former_effect.arm_a_median_ns,
+            former_effect.arm_b_median_ns,
+            fused_effect.arm_b_median_ns,
         );
     });
 }

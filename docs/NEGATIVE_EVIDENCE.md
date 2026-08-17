@@ -45083,3 +45083,97 @@ reading the path; it is counted. The `dtype.kind`-to-`String` sweep is licensed 
 ~20% of the residual, so it must be measured against this row and not assumed to close it. The
 un-costed lever is the numpy-internal setup our delegation triggers.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-16 - RE-TAKEN, not rescaled: `deadlock-audit-0ppym`'s divide kernel rows measured on numpy-ALLOCATED buffers read 1.2181x and 1.1706x, not 1.2652x and 1.5372x - and its 50/50 accumulate/kernel split does NOT reproduce (`deadlock-audit-ascyl`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. Three runs, quiet converged window.
+
+**Campaign result class:** measurement correction that SUPERSEDES two banked rows (both move in our
+favour, which is exactly why the caveats below are not optional)
+
+### Why re-taken and not adjusted
+
+`bench_divide_allocator_provenance` certified that the identical divide loop runs a median 1.072x
+faster on numpy-allocated buffers than on Rust `Vec`s, counted at 5.96x the dTLB misses for 55
+cycles apiece. `0ppym` timed Rust-`Vec` replicas against an `out=`-fed `numpy.divide`, so it carried
+a provenance tax that `zerocopy_f64_binary_flat` never pays. I said then that those rows had to be
+re-measured rather than divided by 1.072, because dividing two numbers from different windows is
+arithmetic, not measurement. This is the measurement. The loop bodies are the byte-identical
+`divide_former_serial` and `divide_fused_serial` that `0ppym` timed — not re-implementations — so
+the only thing that changed is where the bytes live.
+
+```
+DIVIDE_KERNEL_ON_NUMPY_BUFFERS n=1048576 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract
+  arms_are_replicas_not_the_shipped_route=true
+  arms_are_preallocated_no_alloc_either_side=true
+  all_buffers_are_numpy_allocated_views_not_copies=true
+  bench_elf_sha256=0d6f768f5269b63185fd17daaa77e57f7e8fd7488367319d8ae4a9abeeb97f84
+  LOADAVG 14.83/25.44/29.89 -> 14.67/25.06/29.71, every arm pair same_core=true,
+  arm_mhz_spread 1.0000-1.0068 at 3265-4113 MHz
+
+  accumulate-free   0.835975 / 0.820947 / 0.794311   median 0.820947   worst 0.794311
+  fused             0.824091 / 0.867268 / 0.854234   median 0.854234   worst 0.824091
+  all six contracts DECIDABLE_REGRESSION; all twelve nulls straddle unity, bias <= 0.005641
+```
+
+**THE CORRECTED DEFICITS, with the worst run shown beside the median so nobody quotes only the
+flattering one:**
+
+| arm | `0ppym`, Vec-backed | re-taken, numpy buffers (median) | (worst run) |
+|---|---|---|---|
+| accumulate-free | 1.2652x slower | **1.2181x** | 1.2590x |
+| fused (shipped shape) | 1.5372x slower | **1.1706x** | 1.2135x |
+
+The accumulate-free row barely moves — at its worst it is 1.2590x against a banked 1.2652x. **The
+fused row moves a lot**: 1.5372x to 1.1706x median, and even its worst run is 1.2135x.
+
+### The finding that matters more than either number: 0ppym's 50/50 SPLIT DOES NOT REPRODUCE
+
+`0ppym` concluded the f64 divide deficit splits almost exactly in half between the normality
+accumulate (96 398 ns) and the kernel (93 987 ns), on Vec-backed medians of 448 374 (accumulate-free)
+against 544 772 (fused) — the fused arm 21.5% slower. On numpy buffers the medians are 437 424 and
+384 759, i.e. the gap **inverts** and does not reproduce at all.
+
+That is the third independent line of evidence against the split, and it agrees with the two already
+banked: the static census showed the two arms differ in UNROLL FACTOR (1x versus 4x) and not only in
+the classifier, and the instruction counters showed that removing 18.4% of retired instructions from
+the classifier changed cycles by 0.76%. **The classifier is close to free, as the shipped code's own
+comment claims, and `accumulate_cost_ns=96398` was pricing provenance and codegen rather than the
+accumulate.**
+
+### CAVEATS, and they bound every number above
+
+- **The fused arm's absolute ns spread 1.561x across three runs** (576 037 / 384 759 / 369 130)
+  against the accumulate-free arm's 1.143x. Its median is soft and its single best run should not be
+  quoted. The incumbent itself moved 1.214x (372 626 / 368 604 / 306 902).
+- **Comparing the accumulate-free arm to the fused arm across the two contracts is INVALID** — they
+  are separate schedules, the trap this file has already been burned by. The inversion above is
+  reported as "the 21.5% gap does not reproduce", which is a statement about a gap failing to
+  appear, not a measurement that fused is now faster than accumulate-free.
+- These are REPLICAS under the shipped memory configuration, not the shipped route. They price the
+  KERNEL. `fnp.divide` as called from Python carries the wrapper floor on top and is not this number.
+- Both corrections move in OUR favour. That is the direction in which this file has been wrong
+  before, so: the arms are the same functions `0ppym` timed, the buffers are asserted to be numpy
+  views rather than copies, and both arms are asserted bit-identical to `numpy.divide` before timing.
+
+COUNTED_MECHANISM: the provenance difference underlying this correction was counted separately at
+5.96x dTLB load misses (2 568 246 versus 431 073 per 400 calls) at identical L1D misses (0.9974x) and
+identical instruction counts (1.0158x), costing 55.0 cycles per excess miss.
+
+A/A NULL CONTROLS: all twelve nulls across the three runs straddle unity; run 3's accumulate-free
+pair read incumbent ci95=[0.997716,1.008986] bias 0.000275 and candidate ci95=[0.994213,1.008438]
+bias 0.000941.
+
+Built LOCALLY with `RCH_CARGO_WRAPPER_BYPASS=1` (zero `[RCH]` lines), path from
+`--message-format=json`. HOST_BASELINE host=thinkstation1 Threadripper PRO 5975WX 32c/64t
+governor=powersave, allowed_logical_threads=16, runtime avx512f=false,
+`OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`.
+
+RETRY PREDICATE: `0ppym`'s 1.2652x and 1.5372x are SUPERSEDED and must not be quoted again; use
+1.2181x / 1.1706x with the worst-run column beside them. Do not re-derive the accumulate/kernel
+split from the Vec-backed pair — it is refuted three ways now. The remaining ~1.17-1.22x on numpy
+buffers is the real kernel deficit and is what any future divide lever must attack; it is NOT
+explained by packing, unroll depth, classifier shape, or buffer provenance, all four of which are
+now measured or refuted.
+AGENT_NAME=AzureCarp.
