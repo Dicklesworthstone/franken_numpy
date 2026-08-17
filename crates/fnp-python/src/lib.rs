@@ -847,6 +847,43 @@ impl PyUFunc {
     ) -> PyResult<Py<PyAny>> {
         let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
+        // VECTORCALL PER ARITY (`deadlock-audit-v46rn`).
+        //
+        // `reduce` was the last method still materialising a bound method: it did
+        // `getattr("reduce")` and then `.call(args, kwargs)` with a `Bound<PyTuple>`.
+        // pyo3 routes `PyObject_VectorcallMethod` only for RUST tuples
+        // (`tuple_conversion!`), so a `Bound<PyTuple>` takes the slow path — the same
+        // reason `at` could not vectorcall until it branched on arity.
+        //
+        // WHY THIS SHOULD PAY WHERE `at`'s BRANCH LARGELY DID NOT. `at` gained only
+        // ~55 ns because it ALSO runs a `try_parallel_int_scatter_at` pre-decline that
+        // reads `dtype.kind` off the target every call, which no other method pays.
+        // `reduce` has no such probe — it is pure delegation, the same shape as `outer`,
+        // where the vectorcall was worth 808 retired instructions per call.
+        //
+        // THE KEYWORD GUARD IS THE WHOLE CORRECTNESS ARGUMENT. The fast path may only be
+        // taken when there are NO keywords, because it forwards positionals alone. Taking
+        // it with a live `axis=`/`dtype=`/`where=` would silently DROP that keyword and
+        // reduce over NumPy's default instead — a wrong answer that looks like a right
+        // one. Arity 3+ falls through for the same reason.
+        if kwargs.is_none_or(|kwargs| kwargs.is_empty()) {
+            match args.len() {
+                1 => {
+                    return Ok(np_ufunc
+                        .call_method1(intern!(py, "reduce"), (args.get_item(0)?,))?
+                        .unbind());
+                }
+                2 => {
+                    return Ok(np_ufunc
+                        .call_method1(
+                            intern!(py, "reduce"),
+                            (args.get_item(0)?, args.get_item(1)?),
+                        )?
+                        .unbind());
+                }
+                _ => {}
+            }
+        }
         Ok(np_ufunc
             .getattr(intern!(py, "reduce"))?
             .call(args, kwargs)?
@@ -111593,6 +111630,93 @@ mod tests {
                     .str()?
                     .extract::<String>()?,
                 "an explicit dtype must survive the empty-dict fast path"
+            );
+            Ok(())
+        });
+    }
+
+    /// `reduce`'s arity-branch vectorcall may only fire when there are NO keywords,
+    /// because it forwards positionals alone (`deadlock-audit-v46rn`). The failure this
+    /// pins is silent and plausible: an implementation that branched on `args.len()`
+    /// without checking `kwargs` would take the fast path for `add.reduce(a, axis=1)`,
+    /// drop the keyword, reduce over NumPy's default axis 0 instead, and return a
+    /// correctly-shaped array of wrong numbers. No exception, no shape mismatch.
+    ///
+    /// The fixture is guarded first: axis 0 and axis 1 must disagree on this operand, or
+    /// every assertion below would pass against a broken implementation.
+    #[test]
+    fn reduce_vectorcall_fast_path_does_not_drop_keywords() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_reduce_vectorcall")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("add")?;
+            let theirs = numpy.getattr("add")?;
+
+            let shape = PyTuple::new(py, [3_usize, 4])?;
+            let a = numpy
+                .call_method1("arange", (12,))?
+                .call_method1("astype", ("float64",))?
+                .call_method1("reshape", (&shape,))?;
+
+            let bytes_of = |v: &Bound<'_, PyAny>| -> PyResult<Vec<u8>> {
+                v.call_method0("tobytes")?.extract::<Vec<u8>>()
+            };
+
+            // Guard: if axis 0 and axis 1 agreed, the keyword assertions would be vacuous.
+            let kw1 = PyDict::new(py);
+            kw1.set_item("axis", 1)?;
+            assert_ne!(
+                bytes_of(&theirs.call_method1("reduce", (&a,))?)?,
+                bytes_of(&theirs.call_method("reduce", (&a,), Some(&kw1))?)?,
+                "fixture is degenerate: axis 0 and axis 1 reduce identically"
+            );
+
+            // The keyword MUST survive - this is the case a naive arity branch breaks.
+            assert_eq!(
+                bytes_of(&ours.call_method("reduce", (&a,), Some(&kw1))?)?,
+                bytes_of(&theirs.call_method("reduce", (&a,), Some(&kw1))?)?,
+                "reduce(axis=1) must not be swallowed by the no-keyword fast path"
+            );
+
+            // dtype is the other keyword that would vanish silently.
+            let kw_dtype = PyDict::new(py);
+            kw_dtype.set_item("dtype", "float32")?;
+            assert_eq!(
+                ours.call_method("reduce", (&a,), Some(&kw_dtype))?
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                theirs
+                    .call_method("reduce", (&a,), Some(&kw_dtype))?
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                "reduce(dtype=) must not be swallowed by the no-keyword fast path"
+            );
+
+            // Arity 1 and arity 2 are the two vectorcalled shapes; arity 2 passes axis
+            // POSITIONALLY, which must agree with passing it by keyword.
+            assert_eq!(
+                bytes_of(&ours.call_method1("reduce", (&a,))?)?,
+                bytes_of(&theirs.call_method1("reduce", (&a,))?)?,
+                "the arity-1 vectorcall must match numpy"
+            );
+            assert_eq!(
+                bytes_of(&ours.call_method1("reduce", (&a, 1))?)?,
+                bytes_of(&theirs.call_method("reduce", (&a,), Some(&kw1))?)?,
+                "the arity-2 vectorcall must equal the same reduction by keyword"
+            );
+
+            // An empty kwargs dict must still take the fast path and stay correct.
+            let empty = PyDict::new(py);
+            assert_eq!(
+                bytes_of(&ours.call_method("reduce", (&a,), Some(&empty))?)?,
+                bytes_of(&theirs.call_method1("reduce", (&a,))?)?,
+                "an empty kwargs dict must behave as no keywords"
             );
             Ok(())
         });

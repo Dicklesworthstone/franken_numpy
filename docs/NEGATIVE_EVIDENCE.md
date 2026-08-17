@@ -46649,3 +46649,81 @@ entry and the mechanism is unknown. (2) Measure two or three more wrappers befor
 (3) Do NOT sweep the remaining axis-default sites for performance; this row closes that question
 for cold wrappers. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - CERTIFIED: `reduce` was the last method still materialising a bound method, and the arity-branch vectorcall takes it 1.2149x -> 1.1602x. I OVER-predicted this one by 1.8x, having under-predicted the previous two (`deadlock-audit-v46rn`)
+
+`AzureCarp`. One build, before/after, plus a vacuous-green test run I caught and re-ran.
+
+**Campaign result class:** CERTIFIED self-speedup (cell remains a regression)
+
+### The lever
+
+After the family sweep, `reduce` was the WORST cell at 1.2149x and the only method still doing
+`getattr("reduce")` then `.call(args, kwargs)` on a `Bound<PyTuple>` — pyo3 routes
+`PyObject_VectorcallMethod` only for RUST tuples, so that path materialises a bound method.
+Branching on arity for the no-keyword case gives arity 1 and 2 a Rust tuple.
+
+**PREFLIGHTED AGAINST THE LEDGER FIRST**, which is why I expected it to pay where `at`'s identical
+branch largely did not: `0832be1d` showed `at` gained only ~55 ns because it ALSO runs a
+`try_parallel_int_scatter_at` pre-decline reading `dtype.kind` every call. `reduce` has no such
+probe — it is pure delegation, the same shape as `outer`, where the vectorcall was worth 808
+insns/call.
+
+```
+UFUNC_METHOD_FLOOR method=reduce n=256 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract  delegates_unconditionally=true
+  before ELF 9be5ca7c30f352abbe37c27d284689f7c2b3e113eb72950d3367a6f1b817ce78
+  after  ELF 8be4764dfe9ea795f03de14b098494c99fbea4828b4ccc35160cfb41c5e363cf
+
+  before  0.809211/0.831713/0.814059/0.823139/0.825540  median 0.823139  loadavg 22.47/17.11/20.15
+  after   0.863297/0.856792/0.868529/0.854409/0.861897  median 0.861897  loadavg  8.55/12.65/16.66
+
+  deficit 1.2149x -> 1.1602x, ratio gain +4.71%
+  distributions do NOT overlap: before max 0.831713 < after min 0.854409
+  AFTER per-arm: same_core=true on all five, arm MHz 4029.2/4029.2 to 4292.2/4292.2
+  excess_ns 240 -> 166 (median)
+```
+
+COUNTED, and this is the load-independent half:
+
+```
+  reduce wrapper excess    insns/call   cycles/call
+  before (9be5ca7c)           1,771         1,220
+  after  (8be4764d)           1,322           689
+  => vectorcall on reduce:      449           531
+```
+
+### I over-predicted, having under-predicted twice before
+
+I registered ~808 insns/call, `outer`'s figure, on the argument that `reduce` is the same pure
+delegation shape. **Observed 449 — I over-predicted by 1.80x.** The two previous interning
+predictions under-shot by 5-8x, so my error has now changed sign, which means I do not have a model
+of this lever's value, only a range: **the call-shape levers on these methods are worth 400-800
+retired instructions per call, and which end depends on something I cannot yet name.** `outer` passes
+two operands and `reduce` one, which is the obvious candidate and is not established.
+
+### Caveats
+
+The two sets are again from different load windows (22.47 versus 8.55) because measuring moves the
+load. The ratio distributions are cleanly disjoint and the counter delta is load-independent and
+agrees in direction, which is why this is banked; a same-window repeat would still be worth more.
+`reduce` remains **1.1602x SLOWER than NumPy** — a self-speedup on a losing cell, not a crossing.
+
+**A VACUOUS GREEN I ALMOST BANKED.** My first test invocation passed
+`--lib 'reduce_vectorcall accumulate_and_reduceat'` as ONE argument; cargo treats it as a single
+filter substring, matched nothing, and reported `test result: ok. 0 passed; 598 filtered out` with
+exit 0. That is a green run that executed no test. Re-run as `--lib reduce_vectorcall`:
+`1 passed`. **Any `cargo test` line whose result says `0 passed` is a filter bug, not a pass** —
+read the count, not the word `ok`.
+
+COUNTED_MECHANISM: `reduce`'s wrapper excess 1,771 -> 1,322 retired instructions and 1,220 -> 689
+cycles per call, with both arms' operands and the probe form held identical.
+
+A/A NULL CONTROLS: all ten wall-clock rows are `run_dual_null_median_ci_contract` rows the gate
+admitted; counter figures are hardware totals from matched probes and carry no schedule.
+
+RETRY PREDICATE: do not predict a specific instruction count for the next call-shape lever on this
+family — my last three predictions missed by 5-8x low, 5-8x low, and 1.8x high. Quote the range
+400-800 insns/call. `reduce` is 1.1602x and no longer the family's worst cell; `accumulate` at
+1.2088x now is.
+AGENT_NAME=AzureCarp.
