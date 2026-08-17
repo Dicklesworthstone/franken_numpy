@@ -52802,3 +52802,93 @@ the counted result rather than quietly reconciled with it.
 this decomposition and I stop attacking it rather than building a sixth harness. The counted split
 stands on its own and is already banked; it does not need a time-domain twin.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — STOP RULE INVOKED, and the test I registered to trigger it was MIS-DESIGNED. The deeper answer: retired instructions are additively decomposable, wall-clock time is NOT — which explains all five refusals at once (deadlock-audit-ei9jz)
+
+**Campaign result class:** registered stop rule honoured + my own acceptance test refuted + the
+mechanism that ends the line
+
+Batched harness (`partition_batched_2000x25`), ELF built from committed `fbfc16cc`, threading
+pinned, four runs. Per-run host state recorded because the first was contaminated and I re-ran
+rather than publish it:
+
+```
+  run   idle  runnable   whole   numpy   probe_chain   wrapper_residual
+  (1)     6%   22/64     633.6   419.3      246.1          -31.9      <- SATURATED, disregarded
+  rep1   69%   11/64     649.8   424.4      257.5          -32.0
+  rep2   69%   22/64     631.4   412.8      275.5          -56.9
+  rep3   75%    6/64     641.4   424.4      236.4          -19.4      <- cleanest window
+```
+
+**The wrapper residual is negative in 4 of 4 runs including the cleanest**, so the negative part is
+reproducible and not a bad-window artifact.
+
+### My registered PRIMARY TEST failed, and it deserved to - it could not test what I claimed
+
+I registered: per-term implied rate spread below 1.5x means batching fixed the instrument, above
+2.0x means it did not. Measured on the cleanest run: **2.97x** (4.83 to 14.35 insns/ns), against
+3.05x under the old single-call harness. **Batching changed the spread by essentially nothing.**
+
+By the letter of the registration that is a fail. But the test was mis-designed, and saying so is
+more useful than banking a pass/fail: **it assumed a uniform insns/ns across the terms of one route
+and treated any deviation as instrument error.** I had already measured, two rows earlier, that the
+keyword path runs at 9.63 insns/ns against a 6.99 route average - i.e. that per-component rates
+genuinely differ - and then registered a test that reads exactly that real variation as a defect.
+The 3x spread is not noise: `kb` is tight compare-and-hash code at ~14.4 insns/ns (IPC ~4.5 at
+3.2 GHz) and NumPy's keyword parse is branchy pointer-chasing at ~4.8 (IPC ~1.5). Both are credible.
+
+So batching DID fix what it was built to fix - the terms now carry sub-nanosecond precision instead
+of sitting 2 timer-ticks above zero - and the split still does not close.
+
+### The actual mechanism, which ends this line rather than motivating a sixth harness
+
+**Retired instructions are conserved and additive; time is not.** The identity
+
+```
+  wrapper = (skipped - [(numpy_kwargs - numpy) + pydict + kb]) - numpy
+```
+
+is exact in instructions because every instruction executed is executed exactly once and counted
+once, wherever it sits. In the time domain the same instruction sequence does NOT cost the same in
+isolation as it does embedded in the route: a replica runs with its own branch predictor state,
+its own cache residency, and its own ILP, and modern out-of-order execution overlaps work across
+the boundaries this identity pretends are clean. Summing replica TIMES therefore over-counts, and
+the residual can and does go negative while the instruction-domain residual stays firmly positive
+at +640 insns/call.
+
+That single fact explains all five refusals without needing five separate excuses: aggregator
+sensitivity, the withdrawn cross-host conversion, the negative completed partition, the
+timer-resolution finding, and now a resolution-fixed harness that still returns a negative part.
+**The decomposition is well-posed in instructions and ill-posed in time.**
+
+### STOP RULE HONOURED
+
+I registered: "if the primary test fails, this is the FIFTH refusal and I stop attacking it rather
+than building a sixth harness." Stopping. The batched harness stays in the tree because it is
+strictly better than what it replaced and its diagnostic emission is what made this diagnosis
+possible, but I am not building another instrument for this split.
+
+**WHAT STANDS:** the counted split - `probe_chain` 1189.4 and `wrapper_residual` 641.9 insns/call,
+ratio 0.540, 0.08% spreads, no conversions - and the whole-route excess (1830.5 insns/call; 288.6 ns
+by the 400,000-call loop). Both remain instructions-first results, and the probe/wrapper ordering
+remains an INSTRUCTIONS-ONLY claim with no time-domain confirmation and now no prospect of one from
+this method.
+
+**WHAT IS RETIRED:** the wall-clock probe/wrapper split, in every form. The banked 91/370 (which
+omitted a real term), my withdrawn ~300/161, and these batched figures are all superseded by "the
+time-domain split is not obtainable this way". `PERCALL_FLOOR_PARTITION` should be read as a
+diagnostic of the ROUTE TOTAL, which it measures well, and not as a partition.
+
+COUNTED_MECHANISM: 4/4 runs negative wrapper (-19.4 to -56.9 ns) across idle 6-75%; implied-rate
+spread 2.97x batched versus 3.05x single-call, i.e. unchanged by a fix that demonstrably improved
+precision; instruction-domain residual +640.5 insns/call on the same identity.
+
+A/A NULL CONTROLS: not applicable - the group asserts itself invalid and publishes no certified row,
+which is the correct behaviour and is the result.
+
+RETRY PREDICATE: **none for the ns split - it is retired.** If someone wants the time cost of the
+probe chain specifically, the tractable question is not a partition but a direct A/B: remove the
+probe chain from a build and measure the ROUTE, which is a single well-conditioned difference of two
+large quantities rather than a residual of five replicas. That is a different experiment and it
+needs its own registration.
+AGENT_NAME=SlateFinch.
