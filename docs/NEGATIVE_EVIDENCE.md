@@ -52170,3 +52170,60 @@ bench mirror in the same commit - the constant is pinned in three places. Do NOT
 route against the `multiply` control under the same churn control, since the raise covers a size this
 row only reaches by inference.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — DISCLOSURE: my commit 364a4933 swept in a 91-line ledger row belonging to AzureCarp. Same trap that hit me four hours ago, with the roles reversed
+
+**Campaign result class:** provenance disclosure (no measurement)
+
+`364a4933` carries `deadlock-audit-ei9jz` in its message and my bench change, and it ALSO contains
+AzureCarp's complete `F64_DIV_NATIVE_MIN_LEN = 1<<19 IS SET TOO LOW` row, 91 added lines ending
+`AGENT_NAME=AzureCarp`. That row is theirs. It is not mine, it is not about my bead, and my commit
+message describes none of it.
+
+**The content is INTACT and COMPLETE** - the row runs from its heading to its closing
+`AGENT_NAME=AzureCarp.` and its retry predicate, verified line by line - and nothing of theirs is
+left uncommitted. Nothing is lost; only the attribution is wrong.
+
+### How I did it, precisely, because the mechanism is the lesson
+
+I staged one file, `git add crates/fnp-python/benches/criterion_python_elementwise.rs`. Their row was
+ALREADY in the shared index. `git commit` then took the ENTIRE staged index, theirs included.
+
+I did run `git diff --cached --name-only` - the standing orders' check - and it printed both paths.
+**But I had put it in the SAME compound command as the commit, so its output only reached me after
+the commit had already happened.** Running the check is not the control; READING it before the
+commit is the control, and a check whose output arrives after the action it was meant to gate is
+decoration.
+
+This is the identical failure AzureCarp made in `4bde9d6b`, which swept three of my bench files into
+their commit, and which they disclosed unprompted in `1c32c032`. I wrote at the time that "a shared
+working tree makes `git add` explicit paths AND `git diff --cached` mandatory for BOTH parties, and
+neither half is sufficient alone". I then did both halves and still failed, because I sequenced them
+wrong. The rule needs sharpening and this row is the evidence for the sharper version:
+
+> On a shared working tree, `git diff --cached --name-only` must be its OWN command, whose output is
+> read, before any `git commit`. Never chain the check and the commit.
+
+There is a second-order fix available to anyone who wants it: `git commit -- <pathspec>` commits the
+working-tree content of those paths only, ignoring the rest of the index. This project's standing
+orders already warn that pathspec form has its own trap (it commits WORKING-TREE content, not staged
+content), which is why the orders prefer explicit `add` + verify. The verify has to be a separate
+step or the preference does not hold.
+
+### What I am not doing about it
+
+I am not rewriting history to reattribute the row. `main` is shared, other agents have already
+fetched, and a rebase to fix an attribution would be far more disruptive than the misattribution
+itself. The correction is this row: **AzureCarp's `F64_DIV_NATIVE_MIN_LEN` row lives in commit
+`364a4933`, which is mine, and `git log` will not show that.** Anyone auditing that row's provenance
+should read this note, and anyone auditing `364a4933` should know two thirds of its diff is not mine.
+
+COUNTED_MECHANISM: 91 lines of a peer's ledger row in a commit whose message names only my bead;
+1 file of mine staged, 2 files committed.
+
+A/A NULL CONTROLS: not applicable - no measurement in this row.
+
+RETRY PREDICATE: none. This is a disclosure, not a finding. The behavioural change is the sharpened
+rule above, which I will follow for the rest of this session: the staged-file check runs as its own
+command and its output is read before committing.
+AGENT_NAME=SlateFinch.
