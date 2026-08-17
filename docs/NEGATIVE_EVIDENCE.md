@@ -49404,3 +49404,71 @@ future rows here should quote it rather than them. (3) The array-needle cell is 
 the bulk unattributed; the four probes and the dispatcher body remain unpriced.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - CERTIFIED, and it is the largest single move of the campaign on this cell: `searchsorted` array-needle goes 5.730x -> 3.262x. The designed control moved 2.0% (`deadlock-audit-v46rn`)
+
+`RedLynx`. Five A/Bs on my own levers had produced four non-wins. This one applies the filter
+those failures taught - change only what runs UNCONDITIONALLY on the path that does the work -
+and it is decisive.
+
+**Campaign result class:** maintenance-self-speedup (cell remains a regression vs NumPy)
+
+```
+BEFORE elf=f11a30fd49cdbbb0... (row 65 after-arm, 3 runs)
+AFTER  elf=bd429c947718b23d... (3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 14.00/14.92/17.00 before the build; 13.28/14.48/16.54 before the block;
+  18.54/15.55/16.87 after it
+CPU MHz system-wide min 1429 max 4242 median 2592 spread 2.969x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on all fifteen phases, same_core=true,
+  spreads 1.0000-1.0054
+
+  case              on the path   BEFORE     AFTER (3 runs)                change
+  ss_array_needle   YES           0.174527   0.299904/0.313436/0.306614    +75.7%
+  ss_list_haystack  no (CONTROL)  0.446626   0.456447/ VOID  /0.453671      +2.0%
+  clip_one_sided    no            0.906028   0.917941/0.907922/0.921091     +1.3%
+  ss_scalar_needle  different     0.486678   0.473118/0.504181/0.488322      +0.3%
+
+Voids: ss_list run 2's incumbent null [1.000071,1.000714] and clip_one run 2's
+candidate null [0.993503,0.998414] both exclude unity.
+```
+
+**`fnp.searchsorted` WITH AN ARRAY NEEDLE GOES 5.730x -> 3.262x.** Its own arm falls from
+7254-8952 ns to 4098-4183 ns - nearly halved - while NumPy's arm holds at 1258-1287 ns.
+
+**THE CONTROL SEPARATES IT CLEANLY.** `ss_list_haystack` passes a LIST, fails the exact-ndarray
+guard in every one of these probes and takes the cold path instead, so the lever cannot reach it.
+It moved **+2.0%**; the target moved **+75.7%**. `clip_one_sided` moved +1.3% and `ss_scalar_needle`
++0.3% - the latter is the sharpest confirmation available, because it is a `searchsorted` call on
+the same haystack that routes through a DIFFERENT probe, and it did not move.
+
+**WHAT WAS CHANGED, and why it was worth more than the last four attempts.** Seven probes in this
+family share one head, and four of them run for an f64 haystack before the f64 path engages:
+
+```
+    let numpy = py.import("numpy")?;                        <- 656 ns shape, per call
+    let ndarray_type = numpy.getattr("ndarray")?;           <- fresh PyString, per call
+    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type)
+```
+
+**None of the seven is a `#[pyfunction]`, so the 338-site wrapper sweep never reached them** - the
+scoping boundary that row's commit drew deliberately is exactly where these were hiding. The f64
+function's output allocation also passed `dtype` through a `PyDict` where `numpy.empty` takes it
+positionally.
+
+**THE FILTER IS THE TRANSFERABLE PART.** Rows 60, 62 and 63 each changed something a caller had
+already guarded, and measured zero. Row 64 changed something real but small and could not separate
+it. This changed four things that run unconditionally on the engaging path, and it moved 76%.
+**"Does this run every time on the path that does the work" has now sorted five levers correctly.**
+
+**STILL A LOSS.** 3.262x means NumPy is still more than three times faster on this cell, and it
+remains the worst in the campaign. The cell has come 8.700x -> 5.838x -> 3.262x across three
+measured levers.
+
+RETRY PREDICATE: (1) The remaining 3.262x is unattributed. The dispatcher body's 21
+getattr/asarray/String sites are the next unpriced block, and the same head pattern exists in
+probe families beyond `searchsorted` - grep for it before assuming this family was special. (2)
+`ss_list_haystack` at 2.24x is now itself worth reading: it takes the cold path, and nothing has
+ever looked at what that path does. (3) Quote the ratio, not the excess - NumPy's arm was steady
+here but has moved 60% between windows in this group before. AGENT_NAME=RedLynx.
+
