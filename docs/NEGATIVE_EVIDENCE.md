@@ -49835,3 +49835,124 @@ though it were the lever's reach - "8.700x" is where the cell started, not what 
 worth. (3) When a lever's controls are flat, that is evidence FOR the attribution and evidence
 AGAINST breadth at the same time; say both. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - THE CERTIFYING RUN: my own pre-registered guard VOIDS ALL SIX SIZES, so the `out=` gate stays UNDECIDED. What it DID settle is the route-level ENGAGEMENT PROOF I have owed for six rows, and a hard number for how badly the dual-null CI understates this route: run-to-run spread is 3-35x the within-run CI while the nulls straddle unity (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build in this project during measurement (`pgrep -c rustc` = **0** at the start of all
+five invocations, so BOTH the original rule 1 and its amendment were satisfied - the amendment turned
+out not to be needed). Five invocations of
+`bench_elf_sha256=7dd037723ee6ae915846042cbc7ae182e7c4963447c2124f0b2b92c4a54006cf`, profile
+`release-perf`, worker `thinkstation1`, numpy 2.4.3.
+
+```
+  per-run provenance (pre -> post), 1-min <= 5-min at the start of every run as required
+    run1  13.98/20.56/19.88  2972 MHz  ->  12.71/19.96/19.69  3098 MHz   rustc=0
+    run2  12.71/19.96/19.69  3114 MHz  ->  11.11/19.12/19.42  2816 MHz   rustc=0
+    run3  11.11/19.12/19.42  2837 MHz  ->  14.92/19.57/19.56  3044 MHz   rustc=0
+    run4  14.30/19.29/19.47  2370 MHz  ->  13.01/18.67/19.26  3198 MHz   rustc=0
+    run5  13.01/18.67/19.26  3083 MHz  ->  12.35/18.25/19.11  2970 MHz   rustc=0
+```
+
+**Campaign result class:** gate question UNDECIDED by pre-registered rule + an owed ENGAGEMENT PROOF
+discharged + a measured bound on the harness's own CI + a defect found in my own rule
+
+### The result, with the pre-registered rules applied as written
+
+```
+  n      native_over_delegate, 5 runs                    mean    stdev   meanCIhw  GUARD  sign
+  2^10   0.8469 0.8212 0.8377 0.8312 0.8351            0.8344   0.0094    0.0079   VOID   5/5 <1
+  2^14   1.0171 1.0775 1.1003 1.0274 1.0732            1.0591   0.0354    0.0029   VOID   5/5 >1
+  2^18   1.1992 1.0989 1.0784 1.1739 1.1028            1.1306   0.0526    0.0010   VOID   5/5 >1
+  2^19   1.3227 1.1833 1.2995 1.3491 1.1881            1.2685   0.0777    0.0043   VOID   5/5 >1
+  2^20   1.5457 1.3513 1.5834 1.5750 1.3142            1.4739   0.1303    0.0099   VOID   5/5 >1
+  2^21   0.7598 0.7347 0.7892 0.8896 0.9984            0.8343   0.1090    0.0693   VOID   5/5 <1
+```
+
+**Every size is VOID under amended rule 3**, whose text is "VOID any size whose between-run stdev
+exceeds its mean within-run CI half-width... regardless of how clean its nulls look". So **the `out=`
+gate question is UNDECIDED and the route keeps its current behaviour.** No band, no threshold, no
+routing change - which is also what original rule 4 required regardless of outcome.
+
+**This is not an artefact of guarding a DERIVED quantity.** `native_over_delegate` combines two
+contracts, so I re-ran the guard against the raw `divide_vs_numpy` ratio, which publishes its own CI:
+
+```
+  n      stdev    meanCIhw   mean ratio   GUARD   all nulls straddle unity
+  2^10   0.0099    0.0079     0.8301      VOID    yes
+  2^14   0.0245    0.0029     0.8368      VOID    no
+  2^18   0.0352    0.0010     0.8715      VOID    yes
+  2^19   0.1012    0.0043     0.7296      VOID    yes
+  2^20   0.0960    0.0099     0.6722      VOID    no
+  2^21   0.2278    0.0693     1.3506      VOID    no
+```
+
+**VOID at every size on the apples-to-apples test too.** The measurement is unstable, not the guard.
+
+### THE NUMBER WORTH CARRYING: the within-run CI understates this route by 3.2x to 35.2x
+
+At 2^18 the contract reports a CI half-width of **0.0010** while the same statistic moves **0.0352**
+between runs of the same binary on the same host - a **35.2x** understatement. Across the six sizes the
+ratio of between-run stdev to within-run CI half-width is 1.3x, 8.4x, 35.2x, 23.5x, 9.7x, 3.3x. **And
+the A/A nulls straddle unity at 2^10, 2^18 and 2^19 while the ratio wanders 10-14%.** This is the third
+distinct statistic today on which a passing null failed to bound the real uncertainty, and it is the
+first time I have a MULTIPLIER for it rather than an anecdote. Any row in this campaign quoting a
+dual-null CI as its uncertainty on this route is understating it by roughly an order of magnitude.
+
+### DISCHARGED: the route-level engagement proof, owed since the first `out=` row
+
+Original rule 5 pre-registered the test: *if `fnp_div_ns` tracks `predicted_delegate_ns` within the
+nulls at every size, divide is delegating and the premise that our kernel runs on this path is wrong.*
+
+It does not track it. `native_over_delegate` runs from **0.8344 at 2^10 to 1.4739 at 2^20** - separated
+from unity in BOTH directions and by far more than any plausible mismatch between `add`'s wrapper and
+`divide`'s. A delegating divide would sit at ~1.0 at every size. **Our native kernel demonstrably
+engages on the `out=` path**, which is what an identity check could never show, because
+`numpy.divide(a, b, out=o)` returns `o` exactly as our route does. That question is now closed.
+
+Note this survives the VOID: it rests on the SIGN and the SEPARATION, not on any magnitude, and the
+sign is 5/5 consistent at every one of the six sizes. Which is the lesson - **on this route, signs
+replicate and magnitudes do not.**
+
+### A DEFECT IN MY OWN PRE-REGISTERED RULE 3
+
+Rule 3 read: *"if `add_vs_numpy` at 2^21 stays below 0.95 the delegation control is unhealthy there".*
+It guards ONE direction. The five runs give `add_vs_numpy` at 2^21 of 0.9845, 1.1226, 1.1804, 1.3149,
+1.0144 - **mean 1.1234, i.e. ABOVE unity.** `fnp.add(a, b, out=o)` cannot be genuinely FASTER than
+`numpy.add(a, b, out=o)` on a path proven to be pure delegation; the wrapper can only add cost. So the
+control is unhealthy at 2^21 in the direction my rule did not name, and 2^21 would be void on control
+health even if it had passed the variance guard. The smoke run's `wrapper_ns=665863` was the same
+illness showing through, and it was right to flag it as a blocker.
+
+### WORST CELLS, quoted worst-first as the campaign requires
+
+```
+  n      divide_vs_numpy, 5 runs                          WORST    -> slower than numpy
+  2^10   0.8335 0.8411 0.8295 0.8322 0.8142              0.8142      1.2283x
+  2^14   0.8477 0.8467 0.8326 0.8604 0.7966              0.7966      1.2553x
+  2^18   0.8262 0.9020 0.8851 0.8420 0.9020              0.8262      1.2104x
+  2^19   0.6398 0.8406 0.6812 0.6487 0.8378              0.6398      1.5630x
+  2^20   0.5937 0.7669 0.6244 0.5904 0.7852              0.5904      1.6937x
+  2^21   1.2700 1.5181 1.4778 1.5023 0.9849              0.9849      1.0153x
+```
+
+**`fnp.divide` with `out=` is slower than `numpy.divide` at every size from 2^10 to 2^20, in all five
+runs, without exception - 30 of 30 cells below unity.** The worst cell is now **1.6937x at 2^20**,
+which SUPERSEDES the 1.6234x I banked as the worst earlier today. Only 2^21, above the `1 << 21` rayon
+threshold, reaches parity, and its control is unhealthy so even that is not quotable.
+
+COUNTED_MECHANISM: 30 of 30 measured cells across 6 sizes and 5 runs place `fnp.divide(out=)` below
+`numpy.divide(out=)`, worst 0.5904 at 2^20; and the between-run stdev exceeds the within-run CI
+half-width by factors of 1.3, 8.4, 35.2, 23.5, 9.7 and 3.3 at the six sizes.
+
+A/A NULL CONTROLS: the divide contract's incumbent and candidate A/A nulls both straddle unity in all
+five runs at 2^10, 2^18 and 2^19, and in the majority of runs at 2^14, 2^20 and 2^21. **They are
+recorded here as EVIDENCE OF THE HARNESS'S BLINDNESS, not as a licence**: at 2^18 every null straddled
+unity across all five runs while the effect ratio itself moved 0.8262-0.9020.
+
+RETRY PREDICATE: the `out=` gate is UNDECIDED and must not be changed on this row; do not retry it by
+running more repetitions until the spread narrows (amended rule 3 forbids exactly that). To make it
+decidable the statistic itself has to get quieter - the promising direction is that SIGNS were 5/5
+consistent at every size while magnitudes were not, so a sign-based decision rule registered in advance
+may succeed where a magnitude-based one cannot. Fix rule 3 to guard control health in BOTH directions
+before reusing it. The engagement question is CLOSED and must not be re-opened: the kernel engages.
+AGENT_NAME=AzureCarp.
