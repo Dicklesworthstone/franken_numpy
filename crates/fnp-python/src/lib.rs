@@ -423,6 +423,44 @@ impl PyUFunc {
             && order == "K"
             && subok
         {
+            // ONE dtype sniff for the whole probe run below (`deadlock-audit-v46rn`).
+            //
+            // NOW ACTUALLY ABOVE THE FIRST GATED PROBE. This comment already claimed the
+            // sniff was hoisted above every gate that reads it, and it was not: it sat
+            // BELOW the f64 binary block, so that block - the one `divide` enters - could
+            // not see it and re-read `dtype.char` for itself. Moving the binding here is
+            // the whole lever: the five ops that map to `Some(BinaryOp)` now pay ONE
+            // sniff per call where they paid two.
+            //
+            // Cost-neutral for everything else, which is why it can move unconditionally.
+            // The six early returns between here and the old position are native routes
+            // that already sniffed x1 through the gate's own read, and add/subtract/multiply
+            // take `_ => None`, skip the block entirely and reach the old position anyway -
+            // so no path gains a read it did not already pay.
+            // ONE fetch serving every gate below. `kind` costs one extra getattr here and
+            // saves the timedelta probe's TWO `dtype` fetches plus two `kind` extracts,
+            // so it pays for itself on any call that is not temporal.
+            // `dtype.char` is the array-protocol typechar and encodes BOTH fields the
+            // gates need in ONE attribute, so this reads three Python operations
+            // (getattr dtype, getattr char, extract) where the previous form read five
+            // (getattr dtype, getattr itemsize, extract, getattr kind, extract).
+            // Verified against the measured interpreter, numpy 2.4.3, and identical on
+            // 1.26.4: f16='e', f32='f', f64='d', complex64='F', complex128='D',
+            // clongdouble='G', datetime64='M', timedelta64='m', int64='l', int16='h'.
+            // INTERNED KEYS (`deadlock-audit-ei9jz`). This sniff runs on EVERY delegating
+            // call and did TWO `&str` getattrs, each of which builds a fresh `PyString`
+            // and hashes it before the attribute can be looked up. `intern!` hands CPython
+            // a process-lifetime string whose hash it caches, so only the lookup remains.
+            // The getattrs still happen against the live objects, so nothing about dtype
+            // resolution changes - only the key construction is removed.
+            let x1_dtype_char: Option<char> = x1
+                .bind(py)
+                .getattr(intern!(py, "dtype"))
+                .and_then(|dtype| dtype.getattr(intern!(py, "char")))
+                .and_then(|c| c.extract::<char>())
+                // No `dtype`/`char`, or unreadable: the sniff establishes nothing, so
+                // skip nothing.
+                .ok();
             let binop = match self.kind {
                 UFuncKind::Remainder => Some(BinaryOp::Remainder),
                 UFuncKind::Power => Some(BinaryOp::Power),
@@ -464,13 +502,15 @@ impl PyUFunc {
                 // NOT by `numpy_dtype_is_f64`, which imports numpy and runs a full `asarray`
                 // round-trip PER OPERAND. On this path that cost was paid only to decline.
                 //
-                // The size gate now runs BEFORE those reads, because it is both cheaper and,
-                // on the op that reaches here, more selective. For every op but `Div` it does
-                // NO Python work at all - it returns `true` straight off the op match - so
-                // moving it first cannot cost them anything. For `Div` it is a single
-                // `getattr("size")`, and below `F64_DIV_NATIVE_MIN_LEN` it declines the whole
-                // block for the price of that one read instead of four `getattr`s and two
-                // extracts. `divide` is exactly the op that pays this: add/subtract/multiply
+                // x1's typechar is now FREE here - the sniff is hoisted above this block, so
+                // this is a comparison against an already-computed `Option<char>` and nothing
+                // is read. It therefore goes first, being both free and highly selective.
+                //
+                // Then the size gate, which for every op but `Div` does NO Python work at all
+                // (it returns `true` straight off the op match) and for `Div` is a single
+                // `getattr("size")`. Below `F64_DIV_NATIVE_MIN_LEN` that declines the whole
+                // block before x2 is ever touched. The one genuine read left is x2's typechar,
+                // and it is last. `divide` is exactly the op that pays this: add/subtract/multiply
                 // hit `_ => None` above and never enter the block, so divide alone carried the
                 // probe cost, and its measured per-call excess (471 ns) was more than double
                 // `multiply`'s (220 ns).
@@ -481,8 +521,8 @@ impl PyUFunc {
                 // meets the size check first, which returns `true` when `size` is missing, and
                 // is still declined by the dtype read that follows.
                 if !zero_divisor
+                    && x1_dtype_char == Some('d')
                     && f64_binary_route_is_worth_taking(op, a)
-                    && dtype_char_of(a) == Some('d')
                     && dtype_char_of(b) == Some('d')
                     && let Some(out_val) = try_zerocopy_f64_binary(py, a, b, op)?
                 {
@@ -549,32 +589,6 @@ impl PyUFunc {
                     return Ok(out_val);
                 }
             }
-            // ONE dtype sniff for the whole probe run below (`deadlock-audit-v46rn`).
-            // Hoisted ABOVE the first gated probe so every gate can read it.
-            // ONE fetch serving every gate below. `kind` costs one extra getattr here and
-            // saves the timedelta probe's TWO `dtype` fetches plus two `kind` extracts,
-            // so it pays for itself on any call that is not temporal.
-            // `dtype.char` is the array-protocol typechar and encodes BOTH fields the
-            // gates need in ONE attribute, so this reads three Python operations
-            // (getattr dtype, getattr char, extract) where the previous form read five
-            // (getattr dtype, getattr itemsize, extract, getattr kind, extract).
-            // Verified against the measured interpreter, numpy 2.4.3, and identical on
-            // 1.26.4: f16='e', f32='f', f64='d', complex64='F', complex128='D',
-            // clongdouble='G', datetime64='M', timedelta64='m', int64='l', int16='h'.
-            // INTERNED KEYS (`deadlock-audit-ei9jz`). This sniff runs on EVERY delegating
-            // call and did TWO `&str` getattrs, each of which builds a fresh `PyString`
-            // and hashes it before the attribute can be looked up. `intern!` hands CPython
-            // a process-lifetime string whose hash it caches, so only the lookup remains.
-            // The getattrs still happen against the live objects, so nothing about dtype
-            // resolution changes - only the key construction is removed.
-            let x1_dtype_char: Option<char> = x1
-                .bind(py)
-                .getattr(intern!(py, "dtype"))
-                .and_then(|dtype| dtype.getattr(intern!(py, "char")))
-                .and_then(|c| c.extract::<char>())
-                // No `dtype`/`char`, or unreadable: the sniff establishes nothing, so
-                // skip nothing.
-                .ok();
             // STRICTER as well as cheaper: the previous `itemsize == 2` test also
             // admitted int16 and uint16, which paid the f16 probe only to be refused by
             // its `kind` check. 'e' is float16 and nothing else.
@@ -110675,6 +110689,73 @@ mod tests {
                         want.call_method0("tobytes")?.extract::<Vec<u8>>()?,
                         "{name} at shape {shape:?} must match numpy byte for byte"
                     );
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// Hoisting the x1 dtype sniff must not change WHICH inputs the binop routes admit
+    /// (`deadlock-audit-v46rn`).
+    ///
+    /// The f64 binary block used to read `dtype.char` off x1 for itself, below a sniff
+    /// that had already read exactly that and was sitting out of reach. The sniff moved
+    /// above the block so the read is shared, and the block now compares an
+    /// already-computed `Option<char>`.
+    ///
+    /// The hazard is not arithmetic, it is ROUTING: the sniff reads `x1` while the block
+    /// read its own `a`, and if those ever disagreed the gate would admit or decline a
+    /// different set of inputs, silently choosing a different implementation. That shows
+    /// up as a wrong dtype or a wrong value, never as an error, so this walks every op
+    /// that maps to `Some(BinaryOp)` across the dtypes that make the gate answer
+    /// differently, on both sides of the size threshold, against NumPy.
+    ///
+    /// Where NumPy itself refuses a combination (remainder on complex), we must refuse
+    /// too - so the test compares OUTCOMES, raising included, rather than skipping.
+    #[test]
+    fn binop_routing_is_unchanged_by_the_hoisted_dtype_sniff() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_hoist")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            for n in [1_usize << 8, F64_DIV_NATIVE_MIN_LEN] {
+                for dtype in ["float64", "float32", "float16", "int64", "complex128"] {
+                    let a = numpy
+                        .call_method1("arange", (1, n + 1))?
+                        .call_method1("astype", (dtype,))?;
+                    let b = numpy
+                        .call_method1("full", (n, 3))?
+                        .call_method1("astype", (dtype,))?;
+
+                    for op in ["divide", "remainder", "maximum", "minimum", "power"] {
+                        let want = numpy.getattr(op)?.call1((&a, &b));
+                        let got = module.getattr(op)?.call1((&a, &b));
+                        match (want, got) {
+                            (Ok(want), Ok(got)) => {
+                                assert_eq!(
+                                    got.getattr("dtype")?.str()?.extract::<String>()?,
+                                    want.getattr("dtype")?.str()?.extract::<String>()?,
+                                    "{op} on {dtype} at n={n} must keep numpy's dtype"
+                                );
+                                assert_eq!(
+                                    got.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                                    want.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                                    "{op} on {dtype} at n={n} must match numpy byte for byte"
+                                );
+                            }
+                            (Err(_), Err(_)) => {}
+                            (Ok(_), Err(e)) => panic!(
+                                "{op} on {dtype} at n={n}: numpy succeeded and we raised {e}"
+                            ),
+                            (Err(e), Ok(_)) => panic!(
+                                "{op} on {dtype} at n={n}: numpy raised {e} and we succeeded"
+                            ),
+                        }
+                    }
                 }
             }
             Ok(())
