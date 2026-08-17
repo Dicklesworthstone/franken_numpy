@@ -44762,3 +44762,121 @@ knew, so absence of a row is not evidence of health. (4) The integer cumsum rout
 kept its old behaviour here because only the float route was measured; it needs its own crossover
 row before being gated. AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - CERTIFIED, and the third mechanism SURVIVES where two were refuted: buffer PROVENANCE is worth a median 1.072x on the identical divide loop, counted at 5.96x the dTLB misses for 55 cycles apiece - so the replicas' Rust `Vec`s are taxing every banked kernel number, and the SHIPPED route never paid it (`deadlock-audit-ascyl`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. Five certification runs plus a counted mechanism from two matched single-arm probes.
+
+**Campaign result class:** maintenance-diagnostic (a self-speedup between two of OUR arms) + an
+instrument correction that reaches other people's banked rows
+
+### The control is airtight, and the linker is what made it so
+
+Both arms are emitted from one `emit_divide_fused_serial!` macro. LLVM then FOLDED them: `nm` on the
+built ELF reports `divide_fused_on_rust_vec`, `divide_fused_on_numpy_buffer` **and** the original
+`divide_fused_serial` all at address **0x7178f0**. They are not similar code, they are the SAME code
+at the SAME address, so no codegen difference can exist and the only variable left is which memory
+the pointers reach. (The macro was written to get two `perf`-separable symbols; the fold makes that
+impossible, which is a fair trade for a control nothing can argue with.)
+
+The no-copy gate is what keeps this honest: `PyBuffer` hands back a COPY for a non-contiguous or
+wrong-dtype array, and a copy is memory WE allocate — the group would then compare Rust memory to
+Rust memory and report a comforting "no difference". So each buffer's `buf_ptr()` is asserted equal
+to the numpy array's own `ctypes.data`, C-contiguity is asserted, and both arms are asserted to
+reproduce `numpy.divide` bit for bit.
+
+### The timed result
+
+```
+DIVIDE_ALLOCATOR_PROVENANCE n=1048576 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract
+  loop_body_emitted_from_one_macro=true arms_folded_by_llvm_to_one_code_address=true
+  buffers_are_views_not_copies=true both_arms_match_numpy_bitwise=true
+  ratio = numpy-allocated over Rust-Vec, >1 means numpy's memory is faster
+
+  R1 1.018230 ci95=[0.970703,1.052467]  loadavg 27.77/29.29/24.49  cpu=4  mhz 3970.7/3962.7
+  R2 1.010918 ci95=[0.954328,1.087744]  loadavg 25.74/28.79/24.40  cpu=9  mhz 3962.1/3982.4
+  R3 1.157112 ci95=[1.122536,1.173421]  loadavg 25.12/28.61/24.36  cpu=14 mhz 4021.7/4021.0
+  R4 1.149932 ci95=[1.138052,1.175340]  loadavg 25.12/28.61/24.36  cpu=11 mhz 4015.0/4025.9
+  R5 1.071877 ci95=[1.029604,1.123125]  loadavg 24.31/28.38/24.31  cpu=10 mhz 4026.6/4003.2
+  median=1.071877 min=1.010918 max=1.157112  three of five exclude unity
+```
+
+Every arm pair ran on the SAME core with `arm_mhz_spread` between 1.0002 and 1.0058, and all four
+nulls straddled unity on every run. Five runs because one cannot decide a sub-5% effect on this
+harness — that rule was learned the expensive way earlier today and is applied here from the start.
+
+### COUNTED_MECHANISM, from two probes that differ in one thing
+
+`perf stat` on two single-arm probes in SEPARATE processes, 400 calls each, means of two runs:
+
+```
+                 rust_vec        numpy_allocated      ratio
+  dTLB misses     2,568,246          431,073          5.96x
+  L1D misses    166,089,376      166,514,660          0.9974x
+  instructions 1,722,131,802    1,695,262,636         1.0158x
+  cycles       1,087,118,222      969,552,652         1.1213x
+  excess: 117,565,571 cycles over 2,137,172 excess dTLB misses = 55.0 cycles per excess miss
+```
+
+Same instructions to within 1.6% (the excess is the Rust `Vec` construction in setup), **same L1
+data-cache misses to within 0.3%** — identical cache-line traffic — and **5.96x the dTLB load
+misses**, paid at a page-walk cost of 55 cycles each, which is an entirely ordinary figure for a walk
+that misses the page-walk caches. Mechanism counted, not inferred.
+
+**I got these probes wrong the first time and the numbers say so.** The original `_counter_rust`
+probe never started Python while its sibling started the interpreter, imported numpy and built the
+operands — a 426 M instruction and 228 M cycle difference that had nothing to do with provenance.
+`perf stat` counts a PROCESS, so a probe pair is only comparable if everything outside the loop
+matches. The probe now pays the identical setup, including acquiring the `PyBuffer`s it then does not
+use, and the instruction counts agree to 1.6% where they previously disagreed by 25%.
+
+### THREE mechanisms now refuted, so the page-level cause stays open and honest
+
+1. **Transparent huge pages — REFUTED, three ways.** numpy owns the switch
+   (`_set_madvise_hugepage` exists and defaults to `True`), but a numpy buffer reports
+   `AnonHugePages: 0 kB` with the switch ON, with it OFF, and after **25 seconds / 73 365 divides**
+   of continuous real work — long enough for khugepaged (`scan_sleep_millisecs=10000`) to scan
+   twice. THP here is `madvise`-mode and nothing is being collapsed. numpy's buffers are not
+   2 MB-aligned either (`ptr%2MB = 2093072`), so they could not be fully collapsed even if it ran.
+2. **Buffer count — REFUTED.** The smaller control group shows the dTLB effect at least as strongly
+   as the larger one.
+3. **Physical-frame contiguity / Zen PTE coalescing — NOT TESTABLE FROM HERE, and therefore NOT
+   claimed.** It is the leading remaining candidate: Zen can coalesce consecutive, aligned 4 KB PTEs
+   into one TLB entry, which would explain both the 5.96x and its run-to-run swing (numpy's probe
+   read 706 398 dTLB misses on one run and 155 748 on the next). `/proc/self/pagemap` returns
+   zeroed PFNs without `CAP_SYS_ADMIN`, so physical contiguity cannot be observed from this pane. I
+   am naming it as a hypothesis and explicitly not banking it.
+
+### What this costs other people's numbers
+
+The replicas allocate Rust `Vec<f64>`. **The shipped route does not** — `zerocopy_f64_binary_flat`
+reads two numpy arrays and writes into a `numpy.empty` output, i.e. it already runs on the memory
+that is 1.072x FASTER here. So `deadlock-audit-0ppym`'s kernel figures (1.2652x accumulate-free,
+1.5372x fused) include a provenance tax the shipped kernel never pays, and the same applies to any
+row that timed a Rust-`Vec` replica against an `out=`-fed numpy call. Dividing through by the median
+1.072 puts the fused replica's 1.5372x nearer **1.43x** and the accumulate-free 1.2652x nearer
+**1.18x** — offered as the size of the correction, not as a new banked ratio, because those rows must
+be RE-TAKEN on numpy-allocated buffers rather than arithmetically adjusted.
+
+A/A NULL CONTROLS on the certification runs: all four nulls straddle unity on all five runs; R1's
+were incumbent ci95=[0.990516,1.008927] bias 0.001658 and candidate ci95=[0.983252,1.011294] bias
+0.002300.
+
+bench_elf_sha256 for the timed runs = 160e9c305c987da6a6262c733eb3996e3fc3bec3507d3e8809662166ef4ad296;
+for the counter probes = b7411b86a170005492d74e49dc2527e7839df0006f9268471f040746cec73e58. Both built
+LOCALLY with `RCH_CARGO_WRAPPER_BYPASS=1` (zero `[RCH]` lines), path from `--message-format=json`.
+HOST_BASELINE host=thinkstation1 Threadripper PRO 5975WX 32c/64t governor=powersave,
+allowed_logical_threads=16, runtime avx512f=false, `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`.
+
+**CORRECTION LANDED IN THE SAME COMMIT:** the version of this group that reached main in `5026121c`
+prints `arms_are_distinct_symbols=true`. That is FALSE — LLVM folded the arms to one address, as
+above — and it is fixed here to `arms_folded_by_llvm_to_one_code_address=true`. The claim was mine
+and it was published before I had disassembled the result.
+
+RETRY PREDICATE: do not re-test transparent huge pages or buffer count for this gap; both are
+refuted, THP three separate ways. Do NOT arithmetically rescale `0ppym`'s rows by 1.072 — re-take
+them with numpy-allocated buffers, which `bench_divide_allocator_provenance` now shows how to do.
+The open question is the page-level cause, and settling it needs `CAP_SYS_ADMIN` for
+`/proc/self/pagemap` or a host where huge pages are actually available.
+AGENT_NAME=AzureCarp.

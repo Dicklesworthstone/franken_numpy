@@ -1286,6 +1286,14 @@ fn main() {
                 bench_divide_allocator_provenance,
             ),
             (
+                "bench_divide_provenance_counter_rust",
+                bench_divide_provenance_counter_rust,
+            ),
+            (
+                "bench_divide_provenance_counter_numpy",
+                bench_divide_provenance_counter_numpy,
+            ),
+            (
                 "bench_dtype_probe_fanout_ceiling",
                 bench_dtype_probe_fanout_ceiling,
             ),
@@ -3500,12 +3508,20 @@ fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
 // and buffer count (the smaller control group shows the effect at least as
 // strongly as the larger one). This group tests the third and does not assume it.
 //
-// EXACTLY ONE VARIABLE CHANGES. Both arms run a loop emitted from the same
-// `emit_divide_fused_serial!` macro, so the source is identical by construction;
-// only the memory differs. The group does not take that on trust — it prints
-// `arms_are_distinct_symbols=true` and the two symbols can be disassembled and
-// their main-loop census compared (both must read 43 instructions per 16 doubles,
-// the figure already banked for `divide_fused_serial`).
+// EXACTLY ONE VARIABLE CHANGES, and the linker proved it rather than me. Both
+// arms are emitted from the same `emit_divide_fused_serial!` macro, and LLVM then
+// folded them: `nm` reports `divide_fused_on_rust_vec`,
+// `divide_fused_on_numpy_buffer` AND the original `divide_fused_serial` all at
+// address 0x7178f0 in the built ELF. The two arms are not merely similar code,
+// they are the SAME code at the SAME address, so no codegen difference can exist
+// between them and the only remaining variable is which memory the pointers point
+// at. The macro was originally written to get two `perf`-separable symbols; the
+// fold makes that impossible, which is a fair trade for an airtight control.
+//
+// CONSEQUENCE FOR ATTRIBUTION: `perf` cannot split these two arms by symbol, so
+// this group decides the question on the WALL CLOCK head-to-head instead. That is
+// sufficient for the decision rule below — if provenance does not cost time, then
+// whatever the dTLB counter says, it is not what makes us 1.25x slower.
 //
 // THE NEGATIVE CASE, and it is the one that would silently void the whole group:
 // `PyBuffer` will hand back a COPY rather than a view if the array is not
@@ -3515,11 +3531,13 @@ fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
 // `numpy.divide` bit for bit. A copy, a stride, or a dtype surprise panics
 // instead of quietly measuring Rust memory twice and reporting "no difference".
 //
-// DECISION RULE, registered before the run: if the numpy-buffer arm is faster AND
-// its dTLB misses collapse toward numpy's, the allocator is implicated and
-// `0ppym`'s kernel numbers must be re-taken. If the two arms tie, the allocator is
-// EXONERATED, the 10.5x is intrinsic to how this loop walks memory, and the third
-// mechanism joins the two already refuted. Bank either way.
+// DECISION RULE, registered before the run: if the numpy-buffer arm is faster by
+// more than the null spread, the allocator is implicated and `0ppym`'s kernel
+// numbers must be re-taken on numpy memory. If the two arms TIE, the allocator is
+// EXONERATED — the replicas' Rust `Vec`s are not what makes them slow, the 10.5x
+// dTLB gap is not costing time, and the third mechanism joins the two already
+// refuted. Bank either way; a tie is the more useful outcome because it closes a
+// door that would otherwise invalidate a whole lane of banked numbers.
 fn bench_divide_allocator_provenance(_c: &mut Criterion) {
     let n = DIVIDE_SERIAL_N;
     let (a_vec, b_vec) = divide_hazard_free_operands(n);
@@ -3599,20 +3617,23 @@ fn bench_divide_allocator_provenance(_c: &mut Criterion) {
         // operands are read-only under the GIL, and `npout` is a distinct fresh
         // array that neither operand aliases - the same argument the shipped
         // `zerocopy_f64_binary_flat` makes for the same conversion.
-        let a_np: &[f64] = unsafe {
-            std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n)
-        };
-        let b_np: &[f64] = unsafe {
-            std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n)
-        };
+        let a_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n) };
+        let b_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n) };
         let numpy_out: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(out_buffer.buf_ptr().cast::<f64>(), n) };
 
         // The two provenances must hold identical values, or the arms are dividing
         // different numbers and any ratio between them is meaningless.
         assert!(
-            a_np.iter().zip(a_vec.iter()).all(|(l, r)| l.to_bits() == r.to_bits())
-                && b_np.iter().zip(b_vec.iter()).all(|(l, r)| l.to_bits() == r.to_bits()),
+            a_np.iter()
+                .zip(a_vec.iter())
+                .all(|(l, r)| l.to_bits() == r.to_bits())
+                && b_np
+                    .iter()
+                    .zip(b_vec.iter())
+                    .all(|(l, r)| l.to_bits() == r.to_bits()),
             "the numpy operands and the Rust operands are not bit-identical"
         );
 
@@ -3667,7 +3688,8 @@ fn bench_divide_allocator_provenance(_c: &mut Criterion) {
         println!(
             "DIVIDE_ALLOCATOR_PROVENANCE n={n} numpy_version={numpy_version} worker={} \
              harness=common::run_dual_null_median_ci_contract \
-             loop_body_emitted_from_one_macro=true arms_are_distinct_symbols=true \
+             loop_body_emitted_from_one_macro=true \
+             arms_folded_by_llvm_to_one_code_address=true \
              buffers_are_views_not_copies=true \
              both_arms_match_numpy_bitwise=true \
              this_is_a_self_speedup_not_a_win=true \
@@ -3679,6 +3701,167 @@ fn bench_divide_allocator_provenance(_c: &mut Criterion) {
             provenance.ratio_ci_high,
             provenance.arm_a_median_ns,
             provenance.arm_b_median_ns,
+        );
+    });
+}
+
+/// How many calls each counter probe makes. Fixed, and identical across the two
+/// probes, so `perf stat` totals from two separate processes are comparable
+/// without any normalisation (`deadlock-audit-ascyl`).
+const PROVENANCE_COUNTER_CALLS: usize = 400;
+
+// COUNTING the provenance effect instead of just timing it (`deadlock-audit-ascyl`).
+//
+// `bench_divide_allocator_provenance` shows the numpy-allocated arm beating the
+// Vec-backed arm on the wall clock, but it cannot say WHY: LLVM folds the two arms
+// to one code address, so `perf` cannot attribute a counter to one arm or the
+// other inside a single process. The suspected mechanism is the 10.5x dTLB
+// load-miss gap, and a suspicion is not a mechanism.
+//
+// These two probes make it countable. Each runs the SAME loop the SAME number of
+// times over the SAME values, differing only in whether the buffers came from
+// Rust's allocator or numpy's, and each is meant to be run in its OWN process
+// under `perf stat`. Process setup, interpreter start and operand construction are
+// identical between them, so the DIFFERENCE in counted events is the provenance
+// effect and nothing else.
+//
+// Run them as:
+//   perf stat -e dTLB-load-misses:u,L1-dcache-load-misses:u,cycles:u -- \
+//     <elf> --bench fnp-group=bench_divide_provenance_counter_rust
+//   ... same with ..._numpy
+//
+// NEGATIVE CASE: if the two probes report the same dTLB misses, the 10.5x gap seen
+// across symbols was NOT a property of the buffers and the wall-clock difference
+// has some other cause — which must then be found before anyone credits the
+// allocator. A probe that silently made a copy would also show no difference, so
+// both probes re-assert the no-copy and bit-parity gates rather than trusting the
+// sibling group to have checked them.
+fn bench_divide_provenance_counter_rust(_c: &mut Criterion) {
+    let n = DIVIDE_SERIAL_N;
+    let (a_vec, b_vec) = divide_hazard_free_operands(n);
+    let mut out = vec![0.0_f64; n];
+
+    // THE SETUP IS PART OF THE CONTROL, and the first version of this probe got it
+    // wrong. `perf stat` counts a whole PROCESS, so the two probes are only
+    // comparable if they do the same work outside the loop. The first version
+    // skipped Python entirely while its sibling started the interpreter, imported
+    // numpy and built the operands — worth 426 M instructions and 228 M cycles of
+    // pure difference, which swamped the effect being measured. So this probe pays
+    // the identical setup and then simply does not divide into it.
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nnpout = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_py = locals.get_item("a").expect("a operand");
+        let b_py = locals.get_item("b").expect("b operand");
+        let np_out_py = locals.get_item("npout").expect("out buffer");
+        // Acquire the buffers too, so even the PyBuffer cost matches. They are then
+        // deliberately unused: this arm divides out of Rust `Vec`s.
+        let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_py).expect("a buffer");
+        let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_py).expect("b buffer");
+        let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&np_out_py).expect("out buffer");
+        black_box((
+            a_buffer.item_count(),
+            b_buffer.item_count(),
+            out_buffer.item_count(),
+        ));
+
+        let mut hazards = 0usize;
+        for _ in 0..PROVENANCE_COUNTER_CALLS {
+            if divide_fused_on_rust_vec(&a_vec, &b_vec, &mut out) {
+                hazards += 1;
+            }
+            black_box(&out);
+        }
+        assert_eq!(hazards, 0, "operands must be hazard-free");
+        println!(
+            "PROVENANCE_COUNTER_PROBE provenance=rust_vec n={n} \
+             calls={PROVENANCE_COUNTER_CALLS} checksum={:016x} \
+             setup_matches_sibling_probe=true run_this_under_perf_stat=true",
+            divide_checksum(&out)
+        );
+    });
+}
+
+fn bench_divide_provenance_counter_numpy(_c: &mut Criterion) {
+    let n = DIVIDE_SERIAL_N;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nnpout = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_py = locals.get_item("a").expect("a operand");
+        let b_py = locals.get_item("b").expect("b operand");
+        let np_out_py = locals.get_item("npout").expect("out buffer");
+
+        let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_py).expect("a buffer");
+        let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_py).expect("b buffer");
+        let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&np_out_py).expect("out buffer");
+        // Same no-copy gate as the timed group: a copy would be OUR memory and the
+        // probe would report "no difference" for the wrong reason.
+        for (label, buffer, object) in [
+            ("a", &a_buffer, &a_py),
+            ("b", &b_buffer, &b_py),
+            ("npout", &out_buffer, &np_out_py),
+        ] {
+            let owner_ptr = object
+                .getattr("ctypes")
+                .and_then(|c| c.getattr("data"))
+                .and_then(|d| d.extract::<usize>())
+                .expect("numpy array exposes ctypes.data");
+            assert_eq!(
+                buffer.buf_ptr() as usize,
+                owner_ptr,
+                "PyBuffer handed back a COPY for `{label}`, so this probe would be \
+                 counting Rust memory while claiming to count numpy's"
+            );
+            assert!(buffer.is_c_contiguous(), "`{label}` is not C-contiguous");
+        }
+        let a_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n) };
+        let b_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n) };
+        let out: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_buffer.buf_ptr().cast::<f64>(), n) };
+
+        let mut hazards = 0usize;
+        for _ in 0..PROVENANCE_COUNTER_CALLS {
+            if divide_fused_on_numpy_buffer(a_np, b_np, out) {
+                hazards += 1;
+            }
+            black_box(&out);
+        }
+        assert_eq!(hazards, 0, "operands must be hazard-free");
+        println!(
+            "PROVENANCE_COUNTER_PROBE provenance=numpy_allocated n={n} \
+             calls={PROVENANCE_COUNTER_CALLS} checksum={:016x} \
+             run_this_under_perf_stat=true",
+            divide_checksum(out)
         );
     });
 }
