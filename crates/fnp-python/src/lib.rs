@@ -11703,9 +11703,20 @@ fn zerocopy_f32_binary_flat<'py>(
     if n < F32_BINARY_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
-    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    // Allocate at the FINAL shape, positionally (`deadlock-audit-ei9jz`). Measured on
+    // the f64 route: `empty_at_final_shape` 307.50 ns against `empty_plus_real_reshape`
+    // 612.84 ns, a 305.34 ns saving, plus a per-call `PyDict` removed because
+    // `numpy.empty` takes dtype as its SECOND POSITIONAL parameter.
+    //
+    // Safe for the writer below at any rank: `numpy.empty` is C-contiguous by default and
+    // `PyBuffer::as_mut_slice` requires only `!readonly() && is_c_contiguous()` - it does
+    // NOT require `ndim == 1`, so the flat write loop is unchanged.
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1("empty", (*only, "float32"))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1("empty", (&alloc_shape, "float32"))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
@@ -11751,8 +11762,8 @@ fn try_zerocopy_f32_binary(
     let Some((flat, shape)) = zerocopy_f32_binary_flat(py, &numpy, a, b, op)? else {
         return Ok(None);
     };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    // No reshape: `zerocopy_f32_binary_flat` now allocates at the final shape.
+    let output = flat.unbind();
     if shape.is_empty() {
         return Ok(Some(output.bind(py).get_item(())?.unbind()));
     }
@@ -110922,6 +110933,34 @@ mod tests {
             };
             let fnp_remainder = module.getattr("remainder")?;
             let np_remainder = numpy.getattr("remainder")?;
+
+            // ENGAGEMENT, added after this test PASSED TRIVIALLY once: the original
+            // change landed in `zerocopy_f32_UNARY_flat` by a file-wide first-occurrence
+            // replace, leaving the binary route untouched - and this test still went
+            // green, because it exercised the unmodified path and NumPy produced the same
+            // answers. A rank/value test cannot tell "my change worked" from "my change
+            // went somewhere else". Sabotaging numpy.remainder can: only the native f32
+            // binary route can satisfy the call once NumPy's own function raises.
+            {
+                let a = get("a1");
+                let b = get("b1");
+                let sabotage = std::ffi::CString::new(
+                    "import numpy as _np\n_orig_rem = _np.remainder\ndef _boom(*a, **k):\n    raise RuntimeError('delegated')\n_np.remainder = _boom\n",
+                )
+                .expect("no interior nul");
+                py.run(sabotage.as_c_str(), Some(&locals), Some(&locals))?;
+                let engaged = fnp_remainder.call1((&a, &b));
+                let restore =
+                    std::ffi::CString::new("import numpy as _np\n_np.remainder = _orig_rem\n")
+                        .expect("no interior nul");
+                py.run(restore.as_c_str(), Some(&locals), Some(&locals))?;
+                assert!(
+                    engaged.is_ok(),
+                    "the f32 BINARY route must actually run: with numpy.remainder \
+                     sabotaged the call still has to succeed. If this fails, the change \
+                     under test is not on this path."
+                );
+            }
 
             for (an, bn, want_rank) in [("a1", "b1", 1usize), ("a2", "b2", 2)] {
                 let (a, b) = (get(an), get(bn));
