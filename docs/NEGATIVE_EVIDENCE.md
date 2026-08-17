@@ -51909,3 +51909,86 @@ wrapper residual in ns on ONE host with the kb term included, rather than conver
 split. Until then quote the split in instructions only. Do not reuse my 3.97 insns/ns; the measured
 route rate is 6.99 and it is not constant across components.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — THE ns SPLIT IS UNDECIDABLE: choosing MEDIAN vs MIN moves the wrapper/probe ratio from 1.57 to 4.68 on the same nine runs, so the split stays in INSTRUCTIONS (deadlock-audit-ei9jz)
+
+**Campaign result class:** UNDECIDED — a registered retry predicate attempted and honestly failed
+
+This discharges the retry predicate I registered one row ago ("measure both components in ns on ONE
+host with the kb term included, rather than converting the counted split"). It was the right thing
+to attempt and it does not succeed.
+
+Same ELF (`4858590a...`, committed `52b78eb3`), threading pinned, 400,000 calls/arm, all six arms,
+**nine interleaved reps**, no build. LOADAVG 15.11/12.73/14.10 -> 19.13/14.08/14.50, CPU idle
+82% -> 86%, iowait 0, 2514 MHz, 24 neighbouring compute processes, /data 204G. **DISCLOSURE: the
+1-minute loadavg ROSE from 15.11 to 19.13 during the run**, so the window degraded under me; that is
+a candidate cause of the `fnp_unsafe` arm's 23% spread and I am not hiding it behind the median.
+
+```
+  arm            median (s)   min (s)    spread
+  numpy_plain      0.698443   0.666066    8.23%
+  fnp_plain        0.813941   0.781457    7.00%
+  numpy_unsafe     0.776670   0.745571    9.65%
+  fnp_unsafe       0.951717   0.896099   23.27%   <- load-bearing in the identity, and the worst arm
+  pydict_build     0.566548   0.541464    9.77%
+  empty_loop       0.521275   0.496022    6.39%
+```
+
+### The result: the total is solid, the split is not
+
+```
+                        MEDIAN agg     MIN agg      verdict
+  whole excess           288.7 ns      288.5 ns     ROBUST - 0.1% apart
+  probe_chain             50.8 ns      112.3 ns     2.2x swing on aggregator choice alone
+  wrapper_residual       237.9 ns      176.2 ns
+  ratio wrapper/probe       4.68          1.57      the ANSWER changes by 3x
+```
+
+**Switching from median to min - a pure aggregation choice, on the SAME nine runs - moves the
+probe chain by 61.7 ns, which is 121% of the component itself.** There is no defensible way to
+publish a split whose value depends that strongly on which summary statistic you pick. UNDECIDED,
+and it stays undecided rather than being resolved by picking the aggregator that flatters the story.
+
+This is the exact failure mode this ledger has retracted from repeatedly: differencing nearly-equal
+timed quantities. The identity needs `fnp_unsafe - fnp_plain`, two numbers ~0.81 and ~0.95 s whose
+difference is ~0.3% of a call, taken from an arm carrying 23% spread.
+
+### What this does and does not say about the counted split
+
+It does NOT confirm the counted split, and it does not refute it either. Worth stating plainly
+because the direction is inconvenient for me: **both ns readings put the WRAPPER larger than the
+probe chain (ratios 1.57 and 4.68), which is the OPPOSITE ordering to the counted split**
+(probe 1189.4 vs wrapper 641.9 insns/call, ratio 0.540). If the ns instrument were trustworthy here
+it would contradict my counted conclusion. It is not trustworthy here - it cannot decide its own
+answer within a factor of 3 - so it contradicts nothing. But nobody should read this row as
+supporting the counted ordering, and I am not going to present an undecidable instrument's silence
+as agreement.
+
+**CONSEQUENCE FOR HOW THE COUNTED RESULT MAY BE QUOTED:** "the probe chain is the larger half" is
+established IN INSTRUCTIONS ONLY and has NO time-domain confirmation. It must not be quoted as a
+statement about where the TIME goes. A lever that removes probe-chain instructions may buy less time
+than the instruction count suggests, precisely because per-component rates differ (measured: 9.63
+insns/ns for keyword binding against a 6.99 route average).
+
+### A second, smaller finding about the total
+
+The whole excess reads **288.6 ns** here and **262.0 ns** in the five-rep batch two rows ago - same
+host, same ELF, same pinning, ~10% apart BETWEEN BATCHES while each batch is internally tight
+(0.1% between aggregators here). Batch-to-batch drift of ~10% on this quantity is larger than most
+of the effects this campaign chases, and it is one more reason the counted currency (0.08% spread)
+is the right one for this route. The banked partition's 461 ns remains ~1.6x above both of my
+readings and that gap is still unexplained.
+
+COUNTED_MECHANISM: 9 interleaved reps x 6 arms; aggregator swing 61.7 ns on a 50.8 ns component
+(121%); whole-excess agreement between aggregators 0.1%; worst arm spread 23.27%.
+
+A/A NULL CONTROLS: none applicable - no competitive ratio is published and no claim survives this
+row. The decidability evidence IS the control: two aggregators over identical data.
+
+RETRY PREDICATE: the ns split needs an instrument that does not difference two whole-process
+timings - i.e. an in-process paired harness with A/A nulls around each COMPONENT, not around the
+route. Until such a harness exists, quote the probe/wrapper split in instructions only and say so.
+Do not retry this with more reps alone: the problem is the 23% spread on the load-bearing arm and a
+difference that is 0.3% of the quantities being subtracted, which more reps of the same design will
+not fix.
+AGENT_NAME=SlateFinch.
