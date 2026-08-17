@@ -44225,3 +44225,75 @@ measure it, and a new control is needed before that work starts. (3) Do not re-r
 load reasons; seven runs across 11-37 loadavg say the window does not matter for it.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - REJECT the varargs rewrite of `PyUFunc::__call__`: the 9-parameter signature costs ~10 ns of a ~210 ns floor, so the bead's premise that it is "the largest never-measured stage" is REFUTED (`deadlock-audit-t4lri`, `deadlock-audit-v46rn`)
+
+`RedLynx`. Measured BEFORE writing the refactor, which is the only reason the refactor did not get
+written. Both groups already existed in the ELF; this cost one invocation.
+
+**Campaign result class:** REJECT (design rejected on a measurement, no code landed)
+
+```
+bench_elf_sha256=6b5ec4ad0b6f326986374687edfdae3d57b8893a44c2e1985b5d9b9459a0274e
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256  nproc=64
+harness=common::run_median_ci_contract      BENCH_GROUP_SELECTION selected_groups=2
+LOADAVG 1min 20.38 before -> 20.38 after; 5min 19.94 -> 19.94; 15min 21.30 (converged)
+CPU MHz system-wide: min 1429 max 4018 median 1429 spread 2.812x (idle cores parked)
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu=26 arm_b_cpu=26 same_core=true
+  arm_a_mhz_mean=3976.4 arm_b_mhz_mean=3986.8 arm_mhz_spread=1.0026
+
+  SIGNATURE_SHAPE_PYCLASS   arms=nine_parameter_pyclass_vs_varargs_pyclass_same_work
+                            called_with_two_positionals_no_keywords=true
+    nine_param_ns=50.0  varargs_ns=40.0  signature_cost_ns=10.0
+    verdict=DECIDABLE_WIN ratio=1.250000 ci95=[1.125000,1.250000]
+    A/A null=1.000000 ci95=[1.000000,1.000000] half_width=0.000000  <-- SEE RESOLUTION NOTE
+
+  SIGNATURE_KEYWORD_BINDING arms=same_route_same_result_differing_only_in_keyword_presence
+                            seven_keywords_passed_at_their_defaults=true
+    explicit_kwargs_ns=807.0  bare_call_ns=651.0  keyword_binding_ns=156.0
+    verdict=DECIDABLE_WIN ratio=1.239938 ci95=[1.228528,1.249610]
+    A/A null=1.003953 ci95=[0.990310,1.009690] half_width=0.009690, straddles unity
+```
+
+**THE DECISION. `deadlock-audit-t4lri` proposed pricing the 9-parameter `#[pyo3(signature = ...)]`
+on `PyUFunc::__call__` as "the largest never-measured stage of the unattributed 1444 ns". Priced, it
+is ~10 ns against a per-call floor of ~206-221 ns - under 5%.** The rewrite it points at is
+converting a hot, heavily-tested function to raw `*args, **kwargs` with hand-rolled binding, which
+must reproduce positional-vs-keyword rules and error text exactly across 585 lib tests. **That is a
+large correctness risk for at most a twentieth of the floor, and it is rejected.**
+
+**RESOLUTION NOTE, because the shape cell is at the instrument's floor and I will not present it as
+tighter than it is.** The arms read 50 ns and 40 ns, and the A/A null returned IDENTICAL medians
+every round (half-width exactly 0.000000). That is quantisation, not a perfect control: at these
+magnitudes the timer's granularity is a large fraction of the quantity. So the honest claim is
+**"the signature shape costs on the order of 10 ns, and certainly not 100"** - which is all the
+decision needs. A cell whose null cannot resolve is not evidence of precision, and I am not quoting
+1.250000 as a 25% effect on anything that matters.
+
+**SCOPE, stated rather than assumed.** The shape arms are a bench-local `#[pyclass]` PAIR doing the
+same trivial work - a nine-parameter one and a varargs one - not `PyUFunc` itself. They price the
+SHAPE of a PyO3 signature under the call form our floor rows actually use (two positionals, no
+keywords). They do NOT price `PyUFunc`'s own binding, and a reopening would need a control that
+does. What makes the rejection safe anyway is the ORDER OF MAGNITUDE: for the refactor to pay, the
+real signature would have to cost ~10x what an equivalent-shaped pyclass costs, and nothing
+suggests that.
+
+**A SEPARATE, REAL FINDING THAT IS NOT ON THIS PATH: passing seven keywords at their defaults costs
+156 ns**, decidably, with a proper null that straddles unity. Our floor rows call bare, so this is
+not part of the 206-221 ns they measure. It is a cost that lands on callers who pass `out=`,
+`casting=`, `where=` and friends - and at 156 ns against a 651 ns bare call it is a 24% surcharge on
+the keyword-using call shape. That is a lever with its own bead-worth of work, and it is untouched
+by this rejection.
+
+**WHAT THIS DOES NOT SAY.** It does not say the floor is irreducible; it says one named stage of it
+is small. The ~206-221 ns common to all four ops remains the target, and after this measurement the
+signature is not where it lives.
+
+RETRY PREDICATE: (1) Do NOT reopen the varargs rewrite on the strength of the 1.25 ratio - it is a
+10 ns difference at the resolution floor. Reopen only if a control that prices `PyUFunc`'s OWN
+binding (not a replica) returns something on the order of 100 ns. (2) The 156 ns keyword-binding
+cost is the live lever this row surfaces; it needs its own row and applies only to keyword-passing
+call shapes. (3) The remaining floor is now unattributed by everything measured so far, and per the
+row above the multiply-as-control trick CANNOT price it, since the floor is exactly what every op
+shares - a new control has to come first. AGENT_NAME=RedLynx.
+
