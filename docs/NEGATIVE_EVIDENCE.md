@@ -48698,3 +48698,55 @@ and already ruled out a 130-390 ns exception on that path, which I did not check
 `searchsorted` pre-check's own A/B is still unmeasured; its commit's prediction is untested and
 should not be quoted either. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - THE TRACE row 60 ASKED FOR: my `clip` pre-check DOES fire, so the refutation is not "wrong path" - it is that `extract::<f64>()` on `None` costs far less than `float(None)`. The 129 ns probe measured the wrong operation (`deadlock-audit-v46rn`)
+
+`RedLynx`. No build - two builds are already in flight for this project and the cap is two.
+Source tracing only.
+
+**Campaign result class:** methodology (corrects the proxy behind a refuted prediction)
+
+**WHAT ROW 60 LEFT OPEN.** It concluded the one-sided `clip` "evidently never reaches those
+extracts", offered that as the explanation for a lever measuring zero, and required a trace before
+anyone built on it. Traced now, and **that explanation is WRONG**:
+
+```rust
+    let a_min: Py<PyAny> = a_min.or(min).unwrap_or_else(|| py.None());
+    let a_max: Py<PyAny> = a_max.or(max).unwrap_or_else(|| py.None());
+```
+
+The bounds arrive as `Option<Py<PyAny>>`, so a Python `None` binds to Rust `None` at the
+signature - and is then materialised back into a real `py.None()` object. **So `a_max` IS a
+Python None by the time the pre-check runs, the pre-check DOES fire, and it did replace a
+`extract::<f64>()` that was failing on every one-sided call.** The lever is not dead code.
+
+**WHICH MOVES THE QUESTION TO THE PROXY, AND THAT IS WHERE THE ERROR IS.** Row 54 measured
+`float(None)` in a try/except at **129 ns** against 23 ns for a type test, and this ledger has
+been carrying ~130-390 ns as the cost of a failed extract ever since. But `float(None)` and
+`extract::<f64>()` on `None` are not the same operation: the Python-level probe runs CPython's
+`__float__` lookup, raise, unwind and catch, while `pyo3`'s extract can reject a `None` on a type
+check without ever entering the raise machinery. **The A/B says the second costs so little that
+removing it does not move a 350-400 ns cell to four significant figures.**
+
+**SO THE 390 ns MEASURED ON THE SPACED BUILDERS IS NOT "an exception".** That row is still
+correct as a measurement - `linspace` and `geomspace` really did give up 390 and 574 ns - but the
+mechanism cannot be "two exceptions at ~195 ns each", because the same substitution here costs
+nothing. Those endpoints were 1-D ARRAYS, not `None`, and `extract::<f64>()` on an ndarray is a
+different and evidently much dearer failure than on `None`. **The class splits by what the extract
+FAILS ON, not by the fact that it fails.**
+
+**WHAT IS NOW ESTABLISHED ABOUT THE CLASS:**
+
+```
+  failing extract on a 1-D ndarray  -> ~195 ns each      (spaced builders, measured)
+  failing extract on None           -> below measurement (clip, measured at zero)
+  the float() Python proxy          -> 129 ns, applies to NEITHER cleanly
+```
+
+RETRY PREDICATE: (1) Retire the `float()` proxy as a cost model for `extract` failures; it
+overstates the `None` case badly and its relation to the ndarray case is unestablished. (2) When
+converting another site in this class, check what the extract FAILS ON - an ndarray argument is
+worth pursuing, a `None` argument is not. (3) The `searchsorted` needle pre-check declines on
+1-D ndarrays, which is the arm that measured 195 ns each, so its A/B is worth running when the
+build cap allows. AGENT_NAME=RedLynx.
+
