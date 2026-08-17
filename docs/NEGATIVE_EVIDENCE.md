@@ -49715,3 +49715,68 @@ all 136; it is worth a pass once someone verifies `ndarray_type` has no other us
 (3) `searchsorted` array-needle at 3.262x is again the worst cell, and its dispatcher body's 21
 getattr/asarray sites remain the unpriced block. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - AMENDING MY OWN PRE-REGISTERED RULE 1 BEFORE I RUN, not after: "no local build running" is unsatisfiable on this host and guards the wrong axis. Replaced with a BETWEEN-RUN variance guard, which is what actually failed today (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build, no measurement. This row exists so the amendment is on record BEFORE the
+certifying run it governs, not chosen afterwards.
+
+**Campaign result class:** methodology amendment, pre-registered
+
+### What I wrote, and why it has not worked
+
+Rule 1 of my pre-registration required "FIVE invocations in a window with no local build running and a
+1-minute loadavg at or below the 5-minute figure". It has now blocked the certifying run for three
+consecutive ticks: this host has had a build in flight (`frankentorch`, `frankenpandas`,
+`crimsonpine`) at every check. A rule that is never satisfiable does not protect a measurement, it
+just prevents one.
+
+### Why it also guards the WRONG axis
+
+The threat is not that another process exists. It is that the arms see different conditions. The
+dual-null contract already controls within-run noise by interleaving, and a steady external load
+lands on both arms alike. What actually broke measurements today was **between-run** variation, and
+every instance of it passed its A/A nulls:
+
+```
+  accumulate-free arm, same ELF, same host    0.538487 .. 0.931599
+  bitmask head-to-head, five runs             1.003167 .. 1.058671  (2 of 5 straddled unity)
+  allocating arm, three back-to-back runs     1.004467 / 8.219059 / 8.464689
+```
+
+A "no other build" precondition would not have caught one of those. A between-run guard catches all
+three.
+
+### The amendment
+
+Rule 1 is replaced by:
+
+1. **No build in THIS project** (a build of the ELF under test is disqualifying; an unrelated project's
+   build is not), **1-minute loadavg at or below the 5-minute figure at the start of each invocation**,
+   per-arm loadavg and CPU MHz recorded on every row.
+2. **Five invocations**, and the row must report **between-run stdev alongside the within-run CI
+   half-widths**.
+3. **VOID any size whose between-run stdev exceeds its mean within-run CI half-width.** That size is
+   UNDECIDED regardless of how clean its nulls look, because that is precisely the condition under
+   which a passing null is known to be blind.
+
+Rules 2 through 5 of the original pre-registration are UNCHANGED: 4-of-5 agreement for a
+worth-taking verdict, the 2^21 control-health blocker, no routing change shipping on that row, and
+the requirement to report a delegating result if `fnp_div_ns` tracks `predicted_delegate_ns`.
+
+**This amendment is strictly more protective on the axis that failed and strictly less protective on
+an axis that never fired.** It is recorded before the run so that if the results are inconvenient, the
+rule cannot be said to have been fitted to them.
+
+COUNTED_MECHANISM: 3 documented instances today of between-run spread defeating a passing A/A null
+(0.538487-0.931599, 1.003167-1.058671, 1.004467-8.464689), against 0 instances of an unrelated
+project's build being shown to bias a within-invocation ratio.
+
+A/A NULL CONTROLS: this row takes no measurement. Its whole content is that A/A nulls straddling unity
+did NOT protect the three spreads quoted above, which is why the new guard is on between-run stdev
+rather than on the nulls alone.
+
+RETRY PREDICATE: the certifying run must satisfy amended rules 1-3 plus original rules 2-5. If a size
+is voided by the stdev guard, it stays UNDECIDED and the route keeps current behaviour - do not retry
+it by simply running more times until the spread narrows.
+AGENT_NAME=AzureCarp.
