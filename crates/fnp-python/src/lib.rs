@@ -34217,8 +34217,17 @@ fn searchsorted(
     }
     // LARGE integer haystack + LARGE integer query array: same sort-merge cache-miss lever as
     // the f64/f32 paths, but simpler because integer ordering is total.
+    // GATE ON THE KIND ALREADY IN HAND (`deadlock-audit-v46rn`). Unlike the probes row 63
+    // caught - which were already gated on `a_kind` and where a further gate would have
+    // done nothing - the NUMERIC probes are ungated: for an f64 haystack both integer
+    // probes run and decline, and for an integer haystack both float probes do. `a_kind`
+    // is now a cheap `char` computed once in the body, so the skip costs nothing.
+    //
+    // Behaviour-preserving by construction: an integer probe cannot succeed on a float
+    // haystack, so this only skips work that ended in `Ok(None)`.
     if sorter.is_none()
         && !v_is_scalar
+        && matches!(a_kind, 'i' | 'u' | 'b')
         && let Some(out) = try_zerocopy_int_searchsorted_merge(py, a.bind(py), v_bound, side)?
     {
         return Ok(out);
@@ -34227,6 +34236,7 @@ fn searchsorted(
     // sorter — skips the cold extract→UFuncArray path (~11x slower).
     if sorter.is_none()
         && !v_is_scalar
+        && matches!(a_kind, 'i' | 'u' | 'b')
         && let Some(out) = try_zerocopy_int_searchsorted(py, a.bind(py), v_bound, side)?
     {
         return Ok(out);
@@ -34237,8 +34247,11 @@ fn searchsorted(
     // the random probes with ONE sequential pass: sort the queries, then a monotonic pointer
     // walks the sorted haystack once. O(m log m + n) with cache-friendly access. Tried first;
     // falls through to the parallel binary search for small sizes / non-sorted / NaN.
+    // Same kind gate as the integer probes above; a float probe cannot succeed on an
+    // integer haystack (`deadlock-audit-v46rn`).
     if sorter.is_none()
         && !v_is_scalar
+        && a_kind == 'f'
         && let Some(out) = try_zerocopy_f64_searchsorted_merge(py, a.bind(py), v_bound, side)?
     {
         return Ok(out);
@@ -34247,6 +34260,7 @@ fn searchsorted(
     // haystack, which dominates for a small query array (~13x slower at n_query=1000).
     if sorter.is_none()
         && !v_is_scalar
+        && a_kind == 'f'
         && let Some(out) = try_zerocopy_f64_searchsorted(py, a.bind(py), v_bound, side)?
     {
         return Ok(out);
@@ -34256,6 +34270,7 @@ fn searchsorted(
     // fall through to the parallel binary search below.
     if sorter.is_none()
         && !v_is_scalar
+        && a_kind == 'f'
         && let Some(out) = try_zerocopy_f32_searchsorted_merge(py, a.bind(py), v_bound, side)?
     {
         return Ok(out);
@@ -34264,6 +34279,7 @@ fn searchsorted(
     // (~1.6s for 8M queries into a 1M sorted f32). The parallel per-query search wins; NaN defers.
     if sorter.is_none()
         && !v_is_scalar
+        && a_kind == 'f'
         && let Some(out) = try_zerocopy_f32_searchsorted(py, a.bind(py), v_bound, side)?
     {
         return Ok(out);
