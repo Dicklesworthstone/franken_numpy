@@ -47693,3 +47693,97 @@ described as compiled and tested, and must NOT be described as measured or as a 
 on it is `clippy --all-targets` plus the binary counter probes against 1,796 insns/call, and that
 needs a build window this pane does not currently have.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - REJECT the "same_kind" lever: it is worth +10 insns/call, i.e. NOTHING, and my prediction was wrong in SIGN. The cause is that I read SAMPLING SKID as cost - a `movabs` of an immediate cannot be 17.93% of a function (`deadlock-audit-ei9jz`)
+
+`AzureCarp`. One build, controlled A/B, and the refutation is of my own reasoning.
+
+**Campaign result class:** REJECTED LEVER + a profiling methodology correction that invalidates how I
+picked it
+
+### The A/B was clean, which is why the answer can be trusted
+
+The only `lib.rs` commit between the two ELFs is `34a67fdc` — my own change. The bench probes are
+byte-identical. Retired instructions do not move with host load, so the loadavg difference between
+the two runs (12 versus 38-58) cannot reach them.
+
+```
+  before ELF 51a365fee3b3c8061d71dd0135b6e0dfe57bf2b2e870e7a6c4db3dcc272ff455
+  after  ELF 0b300df123b322a0afa8eaf389b2611ecae6ee5b8e8c23e7074fb7b48972295a
+  400 000 calls per probe, n=256, OPENBLAS_NUM_THREADS=1
+
+  OUR ARM ONLY - the sensitive statistic, since NumPy is the same binary both times
+    add    fnp   3,583,079,882 -> 3,587,220,949    +10.4 insns/call
+    divide fnp   3,661,039,889 -> 3,663,361,028     +5.8 insns/call
+```
+
+**Registered prediction: 100-160 insns/call SAVED. Observed: 10 insns/call SPENT.** Wrong in sign,
+and wrong by more than an order of magnitude in the direction that matters.
+
+### Why the excess-based numbers must NOT be quoted here
+
+Read as excess-over-NumPy, the same data says `+94` on add and `+48` on divide — a regression. That
+reading is an artefact:
+
+```
+  NumPy arm, IDENTICAL code both runs:  add -83.6 insns/call,  divide -42.7 insns/call
+```
+
+The incumbent arm moved 4-8x more than my change did. The excess is a difference of two ~3-billion
+instruction totals, so a 1.2% wobble in the incumbent swamps a 100-instruction effect entirely.
+**When the effect is small relative to either arm, difference-of-excesses is the wrong statistic and
+our-arm-only is the right one.** I have been quoting excess deltas all session; they were fine for
+levers worth 400-2000 insns/call and they are not fine here.
+
+### The methodological error that PICKED this lever, which is the durable output
+
+I chose this lever because `perf annotate` showed `movabs $0x6e696b5f656d6173` — the load of the
+literal `"same_kind"` — carrying **17.93% of `PyUFunc::__call__`'s instruction samples**, the hottest
+single instruction in a 1155-instruction function. I banked that as a discovery and wrote that "only
+an instruction-level annotation said WHY".
+
+**A `movabs` of an immediate into a register cannot cost 17.93% of anything.** It is register-write,
+one cycle, no memory operand, no dependency worth stalling on. The samples landed there by SKID: a
+sampling profiler attributes an interrupt to an instruction at or after the one that actually cost
+the time, so a cheap instruction following an expensive operation collects that operation's samples.
+I read a skid attractor as a hot spot.
+
+The corrected rule, which is the opposite of what I banked two rows ago: **an annotation percentage
+on a single cheap instruction is evidence about WHERE THE PROFILER STOPPED, not about what cost
+time.** Before acting on one, check that the instruction can plausibly cost what is attributed to
+it — a `movabs`, a `mov` between registers, a `test`, cannot. My earlier row said "when a symbol diff
+leaves an unexplained entry, annotate before concluding there is no lever". That still stands. What
+does not stand is treating the annotation's top line as a target without asking whether the
+instruction is capable of the cost.
+
+**And the sweep I closed one row up was closed for the right reason anyway** — a ~40 ns item is ~1%
+of a cold wrapper's 1582-3571 ns excess. That conclusion is unaffected; it just turns out the item
+was not worth 40 ns on the ufunc route either.
+
+### Disposition of the code
+
+`34a67fdc` compiles, its swallow-detection test passes, and it is behaviourally identical — a caller
+passing `casting="same_kind"` explicitly still takes the fast path, a non-default is still forwarded,
+and `inspect.signature` is unchanged because `__signature__` is built separately. It costs **+10
+insns/call on a 3,587,220,949-instruction arm**, i.e. within noise of zero.
+
+**I am not silently keeping a change whose rationale is refuted.** It is neutral, tested and safe, so
+reverting it is optional rather than urgent — but the decision belongs to whoever next holds a build
+window for this file, and it should be made knowing the justification is gone. A revert costs a
+build and a test cycle on a contested file; leaving it costs ~10 insns/call. I have no build left to
+do it in this window.
+
+COUNTED_MECHANISM: our own arm's retired instructions per call moved +10.4 (add) and +5.8 (divide)
+across the lever, against a registered prediction of -100 to -160; the NumPy arm, whose code did not
+change, moved -83.6 and -42.7 over the same pair, which is why the excess-based deltas of +94 and +48
+are artefacts rather than measurements.
+
+A/A NULL CONTROLS: not applicable — hardware-counter totals from matched single-arm probes, no
+timed schedule.
+
+RETRY PREDICATE: do not re-attempt the `casting`/`order` string-compare lever; it is measured at
+approximately zero. Do not quote the `+94`/`+48` excess figures as a regression — they are incumbent
+variance. Do not pick a lever from an annotation percentage on a cheap instruction without first
+asking whether that instruction can cost what is attributed to it; this one could not, and a build
+was spent finding that out. When an effect is under ~200 insns/call, measure OUR ARM ONLY.
+AGENT_NAME=AzureCarp.
