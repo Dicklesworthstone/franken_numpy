@@ -9994,6 +9994,19 @@ fn dtype_char_of(value: &Bound<'_, PyAny>) -> Option<char> {
 /// The threshold is the smallest size that MEASURED a decidable win, not the estimated
 /// crossing point, which sits near 2^11. Gating conservatively gives up a little of the
 /// 2^11 band rather than risking a regime that measured as a loss.
+// 1 << 12 is the MEASURED crossover, confirmed by trying to lower it and failing
+// (`deadlock-audit-v46rn`). The value was originally set as "the smallest size that
+// measured a decidable win", with the estimated crossing noted near 2^11, leaving open
+// whether an octave was being given away. It was not:
+//
+//   2^11 native   ratio 0.950428  ci95 [0.946935,0.952780]  DECIDABLE_REGRESSION
+//   2^12 native   ratio 1.470097  ci95 [1.464363,1.474061]  DECIDABLE_WIN
+//
+// So the crossover sits between them and 2^12 is the smallest winning size. Lowering to
+// 1 << 11 was built, measured and reverted against a decision rule registered before the
+// run: keep the lower gate only on a DECIDABLE win at the new threshold. 2^11 is a
+// decidable LOSS, so the gate stays where it was - now by measurement rather than by the
+// estimate it was originally justified with.
 const F64_ACCUMULATE_NATIVE_MIN_LEN: usize = 1 << 12;
 
 /// Whether the native accumulate route is worth taking for this operand.

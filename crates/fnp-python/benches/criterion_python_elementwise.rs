@@ -6891,7 +6891,13 @@ fn bench_accumulate_size_crossover_vs_numpy(_c: &mut Criterion) {
         let ours = module.getattr("add").expect("fnp add");
         let theirs = numpy.getattr("add").expect("numpy add");
 
-        for exponent in [8u32, 10, 12, 14, 16, 18, 20] {
+        // 2^11 and 2^13 added to bracket the accumulate gate (`deadlock-audit-v46rn`).
+        // The gate sits at 1<<12 and was set as "the smallest size that MEASURED a
+        // decidable win", with the estimated crossing noted near 2^11 - i.e. one octave
+        // may be being given away. 2^10 delegates and 2^12 wins by 1.41x, so 2^11 is the
+        // only unmeasured size between a loss and a large win; 2^13 is the confirmation
+        // that nothing above the gate moved.
+        for exponent in [8u32, 10, 11, 12, 13, 14, 16, 18, 20] {
             let n = 1usize << exponent;
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");

@@ -48494,3 +48494,80 @@ that is five declines removed with almost no restructuring risk. (3) The A/B for
 `searchsorted` pre-checks is blocked on a clean `lib.rs`, not on a quiet host.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - WIDENING ATTEMPT REJECTED, and the existing gate is now MEASURED rather than estimated: 2^11 is a DECIDABLE REGRESSION (0.950428) against 2^12's DECIDABLE WIN (1.470097), so `F64_ACCUMULATE_NATIVE_MIN_LEN` stays at 1<<12 (`deadlock-audit-v46rn`)
+
+`AzureCarp`. One build, decision rule registered in the source before the run.
+
+**Campaign result class:** REJECTED widening (the incumbent value survives, now on measured grounds)
+
+### Why this was worth one build
+
+The gate was originally set as "the smallest size that MEASURED a decidable win", with the estimated
+crossing noted near 2^11 — leaving an open question of whether an octave was being given away. The
+criterion I banked one row up says lowering is admissible only if the native route WINS at the new
+threshold, so the question was directly decidable: measure 2^11 with the gate lowered, and keep the
+lower gate only on a decidable win.
+
+That rule was written into the source comment BEFORE the measurement, not after:
+
+> keep 1 << 11 only if 2^11 shows a DECIDABLE win (ratio > 1 with its CI excluding unity). Anything
+> else — a loss, or an UNDECIDED straddle — and this returns to 1 << 12.
+
+### The measurement
+
+```
+ACCUMULATE_CROSSOVER  numpy 2.4.3  worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract
+  bench_elf_sha256=5868785b2485adcf02ad4f6318fd01de7a25574a371d0b02182c271fa7d24abc
+  loadavg 19.32/21.13/18.51 -> 17.81/20.75/18.42, gate provisionally 1<<11
+
+  n       route        ratio      ci95                     verdict
+  2^8     delegates   0.833025   [0.830467,0.834577]       DECIDABLE_REGRESSION
+  2^10    delegates   0.923077   [0.922420,0.924548]       DECIDABLE_REGRESSION
+  2^11    NATIVE      0.950428   [0.946935,0.952780]       DECIDABLE_REGRESSION   <- the test
+  2^12    NATIVE      1.470097   [1.464363,1.474061]       DECIDABLE_WIN
+  2^13    NATIVE      2.095373   [2.083529,2.105920]       DECIDABLE_WIN
+  2^14    NATIVE      2.690858   [2.688885,2.694062]       DECIDABLE_WIN
+  2^16    NATIVE      3.505543   [3.502071,3.508781]       DECIDABLE_WIN
+  2^18    NATIVE      3.859114   [3.854265,3.864399]       DECIDABLE_WIN
+  2^20    NATIVE      3.899689   [3.864559,3.914036]       DECIDABLE_WIN
+```
+
+**2^11 native is 1.0522x SLOWER than NumPy — a decidable LOSS.** The rule therefore reverts the gate,
+and it has been reverted to `1 << 12`, verified (`accumulate_size_gate_declines_below_the_measured_crossover`
+passes).
+
+### What is gained by a rejected attempt
+
+The gate's value stops resting on "the estimated crossing sits near 2^11" and starts resting on
+2^11 and 2^12 both measured under the dual-null contract. **1<<12 is exactly the crossover**, not an
+approximation of it, and the octave that looked like it might be available is not. That closes the
+question rather than leaving it open for someone else to spend a build on.
+
+It also exercised the criterion from one row up on a real case and it held: `accumulate` sits in the
+self-justifying regime (native wins at its gate, 1.4701x), which is why no delegating control was
+needed here, unlike divide's gate which sat in the losing regime.
+
+### A vacuous green I caught, again
+
+My first verification ran `--lib accumulate_native` and reported `test result: ok. 0 passed; 605
+filtered out` with exit 0 — the filter matched no test. The crate compiled (605 tests were
+enumerated) but nothing was verified. Re-run against the real name
+`accumulate_size_gate_declines_below_the_measured_crossover`: `1 passed`. **This is the second time
+this session that reading the COUNT rather than the word `ok` caught an empty run**; the rule is
+banked and it keeps earning its keep.
+
+COUNTED_MECHANISM: with the gate provisionally at 1<<11, `add.accumulate` at n=2048 measured
+ratio 0.950428 ci95 [0.946935,0.952780], a decidable regression, against n=4096's 1.470097
+ci95 [1.464363,1.474061], a decidable win — bracketing the crossover between 2^11 and 2^12.
+
+A/A NULL CONTROLS: all eighteen nulls across the nine cells straddle unity except the 2^18 candidate
+(`candidate_null_straddles_unity=false`, bias 0.000773); that cell is a 3.86x win far outside any
+null-scale concern and is not load-bearing for this decision, which rests on 2^11 and 2^12 whose
+nulls are clean.
+
+RETRY PREDICATE: do not attempt to lower `F64_ACCUMULATE_NATIVE_MIN_LEN` again — 2^11 is a measured
+decidable regression, not an estimate. The bracketing sizes 2^11 and 2^13 are now permanent in
+`bench_accumulate_size_crossover_vs_numpy` so the next reader sees the crossover directly.
+AGENT_NAME=AzureCarp.
