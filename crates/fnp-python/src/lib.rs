@@ -1000,11 +1000,26 @@ impl PyUFunc {
         // The predicate is the same one `kwargs.is_empty()` computed, written out: the
         // dict was empty precisely when axis was NumPy's default and neither `dtype` nor
         // `out` was supplied.
-        let target = np_ufunc.getattr(intern!(py, "accumulate"))?;
+        // VECTORCALL THE METHOD RATHER THAN LOOK IT UP (`deadlock-audit-v46rn`).
+        //
+        // Following the same decide-first principle as the note above: the fast path no
+        // longer resolves the method at all. `getattr(name)` on a ufunc OBJECT builds a
+        // fresh bound method that is called once and dropped; pyo3's `call_method1` with a
+        // RUST TUPLE goes through `PyObject_VectorcallMethod` instead - verified in pyo3
+        // 0.28.3, where `tuple_conversion!` emits that ffi call while the generic
+        // `call_method_positional` falls back to an explicit `.getattr`. The slow path
+        // keeps the lookup, since the keyword form has no vectorcall variant.
+        //
+        // This is SHARED-FLOOR work: the method family has converged to 263-378 ns with no
+        // method-specific excess left, so only a change to what every method does can
+        // still move it.
         let args = (array.bind(py),);
         if axis == 0 && dtype.is_none() && out.is_none() {
-            return Ok(target.call1(args)?.unbind());
+            return Ok(np_ufunc
+                .call_method1(intern!(py, "accumulate"), args)?
+                .unbind());
         }
+        let target = np_ufunc.getattr(intern!(py, "accumulate"))?;
         let kwargs = PyDict::new(py);
         if axis != 0 {
             kwargs.set_item(intern!(py, "axis"), axis)?;
@@ -1028,9 +1043,16 @@ impl PyUFunc {
     ) -> PyResult<Py<PyAny>> {
         let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
+        // `outer` is the FLOOR of this family - pure delegation with nothing to skip -
+        // so vectorcalling is the only thing left to take from it
+        // (`deadlock-audit-v46rn`). Same reasoning as `accumulate` below.
+        let args = (a.bind(py), b.bind(py));
+        if kwargs.is_none_or(|k| k.is_empty()) {
+            return Ok(np_ufunc.call_method1(intern!(py, "outer"), args)?.unbind());
+        }
         Ok(np_ufunc
             .getattr(intern!(py, "outer"))?
-            .call((a.bind(py), b.bind(py)), kwargs)?
+            .call(args, kwargs)?
             .unbind())
     }
 
@@ -1062,11 +1084,15 @@ impl PyUFunc {
         // unconditionally and then testing `is_empty()` paid a heap allocation on the
         // path that never uses it, which is what `_int_malloc` at +165 instructions per
         // call was measuring. Decide first, allocate second.
-        let target = np_ufunc.getattr(intern!(py, "reduceat"))?;
+        // Same lever as `accumulate`: the fast path vectorcalls and never
+        // resolves the method (`deadlock-audit-v46rn`).
         let args = (array.bind(py), indices.bind(py));
         if axis == 0 && dtype.is_none() && out.is_none() {
-            return Ok(target.call1(args)?.unbind());
+            return Ok(np_ufunc
+                .call_method1(intern!(py, "reduceat"), args)?
+                .unbind());
         }
+        let target = np_ufunc.getattr(intern!(py, "reduceat"))?;
         let kwargs = PyDict::new(py);
         if axis != 0 {
             kwargs.set_item(intern!(py, "axis"), axis)?;
@@ -111876,6 +111902,108 @@ mod tests {
                     }
                 }
             }
+            Ok(())
+        });
+    }
+
+    /// Vectorcalling the ufunc methods must not change results OR break monkeypatch
+    /// liveness (`deadlock-audit-v46rn`).
+    ///
+    /// `accumulate`, `reduceat` and `outer` stopped doing `getattr(name)` followed by a
+    /// call, and now use `call_method1` with a Rust tuple, which pyo3 routes through
+    /// `PyObject_VectorcallMethod` so the bound method is never built.
+    ///
+    /// Two things could break. The RESULTS, if the no-keyword fast path were taken when
+    /// keywords were actually present - so each method is exercised both bare and with a
+    /// keyword that changes the answer. And LIVENESS: the whole reason this repo resolves
+    /// the ufunc per call is that monkeypatching `numpy.add` must still be honoured, and a
+    /// lookup change is exactly where that could silently freeze. `call_method1` resolves
+    /// on the live object at call time, and this proves it rather than assuming it.
+    #[test]
+    fn vectorcalled_methods_match_numpy_and_stay_monkeypatchable() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_vectorcall")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("add")?;
+            let theirs = numpy.getattr("add")?;
+
+            let shape = PyTuple::new(py, [3_usize, 4])?;
+            let a = numpy
+                .call_method1("arange", (12,))?
+                .call_method1("astype", ("float64",))?
+                .call_method1("reshape", (&shape,))?;
+            let idx = numpy
+                .call_method1("array", (vec![0_i64, 2],))?
+                .call_method1("astype", ("intp",))?;
+            let v = numpy
+                .call_method1("arange", (4,))?
+                .call_method1("astype", ("float64",))?;
+
+            // Bare, then with a keyword that changes the answer, for each method.
+            let axis1 = PyDict::new(py);
+            axis1.set_item("axis", 1)?;
+            for (method, args_bare, use_idx) in [
+                ("accumulate", 1_usize, false),
+                ("reduceat", 2, true),
+                ("outer", 2, false),
+            ] {
+                let _ = args_bare;
+                for kw in [None, Some(&axis1)] {
+                    // `outer` takes no axis; give it a real second operand instead.
+                    if method == "outer" && kw.is_some() {
+                        continue;
+                    }
+                    let (got, want) = if use_idx {
+                        (
+                            ours.call_method(method, (&a, &idx), kw)?,
+                            theirs.call_method(method, (&a, &idx), kw)?,
+                        )
+                    } else if method == "outer" {
+                        (
+                            ours.call_method(method, (&v, &v), kw)?,
+                            theirs.call_method(method, (&v, &v), kw)?,
+                        )
+                    } else {
+                        (
+                            ours.call_method(method, (&a,), kw)?,
+                            theirs.call_method(method, (&a,), kw)?,
+                        )
+                    };
+                    assert_eq!(
+                        got.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        want.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "{method} (kwargs={}) must match numpy",
+                        kw.is_some()
+                    );
+                }
+            }
+
+            // LIVENESS: patch numpy.add AFTER everything is warm and require the patched
+            // object to be the one used, for a method that now vectorcalls.
+            let sentinel = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!("def outer(*a, **k):\n    return 'patched-outer'\n"),
+                pyo3::ffi::c_str!("sentinel_vectorcall.py"),
+                pyo3::ffi::c_str!("sentinel_vectorcall"),
+            )?;
+            let patched = {
+                let _guard = AttrGuard::new(&numpy, "add")?;
+                numpy.setattr("add", &sentinel)?;
+                ours.call_method1("outer", (&v, &v))?
+            };
+            assert_eq!(
+                patched.extract::<String>()?,
+                "patched-outer",
+                "vectorcalling must still resolve the ufunc at CALL time"
+            );
+            assert!(
+                ours.call_method1("outer", (&v, &v))?.hasattr("shape")?,
+                "numpy.add must be restored once the guard drops"
+            );
             Ok(())
         });
     }
