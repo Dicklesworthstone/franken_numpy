@@ -6428,6 +6428,23 @@ fn method_counter_probe(method: &str, use_fnp: bool) {
             }
         }
 
+        // `outer` ON THE SAME OPERAND AS THE WALL-CLOCK ROW, and this is a defect fix
+        // rather than a preference (`deadlock-audit-v46rn`). `outer` on n=256 builds a
+        // 256x256 result, so a probe that passes the full operand spends ~382 000
+        // instructions per call on O(n^2) arithmetic and buries the wrapper it is
+        // supposed to be counting - measured at a 0.7% excess, against 30-40% for the
+        // other three methods. `bench_ufunc_method_percall_floor_vs_numpy` already
+        // shortens `outer`'s operand to 16 elements for exactly this reason. Matching it
+        // keeps the counter row and the wall-clock row comparable; without this the two
+        // describe different regimes while both saying `n=256`.
+        let a = if method == "outer" {
+            a.get_item(pyo3::types::PySlice::new(py, 0, 16, 1))
+                .expect("short operand for outer")
+        } else {
+            a.clone()
+        };
+        let operand_len = a.len().unwrap_or(N);
+
         let oracle = checksum_of(&invoke(method, &theirs, &a, &idx));
         // THE CHECKSUM IS OUTSIDE THE LOOP, and that placement is load-bearing.
         // Checksumming per iteration assumed `.sum()` costs the same on both arms
@@ -6451,6 +6468,7 @@ fn method_counter_probe(method: &str, use_fnp: bool) {
         );
         println!(
             "METHOD_COUNTER_PROBE method={method} arm={} n={N} \
+             operand_len={operand_len} \
              calls={ACCUMULATE_COUNTER_CALLS} checksum={last:016x} \
              setup_matches_sibling_probe=true run_this_under_perf_stat=true",
             if use_fnp { "fnp" } else { "numpy" }
