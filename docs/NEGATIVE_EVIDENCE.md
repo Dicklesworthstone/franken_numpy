@@ -47384,3 +47384,64 @@ and second-best by the other. (3) `linspace` remains the worst RATIO of the four
 1522-1553 ns of residual, and its native path has still never been read - that is the open lead.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - BUILD-FREE ATTRIBUTION: `linspace` uses EXCEPTIONS AS CONTROL FLOW on its common path - two failed `extract::<f64>()` per call, ~212 ns by a Python-level probe, and the native path it guards cannot fire for array endpoints at all (`deadlock-audit-v46rn`)
+
+`RedLynx`. Host at 23G disk and loadavg 167 with the external build cycle back; no build, no
+benchmark, no measurement. Source reading plus a pure-Python timing probe, which need neither.
+
+**Campaign result class:** lead (a mechanism with a sized lower bound; NO code landed, NO ratio
+claimed)
+
+**THE OPEN QUESTION THIS ANSWERS PART OF.** Row 53 left `linspace` at 1.15x with **1522-1553 ns
+of residual excess** after the import and default-keyword levers, and said its native path had
+never been read. Read now:
+
+```rust
+    let Ok(start_f) = start.bind(py).extract::<f64>() else { return fallback(py); };
+    let Ok(stop_f)  = stop.bind(py).extract::<f64>()  else { return fallback(py); };
+```
+
+**Both extractions FAIL on every call in the measured cell**, whose endpoints are arrays
+(`np.zeros(3)`, `np.ones(3)`). A failed conversion is not free: it sets a Python exception, which
+is constructed and then discarded, twice, before the fallback runs. **This is exception-as-
+control-flow on what is, for array endpoints, the ONLY path.**
+
+**SIZED WITHOUT A BUILD, and stated as a proxy rather than a measurement of our code:**
+
+```
+  float(np.zeros(3)) raises TypeError
+  failed float() + caught exception :  129.2 ns
+  isinstance type check             :   23.1 ns
+  successful float() on a scalar    :   19.4 ns
+  => ~106 ns per failed attempt over a type check; linspace does TWO => ~212 ns
+```
+
+**THAT IS A PYTHON-LEVEL PROXY AND A LOWER BOUND, NOT OUR NUMBER.** `pyo3`'s
+`extract::<f64>` additionally constructs a Rust-side `PyErr` around the CPython error, so the
+real cost is at least this. It accounts for roughly **14% of the 1522 ns residual**, so it is a
+component and not the answer - and I am not guessing at the rest, which is what the last two
+refuted predictions were made of.
+
+**THE STRUCTURAL POINT IS LARGER THAN THE NANOSECONDS.** For ARRAY endpoints the native path
+`num < 0`, `extract`, `resolved_dtype`, the `num_usize >= 1<<16` gate can never fire - the
+function is a pure delegator dressed as a fast path, and it pays two exceptions to discover that
+on every single call. The guard is testing the wrong thing: it asks "can this be a scalar?" by
+attempting the conversion, where a type check answers the same question without an exception.
+
+**THE FIX, DESIGNED BUT NOT LANDED** (no build is possible this turn): test the operand's TYPE
+before attempting the conversion. `np.float64` subclasses Python `float`, so an
+`is_instance_of::<PyFloat>() || is_instance_of::<PyInt>()` pre-check admits both Python and NumPy
+scalars and rejects arrays without raising. **Safety note for whoever lands it:** a 0-d array
+currently converts successfully via `__float__` and would be REJECTED by a type check, routing to
+`fallback` instead of the native build. That is value-safe - the file's own comments record the
+native f64 build as bit-identical to NumPy - but it is a route change and needs a test that pins
+0-d endpoints explicitly.
+
+RETRY PREDICATE: (1) Land the type pre-check with a 0-d endpoint test, then measure `linspace`;
+predicted fall is ~212 ns of the 1522 ns residual, so a fall much larger than that means the
+exception was not the only thing the pre-check skipped. (2) Grep for the same shape elsewhere -
+`let Ok(x) = ...extract::<T>() else { return fallback }` on a common path is exception-as-control
+-flow wherever it appears, and this file has one confirmed instance. (3) Do not quote 106 ns as
+our cost; it is a Python-level proxy for a Rust-level operation. AGENT_NAME=RedLynx.
+
