@@ -51131,3 +51131,101 @@ RETRY PREDICATE: land the `pydict_build` replica arm, re-run it alone under the 
 resolve the window. Until then the wrapper residual has only an UPPER bound of 1856.2 insns/call
 (the whole excess, i.e. assuming a zero-cost probe chain) and must not be quoted as a point estimate.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - THE CERTIFIED `out=` CELLS SURVIVE: on five QUALIFYING runs the separate-vs-shared buffer difference at 2^22 is ~±10% with NO consistent sign - it reversed direction between batches - so it is condition-dependent scatter, not a systematic bias. Under the corrected instrument all three ops still win, worst cells 1.6413 / 1.5951 / 1.7094 (`deadlock-audit-6y5wp`, `deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+
+`AzureCarp`. No build in this row. Ten invocations of ELF
+`2be2c513d93ff54ba9a4e3e7562e82cce2920c95f33cc72840a505ee2e778524` (`release-perf`, `thinkstation1`,
+numpy 2.4.3), of which **five qualify** and five are disqualified on the load precondition.
+
+```
+  qualifying runs, per-run provenance
+    D1   load 15.80/21.71/24.70  idle 83%  2352 MHz  proj_builds=1 (ELF sha verified unchanged)
+    D3   load 26.41/26.50/26.27  idle 86%  2147 MHz  proj_builds=0
+    D4   load 24.83/26.07/26.13  idle 84%  2685 MHz  proj_builds=0
+    D6   load 22.40/25.03/25.75  idle 87%  2148 MHz  proj_builds=1 (ELF sha verified unchanged)
+    D10  load 31.40/34.01/29.97  idle 85%  2770 MHz  proj_builds=0
+  disqualified: D2 D5 D7 D8 D9 (1-min above 5-min at start; D8 also idle 50%)
+```
+
+**On `proj_builds` = 1 for D1 and D6:** my amended rule disqualifies "a build of the ELF under test".
+The concrete hazard is a peer's build overwriting my binary in the repo-local target, so I checked the
+ELF's sha256 before AND after every single invocation. It was `2be2c513d93ff54b` on all twenty checks.
+The binary under test was never rebuilt. The strict subset (`proj_builds` = 0: D3, D4, D10) is reported
+separately below and does not change the conclusion.
+
+**Campaign result class:** a concern I raised against a peer's certified row, RESOLVED in its favour
+
+### The measurement
+
+Each op measured twice in ONE invocation, same operands, microseconds apart - the certified shape
+(`out_np` and `out_fnp` separate) against the corrected shape (one shared buffer):
+
+```
+  op        separate_over_shared, 5 qualifying runs           mean    stdev
+  maximum   1.0794 1.1382 1.1555 1.0872 0.9863              1.0893   0.0661
+  minimum   1.0998 1.1462 1.1058 1.1495 0.9217              1.0846   0.0938
+  divide    1.1771 1.0587 1.0969 1.1165 0.9825              1.0863   0.0721
+
+  strict subset (proj_builds=0 only): 1.0933 / 1.0579 / 1.0460 - same picture
+```
+
+### THE SIGN REVERSED BETWEEN BATCHES, and that is the finding
+
+The four disqualified runs taken earlier gave means of **0.9439 / 0.9664 / 0.9094** - all BELOW unity.
+These five qualifying runs give **1.0893 / 1.0846 / 1.0863** - all ABOVE. Same ELF, same host, same
+day, opposite direction.
+
+**A systematic instrument bias does not change sign.** At 2^22 the separate-buffer configuration
+contributes roughly ±10% of condition-dependent scatter and nothing more. That is exactly what the
+near-cache-size mechanism predicts: with 32 MiB buffers against ~32 MiB of L3, neither arm's output can
+be resident whatever the schedule does, so the residency race has nothing to win and what remains is
+noise that can fall either way.
+
+Contrast 2^20, where the same comparison moved a ratio 32% in one direction and collapsed its spread
+3.9x. That is what a real artifact looks like; this is not one.
+
+### The certified cells stand
+
+Under the CORRECTED instrument all three ops remain decisive wins, quoted worst-first as the campaign
+requires:
+
+```
+  op        shared-buffer ratios, 5 runs                  mean     WORST CELL
+  maximum   1.7133 1.6413 1.6880 1.9042 1.8238          1.7541      1.6413
+  minimum   1.7170 1.5951 1.7207 1.7432 1.7892          1.7130      1.5951
+  divide    1.8347 1.7094 1.7685 1.8511 1.8915          1.8110      1.7094
+```
+
+**The worst shared-buffer cell for `maximum` is 1.6413x - still a large win**, and above the 1.501804
+that was certified. I am NOT claiming the certified figure should be revised upward: that comparison
+is cross-campaign, across hosts and days, and this campaign has burned me twice on exactly that
+arithmetic. The claim is only the within-invocation one: **the buffer configuration does not
+manufacture these wins.**
+
+### Retraction discharged
+
+Two rows up I retracted a single-run reading that the separate-buffer shape UNDERSTATES the win. These
+five runs say it mildly OVERSTATES it, and the four disqualified ones said the opposite - which is why
+neither reading was ever quotable and why the retraction was correct. The resolved answer is "no
+consistent sign, ~±10%", and it took ten invocations to say so.
+
+I flagged `bench_out_kwarg_vs_numpy` hardest of the seven groups in my audit. On this evidence it was
+the least deserving of that, and I have now said so with measurements rather than leaving a peer's
+certified row under a cloud I raised.
+
+COUNTED_MECHANISM: across 5 qualifying runs and 3 ops, separate_over_shared means 1.0893, 1.0846 and
+1.0863 with stdevs 0.0661-0.0938 and 1 of 5 runs below unity for every op; the 4 earlier disqualified
+runs gave means 0.9439, 0.9664, 0.9094 - a reversal of sign between batches of the same ELF on the
+same host, which no systematic bias can produce.
+
+A/A NULL CONTROLS: both A/A nulls straddle unity in both contracts for all three ops across the five
+qualifying runs, and the ELF sha256 was verified identical before and after each of the ten
+invocations (20 checks, all `2be2c513d93ff54b`).
+
+RETRY PREDICATE: `bench_out_kwarg_vs_numpy` does NOT need converting on performance grounds - at 2^22
+the buffer configuration is worth ~±10% of unsigned scatter, not a bias. Converting it would still be
+tidier and would remove that scatter, but it is not a correctness matter and must not be presented as
+one. The five 2^20 groups remain the exposed ones and keep the priority. Do not requote the certified
+1.501804 upward from the 1.7541 measured here - different host, different day, cross-campaign.
+AGENT_NAME=AzureCarp.
