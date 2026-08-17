@@ -52892,3 +52892,73 @@ probe chain from a build and measure the ROUTE, which is a single well-condition
 large quantities rather than a residual of five replicas. That is a different experiment and it
 needs its own registration.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - CORRECTING MY OWN AUDIT: one of the seven groups I flagged for shared buffers MUST NOT be converted - `bench_divide_allocator_provenance` exists to compare buffer provenance, so separate buffers ARE its independent variable. Per-group disposition below (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. **No build, no measurement** - source reading only, in a window the orchestrator flagged
+as saturated. My own check disagreed (load 15.90/24.36/22.96 falling, CPU idle 85%, `rustc` = 0,
+`proj_builds` = 0, disk 187G - the builds had finished), but the directive not to certify or build
+stands on its own and is honoured either way.
+
+**Campaign result class:** a correction to guidance I published, before anyone acts on it
+
+### The trap I created
+
+My repo-wide audit listed seven bench groups that give their two arms separate output buffers and
+said, in effect, convert them. **That is wrong for at least one of them, and following it would break
+a working instrument.**
+
+`bench_divide_allocator_provenance` compares a Rust `Vec`-backed arm against a numpy-buffer-backed arm.
+Its own comment records that LLVM folded both arms and the original to ONE address in the built ELF,
+so "the two arms are not merely similar code, they are the SAME code at the SAME address, so no codegen
+difference can exist between them and **the only remaining variable is which memory the pointers point
+at**". Separate buffers are not a defect there - they are the independent variable. Pointing both arms
+at one allocation would measure nothing at all, and would do it while looking healthier.
+
+### Per-group disposition, replacing the blanket advice
+
+```
+  group                                       n      buffers          disposition
+  bench_divide_out_route_delegation_sweep    2^10-21 shared           DONE
+  bench_divide_kernel_on_numpy_buffers       2^20    shared, reminted DONE - reversed the classifier verdict
+  bench_divide_classifier_accumulator_form   2^20    shared, reminted DONE - recovered a rejected lever
+  bench_divide_accumulate_isolation_vs_numpy 2^20    separate         CONVERT - two of OUR arms compared
+                                                                     to each other, the axis the race sits on
+  bench_divide_allocation_split_vs_numpy     2^20    separate         CONVERT - one line, both arms are
+                                                                     Python `out=` calls; its own question
+                                                                     is closed, so this is hygiene only
+  bench_maximum_arms_vs_numpy                2^22    separate         LOW PRIORITY - our parallel vs our
+                                                                     serial, so the axis is exposed, but at
+                                                                     32 MiB the artifact is ~+-10% unsigned
+  bench_out_kwarg_vs_numpy                   2^22    separate         LEAVE - measured directly, ~+-10% of
+                                                                     unsigned scatter that reverses sign
+                                                                     between batches; not a bias
+  bench_divide_allocator_provenance          2^20    separate         **MUST NOT CONVERT** - provenance IS
+                                                                     the variable under test
+```
+
+### The general rule the audit should have stated
+
+**Shared output buffers are required when the two arms differ in CODE and the buffer is incidental.
+They are forbidden when the two arms differ in MEMORY and the code is identical.** My audit detected
+the first case by a structural pattern - two output allocations plus a dual-null contract - and that
+pattern cannot tell the two apart, because they look the same from the outside. Only reading each
+group's stated purpose separates them, which is what I did here and did not do when I published the
+list.
+
+That is the second time today a structural detector of mine has flagged something correctly and
+labelled it wrongly: the tracking test called 2^8 "native" when it delegates, for the same underlying
+reason - a pattern matched without the context that gives it meaning.
+
+COUNTED_MECHANISM: of 7 flagged groups, 3 are converted, 2 should be, 1 is low priority and 1 must NOT
+be touched; the exempt one has all 3 of its relevant symbols folded by LLVM to a single address
+(0x7178f0), which is what makes memory its only remaining variable.
+
+A/A NULL CONTROLS: not applicable; no measurement in this row.
+
+RETRY PREDICATE: do not convert `bench_divide_allocator_provenance`, now or later - if a future reader
+finds it flagged in my earlier audit row, this row supersedes that entry. Convert
+`bench_divide_accumulate_isolation_vs_numpy` and `bench_divide_allocation_split_vs_numpy` when a build
+is permitted, and add a NOT-TO-BE-CONVERTED comment at the head of the provenance group so the warning
+lives where someone would act rather than only in this ledger.
+AGENT_NAME=AzureCarp.
