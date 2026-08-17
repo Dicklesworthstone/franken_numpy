@@ -48438,3 +48438,59 @@ is our own serial arm. Do not re-measure `F64_ACCUMULATE_NATIVE_MIN_LEN` for cor
 the self-justifying regime. When any future native-vs-delegate gate is proposed, apply the criterion
 above first: it decides whether a delegating control is required before a single build is spent.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - BUILD-FREE ATTRIBUTION for the remaining 5.838x: `searchsorted` tries FOURTEEN native probes in linear order, and the f64 array path is TWELFTH. The dispatcher already computes the dtype it could dispatch on (`deadlock-audit-v46rn`)
+
+`RedLynx`. No build this turn, and the reason is in the row: peers hold uncommitted work in
+`lib.rs` overlapping the region my A/B patches touch. Source reading needs neither.
+
+**Campaign result class:** lead (structure counted from source; NO code landed, NO ratio claimed)
+
+**WHY NO BUILD AND NO A/B.** The queued item was an A/B for the `clip` and `searchsorted`
+pre-check commits, whose predictions row 57 recorded as unchecked. `git apply -R --check` refuses
+both patches: the working tree carries a peer's uncommitted edits (13 lines in `lib.rs`, 7 in the
+bench file) overlapping the region. Reverse-applying onto that would have compiled THEIR in-flight
+code as my "before" arm - the same contamination that made row 53 abandon its before-arm. **The
+A/B remains owed and is now blocked on a clean tree, not on a window.**
+
+**WHAT THE READ FOUND.** `searchsorted`'s entry point dispatches by TRYING probes in sequence:
+
+```
+   1 try_native_string_searchsorted        8 try_zerocopy_scalar_searchsorted
+   2 try_zerocopy_c128_searchsorted        9 try_zerocopy_int_searchsorted_merge
+   3 try_zerocopy_c64_searchsorted        10 try_zerocopy_int_searchsorted
+   4 try_native_searchsorted_struct       11 try_zerocopy_f64_searchsorted_merge
+   5 try_native_searchsorted_struct_valuelex  12 try_zerocopy_f64_searchsorted  <-- engages
+   6 try_native_datetime_searchsorted     13 try_zerocopy_f32_searchsorted_merge
+   7 try_native_f16_searchsorted          14 try_zerocopy_f32_searchsorted
+```
+
+**For an f64 haystack with an f64 array needle - the 5.838x cell - ELEVEN probes run and decline
+before the twelfth engages.** Each decline is not free: the probes re-derive what they need,
+typically an exact-ndarray check, an `ndim` getattr, a `dtype` fetch with `kind` and `itemsize`,
+and often one or two `PyBuffer::get` acquisitions, before returning `None`.
+
+**AND THE DISPATCHER ALREADY KNOWS THE ANSWER.** Its own body extracts `a_kind` from the haystack
+dtype - into a heap `String` - and then uses it only to gate the string and complex families. The
+integer, f64 and f32 probes are tried unconditionally in order. **A `match` on the kind the body
+has already computed would reach the right probe directly.**
+
+**THE ENTRY BODY IS NOT CHEAP EITHER: 21 `getattr`/`asarray`/`String` sites**, including an eager
+`numpy.asarray` on the haystack on every call, an `ndim` getattr with extract, the `kind` String,
+and several non-interned `numpy.getattr("ndarray")` calls - the same shape a 78-site sweep
+converted elsewhere in this file but written in a form that sweep did not match.
+
+**NO COST IS CLAIMED FOR ANY OF THIS.** I have counted structure, not nanoseconds. Eleven
+declining probes and 21 Python operations are consistent with a multi-microsecond dispatcher, but
+"consistent with" is not a measurement, and the last two times this ledger guessed at a magnitude
+it was wrong in both directions.
+
+RETRY PREDICATE: (1) The lever is to dispatch on `a_kind` with a `match` instead of trying 14
+probes in order - but it touches every path in a 309-line dispatcher, so it needs the parity
+tests for string, complex, struct, datetime, f16, int, f64 and f32 haystacks BEFORE the
+restructure, not after. (2) Price it first on ONE arm: gate the string/complex/struct/datetime/f16
+probes behind the `a_kind` the body already has, leave the numeric ordering alone, and measure -
+that is five declines removed with almost no restructuring risk. (3) The A/B for the `clip` and
+`searchsorted` pre-checks is blocked on a clean `lib.rs`, not on a quiet host.
+AGENT_NAME=RedLynx.
+
