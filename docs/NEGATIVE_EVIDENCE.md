@@ -50611,3 +50611,86 @@ a measurement. The bead's own DELETION CONDITION applies to `null_straddles_unit
 shows zero nulls excluding unity, delete it; this sample is 10/10 admissible, which is evidence
 toward deletion but nowhere near a sweep.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - THE SHIPPED BAND IS VERIFIED END-TO-END THROUGH THE REAL ROUTE: inside it `divide` now tracks the delegation control to within 0.0005-0.0074, outside it diverges by 0.13-0.94. No size is mis-routed, and in-band calls pay only the wrapper instead of a 10-24% kernel deficit (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. One build (`release-perf`, 7m57s, `df` 88G immediately before, `proj_builds` = 0 at start),
+five invocations on a genuinely quiet host. ELF
+`18d4af5f3c2bb7e0b1bff1fa1ff1c39376f0fe72694cc619b926a95da14a0504`, worker `thinkstation1`, numpy
+2.4.3.
+
+```
+  per-run provenance (pre -> post)
+    V1  6.62/7.28/9.87   2331 MHz -> 6.76/7.28/9.82   2941 MHz   proj_builds=0
+    V2  7.38/7.34/9.76   2807 MHz -> 11.73/8.30/10.04 3851 MHz   proj_builds=0
+    V3 11.73/8.30/10.04  3754 MHz -> 11.74/8.48/10.07 2913 MHz   proj_builds=0
+    V4 11.74/8.48/10.07  3022 MHz -> 13.32/9.08/10.23 3157 MHz   proj_builds=0
+    V5 13.32/9.08/10.23  3012 MHz -> 12.05/9.01/10.19 2816 MHz   proj_builds=0
+```
+
+**Campaign result class:** end-to-end VERIFICATION of a shipped routing change
+
+### Why this run was necessary and what it could have caught
+
+The unit tests landed with the band call `try_zerocopy_f64_binary_into` **directly**. They would pass
+unchanged even if `PyUFunc::__call__` never reached that helper - which is the failure mode that has
+cost this campaign two cycles before ("green parity does not prove kernel engagement"). Only a
+measurement through the real Python-facing route can show the gate is live.
+
+The statistic that shows it is **whether `divide` tracks the delegation control**. `add` takes the
+`_ => None` arm and cannot route natively, so it is pure delegation at every size. If the band works,
+`divide` must become indistinguishable from `add` inside it and stay distinct outside it. That
+comparison is within-invocation and needs no cross-ELF subtraction.
+
+```
+  n      divide_vs_numpy, 5 runs                    mean   | add mean  |div-add|  routing
+  2^10   0.7927 0.7880 0.8055 0.8026 0.7697       0.7917   |  0.6582    0.1335   NATIVE
+  2^14   0.9169 0.9025 0.9080 0.9063 0.9107       0.9089   |  0.9162    0.0074   delegating
+  2^18   0.9914 0.9911 0.9912 0.9910 0.9918       0.9913   |  0.9899    0.0014   delegating
+  2^19   0.9956 0.9955 0.9954 0.9936 0.9955       0.9951   |  0.9946    0.0005   delegating
+  2^20   0.9922 0.9886 0.9953 0.9916 0.9963       0.9928   |  0.9955    0.0027   delegating
+  2^21   2.6287 1.7248 2.2010 1.2576 1.8912       1.9406   |  0.9975    0.9431   NATIVE
+```
+
+**Every size routes exactly as the band specifies**, and the separation between the two regimes is
+enormous: in-band divergence from the control is 0.0005-0.0074, out-of-band it is 0.1335 and 0.9431 -
+a factor of 18 to 1900 between "tracking" and "not tracking". There is no size where the intended and
+observed routing disagree.
+
+### What the band bought
+
+In-band, `fnp.divide(a, b, out=o)` now costs what a delegated call costs: **0.9089-0.9951 against
+NumPy, i.e. the wrapper alone**. Before the gate the same sizes measured 0.8078-0.8958 on the
+shared-buffer build, so the 10-24% kernel deficit is simply no longer paid.
+
+**I am NOT quoting a precise before/after delta**, and the reason is visible in this very table. 2^10
+is BELOW the band, so its routing did not change at all - yet its ratio moved 0.8419 -> 0.7917 between
+the two campaigns. That is host state, not code: the pre-gate runs were taken at loadavg 15-30 and
+these at 6-13. Any per-size "improvement" computed across the two therefore mixes the gate with host
+drift. **The within-invocation tracking above is the claim; the cross-campaign delta is not.** 2^10 is
+the control that proves the point, and it is the reason it stays in the sweep.
+
+### 2^21 and the core-count lesson, again
+
+At 2^21 the native parallel arm is retained by design and reads **1.9406x FASTER than NumPy (mean of
+5, range 1.2576-2.6287)** against 1.3225 measured earlier on a loaded host. Same ELF family, same
+sizes: a rayon win scales with the cores actually available, so a parallel ratio measured under load
+is a floor, not an estimate. This is the fleet's "ISA gates encode core count" lesson turning up in the
+opposite direction, and it is why the band's upper edge must stay pinned to the rayon threshold rather
+than to any measured ratio.
+
+COUNTED_MECHANISM: inside the band the mean |divide - add| is 0.0074, 0.0014, 0.0005 and 0.0027 at
+2^14, 2^18, 2^19 and 2^20, against 0.1335 at 2^10 and 0.9431 at 2^21 - an 18x to 1900x separation
+between the delegating and native regimes, across 5 invocations of 1 ELF.
+
+A/A NULL CONTROLS: both A/A nulls straddle unity in the divide contract at every size in all five
+runs. They are not the basis of this result - the claim rests on a within-invocation identity between
+two arms measured in the same phase, which is the one statistic this route has produced all day that
+does not move with host or regime.
+
+RETRY PREDICATE: this verification is closed - the band is live and correctly bounded. Do not quote a
+before/after delta per size from these runs; the 2^10 control shows cross-campaign deltas carry host
+drift. The remaining open item in this lane is unchanged: `bench_divide_kernel_on_numpy_buffers` still
+gives its two replica arms separate 8 MiB buffers, so the classifier finding it produced stays
+UNPROVEN until those arms share one output with the `&mut` slices re-derived per call.
+AGENT_NAME=AzureCarp.
