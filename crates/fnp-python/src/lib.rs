@@ -34009,7 +34009,7 @@ fn searchsorted(
     // actual=2`. Same exception TYPE, different message — which a caller matching
     // on the text can see. Defer so numpy owns the wording rather than pinning
     // its literal here, where every numpy rewording would silently re-break it.
-    if a_arr.getattr("ndim")?.extract::<usize>()? != 1 {
+    if a_arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
         let kwargs = PyDict::new(py);
         kwargs.set_item("side", side)?;
         if let Some(sorter) = sorter.as_ref() {
@@ -34069,17 +34069,22 @@ fn searchsorted(
                 .unbind());
         }
     }
-    let a_kind = a_arr
-        .getattr("dtype")?
-        .getattr("kind")?
-        .extract::<String>()?;
+    // UNCONDITIONAL ON EVERY CALL (`deadlock-audit-v46rn`): this ran two non-interned
+    // `getattr`s and extracted a one-character answer into a HEAP STRING, before any
+    // dispatch. `dtype_kind_of` reads the same attribute through interned keys and returns
+    // a `char`. The comparisons below become char comparisons.
+    //
+    // A missing or unreadable dtype yields '\0', which matches none of the kind arms - the
+    // same outcome the `?` on the old form produced by propagating an error only when the
+    // attribute was genuinely absent, and a safer one when it is merely odd.
+    let a_kind = dtype_kind_of(&a_arr).unwrap_or('\0');
     // Fixed-width unicode/bytes ('U' Latin-1 / 'S') sorted-haystack + same-width query array: parallel
     // memcmp binary search (numpy's per-record string binary search is ~2s @2M). C-contiguous N-D
     // queries use a zero-copy flat view, then recover numpy's query shape. Wide 'U' codepoints defer.
-    if (a_kind == "U" || a_kind == "S") && sorter.is_none() {
+    if (a_kind == 'U' || a_kind == 'S') && sorter.is_none() {
         let query = v.bind(py);
         if query.is_exact_instance(&numpy.getattr("ndarray")?)
-            && query.getattr("ndim")?.extract::<usize>()? > 1
+            && query.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
             && query
                 .getattr("flags")?
                 .getattr("c_contiguous")?
@@ -34101,13 +34106,13 @@ fn searchsorted(
     }
     // complex128 sorted-haystack + complex128 queries: parallel lexicographic (re,im) binary search
     // (numpy single-threaded ~1.07s @2M). NaN/-0.0 defer.
-    if a_kind == "c"
+    if a_kind == 'c'
         && sorter.is_none()
         && let Some(out) = try_zerocopy_c128_searchsorted(py, &numpy, &a_arr, v.bind(py), side)?
     {
         return Ok(out);
     }
-    if a_kind == "c"
+    if a_kind == 'c'
         && sorter.is_none()
         && let Some(out) = try_zerocopy_c64_searchsorted(py, &numpy, &a_arr, v.bind(py), side)?
     {
@@ -34116,10 +34121,10 @@ fn searchsorted(
     // Sorted structured haystack + same-dtype query array: parallel value-lex record search via
     // either the homogeneous integer view or the mixed-field byte transform. C-contiguous N-D
     // queries use a zero-copy flat view, then recover numpy's query shape.
-    if a_kind == "V" && sorter.is_none() {
+    if a_kind == 'V' && sorter.is_none() {
         let query = v.bind(py);
         if query.is_exact_instance(&numpy.getattr("ndarray")?)
-            && query.getattr("ndim")?.extract::<usize>()? > 1
+            && query.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
             && query
                 .getattr("flags")?
                 .getattr("c_contiguous")?
@@ -34150,20 +34155,20 @@ fn searchsorted(
     }
     // Sorted datetime64/timedelta64 haystack + same-dtype queries: route the int64 view to the fast int
     // searchsorted (numpy delegates datetime searchsorted, ~867ms @2M+2M; indices are dtype-agnostic). NaT defer.
-    if (a_kind == "M" || a_kind == "m")
+    if (a_kind == 'M' || a_kind == 'm')
         && sorter.is_none()
         && let Some(out) = try_native_datetime_searchsorted(py, &numpy, &a_arr, v.bind(py), side)?
     {
         return Ok(out);
     }
     // float16 haystack + queries: widen exact to f32, route to the fast f32 searchsorted (numpy f16 ~332ms).
-    if a_kind == "f"
+    if a_kind == 'f'
         && sorter.is_none()
         && let Some(out) = try_native_f16_searchsorted(py, &numpy, &a_arr, v.bind(py), side)?
     {
         return Ok(out);
     }
-    if !matches!(a_kind.as_str(), "b" | "i" | "u" | "f") {
+    if !matches!(a_kind, 'b' | 'i' | 'u' | 'f') {
         let kwargs = PyDict::new(py);
         kwargs.set_item("side", side)?;
         if let Some(sorter) = sorter.as_ref() {
