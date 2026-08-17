@@ -33980,7 +33980,28 @@ fn searchsorted(
     // ('m'), and complex haystacks; for any non-numeric `a` dtype delegate the
     // whole call to numpy.searchsorted so it returns the right index (and the
     // right scalar-vs-array shape) instead of being rejected as non-numeric.
-    let mut a_arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    // SKIP `asarray` WHEN THE HAYSTACK IS ALREADY AN EXACT NDARRAY (`deadlock-audit-v46rn`).
+    //
+    // This runs on EVERY searchsorted call, before any dispatch, and for the overwhelmingly
+    // common case - a real ndarray - `numpy.asarray` returns THE SAME OBJECT. It is a
+    // Python call made to obtain something we already have.
+    //
+    // Equivalence is exact rather than approximate: `asarray` is documented as returning
+    // the input unchanged when it is already an ndarray of the right kind, and
+    // `is_exact_numpy_ndarray` answers from a cached `PyType` with no conversion. Anything
+    // that is NOT an exact ndarray - a list, a tuple, a scalar, an ndarray SUBCLASS - still
+    // goes through `asarray` exactly as before, so nothing downstream sees a different
+    // object than it used to.
+    //
+    // The call-site rule from `deadlock-audit-v46rn`'s recent rows applies here and is why
+    // this is worth landing where three micro-gates were not: nothing else in this function
+    // guards it, so it genuinely runs every time.
+    let a_bound = a.bind(py);
+    let mut a_arr = if is_exact_numpy_ndarray(py, a_bound)? {
+        a_bound.clone()
+    } else {
+        numpy.call_method1("asarray", (a_bound,))?
+    };
     // A non-1-D haystack is a pure error case, and it takes the same treatment as
     // an invalid `side` above: numpy raises `ValueError: object too deep for
     // desired array`, while the native path bottoms out in the stride engine and
@@ -113047,6 +113068,89 @@ mod tests {
                     want,
                     "numpy_dtype_is_f64 disagrees with numpy's own asarray dtype on {name}"
                 );
+            }
+            Ok(())
+        });
+    }
+
+    /// `searchsorted` must accept every haystack kind identically after skipping `asarray`
+    /// for exact ndarrays (`deadlock-audit-v46rn`).
+    ///
+    /// The dispatcher called `numpy.asarray` on the haystack on every call, before any
+    /// dispatch - and for a real ndarray that call returns the same object. Skipping it is
+    /// exact, but only for EXACT ndarrays: a list, a tuple, a scalar or an ndarray SUBCLASS
+    /// must still be converted, because for those `asarray` genuinely produces a different
+    /// object and everything downstream depends on it.
+    ///
+    /// The subclass case is the one that would break silently - `is_exact_numpy_ndarray` is
+    /// deliberately exact, so a subclass takes the conversion path, and this pins that it
+    /// still gives NumPy's answer rather than being handed through unconverted.
+    #[test]
+    fn searchsorted_accepts_every_haystack_kind_after_skipping_asarray() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_ss_asarray")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("searchsorted")?;
+            let theirs = numpy.getattr("searchsorted")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                std::ffi::CString::new("class Sub(np.ndarray):\n    pass\n")
+                    .unwrap()
+                    .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )?;
+            py.run(
+                std::ffi::CString::new(
+                    "base = np.arange(0.0, 20.0, 2.0)\n\
+                     HAY = {\n\
+                       'ndarray_f64': base,\n\
+                       'ndarray_i64': np.arange(0, 20, 2).astype(np.int64),\n\
+                       'subclass': base.view(Sub),\n\
+                       'list': [0.0, 2.0, 4.0, 6.0, 8.0],\n\
+                       'tuple': (0.0, 2.0, 4.0, 6.0, 8.0),\n\
+                       'noncontig': np.arange(0.0, 40.0, 2.0)[::2],\n\
+                     }\n\
+                     NEEDLE = {'scalar': 7.0, 'array': np.array([1.0, 7.0, 19.0])}\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let hay = locals.get_item("HAY")?.expect("HAY");
+            let needle = locals.get_item("NEEDLE")?.expect("NEEDLE");
+
+            for h in [
+                "ndarray_f64",
+                "ndarray_i64",
+                "subclass",
+                "list",
+                "tuple",
+                "noncontig",
+            ] {
+                let a = hay.get_item(h)?;
+                for n in ["scalar", "array"] {
+                    let v = needle.get_item(n)?;
+                    for side in ["left", "right"] {
+                        let kw = PyDict::new(py);
+                        kw.set_item("side", side)?;
+                        assert_eq!(
+                            ours.call((&a, &v), Some(&kw))?.str()?.extract::<String>()?,
+                            theirs
+                                .call((&a, &v), Some(&kw))?
+                                .str()?
+                                .extract::<String>()?,
+                            "searchsorted(hay={h}, needle={n}, side={side}) must match numpy"
+                        );
+                    }
+                }
             }
             Ok(())
         });
