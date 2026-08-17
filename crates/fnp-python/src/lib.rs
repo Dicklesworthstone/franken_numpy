@@ -21953,7 +21953,7 @@ fn bincount(
     // a safe-cast TypeError — even integer-valued floats. Match that (reporting
     // the original input dtype) instead of silently truncating. Read the dtype
     // from the source object since extraction upcasts e.g. float32 -> float64.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let input_dtype = numpy
         .getattr("asarray")?
         .call1((x.bind(py),))?
@@ -22056,7 +22056,7 @@ fn interp(
     right: Option<Py<PyAny>>,
     period: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Defer to NumPy's full interp surface for anything the native real-valued
     // fast path can't represent: a `period` (angular interpolation), a complex
     // `fp` (interpolated component-wise), or complex/non-float `left`/`right`
@@ -22794,7 +22794,7 @@ fn where_py(
 
 #[pyfunction]
 fn nonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // 1-D large contiguous supported dtypes: nonzero's single tuple element IS
     // flatnonzero (identical ascending intp indices), so the parallel two-pass
     // kernel applies verbatim. numpy's non-bool nonzero core is branchy per
@@ -23587,7 +23587,7 @@ fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // 1-D fast path: numpy.argwhere(1-D) = transpose(nonzero) (~a reshape, very fast),
     // but the native coordinate-build path is ~8x slower for 1-D specifically (serial-
     // confirmed, BlackThrush 2026-06-22) while it WINS for 2-D (0.28x). Delegate 1-D to
@@ -23665,7 +23665,7 @@ fn take(
     // float/complex64/bool). 16-byte complex128 (no primitive mover) + string/datetime/object/void
     // delegate. NB: the cold extract residual below still widens narrow widths, so it is guarded to
     // bool/8-byte only — the byte-gather helpers cover every relaxed dtype before it is reached.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (a.bind(py),))?;
     let dtype = arr.getattr("dtype")?;
     let dtype_kind = dtype.getattr("kind")?.extract::<String>()?;
@@ -24751,7 +24751,7 @@ fn expand_dims(py: Python<'_>, a: Py<PyAny>, axis: Py<PyAny>) -> PyResult<Py<PyA
     // The old native path materialized a copy and diverged from numpy's view
     // semantics. Delegate to numpy.expand_dims for the exact view, dtype, and
     // error surface (e.g. the AxisError for an out-of-range axis).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("expand_dims")?
         .call1((a.bind(py), axis.bind(py)))?
@@ -24768,7 +24768,7 @@ fn broadcast_to(
 ) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy so broadcasting rules, readonly-view behavior,
     // dtype preservation, and incompatible-shape errors all match exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if subok {
         kwargs.set_item("subok", true)?;
@@ -24785,7 +24785,7 @@ fn broadcast_arrays(py: Python<'_>, args: &Bound<'_, PyTuple>, subok: bool) -> P
     // Delegate to NumPy so mixed-rank broadcasting, returned list
     // length/order, per-result dtypes, and incompatible-shape errors
     // all match exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if subok {
         kwargs.set_item("subok", true)?;
@@ -24802,7 +24802,7 @@ fn py_broadcast_shapes(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py
     // Delegate to NumPy so pairwise/N-ary shape broadcasting, scalar
     // and empty-shape handling, integer-as-1-D-shape permissions, and
     // incompatible-shape ValueError surface all match exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("broadcast_shapes")?.call1(args)?.unbind())
 }
 
@@ -24817,7 +24817,7 @@ fn may_share_memory(
     // Passthrough to np.may_share_memory so the fast bounds-only heuristic,
     // ravel-vs-flatten distinction, strided/reversed view behavior, disjoint
     // arrays, and max_work kwarg surface all match numpy exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("max_work", max_work)?;
     Ok(numpy
@@ -24835,7 +24835,7 @@ fn fromiter(
     count: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if let Some(like_val) = like.as_ref()
         && !like_val.bind(py).is_none()
     {
@@ -24870,7 +24870,7 @@ fn fromstring(
     sep: &str,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
@@ -25022,7 +25022,7 @@ fn frombuffer(
     offset: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if let Some(like_val) = like.as_ref()
         && !like_val.bind(py).is_none()
     {
@@ -25066,7 +25066,7 @@ fn shares_memory(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, max_work: i64) -> P
     // max_work permits it), view/copy behavior, stride-based disjointness,
     // and max_work kwarg surface all match numpy exactly. Unlike
     // may_share_memory, shares_memory defaults to max_work=-1 (solve).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("max_work", max_work)?;
     Ok(numpy
@@ -25467,7 +25467,7 @@ fn clip(
     // arrays, complex inputs, explicit `out` buffers, and any extra
     // kwargs (casting, where, dtype, …) fall back to np.clip so numpy's
     // full dispatch surface is preserved exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let clip_fn = numpy.getattr("clip")?;
 
     // numpy 2.0 renamed a_min/a_max -> min/max. The modern min/max spelling makes
@@ -25977,7 +25977,7 @@ fn repeat(
     repeats: Py<PyAny>,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Native parallel fast path: scalar-int repeat along axis=None/0 breaks numpy's serial page-fault
     // wall on the large fresh output (bit-exact byte copy). Everything else falls through to numpy.
     if let Some(out) = try_native_repeat_scalar(
@@ -26114,7 +26114,7 @@ fn append(
     values: Py<PyAny>,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let append_fn = numpy.getattr("append")?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
@@ -26184,7 +26184,7 @@ fn append(
 #[pyfunction]
 #[pyo3(signature = (a, new_shape))]
 fn resize(py: Python<'_>, a: Py<PyAny>, new_shape: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // np.resize is COMPOSED in numpy: concatenate((ravel(a),) * ceil)[:total]
     // - an OVERSIZED serial concat copy (it writes ceil-multiple bytes and
     // returns a view into the oversized buffer). Natively it is one parallel
@@ -26532,7 +26532,7 @@ fn insert(
     // Delegate to NumPy so scalar and vector insertion positions,
     // flattened defaults, axis-aware broadcasting, and index errors
     // all stay exact.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Native single-int-index + scalar-value 1-D f64 fast path (bypasses np.insert dispatch).
     let axis_bound = axis.as_ref().map(|a| a.bind(py));
     if let Some(out) = try_zerocopy_f64_insert_scalar(
@@ -26796,7 +26796,7 @@ fn delete(
     // Delegate to NumPy so scalar, slice, and vector deletions,
     // flattened defaults, axis-aware removals, and bounds errors all
     // stay exact.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Native single-int-index 1-D f64 fast path (bypasses np.delete's ~us Python dispatch).
     let axis_bound = axis.as_ref().map(|a| a.bind(py));
     // A slice cannot use the scalar path. Reject it before that helper inspects axis so a custom
@@ -27206,7 +27206,7 @@ fn concatenate(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let concatenate_fn = numpy.getattr("concatenate")?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let call_kwargs = PyDict::new(py);
@@ -27300,7 +27300,7 @@ fn stack(
     // Delegate to NumPy so sequence handling, default axis insertion,
     // explicit out buffers, dtype/casting interactions, and shape
     // mismatch errors all match exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let stack_fn = numpy.getattr("stack")?;
     if args.is_empty() || args.len() > 2 {
         return Ok(stack_fn.call(args, kwargs)?.unbind());
@@ -27534,7 +27534,7 @@ fn trim_zeros(
     if axis.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
         return fallback();
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !filt.bind(py).is_instance(&ndarray_type)? {
         return fallback();
@@ -27609,7 +27609,7 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
         }
     }
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let asanyarray = numpy.call_method1("asanyarray", (a.bind(py),))?;
     let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
@@ -27719,7 +27719,7 @@ fn minimum_fill_value_for_supported_dtype(py: Python<'_>, dtype: DType) -> PyRes
 #[pyfunction]
 #[pyo3(signature = (obj,))]
 fn minimum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let bound = obj.bind(py);
     let dtype = if builtins
@@ -27791,7 +27791,7 @@ fn maximum_fill_value_for_supported_dtype(py: Python<'_>, dtype: DType) -> PyRes
 #[pyfunction]
 #[pyo3(signature = (obj,))]
 fn maximum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let bound = obj.bind(py);
     let dtype = if builtins
@@ -27840,7 +27840,7 @@ fn pinv(
     hermitian: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (a.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
 
@@ -27937,7 +27937,7 @@ fn pinv(
 
 #[pyfunction]
 fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Real general (non-symmetric) eigenvalues need a robust unsymmetric
     // eigensolver. The native Francis double-shift QR (`eig_nxn`) does NOT
     // reliably converge: across random real matrices it returns wrong
@@ -27969,7 +27969,7 @@ fn matrix_rank(
     hermitian: bool,
     rtol: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let matrix_rank_fn = numpy.getattr("linalg")?.getattr("matrix_rank")?;
     let a_for_fallback = A.clone_ref(py);
     let tol_for_fallback = tol.as_ref().map(|value| value.clone_ref(py));
@@ -28307,7 +28307,7 @@ fn bool_matrix_power_bitpacked(
 #[pyfunction]
 #[pyo3(signature = (a, n))]
 fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let matrix_power_fn = numpy.getattr("linalg")?.getattr("matrix_power")?;
     let a_for_fallback = a.clone_ref(py);
     let n_for_fallback = n.clone_ref(py);
@@ -28424,7 +28424,7 @@ fn matrix_power_one_exact_ndarray_can_return_input(
 #[pyfunction]
 #[pyo3(signature = (a,))]
 fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let slogdet_fn = numpy.getattr("linalg")?.getattr("slogdet")?;
     let a_for_fallback = a.clone_ref(py);
     let fallback =
@@ -28512,7 +28512,7 @@ fn svd(
     // tolerate. Keeping the passthrough until we either (a) land an
     // SVD algorithm that bit-matches LAPACK or (b) relax the parity
     // oracle to allclose-level tolerance.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let svd_fn = numpy.getattr("linalg")?.getattr("svd")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("full_matrices", full_matrices)?;
@@ -28527,7 +28527,7 @@ fn qr(py: Python<'_>, a: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     // Passthrough to np.linalg.qr so QRResult / ndarray / tuple return types,
     // deprecated compatibility modes, and stacked (..., M, N) semantics stay
     // byte-for-byte aligned with numpy.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let qr_fn = numpy.getattr("linalg")?.getattr("qr")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("mode", mode)?;
@@ -28827,7 +28827,7 @@ fn solve_repeated_f64_square_stack(
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let solve_fn = numpy.getattr("linalg")?.getattr("solve")?;
     let a_for_fallback = a.clone_ref(py);
     let b_for_fallback = b.clone_ref(py);
@@ -29039,7 +29039,7 @@ fn try_zerocopy_f64_eigvalsh_diagonal(
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
 fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let eigvalsh_fn = numpy.getattr("linalg")?.getattr("eigvalsh")?;
     let a_for_fallback = a.clone_ref(py);
     let kwargs = PyDict::new(py);
@@ -29151,7 +29151,7 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // passed through to np.linalg.det so numpy's broadcasting / complex
     // semantics are preserved exactly.
     let bound = a.bind(py);
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // STALE-CLIFF UPDATE (2026-06-20): the old size-gate routed n>=832 single-matrix
     // det to the native blocked LU because OpenBLAS getrf used to hit a sharp cliff
     // above ~832 (n=832 was ~830ms). That cliff is GONE on the current NumPy 2.4.3 /
@@ -29217,7 +29217,7 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Real 2-D square inputs route to fnp_linalg::inv_nxn; complex /
     // batched / non-2-D passthrough to np.linalg.inv.
     let bound = a.bind(py);
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr("linalg")?
@@ -29418,7 +29418,7 @@ fn lstsq(
     // (solution, residuals, rank, singular_values) and the rcond
     // default-handling path match numpy exactly across real/complex,
     // rank-deficient, and broadcasting inputs.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let lstsq_fn = numpy.getattr("linalg")?.getattr("lstsq")?;
     let kwargs = PyDict::new(py);
     if let Some(value) = bound_rcond {
@@ -29437,7 +29437,7 @@ fn tensorsolve(
 ) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy so axes permutation semantics and error reporting
     // stay aligned with numpy.linalg.tensorsolve.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axes) = axes {
         kwargs.set_item("axes", axes.bind(py))?;
@@ -29452,7 +29452,7 @@ fn tensorsolve(
 #[pyfunction]
 #[pyo3(signature = (a, ind=2))]
 fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (a.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
 
@@ -29638,7 +29638,7 @@ fn solve_triangular(
     lower: bool,
     unit_diagonal: bool,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr_a = numpy.call_method1("asarray", (a.bind(py),))?;
     let arr_b = numpy.call_method1("asarray", (b.bind(py),))?;
     let kind_a = arr_a
@@ -30196,7 +30196,7 @@ fn spacing(
     // into the np.empty output (no extract-to-Vec + rebuild, which was ~6x slower than
     // numpy from the extra full-size copies + cold page faults). The per-element formula
     // is byte-identical to ufunc_spacing (UFuncArray::spacing).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if let Some((flat, shape)) = zerocopy_f64_unary_flat_with(py, &numpy, x.bind(py), |v| {
         if v.is_nan() || v.is_infinite() {
             f64::NAN
@@ -30236,7 +30236,7 @@ fn sign(
         return core_numpy_passthrough(py, "sign", args, kwargs);
     }
     let x: Py<PyAny> = args.get_item(0)?.unbind();
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (x.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     // complex128: numpy computes sign = z/|z| per-element single-threaded (~178ms@8M); the
@@ -31618,7 +31618,7 @@ fn masked_sum(py: Python<'_>, a: Py<PyAny>, mask: Py<PyAny>) -> PyResult<Py<PyAn
     if let Some(total) = try_zerocopy_f64_masked_sum(py, a.bind(py), mask.bind(py))? {
         return Ok(total);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.getattr("asarray")?.call1((a.bind(py),))?;
     let selector = numpy.getattr("asarray")?.call1((mask.bind(py),))?;
     Ok(array.get_item(selector)?.call_method0("sum")?.unbind())
@@ -31633,7 +31633,7 @@ fn multiply_add(
     c: Py<PyAny>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if let Some(destination) = out.as_ref() {
         let destination = destination.bind(py);
         macro_rules! try_out_route {
@@ -32142,7 +32142,7 @@ fn subtract_multiply_add(
     d: Py<PyAny>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     macro_rules! try_route {
         ($value:ty, $dtype:literal) => {
             if let Some(output) = out.as_ref() {
@@ -32213,7 +32213,7 @@ fn pairwise_multiply_add(
     c: Py<PyAny>,
     d: Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     macro_rules! try_route {
         ($value:ty, $dtype:literal) => {
             if let Some(result) = zerocopy_pairwise_multiply_add_typed::<$value>(
@@ -32260,7 +32260,7 @@ fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .call1((x.bind(py),))?
             .unbind());
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if let Some(out) = try_zerocopy_f64_sinc(py, &numpy, x.bind(py))? {
         return Ok(out);
     }
@@ -32324,7 +32324,7 @@ fn nextafter(
     }
     let x1: Py<PyAny> = args.get_item(0)?.unbind();
     let x2: Py<PyAny> = args.get_item(1)?.unbind();
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // float32 sibling: numpy runs f32 nextafter single-threaded (~83ms @16M); the native parallel
     // f32 bit-step (mirror of the f64 arm) is bit-identical (verified vs np.nextafter over 3M f32
     // incl specials) and aggregates cores. Same-shape C-contiguous f32; else fall through to numpy.
@@ -32379,7 +32379,7 @@ fn hypot(
     }
     let x1: Py<PyAny> = args.get_item(0)?.unbind();
     let x2: Py<PyAny> = args.get_item(1)?.unbind();
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // f16 hypot: numpy has no f16 ALU, widens f16->f32->hypotf->narrow single-threaded
     // (~165ms@16M). Native parallel widen-hypot-narrow is bit-exact; the helper defers any
     // operand large enough to overflow f16 so numpy's overflow RuntimeWarning surfaces.
@@ -32434,7 +32434,7 @@ fn ldexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // ~7-10x slower than numpy for non-int32 exponents (float64+int64/int8).
     // numpy.ldexp is the exact oracle (right dtype, fast, same float-exponent
     // TypeError), so delegate the residual.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("ldexp")?
         .call1((x1.bind(py), x2.bind(py)))?
@@ -32457,7 +32457,7 @@ fn logaddexp(
     }
     let x1: Py<PyAny> = args.get_item(0)?.unbind();
     let x2: Py<PyAny> = args.get_item(1)?.unbind();
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // f16 logaddexp: numpy has no f16 ALU, widens f16->f32->npy_logaddexpf->narrow single-
     // threaded (~283ms@16M). Native parallel widen-logaddexp-narrow is bit-exact for FINITE
     // inputs (the helper defers any NaN/inf operand so numpy owns the "invalid" warning +
@@ -32504,7 +32504,7 @@ fn logaddexp2(
     }
     let x1: Py<PyAny> = args.get_item(0)?.unbind();
     let x2: Py<PyAny> = args.get_item(1)?.unbind();
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // f16 logaddexp2: NumPy widens f16->f32->npy_logaddexp2f->narrow single-threaded.
     // Native parallel widen-logaddexp2-narrow is bit-exact for finite inputs; non-finite
     // operands defer so NumPy owns warning and special-value behavior.
@@ -33809,7 +33809,7 @@ fn choose(
     //
     // Deferring a 0-d index costs nothing: the native path exists to accelerate
     // bulk selection, and a scalar index selects exactly one element.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let choices_bound = choices.bind(py);
     let index_array = numpy.call_method1("asarray", (a.bind(py),))?;
     let index_kind = index_array
@@ -33893,7 +33893,7 @@ fn searchsorted(
     side: &str,
     sorter: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // An invalid `side` is a pure error case: defer the whole call to numpy so it
     // raises ITS canonical ValueError. The message wording tracks the installed
     // numpy version exactly (numpy 2.4 says "search side must be 'left' or 'right'
@@ -34988,7 +34988,7 @@ fn histogram(
     density: Option<Py<PyAny>>,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let histogram_fn = numpy.getattr("histogram")?;
         let kwargs = PyDict::new(py);
@@ -36839,7 +36839,7 @@ fn gradient(
     axis: Option<Py<PyAny>>,
     edge_order: usize,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // INT input (dtype-gap audit): numpy's int gradient subtracts in the int
     // dtype then true-divides into f64 output. For |v| <= 2^51 the exact
     // integer difference is computed identically by subtract-then-convert and
@@ -37238,7 +37238,7 @@ fn diff(
     varargs: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let diff_fn = numpy.getattr("diff")?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let mut positional: Vec<Py<PyAny>> = Vec::with_capacity(varargs.len() + 3);
@@ -37429,7 +37429,7 @@ fn roll(
     // through roll; tuple-of-shifts with tuple-of-axes routes through
     // roll_multi; mismatched tuples, non-int shifts, non-numeric dtypes
     // fall back to np.roll so numpy's dispatch surface stays exact.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let roll_fn = numpy.getattr("roll")?;
     let a_for_fallback = a.clone_ref(py);
     let shift_for_fallback = shift.clone_ref(py);
@@ -37526,7 +37526,7 @@ fn histogram_bin_edges(
     range: Option<Py<PyAny>>,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let histogram_bin_edges_fn = numpy.getattr("histogram_bin_edges")?;
         let kwargs = PyDict::new(py);
@@ -37679,7 +37679,7 @@ fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
     // from numpy's view semantics (writing through the result must alias the
     // input). Build the view via the array's ravel method, which reproduces
     // numpy's exact view-or-copy decision and preserves the input dtype.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (a.bind(py),))?;
     Ok(arr.call_method1("ravel", (order,))?.unbind())
 }
@@ -37707,7 +37707,7 @@ fn reshape(
     // the installed numpy EXACTLY (e.g. newshape= raises here iff it raises in the
     // numpy on this machine). copy is forwarded only when set so numpy's default
     // (copy=None) is preserved on numpy builds predating the copy argument.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("order", order)?;
     if let Some(copy) = copy {
@@ -37739,7 +37739,7 @@ fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<
     // slower AND a view-semantics divergence (and it widened narrow dtypes via the
     // extract). Delegate to numpy.transpose, which yields the exact view, preserves
     // the dtype, and reproduces numpy's exact error surface.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axes_val) = axes.as_ref() {
         kwargs.set_item("axes", axes_val.bind(py))?;
@@ -37756,7 +37756,7 @@ fn swapaxes(py: Python<'_>, a: Py<PyAny>, axis1: i64, axis2: i64) -> PyResult<Py
     // np.swapaxes swaps two strides — a VIEW (O(1)). The old native path
     // materialized a copy (~13x slower + view-semantics divergence). Delegate to
     // numpy.swapaxes for the exact view, dtype, and error surface.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("swapaxes")?
         .call1((a.bind(py), axis1, axis2))?
@@ -37774,7 +37774,7 @@ fn moveaxis(
     // np.moveaxis is a pure stride permutation — a VIEW (O(1)). The old native
     // path materialized a copy (~4x slower + view-semantics divergence). Delegate
     // to numpy.moveaxis for the exact view, dtype, and error surface.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("moveaxis")?
         .call1((a.bind(py), source.bind(py), destination.bind(py)))?
@@ -37790,7 +37790,7 @@ fn rollaxis(py: Python<'_>, a: Py<PyAny>, axis: i64, start: i64) -> PyResult<Py<
     // input). An axis roll is never faster materialized than as numpy's view, so
     // delegate unconditionally (cf. matrix_transpose; moveaxis/swapaxes already
     // delegate and correctly return views).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("rollaxis")?
         .call1((a.bind(py), axis, start))?
@@ -37803,7 +37803,7 @@ fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py
     // np.squeeze returns a VIEW (drops length-1 axes via stride metadata). The old
     // native path materialized a copy and diverged from numpy's view semantics.
     // Delegate to numpy.squeeze for the exact view, dtype, and error surface.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = axis.as_ref() {
         kwargs.set_item("axis", axis_val.bind(py))?;
@@ -37821,7 +37821,7 @@ fn rot90(py: Python<'_>, m: Py<PyAny>, k: i64, axes: (i64, i64)) -> PyResult<Py<
     // (O(1)). The old native path materialized a rotated copy (~13x slower +
     // view-semantics divergence). Delegate to numpy.rot90 for the exact view,
     // dtype, and error surface.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("rot90")?
         .call1((m.bind(py), k, axes))?
@@ -37909,7 +37909,7 @@ fn vstack(
 fn row_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy so 1-D row promotion, 2-D preservation, object
     // handling, and incompatible-width validation stay exact.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("row_stack")?.call1((tup.bind(py),))?.unbind())
 }
 
@@ -38035,7 +38035,7 @@ fn try_zerocopy_reshaped_concat(
 
 #[pyfunction]
 fn dstack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // 1-D dstack == column-interleave to (N, K) reshaped to (1, N, K); parallel native, else numpy.
     if let Ok(iter) = tup.bind(py).try_iter() {
         let collected: PyResult<Vec<_>> = iter.collect();
@@ -38175,7 +38175,7 @@ fn try_native_column_interleave(
 
 #[pyfunction]
 fn column_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // 1-D column_stack == interleave to (N, K); parallel native path, else numpy.
     if let Ok(iter) = tup.bind(py).try_iter() {
         let collected: PyResult<Vec<_>> = iter.collect();
@@ -38685,7 +38685,7 @@ fn copyto(
     // Delegate to NumPy so in-place broadcasted writes, boolean-mask
     // selection, casting policy checks, and shape-mismatch errors stay
     // exactly aligned with numpy.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let copyto_fn = numpy.getattr("copyto")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("casting", casting)?;
@@ -39146,7 +39146,7 @@ fn tri(
     dtype: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // `like` is keyword-only in numpy and selects __array_function__ dispatch,
     // which only numpy can perform; delegate the whole call when it is given.
     if like.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
@@ -39263,7 +39263,7 @@ fn masked_where(
 #[pyfunction]
 #[pyo3(signature = (a, axis=None))]
 fn mask_rowcols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let mask_rowcols_fn = numpy.getattr("ma")?.getattr("mask_rowcols")?;
     match axis {
         Some(axis) => {
@@ -39278,7 +39278,7 @@ fn mask_rowcols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResu
 #[pyfunction]
 #[pyo3(signature = (a, axis=None))]
 fn mask_rows(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let mask_rows_fn = numpy.getattr("ma")?.getattr("mask_rows")?;
     match axis {
         Some(axis) => {
@@ -39293,7 +39293,7 @@ fn mask_rows(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<
 #[pyfunction]
 #[pyo3(signature = (a, axis=None))]
 fn mask_cols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let mask_cols_fn = numpy.getattr("ma")?.getattr("mask_cols")?;
     match axis {
         Some(axis) => {
@@ -39563,7 +39563,7 @@ fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // wrap-to-int32 gave wrong values (e.g. vdot([2^30,2^30,7],[2^30,2^30,3])
     // returned 0 instead of 21). Deferring to numpy makes dtype, integer
     // wraparound, and float pairwise-summation all bit-exact.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let vdot_fn = numpy.getattr("vdot")?;
     Ok(vdot_fn.call1((a.bind(py), b.bind(py)))?.unbind())
 }
@@ -39893,7 +39893,7 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
 #[pyfunction]
 #[pyo3(signature = (a,))]
 fn getmask(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let asanyarray = numpy.call_method1("asanyarray", (a.bind(py),))?;
     let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
@@ -40249,7 +40249,7 @@ fn median(
     overwrite_input: bool,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let median_fn = numpy.getattr("median")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -41002,7 +41002,7 @@ fn cov(
     aweights: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // INT/BOOL input (dtype-gap audit): numpy's cov converts to
     // result_type(m, f64) BEFORE any arithmetic, so astype(f64) first is
     // byte-transparent UNCONDITIONALLY (pinned incl. 2^62-scale values) and
@@ -41189,7 +41189,7 @@ fn corrcoef(
     ddof: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // `bias` / `ddof`: hand the WHOLE call to numpy the moment either is supplied.
     //
     // numpy deprecated both on corrcoef long ago and REMOVED them in 2.4. The two
@@ -41738,7 +41738,7 @@ fn nanmean(
     keepdims: bool,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanmean_fn = numpy.getattr("nanmean")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -43801,7 +43801,7 @@ fn nansum(
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nansum_fn = numpy.getattr("nansum")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -43965,7 +43965,7 @@ fn nanprod(
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanprod_fn = numpy.getattr("nanprod")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -47207,7 +47207,7 @@ fn nanmax(
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanmax_fn = numpy.getattr("nanmax")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -47371,7 +47371,7 @@ fn nanmin(
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanmin_fn = numpy.getattr("nanmin")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -47538,7 +47538,7 @@ fn nanstd(
     mean: Option<Py<PyAny>>,
     correction: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanstd_fn = numpy.getattr("nanstd")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -47826,7 +47826,7 @@ fn nanvar(
     mean: Option<Py<PyAny>>,
     correction: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanvar_fn = numpy.getattr("nanvar")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -48573,7 +48573,7 @@ fn nanargmax(
     out: Option<Py<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanargmax_fn = numpy.getattr("nanargmax")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -48709,7 +48709,7 @@ fn nanargmin(
     out: Option<Py<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanargmin_fn = numpy.getattr("nanargmin")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -48845,7 +48845,7 @@ fn percentile(
     keepdims: bool,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let percentile_fn = numpy.getattr("percentile")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -49152,7 +49152,7 @@ fn nanpercentile(
     weights: Option<Py<PyAny>>,
     interpolation: Option<String>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanpercentile_fn = numpy.getattr("nanpercentile")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -49315,7 +49315,7 @@ fn nanquantile(
     weights: Option<Py<PyAny>>,
     interpolation: Option<String>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanquantile_fn = numpy.getattr("nanquantile")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -50056,7 +50056,7 @@ fn try_native_lexsort_wide_rows<const K: usize>(
 #[pyfunction]
 #[pyo3(signature = (keys, axis=-1))]
 fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let keys_bound = keys.bind(py);
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let lexsort_fn = numpy.getattr("lexsort")?;
@@ -50232,7 +50232,7 @@ fn rfftn(
     // complex with the last transformed axis having length n//2+1.
     // Covers optional shape `s`, axes selection (default: all axes),
     // norm conventions ('backward'/'ortho'/'forward'), and `out=`.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let rfftn_fn = numpy.getattr("fft")?.getattr("rfftn")?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -50260,7 +50260,7 @@ fn irfftn(
     norm: Option<String>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let irfftn_fn = numpy.getattr("fft")?.getattr("irfftn")?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -50317,7 +50317,7 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
             .unbind())
     };
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
     let ndim = arr.getattr("ndim")?.extract::<usize>()?;
 
@@ -50356,7 +50356,7 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
 fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // numpy.flipud(m) == m[::-1, ...] — a stride-flip view of axis 0 (requires
     // ndim >= 1, else numpy raises ValueError). Build the view directly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
     let ndim = arr.getattr("ndim")?.extract::<usize>()?;
     if ndim < 1 {
@@ -50372,7 +50372,7 @@ fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // numpy.fliplr(m) == m[:, ::-1] — a stride-flip view of axis 1 (requires
     // ndim >= 2, else numpy raises ValueError). Build the view directly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
     let ndim = arr.getattr("ndim")?.extract::<usize>()?;
     if ndim < 2 {
@@ -51179,7 +51179,7 @@ fn intersect1d(
     // tuple-return semantics left to numpy) and for complex /
     // integer-sidecar / mixed-dtype inputs so numpy's dispatch surface
     // stays exact.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let intersect1d_fn = numpy.getattr("intersect1d")?;
     let ar1_for_fallback = ar1.clone_ref(py);
     let ar2_for_fallback = ar2.clone_ref(py);
@@ -51280,7 +51280,7 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
     // union of the two flattened inputs. Falls back to np.union1d for
     // complex/structured/string inputs and for dtype mixes that would
     // require numpy's coercion rules (e.g. int64 ∪ float64 → float64).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let union1d_fn = numpy.getattr("union1d")?;
     let ar1_for_fallback = ar1.clone_ref(py);
     let ar2_for_fallback = ar2.clone_ref(py);
@@ -51359,7 +51359,7 @@ fn setdiff1d(
     // Native setdiff1d via UFuncArray::setdiff1d. Falls back to numpy
     // when assume_unique=true (subtly different semantics preserving
     // order) or for complex / mixed-dtype / integer-sidecar inputs.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let setdiff1d_fn = numpy.getattr("setdiff1d")?;
     let ar1_for_fallback = ar1.clone_ref(py);
     let ar2_for_fallback = ar2.clone_ref(py);
@@ -51457,7 +51457,7 @@ fn setxor1d(
     // Native setxor1d via UFuncArray::setxor1d. Falls back to numpy
     // when assume_unique=true or when dtype coercion/error behavior
     // belongs to numpy's object/string/complex dispatch.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let setxor1d_fn = numpy.getattr("setxor1d")?;
     let ar1_for_fallback = ar1.clone_ref(py);
     let ar2_for_fallback = ar2.clone_ref(py);
@@ -51557,7 +51557,7 @@ fn isin(
     // for complex / integer-sidecar / mixed-dtype inputs and for the
     // tuned assume_unique / kind="table"/"sort" back-ends so their
     // semantics match numpy exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let isin_fn = numpy.getattr("isin")?;
     let element_for_fallback = element.clone_ref(py);
     let test_for_fallback = test_elements.clone_ref(py);
@@ -53246,7 +53246,7 @@ fn in1d(
     invert: bool,
     kind: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ar1_flat = numpy
         .getattr("asarray")?
         .call1((ar1.bind(py),))?
@@ -53734,7 +53734,7 @@ fn vander(py: Python<'_>, x: Py<PyAny>, N: Option<usize>, increasing: bool) -> P
     // multiply.accumulate is far slower. Other dtypes/shapes fall through so width
     // selection, increasing-order columns, int64 dtype preservation, and 1-D
     // input validation all match numpy exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if let Some(out) = try_zerocopy_f64_vander(py, &numpy, x.bind(py), N, increasing)? {
         return Ok(out);
     }
@@ -53758,7 +53758,7 @@ fn arange(
 ) -> PyResult<Py<PyAny>> {
     // Always passthrough to NumPy - our Rust→NumPy export is slower.
     // See zeros() comment and perf bead franken_numpy-yx2wt.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arange_fn = numpy.getattr("arange")?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype.as_ref() {
@@ -53912,7 +53912,7 @@ fn geomspace(
     dtype: Option<Py<PyAny>>,
     axis: isize,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let geomspace_fn = numpy.getattr("geomspace")?;
         let kwargs = PyDict::new(py);
@@ -54128,7 +54128,7 @@ fn full(
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let full_fn = numpy.getattr("full")?;
         let kwargs = PyDict::new(py);
@@ -54343,7 +54343,7 @@ fn full_like(
     // page-fault wall on large outputs; route the common C-contiguous case to the parallel const-fill. The
     // helper only engages a plain (exact) ndarray, so a subclass (subok=true) defers to numpy either way.
     let _ = subok;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if let Some(out) = try_native_full_like_parallel(
         py,
         &numpy,
@@ -54391,7 +54391,7 @@ fn zeros_like(
     let device_bound = device.as_ref().map(|value| value.bind(py));
     // np.zeros_like does a serial typed memset (measured ~139ms @ 6000^2 f64 — the first-touch page-fault
     // wall, NOT calloc), so route the common C-contiguous case to a parallel fill of 0.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let zero = 0i64.into_pyobject(py)?.into_any();
     if let Some(out) = try_native_full_like_parallel(
         py,
@@ -54438,7 +54438,7 @@ fn ones_like(
     let device_bound = device.as_ref().map(|value| value.bind(py));
     // np.ones_like is a serial typed memset of 1 (page-fault-wall bound on large outputs); route the
     // common C-contiguous case to a parallel fill of 1.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let one = 1i64.into_pyobject(py)?.into_any();
     if let Some(out) = try_native_full_like_parallel(
         py,
@@ -54486,7 +54486,7 @@ fn empty_like(
     // np.empty_like returns UNINITIALIZED memory (instant); the old native path
     // built+zeroed an f64 UFuncArray and converted it — ~240000x slower for int8.
     // Delegate.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let empty_like_fn = numpy.getattr("empty_like")?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
@@ -54711,7 +54711,7 @@ fn asarray(
     )? {
         return Ok(native);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let asarray_fn = numpy.getattr("asarray")?;
     let kwargs = PyDict::new(py);
     if let Some(v) = dtype_bound {
@@ -54761,7 +54761,7 @@ fn asanyarray(
     )? {
         return Ok(native);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let asanyarray_fn = numpy.getattr("asanyarray")?;
     let kwargs = PyDict::new(py);
     if let Some(v) = dtype_bound {
@@ -54790,7 +54790,7 @@ fn ascontiguousarray(
     dtype: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let asc_fn = numpy.getattr("ascontiguousarray")?;
         let kwargs = PyDict::new(py);
@@ -54859,7 +54859,7 @@ fn ascontiguousarray(
 #[pyo3(signature = (a, tol=100.0))]
 fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy to preserve scalar return type for scalar inputs.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tol", tol)?;
     Ok(numpy
@@ -55319,7 +55319,7 @@ fn try_zerocopy_complex_angle(
 #[pyfunction]
 #[pyo3(signature = (z, deg=false))]
 fn angle(py: Python<'_>, z: Py<PyAny>, deg: bool) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Native zero-copy parallel path for complex128 ndarrays (arctan2 stencil); other
     // dtypes / scalars / 0-d / non-contiguous defer to numpy below.
     if let Some(out) = try_zerocopy_complex_angle(py, &numpy, z.bind(py), deg)? {
@@ -55510,7 +55510,7 @@ fn conjugate(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy to preserve scalar return type for scalar inputs.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let call_kwargs = PyDict::new(py);
     if let Some(out_val) = out {
         call_kwargs.set_item("out", out_val.bind(py))?;
@@ -55591,7 +55591,7 @@ fn fmod(
 #[pyo3(signature = (x,))]
 fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy to preserve scalar return type
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("iscomplex")?.call1((x.bind(py),))?.unbind())
 }
 
@@ -57129,7 +57129,7 @@ fn isscalar(py: Python<'_>, element: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // (int, float, complex, str, bytes) and numpy generic scalar
     // objects; False for ndarray (including 0-d) and Python
     // collections (list, dict, tuple).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("isscalar")?
         .call1((element.bind(py),))?
@@ -57140,7 +57140,7 @@ fn isscalar(py: Python<'_>, element: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyo3(signature = (x,))]
 fn isreal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy to preserve scalar return type
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("isreal")?.call1((x.bind(py),))?.unbind())
 }
 
@@ -57231,7 +57231,7 @@ fn negative(
 #[pyo3(signature = (val,))]
 fn real(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy to preserve scalar return type and view semantics.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("real")?.call1((val.bind(py),))?.unbind())
 }
 
@@ -57240,7 +57240,7 @@ fn real(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn imag(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Pass original value to NumPy to preserve scalar return type.
     // NumPy handles both complex and real inputs correctly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("imag")?.call1((val.bind(py),))?.unbind())
 }
 
@@ -57366,7 +57366,7 @@ fn try_zerocopy_f64_floor_divide(
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn floor_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr("floor_divide")?
@@ -57622,7 +57622,7 @@ fn unwrap(
     // period/2 in numpy; we forward None explicitly only when provided so
     // numpy applies its own default. `period` is keyword-only in modern
     // numpy and defaults to 2*pi.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(discont_val) = discont {
         kwargs.set_item("discont", discont_val.bind(py))?;
@@ -57648,7 +57648,7 @@ fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyder. Returns the m-th derivative of the
     // polynomial p (decreasing-power coefficients). m=0 returns the
     // input unchanged; m>0 reduces the polynomial degree by m.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("polyder")?.call1((p.bind(py), m))?.unbind())
 }
 
@@ -57659,7 +57659,7 @@ fn polyint(py: Python<'_>, p: Py<PyAny>, m: i64, k: Option<Py<PyAny>>) -> PyResu
     // polynomial p (decreasing-power coefficients). `k` may be None (all
     // zeros), a scalar (reused for every integration), or a rank-1 array
     // of length 1 or >= m (per NumPy's documented broadcasting rule).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k) = k {
         kwargs.set_item("k", k.bind(py))?;
@@ -57680,7 +57680,7 @@ fn tile(py: Python<'_>, A: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // dispatch surface (scalar reps, batched handling, object dtype) is
     // preserved exactly. `A` carries numpy's capital spelling so the
     // documented np.tile(A=..., reps=...) keyword call ports verbatim.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let a_for_fallback = A.clone_ref(py);
     let reps_for_fallback = reps.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -57757,7 +57757,7 @@ fn array_equal(
     // inputs so numpy's dispatch surface (object arrays, strings, etc.)
     // stays exact. The return is a builtin Python bool (not np.bool_),
     // matching numpy's documented return type.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array_equal_fn = numpy.getattr("array_equal")?;
     let a1_for_fallback = a1.clone_ref(py);
     let a2_for_fallback = a2.clone_ref(py);
@@ -58023,7 +58023,7 @@ fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAn
     // entries agree. Non-broadcastable shapes return False (matches numpy);
     // non-numeric / complex / integer-sidecar inputs defer to numpy so the
     // object-dtype / structured surfaces stay exact.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr("array_equiv")?
@@ -58083,7 +58083,7 @@ fn polyadd(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> 
     // the shorter sequence is zero-padded on the left so like-degree
     // terms align before summation. Returns a 1-D array whose length is
     // max(len(a1), len(a2)).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polyadd")?
         .call1((a1.bind(py), a2.bind(py)))?
@@ -58095,7 +58095,7 @@ fn polyadd(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 fn polysub(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polysub. Returns a1 - a2 with the same
     // left-zero-pad alignment rule as polyadd.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polysub")?
         .call1((a1.bind(py), a2.bind(py)))?
@@ -58108,7 +58108,7 @@ fn polydiv(py: Python<'_>, u: Py<PyAny>, v: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polydiv. Returns (quotient, remainder) where
     // both are 1-D arrays in decreasing-power coefficient order —
     // same convention as polyadd/polysub/polymul.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polydiv")?
         .call1((u.bind(py), v.bind(py)))?
@@ -58121,7 +58121,7 @@ fn polyfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.polynomial.polyfromroots. Builds
     // ascending-power coefficients for the monic polynomial whose roots
     // are supplied; empty input returns the constant polynomial [1.0].
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("polynomial")?
@@ -58133,7 +58133,7 @@ fn polyfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (off, scl))]
 fn polyline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("polynomial")?
@@ -58145,7 +58145,7 @@ fn polyline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny
 #[pyfunction]
 #[pyo3(signature = (c, tol=0.0))]
 fn polytrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tol", tol)?;
     Ok(numpy
@@ -58164,7 +58164,7 @@ fn polyvalfromroots(
     r: Py<PyAny>,
     tensor: bool,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tensor", tensor)?;
     Ok(numpy
@@ -58178,7 +58178,7 @@ fn polyvalfromroots(
 #[pyfunction]
 #[pyo3(signature = (x, deg))]
 fn polyvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("polynomial")?
@@ -58193,7 +58193,7 @@ fn polypow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyRes
     // Passthrough to numpy.polynomial.polynomial.polypow. Raises a
     // power-basis series to a non-negative integer power, bounded by
     // maxpower to match NumPy's allocation guard.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("maxpower", maxpower)?;
     Ok(numpy
@@ -58210,7 +58210,7 @@ fn polyroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.polynomial.polyroots. Input
     // coefficients are ascending-power (c[0] + c[1]x + ...); a
     // constant series returns an empty array.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("polynomial")?
@@ -58225,7 +58225,7 @@ fn polymul(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> 
     // Passthrough to np.polymul. Returns the product polynomial with
     // degree len(a1) + len(a2) - 2 (length len(a1) + len(a2) - 1).
     // Inputs must be 1-D; NumPy raises ValueError on higher ranks.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polymul")?
         .call1((a1.bind(py), a2.bind(py)))?
@@ -58239,7 +58239,7 @@ fn chebadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
     // are expressed in the Chebyshev basis in ascending order (c[0] is
     // T_0's coefficient). Shorter input is zero-right-padded so
     // like-basis terms align before summing.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58254,7 +58254,7 @@ fn chebsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
     // Passthrough to numpy.polynomial.chebyshev.chebsub. Returns c1 - c2
     // in the Chebyshev basis with the same zero-right-pad alignment as
     // chebadd.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58268,7 +58268,7 @@ fn chebsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 fn chebmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.chebyshev.chebmul. Multiplies two
     // Chebyshev series; result has len(c1) + len(c2) - 1 coefficients.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58286,7 +58286,7 @@ fn chebval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult
     // over `x` with the coefficient axis treated as a tensor index;
     // tensor=False evaluates the corresponding x element against the
     // corresponding coefficient row instead.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tensor", tensor)?;
     Ok(numpy
@@ -58304,7 +58304,7 @@ fn chebroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // real and complex roots of the Chebyshev series via its companion
     // matrix eigenvalues. Input must be 1-D; a length-1 (constant)
     // series returns an empty array.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58319,7 +58319,7 @@ fn chebder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResul
     // Passthrough to numpy.polynomial.chebyshev.chebder. Takes the m-th
     // derivative of a Chebyshev series along `axis`, multiplying by
     // `scl` at each iteration (use for a linear change-of-variable).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
     // numpy's own default for `chebder` is axis=0, verified against the
@@ -58353,7 +58353,7 @@ fn chebint(
     // or length-1 when m>1). `lbnd` is the lower integration bound
     // used to pin each antiderivative's constant; `scl` rescales each
     // integration.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
         kwargs.set_item("k", k_val.bind(py))?;
@@ -58381,7 +58381,7 @@ fn chebfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // of chebroots: builds the Chebyshev-basis coefficient array of a
     // monic polynomial having the supplied roots. Empty input returns
     // [1.0] (the constant 1).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58397,7 +58397,7 @@ fn chebpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyRes
     // Chebyshev series to a non-negative integer power, bounded by
     // `maxpower` to prevent runaway allocation (NumPy raises
     // ValueError if pow > maxpower).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("maxpower", maxpower)?;
     Ok(numpy
@@ -58414,7 +58414,7 @@ fn chebdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
     // Passthrough to numpy.polynomial.chebyshev.chebdiv. Returns the
     // (quotient, remainder) tuple from dividing the Chebyshev series
     // c1 by c2.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58428,7 +58428,7 @@ fn chebdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 fn chebline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.chebyshev.chebline. Constructs
     // the Chebyshev series coefficients of a line off + scl*x.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58443,7 +58443,7 @@ fn chebmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.chebyshev.chebmulx. Multiplies a
     // Chebyshev series by x (equivalent to chebmul(c, [0, 1])) but
     // uses the closed-form recurrence for efficiency.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58458,7 +58458,7 @@ fn chebtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy.polynomial.chebyshev.chebtrim. Drops
     // trailing coefficients whose absolute value is <= tol. Inherited
     // from polytrim's semantics; tol must be non-negative.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tol", tol)?;
     Ok(numpy
@@ -58472,7 +58472,7 @@ fn chebtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (pol,))]
 fn poly2cheb(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58484,7 +58484,7 @@ fn poly2cheb(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn cheb2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58496,7 +58496,7 @@ fn cheb2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x, deg))]
 fn chebvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58512,7 +58512,7 @@ fn chebvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58524,7 +58524,7 @@ fn hermadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58536,7 +58536,7 @@ fn hermsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58548,7 +58548,7 @@ fn hermmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 #[pyfunction]
 #[pyo3(signature = (x, c, tensor=true))]
 fn hermval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tensor", tensor)?;
     Ok(numpy
@@ -58562,7 +58562,7 @@ fn hermval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn hermroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58574,7 +58574,7 @@ fn hermroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (roots,))]
 fn hermfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58586,7 +58586,7 @@ fn hermfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
 fn hermpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("maxpower", maxpower)?;
     Ok(numpy
@@ -58600,7 +58600,7 @@ fn hermpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyRes
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58612,7 +58612,7 @@ fn hermdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 #[pyfunction]
 #[pyo3(signature = (off, scl))]
 fn hermline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58624,7 +58624,7 @@ fn hermline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn hermmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58636,7 +58636,7 @@ fn hermmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, tol=0.0))]
 fn hermtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tol", tol)?;
     Ok(numpy
@@ -58650,7 +58650,7 @@ fn hermtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
 fn hermder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
     // numpy's own default for `hermder` is axis=0, verified against the
@@ -58678,7 +58678,7 @@ fn hermint(
     scl: f64,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
         kwargs.set_item("k", k_val.bind(py))?;
@@ -58702,7 +58702,7 @@ fn hermint(
 #[pyfunction]
 #[pyo3(signature = (pol,))]
 fn poly2herm(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58714,7 +58714,7 @@ fn poly2herm(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn herm2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58726,7 +58726,7 @@ fn herm2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x, deg))]
 fn hermvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58743,7 +58743,7 @@ fn hermvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermeadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58755,7 +58755,7 @@ fn hermeadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>>
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermesub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58767,7 +58767,7 @@ fn hermesub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>>
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermemul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58779,7 +58779,7 @@ fn hermemul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>>
 #[pyfunction]
 #[pyo3(signature = (x, c, tensor=true))]
 fn hermeval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tensor", tensor)?;
     Ok(numpy
@@ -58793,7 +58793,7 @@ fn hermeval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResul
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn hermeroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58805,7 +58805,7 @@ fn hermeroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (roots,))]
 fn hermefromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58817,7 +58817,7 @@ fn hermefromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
 fn hermepow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("maxpower", maxpower)?;
     Ok(numpy
@@ -58831,7 +58831,7 @@ fn hermepow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyRe
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn hermediv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58843,7 +58843,7 @@ fn hermediv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>>
 #[pyfunction]
 #[pyo3(signature = (off, scl))]
 fn hermeline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58855,7 +58855,7 @@ fn hermeline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAn
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn hermemulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58867,7 +58867,7 @@ fn hermemulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, tol=0.0))]
 fn hermetrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58933,7 +58933,7 @@ fn herme_native_result(
 #[pyfunction]
 #[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
 fn hermeder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let c_bound = c.bind(py);
     if let Some(series) = herme_native_series(&numpy, c_bound, m, axis)? {
         let der = ufunc_hermeder(&series, m as usize, scl);
@@ -58966,7 +58966,7 @@ fn hermeint(
     scl: f64,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let c_bound = c.bind(py);
     // The native kernel needs the constants as f64; a scalar counts as a one-element list
     // exactly as numpy's `if not np.iterable(k): k = [k]` does. Anything else defers.
@@ -59011,7 +59011,7 @@ fn hermeint(
 #[pyfunction]
 #[pyo3(signature = (pol,))]
 fn herme2poly(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -59023,7 +59023,7 @@ fn herme2poly(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (pol,))]
 fn poly2herme(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -59035,7 +59035,7 @@ fn poly2herme(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x, deg))]
 fn hermevander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -59050,7 +59050,7 @@ fn hermevander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn lagadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59062,7 +59062,7 @@ fn lagadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn lagsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59074,7 +59074,7 @@ fn lagsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn lagmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59086,7 +59086,7 @@ fn lagmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x, c, tensor=true))]
 fn lagval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tensor", tensor)?;
     Ok(numpy
@@ -59100,7 +59100,7 @@ fn lagval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn lagroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59112,7 +59112,7 @@ fn lagroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (roots,))]
 fn lagfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59124,7 +59124,7 @@ fn lagfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
 fn lagpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("maxpower", maxpower)?;
     Ok(numpy
@@ -59138,7 +59138,7 @@ fn lagpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResu
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn lagdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59150,7 +59150,7 @@ fn lagdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (off, scl))]
 fn lagline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59162,7 +59162,7 @@ fn lagline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn lagmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59174,7 +59174,7 @@ fn lagmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, tol=0.0))]
 fn lagtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tol", tol)?;
     Ok(numpy
@@ -59188,7 +59188,7 @@ fn lagtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
 fn lagder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
     // numpy's own default for `lagder` is axis=0, verified against the
@@ -59216,7 +59216,7 @@ fn lagint(
     scl: f64,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
         kwargs.set_item("k", k_val.bind(py))?;
@@ -59240,7 +59240,7 @@ fn lagint(
 #[pyfunction]
 #[pyo3(signature = (pol,))]
 fn poly2lag(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59252,7 +59252,7 @@ fn poly2lag(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn lag2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59264,7 +59264,7 @@ fn lag2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x, deg))]
 fn lagvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59280,7 +59280,7 @@ fn lagvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn legadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59292,7 +59292,7 @@ fn legadd(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn legsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59304,7 +59304,7 @@ fn legsub(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn legmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59316,7 +59316,7 @@ fn legmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x, c, tensor=true))]
 fn legval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tensor", tensor)?;
     Ok(numpy
@@ -59330,7 +59330,7 @@ fn legval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn legroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59342,7 +59342,7 @@ fn legroots(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (roots,))]
 fn legfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59354,7 +59354,7 @@ fn legfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, pow, maxpower=16))]
 fn legpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("maxpower", maxpower)?;
     Ok(numpy
@@ -59368,7 +59368,7 @@ fn legpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResu
 #[pyfunction]
 #[pyo3(signature = (c1, c2))]
 fn legdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59380,7 +59380,7 @@ fn legdiv(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (off, scl))]
 fn legline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59392,7 +59392,7 @@ fn legline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny>
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn legmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59404,7 +59404,7 @@ fn legmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, tol=0.0))]
 fn legtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("tol", tol)?;
     Ok(numpy
@@ -59418,7 +59418,7 @@ fn legtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c, m=1, scl=1.0, axis=0))]
 fn legder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
     // numpy's own default for `legder` is axis=0, verified against the
@@ -59446,7 +59446,7 @@ fn legint(
     scl: f64,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
         kwargs.set_item("k", k_val.bind(py))?;
@@ -59470,7 +59470,7 @@ fn legint(
 #[pyfunction]
 #[pyo3(signature = (pol,))]
 fn poly2leg(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59482,7 +59482,7 @@ fn poly2leg(py: Python<'_>, pol: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (c,))]
 fn leg2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59494,7 +59494,7 @@ fn leg2poly(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x, deg))]
 fn legvander(py: Python<'_>, x: Py<PyAny>, deg: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59518,7 +59518,7 @@ fn sliding_window_view(
     // `window_shape`; `axis` restricts which axes are windowed (None →
     // every axis, which is the NumPy default). `subok` preserves ndarray
     // subclasses like MaskedArray in the output.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let stride_tricks = numpy.getattr("lib")?.getattr("stride_tricks")?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = axis {
@@ -59548,7 +59548,7 @@ fn as_strided(
     // the caller-supplied values with no bounds checking, so it is
     // inherently unsafe. Exposed for callers that know what they're
     // doing and want to construct custom overlapping views.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let stride_tricks = numpy.getattr("lib")?.getattr("stride_tricks")?;
     let kwargs = PyDict::new(py);
     if let Some(shape_val) = shape {
@@ -59760,7 +59760,7 @@ fn allclose(
     // numpy for complex/structured/string inputs, integer-sidecar mixed
     // arrays, and shape-mismatch broadcast failures so numpy's full
     // dispatch surface (including bytes/object coercion) stays exact.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let allclose_fn = numpy.getattr("allclose")?;
     let a_for_fallback = a.clone_ref(py);
     let b_for_fallback = b.clone_ref(py);
@@ -59824,7 +59824,7 @@ fn fix(py: Python<'_>, x: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAn
     // positives. Integer input passes through unchanged; NaN propagates.
     // Falls back to np.fix for complex/object/structured inputs so
     // numpy's coercion surface stays exact.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fix_fn = numpy.getattr("fix")?;
     let x_for_fallback = x.clone_ref(py);
     let out_for_fallback = out.as_ref().map(|value| value.clone_ref(py));
@@ -60103,7 +60103,7 @@ fn asarray_chkfinite(
     dtype: Option<Py<PyAny>>,
     order: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let asarray_fn = numpy.getattr("asarray")?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype.as_ref() {
@@ -60154,7 +60154,7 @@ fn common_type(py: Python<'_>, arrays: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny
     // classification over numpy's scalar-type hierarchy — there is no
     // array computation to move to fnp crates. Delegation is the correct
     // long-term answer; keep the wrapper thin.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("common_type")?.call1(arrays)?.unbind())
 }
 
@@ -60165,7 +60165,7 @@ fn roots(py: Python<'_>, p: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // given by its coefficients in decreasing-degree order. Matches
     // numpy on dtype (always complex), leading-zero trimming, empty and
     // degree-0 polynomial handling, and real vs complex coefficient input.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("roots")?.call1((p.bind(py),))?.unbind())
 }
 
@@ -60177,7 +60177,7 @@ fn poly(py: Python<'_>, seq_of_zeros: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // coefficients in decreasing-degree order. Matches numpy on real vs
     // complex-root input, 2-D square matrix input, and error surface
     // for non-square 2-D or >2-D arrays.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("poly")?
         .call1((seq_of_zeros.bind(py),))?
@@ -60197,7 +60197,7 @@ fn require(
     // listed requirements (C/F contiguity, aligned, writeable, owndata).
     // Matches numpy for the single-char and multi-requirement forms
     // and for no-op behavior when the input already meets every flag.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype {
         kwargs.set_item("dtype", dtype_val.bind(py))?;
@@ -60226,7 +60226,7 @@ fn mask_indices(py: Python<'_>, n: i64, mask_func: Py<PyAny>, k: i64) -> PyResul
     // where_nonzero — two extra full n*n marshalling copies that numpy never makes
     // (measured ~2.56x slower at n=2000). The op is dominated by those copies, not
     // the nonzero, so delegate to numpy for parity (no native advantage exists).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("mask_indices")?
         .call1((n, mask_func.bind(py), k))?
@@ -60236,7 +60236,7 @@ fn mask_indices(py: Python<'_>, n: i64, mask_func: Py<PyAny>, k: i64) -> PyResul
 #[pyfunction]
 #[pyo3(signature = (x1, x2, *, axis=-1_i64))]
 fn linalg_vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let vecdot_fn = numpy.getattr("linalg")?.getattr("vecdot")?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
@@ -60655,7 +60655,7 @@ fn partition(
     // native can at best tie numpy — so we route to numpy for the win, exactly as
     // `sort`/`norm` already do. Parity is exact (this IS numpy). Native path tracked
     // for a future single-buffer bridge in the perf bead.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("partition")?.call(args, kwargs)?.unbind())
 }
 
@@ -60675,7 +60675,7 @@ fn argpartition(
     // exported int64 buffer) make the native export ~9x slower than numpy on large
     // inputs. An identical O(n) index selection can at best tie numpy, so route to
     // numpy. Parity is exact (this IS numpy).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("argpartition")?.call(args, kwargs)?.unbind())
 }
 
@@ -60697,7 +60697,7 @@ fn save(
     allow_pickle: bool,
     fix_imports: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("allow_pickle", allow_pickle)?;
@@ -60773,7 +60773,7 @@ fn load(
     encoding: &str,
     max_header_size: usize,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(mode) = mmap_mode.as_ref() {
@@ -60917,7 +60917,7 @@ fn tofile(
     sep: &str,
     format: &str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.getattr("asarray")?.call1((a.bind(py),))?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
@@ -60988,7 +60988,7 @@ fn fromfile(
     offset: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
@@ -61106,7 +61106,7 @@ fn loadtxt(
     quotechar: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
@@ -61767,7 +61767,7 @@ fn genfromtxt(
     ndmin: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
@@ -62214,7 +62214,7 @@ fn recfunctions_drop_fields(
         // when every field is dropped — delegate to stay safe.
         return fallback(py);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
 
     // Allocate an empty structured array and copy each kept field.
@@ -62288,7 +62288,7 @@ fn recfunctions_rename_fields(
             ],
         )?)?;
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
     Ok(base_bound.call_method1("view", (new_dtype,))?.unbind())
 }
@@ -62331,7 +62331,7 @@ fn recfunctions_append_fields(
     if asrecarray || dtypes.is_some() {
         return fallback(py);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let Ok(single_name) = names_bound.extract::<String>() else {
         return fallback(py);
     };
@@ -62427,7 +62427,7 @@ fn recfunctions_merge_arrays(
     if flatten || usemask || asrecarray {
         return fallback(py);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
 
     let Ok(iter) = seqarrays_bound.try_iter() else {
         return fallback(py);
@@ -62566,7 +62566,7 @@ fn recfunctions_unstructured_to_structured(
         return fallback(py);
     }
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let source_shape: Vec<usize> = arr_bound.getattr("shape")?.extract()?;
     if source_shape.is_empty() {
         return fallback(py);
@@ -62936,7 +62936,7 @@ fn ma_argmax(
 ) -> PyResult<Py<PyAny>> {
     // The native extract->masked.argmax path widens non-f64 masked data (~3.4x for int/f32) and
     // never beats numpy.ma.argmax even for f64 (1.33x). Delegate to numpy for parity across dtypes.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = &axis {
         kwargs.set_item("axis", axis_val.bind(py))?;
@@ -62967,7 +62967,7 @@ fn ma_argmin(
 ) -> PyResult<Py<PyAny>> {
     // Delegate to numpy.ma.argmin: the native extract->masked.argmin path widens non-f64 (~3x) and
     // never beats numpy (f64 1.29x). Parity across dtypes (cf ma_argmax).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = &axis {
         kwargs.set_item("axis", axis_val.bind(py))?;
@@ -63547,7 +63547,7 @@ fn pad(
     // mode-specific kwargs (constant_values, end_values, stat_length,
     // reflect_type). Extra kwargs forward through verbatim so the full
     // numpy surface is exposed.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Native 1-D constant-mode fast path (bypasses np.pad's ~9us Python dispatch).
     if let Some(out) = try_zerocopy_f64_pad_1d_constant(
         py,
@@ -63623,7 +63623,7 @@ fn linalg_eig(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // for a general square matrix. Matches numpy on real matrices with
     // real eigenvalues, real matrices with complex-conjugate pairs,
     // complex input, and 3-D batched input (last two axes).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("linalg")?
         .getattr("eig")?
@@ -63647,7 +63647,7 @@ fn polyfit(
     // Passthrough to np.polyfit. Least-squares polynomial fit of degree
     // `deg`. Matches numpy for scalar/array rcond, the `full` residual
     // tuple surface, optional weights, and cov ∈ {False, True, 'unscaled'}.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(rcond_val) = rcond {
         kwargs.set_item("rcond", rcond_val.bind(py))?;
@@ -63681,7 +63681,7 @@ fn linalg_matrix_norm(
     // deterministic, the norm result is allclose-level). The cheap orders
     // (Frobenius/None, 1, -1, inf, -inf are row/col-sum reductions, not SVD) and
     // every 2-D / complex / non-finite case stay on the numpy passthrough.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // svd_mode: 0 = spectral (sigma_max), 1 = neg-spectral (sigma_min),
     // 2 = nuclear (sum). None = not an SVD-derived order.
     let svd_mode: Option<u8> = ord.as_ref().and_then(|ord_val| {
@@ -63762,7 +63762,7 @@ fn einsum_path(
     // expression. The optimize kwarg accepts True/False/str/path-list
     // inputs exactly as numpy does; numpy's default is True so we
     // forward the caller value as-is without substituting our own.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let subscripts_obj = subscripts.into_pyobject(py)?.unbind();
     let mut call_items: Vec<Py<PyAny>> = vec![subscripts_obj.into_any()];
     for o in operands.iter() {
@@ -63795,7 +63795,7 @@ fn asfortranarray(
     dtype: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let asf_fn = numpy.getattr("asfortranarray")?;
         let kwargs = PyDict::new(py);
@@ -63940,7 +63940,7 @@ fn average(
             .call1((a.bind(py),))?
             .unbind());
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let avg_fn = numpy.getattr("average")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let a_for_fallback = a.clone_ref(py);
@@ -64594,7 +64594,7 @@ fn testing_assert_equal(
     // if the two inputs are not element-wise equal. Supports nested
     // dict/list structures, NaN-aware equality, and (in modern numpy)
     // strict dtype/shape enforcement.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let assert_fn = numpy.getattr("testing")?.getattr("assert_equal")?;
     let kwargs = PyDict::new(py);
     if let Some(msg) = err_msg {
@@ -64621,7 +64621,7 @@ fn testing_assert_almost_equal(
     // Passthrough to numpy.testing.assert_almost_equal. Compares scalars
     // or arrays up to `decimal` places; raises AssertionError on
     // disagreement. Kept for backward compatibility with legacy numpy.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let assert_fn = numpy.getattr("testing")?.getattr("assert_almost_equal")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("decimal", decimal)?;
@@ -64646,7 +64646,7 @@ fn testing_assert_array_almost_equal(
     // Passthrough to numpy.testing.assert_array_almost_equal. Arrays
     // are compared element-wise up to `decimal` places; NaN positions
     // must match and shapes must agree.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let assert_fn = numpy
         .getattr("testing")?
         .getattr("assert_array_almost_equal")?;
@@ -64673,7 +64673,7 @@ fn testing_assert_array_less(
     // Passthrough to numpy.testing.assert_array_less. Raises
     // AssertionError unless all x[i] < y[i] element-wise. NaN positions
     // cause failure on both implementations.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let assert_fn = numpy.getattr("testing")?.getattr("assert_array_less")?;
     let kwargs = PyDict::new(py);
     if let Some(msg) = err_msg {
@@ -64700,7 +64700,7 @@ fn testing_assert_approx_equal(
     // Passthrough to numpy.testing.assert_approx_equal. Scalar-only
     // comparison up to `significant` significant digits; raises
     // AssertionError on disagreement.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let assert_fn = numpy.getattr("testing")?.getattr("assert_approx_equal")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("significant", significant)?;
@@ -64781,7 +64781,7 @@ fn testing_assert_allclose(
     err_msg: Option<String>,
     verbose: bool,
 ) -> PyResult<()> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<()> {
         let assert_fn = numpy.getattr("testing")?.getattr("assert_allclose")?;
         let kwargs = PyDict::new(py);
@@ -64843,7 +64843,7 @@ fn testing_assert_array_equal(
     verbose: bool,
     strict: bool,
 ) -> PyResult<()> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<()> {
         let assert_fn = numpy.getattr("testing")?.getattr("assert_array_equal")?;
         let kwargs = PyDict::new(py);
@@ -64904,7 +64904,7 @@ fn matrix_transpose(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // view vs ~13ms copy) AND a semantics divergence (the result no longer aliased
     // the input). A transpose is never faster materialized than as numpy's view, so
     // delegate unconditionally — restores both the view semantics and the speed.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("linalg")?
         .getattr("matrix_transpose")?
@@ -64915,7 +64915,7 @@ fn matrix_transpose(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let svdvals_fn = numpy.getattr("linalg")?.getattr("svdvals")?;
     let fallback = || -> PyResult<Py<PyAny>> { Ok(svdvals_fn.call1((x.bind(py),))?.unbind()) };
 
@@ -64972,7 +64972,7 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x, /, *, axis=0))]
 fn unstack(py: Python<'_>, x: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     // numpy's own default for `unstack` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
@@ -64989,7 +64989,7 @@ fn unstack(py: Python<'_>, x: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (a, axes))]
 fn permute_dims(py: Python<'_>, a: Py<PyAny>, axes: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("permute_dims")?
         .call1((a.bind(py), axes.bind(py)))?
@@ -64999,7 +64999,7 @@ fn permute_dims(py: Python<'_>, a: Py<PyAny>, axes: Py<PyAny>) -> PyResult<Py<Py
 #[pyfunction]
 #[pyo3(signature = (x1, x2, /, *, axis=-1_i64))]
 fn vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     // Same empirically-confirmed default as `linalg_vecdot` above: numpy's vecdot
     // defaults to axis=-1, and `inspect.signature` cannot say so because it is a gufunc
@@ -65022,7 +65022,7 @@ fn fromregex(
     dtype: Py<PyAny>,
     encoding: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(enc) = encoding {
         kwargs.set_item("encoding", enc)?;
@@ -65039,7 +65039,7 @@ fn fromregex(
 #[pyfunction]
 #[pyo3(signature = (a,))]
 fn min_scalar_type(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("min_scalar_type")?
         .call1((a.bind(py),))?
@@ -65049,7 +65049,7 @@ fn min_scalar_type(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = ())]
 fn get_printoptions(py: Python<'_>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("get_printoptions")?.call0()?.unbind())
 }
 
@@ -65061,7 +65061,7 @@ fn mintypecode(
     typeset: &str,
     default: &str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("typeset", typeset)?;
     kwargs.set_item("default", default)?;
@@ -65118,7 +65118,7 @@ fn eye(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let eye_fn = numpy.getattr("eye")?;
     let call_kwargs = PyDict::new(py);
     if let Some(kwargs) = kwargs {
@@ -65282,7 +65282,7 @@ fn identity(
     dtype: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let id_fn = numpy.getattr("identity")?;
     let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -65346,7 +65346,7 @@ fn logspace(
     dtype: Option<Py<PyAny>>,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let ls_fn = numpy.getattr("logspace")?;
         let kwargs = PyDict::new(py);
@@ -65414,7 +65414,7 @@ fn logspace(
 #[pyfunction]
 #[pyo3(signature = (a, order="K", subok=false))]
 fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let copy_fn = numpy.getattr("copy")?;
         let kwargs = PyDict::new(py);
@@ -75349,7 +75349,7 @@ fn try_zerocopy_f64_sort_complex_flat(
 
 #[pyfunction]
 fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr("sort_complex")?
@@ -75436,7 +75436,7 @@ fn nanmedian(
     overwrite_input: bool,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nanmedian_fn = numpy.getattr("nanmedian")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -75521,7 +75521,7 @@ fn ma_average(
     weights: Option<Py<PyAny>>,
     returned: bool,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let a_for_fallback = a.clone_ref(py);
     let weights_for_fallback = weights.as_ref().map(|value| value.clone_ref(py));
@@ -75848,7 +75848,7 @@ fn size_count(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult
     // Passthrough to np.size. Returns total elements (axis=None) or
     // count along axis. Exposed as size_count to avoid clashing with
     // std::mem::size_of.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let size_fn = numpy.getattr("size")?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = axis {
@@ -76033,7 +76033,7 @@ fn quantile(
     keepdims: bool,
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let quantile_fn = numpy.getattr("quantile")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
@@ -76513,7 +76513,7 @@ fn polyval(py: Python<'_>, p: Py<PyAny>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Coefficients `p` are in decreasing powers (p[0]*x^n + ... + p[n]). `x` may be
     // scalar or array-like; output matches numpy's dtype-promotion rules (including
     // complex coefficients broadcasting up).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Native fused Horner for real coefficients + an f64 C-contiguous x array.
     if let Some(out) = try_zerocopy_f64_polyval(py, &numpy, p.bind(py), x.bind(py))? {
         return Ok(out);
@@ -76606,7 +76606,7 @@ fn make_mask(
             .unbind())
     };
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let source = m.bind(py);
     let nomask = numpy.getattr("ma")?.getattr("nomask")?;
     if source.is(&nomask) {
@@ -76667,7 +76667,7 @@ fn masked_all(py: Python<'_>, shape: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyR
 #[pyfunction]
 #[pyo3(signature = (arr,))]
 fn masked_all_like(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("ma")?
         .getattr("masked_all_like")?
@@ -76787,7 +76787,7 @@ fn ifft(
     // length n, axis selector, norm conventions ('backward'/'ortho'/
     // 'forward'), optional `out=` destination, and complex output dtype
     // all match numpy exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ifft_fn = numpy.getattr("fft")?.getattr("ifft")?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
@@ -76821,7 +76821,7 @@ fn fft2(
     // Passthrough to np.fft.fft2 so the 2-D FFT matches numpy exactly
     // across optional shape `s`, axes tuple/list input, norm conventions,
     // and optional `out=` destination. Output is complex.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fft2_fn = numpy.getattr("fft")?.getattr("fft2")?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -76853,7 +76853,7 @@ fn ifft2(
     // exactly across optional shape `s`, axes tuple (default (-2, -1)),
     // norm conventions ('backward'/'ortho'/'forward'), and optional
     // `out=` destination. Output is complex.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ifft2_fn = numpy.getattr("fft")?.getattr("ifft2")?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -76886,7 +76886,7 @@ fn fftn(
     // (default: all axes), norm conventions
     // ('backward'/'ortho'/'forward'), and optional `out=` destination.
     // Output is complex.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fftn_fn = numpy.getattr("fft")?.getattr("fftn")?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -76919,7 +76919,7 @@ fn ifftn(
     // (default: all axes), norm conventions
     // ('backward'/'ortho'/'forward'), and optional `out=` destination.
     // Output is complex.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ifftn_fn = numpy.getattr("fft")?.getattr("ifftn")?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -76941,7 +76941,7 @@ fn ifftn(
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
 fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let eigh_fn = numpy.getattr("linalg")?.getattr("eigh")?;
     let a_for_fallback = a.clone_ref(py);
     let kwargs = PyDict::new(py);
@@ -77063,7 +77063,7 @@ fn tensordot(
     b: Py<PyAny>,
     axes: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let tensordot_fn = numpy.getattr("tensordot")?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let axes_arg = match axes.as_ref() {
@@ -77739,7 +77739,7 @@ fn cross(
     axisc: i64,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let cross_fn = numpy.getattr("cross")?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
@@ -77881,7 +77881,7 @@ fn try_native_int_multi_dot(
 #[pyfunction]
 #[pyo3(signature = (arrays, *, out=None))]
 fn multi_dot(py: Python<'_>, arrays: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let multi_dot_fn = numpy.getattr("linalg")?.getattr("multi_dot")?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
@@ -78073,7 +78073,7 @@ fn ma_ediff1d(
     to_end: Option<Py<PyAny>>,
     to_begin: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let arr_any = numpy.call_method1("asanyarray", (arr.bind(py),))?;
     let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
@@ -78653,7 +78653,7 @@ fn try_zerocopy_int_kron1d(
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kron_fn = numpy.getattr("kron")?;
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(kron_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
@@ -78703,7 +78703,7 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let inner_fn = numpy.getattr("inner")?;
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(inner_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
@@ -78995,7 +78995,7 @@ fn outer(
     b: Py<PyAny>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let outer_fn = numpy.getattr(intern!(py, "outer"))?;
     let kwargs = PyDict::new(py);
     if let Some(ref value) = out {
@@ -79088,7 +79088,7 @@ fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny
     // The other p values (1, -1, 'fro', inf, -inf) use matrix-inverse norms and
     // every 2-D case stay on the numpy passthrough so all eight semantics and
     // complex inputs match exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let cond_fn = numpy.getattr("linalg")?.getattr("cond")?;
     // p_mode: Some(2) -> sigma_max/sigma_min, Some(-2) -> sigma_min/sigma_max,
     // None -> not a 2-norm selector (fall back to numpy).
@@ -79365,7 +79365,7 @@ fn norm(
     // Passthrough to np.linalg.norm so ord (None/fro/nuc/int/inf/-inf/real),
     // axis (None/int/tuple), keepdims, and 1-D vector vs 2-D matrix vs
     // batched (..., M, N) broadcasting semantics all match numpy exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let norm_fn = numpy.getattr("linalg")?.getattr("norm")?;
     let kwargs = PyDict::new(py);
     if let Some(value) = ord {
@@ -79441,7 +79441,7 @@ fn rfftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyRe
     // d), and numpy returns the same writeable/owndata float64 array our build did,
     // so delegate the generation to numpy. The device kwarg was validated above and
     // n==0 / d==0 already raise the same ZeroDivisionError numpy itself would.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("d", d)?;
     Ok(numpy
@@ -79484,7 +79484,7 @@ fn rfft(
     norm: Option<String>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
         kwargs.set_item("n", n_val)?;
@@ -79518,7 +79518,7 @@ fn irfft(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     validate_irfft_norm(norm.as_deref())?;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(n) = n {
         kwargs.set_item("n", n)?;
@@ -79555,7 +79555,7 @@ fn hfft(
     // returning a real spectrum. Optional truncation/zero-padding length
     // n, axis selector, norm conventions ('backward'/'ortho'/'forward'),
     // and optional `out=` destination all match numpy exactly.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let hfft_fn = numpy.getattr("fft")?.getattr("hfft")?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
@@ -79586,7 +79586,7 @@ fn ihfft(
     norm: Option<String>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ihfft_fn = numpy.getattr("fft")?.getattr("ihfft")?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
@@ -79621,7 +79621,7 @@ fn rfft2(
     // `s`, axes tuple/list (default (-2, -1) in numpy), norm conventions,
     // and optional `out=` destination all match numpy exactly. Output
     // last-axis length is s[-1]//2+1; output dtype is complex.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let rfft2_fn = numpy.getattr("fft")?.getattr("rfft2")?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -79653,7 +79653,7 @@ fn irfft2(
     // `s`, axes tuple/list (default (-2, -1) in numpy), norm conventions,
     // and optional `out=` destination all match numpy exactly. Output
     // dtype is real (float64).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let irfft2_fn = numpy.getattr("fft")?.getattr("irfft2")?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -79674,7 +79674,7 @@ fn irfft2(
 #[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (v.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if dtype_kind == "c" {
@@ -79766,7 +79766,7 @@ fn try_zerocopy_f64_diagflat(
 #[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diagflat(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr = numpy.call_method1("asarray", (v.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if dtype_kind == "c" {
@@ -79797,7 +79797,7 @@ fn diagonal(
     // cost O(n^2) (it bridged the whole matrix) and diverged from numpy's
     // read-only-view semantics. Delegate to numpy.diagonal for the exact view,
     // dtype, writeable flag, and error surface.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr("diagonal")?
         .call1((a.bind(py), offset, axis1, axis2))?
@@ -79885,7 +79885,7 @@ fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> Py
     // fill_diagonal only writes the n diagonal slots — ~60-611x slower than numpy for
     // a 2000x2000 int8. numpy writes only the diagonal in place (and owns the exact
     // dtype-cast surface), so delegate.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("wrap", wrap)?;
     numpy
@@ -81096,7 +81096,7 @@ fn take_along_axis(
     };
 
     // Check for complex dtype and fallback to numpy
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let arr_dtype_o = numpy
         .call_method1("asarray", (arr.bind(py),))?
         .getattr("dtype")?;
@@ -81230,7 +81230,7 @@ fn zeros(
 ) -> PyResult<Py<PyAny>> {
     // Always passthrough to NumPy - our Rust→NumPy export is slower than
     // letting NumPy allocate directly. See perf bead franken_numpy-o9up3.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let zeros_fn = numpy.getattr("zeros")?;
     let kw = PyDict::new(py);
     kw.set_item("shape", shape)?;
@@ -81257,7 +81257,7 @@ fn ones(
     order: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Native parallel const-fill (ones == full(1)): numpy's serial fill hits the ~2 GB/s page-fault wall on
     // large outputs. Route to the parallel fill with the exact ones dtype (given, or float64 by default).
     // No extra kwargs (device/like) and order C/K only; else delegate below.
@@ -81710,7 +81710,7 @@ fn sum(
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Large flat float32/float64 sum: evaluate NumPy's exact pairwise tree on
     // Rayon.  The incumbent pays one serial DOUBLE/FLOAT_pairwise_sum; every
     // candidate subtree is independent and preserves the same combine edges.
@@ -82618,7 +82618,7 @@ fn prod(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let prod_fn = numpy.getattr("prod")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -82765,7 +82765,7 @@ fn mean(
     keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Native exact-tree parallel flat float32/float64 mean.  The incumbent's
     // scalar division is negligible; its single-threaded pairwise reduction is
     // the whole-job hotspot, so schedule those independent tree nodes on Rayon.
@@ -82887,7 +82887,7 @@ fn py_std(
     keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Conversion is gated to AXIS forms: the flat kernel's scalar composition
     // differs from numpy's flat int chain at sub-ULP level (gate-measured),
     // so flat int inputs keep the byte-exact numpy delegate.
@@ -83020,7 +83020,7 @@ fn var(
     keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Conversion is gated to AXIS forms: the flat kernel's scalar composition
     // differs from numpy's flat int chain at sub-ULP level (gate-measured),
     // so flat int inputs keep the byte-exact numpy delegate.
@@ -83568,7 +83568,7 @@ fn py_min(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let min_fn = numpy.getattr("min")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -83747,7 +83747,7 @@ fn py_max(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let max_fn = numpy.getattr("max")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -83955,7 +83955,7 @@ fn all(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let all_fn = numpy.getattr("all")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -84059,7 +84059,7 @@ fn any(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let any_fn = numpy.getattr("any")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -85572,7 +85572,7 @@ fn cumsum(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let cumsum_fn = numpy.getattr("cumsum")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -85767,7 +85767,7 @@ fn cumprod(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let cumprod_fn = numpy.getattr("cumprod")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -86897,7 +86897,7 @@ fn argmax(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let argmax_fn = numpy.getattr("argmax")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -87106,7 +87106,7 @@ fn argmin(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let argmin_fn = numpy.getattr("argmin")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -92331,7 +92331,7 @@ fn matmul(
         return Ok(result);
     }
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let matmul_fn = numpy.getattr("matmul")?;
     match out {
         Some(o) => Ok(matmul_fn
@@ -92392,7 +92392,7 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
         return Ok(result);
     }
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dot_fn = numpy.getattr("dot")?;
     match out {
         Some(o) => Ok(dot_fn
@@ -98661,7 +98661,7 @@ fn conj(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy to preserve scalar return type for scalar inputs.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let call_kwargs = PyDict::new(py);
     if let Some(out_val) = out {
         call_kwargs.set_item("out", out_val.bind(py))?;
@@ -99027,7 +99027,7 @@ fn bitwise_count(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Fast path: use native implementation for integer types
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
 
     // Fall back if kwargs are provided
     if kwargs.is_some_and(|k| !k.is_empty()) {
@@ -99080,7 +99080,7 @@ fn unpackbits(
     // single-threaded write DRAM-bound and worth parallelizing. Below that numpy is cache-resident/fast
     // (measured 500K bytes: parallel 3.8x LOSS, 2M: parity, 8M: 3.5x WIN), so gate at 1<<22.
     const UNPACKBITS_PARALLEL_MIN: usize = 1 << 22;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let delegate = || -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr("unpackbits")?
@@ -103439,7 +103439,7 @@ fn try_zerocopy_f64_divmod(
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn divmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr("divmod")?
@@ -104658,7 +104658,7 @@ fn ptp(
     out: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ptp_fn = numpy.getattr("ptp")?;
 
     let a_for_fallback = a.clone_ref(py);
@@ -105514,7 +105514,7 @@ fn around(
     decimals: i32,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let around_fn = numpy.getattr("around")?;
     let a_for_fallback = a.clone_ref(py);
     let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
@@ -106126,7 +106126,7 @@ fn unique_values(
     // tests pass today, but that may only mean their inputs do not discriminate
     // sorted order from numpy's — check them with an input like [3, 1, 2, 1, 3]
     // before assuming they are safe.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy.getattr("unique_values")?.call(args, kwargs)?.unbind())
 }
 
@@ -106455,7 +106455,7 @@ fn try_native_int_convolve(
 #[pyfunction]
 #[pyo3(signature = (a, v, mode="full"))]
 fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let convolve_fn = numpy.getattr("convolve")?;
     let a_for_fallback = a.clone_ref(py);
     let v_for_fallback = v.clone_ref(py);
@@ -106535,7 +106535,7 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
 #[pyfunction]
 #[pyo3(signature = (a, v, mode="valid"))]
 fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let correlate_fn = numpy.getattr("correlate")?;
     let a_for_fallback = a.clone_ref(py);
     let v_for_fallback = v.clone_ref(py);
@@ -106631,7 +106631,7 @@ fn isclose(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let isclose_fn = numpy.getattr("isclose")?;
     let a_for_fallback = a.clone_ref(py);
     let b_for_fallback = b.clone_ref(py);
@@ -107656,7 +107656,7 @@ fn ediff1d(
     to_end: Option<Py<PyAny>>,
     to_begin: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ediff1d_fn = numpy.getattr("ediff1d")?;
     let ary_ref = ary.clone_ref(py);
     let to_end_ref = to_end.as_ref().map(|v| v.clone_ref(py));
@@ -112394,6 +112394,68 @@ mod tests {
                     "fft with {key} must match numpy"
                 );
             }
+            Ok(())
+        });
+    }
+
+    /// The swept delegating wrappers must still resolve NumPy at CALL time
+    /// (`deadlock-audit-v46rn`).
+    ///
+    /// 338 `#[pyfunction]` wrappers stopped doing `py.import("numpy")` per call and now take
+    /// the cached module handle - a change worth ~656 ns each on the two cells that were
+    /// measured (`linspace` 1.3616x -> 1.1640x, `fft` 1.3139x -> 1.1270x).
+    ///
+    /// What a sweep this size could break is not arithmetic - the compiler and the suite
+    /// cover that - it is LIVENESS. If what were cached were the resolved FUNCTION rather
+    /// than the module, a wrapper would freeze whatever NumPy held at warm-up and silently
+    /// ignore a later monkeypatch, returning a stale implementation with no error. What is
+    /// cached is the module; each wrapper still does its own `getattr` at call time. This
+    /// proves that on swept wrappers rather than assuming it transfers from the ufunc
+    /// tests.
+    #[test]
+    fn swept_wrappers_still_resolve_numpy_at_call_time() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_wrapper_liveness")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            // Warm the cell first - the claim is about a handle already held.
+            let start = numpy.call_method1("zeros", (3,))?;
+            let stop = numpy.call_method1("ones", (3,))?;
+            let warm = module.getattr("linspace")?.call1((&start, &stop))?;
+            assert!(
+                warm.hasattr("shape")?,
+                "warm-up linspace must delegate to numpy and return an array"
+            );
+
+            let sentinel = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!("def linspace(*a, **k):\n    return 'patched-linspace'\n"),
+                pyo3::ffi::c_str!("sentinel_wrapper.py"),
+                pyo3::ffi::c_str!("sentinel_wrapper"),
+            )?;
+            let patched = {
+                let _guard = AttrGuard::new(&numpy, "linspace")?;
+                numpy.setattr("linspace", sentinel.getattr("linspace")?)?;
+                module.getattr("linspace")?.call1((&start, &stop))?
+            };
+            assert_eq!(
+                patched.extract::<String>()?,
+                "patched-linspace",
+                "a swept wrapper must resolve numpy.linspace at CALL time, not at warm-up"
+            );
+
+            // And the guard must have put numpy back, or every later test is poisoned.
+            assert!(
+                module
+                    .getattr("linspace")?
+                    .call1((&start, &stop))?
+                    .hasattr("shape")?,
+                "numpy.linspace must be restored once the guard drops"
+            );
             Ok(())
         });
     }
