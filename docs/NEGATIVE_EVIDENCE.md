@@ -49651,3 +49651,67 @@ RETRY PREDICATE: quote divide at 2^20 as 1.6234x worst / 1.2331-1.2669x settled,
 as a blended "1.14-1.27x". If a cold-state discard rule is ever adopted, it must be written down before
 the run it applies to and applied to every row in this campaign, not to this one.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CERTIFIED: the 136-probe import sweep takes two-sided `clip` from 1.6791x to 1.18x, with FOUR controls holding between -0.03% and -2.2% (`deadlock-audit-v46rn`)
+
+`RedLynx`. The sweep row 66 pointed at, measured on a cell that had never had anything
+attributed to it.
+
+**Campaign result class:** maintenance-self-speedup (cell remains a regression vs NumPy)
+
+```
+BEFORE elf=bd429c947718b23d... (row 66, 3 runs)
+AFTER  elf=2a862baa26b463bb... (3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 17.31/18.33/17.89 before the build; 29.21/25.09/20.70 before the block and
+  28.71/25.05/20.72 after it - a BUSIER window than the before-arm's 13.28, which
+  matters below
+CPU MHz system-wide min 1429 max 4068 median 3214 spread 2.846x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on all fifteen phases, same_core=true,
+  spreads 1.0000-1.0071
+
+  case              takes lever    BEFORE     AFTER (3 runs)               change
+  clip_two_sided    YES            0.595525   0.833015/ VOID  /0.862923    +42%
+  clip_one_sided    no (early)     0.917941   0.910140/0.916297/0.914868    -0.3%
+  ss_list_haystack  no (CONTROL)   0.455705   0.454307/0.456603/0.455573   -0.03%
+  ss_array_needle   no (CONTROL)   0.306614   0.299907/0.308562/0.299677    -2.2%
+  ss_scalar_needle  no (CONTROL)   0.488322   0.484725/0.491148/0.479708    -0.7%
+
+A/A null=[0.984022,0.995661] on clip_two run 2's candidate arm EXCLUDES unity - VOID.
+Every other A/A null admits unity; the steadiest is ss_list_haystack incumbent
+A/A null=[0.999061,1.000464], half-width 0.001464.
+```
+
+**TWO-SIDED SCALAR `clip` GOES 1.6791x -> ~1.18x**, its arm falling from ~6100 ns to 4519-4734 ns
+while NumPy's holds at 3848-3913 ns.
+
+**FOUR CELLS HELD STILL WHILE IT MOVED.** The three `searchsorted` cells had their probe heads
+converted in the PREVIOUS commit, so this sweep cannot reach them - they are controls by
+construction, and they moved -0.03%, -0.7% and -2.2%. `ss_list_haystack` is the steadiest
+instrument this group has: 0.454307 / 0.456603 / 0.455573, a **0.5% spread**.
+
+**AND `clip_one_sided` IS THE SHARPEST CONTROL OF ALL, because it is the same function.** A
+one-sided clip returns through the bound pre-check before ever reaching
+`try_zerocopy_int_clip_arrays`, which is where this head lives; a two-sided clip goes through it.
+Same entry point, same operands, same run - **the one that reaches the probe moved 42% and the one
+that does not moved -0.3%.**
+
+**THE BUSIER WINDOW STRENGTHENS THIS RATHER THAN WEAKENING IT.** The after-block ran at loadavg
+29.2 against the before-arm's 13.3. Every control moved slightly DOWN, which is what a busier
+window should do. The target moved up 42% against that.
+
+**AND IT VINDICATES THE ONE THING ROW 60 COULD NOT EXPLAIN.** That row measured the `clip` bound
+pre-check at zero and could not say where the two-sided cell's 2300 ns went. It went here: a
+per-call `py.import("numpy")` inside the probe the two-sided path reaches and the one-sided path
+skips. **The pre-check was measuring the wrong half of its own function.**
+
+**STILL A LOSS at ~1.18x**, and the sweep is 136 sites of which exactly one is measured. The
+figure is licensed for probe heads on hot paths, not for all 136.
+
+RETRY PREDICATE: (1) 1137 `py.import("numpy")` sites remain. Two tranches are now measured -
+wrappers (925-1944 ns) and probe heads (42% on one cell) - and both paid; a third tranche should
+still be measured before it is claimed. (2) The `getattr("ndarray")` half was deliberately left in
+all 136; it is worth a pass once someone verifies `ndarray_type` has no other use per function.
+(3) `searchsorted` array-needle at 3.262x is again the worst cell, and its dispatcher body's 21
+getattr/asarray sites remain the unpriced block. AGENT_NAME=RedLynx.
+
