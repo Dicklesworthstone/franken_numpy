@@ -368,25 +368,24 @@ impl PyUFunc {
         Ok(sig_cls.call1((params,))?.unbind())
     }
 
-    // `casting` and `order` DEFAULT TO None, NOT to their string values
-    // (`deadlock-audit-ei9jz`). Profiling `PyUFunc::__call__` found its single
-    // hottest instruction — 17.93% of the function's samples — was
-    // `movabs $0x6e696b5f656d6173`, which is the ASCII for "same_kin": the wrapper
-    // loaded the 9-byte literal "same_kind" and string-compared it on EVERY binary
-    // ufunc call, which is also where `__strcmp_avx2` (99 insns/call in the
-    // symbol diff) was coming from. `order == "K"` sits beside it and is the same
-    // shape.
+    // `casting` and `order` keep their STRING defaults, and the Option form that
+    // briefly replaced them is REVERTED (`deadlock-audit-ei9jz`).
     //
-    // With an `Option`, the overwhelmingly common call — one that passes neither
-    // keyword — tests a null instead of comparing nine bytes. A caller who DOES
-    // pass `casting="same_kind"` explicitly still compares, and still takes the
-    // fast path, because `Some("same_kind")` is treated exactly as the default was.
+    // The Option form was landed because `perf annotate` put the load of the literal
+    // "same_kind" at 17.93% of this function's instruction samples, the hottest single
+    // instruction in it. That reading was wrong: a `movabs` of an immediate into a
+    // register is one cycle with no memory operand and cannot cost 17.93% of anything.
+    // The samples arrived there by SAMPLING SKID - a profiler attributes an interrupt at
+    // or after the instruction that actually spent the time, so a cheap instruction
+    // downstream of an expensive one collects its samples.
     //
-    // THE REPORTED SIGNATURE IS UNAFFECTED, which is why this is safe: `__signature__`
-    // is constructed separately (it sets `default` to "same_kind" and "K" explicitly),
-    // so `inspect.signature(fnp.add)` still shows the NumPy-matching defaults. Only the
-    // internal representation of "caller said nothing" changes.
-    #[pyo3(signature = (x1, x2, /, out=None, *, r#where=None, casting=None, order=None, dtype=None, subok=true, signature=None))]
+    // Measured on a controlled A/B (only this change between the two ELFs, bench probes
+    // byte-identical): our own arm moved +10.4 insns/call on `add` and +5.8 on `divide`,
+    // against a registered prediction of -100 to -160. The lever cost a little and saved
+    // nothing, so the string defaults come back - they also state NumPy's actual defaults
+    // directly, which the Option form only recovered via the separately built
+    // `__signature__`.
+    #[pyo3(signature = (x1, x2, /, out=None, *, r#where=None, casting="same_kind", order="K", dtype=None, subok=true, signature=None))]
     #[allow(clippy::too_many_arguments)]
     fn __call__(
         &self,
@@ -395,8 +394,8 @@ impl PyUFunc {
         x2: Py<PyAny>,
         out: Option<Py<PyAny>>,
         r#where: Option<Py<PyAny>>,
-        casting: Option<&str>,
-        order: Option<&str>,
+        casting: &str,
+        order: &str,
         dtype: Option<Py<PyAny>>,
         subok: bool,
         signature: Option<Py<PyAny>>,
@@ -421,8 +420,8 @@ impl PyUFunc {
             && r#where.is_none()
             && dtype.is_none()
             && signature.is_none()
-            && casting.is_none_or(|c| c == "same_kind")
-            && order.is_none_or(|o| o == "K")
+            && casting == "same_kind"
+            && order == "K"
             && subok
         {
             let binop = match self.kind {
@@ -449,8 +448,8 @@ impl PyUFunc {
             && r#where.is_none()
             && dtype.is_none()
             && signature.is_none()
-            && casting.is_none_or(|c| c == "same_kind")
-            && order.is_none_or(|o| o == "K")
+            && casting == "same_kind"
+            && order == "K"
             && subok
         {
             // ONE dtype sniff for the whole probe run below (`deadlock-audit-v46rn`).
@@ -796,8 +795,8 @@ impl PyUFunc {
             && r#where.is_none()
             && dtype.is_none()
             && signature.is_none()
-            && casting.is_none_or(|c| c == "same_kind")
-            && order.is_none_or(|o| o == "K")
+            && casting == "same_kind"
+            && order == "K"
             && subok
         {
             return Ok(np_ufunc.call1((x1.bind(py), x2.bind(py)))?.unbind());
@@ -829,18 +828,11 @@ impl PyUFunc {
         if let Some(w) = r#where {
             kwargs.set_item("where", w.bind(py))?;
         }
-        // Forward only a NON-default casting, exactly as before: a caller who passed
-        // "same_kind" explicitly is indistinguishable from one who passed nothing, and
-        // NumPy assumes that value anyway.
-        if let Some(c) = casting
-            && c != "same_kind"
-        {
-            kwargs.set_item("casting", c)?;
+        if casting != "same_kind" {
+            kwargs.set_item("casting", casting)?;
         }
-        if let Some(o) = order
-            && o != "K"
-        {
-            kwargs.set_item("order", o)?;
+        if order != "K" {
+            kwargs.set_item("order", order)?;
         }
         if let Some(d) = dtype.as_ref() {
             kwargs.set_item("dtype", d.bind(py))?;
@@ -53798,6 +53790,64 @@ fn arange(
     Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
 }
 
+/// Whether an endpoint is an array that CANNOT convert to a scalar
+/// (`deadlock-audit-v46rn`).
+///
+/// The native path used to discover this by attempting `extract::<f64>()` and letting it
+/// fail, which sets a Python exception, wraps it in a `PyErr` and discards both - twice
+/// per call, on what is the ONLY path when the endpoints are arrays. A Python-level probe
+/// puts a caught `float()` failure at 129 ns against 23 ns for a type test.
+///
+/// THE PREDICATE IS NARROW ON PURPOSE. The obvious version - "is it a Python float or
+/// int?" - is WRONG, and measurably: `np.float32`, `np.int64`, `np.int32` and 0-d arrays
+/// are none of those and all convert successfully, so a scalar-ness test would demote four
+/// currently-native input kinds. Only an EXACT ndarray with `ndim >= 1` actually fails, so
+/// that is what this asks. An ndarray SUBCLASS is not "exact" and still reaches the
+/// conversion, keeping today's behaviour; a deliberate scope limit.
+fn spaced_endpoint_cannot_be_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    if !is_exact_numpy_ndarray(py, value).unwrap_or(false) {
+        return false;
+    }
+    value
+        .getattr(intern!(py, "ndim"))
+        .and_then(|ndim| ndim.extract::<usize>())
+        .map(|ndim| ndim >= 1)
+        .unwrap_or(false)
+}
+
+/// Whether an endpoint would make NumPy return a NARROWER float than float64
+/// (`deadlock-audit-v46rn`).
+///
+/// CORRECTNESS, not speed. `numpy.linspace` and `numpy.logspace` take their result dtype
+/// from their ENDPOINTS when no explicit `dtype=` is given:
+///
+/// ```text
+///   np.linspace(np.float32(0), np.float32(1), 5).dtype -> float32
+///   np.linspace(np.float16(0), np.float16(1), 5).dtype -> float16
+///   np.linspace(np.int64(0),   np.int64(4),   5).dtype -> float64
+///   np.linspace(0.0,           1.0,           5).dtype -> float64
+/// ```
+///
+/// The native path builds float64 unconditionally, so a float32 endpoint used to yield a
+/// float64 array - wrong dtype and wrong itemsize, with numerically fine values and no
+/// error, which is why it went unnoticed. The existing `dtype=` guard did not cover it,
+/// because that branch only fires when a dtype is passed EXPLICITLY.
+///
+/// `geomspace` is deliberately NOT guarded: NumPy returns float64 there for float32 and
+/// float16 endpoints alike, so its native float64 build already agrees.
+fn endpoint_forces_narrow_float(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let Ok(dtype) = value.getattr(intern!(py, "dtype")) else {
+        return false; // a plain Python float/int has no dtype; NumPy gives float64
+    };
+    let kind = dtype
+        .getattr(intern!(py, "kind"))
+        .and_then(|k| k.extract::<char>());
+    let itemsize = dtype
+        .getattr(intern!(py, "itemsize"))
+        .and_then(|i| i.extract::<usize>());
+    matches!((kind, itemsize), (Ok('f'), Ok(size)) if size < 8)
+}
+
 #[pyfunction]
 #[pyo3(signature = (start, stop, num=50, endpoint=true, retstep=false, dtype=None, axis=0, *, device=None))]
 #[allow(clippy::too_many_arguments)]
@@ -53865,6 +53915,13 @@ fn linspace(
     if num < 0 {
         return fallback(py);
     }
+    // Decline array endpoints WITHOUT raising: the two `extract`s below fail for arrays,
+    // and each failure sets and discards a Python exception (`deadlock-audit-v46rn`).
+    if spaced_endpoint_cannot_be_scalar(py, start.bind(py))
+        || spaced_endpoint_cannot_be_scalar(py, stop.bind(py))
+    {
+        return fallback(py);
+    }
     let Ok(start_f) = start.bind(py).extract::<f64>() else {
         return fallback(py);
     };
@@ -53882,6 +53939,14 @@ fn linspace(
                 Some(DType::F64) => DType::F64,
                 _ => return fallback(py),
             }
+        }
+        // NumPy takes the result dtype from the ENDPOINTS when no dtype is given, so a
+        // float32 endpoint means a float32 result and this native float64 build would be
+        // wrong. Delegate instead (`deadlock-audit-v46rn`).
+        _ if endpoint_forces_narrow_float(py, start.bind(py))
+            || endpoint_forces_narrow_float(py, stop.bind(py)) =>
+        {
+            return fallback(py);
         }
         _ => DType::F64,
     };
@@ -53976,6 +54041,13 @@ fn geomspace(
         return fallback(py);
     }
 
+    // Decline array endpoints WITHOUT raising: the two `extract`s below fail for arrays,
+    // and each failure sets and discards a Python exception (`deadlock-audit-v46rn`).
+    if spaced_endpoint_cannot_be_scalar(py, start.bind(py))
+        || spaced_endpoint_cannot_be_scalar(py, stop.bind(py))
+    {
+        return fallback(py);
+    }
     let Ok(start_f) = start.bind(py).extract::<f64>() else {
         return fallback(py);
     };
@@ -65412,6 +65484,13 @@ fn logspace(
     {
         return fallback(py);
     }
+    // Decline array endpoints WITHOUT raising: the two `extract`s below fail for arrays,
+    // and each failure sets and discards a Python exception (`deadlock-audit-v46rn`).
+    if spaced_endpoint_cannot_be_scalar(py, start.bind(py))
+        || spaced_endpoint_cannot_be_scalar(py, stop.bind(py))
+    {
+        return fallback(py);
+    }
     let Ok(start_f) = start.bind(py).extract::<f64>() else {
         return fallback(py);
     };
@@ -65422,6 +65501,13 @@ fn logspace(
         return fallback(py);
     }
 
+    // Same endpoint-dtype rule as `linspace`: NumPy returns float32 for float32 endpoints
+    // and this build is float64 (`deadlock-audit-v46rn`).
+    if endpoint_forces_narrow_float(py, start.bind(py))
+        || endpoint_forces_narrow_float(py, stop.bind(py))
+    {
+        return fallback(py);
+    }
     let result = match UFuncArray::logspace_endpoint(
         start_f,
         stop_f,
@@ -112576,6 +112662,89 @@ mod tests {
                     .hasattr("shape")?,
                 "numpy.linspace must be restored once the guard drops"
             );
+            Ok(())
+        });
+    }
+
+    /// The linspace endpoint pre-check must not change WHICH inputs take the native path
+    /// (`deadlock-audit-v46rn`).
+    ///
+    /// It exists to stop the native path discovering array endpoints by letting
+    /// `extract::<f64>()` raise. The risk is that a cheaper predicate answers for a
+    /// DIFFERENT set of inputs than the conversion did, silently demoting some to the
+    /// delegating path.
+    ///
+    /// The obvious predicate would have done exactly that. Measured against the installed
+    /// interpreter: `np.float32`, `np.int64`, `np.int32` and 0-d arrays are neither Python
+    /// `float` nor `int`, yet all four convert successfully - so a scalar-ness test would
+    /// have demoted them. This checks every one of those kinds still produces NumPy's
+    /// answer, alongside the 1-d arrays the pre-check is for.
+    #[test]
+    fn spaced_builders_preserve_every_endpoint_kind_and_dtype() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_linspace_precheck")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("linspace")?;
+            let theirs = numpy.getattr("linspace")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                std::ffi::CString::new(
+                    "KINDS = {\n\
+                       'py_float': (0.0, 1.0),\n\
+                       'py_int': (0, 4),\n\
+                       'np_float64': (np.float64(0.0), np.float64(1.0)),\n\
+                       'np_float32': (np.float32(0.0), np.float32(1.0)),\n\
+                       'np_int64': (np.int64(0), np.int64(4)),\n\
+                       'np_int32': (np.int32(0), np.int32(4)),\n\
+                       'zero_d': (np.array(0.0), np.array(1.0)),\n\
+                       'one_d': (np.zeros(3), np.ones(3)),\n\
+                       'mixed': (0.0, np.zeros(3)),\n\
+                     }\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let kinds = locals.get_item("KINDS")?.expect("KINDS");
+
+            for name in [
+                "py_float",
+                "py_int",
+                "np_float64",
+                "np_float32",
+                "np_int64",
+                "np_int32",
+                "zero_d",
+                "one_d",
+                "mixed",
+            ] {
+                let pair = kinds.get_item(name)?.cast_into::<PyTuple>()?;
+                let start = pair.get_item(0)?;
+                let stop = pair.get_item(1)?;
+                for num in [5_i64, 50] {
+                    let kw = PyDict::new(py);
+                    kw.set_item("num", num)?;
+                    let got = ours.call((&start, &stop), Some(&kw))?;
+                    let want = theirs.call((&start, &stop), Some(&kw))?;
+                    assert_eq!(
+                        got.getattr("dtype")?.str()?.extract::<String>()?,
+                        want.getattr("dtype")?.str()?.extract::<String>()?,
+                        "linspace on {name} endpoints (num={num}) must keep numpy's dtype"
+                    );
+                    assert_eq!(
+                        got.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        want.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "linspace on {name} endpoints (num={num}) must match numpy exactly"
+                    );
+                }
+            }
             Ok(())
         });
     }
