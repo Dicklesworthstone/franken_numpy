@@ -45733,3 +45733,88 @@ counters are flat — LLC and branch are, L1D is not. Before anyone attributes t
 missing input is the L1-miss service cost on this host, which turns the 8.5-60.2% range into a
 number; that needs a build and is blocked until the halt lifts.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-16 - MEASURED, and my registered prediction was WRONG BY 5-8x IN THE CONSERVATIVE DIRECTION: the kwargs-dict + interning lever is worth 795-1290 retired instructions per call, not the ~165 I predicted, because a non-interned `getattr(&str)` ALLOCATES (`deadlock-audit-v46rn`)
+
+`AzureCarp`. Discharges the verification debt on `3a542125`, which was committed UNCOMPILED under
+the I/O freeze.
+
+**Campaign result class:** CERTIFIED self-speedup (counted; the cells remain regressions vs NumPy)
+
+### First: it compiles, and the tests pass
+
+`3a542125` had never been through a single gate. Remote `cargo clippy -p fnp-python --all-targets`
+is clean for my code — the one remaining warning, `lib.rs:1098`, is `&self.kind` from a peer's
+`70286c2c` and predates this. `cargo test -p fnp-python --lib accumulate_and_reduceat`:
+
+```
+  test tests::accumulate_and_reduceat_fast_path_forwards_out_and_reduceat_dtype ... ok
+  test tests::accumulate_and_reduceat_omit_default_axis_and_forward_the_rest ... ok
+  test result: ok. 2 passed; 0 failed; 592 filtered out
+```
+
+### The counted A/B
+
+```
+COUNTER_AB n=256 calls=400000 worker=thinkstation1  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+  before ELF ada3f3b14df5dac9fe8a4a1f5bdac820174cfb4e84c88e490611812644a71a5d  (pre-3a542125)
+  after  ELF 088de5c0b67f816c532fe9e417f78509fa918172a5bc84ddf1ddff3d64d8aefb  (post)
+  LOADAVG 25.05/23.22/33.43 -> 24.17/23.07/33.33
+
+  method       excess insns/call        excess cycles/call       excess L1D/call
+               before   after  delta    before  after  delta     before  after
+  reduce        2,680   1,885   -795     1,255  1,109   -146       45.6   39.0
+  accumulate    3,810   2,520 -1,290     2,028  1,460   -568      101.8   92.4
+  reduceat      2,541   1,539 -1,002     1,297    626   -671       27.6   39.4
+```
+
+**WHY THIS IS A CONTROLLED PAIR, checked rather than assumed** — the last row I banked was retracted
+for exactly this failure. Two peer commits touched `lib.rs` between the two builds (`9d5719aa`,
+`f27ee734`), but their hunks land at lines 39516-64864 and in the test module; the four methods here
+live at lines 842-1120 and are untouched. The bench probes and `call_ufunc_method` are byte-identical
+across the two builds (a diff of `79ecf932..HEAD` over that file matches ZERO lines mentioning
+`call_ufunc_method`, `method_counter_probe`, `accumulate_counter_probe` or
+`ACCUMULATE_COUNTER_CALLS`). And decisively: **retired instruction counts are immune to code
+layout**, so even the second-order effect of a bigger `lib.rs` cannot move them. NumPy's own arms
+confirm the environment held — they moved 0.04%, 2.7% and 0.06% across the pair.
+
+### The prediction was wrong, and in which direction
+
+I registered, in `3a542125`'s own commit message: *"this removes one heap allocation and four
+PyString constructions per delegating call. If `_int_malloc`'s +165 instructions/call is the whole of
+the allocation cost, the excess should fall by roughly that much and no more - a few percent."*
+
+It fell by **795 to 1290 instructions per call, 5-8x the prediction.** I was wrong in the
+conservative direction, which is the better direction to be wrong in but is still wrong, and the
+reason is instructive: **I credited only the `PyDict` and treated the interning as cosmetic.** A
+non-interned `getattr("accumulate")` does not merely skip a cache — it CONSTRUCTS a `PyString` every
+call (allocate, copy, hash on first use), performs the attribute lookup with a string whose hash is
+not cached, and then frees it. That is itself an allocation, and it is the larger half.
+
+The arithmetic hangs together: `reduce` received ONLY the interning change (it forwards
+`(*args, **kwargs)` untouched and never built a dict) and dropped **795**. `accumulate` and
+`reduceat` received interning AND the dict removal and dropped **1290** and **1002** — i.e. the dict
+is worth roughly 200-500 on top of the interning's ~795. Three cells, one consistent decomposition.
+
+### What it does NOT say
+
+These are counted excesses over NumPy, not wall-clock ratios, and all three cells REMAIN
+regressions: `reduce` still executes 1,885 excess instructions per call, `accumulate` 2,520,
+`reduceat` 1,539. Nothing here crosses. The L1D column is mixed rather than uniformly improved —
+`reduce` and `accumulate` fall (45.6 -> 39.0, 101.8 -> 92.4) but `reduceat` RISES (27.6 -> 39.4),
+which I cannot explain and am not going to dress up.
+
+COUNTED_MECHANISM: excess retired instructions per call at n=256 fell 2680 -> 1885 (reduce),
+3810 -> 2520 (accumulate), 2541 -> 1539 (reduceat); excess cycles fell 1255 -> 1109, 2028 -> 1460 and
+1297 -> 626 respectively, with the probe form and both arms' operands held byte-identical.
+
+A/A NULL CONTROLS: not applicable — hardware-counter totals from matched single-arm probes, not a
+timed A/B, so there is no schedule to control for. No wall-clock ratio is claimed.
+
+RETRY PREDICATE: do not re-run this A/B; it is decided and its pair was checked for confounds. The
+wall-clock consequence is NOT measured — `reduceat` has a usable before-figure (1.3509x / 426 ns
+excess, `6a87cc68`) and should be re-run under the dual-null contract in a quiet window; the
+`accumulate` cell is VOID (`6a87cc68`, its A/A null excludes unity) and needs a fresh before-row
+first. Anyone extending the interning to the remaining bare-`&str` getattrs should expect ~795
+instructions per call per hot site, not the ~165 I first guessed.
+AGENT_NAME=AzureCarp.
