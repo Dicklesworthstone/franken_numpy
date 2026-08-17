@@ -1343,6 +1343,11 @@ fn main() {
                 bench_add_tiny_n_floor_vs_numpy,
             ),
             ("bench_out_kwarg_vs_numpy", bench_out_kwarg_vs_numpy),
+            ("bench_accumulate_counter_fnp", bench_accumulate_counter_fnp),
+            (
+                "bench_accumulate_counter_numpy",
+                bench_accumulate_counter_numpy,
+            ),
             (
                 "bench_accumulate_size_crossover_vs_numpy",
                 bench_accumulate_size_crossover_vs_numpy,
@@ -5676,6 +5681,101 @@ fn call_ufunc_method<'py>(
 // A crossover has to be MEASURED, not guessed: gate too low and the loss stays, gate too
 // high and a real win is thrown away. Each size is its own dual-null contract so the
 // crossing point is read off decidable cells rather than off a trend line.
+/// Calls per accumulate counter probe. Identical across the pair so `perf stat`
+/// totals from two processes compare without normalisation, and large enough that
+/// the loop dominates the shared setup (`deadlock-audit-v46rn`).
+const ACCUMULATE_COUNTER_CALLS: usize = 400_000;
+
+// COUNTING what `add.accumulate` on 256 f64 still spends over NumPy
+// (`deadlock-audit-v46rn`).
+//
+// WHY COUNT AND NOT JUST TIME. The size gate (`95ed2802`) and the probe-to-decline
+// cut (`760a03e9`) were both attributed by READING the path — accurate as far as
+// it went, but a read cannot say how much is left, and the residual is what
+// licenses or blocks the 75-site `dtype.kind`-to-`String` sweep that `760a03e9`
+// says is "not licensed until this one is measured". A wall-clock ratio at n=256
+// is a few hundred nanoseconds riding on a host that moves 10% between runs;
+// retired instructions per call do not move with the host at all.
+//
+// THE PAIR. Both probes start Python, import numpy, build the fnp module and
+// construct the same operand, then call ONE callable in a fixed loop. Everything
+// outside the loop is identical, so the DIFFERENCE in counted events divided by
+// `ACCUMULATE_COUNTER_CALLS` is the per-call excess and nothing else. That setup
+// symmetry is not decoration: the first provenance probe pair in this file
+// differed by 426 M instructions purely because one of them skipped interpreter
+// startup, and `perf stat` counts a PROCESS.
+//
+// NEGATIVE CASE: a probe that silently accumulated a DIFFERENT array, or that
+// returned early, would report a flatteringly small instruction count. Both probes
+// therefore checksum their last result and assert it against NumPy's answer for
+// the same operand before printing, so a route that returned the wrong thing —
+// or nothing — fails instead of counting fast.
+fn accumulate_counter_probe(use_fnp: bool) {
+    const N: usize = 256;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new("i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\n")
+                .unwrap()
+                .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operand");
+        let a = locals.get_item("a").expect("a operand");
+
+        // Both handles are resolved in both probes so the getattr work matches.
+        let ours = module.getattr("add").expect("fnp add");
+        let theirs = numpy.getattr("add").expect("numpy add");
+        let target = if use_fnp { &ours } else { &theirs };
+
+        let oracle = call_ufunc_method(&theirs, "accumulate", &a)
+            .call_method0("sum")
+            .expect("oracle sums")
+            .extract::<f64>()
+            .expect("sum is f64")
+            .to_bits();
+
+        let mut last = 0u64;
+        for _ in 0..ACCUMULATE_COUNTER_CALLS {
+            let result = call_ufunc_method(target, "accumulate", &a);
+            black_box(&result);
+            last = result
+                .call_method0("sum")
+                .expect("result sums")
+                .extract::<f64>()
+                .expect("sum is f64")
+                .to_bits();
+        }
+        assert_eq!(
+            last, oracle,
+            "the counted probe did not reproduce NumPy's accumulate, so its \
+             instruction count describes the wrong computation"
+        );
+        println!(
+            "ACCUMULATE_COUNTER_PROBE arm={} n={N} calls={ACCUMULATE_COUNTER_CALLS} \
+             checksum={last:016x} setup_matches_sibling_probe=true \
+             run_this_under_perf_stat=true",
+            if use_fnp { "fnp" } else { "numpy" }
+        );
+    });
+}
+
+fn bench_accumulate_counter_fnp(_c: &mut Criterion) {
+    accumulate_counter_probe(true);
+}
+
+fn bench_accumulate_counter_numpy(_c: &mut Criterion) {
+    accumulate_counter_probe(false);
+}
+
 fn bench_accumulate_size_crossover_vs_numpy(_c: &mut Criterion) {
     Python::initialize();
     Python::attach(|py| {

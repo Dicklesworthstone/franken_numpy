@@ -44949,3 +44949,137 @@ cost there is unmeasured. (3) The remaining ~450 ns above the floor needs its ow
 do not guess at it, the last two guesses that were checked (the signature shape, and "the routed
 dtypes will not move") were both wrong. AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - CERTIFIED IN A QUIET WINDOW: `add.accumulate` on 256 f64 goes 4.76x -> 1.5405x slower, and the 766 ns residual is now ATTRIBUTED BY COUNTER, not by reading - 5760 excess retired instructions per call, of which ~1030 are Python attribute lookup (`deadlock-audit-v46rn`)
+
+`AzureCarp`. `RedLynx` landed the size gate (`95ed2802`) and the probe-to-decline cut (`760a03e9`)
+and could not measure either — "load is 47 and rising, no certification window" — and registered a
+specific prediction. This is that certification, plus the counted mechanism the residual was owed.
+
+**Campaign result class:** CERTIFIED self-speedup on a cell that remains a regression, + a counted
+attribution of what is left
+
+### The certification
+
+```
+ACCUMULATE_CROSSOVER f64 add.accumulate numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract, one contract PER SIZE
+  bench_elf_sha256=a8dd458e1411d3ead9dcb02b90257bdf98d265b354e645fe4e7dcc06643041e6
+  LOADAVG 18.45/23.59/25.16 -> 19.25/23.59/25.14   (a genuinely quiet, converged window)
+  every arm pair same_core=true, arm_mhz_spread 1.0000-1.0060, 3414-4141 MHz per arm
+
+   n        ratio       ci95                    numpy_ns    fnp_ns     excess_ns   verdict
+  2^8    0.649147  [0.646978,0.651452]             1408       2174          766    REGRESSION
+  2^10   0.819083  [0.817282,0.820825]             3747       4564          817    REGRESSION
+  2^12   1.407742  [1.377024,1.416981]            12820       9082        -3738    WIN
+  2^14   2.608566  [2.601660,2.609825]            49169      18861       -30308    WIN
+  2^16   3.483447  [3.481604,3.486324]           194564      55916      -138648    WIN
+  2^18   3.844038  [3.833173,3.848239]           763531     198706      -564825    WIN
+  2^20   3.859289  [3.809158,3.876316]          3087385     800241     -2287144    WIN
+```
+
+All fourteen nulls straddle unity, biases 0.000000-0.001319. Two decidable regressions and five
+decidable wins, same split as before, but the regressions are much smaller.
+
+**THE WORST CELL AT n=256, ACROSS THE THREE STATES:**
+
+| state | ratio | numpy/fnp ns | excess | vs NumPy |
+|---|---|---|---|---|
+| pre-gate | 0.210258 | 1397 / 6652 | 5255 ns | **4.7561x slower** |
+| post-gate, noisy window | 0.450164 | 1483 / 3286 | 1803 ns | 2.2214x slower |
+| **now, post probe-cut, quiet** | **0.649147** | **1408 / 2174** | **766 ns** | **1.5405x slower** |
+
+NumPy's own arm reads 1397 / 1483 / 1408 ns across the three runs, i.e. it moved 6% while our arm
+moved 3.1x, so the cross-run comparison survives here in a way the divide lane's did not.
+`RedLynx`'s prediction — "accumulate's excess at n=256 should fall toward the wrapper floor" — is
+**CONFIRMED IN DIRECTION and NOT AT THE FLOOR**: 1803 -> 766 ns is a 1037 ns cut, but the wrapper
+floor the other method rows measure is 210-320 ns, so roughly 450-550 ns is still unexplained by
+delegation alone. That gap is what the counter below is for.
+
+### COUNTED_MECHANISM: 5760 excess retired instructions per call
+
+Two single-arm probes, separate processes, 400 000 calls each, identical setup on both sides
+(Python start, numpy import, fnp module build, operand construction, and BOTH handles resolved so
+even the getattr work matches), means of two runs each:
+
+```
+                   fnp/call     numpy/call     excess/call
+  instructions       26,925         21,165          5,760
+  cycles             15,730         12,443          3,287
+  dTLB misses            <1             <1             ~0
+```
+
+3287 cycles is **822 ns at 4.0 GHz** against a certified wall-clock excess of **766 ns** — the
+counter accounts for essentially the whole measured gap (within 7%), and it does so without
+depending on the host's clock the way the wall clock does. dTLB misses are under one per call on
+both arms, so unlike the divide lane this residual owes nothing to address translation.
+
+### WHERE those instructions go — per-symbol delta, not a guess
+
+`perf record -e instructions:u` on each probe, symbol-attributed, differenced per call (positive =
+we execute more):
+
+```
+  delta/call   fnp/call  numpy/call   symbol
+        335         422          87   _PyType_LookupRef
+        320         320           0   PyObject_GetAttr
+        245         376         132   [unresolved 0x1937eb]
+        186         196          11   _PyObject_GenericGetAttrWithDict
+        177         258          81   NpyIter_AdvancedNew
+        156         156           0   <fnp_python::PyUFunc>::accumulate
+        129         129           0   PyObject_VectorcallDict
+        127         261         134   PyArray_GetCastingImpl
+        112         406         294   fetestexcept
+        111         460         349   __tls_get_addr
+        100         100           0   <u64 as pyo3::conversion::FromPyObject>::extract
+         97          97           0   PyObject_RichCompare
+         90         124          34   PyDict_GetItemRef
+       -420       5,846       6,266   DOUBLE_add_X86_V3
+```
+
+Two things are worth more than the individual rows.
+
+**First, the kernel is NOT the problem and is slightly in our favour** — `DOUBLE_add_X86_V3` is 420
+instructions per call CHEAPER on our arm. Every one of the positive rows is call machinery.
+
+**Second, the single largest identifiable theme is Python ATTRIBUTE LOOKUP**: `PyObject_GetAttr`
+(+320), `_PyType_LookupRef` (+335), `_PyObject_GenericGetAttrWithDict` (+186) and
+`PyDict_GetItemRef` (+90) sum to **931 instructions per call of pure getattr machinery that NumPy
+never executes**, with `PyObject_RichCompare` (+97, string comparison — the shape of comparing a
+dtype `kind`/`char`) and a `u64` extract (+100) beside it. **This is a counted licence for exactly
+the class `760a03e9` named** ("75 sites extract `dtype.kind` into a String and 262 fetch
+`getattr("ndarray")` after an import") — the sweep is aimed at real, counted cost and is no longer
+speculative.
+
+**And a bound on that licence, which matters just as much:** getattr-and-compare is ~1130 of 5760
+instructions, about **20% of the residual**. The sweep cannot close this cell on its own. The other
+named contributors are numpy-internal setup we make NumPy redo — `NpyIter_AdvancedNew` (+177),
+`PyArray_GetCastingImpl` (+127), `fetestexcept` (+112) — which say our delegation is not a cheap
+forward but causes descriptor and iterator construction a direct call avoids. That is a second,
+larger lever and nobody has costed it yet.
+
+COUNTED_MECHANISM: 5760 excess retired instructions and 3287 excess cycles per call at n=256, of
+which 931 are Python attribute lookup, 97 rich-compare, 100 a u64 extract, 156 our own accumulate
+prologue, and 416 numpy-internal descriptor/iterator/FP-flag setup; the arithmetic kernel is 420
+instructions per call CHEAPER on our side.
+
+A/A NULL CONTROLS: all fourteen nulls on the certification straddle unity; the n=256 row reads
+incumbent_null_ci95=[0.997131,1.002910] bias 0.000000 and candidate_null_ci95=[0.995379,1.002305]
+bias 0.000000.
+
+Both ELFs built LOCALLY with `RCH_CARGO_WRAPPER_BYPASS=1` (zero `[RCH]` lines), path from
+`--message-format=json`. HOST_BASELINE host=thinkstation1 Threadripper PRO 5975WX 32c/64t
+governor=powersave, allowed_logical_threads=16, runtime avx512f=false,
+`OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`.
+
+**THE NEGATIVE CASE THE PROBES CARRY:** a probe that accumulated a different array, or returned
+early, would report a flatteringly small instruction count. Both probes checksum their LAST result
+and assert it equals NumPy's answer for the same operand before printing, so a wrong or absent route
+fails rather than counting fast. Both printed `checksum=40e16d851eb851e8`.
+
+RETRY PREDICATE: `add.accumulate` at n=256 is no longer the campaign's worst cell at 4.76x — it is
+1.5405x and sits alongside the n=256 per-call floor's 1.5613x. Do NOT re-attribute this residual by
+reading the path; it is counted. The `dtype.kind`-to-`String` sweep is licensed but is bounded at
+~20% of the residual, so it must be measured against this row and not assumed to close it. The
+un-costed lever is the numpy-internal setup our delegation triggers.
+AGENT_NAME=AzureCarp.
