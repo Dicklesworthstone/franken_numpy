@@ -163184,6 +163184,87 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
         });
     }
 
+    /// The TWO divide gates compose, and they deliberately DISAGREE at small n
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// There are two independent size gates on f64 divide and they were measured
+    /// separately, months apart in campaign time and hours apart in wall clock:
+    ///
+    ///   allocating route  `f64_binary_route_is_worth_taking`  native at n >= 1<<21
+    ///   `out=` route      `f64_out_route_is_worth_taking`     declines only inside [1<<14, 1<<21)
+    ///
+    /// So below 1<<14 the two routes REACH OPPOSITE DECISIONS on the same operands: the
+    /// `out=` route runs our kernel while the allocating route hands the work to NumPy.
+    /// That looks like a bug and is not. It is what the measurements say, because the two
+    /// routes are answering different questions:
+    ///
+    ///   - The allocating route was measured against a delegating control and LOST at
+    ///     every size below the rayon threshold (8.7% at 2^19, 14.7% at 2^20), so it
+    ///     concedes everywhere below it.
+    ///   - The `out=` route was measured against the cost of DECLINING, and below its band
+    ///     declining is dearer than our slower kernel, because the fixed ~500 ns delegation
+    ///     wrapper dominates a sub-microsecond call. A pre-registered sign test certified
+    ///     that 7/7 at 2^10.
+    ///
+    /// This test exists so that the disagreement is pinned rather than discovered. Anyone
+    /// who "fixes" the inconsistency by making the gates agree will fail here and be sent
+    /// to the two rows that measured them.
+    #[test]
+    fn the_two_divide_gates_deliberately_disagree_below_the_out_band() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(numpy) => numpy,
+                Err(_) => return,
+            };
+            let make = |n: usize| {
+                numpy
+                    .call_method1("empty", (n,))
+                    .expect("numpy.empty fixture")
+            };
+
+            // (len, allocating route takes native?, out= route takes native?)
+            let cases: &[(usize, bool, bool)] = &[
+                // Below the out= band: the routes DISAGREE, and that is the point.
+                (1024, false, true),
+                (F64_DIV_OUT_DECLINE_MIN_LEN - 1, false, true),
+                // Inside the out= band: both decline, for different measured reasons.
+                (F64_DIV_OUT_DECLINE_MIN_LEN, false, false),
+                (F64_DIV_NATIVE_MIN_LEN - 1, false, false),
+                // At the rayon threshold both gates open together.
+                (F64_DIV_NATIVE_MIN_LEN, true, true),
+            ];
+            for (len, allocating_native, out_native) in cases.iter().copied() {
+                let a = make(len);
+                assert_eq!(
+                    f64_binary_route_is_worth_taking(BinaryOp::Div, &a),
+                    allocating_native,
+                    "len={len}: the ALLOCATING gate disagrees with the measured band \
+                     (native at and above {F64_DIV_NATIVE_MIN_LEN} only)"
+                );
+                assert_eq!(
+                    f64_out_route_is_worth_taking(BinaryOp::Div, &a),
+                    out_native,
+                    "len={len}: the out= gate disagrees with its certified band \
+                     [{F64_DIV_OUT_DECLINE_MIN_LEN}, {F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN})"
+                );
+            }
+
+            // The disagreement is real and load-bearing, not an artefact of the cases
+            // chosen: there must EXIST a size where out= goes native and allocating does
+            // not. If a future change makes the gates agree everywhere, this fails.
+            let small = make(1024);
+            assert!(
+                f64_out_route_is_worth_taking(BinaryOp::Div, &small)
+                    && !f64_binary_route_is_worth_taking(BinaryOp::Div, &small),
+                "the two divide gates no longer disagree below the out= band; if that was \
+                 deliberate, the rows that measured them must be revisited first - the out= \
+                 band was certified 7/7 by a pre-registered sign test and the allocating \
+                 gate by a 5/5 delegating-control sweep"
+            );
+        });
+    }
+
     /// The band gate must touch `Div` and nothing else (`deadlock-audit-6y5wp`).
     ///
     /// Only `Div` was measured. The other four ops on the `out=` fast path are
