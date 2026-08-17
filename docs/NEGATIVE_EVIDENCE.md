@@ -50228,3 +50228,86 @@ exist. If this host never affords seven such windows, the correct outcome is tha
 question is UNDECIDABLE HERE and should be handed to a quieter worker, not answered on a degraded
 sample.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - I WAS CHASING AN ARTIFACT: the worst cells I banked TWICE today (1.6234x, then 1.6937x) were inflated by the separate-buffer instrument. On the shared-buffer build the SAME cell reads 1.2824x and the "bimodality" I attributed to a memory regime disappears. Corrected worst cell for `fnp.divide(out=)` is 1.2824x at 2^20 (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build. Re-reading a DIRECT ratio that needs no subtraction, from runs already taken on
+the shared-buffer ELF `f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (8 runs)
+against the separate-buffer ELF `7dd037723ee6ae91...` (5 runs). Load across the shared-buffer runs
+17.39-53.15, CPU mean 2916-3993 MHz, `proj_builds` = 0 throughout.
+
+**Campaign result class:** two of my own banked worst cells VOIDED as instrument artifacts
+
+### The correction
+
+```
+  n      divide_vs_numpy, SEPARATE buffers (5 runs)      worst  |  SHARED buffer (8 runs)                worst
+  2^10   0.8335 0.8411 0.8295 0.8322 0.8142             0.8142  |  0.8504 .. 0.8337 (8 runs)            0.8337
+  2^14   0.8477 0.8467 0.8326 0.8604 0.7966             0.7966  |  0.8109 .. 0.9060                     0.8109
+  2^18   0.8262 0.9020 0.8851 0.8420 0.9020             0.8262  |  0.8295 .. 0.9190                     0.8295
+  2^19   0.6398 0.8406 0.6812 0.6487 0.8378             0.6398  |  0.8320 .. 0.9160                     0.8320
+  2^20   0.5937 0.7669 0.6244 0.5904 0.7852             0.5904  |  0.7798 .. 0.8304                     0.7798
+  2^21   1.2700 1.5181 1.4778 1.5023 0.9849             0.9849  |  1.1504 .. 1.5411                     1.1504
+
+  worst-cell change   2^19  1.5630x -> 1.2019x     2^20  1.6937x -> 1.2824x
+  spread collapse     2^19  0.2008 -> 0.0840       2^20  0.1948 -> 0.0506
+```
+
+**The two sizes that changed are exactly the two where the output buffers exceed cache**, which is
+where a separate-buffer residency race can bite. The small sizes barely move. That is the signature of
+an instrument artifact, not of a property of the divide route.
+
+### What this voids, including things I said today
+
+**The "bimodality" was the buffer race.** I recorded 2^19 and 2^20 as showing two modes (0.6398 vs
+0.8406; 0.5904 vs 0.7852) and attributed it to an allocator/page regime switching between runs. With
+one shared buffer the modes collapse into a single tight band and the spread falls by 2.4x and 3.9x.
+It was never a regime; it was whichever of `o1`/`o2` happened to be better resident.
+
+**Both worst-cell headlines I banked today are VOID.** I reported 1.6234x as the worst cell, corrected
+myself to 1.6937x as a "new worst cell superseding" it, and both came from separate-buffer
+instruments - `bench_divide_allocation_split_vs_numpy` (`o1`/`o2`) and this sweep before the fix. The
+worst-cell audit I ran this morning was therefore rigorous about WHICH number to quote and wrong about
+whether the number meant anything. Being scrupulous about quoting the worst cell does not help if the
+instrument producing it is asymmetric.
+
+**Corrected figures.** `fnp.divide(a, b, out=o)` against `numpy.divide(a, b, out=o)`, shared buffer,
+8 runs per size, worst-first:
+
+```
+  2^10  1.1995x slower      2^14  1.2332x slower      2^18  1.2056x slower
+  2^19  1.2019x slower      2^20  1.2824x slower      2^21  1.1504x FASTER (worst of 8; best 1.5411x)
+```
+
+**Worst cell at or below 2^20 is 1.2824x at 2^20**, and the route is remarkably flat at ~1.20-1.28x
+across four octaves rather than degrading with size as the old data suggested. Above the rayon
+threshold at 2^21 the parallel arm wins in all 8 runs.
+
+### On the sign test, which this does NOT touch
+
+The quantity read here is `divide_vs_numpy`, a DIRECT ratio of two interleaved arms requiring no
+subtraction and no delegation control. The pre-registered sign test is on
+`native_over_delegate`, which I have still not read in any run. Reading a different statistic cannot
+affect that test because its continuation rule is mechanical - seven qualifying invocations - and does
+not depend on any result.
+
+Sign-test accounting is now **2 of 7**: Q5 qualifies (pre-run load 20.83/23.21/21.02, `proj_builds`=0,
+3302 MHz); Q6 (35.69 > 26.37) and Q7 (31.77 > 26.08) are disqualified on the load condition.
+
+I also tested and REJECTED the theory that my own 2^21 rayon arm was causing the load spikes that keep
+disqualifying runs: during the five certification runs on the same six sizes the load FELL (13.98 ->
+12.35). The spikes are external and coincidental, so there is nothing to fix in the instrument for it.
+
+COUNTED_MECHANISM: at the 2 sizes whose 8 MiB output buffers exceed cache, the worst cell moves 0.6398
+-> 0.8320 and 0.5904 -> 0.7798 and the run-to-run spread falls 2.4x and 3.9x when the two arms are
+given ONE shared output buffer instead of two; the 4 smaller sizes move by at most 0.02.
+
+A/A NULL CONTROLS: all A/A nulls straddled unity in the separate-buffer runs that produced the VOIDED
+1.6937x cell. That is the fourth statistic today on which passing nulls failed to flag a defect, and
+here the defect was in the instrument's own design rather than in the host.
+
+RETRY PREDICATE: quote `fnp.divide(out=)` at 2^20 as 1.2824x, never 1.6937x or 1.6234x, and only from
+shared-buffer builds. `bench_divide_allocation_split_vs_numpy` and `bench_divide_kernel_on_numpy_buffers`
+still use separate per-arm buffers and every large-n row from them remains suspect until they are
+converted; that conversion is the next code change in this lane.
+AGENT_NAME=AzureCarp.
