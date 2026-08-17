@@ -48950,3 +48950,60 @@ allocator control before treating 1<<19 as certified. (d) The `out=` identity as
 honoured but does NOT prove OUR native route engaged — NumPy's own `out=` returns the same object too;
 an engagement proof (contrast against an op that takes `_ => None`, e.g. `add`) is still owed.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CORRECTION to row 59, caught BEFORE landing: only FOUR probes actually run for an f64 haystack, not eleven - the dispatcher is already gated on `a_kind`, and the lever row 59 proposed would have been a third dead one (`deadlock-audit-v46rn`)
+
+`RedLynx`. No build. This is the rule from row 62 - *read the call sites before adding a guard* -
+applied to my own next proposal, and it stopped it.
+
+**Campaign result class:** methodology (withdraws a proposed lever before it was written)
+
+**WHAT ROW 59 CLAIMED.** That `searchsorted` "tries FOURTEEN native probes in linear order" and
+that for the f64 array cell "ELEVEN probes run and decline before the twelfth engages", and it
+proposed gating the string/complex/struct/datetime/f16 probes behind the `a_kind` the body already
+computes - *"five declines removed with almost no restructuring risk"*.
+
+**THEY ARE ALREADY GATED.** Reading the call sites rather than the ordered list:
+
+```
+  try_native_string_searchsorted        if (a_kind == "U" || a_kind == "S")   skipped for f64
+  try_zerocopy_c128/c64_searchsorted    if a_kind == "c"                      skipped
+  try_native_searchsorted_struct        if a_kind == "V"                      skipped
+  try_native_datetime_searchsorted      if (a_kind == "M" || a_kind == "m")   skipped
+  try_native_f16_searchsorted           if a_kind == "f"                      RUNS
+  try_zerocopy_scalar_searchsorted      if v_is_scalar                        skipped (array needle)
+```
+
+**So the lever row 59 proposed would have removed nothing** - it would have added a gate in front
+of gates that already exist. That is exactly the shape of the two levers rows 60 and 62 measured
+at zero, and this time it was caught by reading rather than by a build.
+
+**WHAT ACTUALLY RUNS FOR AN f64 HAYSTACK WITH AN ARRAY NEEDLE - four probes, not eleven:**
+
+```
+  try_native_f16_searchsorted        runs because `a_kind == "f"` matches f16 AND f64;
+                                     declines after a non-interned numpy.getattr("ndarray")
+                                     and two dtype checks
+  try_zerocopy_int_searchsorted_merge  runs, declines (haystack is not integer)
+  try_zerocopy_int_searchsorted        runs, declines
+  try_zerocopy_f64_searchsorted_merge  runs, declines on MERGE_MIN_HAYSTACK = 1<<19
+  try_zerocopy_f64_searchsorted        ENGAGES
+```
+
+**THE ONE GENUINELY MIS-GATED PROBE IS f16.** `a_kind == "f"` is true for float16, float32 AND
+float64, so every f64 searchsorted pays an f16 probe that cannot succeed. That is one wasted
+decline with a non-interned `getattr` in it - real, small, and the only thing in row 59's list
+that survives.
+
+**WHAT THIS DOES NOT EXPLAIN.** The cell is 5.838x. Four declining probes and a dispatcher body
+with 21 `getattr`/`asarray`/`String` sites are what is left, and **no measurement attributes any
+of it**. Row 59's structural count was wrong; its conclusion that the remainder is unattributed
+still stands, and is now the only thing standing.
+
+RETRY PREDICATE: (1) The f16 probe's gate should be `itemsize == 2`, not `kind == "f"` - it is
+the one real find here and it is small; measure before claiming it. (2) Do NOT re-propose gating
+the already-gated probes; this row exists so the next reader does not. (3) The 5.838x remains
+unattributed beyond the `numpy_dtype_is_f64` fast path, and the entry body's eager `asarray` on
+the haystack - run on EVERY call before any dispatch - has never been priced.
+AGENT_NAME=RedLynx.
+
