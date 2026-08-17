@@ -46364,3 +46364,74 @@ RETRY PREDICATE: do not compare an `outer` counter row to an `outer` wall-clock 
 same-window result; it is not. Stop predicting ~795 insns/call is worth ~1.5% on these cells: it has
 now under-predicted twice and the mechanism connecting the two is not established.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CERTIFIED: the vectorcall lever took `reduceat` 1.3509x -> 1.1246x, and left `at` EXACTLY where it was - the null result that located the next lever (`deadlock-audit-v46rn`)
+
+`RedLynx`. The stale cells row 48 flagged, re-read on the same ELF with no build.
+
+**Campaign result class:** maintenance-self-speedup (reduceat) + a NULL RESULT that is the
+useful half (at)
+
+```
+bench_elf_sha256=aa84de7f0d2da73e158e07062bfc1fe5db79f762206eb2062ff702a380b03493
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 15.16/23.05/24.69 -> 15.95/23.08/24.70 across the three-run block; 15.65 for run 4
+CPU MHz system-wide min 1429 max 4267 median 2400 spread 2.986x
+PER-ARM (CPU_WITNESS, effect, run 4): arm_a_cpu==arm_b_cpu=47 on both phases,
+  same_core=true, 4191.8/4191.7 and 4186.0/4185.9, both spread 1.0000
+
+  cell            BEFORE excess   AFTER excess         BEFORE ratio   AFTER ratio
+  reduceat            345          120 125 135 151      1.3509x       1.1246-1.1654x
+  at (f64) n=2^8      346          366 316 316          1.2879x       1.2817x   NO CHANGE
+  at (i64) n=2^20    5336         5064 4914 4378        1.0326x       1.0294x   no change
+
+ALL 18 A/A nulls in the three-run block admit unity.
+```
+
+**`reduceat` is 1.1246x, from 1.3509x - 220 ns removed** and it now carries the LOWEST excess of
+any method entry point (120-135 ns against `outer`'s 155).
+
+**THE NULL RESULT IS WHY THIS ROW MATTERS. `at` did not move at all** - 346 ns before, 316-366
+after, ratio 1.2879x -> 1.2817x. Two methods took what looked like the same commit and only one
+of them changed.
+
+**AND THE REASON WAS ALREADY IN THE SOURCE, which is what makes this a located lever rather than
+a mystery.** `reduceat` passes a RUST TUPLE `(array, indices)`; `at` accepts two operands or
+three, so it built a `Bound<PyTuple>` to carry either. pyo3 0.28.3 emits
+`PyObject_VectorcallMethod` from `tuple_conversion!` - for Rust tuples only - while a
+`Bound<PyTuple>` falls back through the generic path to an explicit `getattr` and a materialised
+bound method. **`at` was never on the vectorcall path, and the measurement is what proved the
+mechanism rather than merely illustrating it**: a lever that moved both cells would have been
+consistent with several explanations; one that moved exactly the cell with a Rust tuple is
+consistent with one.
+
+**THE FIX IS LANDED (`99860387`) AND UNMEASURED.** Branching on the arity gives each case its own
+Rust tuple. Prediction: `at` f64 excess falls from ~316 ns toward `reduceat`'s ~125 ns, since
+after the branch they differ only in arity. If it does not, the remaining cost is in `at`'s own
+prologue rather than its call shape.
+
+**THE FAMILY NOW READS** (n=256, f64 where applicable):
+
+```
+  outer       1.0798x   excess 155 ns
+  reduceat    1.1246x   excess 125 ns
+  accumulate  1.1977x   excess 285 ns
+  reduce      1.2016x   excess 231 ns
+  at (f64)    1.2817x   excess 316 ns   <- lever landed, not yet measured
+```
+
+**`reduce` AND `at` ARE NOW THE TWO WORST, AND BOTH FOR THE SAME REASON** - neither was on the
+vectorcall path. `at` is now fixed; `reduce` forwards a caller-supplied `&Bound<PyTuple>` through
+`(*args, **kwargs)`, so it cannot be converted without changing its signature, and that is a
+different and larger change.
+
+**THE i64 `at` CELL IS UNCHANGED AND SHOULD BE**: it routes into the native scatter, where the
+call shape is a rounding error against 155 us of real work.
+
+RETRY PREDICATE: (1) Measure `at` after `99860387`; the prediction above is specific and
+falsifiable. (2) `reduce` is the last method off the vectorcall path and its excess (231 ns)
+is now second-worst - converting it means restructuring `(*args, **kwargs)` into a typed
+signature, which changes the Python-visible calling convention and needs its own parity
+argument before any perf claim. (3) Do not quote the i64 cell as evidence about call shape.
+AGENT_NAME=RedLynx.
+
