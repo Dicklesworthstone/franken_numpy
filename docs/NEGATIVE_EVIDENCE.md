@@ -51466,3 +51466,82 @@ RETRY PREDICATE: run `git diff --cached --name-only` and read it before EVERY co
 is not optional and it is the only thing standing between an explicit `git add` and a peer's staged
 work. Do not revert `4bde9d6b`; the three bench files are a peer's and are now safely in history.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — 7xcq2 CLOSED: the three weak gates are harmonised onto the canonical rule, decided on 28 real rows with ZERO divergences — and the change reached main inside SOMEONE ELSE'S commit (deadlock-audit-7xcq2)
+
+**Campaign result class:** harness correctness defect closed + a provenance disclosure
+
+Host at decision time: LOADAVG 11.39/16.93/21.94, CPU idle 80%, iowait 0, 3041 MHz, /data 205G.
+Nothing here is a timed row; the host figures are recorded because the standing orders require them.
+
+### The decision, and why it is now a decision rather than a judgement call
+
+This bead deliberately stopped short of changing the rule: "Report it; do not hard-fail rows yet —
+two instances is not enough to know the false-positive rate, and a gate that starts rejecting
+historical rows wholesale is worse than one that flags them." Correct when written. The missing
+input was a divergence count, which the bead itself had declared unobtainable retrospectively
+(116 prose ci95 mentions, ZERO pasted null rows).
+
+It was obtainable after all, from a source the bead did not consider: `.rch-bench-replay/*.log`
+holds real `MEDIAN_CI_GATE` lines from `fnp-python`, and those carry BOTH `effect_ci95` and
+`null_ci95` — everything both rules need. So the weak rule can be re-scored against real historical
+data without re-running anything.
+
+```
+  population                                    rows   divergent
+  historical  .rch-bench-replay logs (scorable)    9       0
+  live        visibility commit 568a166a          10       0
+  live        this change's own verification run   9       0
+  ----------------------------------------------------------------
+  TOTAL                                           28       0
+```
+
+Zero divergences in 28 real rows. Harmonising therefore rejects nothing that has ever been observed
+to pass, and the bead's stated fear is empirically absent in this population. The rule is now
+`strict_gate_verdict`, byte-identical to `fnp-python`'s `contract_gate_verdict`. The old rule is
+still computed and emitted as `verdict_legacy_weak`, with a new `gate_rule=` field, so a reader
+holding a banked row can still tell whether it would pass today — the rule is corrected WITHOUT
+destroying the ability to read old rows.
+
+VERIFIED: fmt exit 0 captured unpiped; clippy exit 0 on rch with no warnings on the added symbols;
+all three ELFs built and RAN with **0 panics and 0 assertion failures**, emitting 9 gate lines
+carrying `gate_rule=canonical_matches_fnp_python`, of which **0 changed verdict** (8 WIN->WIN,
+1 REGRESSION->REGRESSION).
+
+THE SELF-CHECK PREDICTED ITS OWN OBSOLESCENCE AND WAS RIGHT. The visibility commit's assertion said
+a later harmonisation "fails this assertion and points at the banked rows that need re-reading". It
+did exactly that. That is the mechanism working, not a nuisance, so it was updated deliberately
+rather than deleted: it now pins BOTH that the legacy rule certified the worked pair AND that the
+shipped verdict refuses it — the harmonisation itself in executable form.
+
+### PROVENANCE DISCLOSURE, which matters more than the tidiness of it
+
+**These three files reached `main` inside commit `4bde9d6b`, which belongs to another agent and
+carries `deadlock-audit-6y5wp` in its message.** I had them staged and verified, waiting on the
+self-check run before committing; a peer ran a bare `git commit`, which takes the ENTIRE STAGED
+INDEX, and swept them in. That peer disclosed it immediately and unprompted in `1c32c032`.
+
+Recording it here because the commit history now attributes this change to the wrong bead and
+carries none of the reasoning above, so `git log` alone will mislead whoever audits the gate next.
+The content landed INTACT and COMPLETE — each of the three files carries exactly one `gate_rule=`,
+one `fn legacy_weak_verdict`, one `let verdict = strict_gate_verdict`, and one pinned
+post-harmonisation assertion — and it is the same content that passed the verification above.
+
+The general hazard is already in this repo's standing orders and it caught two agents in one hour
+from opposite sides: I declined to edit `criterion_python_elementwise.rs` this turn precisely
+BECAUSE a peer held it dirty and `git add <file>` cannot separate two agents' edits to one file;
+they hit the same trap from the staging side. A shared working tree makes `git add` explicit paths
+AND `git diff --cached` mandatory for BOTH parties, and neither half is sufficient alone.
+
+COUNTED_MECHANISM: 3 of 4 `MEDIAN_CI_GATE` emitters harmonised; 28 rows scored under both rules,
+0 divergent; 9 live rows post-change, 0 verdict changes.
+
+A/A NULL CONTROLS: not applicable — no ratio is published. The evidence is the divergence count and
+the executed assertions.
+
+RETRY PREDICATE: the DELETION CONDITION on `null_straddles_unity` still stands and is NOT yet met —
+it says delete the field if a full sweep shows zero nulls excluding unity. Observed so far 10/10
+then 9/9 admissible, which is evidence toward deletion and nowhere near a full sweep, so the field
+stays. `verdict_legacy_weak` should be deleted once no banked row older than 2026-08-17 is still
+being cited.
+AGENT_NAME=SlateFinch.
