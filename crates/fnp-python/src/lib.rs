@@ -904,7 +904,12 @@ impl PyUFunc {
             // last/mid-axis lanes, timedelta int64 view) with its safe numpy
             // fallback. Whitelisted kinds only, so anything else (datetime 'M',
             // object, ...) keeps numpy.accumulate's exact error surface.
-            if is_exact_numpy_ndarray(py, arr)?
+            // SIZE GATE FIRST (`deadlock-audit-v46rn`): this float route had none, and
+            // at n=256 it was 4.76x SLOWER than delegating. Scoped to the float/complex/
+            // timedelta route below because that is what was measured; the integer
+            // cumsum/cumprod route above keeps its own behaviour until it has its own row.
+            if accumulate_native_route_is_worth_taking(arr)
+                && is_exact_numpy_ndarray(py, arr)?
                 && let Ok(kind) = arr
                     .getattr("dtype")
                     .and_then(|d| d.getattr("kind"))
@@ -9787,6 +9792,53 @@ fn dtype_char_of(value: &Bound<'_, PyAny>) -> Option<char> {
         .and_then(|dtype| dtype.getattr(intern!(py, "char")))
         .and_then(|c| c.extract::<char>())
         .ok()
+}
+
+/// Below this many elements, routing `add`/`multiply.accumulate` through fnp's native
+/// cumsum/cumprod dispatch COSTS more than delegating (`deadlock-audit-v46rn`).
+///
+/// MEASURED, not guessed. One dual-null contract per size, f64 `add.accumulate`,
+/// `bench_accumulate_size_crossover_vs_numpy`:
+///
+/// ```text
+///   n=2^8   ratio 0.210258   DECIDABLE_REGRESSION   numpy 1397 ns   fnp 6652 ns
+///   n=2^10  ratio 0.503727   DECIDABLE_REGRESSION   numpy 3707      fnp 7374
+///   n=2^12  ratio 1.326448   DECIDABLE_WIN          numpy 12734     fnp 9604
+///   n=2^14  ratio 2.516695   DECIDABLE_WIN
+///   n=2^20  ratio 3.882718   DECIDABLE_WIN          numpy 3107 us   fnp 798 us
+/// ```
+///
+/// The native route had NO size gate, so a 256-element `add.accumulate` was 4.76x
+/// SLOWER than NumPy - the worst cell in this campaign when it was found, and it was
+/// invisible because every existing row went through `__call__` rather than through the
+/// `accumulate` method.
+///
+/// The threshold is the smallest size that MEASURED a decidable win, not the estimated
+/// crossing point, which sits near 2^11. Gating conservatively gives up a little of the
+/// 2^11 band rather than risking a regime that measured as a loss.
+const F64_ACCUMULATE_NATIVE_MIN_LEN: usize = 1 << 12;
+
+/// Whether the native accumulate route is worth taking for this operand.
+///
+/// Reads `size` off the operand rather than waiting for a buffer, so the check runs
+/// BEFORE the route's acquisitions - the same reason `f64_binary_route_is_worth_taking`
+/// does. A missing or odd `size` means this is not the plain ndarray the route wants
+/// anyway; let the existing checks decline it rather than guessing.
+/// Size-only form of [`accumulate_native_route_is_worth_taking`], so the THRESHOLD can be
+/// tested without constructing an operand. The two must not drift: the predicate above
+/// delegates to this one.
+fn accumulate_native_route_is_worth_taking_len(size: usize) -> bool {
+    size >= F64_ACCUMULATE_NATIVE_MIN_LEN
+}
+
+fn accumulate_native_route_is_worth_taking(a: &Bound<'_, PyAny>) -> bool {
+    match a
+        .getattr(intern!(a.py(), "size"))
+        .and_then(|size| size.extract::<usize>())
+    {
+        Ok(size) => accumulate_native_route_is_worth_taking_len(size),
+        Err(_) => true,
+    }
 }
 
 fn f64_binary_route_is_worth_taking(op: BinaryOp, a: &Bound<'_, PyAny>) -> bool {
@@ -109897,8 +109949,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BinaryOp, F64_DIV_NATIVE_MIN_LEN, MaskedStream, NarrowSetOp, PyFromPyFunc, PyVectorize,
-        PythonNativeGemmOp, UFuncKind, argwhere, bincount, blas_is_single_threaded,
+        BinaryOp, F64_ACCUMULATE_NATIVE_MIN_LEN, F64_DIV_NATIVE_MIN_LEN, MaskedStream, NarrowSetOp,
+        PyFromPyFunc, PyVectorize, PythonNativeGemmOp, UFuncKind,
+        accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, cached_float64_dtype, cached_numpy, ceil_native, choose,
         compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
         diagflat, diagonal, digitize, extract, extract_numeric_array,
@@ -111014,6 +111067,69 @@ mod tests {
                 6.0,
                 "numpy.add must be restored once the guard drops"
             );
+            Ok(())
+        });
+    }
+
+    /// The accumulate size gate must decline only BELOW the measured crossover, and the
+    /// values must be NumPy's on both sides (`deadlock-audit-v46rn`).
+    ///
+    /// The float accumulate route had no size gate at all, so `add.accumulate` on 256
+    /// f64 elements ran fnp's cumsum dispatch and came out 4.76x slower than NumPy. The
+    /// gate delegates below 2^12, the smallest size that measured a decidable win.
+    ///
+    /// Two ways to get this wrong, and this checks both: gating on the wrong side of the
+    /// comparison (which would disable the 3.88x win at 2^20 instead of the loss at 2^8),
+    /// and changing the VALUES - the two routes are different implementations of a
+    /// running sum, so a mis-gate is not just a speed question. Float accumulation is
+    /// order-sensitive, which is exactly why the native arms are documented as
+    /// sequential-per-lane, so byte equality across the gate is the property to pin.
+    #[test]
+    fn accumulate_size_gate_declines_below_the_measured_crossover() {
+        assert!(
+            !accumulate_native_route_is_worth_taking_len(F64_ACCUMULATE_NATIVE_MIN_LEN - 1),
+            "below the threshold must delegate - that regime measured 1.99-4.76x SLOWER"
+        );
+        assert!(
+            accumulate_native_route_is_worth_taking_len(F64_ACCUMULATE_NATIVE_MIN_LEN),
+            "the threshold itself must TAKE the route - it measured a decidable win"
+        );
+        assert!(
+            accumulate_native_route_is_worth_taking_len(F64_ACCUMULATE_NATIVE_MIN_LEN + 1),
+            "above the threshold must keep the native route"
+        );
+
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_accum_gate")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("add")?;
+            let theirs = numpy.getattr("add")?;
+
+            for n in [
+                256_usize,
+                F64_ACCUMULATE_NATIVE_MIN_LEN - 1,
+                F64_ACCUMULATE_NATIVE_MIN_LEN,
+                F64_ACCUMULATE_NATIVE_MIN_LEN + 1,
+            ] {
+                let a = numpy
+                    .call_method1("arange", (n,))?
+                    .call_method1("astype", ("float64",))?;
+                assert_eq!(
+                    ours.call_method1("accumulate", (&a,))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    theirs
+                        .call_method1("accumulate", (&a,))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    "add.accumulate at n={n} must be byte-identical to numpy on both sides \
+                     of the gate"
+                );
+            }
             Ok(())
         });
     }
