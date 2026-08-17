@@ -47022,3 +47022,85 @@ story: 197 of its 245 ns is the shared floor every binary op pays. The next ques
 f64 block's entry test can decline without paying 48 ns, and that needs the entry order read the way
 `accumulate`'s was before anyone builds for it.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - REJECTED, second time on the same shape and again before a build: divide's 48 ns is ONE interned `getattr("size")` that the size gate genuinely needs, and the entry order is ALREADY optimal. Size gates cost one attribute read each and reordering cannot remove it (`deadlock-audit-6y5wp`, `deadlock-audit-v46rn`)
+
+`AzureCarp`. Static read, no build. The row above named this as the next question and said it needed
+the entry order read before anyone builds for it. This is that read.
+
+**Campaign result class:** REJECTED lever (refuted before a build) + a generalisation that closes a
+class
+
+### What divide actually pays at n=256
+
+The entry condition, in evaluation order:
+
+```rust
+if !zero_divisor                              // matches!(op, Remainder) -> false for Div, free
+    && x1_dtype_char == Some('d')             // ALREADY COMPUTED above the binop match, free
+    && f64_binary_route_is_worth_taking(op, a)// getattr(intern!("size")) + extract  <-- THE COST
+    && dtype_char_of(b) == Some('d')          // short-circuited at n=256
+    && let Some(out_val) = try_zerocopy_f64_binary(py, a, b, op)?   // short-circuited
+```
+
+Three things fall out of reading it rather than assuming:
+
+1. **`zero_divisor` is free for divide.** It is `matches!(op, BinaryOp::Remainder)`, so the divisor
+   SCAN — which is real, and which I half-expected to be the 48 ns — runs only for `Remainder`.
+   Divide's deferral is done later, inside the kernel, on the result buffer. The comment says so and
+   the code agrees.
+2. **`x1_dtype_char` is computed ABOVE the `binop` match, unconditionally, for every op.** So it is
+   part of the 197 ns floor that add/subtract/multiply pay too, not part of divide's extra.
+3. **What is left is exactly one interned `getattr("size")` + `extract::<usize>()`.** 48 ns at the
+   4.29 GHz these arms ran at is ~206 cycles, which is the right order for an interned attribute
+   fetch plus an extract plus two enum matches. The arithmetic is consistent.
+
+### Why reordering cannot help, and the order is already right
+
+`f64_binary_route_is_worth_taking` returns `true` immediately for every op that is not `Div`, so
+non-divide ops never read `size`. Within divide the order is already optimal: the FREE comparison
+(`x1_dtype_char`, already in hand) runs first and rejects every non-f64 divide without a read; only
+then does the size read happen; and `b`'s dtype read sits behind it, short-circuited at n=256. A
+peer already reordered this block for exactly this reason and left the note. **There is no cheaper
+ordering, because there is only one non-free term.**
+
+Nor is there a cheaper SOURCE for the size. `PyBuffer::item_count()` would give it without a
+`getattr`, but buffer acquisition was measured at 303 ns on this route — six times the cost it would
+replace. `a.len()` is `__len__`, which is `shape[0]` and not `size`, so it is wrong for N-D.
+
+### The generalisation, which is the part worth keeping
+
+This is the SECOND size-gate prologue refuted on a static read this session, on a different cell and
+a different code path — `accumulate`'s routing prologue one row up was the first. Both reduce to the
+same statement:
+
+> **A size gate costs one interned attribute read, that read is what makes the gate a gate, and no
+> reordering removes it. The only way to stop paying it is to stop needing the gate.**
+
+That closes the reorder class for size gates here. It also points at the one lever that would
+actually work and is not a micro-optimisation: **make the native route WIN below its threshold, so
+the gate can be deleted rather than made cheaper.** For divide that means beating NumPy under
+16384 elements, which is a kernel question and not a wrapper one — and `deadlock-audit-6y5wp` is
+where it belongs.
+
+### What this does NOT say
+
+The 48 ns is real and remains on the worst cell. I am not claiming it is unimportant — I am claiming
+it is not reachable by the lever that suggests itself, and I have now spent zero builds establishing
+that twice. The 197 ns shared floor underneath it is untouched by any of this and remains the larger
+half of divide's 245 ns.
+
+COUNTED_MECHANISM: divide's excess over its three siblings is 48 ns (245 vs a 191-200 ns band that
+agrees within 9 ns), and the static read accounts for it as one interned `getattr("size")` +
+`extract::<usize>()` — ~206 cycles at the 4.29 GHz the arms ran at — with `zero_divisor` free for
+divide and `x1_dtype_char` shared with every other op.
+
+A/A NULL CONTROLS: not applicable — this row is a static read of an evaluation order. The measured
+figures it rests on carry their own dual nulls in the row above.
+
+RETRY PREDICATE: do not propose reordering the f64 binary block's entry condition, and do not propose
+reordering `accumulate`'s routing prologue — both are refuted on static reads, both would cost a
+build to measure zero. Do not substitute `PyBuffer::item_count()` for the `size` getattr: it is 303
+ns against 48. The live question on this cell is whether the f64 divide kernel can win below 16384
+so the gate can be deleted outright.
+AGENT_NAME=AzureCarp.
