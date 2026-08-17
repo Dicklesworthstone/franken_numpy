@@ -43732,3 +43732,145 @@ entered it. A lever that moves all four refutes the account in this row. (3) Aud
 hardcoded labels in this bench file the same way: a literal that describes runtime behaviour is a
 claim, and it needs a source, not a comment. AGENT_NAME=RedLynx.
 
+## 2026-08-16 - METHOD NOT AVAILABLE FROM THIS PANE (no measurement produced): second-worker replication of the worst cell cannot be reached inside a 600 s foreground window - two workers, two attempts, both died inside the `fnp-python` compile (`deadlock-audit-ei9jz`)
+
+`RedLynx`. This row carries **no elf sha and no A/A null, because no measurement completed** — it
+records a method that did not pay, so the next agent does not spend another hour rediscovering it.
+The perf question it was meant to answer is unchanged and still open.
+
+**Campaign result class:** operational (no measurement produced)
+
+**ON THE LABEL, because the ledger gate is right to police it.** This was first written as a
+`REJECT` and the pre-commit `ledger_integrity` gate refused it: *"REJECT lacks measured A/A null
+or COUNTED_MECHANISM"*. The gate is correct and I did not weaken it. A `REJECT` in this ledger
+means a PERF LEVER was measured and did not pay, and such a row must carry the null that decided
+it; nothing of the sort happened here. No lever was rejected — a measurement METHOD was found
+unavailable, and the row is labelled to say exactly that. Anyone reaching for `REJECT` on a row
+with no null should re-read what their row actually decided.
+
+**WHY IT WAS ATTEMPTED RATHER THAN RE-RUNNING LOCALLY.** The worst cell has now been measured
+three times on `thinkstation1` (rows below: ~2.9-3.6x at n=256, spread 4.4-7.4%). Those rows'
+own retry predicate says a fourth run on this host adds noise rather than information, and that
+the one open item is replication on a SECOND WORKER before anything is quoted as a fleet figure.
+So the only run worth making was a remote one.
+
+**ATTEMPT 1** — `RCH_REQUIRE_REMOTE=1 rch exec -- cargo bench -p fnp-python --bench
+criterion_python_elementwise -- fnp-group=bench_percall_floor_across_ops_vs_numpy`, 570 s window.
+Selected `vmi1152480` (speed 64.8), synced the project, rewrote `CARGO_TARGET_DIR` to a
+worker-scoped pool path, entered the compile, produced no row.
+
+**ATTEMPT 2** — identical command, 560 s window. rch selected a DIFFERENT worker, `vmi1293453`
+(speed 52.2). Its dependency tree was already warm: the log went straight to
+`Compiling fnp-python` without rebuilding deps. It still produced no row.
+
+**THE DIAGNOSIS, and it is more useful than the failure.** On attempt 2 the ONLY thing left to
+compile was our own crate, and that alone exhausted the window. `crates/fnp-python/src/lib.rs` is
+6.1 MB in one file and takes 2m39s at `bench` profile on THIS host (32 physical cores); the
+workers rch offers are slower than it (speed 52.2 and 64.8 against this box). So the blocker is
+not cold dependencies, not sync, and not rch: **it is the release-profile compile of
+`fnp-python` itself, which does not fit in a foreground window on a worker slower than the
+build host.**
+
+**WHAT IS THEREFORE RULED OUT from a pane with this budget:**
+
+1. `rch exec -- cargo bench ...` in one command — the shape both attempts used. Dies in the
+   compile.
+2. Pre-warming with a separate `--no-run` job, then running the bench in a second command. The
+   pooled target dir is reclaimed by the NEXT job, which is why the standing guidance is to
+   capture the ELF in the SAME command — so the warm state cannot be relied on across two.
+3. Building locally and copying the ELF. Two independent blockers: this pane has no direct ssh to
+   the workers (`Permission denied (publickey)` on all three probed — rch holds its own keys),
+   and the local ELF links `libpython3.13.so.1.0` against **glibc 2.42**, which is newer than
+   these workers are likely to carry. Even with ssh, the copy would need a glibc- and
+   libpython-matched host.
+
+**WHAT WOULD ACTUALLY WORK**, in ascending order of effort: (a) a pane allowed to run the remote
+job detached and read its result in a later turn — the compile needs roughly 10-25 minutes on
+these workers, not 10; (b) a worker with a PERSISTENT warm target dir for this crate, so only the
+bench relinks; (c) splitting `lib.rs`, which is a large change with its own justification and
+should not be done for this reason alone; (d) a second measurement HOST of comparable speed with
+direct ssh, which is what the `hz2`-style pure-library probes in this ledger have used.
+
+**WHAT THIS DOES NOT SAY.** It does not say the worst-cell figure is wrong, and it does not
+weaken it — three same-host runs with clean nulls stand exactly as banked. It says only that the
+`replicate on a second worker` predicate remains **OPEN**, and that it cannot be discharged by
+the obvious route.
+
+RETRY PREDICATE: do NOT re-attempt shape 1 or shape 2 from a foreground-limited pane; both are
+now measured failures on two workers. Re-open this only with (a), (b) or (d) above, and when a
+second-host row does land, compare the cross-host difference against the 4.4-7.4% same-host
+spread already recorded before attributing anything to the host.
+
+**BANKED LATE, AND THE FIGURE IT CITES HAS MOVED.** This row was written before the interning
+and caching levers landed and is banked unchanged except for this note. The `~2.9-3.6x at
+n=256` it cites was the worst cell AT THE TIME; the worst cell now reads **1.855x on divide**
+(see the rows dated later the same day). The method finding - that a second-worker replication
+cannot be reached from a foreground-limited pane, because the `fnp-python` release compile does
+not fit the window on a worker slower than the build host - is unaffected by that, and is the
+reason to keep the row. AGENT_NAME=RedLynx.
+
+## 2026-08-16 - RECONCILING TWO OPPOSITE HEADLINES ON CONTAMINATION: `SlateHeron`'s read-off and my direct test do not contradict each other - they measure different things, and mine carries a confound the other does not (`deadlock-audit-48by6`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. The row above concludes our arm does NOT slow the incumbent; two rows below I measured
+that it does, twice. Both stand, because they are not the same measurement. Written so the next
+agent does not have to pick a side by seniority.
+
+**Campaign result class:** methodology (reconciliation; no new number)
+
+**LOADAVG, observed:** 1-min 28.64 against 5-min 17.53 at selection, rising to 47.29 and then 53.10.
+**No certification was run this turn** — the 1-min sat 63% above the 5-min and near the ~32
+saturation threshold. This row is analysis of results already banked plus a code landing.
+
+**THE TWO METHODS.**
+
+```
+  SlateHeron  compares NumPy's median in its own A/A phase against its median in the EFFECT phase,
+              across 58 already-banked row-pairs. No new run.
+  RedLynx     times the SAME NumPy call twice inside ONE ABBAABBA schedule, once alone and once
+              with our arm run immediately before it and OUTSIDE the timer.
+```
+
+**THEY ANSWER DIFFERENT QUESTIONS.** The read-off asks whether the incumbent's level differs
+between two PHASES. The direct test asks whether one adjacent execution slows one call. A
+contaminating effect that is present in both phases equally, or that is swamped by drift between
+them, is invisible to the first and visible to the second.
+
+**AND THE READ-OFF CARRIES THE CONFOUND I DECLINED TO ACCEPT.** My own group's doc comment says why
+I did not use it: the phases run at DIFFERENT TIMES with the effect phase last, so load drift lands
+entirely on the difference. `SlateHeron`'s own data shows that dominating — the largest row moves
++109.5% incumbent and +101.3% candidate, which is a busy host, not a contaminant. I nearly ran the
+same read-off this session and stopped for exactly this reason.
+
+**THE PARTS OF THAT ROW I ACCEPT WITHOUT QUALIFICATION**, and they are load-bearing:
+
+- **The printing artifact is real and I had not spotted it.** `arm_*_median_ms` prints four decimals,
+  so at a 0.0003 ms median one print tick is 20-33%. Every large percentage at n<=256 in that
+  analysis is one tick. That invalidates the read-off at small n in BOTH directions, and it is a
+  genuine defect in what the harness emits.
+- **Common-mode movement is what the balanced square exists to cancel.** Where both arms move
+  together, no correction is owed.
+
+**WHERE I STILL DISAGREE, on the numbers rather than the framing.** In the rows that row reports as
+common-mode with adequate precision, the incumbent moves MORE than the candidate in three of five:
++8.9 against +3.7, +6.7 against +3.8, +8.3 against -7.1; one is opposite (-5.8 against +11.0) and
+one is host drift. That is a weak signal in the direction my direct test measures, not evidence of
+its absence — which is what a confounded instrument looks like when the effect is real but small.
+
+**WHAT IS ACTUALLY SETTLED:** my direct test measured +6.26% and +6.73% for `numpy.maximum` on two
+independent invocations and ELFs, with the candidate's work outside the timer, and ~0% for
+`numpy.remainder`. Those are replicated and I stand on them. **What is NOT settled is the
+mechanism**, and the confound there is mine: those two cells differ in shadow and size as well as
+in incumbent, so "the incumbent's regime drives it" is unsupported. That is flagged in place on the
+row below, and `bench_incumbent_interference_shadow_held_constant` — landed this turn, one shadow,
+one size, two incumbents, prediction registered before the run — exists to settle it.
+
+**NEITHER ROW LICENSES A LEDGER-WIDE CORRECTION.** Mine applies to two named cells; the analysis
+above declines a correction generally. The maximum rows carry a ~6.7% discount; the remainder
+discount is already withdrawn; everything else is untouched until measured.
+
+RETRY PREDICATE: (1) Run `bench_incumbent_interference_shadow_held_constant` in a converged window
+and let it decide the mechanism; it is built and green. (2) Fix `arm_*_median_ms` to print
+nanoseconds or more decimals — the four-decimal ms format makes every small-n row-pair comparison
+meaningless and that is worth a one-line change. (3) Do not use the A/A-versus-effect read-off as a
+contamination test at any n without first correcting for phase-time drift. AGENT_NAME=RedLynx.
+
