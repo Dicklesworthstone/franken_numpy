@@ -46114,3 +46114,81 @@ RETRY PREDICATE: `accumulate` at n=256 is 1.2593x and no longer VOID; quote that
 fail on this evidence — 0/6 here plus 2/34 banked argues for reporting and manual voiding. A valid
 before/after for `accumulate` is now unobtainable and should stop being treated as owed.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - THE VOIDED `accumulate` CELL RE-READ CLEAN: 1.5464x -> 1.2528x, and with it the ufunc METHOD FAMILY HAS CONVERGED - every method-specific excess is gone and only the shared wrapper floor remains (`deadlock-audit-v46rn`, `deadlock-audit-7xcq2`)
+
+`RedLynx`. Four runs, no build - the ELF from the `at` lever was still on disk, so this cost
+one invocation each. Every null in every run admits unity, which is what the earlier voided
+reading needed.
+
+**Campaign result class:** maintenance-self-speedup + resolution of a voided cell
+
+```
+bench_elf_sha256=7aad8d7cdb96f4c044c6c24b05b71f459dad6ff6789b2d36eb80ba8eae0ec44f
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256
+group=bench_ufunc_method_percall_floor_vs_numpy
+harness=common::run_dual_null_median_ci_contract
+LOADAVG runs 1-3: 21.30/22.31/26.40 unchanged BEFORE and AFTER; run 4: 18.93/21.66/26.05
+CPU MHz system-wide: runs 1-3 min 1429 max 4217 median 3366 spread 2.951x;
+                     run 4 min 2504 max 4139 median 3294 spread 1.653x
+PER-ARM (CPU_WITNESS, effect, run 4): arm_a_cpu==arm_b_cpu on all four phases,
+  same_core=true; 4288.8/4288.8 spread 1.0000; 3898.3/3887.8 spread 1.0027;
+  4130.2/4130.5 spread 1.0001; 4079.4/4079.4 spread 1.0000
+
+  method       excess_ns across 4 runs      median   ratio (median)   vs numpy
+  reduce       255  321  221  271             263     0.8087           1.2376x
+  accumulate   381  355  370  347             362     0.7986           1.2528x
+  outer        391  346  381  375             378     0.8315           1.2027x
+
+ALL 24 A/A nulls admit unity. Every cell DECIDABLE_REGRESSION.
+```
+
+**THE VOIDED CELL IS RESOLVED. `accumulate` reads 1.2528x, from a last-admissible 1.5464x** -
+and the void was worth respecting: the run I discarded two rows ago would have banked 542 ns of
+excess, where four clean runs now agree on ~362.
+
+**THE FAMILY HAS CONVERGED, AND THAT IS THE REAL RESULT.** Every ufunc method entry point now
+sits in one band:
+
+```
+  outer       1.2027x   excess 378 ns
+  reduce      1.2376x   excess 263 ns
+  at (f64)    1.2879x   excess 346 ns
+  accumulate  1.2528x   excess 362 ns
+  reduceat    1.3509x   excess 345 ns
+```
+
+Six weeks of this campaign's method rows started at `accumulate` 4.76x, `at` 2.39x,
+`reduceat` 1.68x, `reduce` 1.91x - spread across a factor of 2.5 with method-specific
+prologues dominating. **They are now within 12% of each other.**
+
+**THE WITHIN-RUN CONTROL SAYS THE METHOD-SPECIFIC COST IS GONE, not merely smaller.** `outer` is
+pure delegation with no routing and no probes - the floor by construction. Reading each method's
+excess against `outer`'s in the SAME invocation:
+
+```
+  accumulate / outer   was 767/321 = 2.39x   now 347/375, 381/391, 355/346, 370/381 = ~0.97x
+```
+
+**Accumulate now costs LESS above NumPy than the method that has nothing to skip.** That is the
+signature of a removed prologue rather than a faster one, and it is window-independent because
+both numbers come from one binary in one run.
+
+**WHAT IS NOT CLAIMED.** Several levers landed between the 767 ns reading and this one - the
+`axis=0` omission, the 78-site probe sweep, the int-cumsum pre-decline - and this row does NOT
+apportion between them. It says the method-specific excess is gone, not which change removed
+which part. The 78-site sweep in particular is STILL unmeasured in isolation and this row does
+not discharge that debt.
+
+**AND THE CELLS ARE STILL LOSSES.** 1.20-1.35x means NumPy is faster at every method entry point.
+What has been removed is the part that differed BETWEEN them; the ~263-378 ns they now share is
+untouched and is the whole remaining target.
+
+RETRY PREDICATE: (1) The next lever on this family must attack the SHARED floor - a per-method
+probe fix cannot help, because the within-run control shows no method-specific excess left to
+remove. (2) Do not quote this row as certifying any individual lever; it certifies a state, not
+an attribution. (3) The floor lever needs a control that is not another method, since they now
+all carry the same cost - the `__call__` rows at 206-221 ns are the nearest thing to a lower
+bound and the gap to 263-378 ns is where a method-entry cost would still hide.
+AGENT_NAME=RedLynx.
+
