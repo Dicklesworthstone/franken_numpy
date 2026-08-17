@@ -1377,6 +1377,10 @@ fn main() {
                 "bench_binary_counter_multiply_numpy_unsafe",
                 bench_binary_counter_multiply_numpy_unsafe,
             ),
+            (
+                "bench_binary_counter_multiply_pydict_build",
+                bench_binary_counter_multiply_pydict_build,
+            ),
             ("bench_reduce_counter_fnp", bench_reduce_counter_fnp),
             ("bench_reduce_counter_numpy", bench_reduce_counter_numpy),
             ("bench_outer_counter_fnp", bench_outer_counter_fnp),
@@ -6970,6 +6974,72 @@ fn bench_binary_counter_multiply_fnp_unsafe(_c: &mut Criterion) {
 
 fn bench_binary_counter_multiply_numpy_unsafe(_c: &mut Criterion) {
     binary_counter_probe_with_casting("multiply", false, Some("unsafe"));
+}
+
+// THE MISSING HALF OF `kwargs_overhead`, in the counted currency (`deadlock-audit-ei9jz`).
+//
+// The `_unsafe` arms above do not isolate the probe chain on their own. `casting="unsafe"`
+// flips ONE predicate that gates BOTH the probe block and the keyword tail, so the
+// probe-skipped arm additionally allocates a `PyDict`, sets an item on it, and makes NumPy
+// parse a keyword — none of which the all-defaults arm pays, because that path takes
+// `np_ufunc.call1((x1, x2))` with no dict at all. `deadlock-audit-uj3r3` found this in wall
+// clock, where the uncorrected term drove `probe_chain_ns` NEGATIVE (-40.0 ns).
+//
+// The correction has two halves. NumPy's own parse is already measurable from the arms
+// above as `numpy_unsafe - numpy_plain`, taken on NumPy's ufunc so no probe chain is
+// involved. This probe is the other half: OUR dict construction, replicated standalone.
+//
+// IT IS A REPLICA, THEREFORE A LOWER BOUND on the correction and so an UPPER BOUND on the
+// wrapper residual. That is the same caveat `uj3r3` carries and it must travel with any
+// number derived from it — the residual computed this way cannot be quoted as a point
+// estimate, only as a ceiling.
+//
+// The body mirrors the shipped tail exactly: `PyDict::new`, then `set_item("casting", ..)`,
+// which is what `PyUFunc::__call__` does when `casting != "same_kind"` and every other
+// keyword is at its default. Adding keys the shipped tail would not set on this input would
+// overstate the correction and understate the residual.
+fn bench_binary_counter_multiply_pydict_build(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        // Same module/oracle setup as the sibling probes so the per-process constant that
+        // `perf stat` also counts matches theirs and cancels in the difference.
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", 256usize).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+
+        let mut sink = 0usize;
+        for _ in 0..ACCUMULATE_COUNTER_CALLS {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("casting", "unsafe").expect("set casting");
+            sink += kwargs.len().expect("dict length");
+            black_box(&kwargs);
+        }
+        assert_eq!(
+            sink, ACCUMULATE_COUNTER_CALLS,
+            "each replica must build a dict with exactly one entry, or it is not the dict \
+             the shipped tail builds"
+        );
+        println!(
+            "BINARY_COUNTER_PROBE op=multiply arm=pydict_build_replica casting=n/a n=256 \
+             calls={ACCUMULATE_COUNTER_CALLS} checksum={sink:016x} \
+             setup_matches_sibling_probe=true run_this_under_perf_stat=true \
+             this_is_a_replica_so_a_LOWER_BOUND_on_the_correction=true"
+        );
+    });
 }
 
 fn bench_binary_counter_divide_fnp(_c: &mut Criterion) {
