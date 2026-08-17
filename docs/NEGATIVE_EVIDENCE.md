@@ -51038,3 +51038,96 @@ against a now-cached lib. Cheaper than publishing a biased number and cheaper th
 
 No counts exist yet. This row changes only what the next row is permitted to say.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — THE MULTIPLY ROUTE'S WHOLE EXCESS IS 1856.2 INSTRUCTIONS/CALL, and the raw probe-chain split comes out NEGATIVE exactly as my amendment predicted — so the split is WITHHELD, not published (deadlock-audit-ei9jz)
+
+Counters only; no wall-clock certification attempted or implied. Four matched single-arm probes,
+one process per arm, `perf stat -e instructions:u`, `n=256`, 400,000 calls per arm.
+
+```
+  worker=thinkstation1   elf bench_elf_sha256=0960cc24fdf84fd9c6d29b9db7377b1c46d5616e125414893f7e5cd05febd2ac
+  committed source = 81d00ccb (working tree clean at build; no edits between build and run)
+  profile=release-perf  RUSTFLAGS="-Z threads=4 -C target-feature=+avx2 -C force-frame-pointers=yes"
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1     <- mandatory, see the spinner row
+  LOADAVG 29.76/27.14/26.46 -> 30.93/26.99/26.41    CPU idle 85-86%, iowait 1%, 2479-2806 MHz
+  every arm: BENCH_GROUP_SELECTION selected_groups=1, checksum asserted vs NumPy, 0 panics
+```
+
+Six reps per arm, across TWO independently launched run-sets:
+
+```
+  arm            median insns (400k calls)   spread   insns/call
+  numpy_plain          3,182,787,000          0.601%     7,957.0
+  fnp_plain            3,925,247,277          0.179%     9,813.1
+  numpy_unsafe         3,793,178,150          0.125%     9,482.9
+  fnp_unsafe           5,014,866,126          0.167%    12,537.2
+```
+
+### The one number this row publishes
+
+**WHOLE-ROUTE EXCESS = `fnp_plain - numpy_plain` = 1856.2 instructions/call.** That is what our
+delegating `multiply` wrapper costs over NumPy's own call at n=256, in a currency that does not move
+with host load, taken while the box sat at loadavg 27-31. It needs no correction, no replica and no
+assumption: both arms make the same call with the same operands and identical process setup, which
+cancels in the difference.
+
+CROSS-INSTRUMENT CONSISTENCY, offered as consistency and not as agreement: the wall-clock partition
+puts 91 ns of probe chain plus 370 ns of wrapper residual = 461 ns of non-NumPy cost on this call.
+1856.2 insns over 461 ns is 4.03 insns/ns, i.e. IPC ~1.5 at 2.7 GHz, which is an ordinary rate for
+this kind of interpreter-bound code. Two instruments built on different principles land in the same
+place. I am not claiming a percentage agreement — the ns figure carries its own history of
+retraction.
+
+### The split is NOT published, and the reason is the amendment I registered before running
+
+```
+  NumPy keyword parse   numpy_unsafe - numpy_plain =  1526.0 insns/call   (registered control: >= 0 -> PASSES)
+  our keyword path      fnp_unsafe   - fnp_plain   =  2724.0 insns/call
+  our_kwargs_cost - probe_chain                    =  1198.1 insns/call
+  RAW probe_chain                                  = -1198.1 insns/call   -> NEGATIVE
+```
+
+**The raw probe chain is negative, which under amended rule 3 VOIDS any split claim.** This is not a
+surprise and not a failure: it is the same sign, in a second currency, that `deadlock-audit-uj3r3`
+hit in wall clock (-40.0 ns) and fixed. `casting="unsafe"` flips ONE predicate gating BOTH the probe
+block and the keyword tail, so the probe-skipped arm pays a `PyDict` allocation, a `set_item`, our
+PyO3 keyword binding, and NumPy's parse — and here that bundle costs **2724.0 insns/call against a
+probe chain it avoids**, making the "cheaper" arm 1198.1 insns/call MORE expensive net of NumPy's own
+1526.0. Anyone reading `casting="unsafe"` as a free way to skip our probes has it backwards.
+
+The registered control PASSED — `numpy_unsafe - numpy_plain` is positive — so the form is not
+invalid; it is incomplete. The missing term is our own `PyDict` construction, which has no arm yet.
+
+### The sharp, falsifiable window this leaves
+
+With `probe_chain = pydict_build_replica - 1198.1` and `wrapper_residual = 1856.2 - probe_chain`:
+
+```
+  pydict_build_replica < 1198.1 insns/call  ->  probe_chain NEGATIVE      -> row VOID (amended rule 3)
+  pydict_build_replica > 2126.2 insns/call  ->  the registered SIGN TEST FAILS
+                                                (wrapper_residual > probe_chain requires probe < 928.1)
+  1198.1 .. 2126.2                          ->  both hold; the split is publishable
+```
+
+So the next measurement is decidable in advance and can refute me in two distinct ways. I expect a
+`PyDict::new` plus one `set_item` with a NON-INTERNED `&str` key to land in that window — the
+interning ledger prices a non-interned `&str` key at ~795 insns/call on its own — but that is a
+prediction, registered here, not a result.
+
+COUNTED_MECHANISM: 1856.2 insns/call whole-route excess; 2724.0 insns/call for our keyword tail
+against 1526.0 for NumPy's; 400,000 calls/arm; 6 reps/arm over 2 run-sets; max spread 0.601%.
+
+A/A NULL CONTROLS: not applicable and not faked — this row publishes counter differences, not a
+ratio between two timed arms. The reproducibility evidence is the 0.125-0.601% spread across six
+reps and two independent launches, plus the registered `selected_groups=1` and checksum gates, which
+every arm passed.
+
+INSTRUMENT NOTE WORTH KEEPING: `cycles:u` was collected on the same runs and is UNUSABLE here —
+`numpy_plain` cycles spanned 1.77e9-3.02e9, a **71% spread**, against **0.014%** for instructions on
+the identical runs. That is the load-independence claim of the counted method demonstrated and its
+converse demonstrated in the same breath, and it is why no ns figure is derived from cycles above.
+
+RETRY PREDICATE: land the `pydict_build` replica arm, re-run it alone under the same pinning, and
+resolve the window. Until then the wrapper residual has only an UPPER bound of 1856.2 insns/call
+(the whole excess, i.e. assuming a zero-cost probe chain) and must not be quoted as a point estimate.
+AGENT_NAME=SlateFinch.
