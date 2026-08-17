@@ -50833,3 +50833,70 @@ re-quote the `maximum`/`minimum`/`divide` 2^22 `out=` wins as certified until
 stronger, not weaker. Route this to the owners of `deadlock-audit-ei9jz` and `deadlock-audit-48by6`
 rather than editing their instrument.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — `perf stat -e instructions:u` COUNTS THE OPENBLAS SPINNERS: unpinned, the count is 15.5x inflated AND proportional to elapsed time, which destroys the load-independence the whole counted-attribution method rests on (deadlock-audit-ei9jz)
+
+Found while checking the precondition for the four-arm counted split registered one row above,
+BEFORE taking any measurement with it. `perf stat` counts a PROCESS, and a NumPy process on this
+64-core host carries an OpenBLAS thread pool whose workers BUSY-WAIT. Those spinners retire
+instructions, `instructions:u` counts them, and how many they retire depends on how long the process
+runs.
+
+Same script (20,000 `np.multiply` calls at n=256), three runs each, on thinkstation1 at loadavg
+15.06-15.40, CPU 2806 MHz mean over 64 cpus:
+
+```
+  UNPINNED                                          PINNED (OPENBLAS/OMP/MKL_NUM_THREADS=1)
+  instructions   elapsed      implied GIPS          instructions   elapsed
+  7,213,554,654  0.160458 s   44.96                 464,050,968    0.099497 s
+  7,206,617,426  0.156945 s   45.92                 464,394,058    0.086777 s
+  7,042,118,693  0.139894 s   50.34                 464,476,200    0.095220 s
+  spread 2.4%                                       spread 0.09%
+```
+
+**THE TELL IS THE IMPLIED RATE, NOT THE SPREAD.** ~45-50 GIPS is impossible for a single-threaded
+Python loop on a 2.8 GHz core; it is ~64 threads spinning. And the counts track elapsed time — the
+shortest run is also the smallest count — which is the signature of a term proportional to duration
+rather than to work.
+
+**WHY THIS WOULD HAVE VOIDED THE MEASUREMENT AND NOT MERELY ADDED NOISE.** A spinner term
+proportional to elapsed time does NOT cancel in a difference between two matched arms, because the
+two arms have different elapsed times by construction — that difference is the thing being measured.
+The spin term therefore scales WITH the effect and in the same direction, inflating the measured
+instruction difference by roughly (spin GIPS x delta-elapsed). At ~45 GIPS of spin against a few
+GIPS of real work, an unpinned counted attribution can overstate a difference by an order of
+magnitude, systematically, while looking perfectly reproducible. Pinned, the counter is stable to
+0.09% while wall clock over the SAME runs moves 14.6% (0.0868-0.0995 s) at constant load — which is
+the load-independence the method claims, and it is real, but only with threading pinned.
+
+### What this does NOT impugn
+
+**The campaign's banked counted rows are CLEAN and I am not casting doubt on them.** The
+`METHOD_COUNTER_PROBE` row of 2026-08-16 (`AzureCarp`, elf `ada3f3b1...`) records
+`OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1` in its own provenance block. The operator knew. Checked
+before writing this row, because "your predecessors' numbers are contaminated" is exactly the
+flattering claim that needs evidence, and the evidence says otherwise.
+
+### The gap that is real
+
+The pinning is an OPERATOR CONVENTION here, not an enforced precondition.
+`criterion_python_linalg.rs`, `criterion_python_sortmisc.rs` and `criterion_python_reductions.rs`
+ASSERT the three variables; `criterion_python_elementwise.rs` — the file that holds every counter
+probe — does not. `common/mod.rs` reports the values in its provenance line, so a banked row can be
+audited after the fact, but nothing stops an unpinned run from producing a 15.5x-inflated,
+time-proportional count that no downstream reader can distinguish from a good one. A probe whose
+correctness depends on the invoker remembering an env var will eventually be run by someone who
+does not.
+
+COUNTED_MECHANISM: 15.5x count inflation (7.15e9 -> 4.64e8 mean), run-to-run spread 2.4% -> 0.09%,
+implied rate 44.96-50.34 GIPS unpinned versus a 2806 MHz single core.
+
+A/A NULL CONTROLS: none, and none are applicable — this row publishes counter reproducibility and an
+arithmetic impossibility argument, not a ratio between two arms.
+
+RETRY PREDICATE: the guard belongs in the counter probes themselves, asserting the three variables
+equal "1" the way the linalg bench already does. It is NOT in the ELF currently compiling for the
+four-arm split, so that measurement will pin manually and record the env in its own row; the
+assertion lands as a separate hardening commit rather than triggering a second 30-minute rebuild of
+a 110k-line crate for a guard that changes no measured code.
+AGENT_NAME=SlateFinch.
