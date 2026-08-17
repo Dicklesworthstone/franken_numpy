@@ -25578,7 +25578,26 @@ fn clip(
         return Ok(out);
     }
 
-    // Both bounds must be real scalars.
+    // Both bounds must be real scalars - decided WITHOUT raising
+    // (`deadlock-audit-v46rn`).
+    //
+    // The two `extract`s below fail for exactly two inputs, and each failure sets a Python
+    // exception, wraps it in a `PyErr` and discards both. Neither input is exotic:
+    // `np.clip(a, 0, None)` and `np.clip(a, None, 3)` are ordinary NumPy usage, and a
+    // one-sided clip therefore paid an exception on EVERY call. A caught `float()` failure
+    // measures 129 ns against 23 ns for a type test.
+    //
+    // `is_none` is a pointer comparison. `arg_cannot_be_scalar` is the same narrow
+    // predicate the spaced builders use - only an EXACT ndarray with `ndim >= 1` fails the
+    // conversion, so 0-d arrays and every NumPy scalar width keep the native path they
+    // have today.
+    if a_min.bind(py).is_none()
+        || a_max.bind(py).is_none()
+        || arg_cannot_be_scalar(py, a_min.bind(py))
+        || arg_cannot_be_scalar(py, a_max.bind(py))
+    {
+        return fallback();
+    }
     let Ok(min_val) = a_min.bind(py).extract::<f64>() else {
         return fallback();
     };
@@ -53790,7 +53809,7 @@ fn arange(
     Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
 }
 
-/// Whether an endpoint is an array that CANNOT convert to a scalar
+/// Whether an argument is an array that CANNOT convert to a scalar
 /// (`deadlock-audit-v46rn`).
 ///
 /// The native path used to discover this by attempting `extract::<f64>()` and letting it
@@ -53804,7 +53823,7 @@ fn arange(
 /// currently-native input kinds. Only an EXACT ndarray with `ndim >= 1` actually fails, so
 /// that is what this asks. An ndarray SUBCLASS is not "exact" and still reaches the
 /// conversion, keeping today's behaviour; a deliberate scope limit.
-fn spaced_endpoint_cannot_be_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+fn arg_cannot_be_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     if !is_exact_numpy_ndarray(py, value).unwrap_or(false) {
         return false;
     }
@@ -53917,9 +53936,7 @@ fn linspace(
     }
     // Decline array endpoints WITHOUT raising: the two `extract`s below fail for arrays,
     // and each failure sets and discards a Python exception (`deadlock-audit-v46rn`).
-    if spaced_endpoint_cannot_be_scalar(py, start.bind(py))
-        || spaced_endpoint_cannot_be_scalar(py, stop.bind(py))
-    {
+    if arg_cannot_be_scalar(py, start.bind(py)) || arg_cannot_be_scalar(py, stop.bind(py)) {
         return fallback(py);
     }
     let Ok(start_f) = start.bind(py).extract::<f64>() else {
@@ -54043,9 +54060,7 @@ fn geomspace(
 
     // Decline array endpoints WITHOUT raising: the two `extract`s below fail for arrays,
     // and each failure sets and discards a Python exception (`deadlock-audit-v46rn`).
-    if spaced_endpoint_cannot_be_scalar(py, start.bind(py))
-        || spaced_endpoint_cannot_be_scalar(py, stop.bind(py))
-    {
+    if arg_cannot_be_scalar(py, start.bind(py)) || arg_cannot_be_scalar(py, stop.bind(py)) {
         return fallback(py);
     }
     let Ok(start_f) = start.bind(py).extract::<f64>() else {
@@ -65486,9 +65501,7 @@ fn logspace(
     }
     // Decline array endpoints WITHOUT raising: the two `extract`s below fail for arrays,
     // and each failure sets and discards a Python exception (`deadlock-audit-v46rn`).
-    if spaced_endpoint_cannot_be_scalar(py, start.bind(py))
-        || spaced_endpoint_cannot_be_scalar(py, stop.bind(py))
-    {
+    if arg_cannot_be_scalar(py, start.bind(py)) || arg_cannot_be_scalar(py, stop.bind(py)) {
         return fallback(py);
     }
     let Ok(start_f) = start.bind(py).extract::<f64>() else {
@@ -112742,6 +112755,84 @@ mod tests {
                         got.call_method0("tobytes")?.extract::<Vec<u8>>()?,
                         want.call_method0("tobytes")?.extract::<Vec<u8>>()?,
                         "linspace on {name} endpoints (num={num}) must match numpy exactly"
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// `clip` must decline non-scalar bounds without raising, and route every scalar kind
+    /// exactly as before (`deadlock-audit-v46rn`).
+    ///
+    /// `clip` decided whether its bounds were scalars by attempting `extract::<f64>()` and
+    /// letting it fail - and the inputs that fail are not exotic. `np.clip(a, 0, None)` and
+    /// `np.clip(a, None, 3)` are ordinary one-sided clips, so those calls paid a
+    /// constructed-and-discarded Python exception every time.
+    ///
+    /// The hazard in replacing that is demoting inputs that DO convert. The same probe that
+    /// corrected this predicate for `linspace` applies: `np.float32`, `np.int64`, `np.int32`
+    /// and 0-d arrays all convert successfully and must keep their route. This walks the
+    /// bound kinds on both sides - including one-sided None, array bounds, and mismatched
+    /// pairs - against NumPy's own answer, checking dtype and bytes.
+    #[test]
+    fn clip_bound_precheck_matches_numpy_across_bound_kinds() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_clip_bounds")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("clip")?;
+            let theirs = numpy.getattr("clip")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                std::ffi::CString::new(
+                    "a = np.arange(12.0).reshape(3, 4)\n\
+                     ai = np.arange(12).astype(np.int32).reshape(3, 4)\n\
+                     BOUNDS = {\n\
+                       'py': (2.0, 8.0),\n\
+                       'py_int': (2, 8),\n\
+                       'none_hi': (2.0, None),\n\
+                       'none_lo': (None, 8.0),\n\
+                       'np64': (np.float64(2.0), np.float64(8.0)),\n\
+                       'np32': (np.float32(2.0), np.float32(8.0)),\n\
+                       'npi64': (np.int64(2), np.int64(8)),\n\
+                       'zero_d': (np.array(2.0), np.array(8.0)),\n\
+                       'array': (np.full(4, 2.0), np.full(4, 8.0)),\n\
+                       'mixed': (2.0, np.full(4, 8.0)),\n\
+                     }\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let bounds = locals.get_item("BOUNDS")?.expect("BOUNDS");
+
+            for target in ["a", "ai"] {
+                let arr = locals.get_item(target)?.expect("target array");
+                for name in [
+                    "py", "py_int", "none_hi", "none_lo", "np64", "np32", "npi64", "zero_d",
+                    "array", "mixed",
+                ] {
+                    let pair = bounds.get_item(name)?.cast_into::<PyTuple>()?;
+                    let lo = pair.get_item(0)?;
+                    let hi = pair.get_item(1)?;
+                    let got = ours.call1((&arr, &lo, &hi))?;
+                    let want = theirs.call1((&arr, &lo, &hi))?;
+                    assert_eq!(
+                        got.getattr("dtype")?.str()?.extract::<String>()?,
+                        want.getattr("dtype")?.str()?.extract::<String>()?,
+                        "clip({target}, {name}) must keep numpy's dtype"
+                    );
+                    assert_eq!(
+                        got.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        want.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "clip({target}, {name}) must match numpy byte for byte"
                     );
                 }
             }
