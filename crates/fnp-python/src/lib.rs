@@ -39516,7 +39516,12 @@ fn fft(
     if let Some(n_val) = n {
         kwargs.set_item("n", n_val)?;
     }
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `fft` is axis=-1, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != -1 {
+        kwargs.set_item("axis", axis)?;
+    }
     if let Some(norm_val) = norm {
         kwargs.set_item("norm", norm_val)?;
     }
@@ -49947,7 +49952,12 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let lexsort_fn = numpy.getattr("lexsort")?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", axis)?;
+        // numpy's own default for `lexsort` is axis=-1, verified against the
+        // installed interpreter - sending it costs a dict entry and a keyword parse
+        // to communicate the default (`deadlock-audit-v46rn`).
+        if axis != -1 {
+            kwargs.set_item("axis", axis)?;
+        }
         Ok(lexsort_fn.call((keys_bound,), Some(&kwargs))?.unbind())
     };
 
@@ -53678,7 +53688,12 @@ fn linspace(
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item("dtype", dtype_val.bind(py))?;
         }
-        kwargs.set_item("axis", axis)?;
+        // numpy's own default for `linspace` is axis=0, verified against the
+        // installed interpreter - sending it costs a dict entry and a keyword parse
+        // to communicate the default (`deadlock-audit-v46rn`).
+        if axis != 0 {
+            kwargs.set_item("axis", axis)?;
+        }
         if let Some(device_val) = device.as_ref() {
             kwargs.set_item("device", device_val.bind(py))?;
         }
@@ -53776,7 +53791,12 @@ fn geomspace(
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item("dtype", dtype_val.bind(py))?;
         }
-        kwargs.set_item("axis", axis)?;
+        // numpy's own default for `geomspace` is axis=0, verified against the
+        // installed interpreter - sending it costs a dict entry and a keyword parse
+        // to communicate the default (`deadlock-audit-v46rn`).
+        if axis != 0 {
+            kwargs.set_item("axis", axis)?;
+        }
         Ok(geomspace_fn
             .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
             .unbind())
@@ -57477,7 +57497,12 @@ fn unwrap(
     if let Some(discont_val) = discont {
         kwargs.set_item("discont", discont_val.bind(py))?;
     }
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `unwrap` is axis=-1, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != -1 {
+        kwargs.set_item("axis", axis)?;
+    }
     if let Some(period_val) = period {
         kwargs.set_item("period", period_val.bind(py))?;
     }
@@ -58167,7 +58192,12 @@ fn chebder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResul
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `chebder` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58200,7 +58230,12 @@ fn chebint(
     }
     kwargs.set_item("lbnd", lbnd)?;
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `chebint` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("chebyshev")?
@@ -58488,7 +58523,12 @@ fn hermder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResul
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `hermder` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58515,7 +58555,12 @@ fn hermint(
     }
     kwargs.set_item("lbnd", lbnd)?;
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `hermint` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite")?
@@ -58766,7 +58811,12 @@ fn hermeder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResu
     }
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `hermeder` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -58814,7 +58864,12 @@ fn hermeint(
     }
     kwargs.set_item("lbnd", lbnd)?;
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `hermeint` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("hermite_e")?
@@ -59006,7 +59061,12 @@ fn lagder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `lagder` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59033,7 +59093,12 @@ fn lagint(
     }
     kwargs.set_item("lbnd", lbnd)?;
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `lagint` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("laguerre")?
@@ -59226,7 +59291,12 @@ fn legder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `legder` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -59253,7 +59323,12 @@ fn legint(
     }
     kwargs.set_item("lbnd", lbnd)?;
     kwargs.set_item("scl", scl)?;
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `legint` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("polynomial")?
         .getattr("legendre")?
@@ -64762,7 +64837,12 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn unstack(py: Python<'_>, x: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `unstack` is axis=0, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != 0 {
+        kwargs.set_item("axis", axis)?;
+    }
     Ok(numpy
         .getattr("unstack")?
         .call((x.bind(py),), Some(&kwargs))?
@@ -65134,7 +65214,12 @@ fn logspace(
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item("dtype", dtype_val.bind(py))?;
         }
-        kwargs.set_item("axis", axis)?;
+        // numpy's own default for `logspace` is axis=0, verified against the
+        // installed interpreter - sending it costs a dict entry and a keyword parse
+        // to communicate the default (`deadlock-audit-v46rn`).
+        if axis != 0 {
+            kwargs.set_item("axis", axis)?;
+        }
         Ok(ls_fn
             .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
             .unbind())
@@ -76566,7 +76651,12 @@ fn ifft(
     if let Some(n_val) = n {
         kwargs.set_item("n", n_val)?;
     }
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `ifft` is axis=-1, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != -1 {
+        kwargs.set_item("axis", axis)?;
+    }
     if let Some(norm_val) = norm {
         kwargs.set_item("norm", norm_val)?;
     }
@@ -79257,7 +79347,12 @@ fn rfft(
     if let Some(n_val) = n {
         kwargs.set_item("n", n_val)?;
     }
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `rfft` is axis=-1, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != -1 {
+        kwargs.set_item("axis", axis)?;
+    }
     if let Some(norm_val) = norm {
         kwargs.set_item("norm", norm_val)?;
     }
@@ -79286,7 +79381,12 @@ fn irfft(
     if let Some(n) = n {
         kwargs.set_item("n", n)?;
     }
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `irfft` is axis=-1, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != -1 {
+        kwargs.set_item("axis", axis)?;
+    }
     if let Some(norm) = norm {
         kwargs.set_item("norm", norm)?;
     }
@@ -79319,7 +79419,12 @@ fn hfft(
     if let Some(n_val) = n {
         kwargs.set_item("n", n_val)?;
     }
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `hfft` is axis=-1, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != -1 {
+        kwargs.set_item("axis", axis)?;
+    }
     if let Some(norm_val) = norm {
         kwargs.set_item("norm", norm_val)?;
     }
@@ -79345,7 +79450,12 @@ fn ihfft(
     if let Some(n_val) = n {
         kwargs.set_item("n", n_val)?;
     }
-    kwargs.set_item("axis", axis)?;
+    // numpy's own default for `ihfft` is axis=-1, verified against the
+    // installed interpreter - sending it costs a dict entry and a keyword parse
+    // to communicate the default (`deadlock-audit-v46rn`).
+    if axis != -1 {
+        kwargs.set_item("axis", axis)?;
+    }
     if let Some(norm_val) = norm {
         kwargs.set_item("norm", norm_val)?;
     }
@@ -111516,6 +111626,127 @@ mod tests {
                 expected2.call_method0("tobytes")?.extract::<Vec<u8>>()?,
                 "the all-defaults reduceat fast path must match numpy"
             );
+            Ok(())
+        });
+    }
+
+    /// The 22 functions that stopped forwarding a default `axis` must be unchanged for
+    /// the default AND still honour a non-default one (`deadlock-audit-v46rn`).
+    ///
+    /// Each of these sent `axis` unconditionally, including the value that is already
+    /// NumPy's own default - verified per callee against the installed interpreter, since
+    /// the default is NOT uniform (ufunc.reduce is 0, np.sum is None, the fft family is
+    /// -1). Omitting a keyword whose value equals the callee's default cannot change
+    /// behaviour; omitting one whose value DIFFERS silently changes which axis the work
+    /// happens on and returns a correctly-shaped array of wrong numbers.
+    ///
+    /// So every function is called three ways: with `axis` omitted (the case the change
+    /// makes take a different code path), with the default passed EXPLICITLY (which must
+    /// still be omitted internally and still agree), and with a NON-default axis (which
+    /// must still be forwarded). All three are compared against NumPy's own answer.
+    /// Fixtures are 3x4 so the two axes cannot coincide and so `repr` is complete rather
+    /// than truncated.
+    #[test]
+    fn default_axis_is_omitted_and_non_default_axis_is_forwarded() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_axis_defaults")?;
+            fnp_python(&module)?;
+            let locals = PyDict::new(py);
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as np\n\
+                     a2 = np.arange(12.0).reshape(3, 4)\n\
+                     c2 = np.arange(12.0).reshape(3, 4) + 1.0\n\
+                     keys = np.array([[3, 1, 2, 0], [0, 1, 2, 3]])\n\
+                     NP = {\n\
+                       'linspace': np.linspace, 'geomspace': np.geomspace,\n\
+                       'logspace': np.logspace, 'unstack': np.unstack,\n\
+                       'lexsort': np.lexsort, 'unwrap': np.unwrap,\n\
+                       'fft': np.fft.fft, 'ifft': np.fft.ifft, 'rfft': np.fft.rfft,\n\
+                       'irfft': np.fft.irfft, 'hfft': np.fft.hfft, 'ihfft': np.fft.ihfft,\n\
+                       'chebder': np.polynomial.chebyshev.chebder,\n\
+                       'chebint': np.polynomial.chebyshev.chebint,\n\
+                       'hermder': np.polynomial.hermite.hermder,\n\
+                       'hermint': np.polynomial.hermite.hermint,\n\
+                       'hermeder': np.polynomial.hermite_e.hermeder,\n\
+                       'hermeint': np.polynomial.hermite_e.hermeint,\n\
+                       'lagder': np.polynomial.laguerre.lagder,\n\
+                       'lagint': np.polynomial.laguerre.lagint,\n\
+                       'legder': np.polynomial.legendre.legder,\n\
+                       'legint': np.polynomial.legendre.legint,\n\
+                     }\n\
+                     ARGS = {\n\
+                       'linspace': (np.zeros(3), np.ones(3), 5),\n\
+                       'geomspace': (np.ones(3), np.full(3, 8.0), 4),\n\
+                       'logspace': (np.zeros(3), np.ones(3), 4),\n\
+                       'unstack': (a2,), 'lexsort': (keys,), 'unwrap': (a2,),\n\
+                       'fft': (a2,), 'ifft': (a2,), 'rfft': (a2,),\n\
+                       'irfft': (a2,), 'hfft': (a2,), 'ihfft': (a2,),\n\
+                     }\n\
+                     ARGS['chebder'] = ARGS['chebint'] = (c2,)\n\
+                     ARGS['hermder'] = ARGS['hermint'] = (c2,)\n\
+                     ARGS['hermeder'] = ARGS['hermeint'] = (c2,)\n\
+                     ARGS['lagder'] = ARGS['lagint'] = (c2,)\n\
+                     ARGS['legder'] = ARGS['legint'] = (c2,)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let np_fns = locals.get_item("NP")?.expect("NP table");
+            let args_tbl = locals.get_item("ARGS")?.expect("ARGS table");
+
+            // (name, default the callee already uses, a NON-default axis to force)
+            let cases: [(&str, i64, i64); 22] = [
+                ("linspace", 0, 1),
+                ("geomspace", 0, 1),
+                ("logspace", 0, 1),
+                ("unstack", 0, 1),
+                ("chebder", 0, 1),
+                ("chebint", 0, 1),
+                ("hermder", 0, 1),
+                ("hermint", 0, 1),
+                ("hermeder", 0, 1),
+                ("hermeint", 0, 1),
+                ("lagder", 0, 1),
+                ("lagint", 0, 1),
+                ("legder", 0, 1),
+                ("legint", 0, 1),
+                ("fft", -1, 0),
+                ("ifft", -1, 0),
+                ("rfft", -1, 0),
+                ("irfft", -1, 0),
+                ("hfft", -1, 0),
+                ("ihfft", -1, 0),
+                ("lexsort", -1, 0),
+                ("unwrap", -1, 0),
+            ];
+
+            for (name, default_axis, other_axis) in cases {
+                let ours = module.getattr(name)?;
+                let theirs = np_fns.get_item(name)?;
+                let args = args_tbl.get_item(name)?.cast_into::<PyTuple>()?;
+
+                for axis in [None, Some(default_axis), Some(other_axis)] {
+                    let kwargs = PyDict::new(py);
+                    if let Some(ax) = axis {
+                        kwargs.set_item("axis", ax)?;
+                    }
+                    let got = ours.call(&args, Some(&kwargs))?;
+                    let want = theirs.call(&args, Some(&kwargs))?;
+                    assert_eq!(
+                        got.repr()?.extract::<String>()?,
+                        want.repr()?.extract::<String>()?,
+                        "{name} with axis={axis:?} must match numpy (default is \
+                         {default_axis}, so omitting it must be a no-op and forcing \
+                         {other_axis} must still be forwarded)"
+                    );
+                }
+            }
             Ok(())
         });
     }
