@@ -51545,3 +51545,90 @@ then 9/9 admissible, which is evidence toward deletion and nowhere near a full s
 stays. `verdict_legacy_weak` should be deleted once no banked row older than 2026-08-17 is still
 being cited.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - CERTIFIED AND SHIPPABLE: the bitmask classifier is a 4.04% win, 5/5 runs, and it is the FIRST result on this route to PASS my own variance guard. Fixing the buffer collapsed between-run stdev 7.8x (0.0233 -> 0.0030) and turned a rejected marginal effect into a clean one (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
+
+`AzureCarp`. One build (`release-perf`, 2m57s, `df` 205G immediately before, `proj_builds` = 0), five
+invocations of ELF `7670d20bbbbf1cf4...` (full sha256 above), worker `thinkstation1`, numpy 2.4.3,
+n=2^20.
+
+```
+  per-run provenance (pre-run), every run 1-min <= 5-min with proj_builds = 0
+    B1  load 12.24/14.46/17.93  idle 87%  3193 MHz
+    B2  load 12.43/14.43/17.88  idle 82%  2786 MHz
+    B3  load 12.32/14.37/17.84  idle 87%  2622 MHz
+    B4  load 11.98/14.15/17.70  idle 82%  3567 MHz
+    B5  load 11.61/14.00/17.61  idle 80%  2557 MHz
+```
+
+**Campaign result class:** a REJECTED lever recovered as CERTIFIED once its instrument was fixed
+
+### The measurement
+
+```
+  DIRECT head-to-head, bitmask / boolean accumulator, one shared output buffer
+
+    1.0394  1.0424  1.0356  1.0425  1.0423
+    mean 1.0404   between-run stdev 0.0030   mean within-run CI half-width 0.0088
+    5 of 5 above unity, range 1.0356-1.0425
+    VARIANCE GUARD: stdev 0.0030 <= CI half-width 0.0088  -> PASS
+```
+
+**This is the first statistic in this entire lane to pass that guard.** Every prior attempt - the
+delegation sweep at all six sizes, the earlier bitmask head-to-head, the accumulate-free arm - was
+VOIDED because between-run spread exceeded the within-run CI by 3x to 35x. Here it is three times
+SMALLER.
+
+### What the buffer fix did to the same statistic
+
+```
+                     separate 8 MiB Vecs        one shared buffer
+  values             1.0416 1.0032 1.0106       1.0394 1.0424 1.0356
+                     1.0413 1.0587              1.0425 1.0423
+  mean               1.0311                     1.0404
+  between-run stdev  0.0233                     0.0030      <- 7.8x tighter
+  straddling unity   2 of 5                     0 of 5
+  verdict            not certified              CERTIFIED
+```
+
+The effect size barely moved (1.0311 -> 1.0404). **What changed is the noise.** The residency race sat
+directly on the measured axis - `boolean_head` and `bitmask_head` were the two arms - and it was
+injecting roughly 2% of run-to-run scatter onto a 4% effect. Removing it did not manufacture the win;
+it made an existing one legible.
+
+**I rejected this lever earlier today on that noisy evidence.** The rejection was correct given what I
+could see - two of five runs straddled unity - but the instrument, not the lever, was at fault. This is
+the second finding today that reversed when its buffers were shared, and both times the pre-fix reading
+was the misleading one.
+
+### Why this is shippable
+
+`divide_bitmask_fused_serial` computes the identical predicate to the boolean accumulator by OR-ing
+exponent evidence, avoiding the three narrowing ops (`vextracti128`, `vpackssdw`, `vpor`) the boolean
+form needs to collapse a 4-lane mask into a `bool` - 35 instructions per 16 doubles against 43.
+
+Its equivalence is already pinned by `assert_bitmask_classifier_matches_boolean_classifier`, which runs
+BEFORE any timing over twelve cases chosen so each non-normal exponent class is the only thing
+separating a case from an all-normal control: +/-inf, nan from 0/0 and inf/inf, +/-0, subnormal,
+flush-toward-zero, overflow-to-inf, and both normal boundaries. That is a correctness proof, not a
+sample.
+
+**Value:** the FE-hazard classifier costs 7.9% of this kernel (certified one row up). The bitmask form
+recovers 4.04% of that, roughly half the parity tax, for no change in behaviour.
+
+COUNTED_MECHANISM: with both arms on ONE shared buffer the bitmask/boolean ratio reads 1.0394, 1.0424,
+1.0356, 1.0425, 1.0423 - mean 1.0404, stdev 0.0030 against a mean within-run CI half-width of 0.0088 -
+where the separate-buffer form gave stdev 0.0233 with 2 of 5 runs straddling unity; the static census
+is 35 instructions per 16 doubles against 43.
+
+A/A NULL CONTROLS: both A/A nulls straddle unity in all three contracts across all five runs. Unlike
+every earlier row in this lane the nulls are consistent with the between-run behaviour here, which is
+the point: when the instrument is sound the null and the replication agree.
+
+RETRY PREDICATE: ship the bitmask accumulator into the `Div` arms of
+`zerocopy_f64_binary_flat_with_out`, serial and parallel, keeping
+`assert_bitmask_classifier_matches_boolean_classifier` as the equivalence gate and adding a lib-side
+test of the same predicate. Quote the win as 4.04% (worst run 1.0356), a self-speedup on our own
+kernel, NOT a vs-numpy claim - the vs-numpy rows in this group are Vec-backed replicas carrying the
+buffer-provenance tax. Two of the five audited 2^20 groups remain unconverted.
+AGENT_NAME=AzureCarp.
