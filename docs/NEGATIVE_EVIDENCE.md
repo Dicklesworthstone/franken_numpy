@@ -46877,3 +46877,72 @@ the bare-`&str` getattrs on the engaged float route as a floor lever; they do no
 floor. If someone does attack the 770 ns, it must be by fusing attribute reads, and the fused form
 has to beat three interned getattrs, which is a higher bar than it sounds.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CERTIFIED: the wrapper class pays 925-1944 ns per call for a re-import, non-interned keys and default keywords. `linspace` 1.3616x -> 1.1640x, `fft` 1.3139x -> 1.1270x - and 1382 sites share the shape (`deadlock-audit-v46rn`)
+
+`RedLynx`. The lever the previous row attributed from source, measured in the quietest window
+of the session. The build was taken BEFORE the measuring window and load was re-checked after it.
+
+**Campaign result class:** maintenance-self-speedup (both cells remain regressions vs NumPy)
+
+```
+BEFORE elf=d41c15dea9109f67a30c52ad641318c68127c1c950443fd7e04d8719f37576d4 (2 runs)
+AFTER  elf=e97c7d79115baa32350cea3796fc6651e0e4471166fe336934b7c347d694089d (3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 9.58/10.69/13.25 before the build, 12.06 immediately after it,
+  11.54/11.55/13.17 identical BEFORE and AFTER the measuring block
+CPU MHz system-wide min 1429 max 4278 median 2517 spread 2.993x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on every phase, same_core=true;
+  4290.5/4290.4 (1.0000), 4247.0/4247.0 (1.0000), 4260.2/4260.2 (1.0000),
+  3457.0/3456.8 (1.0001), 4119.7/4120.1 (1.0001), 4118.1/4116.9 (1.0003),
+  4129.9/4102.1 (1.0068), 4264.6/4264.9 (1.0001), 4289.9/4289.9 (1.0000)
+
+  fn         BEFORE excess    AFTER excess        BEFORE ratio   AFTER ratio
+  linspace   3571 / 3576      1783 / 1618 / 1627  1.3616x        1.1640x
+  fft        1582 / 1673       657 /  631 /  731  1.3139x        1.1270x
+
+All A/A nulls in both blocks admit unity. Every cell DECIDABLE_REGRESSION.
+```
+
+**~1944 ns removed from `linspace` and ~925 ns from `fft`, per call.** The incumbent is the
+control and it is stable across the two builds: NumPy reads 9829/10014 before and 9564-10069
+after on `linspace`, 5105/5049 before and 5059-5235 after on `fft`.
+
+**THE THREE COSTS, and what each appears to be worth.** `fft` took only the import and two
+interned keys and gave up **925 ns**, which brackets the import at roughly the 656 ns it was
+measured at on the ufunc methods with ~270 ns for the two `PyString` constructions. `linspace`
+took those plus three default keywords no longer sent and an empty-dict call that now goes
+through `call1`, and gave up **1944 ns** - so the three keyword entries and the dict are worth
+roughly 1288 ns between them, around 400 ns each once NumPy's own keyword parsing is counted.
+**This is arithmetic across two cells, not a decomposition** - no cell isolated a single
+component.
+
+**THE PREDICTION WAS RIGHT ABOUT DIRECTION AND HALF-RIGHT ABOUT SIZE.** It said the fall should
+be "roughly the import plus three dict entries", and that if the residual were still thousands of
+nanoseconds the cost would be in the native path rather than the delegation. `linspace`'s residual
+is **1627 ns** - not thousands, but not small either, and still 6-13x the ufunc method family's
+125-285 ns. So the delegation was most of it and something real remains.
+
+**THE CLASS IS NOW MEASURED, WHICH LICENSES THE SWEEP IT WAS WITHHELD FOR.** There are **1382
+`py.import("numpy")` sites** in `lib.rs`. Two wrapper cells now put that shape at ~656 ns each,
+on top of whatever else the wrapper does. This is the tranche measurement the earlier rows kept
+demanding before touching the class - **it is now supplied, and a sweep of the wrapper family is
+evidence-backed rather than assumed.**
+
+**WHAT IS STILL NOT LICENSED.** That 1382 includes helpers called deep inside native routes,
+where the import may be amortised over real work, and test code. The measurement covers
+DELEGATING WRAPPERS specifically. A sweep should take that family and re-measure, not assume the
+figure transfers to every site with the same text - this ledger has watched tranches of one class
+differ by 65x.
+
+**SIZE CAVEAT, unchanged from the previous row.** Both cells are small-input by design, which
+maximises the share a fixed per-call cost occupies. These are per-call excesses; at large inputs
+the ratios fall toward 1.0.
+
+RETRY PREDICATE: (1) Sweep `py.import("numpy")` -> `cached_numpy` across the DELEGATING WRAPPER
+family and re-measure two cells that were not `linspace` or `fft`; the figure is licensed for the
+family, not for every site sharing the text. (2) `linspace`'s residual 1627 ns is now the open
+question - it sits behind a native path this fallback is reached through, and that path has never
+been read. (3) Do not quote 400 ns per keyword entry as a measured constant; it is a difference of
+differences across two cells. AGENT_NAME=RedLynx.
+
