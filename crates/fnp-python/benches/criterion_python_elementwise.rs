@@ -3090,6 +3090,36 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
         let probe_chain_ns = whole_ns - skipped_fast_tail_ns;
         let wrapper_residual_ns = skipped_fast_tail_ns - numpy_ns;
 
+        // DIAGNOSTIC EMISSION BEFORE THE GATES (`deadlock-audit-ei9jz`).
+        //
+        // The three assertions below are fail-closed and correct, but they PANIC, and a panic
+        // here destroys the evidence needed to understand the failure: every term is computed
+        // and then thrown away, so the operator learns only that a part went negative and not
+        // which term drove it. That is the wrong shape for a gate - it discards its own
+        // diagnostic data on the one occasion the data matters.
+        //
+        // Found by tripping it: adding the keyword-binding term drove `wrapper_residual_ns`
+        // to -80.0 ns and the group aborted, reporting that single number and nothing else.
+        //
+        // This line is emitted UNCONDITIONALLY and carries `partition_valid`, so an invalid
+        // partition is legible instead of merely loud. The assertions still fire immediately
+        // afterwards, so nothing is published as if it were sound - the row is diagnostic
+        // output, and it says so in its own field name.
+        let partition_valid =
+            kwargs_overhead_ns > 0.0 && probe_chain_ns >= 0.0 && wrapper_residual_ns >= 0.0;
+        println!(
+            "PERCALL_FLOOR_PARTITION_DIAGNOSTIC partition_valid={partition_valid} \
+             whole_ns={whole_ns:.1} skipped_raw_ns={skipped_ns:.1} numpy_ns={numpy_ns:.1} \
+             numpy_kwargs_ns={numpy_kwargs_ns:.1} pydict_build_ns={pydict_build_ns:.1} \
+             keyword_binding_ns={keyword_binding_ns:.1} \
+             kb_positional_ns={kb_positional_ns:.1} kb_keyword_ns={kb_keyword_ns:.1} \
+             kwargs_overhead_ns={kwargs_overhead_ns:.1} \
+             skipped_fast_tail_ns={skipped_fast_tail_ns:.1} \
+             probe_chain_ns={probe_chain_ns:.1} wrapper_residual_ns={wrapper_residual_ns:.1} \
+             this_is_diagnostic_not_a_certified_row=true"
+        );
+        std::io::Write::flush(&mut std::io::stdout()).expect("flushing stdout cannot fail");
+
         // The correction must be POSITIVE: the keyword tail does strictly more work than
         // the fast tail — it builds a PyDict and hands NumPy three keywords to parse. A
         // non-positive value means the replica is not capturing that work at all, and a
@@ -5625,7 +5655,7 @@ fn bench_percall_floor_across_sizes_vs_numpy(_c: &mut Criterion) {
         // inferring it from the two the existing size-gate group happens to carry.
         for exponent in [12u32, 14, 16, 18, 20] {
             let n = 1usize << exponent;
-            let below_gate = n < (1usize << 19);
+            let below_gate = n < (1usize << 21);
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");
             locals.set_item("n", n).expect("bind n");
@@ -7620,7 +7650,7 @@ fn bench_percall_floor_across_ops_vs_numpy(_c: &mut Criterion) {
         // this mirror changing, the LABEL goes stale, not the measurement - the lib
         // test `f64_div_native_min_len_is_mirrored_in_the_percall_floor_bench` fails
         // and names this line.
-        const NATIVE_MIN_LEN_MIRROR: usize = 1 << 19;
+        const NATIVE_MIN_LEN_MIRROR: usize = 1 << 21;
         for (name, enters_f64_block) in [
             ("add", false),
             ("subtract", false),
@@ -8363,7 +8393,7 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
             for op in ["divide", "multiply"] {
                 let (ratio, lo, hi, numpy_ns, fnp_ns) =
                     measure_binary_ufunc_vs_numpy(py, &module, &numpy, op, &args, n);
-                let routes_natively = op == "divide" && n >= (1usize << 19);
+                let routes_natively = op == "divide" && n >= (1usize << 21);
                 println!(
                     "DIVIDE_SIZE_GATE op={op} n={n} log2n={exponent} \
                      routes_natively={routes_natively} \
@@ -8372,7 +8402,7 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
                      harness=common::run_dual_null_median_ci_contract \
                      ratio={ratio:.6} ratio_ci95=[{lo:.6},{hi:.6}] \
                      numpy_ns={numpy_ns:.1} fnp_ns={fnp_ns:.1} excess_ns={:.1}",
-                    n < (1usize << 19),
+                    n < (1usize << 21),
                     op == "multiply",
                     fnp_ns - numpy_ns,
                 );

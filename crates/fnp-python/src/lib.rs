@@ -9984,7 +9984,32 @@ fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
 // `F64_ACCUMULATE_NATIVE_MIN_LEN` was set by. The old 1 << 14 admitted 2^14 through
 // 2^18, a band where routing cost 5-10x what delegating would: at 2^18 it made divide
 // 1.0912x slower than NumPy where delegating is ~1.0096x.
-const F64_DIV_NATIVE_MIN_LEN: usize = 1 << 19;
+const F64_DIV_NATIVE_MIN_LEN: usize = 1 << 21;
+
+// RAISED 1<<19 -> 1<<21 on measurement, 2026-08-17 (`deadlock-audit-6y5wp`).
+//
+// Every size the raise covers was measured against a DELEGATING control - `multiply`,
+// which maps to `_ => None` and structurally cannot route natively - in the same
+// invocation, with the allocator pinned so the regime could resolve at all:
+//
+//   n      native-over-delegating, 5 runs each        mean     verdict
+//   2^17   0.9984 1.0004 1.0030 0.9997 1.0009        1.0005   tracks control -> DELEGATES
+//   2^18   0.9993 0.9986 0.9992 1.0015 1.0005        0.9998   tracks control -> DELEGATES
+//   2^19   0.9650 0.9024 0.9059 0.8921 0.8986        0.9128   native COSTS 8.7%   (5/5)
+//   2^20   0.9396 0.8330 0.8375 0.8307 0.8254        0.8532   native COSTS 14.7%  (5/5)
+//   2^21   3.0361 2.6666 2.4116 2.5694 2.8287        2.7025   native WINS 2.70x   (5/5)
+//
+// The cost GROWS with n until the rayon threshold flips it to a large win, so the right
+// shape is "delegate below `1 << 21`, go native at it" - which is also, independently,
+// the band a pre-registered sign test certified 7/7 for the `out=` route. Two routes
+// sharing no arms, no regime and no statistic agreeing is the strongest evidence this
+// campaign has produced.
+//
+// CONSEQUENCE WORTH KNOWING BEFORE EDITING ANYTHING NEAR HERE: `1 << 21` is also the
+// `Div` rayon threshold, so the native allocating route now engages ONLY where the
+// PARALLEL arm runs. The serial Div arm is unreachable from the allocating route
+// entirely, and reachable from the `out=` route only below its decline band at
+// n < 1 << 14. Any measurement of the serial arm must be taken through one of those.
 
 /// The dtype typechar of an operand, read directly and cheaply (`deadlock-audit-ei9jz`).
 ///
@@ -111283,7 +111308,11 @@ mod tests {
 
             let module = PyModule::new(py, "fnp_python_test_f64_output_dtype")?;
             fnp_python(&module)?;
-            let n = F64_DIV_NATIVE_MIN_LEN.max(4096);
+            // Must CLEAR the divide gate, so a decline here would mean the dtype logic is
+            // wrong rather than that the route simply refused a small array. Derived from
+            // the constant, so raising the gate cannot silently turn this into a
+            // below-gate test that passes for the wrong reason.
+            let n = F64_DIV_NATIVE_MIN_LEN;
             let a = numpy
                 .call_method1("arange", (n,))?
                 .call_method1("astype", ("float64",))?;
@@ -111339,8 +111368,9 @@ mod tests {
                 "a list pair must produce numpy's own result whichever way the gate declines"
             );
 
-            // 2) float32: dtype present, wrong typechar.
-            let n = F64_DIV_NATIVE_MIN_LEN.max(4096);
+            // 2) float32: dtype present, wrong typechar. Size clears the gate so the
+            // decline can only be the dtype, never the size.
+            let n = F64_DIV_NATIVE_MIN_LEN;
             let f32_kwargs = PyDict::new(py);
             f32_kwargs.set_item("dtype", "float32")?;
             let a32 = numpy.call_method("arange", (n,), Some(&f32_kwargs))?;
@@ -111391,7 +111421,7 @@ mod tests {
     fn f64_div_native_min_len_is_mirrored_in_the_percall_floor_bench() {
         assert_eq!(
             F64_DIV_NATIVE_MIN_LEN,
-            1 << 19,
+            1 << 21,
             "F64_DIV_NATIVE_MIN_LEN changed; update NATIVE_MIN_LEN_MIRROR in \
              crates/fnp-python/benches/criterion_python_elementwise.rs, which mirrors it \
              to label PERCALL_FLOOR cells as native or delegating"
@@ -111542,8 +111572,17 @@ mod tests {
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
 
+            // Below-gate and at-gate, so the hoisted sniff is exercised on both sides of
+            // the routing decision. Only `float64` can take the native route at all, so
+            // the other dtypes are swept at the small size only - building 2M-element
+            // complex128 operands to exercise a dtype sniff is cost with no coverage.
             for n in [1_usize << 8, F64_DIV_NATIVE_MIN_LEN] {
-                for dtype in ["float64", "float32", "float16", "int64", "complex128"] {
+                let dtypes: &[&str] = if n >= F64_DIV_NATIVE_MIN_LEN {
+                    &["float64"]
+                } else {
+                    &["float64", "float32", "float16", "int64", "complex128"]
+                };
+                for dtype in dtypes.iter().copied() {
                     let a = numpy
                         .call_method1("arange", (1, n + 1))?
                         .call_method1("astype", (dtype,))?;
@@ -114374,7 +114413,12 @@ mod tests {
             let module = PyModule::new(py, "fnp_python_test_cached_numpy_parity")?;
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
-            let n = F64_DIV_NATIVE_MIN_LEN.max(4096);
+            // DECOUPLED from `F64_DIV_NATIVE_MIN_LEN` (`deadlock-audit-6y5wp`). This test
+            // exercises `remainder`, which `f64_binary_route_is_worth_taking` never gates -
+            // only `Div` is size-gated. It wanted "a largish array" and reached for the
+            // nearest constant, so raising the divide gate would have made it allocate
+            // 16 MiB operands for coverage it does not add.
+            let n = 4096usize;
             let a = numpy
                 .call_method1("arange", (n,))?
                 .call_method1("astype", ("float64",))?;
