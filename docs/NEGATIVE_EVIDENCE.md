@@ -47643,3 +47643,53 @@ performance; at 1% of a 1582-3571 ns excess it cannot be measured against the be
 this host produces. Do not treat the static check above as verification of `34a67fdc` — it is on
 main uncompiled until the three named gates run.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - `34a67fdc` COMPILES and its swallow-detection test PASSES: the "same_kind" lever is no longer uncompiled code on main. Clippy and the ratio remain owed (`deadlock-audit-ei9jz`)
+
+`AzureCarp`. The remote job I started the moment the halt lifted, queued 1477 s behind the
+bulk-resume backlog, has landed. No new build was started — the throttle stands.
+
+**Campaign result class:** discharge of a verification debt (NOT a certified win — no ratio yet)
+
+```
+  RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p fnp-python --lib casting_and_order
+  test tests::casting_and_order_defaults_are_none_without_swallowing_non_defaults ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 600 filtered out
+  [RCH] remote vmi1152480 (1477.3s)
+```
+
+**I read the COUNT, not the word `ok`.** A `cargo test` line saying `0 passed` is a filter bug rather
+than a pass, and I banked that trap earlier this session after nearly reporting one — `1 passed` with
+600 filtered is a real run of exactly the intended test.
+
+### What this discharges, and what it does not
+
+**Discharged:** the change compiles — it had to, for the test binary to link and run — and the
+swallow-detection test passes. That test is the one that matters, because the failure mode it pins is
+silent: an implementation testing `is_none()` and forgetting `Some(non_default)` would take the
+native fast path for a call asking for different casting or memory order, never forward the keyword,
+and return a correctly-shaped, plausibly-valued, WRONG answer. It asserts both directions — defaults
+still match NumPy, `order='F'` still flips `f_contiguous`, `casting='no'` on int8+float64 still
+RAISES instead of returning an array — with both fixtures guarded so neither assertion can pass
+vacuously.
+
+The static self-consistency read I banked one row up is now superseded by an actual compile. It was
+honest about being "not a compile"; this is the compile.
+
+**STILL OWED, and this is not a win until it lands:** `clippy --all-targets` has not run, and neither
+has the measurement. The lever's value is UNKNOWN. The registered prediction stands unchanged —
+100-160 insns/call off the binary counter baseline of **1,796 insns/call** excess for `fnp.add` over
+`numpy.add` at n=256, about 6-9% — and it is a range because my last three predictions on this
+codebase missed 5-8x low, 5-8x low and 1.8x high.
+
+COUNTED_MECHANISM: none claimed — this row reports a test result, not a ratio. The mechanism it
+verifies the correctness of (a `movabs` of "same_kin" carrying 17.93% of `PyUFunc::__call__`'s
+instruction samples) is banked two rows above.
+
+A/A NULL CONTROLS: not applicable — a correctness test, no timed arms.
+
+RETRY PREDICATE: do not re-run this test to re-establish the same fact. `34a67fdc` may now be
+described as compiled and tested, and must NOT be described as measured or as a win. The next action
+on it is `clippy --all-targets` plus the binary counter probes against 1,796 insns/call, and that
+needs a build window this pane does not currently have.
+AGENT_NAME=AzureCarp.
