@@ -45243,3 +45243,83 @@ claiming anything about it; it is the last method with no row. (3) This ELF also
 unmeasured 78-site sweep - a tranche measurement is still owed and this row does not supply it.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - CERTIFIED for `reduceat`: dropping the default `axis=0` removes 426 ns and takes it 1.6821x -> 1.3509x. And the `accumulate` cell in the SAME run is VOID - its incumbent A/A null EXCLUDES unity and the gate passed it anyway (`deadlock-audit-v46rn`, `deadlock-audit-7xcq2`)
+
+`RedLynx`. Discharges the prediction registered with `e19b9dfe`. One cell certifies, one is
+voided by its own control, and the void is the more useful half.
+
+**Campaign result class:** maintenance-self-speedup (reduceat) + a live instance of a known
+gate defect (accumulate)
+
+```
+bench_elf_sha256=05b1b2b09dc1d3358c13288b4961e4e34ba89dba2c818f4d56d6a305a2f4b6d4
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256  f64
+harness=common::run_dual_null_median_ci_contract
+LOADAVG 37.89/28.50/28.23 BEFORE and 37.89/28.50/28.23 AFTER - identical across the run
+CPU MHz system-wide min 3711 max 3893 median 3865 spread 1.049x (unusually uniform - every
+  core boosted, unlike the 2.8-2.9x spreads in earlier rows where idle cores were parked)
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on every phase, same_core=true,
+  3890.0/3890.1 spread 1.0000 and 3899.8/3899.8 spread 1.0000
+
+  method      BEFORE excess   AFTER excess   ratio before -> after   [numpy_ns b -> a]
+  reduceat        771             345         0.594538 -> 0.740240    [1122 -> 987]
+  accumulate      767             542         0.646704 -> 0.733201    [1397 -> 1487]  VOID
+  reduce          291             335         (control, no dict)      [1042 -> 1132]
+  outer           321             371         (control, no dict)      [1774 -> 1963]
+```
+
+**`fnp.add.reduceat` is 1.3509x, from 1.6821x. 426 ns removed.**
+
+**THE WITHIN-RUN CONTROL CARRIES THIS, because NumPy's arm moved in both directions between
+windows** (-12% on reduceat, +9% on reduce, +6% on accumulate, +11% on outer), so no absolute
+is safe on its own. `reduce` and `outer` are the internal control: they are pure delegation that
+never built the kwargs dict, so the lever cannot touch them. They moved **+44 and +50 ns** in
+excess while `reduceat` moved **-426**. That sign split is the result.
+
+**THE PREDICTION, HALF CONFIRMED AND HALF WRONG.** I registered: *"reduceat's 771 ns should fall
+toward reduce's ~291 ns, and accumulate's 767 ns should fall by a similar absolute amount, since
+both paid the same dict."*
+
+- **Confirmed:** reduceat 771 -> 345, landing just above reduce's own excess. Exactly as stated.
+- **Wrong:** accumulate did NOT fall by a similar amount, and the reason is structural rather
+  than noise - `accumulate` still runs its native routing block (the int-cumsum pre-decline and
+  the size gate) before it delegates, which `reduceat` has none of. The difference between the
+  two AFTER figures, 542 - 345 = **~197 ns, is what accumulate's routing block costs**. That
+  refines the "~450 ns routing prologue" this ledger carried after row41: most of that 450 was
+  the shared kwargs dict, and only ~197 ns is routing. (Offered as the leading account -
+  accumulate's own number is voided below, so this decomposition is a lead, not a result.)
+
+**THE ACCUMULATE CELL IS VOID, AND IT IS A LIVE INSTANCE OF `deadlock-audit-7xcq2`.**
+
+```
+  add_accumulate  incumbent A/A null ci95=[0.993844,0.999316]   <-- EXCLUDES UNITY
+  add_reduceat    incumbent A/A null ci95=[1.000000,1.001019]   touches unity, admissible
+  add_reduce      incumbent A/A null ci95=[1.000000,1.005348]   touches unity, admissible
+  add_outer       incumbent A/A null ci95=[0.986115,1.007756]   straddles, healthy
+```
+
+The accumulate A/A null times **NumPy's own call against itself** and its 95% interval sits
+entirely BELOW 1.0 - the same call is systematically faster in one phase than the other. That
+is the instrument telling us this cell's phases are not exchangeable, so no effect measured
+against it can be trusted. **The gate nonetheless returned `verdict=DECIDABLE_REGRESSION`**,
+because the straddle veto that would catch it is dormant at `report_median_gate_pair` - which is
+exactly what `deadlock-audit-7xcq2` was filed for. **I am not weakening or "fixing" the gate from
+inside a measurement turn; I am voiding my own cell and recording the sighting.**
+
+So: accumulate's 767 -> 542 is NOT banked. Its previous 767 ns figure stands as the last
+admissible reading, and the ~197 ns routing decomposition above rests on a voided number and must
+be re-derived before use.
+
+**WHY THE HEALTHY CELLS ARE STILL READABLE.** The three other cells' nulls admit unity, the load
+was identical before and after, and the per-arm witness shows both arms on one core at 1.0000
+spread. The bias is specific to one cell, not to the run.
+
+RETRY PREDICATE: (1) Re-run the accumulate cell and check its incumbent null BEFORE reading its
+ratio; if the exclusion reproduces, the cell needs a different schedule, not a re-read. (2) The
+~197 ns routing decomposition is a lead resting on a voided cell - re-derive it from a run whose
+accumulate null straddles. (3) `deadlock-audit-7xcq2` now has a second documented sighting with
+its exact interval; anyone reviving the dormant veto can use this row as a test case. (4) The
+78-site probe sweep is STILL unmeasured - two owed measurements went to one this turn.
+AGENT_NAME=RedLynx.
+
