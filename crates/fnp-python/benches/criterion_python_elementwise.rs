@@ -1361,6 +1361,22 @@ fn main() {
                 "bench_binary_counter_divide_numpy",
                 bench_binary_counter_divide_numpy,
             ),
+            (
+                "bench_binary_counter_multiply_fnp",
+                bench_binary_counter_multiply_fnp,
+            ),
+            (
+                "bench_binary_counter_multiply_numpy",
+                bench_binary_counter_multiply_numpy,
+            ),
+            (
+                "bench_binary_counter_multiply_fnp_unsafe",
+                bench_binary_counter_multiply_fnp_unsafe,
+            ),
+            (
+                "bench_binary_counter_multiply_numpy_unsafe",
+                bench_binary_counter_multiply_numpy_unsafe,
+            ),
             ("bench_reduce_counter_fnp", bench_reduce_counter_fnp),
             ("bench_reduce_counter_numpy", bench_reduce_counter_numpy),
             ("bench_outer_counter_fnp", bench_outer_counter_fnp),
@@ -6810,7 +6826,43 @@ fn method_counter_probe(method: &str, use_fnp: bool) {
 // result - outside the timed loop, because a per-iteration checksum is only free if
 // it costs the same on both arms, which is an assumption about the result objects
 // rather than a fact - and asserts it against NumPy's answer for the same operands.
+// SPLITTING THE EXCESS INTO ITS TWO NAMED HALVES, IN THE COUNTED CURRENCY
+// (`deadlock-audit-ei9jz`).
+//
+// The probes above count the WHOLE fnp-over-numpy excess. `bench_percall_floor_partition`
+// splits that excess in WALL CLOCK into a probe chain and a wrapper residual, and with the
+// probe chain 83% removed (521 -> 91 ns) the wrapper residual at 370 ns is now the largest
+// remaining component and this bead's open question. Wall clock is the wrong instrument to
+// answer it on this host: the ledger has three retractions today from differencing
+// nearly-equal timed quantities, and the machine has swung between loadavg 8 and 525.
+// Retired instructions do not move with load.
+//
+// THE SEPARATOR IS ALREADY IN SHIPPED CODE and needs no instrumentation: the probe block in
+// `PyUFunc::__call__` is guarded on `casting == "same_kind"`, so `casting="unsafe"` skips
+// every probe and falls straight to the delegation tail (`deadlock-audit-wsd7h`). So
+//
+//   wrapper_residual = fnp_unsafe - numpy_unsafe
+//   probe_chain      = (fnp_plain - numpy_plain) - wrapper_residual
+//
+// WHY THE NUMPY ARM ALSO TAKES `casting=` and this is not a wasted arm: passing ANY keyword
+// forces the keyword-parsing tail on both sides and allocates nothing per call only if the
+// dict is hoisted. Differencing `fnp_unsafe` against `numpy_PLAIN` would charge the keyword
+// path to our wrapper and overstate the residual. Four arms, differenced pairwise at equal
+// keyword shape, is the form where that cost cancels — the same cancellation
+// `bench_percall_floor_partition` applies in wall clock.
+//
+// The kwargs dict is built ONCE outside the loop, identically on both arms, so what the
+// diff sees is the keyword-passing path and not repeated dict construction.
+//
+// NEGATIVE CASE a naive version would fail: `casting="unsafe"` must not change the ANSWER.
+// Both arms still checksum their last result against NumPy's PLAIN oracle, so an arm that
+// silently took a different numeric path fails the assertion rather than reporting a
+// flatteringly small count.
 fn binary_counter_probe(op: &str, use_fnp: bool) {
+    binary_counter_probe_with_casting(op, use_fnp, None);
+}
+
+fn binary_counter_probe_with_casting(op: &str, use_fnp: bool, casting: Option<&str>) {
     const N: usize = 256;
     Python::initialize();
     Python::attach(|py| {
@@ -6848,9 +6900,19 @@ fn binary_counter_probe(op: &str, use_fnp: bool) {
         };
         let oracle = checksum_of(&theirs.call1((&a, &b)).expect("oracle call"));
 
+        // Hoisted so the diff sees the keyword-PASSING path, not repeated dict building.
+        let kwargs = casting.map(|c| {
+            let d = PyDict::new(py);
+            d.set_item("casting", c).expect("bind casting");
+            d
+        });
+
         let mut last = None;
         for _ in 0..ACCUMULATE_COUNTER_CALLS {
-            let r = target.call1((&a, &b)).expect("binary call");
+            let r = match kwargs.as_ref() {
+                Some(kw) => target.call((&a, &b), Some(kw)).expect("binary call"),
+                None => target.call1((&a, &b)).expect("binary call"),
+            };
             black_box(&r);
             last = Some(r);
         }
@@ -6861,10 +6923,11 @@ fn binary_counter_probe(op: &str, use_fnp: bool) {
              its instruction count describes the wrong computation"
         );
         println!(
-            "BINARY_COUNTER_PROBE op={op} arm={} n={N} calls={ACCUMULATE_COUNTER_CALLS} \
-             checksum={last:016x} setup_matches_sibling_probe=true \
-             run_this_under_perf_stat=true",
-            if use_fnp { "fnp" } else { "numpy" }
+            "BINARY_COUNTER_PROBE op={op} arm={} casting={} n={N} \
+             calls={ACCUMULATE_COUNTER_CALLS} checksum={last:016x} \
+             setup_matches_sibling_probe=true run_this_under_perf_stat=true",
+            if use_fnp { "fnp" } else { "numpy" },
+            casting.unwrap_or("default_same_kind"),
         );
     });
 }
@@ -6875,6 +6938,25 @@ fn bench_binary_counter_add_fnp(_c: &mut Criterion) {
 
 fn bench_binary_counter_add_numpy(_c: &mut Criterion) {
     binary_counter_probe("add", false);
+}
+
+// The four arms that split `multiply`'s excess (`deadlock-audit-ei9jz`). `multiply` and not
+// `add`/`divide` because `multiply` is NOT in the fast-path binop set, so it exercises the
+// DELEGATING route the 370 ns wrapper residual actually belongs to.
+fn bench_binary_counter_multiply_fnp(_c: &mut Criterion) {
+    binary_counter_probe("multiply", true);
+}
+
+fn bench_binary_counter_multiply_numpy(_c: &mut Criterion) {
+    binary_counter_probe("multiply", false);
+}
+
+fn bench_binary_counter_multiply_fnp_unsafe(_c: &mut Criterion) {
+    binary_counter_probe_with_casting("multiply", true, Some("unsafe"));
+}
+
+fn bench_binary_counter_multiply_numpy_unsafe(_c: &mut Criterion) {
+    binary_counter_probe_with_casting("multiply", false, Some("unsafe"));
 }
 
 fn bench_binary_counter_divide_fnp(_c: &mut Criterion) {
