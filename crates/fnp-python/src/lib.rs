@@ -432,6 +432,9 @@ impl PyUFunc {
                 UFuncKind::Divide => Some(BinaryOp::Div),
                 _ => None,
             };
+            // The size band lives inside `try_zerocopy_f64_binary_into` rather than here,
+            // so that no caller of that helper can bypass the routing decision. Tests
+            // exercise the helper directly and would not see a gate placed at this site.
             if let Some(op) = binop
                 && let Some(out_val) = try_zerocopy_f64_binary_into(
                     py,
@@ -10032,6 +10035,66 @@ fn accumulate_native_route_is_worth_taking(a: &Bound<'_, PyAny>) -> bool {
     }
 }
 
+/// The `out=` route's decline BAND for `Div` (`deadlock-audit-6y5wp`).
+///
+/// CERTIFIED, not estimated. A pre-registered sign test on seven qualifying invocations
+/// measured our native `out=` kernel against the real cost of DECLINING - a trip through
+/// `PyUFunc::__call__` and out the delegation tail, priced by `add`, which takes the
+/// `_ => None` arm and so cannot route natively. Taking the native route cost MORE than
+/// declining in 7 of 7 runs at each of 2^14, 2^18 and 2^19 (by 2-12%, 7-11% and 8-14%),
+/// and LESS in 7 of 7 at 2^10. Every one of the six registered predictions held.
+///
+/// WHY A BAND AND NOT A THRESHOLD. The route is worth taking at BOTH ends and not in the
+/// middle, for two different reasons: below the band the fixed ~500 ns delegation wrapper
+/// dominates a call that is itself under a microsecond, so declining costs more than our
+/// slower kernel does; above `1 << 21` the rayon arm engages and we beat NumPy outright
+/// (`divide_vs_numpy` 1.1504-1.5411x across 8 runs). A `>=` gate cannot express that shape.
+///
+/// ENDPOINTS ARE DELIBERATELY CONSERVATIVE. The lower edge is 2^14 - the smallest size
+/// CERTIFIED not worth taking - rather than an extrapolation into the untested 2^11-2^13
+/// gap, so the native route is kept wherever it has not been proven harmful. The upper
+/// edge is the kernel's own rayon threshold for `Div`; the two must stay equal, which
+/// `f64_out_decline_band_upper_edge_matches_the_div_rayon_threshold` pins.
+///
+/// 2^20 sits inside the band on an INFERENCE rather than a certification: its delegation
+/// control failed the health test (wrapper median 3882 ns against a 1533 ns bound), so the
+/// sign result there is void. But the void is about whether a ~500 ns wrapper can be
+/// RESOLVED at that size, not about which side wins - the wrapper is fixed at 341-611 ns
+/// across 2^10-2^18 while our kernel gives up roughly 112,000 ns at 2^20, so declining
+/// wins there by about 200x the wrapper. That reasoning is recorded so the next reader can
+/// reject it if they disagree.
+const F64_DIV_OUT_DECLINE_MIN_LEN: usize = 1 << 14;
+
+/// Exclusive upper edge of the band: the `Div` rayon threshold in
+/// `zerocopy_f64_binary_flat_with_out`. At and above this the parallel arm engages and the
+/// native route WINS, so it must keep running there.
+const F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN: usize = 1 << 21;
+
+/// Should the `out=` fast path take the native f64 kernel at this size?
+///
+/// Separate from `f64_binary_route_is_worth_taking` on purpose: that gate answers for the
+/// ALLOCATING route, where both arms allocate and the comparison is against NumPy. This one
+/// answers for the `out=` route, where nothing allocates and the comparison is against
+/// declining. They are different questions and their thresholds were measured separately.
+fn f64_out_route_is_worth_taking(op: BinaryOp, a: &Bound<'_, PyAny>) -> bool {
+    // Only `Div` was measured; the other four `out=` ops are compute-heavy shapes NumPy
+    // runs single-threaded and are untouched at any size.
+    if !matches!(op, BinaryOp::Div) {
+        return true;
+    }
+    match a
+        .getattr(intern!(a.py(), "size"))
+        .and_then(|size| size.extract::<usize>())
+    {
+        Ok(size) => {
+            !(F64_DIV_OUT_DECLINE_MIN_LEN..F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN).contains(&size)
+        }
+        // No `size` means this is not the plain ndarray the route wants; let the existing
+        // checks decline it rather than guessing, exactly as the allocating gate does.
+        Err(_) => true,
+    }
+}
+
 fn f64_binary_route_is_worth_taking(op: BinaryOp, a: &Bound<'_, PyAny>) -> bool {
     if !matches!(op, BinaryOp::Div) {
         return true;
@@ -13534,6 +13597,13 @@ fn try_zerocopy_f64_binary_into(
     out: &Bound<'_, PyAny>,
     op: BinaryOp,
 ) -> PyResult<Option<Py<PyAny>>> {
+    // SIZE BAND FIRST, before the module handle and the dtype/shape probes below
+    // (`deadlock-audit-6y5wp`). Declining here returns `None`, which the caller turns into
+    // the ordinary delegation to NumPy - the incumbent's own answer, so this is fail-safe
+    // for correctness and only ever a routing choice.
+    if !f64_out_route_is_worth_taking(op, a) {
+        return Ok(None);
+    }
     let numpy = cached_numpy(py)?.clone();
     let Some((written, _shape)) =
         zerocopy_f64_binary_flat_with_out(py, &numpy, a, b, op, Some(out))?
@@ -110546,27 +110616,29 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BinaryOp, F64_ACCUMULATE_NATIVE_MIN_LEN, F64_DIV_NATIVE_MIN_LEN, MaskedStream, NarrowSetOp,
-        PyFromPyFunc, PyVectorize, PythonNativeGemmOp, UFuncKind,
+        BinaryOp, F64_ACCUMULATE_NATIVE_MIN_LEN, F64_DIV_NATIVE_MIN_LEN,
+        F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN, F64_DIV_OUT_DECLINE_MIN_LEN, MaskedStream,
+        NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, UFuncKind,
         accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, cached_float64_dtype, cached_numpy, ceil_native, choose,
         compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
         diagflat, diagonal, digitize, dtype_kind_of, extract, extract_numeric_array,
         extract_precise_numeric_array, f64_binary_route_is_worth_taking,
         f64_divide_fast_accepts_without_fp_error, f64_divide_non_fast_raises_fp_error,
-        f64_divide_quotient_bits_are_normal, f64_divide_raises_fp_error, fill_diagonal,
-        flatnonzero, flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices,
-        interned_ufunc_name, interp, is_exact_numpy_ndarray, isfinite_native, isinf_native,
-        isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
-        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, numpy_dtype_is_f64, place, put, put_along_axis, putmask,
-        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
-        python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
-        required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
-        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
-        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
-        try_native_lstsq_tsqr, try_zerocopy_f64_binary_into, unravel_index, where_py,
-        wide_int_table_bounds, zerocopy_f64_binary_flat,
+        f64_divide_quotient_bits_are_normal, f64_divide_raises_fp_error,
+        f64_out_route_is_worth_taking, fill_diagonal, flatnonzero, flip, fliplr, flipud,
+        floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name, interp,
+        is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native, isneginf_native,
+        isposinf_native, ix_, ldexp, logaddexp, logaddexp2, masked_pairwise_parallel,
+        masked_pairwise_streamed, meshgrid, modf, nan_to_num, narrow_bitmap_setop, nextafter,
+        numpy_dtype_is_f64, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
+        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate,
+        radians_native, ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted,
+        select, sign, signbit_native, sinc, solve_triangular, spacing, take, take_along_axis,
+        tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from,
+        triu_indices, triu_indices_from, trunc_native, try_native_lstsq_tsqr,
+        try_zerocopy_f64_binary_into, unravel_index, where_py, wide_int_table_bounds,
+        zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -162817,10 +162889,15 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
     /// endorse it.
     ///
     /// `f64_binary_route_is_worth_taking` has exactly ONE call site — the
-    /// allocating branch of `PyUFunc::__call__`. The `out=` branch reaches
-    /// `try_zerocopy_f64_binary_into` without consulting it, so the native divide
-    /// kernel runs at EVERY size on the `out=` path while the allocating path
-    /// concedes to NumPy below `F64_DIV_NATIVE_MIN_LEN`.
+    /// allocating branch of `PyUFunc::__call__`. The `out=` branch does not consult
+    /// it and never did; it now consults its OWN gate,
+    /// `f64_out_route_is_worth_taking`, whose band was measured against the cost of
+    /// declining rather than against NumPy. So the two routes still disagree at this
+    /// size, but deliberately and for a measured reason: 2^10 is BELOW the decline
+    /// band, where taking the native route beat declining in 7 of 7 qualifying runs
+    /// even though our kernel is slower than NumPy's, because the fixed ~500 ns
+    /// delegation wrapper costs more than the kernel deficit on a sub-microsecond
+    /// call.
     ///
     /// Why this deserves a test rather than a shrug: the gate exists because the
     /// native divide LOSES to NumPy below its threshold, and on 2026-08-17 the
@@ -162901,6 +162978,126 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
         });
     }
 
+    /// The `out=` decline band engages outside itself and declines inside it, at the
+    /// exact edges (`deadlock-audit-6y5wp`).
+    ///
+    /// The band is an interval, not a threshold, so it has TWO edges and both are
+    /// off-by-one hazards. `contains` is half-open, so the lower edge must DECLINE and
+    /// the upper edge must ENGAGE - get either backwards and the route silently does the
+    /// opposite of what was certified at exactly the sizes the certification names.
+    #[test]
+    fn out_route_divide_declines_inside_the_certified_band_and_engages_at_its_edges() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(numpy) => numpy,
+                Err(_) => return,
+            };
+            // (len, must_engage). The upper edge is the rayon threshold, where the
+            // parallel arm engages and we beat NumPy outright, so it must NOT decline.
+            let cases: &[(usize, bool)] = &[
+                (1024, true),
+                (F64_DIV_OUT_DECLINE_MIN_LEN - 1, true),
+                (F64_DIV_OUT_DECLINE_MIN_LEN, false),
+                (F64_DIV_OUT_DECLINE_MIN_LEN + 1, false),
+                (F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN - 1, false),
+                (F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN, true),
+            ];
+            for (len, must_engage) in cases.iter().copied() {
+                let a = numpy
+                    .call_method1("arange", (1.0f64, len as f64 + 1.0))
+                    .expect("numerator");
+                let b = numpy
+                    .call_method1("arange", (2.0f64, len as f64 + 2.0))
+                    .expect("divisor");
+                let out = numpy.call_method1("empty", (len,)).expect("caller buffer");
+                let routed = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div)
+                    .expect("the out= route must not error");
+                assert_eq!(
+                    routed.is_some(),
+                    must_engage,
+                    "len={len}: expected the out= divide route to {}, band is \
+                     [{F64_DIV_OUT_DECLINE_MIN_LEN}, {F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN})",
+                    if must_engage { "ENGAGE" } else { "DECLINE" }
+                );
+                if must_engage {
+                    let expected = numpy
+                        .call_method1("divide", (&a, &b))
+                        .expect("numpy.divide oracle");
+                    assert!(
+                        numpy
+                            .call_method1("array_equal", (&out, &expected))
+                            .and_then(|equal| equal.extract::<bool>())
+                            .expect("numpy.array_equal"),
+                        "len={len}: the native out= kernel diverged from numpy.divide"
+                    );
+                }
+            }
+        });
+    }
+
+    /// The band gate must touch `Div` and nothing else (`deadlock-audit-6y5wp`).
+    ///
+    /// Only `Div` was measured. The other four ops on the `out=` fast path are
+    /// compute-heavy shapes NumPy runs single-threaded, where we win; gating them on a
+    /// band measured for division would hand back wins nobody tested.
+    #[test]
+    fn out_route_band_gate_declines_only_divide() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(numpy) => numpy,
+                Err(_) => return,
+            };
+            let inside = numpy
+                .call_method1("empty", (F64_DIV_OUT_DECLINE_MIN_LEN,))
+                .expect("an array inside the band");
+            assert!(
+                !f64_out_route_is_worth_taking(BinaryOp::Div, &inside),
+                "Div must decline inside the band"
+            );
+            for op in [
+                BinaryOp::Remainder,
+                BinaryOp::Power,
+                BinaryOp::Maximum,
+                BinaryOp::Minimum,
+            ] {
+                assert!(
+                    f64_out_route_is_worth_taking(op, &inside),
+                    "{op:?} must keep the out= native route inside divide's band"
+                );
+            }
+            // A non-array operand has no `size`; defer rather than decline on a failed
+            // lookup, the same way the allocating gate does.
+            let not_an_array = numpy.getattr("pi").expect("numpy.pi");
+            assert!(
+                f64_out_route_is_worth_taking(BinaryOp::Div, &not_an_array),
+                "an operand without `size` must not be declined by the band gate"
+            );
+        });
+    }
+
+    /// The band's upper edge must equal the `Div` rayon threshold in
+    /// `zerocopy_f64_binary_flat_with_out` (`deadlock-audit-6y5wp`).
+    ///
+    /// They are written in two places and mean one thing: the size at and above which the
+    /// parallel arm engages and the native route starts WINNING. If the kernel's threshold
+    /// moves and this constant does not, the band would keep declining into sizes where we
+    /// beat NumPy - a silent loss of a measured win, invisible to any parity test.
+    #[test]
+    fn f64_out_decline_band_upper_edge_matches_the_div_rayon_threshold() {
+        assert_eq!(
+            F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN,
+            1 << 21,
+            "the band's upper edge and the Div arm of `parallel_min` in \
+             `zerocopy_f64_binary_flat_with_out` must stay equal; update both together"
+        );
+        assert!(
+            F64_DIV_OUT_DECLINE_MIN_LEN < F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN,
+            "the decline band must be non-empty"
+        );
+    }
+
     /// The native `out=` divide kernel must agree with NumPy on BOTH sides of
     /// `F64_DIV_NATIVE_MIN_LEN` (`deadlock-audit-6y5wp`).
     ///
@@ -162919,13 +163116,21 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 Ok(numpy) => numpy,
                 Err(_) => return,
             };
+            // 2^19 and its neighbours now sit INSIDE the `out=` decline band, so this
+            // walks both regimes: sizes below the band must still engage and match NumPy,
+            // sizes inside it must decline. Keeping the band sizes here is the point - they
+            // are where the routing changed, so they are where a regression would land.
             for len in [
                 7usize,
                 1024,
+                F64_DIV_OUT_DECLINE_MIN_LEN - 1,
                 F64_DIV_NATIVE_MIN_LEN - 1,
                 F64_DIV_NATIVE_MIN_LEN,
                 F64_DIV_NATIVE_MIN_LEN + 1,
             ] {
+                let in_decline_band = (F64_DIV_OUT_DECLINE_MIN_LEN
+                    ..F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN)
+                    .contains(&len);
                 let a = numpy
                     .call_method1("arange", (1.0f64, len as f64 + 1.0))
                     .expect("numpy.arange for the numerator");
@@ -162936,15 +163141,24 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                     .call_method1("empty", (len,))
                     .expect("numpy.empty for the caller buffer");
 
-                let engaged = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div)
-                    .expect("the out= route must not error")
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "the out= divide route declined at len={len}, so this size is \
-                                silently served by NumPy and the row claiming our kernel runs \
-                                at every size is wrong"
-                        )
-                    });
+                let routed = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div)
+                    .expect("the out= route must not error");
+                if in_decline_band {
+                    assert!(
+                        routed.is_none(),
+                        "len={len} is inside the CERTIFIED decline band, where taking the \
+                         native route measured more expensive than delegating in 7 of 7 \
+                         qualifying runs - it must decline"
+                    );
+                    continue;
+                }
+                let engaged = routed.unwrap_or_else(|| {
+                    panic!(
+                        "the out= divide route declined at len={len}, which is OUTSIDE the \
+                         decline band - below the band the fixed delegation wrapper costs \
+                         more than our kernel, so declining there is a regression"
+                    )
+                });
                 assert!(
                     engaged.bind(py).is(&out),
                     "len={len}: the out= route must return the caller's buffer"
