@@ -1357,6 +1357,10 @@ fn main() {
                 bench_accumulate_counter_numpy,
             ),
             (
+                "bench_ufunc_at_percall_floor_vs_numpy",
+                bench_ufunc_at_percall_floor_vs_numpy,
+            ),
+            (
                 "bench_reduceat_percall_floor_vs_numpy",
                 bench_reduceat_percall_floor_vs_numpy,
             ),
@@ -5909,6 +5913,175 @@ fn call_ufunc_method<'py>(
             .call_method1(method, (operand,))
             .expect("ufunc method call")
     }
+}
+
+/// Restores a mutable target from a pristine copy. Must be called BEFORE `Instant::now()`
+/// so the restore is outside the timed region - that is the whole reason this group can
+/// exist (`deadlock-audit-v46rn`).
+fn restore_target<'py>(
+    numpy: &pyo3::Bound<'py, PyModule>,
+    target: &pyo3::Bound<'py, pyo3::PyAny>,
+    pristine: &pyo3::Bound<'py, pyo3::PyAny>,
+) {
+    numpy
+        .call_method1("copyto", (target, pristine))
+        .expect("restore target");
+}
+
+// `ufunc.at` is the last method entry point with no row (`deadlock-audit-v46rn`). Row 41
+// deliberately left it out because it MUTATES its target and returns None: under an
+// interleaved ABBA schedule each arm would accumulate a different number of applications,
+// the arms' checksums would diverge legitimately, and the contract would be comparing two
+// STATES rather than two implementations. A green row measuring the wrong thing is worse
+// than no row, and this ledger has enough of those.
+//
+// The fix is the restore-outside-the-timer harness row 41 asked for: each arm copies a
+// pristine buffer into its own target BEFORE starting the clock, times only the `at` call,
+// and checksums the mutated target afterwards. Both arms therefore start from an identical
+// state every round, so their checksums MATCH by construction - which is what makes the
+// contract's checksum agreement meaningful here rather than accidental.
+//
+// Two cells, because `at` has two regimes and one row cannot speak for both:
+//   f64 n=2^8      no native path applies - measures the wrapper floor, comparable with
+//                  the reduce/outer/accumulate/reduceat rows at the same size
+//   int64 n=2^20   the regime `try_parallel_int_scatter_at` was written for (i64 target,
+//                  order-free op, large target), so this is where a native route can engage
+//
+// DUPLICATE INDICES ON PURPOSE: `at` exists to apply unbuffered accumulation, so with
+// repeated indices its result differs from plain fancy indexing. Indices without duplicates
+// would measure a path that is not what anyone uses `at` for.
+fn bench_ufunc_at_percall_floor_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        for (dtype, exponent, idx_exponent) in [("float64", 8u32, 6u32), ("int64", 20, 16)] {
+            let n = 1usize << exponent;
+            let idx_n = 1usize << idx_exponent;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            locals.set_item("idx_n", idx_n).expect("bind idx_n");
+            locals.set_item("dt", dtype).expect("bind dtype");
+            py.run(
+                std::ffi::CString::new(
+                    "pristine = np.arange(n).astype(dt)\n\
+                     ours_target = pristine.copy()\n\
+                     theirs_target = pristine.copy()\n\
+                     rng = np.arange(idx_n)\n\
+                     idx = (rng * 7 % (n // 2)).astype(np.intp)\n\
+                     vals = np.arange(idx_n).astype(dt)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let pristine = locals.get_item("pristine").expect("pristine");
+            let ours_target = locals.get_item("ours_target").expect("ours target");
+            let theirs_target = locals.get_item("theirs_target").expect("theirs target");
+            let idx = locals.get_item("idx").expect("idx");
+            let vals = locals.get_item("vals").expect("vals");
+
+            // The duplicates are the point; assert they exist rather than assuming the
+            // index expression produced them.
+            let unique_len = numpy
+                .call_method1("unique", (&idx,))
+                .expect("unique")
+                .len()
+                .expect("unique len");
+            assert!(
+                unique_len < idx_n,
+                "index set has no duplicates at dtype={dtype}, so this would not measure \
+                 the unbuffered path `at` exists for"
+            );
+
+            let ours = module.getattr("add").expect("fnp add");
+            let theirs = numpy.getattr("add").expect("numpy add");
+            assert!(
+                !ours.is(&theirs),
+                "fnp.add IS numpy's object - there is no candidate arm"
+            );
+
+            let checksum_of = |target: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+                target
+                    .call_method0("sum")
+                    .expect("target sums")
+                    .extract::<f64>()
+                    .expect("sum extracts as f64")
+                    .to_bits()
+            };
+
+            // Parity first: same pristine state, same operation, must land identically.
+            restore_target(&numpy, &ours_target, &pristine);
+            restore_target(&numpy, &theirs_target, &pristine);
+            ours.call_method1("at", (&ours_target, &idx, &vals))
+                .expect("fnp at");
+            theirs
+                .call_method1("at", (&theirs_target, &idx, &vals))
+                .expect("numpy at");
+            assert_eq!(
+                checksum_of(&ours_target),
+                checksum_of(&theirs_target),
+                "fnp.add.at and numpy.add.at disagree at dtype={dtype} n={n}"
+            );
+
+            let incumbent = || {
+                restore_target(&numpy, &theirs_target, &pristine);
+                let started = Instant::now();
+                theirs
+                    .call_method1("at", (&theirs_target, &idx, &vals))
+                    .expect("numpy at");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&theirs_target),
+                }
+            };
+            let candidate = || {
+                restore_target(&numpy, &ours_target, &pristine);
+                let started = Instant::now();
+                ours.call_method1("at", (&ours_target, &idx, &vals))
+                    .expect("fnp at");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&ours_target),
+                }
+            };
+
+            let row = format!("add_at_{dtype}_n{n}_vs_numpy_method_route");
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract(&row, incumbent, candidate);
+            println!(
+                "UFUNC_AT_FLOOR dtype={dtype} n={n} indices={idx_n} \
+                 numpy_version={numpy_version} worker={} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 restore_is_outside_the_timed_region=true duplicate_indices=true \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 numpy_ns={:.1} fnp_ns={:.1} excess_ns={:.1} \
+                 incumbent_aa_null={:.6} candidate_aa_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.arm_b_median_ns - effect.arm_a_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
 }
 
 /// Explicit lifetimes for the same reason `call_ufunc_method` needs them: a closure ties
