@@ -46268,3 +46268,99 @@ could NOT take the vectorcall path - giving it a Rust-tuple call shape is the na
 and its excess should fall toward outer's 155 ns if the mechanism is what this row says it is.
 (3) Do not read accumulate's 77 ns as this lever's alone. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - A PROBE I ADDED WAS MEASURING THE WRONG REGIME: `outer`'s counter passed the full n=256 operand and spent 99.3% of the call on O(n^2) arithmetic. Fixed, the counter and the wall clock agree to 4% - and interning `outer` takes the cell 1.1829x -> 1.1329x (`deadlock-audit-v46rn`)
+
+`AzureCarp`. Two builds, before/after, plus a defect fix in my own instrument.
+
+**Campaign result class:** instrument defect fixed + CERTIFIED self-speedup (cell remains a regression)
+
+### The probe defect, and it was mine
+
+`322e7c46` added an `outer` counter probe alongside the `reduce`/`accumulate`/`reduceat` ones, all
+printing `n=256`. But `outer` on a 256-element operand builds a **256x256** result, so the probe
+spent ~382 000 instructions per call on the outer product and the wrapper it was supposed to be
+counting was **0.70% of the call**. The wall-clock group already knew this — it deliberately shortens
+`outer`'s operand to 16 elements, with a comment saying why — and my probe did not match it, so the
+counter row and the wall-clock row described different regimes while both saying `n=256`.
+
+```
+  full n=256 operand   excess 2,663 insns of 382,295 per call =  0.70% of the call
+  16-element operand   excess 2,036 insns of  22,256 per call =  9.15% of the call
+```
+
+Fixed by matching the wall-clock group's operand and printing `operand_len` so the two can never
+silently diverge again. **The fix immediately paid for itself:** with the corrected operand the
+counter's excess of 1231 cycles/call is **293 ns at 4.2 GHz** against a measured wall-clock excess
+median of **280 ns** — 4% agreement. Before the fix the two could not be compared at all.
+
+### The lever, and it is the one the last row calibrated
+
+`3a542125` interned four bare-`&str` method getattrs and the counters priced that at ~795 retired
+instructions per call per site. **I missed `outer`.** Interned here at all three delegating sites —
+`PyUFunc::outer` (line 1032, the measured one), the module-level `outer`, and `linalg_outer`.
+
+```
+UFUNC_METHOD_FLOOR method=outer n=256 operand_len=16 numpy_version=2.4.3 worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract  delegates_unconditionally=true
+  before ELF bdf74217e3547bbeb27ca5f07418423f470dcf66ed1bcd1f68fb9362998c95b4
+  after  ELF 7d32eb6e10a7c60aeab74a227afc8022871a7ba2b95d1c59d36bb51e464048e4
+
+  before  0.845568 / 0.852283 / 0.845384 / 0.844720 / 0.829237   median 0.845384   loadavg 49.28/41.67/23.15
+  after   0.881395 / 0.885185 / 0.885728 / 0.870561 / 0.882655   median 0.882655   loadavg 28.65/36.39/25.09
+
+  deficit 1.1829x -> 1.1329x     ratio gain +4.41%
+  the two distributions do NOT overlap: before max 0.852283 < after min 0.870561
+```
+
+**THE CAVEAT, and it is not small: the two sets were taken in different load windows** (49.28 versus
+28.65), because my own `outer` measurement drove the load up and it had not fallen back by the time
+I rebuilt. Ratios in this lane have been load-robust before — `reduceat` held a 1.6% spread and
+`accumulate` was stable across loads 20-27 — and the ten runs separate cleanly with no overlap, which
+is why I am banking it. But a same-window repeat would be worth more than this row is, and anyone
+re-deciding it should take one.
+
+**MY PREDICTION UNDER-SHOT AGAIN, in the same direction as last time.** I expected ~795 insns/call
+≈ 146 cycles ≈ 35 ns off a 345 ns excess, i.e. about +1.5% on the ratio. Observed **+4.41%**. That is
+the second consecutive time I have priced the interning too low, and I no longer have a mechanism
+that explains the excess — the counted ~795 insns/call does not obviously buy 4.4%.
+
+### What it does not say
+
+`outer` remains **1.1329x SLOWER than NumPy** — still the best cell in the method family and still a
+regression. The two non-`PyUFunc` sites (module-level `outer`, `linalg_outer`) are interned on the
+strength of the same argument but are **NOT measured**; no row here covers them.
+
+COUNTED_MECHANISM: with the operand corrected, `outer`'s wrapper excess is 2036 retired instructions
+and 1231 cycles per call (22 256 and 10 377 total), i.e. 9.15% of the call rather than the 0.70% the
+mis-operanded probe implied; 1231 cycles is 293 ns at 4.2 GHz against a measured 280 ns.
+
+A/A NULL CONTROLS: every run above is a `run_dual_null_median_ci_contract` row whose dual nulls the
+gate admitted; the counter figures are hardware totals from matched probes and carry no schedule.
+
+### A COLLISION ON THIS CELL THAT MUST NOT BE SUMMED
+
+While I was measuring, a peer landed `cbc99664` (vectorcall `accumulate`/`reduceat`/`outer`) at
+01:55:45 and certified `7d073494`: **`outer` 1.2027x -> 1.0798x**, credited to the vectorcall. My two
+ELFs bracket only MY change — build A (`bdf74217`, ~01:47) predates the interning and build B
+(`7d32eb6e`, ~01:53:38) predates `cbc99664` by two minutes — so the vectorcall is in neither and this
+row is not contaminated by it.
+
+**But the two rows do not reconcile and I am not going to paper over it.** My interning commit
+(`f7537c85`, 01:53:06) is an ANCESTOR of the peer's vectorcall (`cbc99664`, 01:55:45), so their
+"before" of 1.2027x should already contain my interning and should therefore sit near my "after" of
+1.1329x. It does not — it is 6% worse, i.e. worse than my pre-interning median of 1.1829x. One of
+three things is true: their before-ELF was built before 01:53 and does not contain the interning,
+or the two windows differ enough to swamp both levers, or one of the two rows is wrong.
+
+**Consequence, and it is the actionable part: these two rows MUST NOT be added.** Quoting
+"1.1829x -> 1.1329x (interning) plus 1.2027x -> 1.0798x (vectorcall)" would credit the same cell
+twice from overlapping baselines. Until the discrepancy is resolved, the only defensible statement is
+the peer's endpoint — `outer` is **1.0798x** on current `main` — with the split between the two
+levers UNKNOWN.
+
+RETRY PREDICATE: do not compare an `outer` counter row to an `outer` wall-clock row unless BOTH say
+`operand_len=16` — that is what this defect was. Do not quote the 1.1829x -> 1.1329x pair as a
+same-window result; it is not. Stop predicting ~795 insns/call is worth ~1.5% on these cells: it has
+now under-predicted twice and the mechanism connecting the two is not established.
+AGENT_NAME=AzureCarp.
