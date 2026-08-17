@@ -9931,7 +9931,22 @@ fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
 ///
 /// Delegating is safe by construction: it is the incumbent's own implementation,
 /// so the values are NumPy's and the FE-hazard deferral question does not arise.
-const F64_DIV_NATIVE_MIN_LEN: usize = 1 << 14;
+// MEASURED, not estimated (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`). This was
+// 1 << 14, which was chosen without a delegating control at the sizes it admits. With
+// `multiply` measured as that control at each size IN THE SAME INVOCATION, the native
+// route's excess over NumPy against what delegating would have cost reads:
+//
+//   2^17   native 3,196 ns   delegating   584 ns   native WORSE
+//   2^18   native 6,818 ns   delegating   704 ns   native WORSE
+//   2^19   native -1,778 ns  delegating   759 ns   native BETTER
+//   2^20   native -8,762 ns  delegating 1,936 ns   native BETTER
+//
+// The crossover is between 2^18 and 2^19, so 1 << 19 is the smallest size at which the
+// native route was MEASURED to beat delegating - the same rule
+// `F64_ACCUMULATE_NATIVE_MIN_LEN` was set by. The old 1 << 14 admitted 2^14 through
+// 2^18, a band where routing cost 5-10x what delegating would: at 2^18 it made divide
+// 1.0912x slower than NumPy where delegating is ~1.0096x.
+const F64_DIV_NATIVE_MIN_LEN: usize = 1 << 19;
 
 /// The dtype typechar of an operand, read directly and cheaply (`deadlock-audit-ei9jz`).
 ///
@@ -99591,8 +99606,28 @@ fn float_power(
 /// or narrow-float inputs and diverge from NumPy's output dtype. Any extraction
 /// error is treated as "not float64".
 fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    // FAST PATH FIRST, and it is faithful rather than narrower (`deadlock-audit-v46rn`).
+    //
+    // 117 call sites reach this, and the probe below is the expensive shape this campaign
+    // has measured repeatedly: `py.import("numpy")`, a full `asarray` CALL, then `dtype`,
+    // `kind` extracted into a HEAP STRING and `itemsize`. `try_zerocopy_f64_searchsorted`
+    // alone pays it TWICE per call, on the array-needle path that measures 8.700x slower
+    // than NumPy.
+    //
+    // Anything that already HAS a `dtype` answers from it with no conversion, and that
+    // answer is the same one `asarray` would give: `asarray` is the identity on an ndarray,
+    // and on a NumPy scalar it produces a 0-d array of that same dtype. `'d'` is the
+    // float64 typechar.
+    //
+    // Objects WITHOUT a dtype - Python floats, lists, tuples - fall through to the original
+    // probe UNCHANGED, because for them `asarray` genuinely converts and its answer is not
+    // predictable from the object alone. That is why this is a fast path and not a
+    // replacement: narrowing here would change the answer for 117 callers at once.
+    if let Some(typechar) = dtype_char_of(value) {
+        return typechar == 'd';
+    }
     let probe = || -> PyResult<bool> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let array = numpy.call_method1("asarray", (value,))?;
         let dtype = array.getattr("dtype")?;
         let kind: String = dtype.getattr("kind")?.extract()?;
@@ -110379,7 +110414,7 @@ mod tests {
         interned_ufunc_name, interp, is_exact_numpy_ndarray, isfinite_native, isinf_native,
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, place, put, put_along_axis, putmask,
+        narrow_bitmap_setop, nextafter, numpy_dtype_is_f64, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
@@ -111091,7 +111126,7 @@ mod tests {
     fn f64_div_native_min_len_is_mirrored_in_the_percall_floor_bench() {
         assert_eq!(
             F64_DIV_NATIVE_MIN_LEN,
-            1 << 14,
+            1 << 19,
             "F64_DIV_NATIVE_MIN_LEN changed; update NATIVE_MIN_LEN_MIRROR in \
              crates/fnp-python/benches/criterion_python_elementwise.rs, which mirrors it \
              to label PERCALL_FLOOR cells as native or delegating"
@@ -112920,6 +112955,85 @@ mod tests {
                         );
                     }
                 }
+            }
+            Ok(())
+        });
+    }
+
+    /// The cheap `numpy_dtype_is_f64` fast path must agree with the `asarray` probe it
+    /// short-circuits, for every input kind (`deadlock-audit-v46rn`).
+    ///
+    /// 117 call sites reach this predicate and it used to answer by importing NumPy and
+    /// running a full `asarray` conversion, extracting `kind` into a heap `String`.
+    /// `try_zerocopy_f64_searchsorted` pays it twice per call on the array-needle path that
+    /// measures 8.700x slower than NumPy.
+    ///
+    /// Changing a predicate that 117 callers depend on is where a narrowing does the most
+    /// damage, so this compares against an INDEPENDENT oracle rather than a copy of the old
+    /// code: NumPy's own `asarray(v).dtype`, evaluated in Python. Every kind is covered -
+    /// ndarrays of several dtypes, NumPy scalars, 0-d arrays, and the dtype-less objects
+    /// (Python float, int, list, tuple) that must still take the slow path, because those
+    /// are exactly the ones a `dtype`-based shortcut would answer wrongly.
+    #[test]
+    fn numpy_dtype_is_f64_fast_path_agrees_with_the_asarray_probe() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                std::ffi::CString::new(
+                    "VALUES = {\n\
+                       'arr_f64': np.zeros(3),\n\
+                       'arr_f32': np.zeros(3, dtype=np.float32),\n\
+                       'arr_i64': np.zeros(3, dtype=np.int64),\n\
+                       'arr_c128': np.zeros(3, dtype=np.complex128),\n\
+                       'zero_d_f64': np.array(1.5),\n\
+                       'zero_d_f32': np.array(np.float32(1.5)),\n\
+                       'np_f64': np.float64(1.5),\n\
+                       'np_f32': np.float32(1.5),\n\
+                       'np_i64': np.int64(3),\n\
+                       'py_float': 1.5,\n\
+                       'py_int': 3,\n\
+                       'py_list': [1.0, 2.0],\n\
+                       'py_tuple': (1.0, 2.0),\n\
+                       'py_str': 'nope',\n\
+                     }\n\
+                     oracle = lambda v: np.asarray(v).dtype.kind == 'f' and np.asarray(v).dtype.itemsize == 8\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let values = locals.get_item("VALUES")?.expect("VALUES");
+            let oracle = locals.get_item("oracle")?.expect("oracle");
+
+            for name in [
+                "arr_f64",
+                "arr_f32",
+                "arr_i64",
+                "arr_c128",
+                "zero_d_f64",
+                "zero_d_f32",
+                "np_f64",
+                "np_f32",
+                "np_i64",
+                "py_float",
+                "py_int",
+                "py_list",
+                "py_tuple",
+                "py_str",
+            ] {
+                let v = values.get_item(name)?;
+                let want = oracle.call1((&v,))?.extract::<bool>()?;
+                assert_eq!(
+                    numpy_dtype_is_f64(py, &v),
+                    want,
+                    "numpy_dtype_is_f64 disagrees with numpy's own asarray dtype on {name}"
+                );
             }
             Ok(())
         });
