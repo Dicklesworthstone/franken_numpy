@@ -273,9 +273,21 @@ impl PyUFunc {
         22
     }
 
+    // CACHED MODULE HANDLE THROUGHOUT THIS IMPL (`deadlock-audit-v46rn`).
+    //
+    // Every method below used to open with `py.import("numpy")`, which `__call__`'s own
+    // comment already prices at 310 ns PER CALL - more than the entire ~210 ns per-call
+    // floor those rows chase. `__call__` was converted when that was measured; the ufunc
+    // METHODS were not, so `reduce`, `accumulate`, `outer`, `reduceat` and `at` each kept
+    // paying it on every invocation.
+    //
+    // Liveness is unchanged and that is the property that matters: the MODULE handle is
+    // cached, not the ufunc, and each method still does its own `getattr` against the live
+    // module - so monkeypatching `numpy.add` is still honoured. That is pinned by
+    // `cached_numpy_handle_is_live_so_a_post_warmup_monkeypatch_is_still_honoured`.
     #[getter]
     fn types(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         np_ufunc.getattr("types").map(|v| v.unbind())
     }
@@ -293,7 +305,7 @@ impl PyUFunc {
         signature: Option<Py<PyAny>>,
         casting: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         let kwargs = PyDict::new(py);
         if let Some(sig) = signature.as_ref() {
@@ -833,7 +845,7 @@ impl PyUFunc {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         Ok(np_ufunc.getattr("reduce")?.call(args, kwargs)?.unbind())
     }
@@ -892,7 +904,7 @@ impl PyUFunc {
             // last/mid-axis lanes, timedelta int64 view) with its safe numpy
             // fallback. Whitelisted kinds only, so anything else (datetime 'M',
             // object, ...) keeps numpy.accumulate's exact error surface.
-            if arr.is_exact_instance(&py.import("numpy")?.getattr("ndarray")?)
+            if is_exact_numpy_ndarray(py, arr)?
                 && let Ok(kind) = arr
                     .getattr("dtype")
                     .and_then(|d| d.getattr("kind"))
@@ -962,7 +974,7 @@ impl PyUFunc {
                 }
             }
         }
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("axis", axis)?;
@@ -986,7 +998,7 @@ impl PyUFunc {
         b: Py<PyAny>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         Ok(np_ufunc
             .getattr("outer")?
@@ -1004,7 +1016,7 @@ impl PyUFunc {
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("axis", axis)?;
@@ -1028,7 +1040,7 @@ impl PyUFunc {
         indices: Py<PyAny>,
         b: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         // Parallel int scatter (i64/u64/i32/u32; add/subtract/maximum/minimum -
         // the order-free ops) for ufunc.at's large-target regime (see
         // try_parallel_int_scatter_at); every defer falls through to numpy's at.
@@ -110927,6 +110939,81 @@ mod tests {
                     "subok={subok} must reproduce numpy's result TYPE"
                 );
             }
+            Ok(())
+        });
+    }
+
+    /// Caching the numpy MODULE on the ufunc methods must not freeze the ufunc LOOKUP
+    /// (`deadlock-audit-v46rn`).
+    ///
+    /// `reduce`, `accumulate`, `outer`, `reduceat` and `at` each opened with
+    /// `py.import("numpy")` on every invocation - the 310 ns `__call__`'s own comment
+    /// prices, paid per call. They now take the cached handle.
+    ///
+    /// The property that could break is not the arithmetic, it is LIVENESS: cache the
+    /// wrong thing and `numpy.add.reduce` gets resolved once and frozen, so a later
+    /// monkeypatch is silently ignored and the caller gets a stale implementation with
+    /// no error. What is cached is the MODULE; each method still does its own `getattr`
+    /// against it at call time. This proves that by patching `numpy.add` AFTER the cell
+    /// is warm and requiring the patched object to be the one used.
+    ///
+    /// `reduce` and `outer` are the two methods that delegate unconditionally, so they
+    /// are the ones that can carry this claim; the others have native fast paths that
+    /// may legitimately never reach numpy.
+    #[test]
+    fn cached_numpy_handle_on_ufunc_methods_is_live_for_reduce_and_outer() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_method_liveness")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let add = module.getattr("add")?;
+            let a = numpy.call_method1("array", (vec![1.0_f64, 2.0, 3.0],))?;
+
+            // Warm the cell first - the claim is about a handle already held.
+            let warm = add.call_method1("reduce", (&a,))?;
+            assert_eq!(
+                warm.extract::<f64>()?,
+                6.0,
+                "warm-up reduce must delegate to numpy and produce numpy's result"
+            );
+
+            let sentinel = PyModule::from_code(
+                py,
+                pyo3::ffi::c_str!(
+                    "def reduce(*args, **kwargs):\n    return 'patched-reduce'\n\ndef outer(*args, **kwargs):\n    return 'patched-outer'\n"
+                ),
+                pyo3::ffi::c_str!("sentinel_methods.py"),
+                pyo3::ffi::c_str!("sentinel_methods"),
+            )?;
+
+            let (reduced, outered) = {
+                let _guard = AttrGuard::new(&numpy, "add")?;
+                numpy.setattr("add", &sentinel)?;
+                (
+                    add.call_method1("reduce", (&a,))?,
+                    add.call_method1("outer", (&a, &a))?,
+                )
+            };
+            assert_eq!(
+                reduced.extract::<String>()?,
+                "patched-reduce",
+                "reduce must resolve the ufunc at CALL time, not when the module was cached"
+            );
+            assert_eq!(
+                outered.extract::<String>()?,
+                "patched-outer",
+                "outer must resolve the ufunc at CALL time, not when the module was cached"
+            );
+
+            // And the guard must have put numpy back, or every later test is poisoned.
+            assert_eq!(
+                add.call_method1("reduce", (&a,))?.extract::<f64>()?,
+                6.0,
+                "numpy.add must be restored once the guard drops"
+            );
             Ok(())
         });
     }
