@@ -51732,3 +51732,99 @@ replicate the symbol across >= 3 recordings, because default frequency sampling 
 top symbol 2x too high. The open question that remains worth money is the native-route class, not
 another stage.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — I CORRECT MY OWN HEADLINE: PyO3 keyword binding is 831.6 insns/call, my registered SIGN TEST is REFUTED, and the "two instruments agree to 1.3%" claim was two instruments sharing ONE OMISSION (deadlock-audit-ei9jz)
+
+**Campaign result class:** refutation of my own registered prediction + correction of a banked
+partition that other rows rest on
+
+Counters only. Same ELF family, `bench_elf_sha256=4858590a7700bfa7012e6d3370e9d21f16c08b853dee3e746d9d7086f3fd2464`,
+committed source `52b78eb3`, release-perf, `OPENBLAS/OMP/MKL_NUM_THREADS=1`, 400,000 calls/arm,
+3 reps. LOADAVG 12.01/13.46/15.78 -> 11.85/13.40/15.75, CPU idle 82%, iowait 0, 2972 MHz,
+/data 203G. Both arms `selected_groups=1`, return-value assertion passed, 0 panics.
+
+```
+  arm                  median insns (400k calls)   spread
+  kwbind_positional          1,042,835,502         0.064%
+  kwbind_keyword             1,375,457,033         0.027%
+  kb = keyword - positional  =  831.6 insns/call
+```
+
+831.6 insns/call to bind ONE keyword through a nine-parameter PyO3 signature. Plausible on
+inspection: pyo3 matches the supplied name against the declared parameter names, which is why the
+symbol profile of the real route shows `__strcmp_avx2` and `PyUnicode_AsUTF8AndSize` on our side.
+
+### My registered predictions, evaluated honestly
+
+```
+  registered: SIGN TEST wrapper_residual > probe_chain      641.9 vs 1189.4   REFUTED
+  registered: ratio in band 2.0-8.0 (point prediction ~4.1)          0.540    REFUTED
+  registered: kb < 557.9 or the sign test fails                      831.6    kb EXCEEDS it
+  published bounds probe_chain >= 357.7, wrapper <= 1473.5   1189.4 / 641.9   BOTH HOLD
+```
+
+The bounds I published held; the point prediction I registered did not. That distinction is the
+whole value of having published bounds rather than point estimates, and it is why the earlier row
+refused to quote 1473.5 as anything but a ceiling.
+
+**THE CORRECTED SPLIT REVERSES WHICH COMPONENT IS LARGER.** The probe chain is 1189.4 insns/call
+(65% of the route's 1831.3 excess) and the wrapper residual is 641.9 (35%). Every prior statement in
+this ledger and in `ei9jz` that "the wrapper residual is the largest remaining component" is
+inverted by this measurement, including statements I wrote today.
+
+### RETRACTION: the cross-instrument agreement I called "the part worth keeping"
+
+I banked this a few rows ago:
+
+> Two instruments built on different principles agree on the ratio to 1.3% ... it is the strongest
+> evidence this ledger has that the wall-clock partition's 91/370 split is real and not an artifact.
+
+**That is withdrawn.** The counted ratio of 4.119 was computed with `kb` treated as zero, because it
+had not been measured. The wall-clock partition's `kwargs_overhead` is `(numpy_with_kwargs -
+numpy_plain) + pydict_build` — it omits `kb` too. The two instruments agreed because they were
+making the SAME omission, not because they were independently correct. Agreement between two
+estimates that share a bug is worth nothing, and I presented it as the strongest evidence in the
+row.
+
+### The reconciliation, which is the actual result
+
+Correcting BOTH instruments for the now-measured `kb` (831.6 insns/call = 209.3 ns at this route's
+measured 3.97 insns/ns) makes them agree again — this time on the corrected answer:
+
+```
+                         probe chain     wrapper residual    ratio wrapper/probe
+  wall clock as banked      91.0 ns          370.0 ns             4.066
+  wall clock + kb          300.3 ns          160.7 ns             0.535
+  counted (this row)      1189.4 insns       641.9 insns          0.540
+  disagreement                                                    0.9%
+```
+
+So the instruments never disagreed; they shared an omission, and correcting it moves both to the
+same place. **CONSEQUENCE FOR A BANKED FIGURE OTHERS USE: the wall-clock partition's 91 ns / 370 ns
+split is wrong and should be read as ~300 ns / ~161 ns.** `deadlock-audit-uj3r3` fixed this
+partition once for the NumPy-parse half of the keyword term and did not add the PyO3-binding half;
+that is the remaining half. The bead comment asserting "wrapper_residual = 370 ns is 43% of our
+multiply call and the largest remaining component" should be read as ~161 ns and NOT the largest.
+
+### What this changes about where to attack
+
+The earlier symbol row found the excess DIFFUSE, with ~74% spread across CPython machinery below
+the per-symbol noise floor, and recommended a native route over further micro-levers. That stands,
+and this row sharpens it: the diffuse majority is the PROBE CHAIN, and probe-chain cost is
+attribute-lookup and keyword-handling machinery — exactly what `deadlock-audit-v46rn` has been
+removing (shared dtype fetches, the 136-probe import removal). Those levers are aimed at the right
+component after all; the wrapper residual is the smaller half.
+
+COUNTED_MECHANISM: kb = 831.6 insns/call from two arms differing only in positional-vs-keyword
+invocation of one nine-parameter `#[pyfunction]` with an identical body, spreads 0.027-0.064%;
+corrected split 1189.4 / 641.9 against a 1831.3 total.
+
+A/A NULL CONTROLS: not applicable - counter differences, not timed ratios. The controls that apply
+are the return-value assertion on both arms, `selected_groups=1`, and the 0.027-0.064% spreads.
+
+RETRY PREDICATE: `kb` is measured on a REPLICA signature, not on `PyUFunc::__call__` itself, so it
+carries the standard replica caveat - it is the cost of binding one keyword through a nine-parameter
+pyo3 signature, which is the same shape but not the same function. Anyone wanting the split to
+better than ~10% should price the binding in situ. Do NOT quote the 91/370 wall-clock split again
+without the kb correction, and do not quote my 4.119 ratio at all.
+AGENT_NAME=SlateFinch.
