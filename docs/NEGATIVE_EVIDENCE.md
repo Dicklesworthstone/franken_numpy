@@ -48750,3 +48750,66 @@ worth pursuing, a `None` argument is not. (3) The `searchsorted` needle pre-chec
 1-D ndarrays, which is the arm that measured 195 ns each, so its A/B is worth running when the
 build cap allows. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - REFUTED, and this one is a plain mistake: my `searchsorted` needle pre-check is DEAD CODE for the case it was written for. The caller already guards on `v_is_scalar` (`deadlock-audit-v46rn`)
+
+`RedLynx`. Second A/B on my own levers. Both have now come back at zero, and this one for a
+reason that was visible in the source I had already read.
+
+**Campaign result class:** REJECT (a landed lever that cannot execute on its target path)
+
+```
+BEFORE elf=0c2e06ff385871f5... (needle pre-check REMOVED, 3 runs)
+AFTER  elf=2a2f3aef04db3d89... (row 58, pre-check present, 3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 13.98/14.12/15.60 at the start; 19.92/17.53/16.67 at the before-arm
+CPU MHz system-wide min 1429 max 4233 median 3144 spread 2.962x
+
+  ss_array_needle   BEFORE 0.169856 / 0.171618 / VOID     AFTER 0.171288 / 0.174624 / 0.168283
+  ss_scalar_needle  BEFORE 0.449261 / 0.479576 / VOID      AFTER 0.456536 / 0.471859 / 0.466404
+  clip_one_sided    BEFORE 0.888889 / 0.911178 / 0.904110  AFTER 0.896961 / 0.911994 / 0.906177
+  clip_two_sided    BEFORE 0.584250 / VOID     / 0.603163  AFTER 0.602324 / 0.596335 / 0.592912
+
+Voids: ss_array run 3 candidate null [0.982252,0.988820]; ss_scalar run 3 candidate
+[1.001564,1.004760]; clip_two run 2 candidate [1.000775,1.005471] - all exclude unity.
+```
+
+**NO CHANGE. 0.1706 before against 0.1713 after**, inside either arm's spread.
+
+**THE REASON, and it is not subtle.** The probe's ONLY caller reads:
+
+```rust
+    if sorter.is_none()
+        && v_is_scalar
+        && let Some(out) = try_zerocopy_scalar_searchsorted(py, a.bind(py), v_bound, side)?
+```
+
+**`try_zerocopy_scalar_searchsorted` is never invoked for an array needle** - the caller already
+computed `v_is_scalar` and gates on it. The pre-check I added *inside* that function re-tests the
+same condition its only call site has just tested. For the array-needle cell it is unreachable;
+for the scalar-needle cell it always passes. **It cannot do anything, on either cell.**
+
+**I HAD ALREADY READ THAT CALL SITE.** It appears in the extract I quoted while attributing the
+searchsorted path two rows earlier - the `v_is_scalar` guard is on the line directly above the
+call. I wrote a guard against a condition the caller had already excluded, and then registered a
+prediction for it.
+
+**BOTH OF MY EXCEPTION-CLASS LEVERS HAVE NOW MEASURED ZERO**, for two different reasons: `clip`'s
+fires but the failure it avoids is too cheap to see, and `searchsorted`'s cannot fire at all. The
+only member of this class with a real measurement remains the spaced builders at 390/574 ns - and
+row 61's attempt to explain that by "a failed extract on an ndarray is dear" is now **unsupported**,
+because this cell never exercised that path and so says nothing about it. **The spaced-builder
+figure is a measurement in search of a mechanism again.**
+
+**NEITHER LEVER IS BEING REMOVED.** Both are correct and tested - `searchsorted`'s also carries a
+cached-module change that is not in question. But neither may be cited as a win, and the class has
+now produced one measured gain and two measured zeros.
+
+RETRY PREDICATE: (1) Before adding a guard inside a probe, READ ITS CALL SITES - two of my three
+levers in this class were defeated by conditions the caller had already handled, and both call
+sites were in extracts I had already quoted. (2) The spaced-builder 390/574 ns is the only real
+figure in this class and its mechanism is UNKNOWN; the exception story is retired and nothing has
+replaced it. (3) The searchsorted array-needle cell is still 5.838x and still unattributed beyond
+the `numpy_dtype_is_f64` fast path; the 11-declining-probe chain in row 59 remains the leading
+structural candidate and is untested. AGENT_NAME=RedLynx.
+
