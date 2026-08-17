@@ -52707,3 +52707,68 @@ probes already batch 400,000 calls, rather than timing single calls with `min_ns
 harness exists the split stays an instructions-only result. Do NOT tune the partition to make the
 wrapper positive; the term that would have to move is smaller than the instrument's error.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - THE RAISE IS VERIFIED END-TO-END: divide now TRACKS the delegating control at 2^19 (0.9128 -> 0.9998) and 2^20 (0.8532 -> 0.9968), recovering the 8.7% and 14.7% it was losing, while KEEPING the 2.54x native win at 2^21 (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
+
+`AzureCarp`. One build (`release-perf`, 8m14s, `df` 198G immediately before), three invocations,
+worker `thinkstation1`, numpy 2.4.3, under `MALLOC_MMAP_THRESHOLD_`.
+`bench_elf_sha256=5065f3412a102b063ad0540d0af01cf86560fb39fb4bd408d2ca712eac930611`
+
+```
+  V1  load 26.46/28.65/23.96  idle 88%  2343 MHz  proj_builds=0
+  V2  load 21.60/27.41/23.65  idle 89%  2207 MHz  proj_builds=0
+  V3  load 20.97/26.87/23.55  idle 79%  2665 MHz  proj_builds=0
+  all three satisfy 1-min <= 5-min with no build of the ELF under test
+```
+
+**Campaign result class:** maintenance-self-speedup
+
+Classified `maintenance-self-speedup` deliberately, NOT `incumbent-win`. The route did not become
+faster than NumPy at 2^19 or 2^20 - it stopped paying a penalty for a native path that was never worth
+taking, and now sits at parity with DELEGATING to NumPy. Claiming an incumbent win here would be
+exactly the kind of flattering misclassification this ledger's gate exists to catch.
+
+### The measurement
+
+`multiply` maps to `_ => None` and structurally cannot route natively, so it prices the wrapper in the
+same invocation. A route that DELEGATES must equal it; a route that goes native must not.
+
+```
+  n      BEFORE (gate 1<<19)      AFTER (gate 1<<21), 3 runs        mean      routing
+  2^17          1.0005            1.0022 1.0015 0.9990            1.0009     delegates - unchanged
+  2^18          0.9998            1.0002 0.9994 1.0012            1.0003     delegates - unchanged
+  2^19          0.9128            0.9994 1.0006 0.9994            0.9998     NOW DELEGATES
+  2^20          0.8532            0.9955 0.9978 0.9971            0.9968     NOW DELEGATES
+  2^21          2.7025            2.6609 2.3197 2.6457            2.5421     still NATIVE, still winning
+```
+
+**The two sizes the raise targeted moved to exactly 1.000 against the delegating control**, which is
+what "stopped taking a losing native path" looks like. The two sizes below the old gate did not move,
+which is the control that the change was surgical. And 2^21 still diverges by 2.54x, confirming the
+native parallel arm survives above the threshold - the property the upper edge exists to protect.
+
+**User-visible effect: `fnp.divide(a, b)` at 2^19 and 2^20 stops giving up 8.7% and 14.7%.** It does
+not become faster than NumPy there - it stops paying a penalty for a route that was never worth taking.
+
+### The 2^8 cell, again, and why it is still not evidence
+
+2^8 reads 0.9568 and a naive "diverges means native" rule would call it native. It delegates there and
+always has. This is the third time this cell has needed the same caveat, so it is worth stating as a
+rule rather than a footnote: **the tracking test compares two ops' fnp-vs-NumPy ratios, so it requires
+the two ops to have comparable per-call cost.** At 256 elements the fixed wrapper is a large fraction
+of the call and that fraction differs between divide and multiply. The test is valid from 2^17 up,
+where both-delegating sizes read 0.9990-1.0022.
+
+COUNTED_MECHANISM: at 2^19 and 2^20 the native-over-delegating ratio moves from 0.9128 and 0.8532 to
+0.9998 and 0.9968 - within 0.0002 and 0.0032 of the delegating control - across 3 runs, while 2^17 and
+2^18 move by 0.0004 and 0.0005 and 2^21 stays at 2.5421.
+
+A/A NULL CONTROLS: the route contracts' A/A nulls straddle unity across all three runs. The
+load-bearing control is `multiply`, measured in the same invocation, not the null.
+
+RETRY PREDICATE: this verification is closed - the gate routes correctly and surgically. Do NOT read
+"delegates at 2^19/2^20" as "divide is now at parity with NumPy" - it is at parity with DELEGATING,
+which is the best this route can do below the rayon threshold given the kernel deficit. The remaining
+open item in this lane is unchanged: three of the five audited 2^20 groups still give their arms
+separate output buffers.
+AGENT_NAME=AzureCarp.
