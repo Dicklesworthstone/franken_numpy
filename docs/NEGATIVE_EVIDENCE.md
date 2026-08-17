@@ -49472,3 +49472,102 @@ probe families beyond `searchsorted` - grep for it before assuming this family w
 ever looked at what that path does. (3) Quote the ratio, not the excess - NumPy's arm was steady
 here but has moved 60% between windows in this group before. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - PRE-REGISTRATION, not a result: the `out=` divide route now has a DELEGATION control, and the decision rules are being written down BEFORE the certifying run. A smoke run (NOT BANKED) says the right gate for this route may be a BAND rather than a threshold, and flags one field that would invalidate the control (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. One build (`release-perf`, 7m47s), one smoke invocation. **NOTHING IN THIS ROW IS
+CERTIFIED**; load was rising (18.92/16.48/16.96, two external `rustc`) and every number below comes
+from a single run. It is here so the rules cannot be chosen after seeing the answer.
+`bench_elf_sha256=7dd037723ee6ae91...` (full sha to be recorded with the certifying run), worker
+`thinkstation1`, numpy 2.4.3.
+
+**Campaign result class:** instrument landed + smoke-verified + decision rules pre-registered
+
+### Why a delegation control rather than a NumPy control
+
+"Are we slower than NumPy?" is the WRONG question for a routing gate. Declining does not teleport the
+caller into NumPy — it costs a trip through `PyUFunc::__call__` and out the delegation tail. The right
+question is whether taking the native route beats DECLINING it, and declining is not free. A
+bare-NumPy control would condemn the route for overhead it pays either way.
+
+`add` supplies the control for free and the choice is STRUCTURAL, not assumed: `add` is bound as
+`PyUFunc { kind: UFuncKind::Add }` (`lib.rs:108634`), `UFuncKind::Add` maps to `_ => None` in the
+`out=` binop match, and both of the other native Add paths (integer cumsum at `lib.rs:941`, timedelta
+and f16 at `lib.rs:697-711`) are gated on `out.is_none()`. **With `out=` supplied, `add` cannot take a
+native route at all**, so its excess over `numpy.add(a, b, out=o)` is the wrapper alone — same size,
+same invocation, same path a declining divide would take.
+
+```
+  wrapper_ns            = fnp_add_ns   - numpy_add_ns
+  predicted_delegate_ns = numpy_div_ns + wrapper_ns
+  native is worth taking IFF fnp_div_ns < predicted_delegate_ns
+```
+
+Same SHAPE as the subtraction that burned me this morning; the difference is that all four terms come
+from ONE invocation on ONE host rather than four banked rows across two binaries.
+
+### The smoke run — NOT BANKED, single run, rising load
+
+```
+  n      divide_vs_numpy   add_vs_numpy   wrapper_ns   native/delegate   worth taking?
+  2^10      0.837983         0.607470          511        0.715289            true
+  2^14      0.844008         0.866542          776        1.061039            false
+  2^18      0.894305         0.989288          726        1.103051            false
+  2^19      0.813882         0.979338         2138        1.209024            false
+  2^20      0.772766         0.982503        11066        1.188179            false
+  2^21      1.027416         0.817731       665863        0.800894            true
+```
+
+Two things worth noticing, neither of them established:
+
+**The control behaves at mid sizes.** `add_vs_numpy` sits at 0.979-0.989 across 2^18-2^20, i.e. the
+delegation wrapper costs 1-2% there (726-11,066 ns). That is what a wrapper should look like, and it
+is the first direct measurement of the delegation tail's cost I have.
+
+**The gate may be a BAND, not a threshold.** At 2^10 the native route looks WORTH taking despite being
+slower than bare NumPy — because declining costs a 511 ns wrapper on a ~769 ns operation, so the
+comparison flips sign against the delegation control. At 2^14-2^20 it looks NOT worth taking. At 2^21,
+above the `1 << 21` rayon threshold, it looks worth taking again. **If that shape survives
+certification, no single `>=` threshold expresses it**, and the existing gate idiom would have to
+become an interval — which is a structural claim about the route, not a constant to tune.
+
+### THE FIELD THAT WOULD INVALIDATE THE CONTROL
+
+`wrapper_ns=665863` at 2^21 is not a plausible wrapper. It corresponds to `fnp.add` being 1.22x
+slower than `numpy.add` on a path that is provably pure delegation. Either the delegation tail has a
+real cost at large n — which would be a broad finding touching every delegated op, not just divide —
+or it is single-run noise on 16 MiB operands under rising load. **The 2^21 row must not be used for
+any conclusion until this is resolved**, and resolving it is a precondition for the whole sweep,
+because it is the one place the control itself looks unhealthy.
+
+### PRE-REGISTERED DECISION RULES, fixed before the certifying run
+
+1. **Certification requires FIVE invocations** in a window with no local build running and a 1-minute
+   loadavg at or below the 5-minute figure, per-arm loadavg and CPU MHz recorded. One run decides
+   nothing here: today the same instrument family moved 0.538-0.932 on one arm across runs.
+2. **A size is "native is worth taking" only if `native_over_delegate < 1` in at least 4 of 5 runs**
+   AND the divide contract's own A/A nulls straddle unity in those runs. Anything else is UNDECIDED
+   and the route keeps its current behaviour.
+3. **The 2^21 control anomaly is a blocker for the 2^21 row only.** If `add_vs_numpy` at 2^21 stays
+   below 0.95 across the five runs, the delegation control is unhealthy there and that row is void
+   regardless of what divide does; the finding then becomes "the delegation tail costs ~22% at 2^21",
+   which is a separate investigation and a bigger one.
+4. **No routing change ships on this row.** Even a clean band result only licenses a PROPOSAL, because
+   `F64_DIV_NATIVE_MIN_LEN`'s own 1<<19 crossover is still UNCERTIFIED and a band built on top of an
+   uncertified threshold inherits its uncertainty.
+5. **The engagement question is answered by SEPARATION, not by sign.** If `fnp_div_ns` tracks
+   `predicted_delegate_ns` within the nulls at every size, divide is delegating and the whole premise
+   that our kernel runs on this path is wrong — that outcome must be reported, not discarded as a null
+   result.
+
+COUNTED_MECHANISM: 0 native routes are reachable for `add` when `out=` is supplied — it is bound as `PyUFunc { kind: UFuncKind::Add }` at `lib.rs:108634` and its 2 other native paths are gated on `out.is_none()` at `lib.rs:941` and `lib.rs:697`. No performance effect is claimed by this row; it reports none.
+
+A/A NULL CONTROLS: the smoke run's A/A nulls are not quoted here on purpose — a single run's nulls
+would lend this row a credibility it must not have. Rule 1 above requires them across 5 runs, with the
+divide contract's incumbent and candidate nulls each straddling 1.000000 before any size is called.
+
+RETRY PREDICATE: do not quote any number in this row as a measurement — it is a smoke run under rising
+load, recorded to fix the decision rules in advance. The certifying run must satisfy rules 1-5 above.
+If the 2^21 control anomaly reproduces, STOP and investigate the delegation tail before touching the
+gate: a 22% cost on every delegated op at large n would be worth far more than this gate.
+AGENT_NAME=AzureCarp.
