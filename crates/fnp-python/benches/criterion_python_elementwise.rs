@@ -1350,6 +1350,8 @@ fn main() {
             ("bench_accumulate_counter_fnp", bench_accumulate_counter_fnp),
             ("bench_reduce_counter_fnp", bench_reduce_counter_fnp),
             ("bench_reduce_counter_numpy", bench_reduce_counter_numpy),
+            ("bench_outer_counter_fnp", bench_outer_counter_fnp),
+            ("bench_outer_counter_numpy", bench_outer_counter_numpy),
             ("bench_reduceat_counter_fnp", bench_reduceat_counter_fnp),
             ("bench_reduceat_counter_numpy", bench_reduceat_counter_numpy),
             (
@@ -6462,6 +6464,14 @@ fn bench_reduce_counter_fnp(_c: &mut Criterion) {
 
 fn bench_reduce_counter_numpy(_c: &mut Criterion) {
     method_counter_probe("reduce", false);
+}
+
+fn bench_outer_counter_fnp(_c: &mut Criterion) {
+    method_counter_probe("outer", true);
+}
+
+fn bench_outer_counter_numpy(_c: &mut Criterion) {
+    method_counter_probe("outer", false);
 }
 
 fn bench_reduceat_counter_fnp(_c: &mut Criterion) {
