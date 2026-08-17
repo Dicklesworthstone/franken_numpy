@@ -3289,6 +3289,21 @@ fn bench_divide_accumulate_isolation_vs_numpy(_c: &mut Criterion) {
 // so "wider unroll" is refuted too: LLVM already unrolls our fused arm twice as
 // wide as numpy's and it does not help.
 //
+// CORRECTED 2026-08-17 (AzureCarp): THE SENTENCE ABOVE IS REGIME-SCOPED AND IS FALSE
+// IN THE DEFAULT ALLOCATOR REGIME. The census is right; the ranking drawn from it is
+// not. Measured head-to-head with NumPy cancelled (ratio-of-ratios over the two
+// contracts, which share a NumPy incumbent), the 4x-unrolled fused arm is
+// 1.4152-1.6155x FASTER than the 1x-unrolled accumulate-free arm in the bare regime,
+// across three invocations - despite executing 2.69 instructions per double against
+// the 1x arm's 1.50. Only under `MALLOC_MMAP_THRESHOLD_` does the ordering reverse,
+// and then by ~6% (0.9386, 0.9458).
+//
+// So "wider unroll is dead for f64 divide" MUST NOT be cited without naming a regime,
+// and the fleet note recording unroll as anti-correlated with speed here was taken in
+// the controlled regime. Two consequences: removing the classifier is a REGRESSION of
+// 1.42-1.62x in the regime users actually run, and `deadlock-audit-vqxoa`'s "the
+// accumulate is close to free" understates it - the accumulate is better than free.
+//
 // What the census DOES leave standing is the third candidate, sharpened. Of the
 // fused arm's 43 instructions per 16 doubles, 4 are divides (each taking its
 // divisor straight from memory), 8 are the numerator loads and quotient stores
@@ -6172,11 +6187,13 @@ fn bench_predecline_levers_vs_numpy(_c: &mut Criterion) {
                 "a = np.arange(4096.0)\n\
                  hay = np.arange(0.0, 8192.0, 2.0)\n\
                  needle_arr = np.array([1.0, 777.0, 8191.0])\n\
+                 hay_list = hay.tolist()\n\
                  CASES = {\n\
                    'clip_one_sided': ('clip', (a, 0.0, None)),\n\
                    'clip_two_sided': ('clip', (a, 0.0, 3000.0)),\n\
                    'ss_array_needle': ('searchsorted', (hay, needle_arr)),\n\
                    'ss_scalar_needle': ('searchsorted', (hay, 777.0)),\n\
+                   'ss_list_haystack': ('searchsorted', (hay_list, needle_arr)),\n\
                  }\n",
             )
             .unwrap()
@@ -6192,6 +6209,14 @@ fn bench_predecline_levers_vs_numpy(_c: &mut Criterion) {
             ("clip_two_sided", false),
             ("ss_array_needle", true),
             ("ss_scalar_needle", false),
+            // DESIGNED CONTROL (`deadlock-audit-v46rn`): a LIST haystack must still go
+            // through `asarray`, so the asarray-skip lever cannot reach it. It shares the
+            // dispatcher, the binary and the run with the ndarray cells, so if those move
+            // between arms and this does not, the lever is what moved them. Row 64 could
+            // not separate its effect because its only controls were clip cells, which
+            // moved 0.5% and 2.9% - a control that differs from the target in ONE property
+            // beats a control that merely sits nearby.
+            ("ss_list_haystack", false),
         ] {
             let case = cases.get_item(label).expect("case");
             let fn_name = case
