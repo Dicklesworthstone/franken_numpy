@@ -2911,14 +2911,40 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
     const N: usize = 256;
     const TRIALS: usize = 2001;
 
-    fn min_ns(trials: usize, mut op: impl FnMut()) -> f64 {
-        let mut best = u128::MAX;
-        for _ in 0..trials {
-            let started = Instant::now();
+    // BATCHED, because the single-call form could not resolve this partition
+    // (`deadlock-audit-ei9jz`). `Instant::now()` costs a measured 20.0 ns here, and the
+    // terms this group differences were 40-961 ns, i.e. as few as TWO timer overheads. The
+    // identity combines seven such measurements, so its accumulated error was the size of
+    // the -80.0 ns wrapper residual it produced - the result was below the resolution of
+    // the instrument computing it.
+    //
+    // Timing BATCH calls inside ONE timed region amortises the timer to 20.0/BATCH ns per
+    // call (0.01 ns at BATCH=2000) and makes every timed region hundreds of microseconds,
+    // which is where the clock is trustworthy. This is the same shape the counted probes
+    // already use, where 400,000 calls sit inside one measurement.
+    //
+    // REGIME DISCLOSURE, because it is a real change and not just a precision one: batching
+    // measures the WARM, repeated-call regime - allocator caches hot, pages resident -
+    // whereas min-of-single-calls measured a best-case isolated call. Both are legitimate;
+    // they are not the same quantity, and every arm here is batched identically so the
+    // comparison between them stays sound.
+    const BATCH: usize = 2000;
+    const REPS: usize = 25;
+
+    fn batched_ns(batch: usize, reps: usize, mut op: impl FnMut()) -> f64 {
+        // Warm once so the first batch does not carry first-touch costs the others avoid.
+        for _ in 0..batch.min(64) {
             op();
+        }
+        let mut best = u128::MAX;
+        for _ in 0..reps {
+            let started = Instant::now();
+            for _ in 0..batch {
+                op();
+            }
             best = best.min(started.elapsed().as_nanos());
         }
-        best as f64
+        best as f64 / batch as f64
     }
 
     Python::initialize();
@@ -2990,18 +3016,18 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
             .expect("bind tail subok");
 
         // Whole call, full probe chain, every kwarg at its default.
-        let whole_ns = min_ns(TRIALS, || {
+        let whole_ns = batched_ns(BATCH, REPS, || {
             black_box(ours.call1(&args).expect("fnp.multiply call"));
         });
         // Same call with every probe skipped by the shipped casting guard.
-        let skipped_ns = min_ns(TRIALS, || {
+        let skipped_ns = batched_ns(BATCH, REPS, || {
             black_box(
                 ours.call(&args, Some(&unsafe_kwargs))
                     .expect("fnp.multiply casting=unsafe call"),
             );
         });
         // The incumbent's own work, which the delegation tail also pays.
-        let numpy_ns = min_ns(TRIALS, || {
+        let numpy_ns = batched_ns(BATCH, REPS, || {
             black_box(theirs.call1(&args).expect("numpy.multiply call"));
         });
 
@@ -3025,14 +3051,14 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
         //   (b) our PyDict construction, as a standalone replica.
         // Replica-based, so a LOWER BOUND, which is the same caveat the stage decomposition
         // already carries — and it is checked below against s2fkk's independent figure.
-        let numpy_kwargs_ns = min_ns(TRIALS, || {
+        let numpy_kwargs_ns = batched_ns(BATCH, REPS, || {
             black_box(
                 theirs
                     .call(&args, Some(&tail_kwargs))
                     .expect("numpy.multiply with the tail's three keywords"),
             );
         });
-        let pydict_build_ns = min_ns(TRIALS, || {
+        let pydict_build_ns = batched_ns(BATCH, REPS, || {
             let kwargs = PyDict::new(py);
             kwargs.set_item("casting", "unsafe").expect("set casting");
             kwargs.set_item("order", "K").expect("set order");
@@ -3071,10 +3097,10 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
         kb_kwargs
             .set_item("casting", "unsafe")
             .expect("bind kwbind casting");
-        let kb_positional_ns = min_ns(TRIALS, || {
+        let kb_positional_ns = batched_ns(BATCH, REPS, || {
             black_box(kb_probe.call1(&args).expect("kwbind positional"));
         });
-        let kb_keyword_ns = min_ns(TRIALS, || {
+        let kb_keyword_ns = batched_ns(BATCH, REPS, || {
             black_box(
                 kb_probe
                     .call(&args, Some(&kb_kwargs))
@@ -3178,7 +3204,7 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
 
         println!(
             "PERCALL_FLOOR_PARTITION n={N} numpy_version={numpy_version} worker={} \
-             harness=partition_min_of_{TRIALS} trials={TRIALS} op=multiply \
+             harness=partition_batched_{BATCH}x{REPS} batch={BATCH} reps={REPS} op=multiply \
              route=delegating partition_is_exhaustive_by_construction=true \
              accounted_fraction_is_tautological=true \
              probe_separation=shipped_casting_guard_deadlock-audit-wsd7h \
