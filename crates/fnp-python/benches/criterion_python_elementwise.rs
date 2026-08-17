@@ -3454,8 +3454,17 @@ fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
             "the bitmask replica does not reproduce numpy.divide bit for bit"
         );
 
-        let mut fused_out = vec![0.0_f64; n];
-        let mut bitmask_out = vec![0.0_f64; n];
+        // ONE shared output for every candidate arm, reminted per call
+        // (`deadlock-audit-6y5wp`). Separate 8 MiB buffers race page residency against
+        // this host's ~32 MiB L3, and that race is measured: on the kernel group the same
+        // change reversed the classifier verdict outright, from "fused is 1.42-1.62x
+        // better" to "fused costs 7.9%". Every arm here computes bit-identical quotients,
+        // so one buffer is sound - each call overwrites the last with the same bytes and
+        // the checksum is taken after the timer stops. No `&mut` outlives its call, so two
+        // arms never hold one allocation mutably at the same time.
+        let mut shared_out = vec![0.0_f64; n];
+        let shared_ptr = shared_out.as_mut_ptr();
+        let mint = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(shared_ptr, n) } };
 
         let incumbent_fused = || {
             let started = Instant::now();
@@ -3468,11 +3477,11 @@ fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
         };
         let candidate_fused = || {
             let started = Instant::now();
-            let hazard = divide_fused_serial(&a_vec, &b_vec, &mut fused_out);
+            let hazard = divide_fused_serial(&a_vec, &b_vec, mint());
             let elapsed = started.elapsed();
             assert!(!hazard, "operands must stay hazard-free during timing");
-            let checksum = divide_checksum(&fused_out);
-            black_box(&fused_out);
+            let checksum = divide_checksum(mint());
+            black_box(shared_ptr);
             common::ContractObservation { elapsed, checksum }
         };
         let (fused_effect, _in_null, _cand_null) = common::run_dual_null_median_ci_contract(
@@ -3492,11 +3501,11 @@ fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
         };
         let candidate_bitmask = || {
             let started = Instant::now();
-            let hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, &mut bitmask_out);
+            let hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, mint());
             let elapsed = started.elapsed();
             assert!(!hazard, "operands must stay hazard-free during timing");
-            let checksum = divide_checksum(&bitmask_out);
-            black_box(&bitmask_out);
+            let checksum = divide_checksum(mint());
+            black_box(shared_ptr);
             common::ContractObservation { elapsed, checksum }
         };
         let (bitmask_effect, _in_null2, _cand_null2) = common::run_dual_null_median_ci_contract(
@@ -3519,24 +3528,31 @@ fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
         // This arm is a self-speedup and is labelled as one: it attributes the
         // change, it does not license a vs-incumbent claim. The vs-numpy rows
         // above remain the only competitive statement this group makes.
-        let mut boolean_head = vec![0.0_f64; n];
-        let mut bitmask_head = vec![0.0_f64; n];
+        // THE HEAD-TO-HEAD SHARES ONE BUFFER, and it is the contract that most needed it.
+        // Its previous form gave `boolean_head` and `bitmask_head` separate 8 MiB Vecs,
+        // which put the residency race directly on the axis being measured - the two arms
+        // ARE the comparison. That is why its first run read a DECIDABLE_WIN of 1.0416
+        // that five runs reduced to a marginal 1.0311 with two straddling unity: a
+        // few-percent effect measured across a race worth tens of percent.
+        let mut head_out = vec![0.0_f64; n];
+        let head_ptr = head_out.as_mut_ptr();
+        let mint_head = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(head_ptr, n) } };
         let boolean_arm = || {
             let started = Instant::now();
-            let hazard = divide_fused_serial(&a_vec, &b_vec, &mut boolean_head);
+            let hazard = divide_fused_serial(&a_vec, &b_vec, mint_head());
             let elapsed = started.elapsed();
             assert!(!hazard, "operands must stay hazard-free during timing");
-            let checksum = divide_checksum(&boolean_head);
-            black_box(&boolean_head);
+            let checksum = divide_checksum(mint_head());
+            black_box(head_ptr);
             common::ContractObservation { elapsed, checksum }
         };
         let bitmask_arm = || {
             let started = Instant::now();
-            let hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, &mut bitmask_head);
+            let hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, mint_head());
             let elapsed = started.elapsed();
             assert!(!hazard, "operands must stay hazard-free during timing");
-            let checksum = divide_checksum(&bitmask_head);
-            black_box(&bitmask_head);
+            let checksum = divide_checksum(mint_head());
+            black_box(head_ptr);
             common::ContractObservation { elapsed, checksum }
         };
         let (head_to_head, _in_null3, _cand_null3) = common::run_dual_null_median_ci_contract(
@@ -3559,7 +3575,7 @@ fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
              bitmask_ratio={:.6} bitmask_ci95=[{:.6},{:.6}] \
              numpy_ns_in_boolean_contract={:.1} numpy_ns_in_bitmask_contract={:.1} \
              boolean_ns={:.1} bitmask_ns={:.1} \
-             head_to_head_is_a_self_speedup_not_a_win=true \
+             head_to_head_is_a_self_speedup_not_a_win=true shared_output_buffer_all_arms=true \
              head_to_head_ratio={:.6} head_to_head_ci95=[{:.6},{:.6}] \
              classifier_shape_saving_ns={classifier_shape_saving_ns:.1}",
             measurement_worker(),
