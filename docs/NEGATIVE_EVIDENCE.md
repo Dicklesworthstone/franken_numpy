@@ -52488,3 +52488,63 @@ A/A nulls around each COMPONENT (registered two rows ago and still the right ans
 the split is an instructions-only result. First, land the diagnostic emission so the next person to
 trip this can see which term dominated.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — THIRD index collision today: my diagnostic emission went out inside AzureCarp's `4108c11c`. The staged index is a SHARED MUTABLE GLOBAL and the ritual we all agreed on cannot fix it. Switching to atomic pathspec commits
+
+**Campaign result class:** process defect, third occurrence, with a structural fix
+
+Occurrences today, all on `criterion_python_elementwise.rs` and its neighbours:
+
+```
+  1. 4bde9d6b  AzureCarp's commit carried THREE of my bench files   (they disclosed, 1c32c032)
+  2. 364a4933  my commit carried AzureCarp's 91-line ledger row     (I disclosed, 744df646)
+  3. 4108c11c  AzureCarp's commit carried my partition diagnostic   (this row)
+```
+
+Content intact each time; attribution wrong each time. My `PERCALL_FLOOR_PARTITION_DIAGNOSTIC`
+block is complete in HEAD - one `let partition_valid`, the full emission, the flush - and `4108c11c`
+describes none of it, carrying `deadlock-audit-6y5wp` and `q00ev` instead.
+
+### Why the agreed ritual does not work
+
+After collision 2 I sharpened the rule to "`git diff --cached --name-only` must be its OWN command,
+whose output is read, before any `git commit`". I then followed exactly that and still lost the
+change - because **the failure does not happen at MY commit, it happens at THEIRS.** Between my
+`git add` and my `git commit` there is a window in which any other agent's bare `git commit` takes
+my staged content. No amount of checking on my side closes a window that a different process walks
+through. The staged index is a shared mutable global and both of us are writing to it.
+
+### The fix, and it is structural rather than behavioural
+
+**`git commit -- <explicit paths>` ignores the index entirely** and commits the working-tree content
+of exactly those paths. It is atomic with respect to other agents' staging: there is no interval
+during which my work sits in a shared area waiting to be swept. This project's standing orders warn
+that the pathspec form commits WORKING-TREE rather than STAGED content - true, and for this workflow
+that is the desired behaviour, because I edit files and then commit them; the two are identical for
+me and the difference is precisely what excludes a peer's staged work.
+
+Adopting for the rest of this session:
+
+```
+  git status --porcelain <my paths>      # read it, as its own command
+  git commit -- <my paths> -m "..."      # atomic; index untouched; peers' staging excluded
+```
+
+The `git add` + `git diff --cached` ritual remains correct for a SOLE occupant of a tree. It is not
+sufficient on a shared one, and this row is the third piece of evidence for that in one day.
+
+### Not doing
+
+Not rewriting history. `main` is shared and fetched; the disclosure is the correction. Anyone
+auditing `4108c11c` should know its `criterion_python_elementwise.rs` diagnostic hunk is mine and
+belongs to `deadlock-audit-ei9jz`, and anyone auditing the diagnostic's provenance should read this.
+
+COUNTED_MECHANISM: 3 index collisions in one session between 2 agents on one working tree; 0 bytes
+lost; 3 commits carrying work their messages do not describe.
+
+A/A NULL CONTROLS: not applicable - no measurement.
+
+RETRY PREDICATE: none. If a fourth collision happens after adopting pathspec commits, the cause is
+NOT the index and the diagnosis should start elsewhere - most likely two agents editing the same
+file, which pathspec commits cannot and should not paper over.
+AGENT_NAME=SlateFinch.
