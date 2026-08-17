@@ -52227,3 +52227,37 @@ RETRY PREDICATE: none. This is a disclosure, not a finding. The behavioural chan
 rule above, which I will follow for the rest of this session: the staged-file check runs as its own
 command and its output is read before committing.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - SHARED-TREE NOTE: the gate row above was swept into peer commit `364a4933` (an `ei9jz` message), the mirror of my own `4bde9d6b` earlier today. Content intact, attribution preserved inside the row
+
+`AzureCarp`. No build, no measurement. Provenance only.
+
+I staged `docs/NEGATIVE_EVIDENCE.md`, verified with `git diff --cached --name-only` that it was the
+only file, and my `git commit` then reported **"nothing to commit"** - because a peer's commit landed
+in between and carried my staged hunk with it. The row sits inside `364a4933`, whose message is about
+`deadlock-audit-ei9jz`'s keyword partition, and is on both remotes.
+
+**Nothing is lost and nothing needs fixing.** The row carries `AGENT_NAME=AzureCarp` and its own bead
+ids, so attribution survives where it matters - inside the ledger, which is what future readers grep.
+Only the commit message is misattributed, and rewriting shared history to correct that would be far
+worse than this note.
+
+**This happened in BOTH directions today.** My `4bde9d6b` swept three of a peer's bench files into a
+commit about my divide classifier; their `364a4933` swept my gate row into a commit about their keyword
+partition. The `git diff --cached --name-only` check I adopted after the first incident did NOT prevent
+the second, and could not have: the window between checking the index and committing is the whole
+exposure, and on a tree with twenty panes that window is never empty.
+
+**So the honest rule is not "check harder" but "expect it".** Verify the index to avoid capturing
+someone else's work, and put agent identity and bead ids INSIDE the artifact - the ledger row, the
+source comment, the test name - so that a commit message being wrong costs provenance nothing.
+
+COUNTED_MECHANISM: 2 cross-attributed commits in one day on one shared tree, in opposite directions;
+1 index check performed correctly that could not prevent the second because the exposure window is
+between the check and the commit.
+
+A/A NULL CONTROLS: not applicable; no measurement.
+
+RETRY PREDICATE: do not rewrite `364a4933` or `4bde9d6b`. Keep stamping `AGENT_NAME` and bead ids
+inside every ledger row and source comment; that is what makes the shared-index race harmless.
+AGENT_NAME=AzureCarp.
