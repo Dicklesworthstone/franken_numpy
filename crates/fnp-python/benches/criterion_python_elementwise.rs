@@ -3205,17 +3205,27 @@ fn bench_divide_accumulate_isolation_vs_numpy(_c: &mut Criterion) {
 // them per 16 doubles buys nothing, and the head-to-head ratio moves by less than
 // the null spread.
 //
-// THAT IS WHAT HAPPENED, and the group is kept to say so. The bitmask arm does
-// emit the codegen it was designed to emit — 35 instructions per 16 doubles
-// against the boolean arm's 43, classifier ops 28 -> 20, and no cross-lane
-// `vextracti128` left inside the loop — and it is still not measurably faster:
-// `head_to_head_ratio=1.010865 ci95=[0.993078,1.021850]`, UNDECIDED, against a
-// `required_2x_delta` of 0.031989. Eight fewer vector ops per 16 doubles is worth
-// at most ~1%, indistinguishable from zero. The classifier is already in the
-// divider's shadow, so the shipped `zerocopy_f64_binary_flat` arm was NOT changed:
-// the reduction-shape lever is REJECTED and the divide deficit lives somewhere
-// this group cannot reach. Do not re-propose it; see `deadlock-audit-6y5wp` in
-// docs/NEGATIVE_EVIDENCE.md.
+// THAT IS ESSENTIALLY WHAT HAPPENED, and the group is kept to say so. The bitmask
+// arm does emit the codegen it was designed to emit — 35 instructions per 16
+// doubles against the boolean arm's 43, classifier ops 28 -> 20, and no cross-lane
+// `vextracti128` left inside the loop — and it buys almost nothing. `perf record
+// -e cycles:u,instructions:u` attributed by symbol over a full run of this group
+// is the counted form: retired instructions fall 18.4% (matching the static census
+// 35/43 = 0.814 to within 0.3%) and CYCLES FALL 0.76%. The classifier is in the
+// divider's shadow.
+//
+// READ THE WALL CLOCK OVER RUNS, NOT WITHIN ONE. Five runs of one ELF put the
+// head-to-head at 1.010865 / 1.049398 / 1.026644 / 1.036853 / 1.014776 — median
+// 1.027, every one above unity, but R1's and R2's 95% intervals are DISJOINT and
+// the between-run stdev (0.0159) exceeds the mean within-run half-width (0.0138).
+// One contract cannot decide a sub-5% effect here. So the lever is a real ~2.7%
+// self-speedup, not zero and not the 18.4% its instruction count suggests, and the
+// shipped `zerocopy_f64_binary_flat` arm was NOT changed on the strength of it —
+// see `deadlock-audit-6y5wp` in docs/NEGATIVE_EVIDENCE.md.
+//
+// PIN `OPENBLAS_NUM_THREADS=1` WHEN RUNNING THIS. The same perf record found
+// `blas_thread_server` burning 18.4% of the process's user cycles at IPC 0.408,
+// spinning on the very cores the arms are pinned to.
 //
 // The vs-numpy rows are why the head-to-head is here at all. On the first run the
 // two candidates' ratios looked cleanly separated (0.750216 vs 0.820084, CIs

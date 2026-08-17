@@ -44428,3 +44428,103 @@ divide loop and numpy's 2x-unrolled one with the classifier's cost shown to be n
 means the deficit is NOT in the instructions beside the divide and the next lever must come from
 somewhere else entirely.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-16 - I CORRECT THE REJECT I BANKED AN HOUR AGO: it rested on ONE run, and four more runs of the SAME ELF disagree with it. The lever is a real ~2.7%, not zero - and the reason it is only 2.7% is now COUNTED, not inferred (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. Same ELF, same host, five runs.
+
+**Campaign result class:** correction of a banked REJECT + measurement-instrument defect
+
+### What I got wrong
+
+The entry above rejects the bitmask classifier on `head_to_head_ratio=1.010865
+ci95=[0.993078,1.021850]`, verdict UNDECIDED, and calls the lever "indistinguishable from zero".
+That verdict is real but it is **n=1**, and I wrote it as though a dual-null contract's CI bounded
+the answer. It does not bound the run-to-run term. Five runs of
+bench_elf_sha256=b064c19849a1ca55331c58970dfbf75b3e0ea3338a17119673ebbe74edde57f4:
+
+```
+HEAD_TO_HEAD_REPLICATION row=divide_f64_1m_bitmask_over_boolean_classifier worker=thinkstation1
+  R1 no-perf, OPENBLAS unset   1.010865  ci95=[0.993078,1.021850]   UNDECIDED
+  R2 under perf, OPENBLAS unset 1.049398 ci95=[1.026075,1.065736]   DECIDABLE_WIN
+  R3 OPENBLAS_NUM_THREADS=1    1.026644  ci95=[1.016999,1.032249]
+  R4 OPENBLAS_NUM_THREADS=1    1.036853  ci95=[1.020903,1.053304]
+  R5 OPENBLAS_NUM_THREADS=1    1.014776  ci95=[1.007658,1.029783]
+  median=1.026644 min=1.010865 max=1.049398
+  between_run_stdev=0.0159  mean_within_run_half_width=0.0138
+```
+
+**All five are above unity**, and R1's and R2's 95% intervals are DISJOINT. Between-run stdev
+(0.0159) EXCEEDS the mean within-run half-width (0.0138), so the contract's own CI is not an
+error bar on the answer - it is an error bar on one schedule. **A single dual-null run cannot decide
+a sub-5% effect on this harness.** The correct reading of the lever is a ~2.7% median self-speedup
+on the kernel arm, not zero.
+
+### What survives unchanged, and it is the part worth keeping
+
+The REJECT's *quantitative* claim was right even though its verdict was under-powered, and hardware
+counters now prove the mechanism instead of inferring it. `perf record -e cycles:u,instructions:u`
+over a full run of the group, attributed by symbol (each of the three symbols is entered the same
+number of times per run, so the aggregates are comparable):
+
+```
+COUNTED_MECHANISM  perf record -F 999, 13078 samples, symbol-attributed
+  symbol                        Gcycles   Ginsns    IPC
+  DOUBLE_divide_X86_V3            5.468    4.270   0.781
+  divide_fused_serial   (43/16)   6.522    9.065   1.390
+  divide_bitmask_...    (35/16)   6.473    7.401   1.143
+  blas_thread_server              4.347    1.774   0.408
+  fused/numpy    cycles 1.193  insns 2.123   (static census predicted 43/20 = 2.150)
+  bitmask/fused  cycles 0.9924 insns 0.8165  (static census predicted 35/43 = 0.8140)
+```
+
+Two things fall out. First, **the static census is confirmed by retired-instruction counts to within
+1.5%** - 2.123 measured against 2.150 predicted, 0.8165 against 0.8140 - so the disassembly-based
+insns-per-16-doubles figures in the entry above can be relied on. Second, and this is the finding:
+**cutting 18.4% of retired instructions bought 0.76% of cycles.** That is the mechanism the earlier
+entry asserted from a wall-clock null result, now counted directly. The classifier really is almost
+entirely in the divider's shadow; a ~2.7% wall-clock median is what leaks out past it.
+
+numpy's own IPC of 0.781 against our 1.390 says the same thing from the other side: numpy is
+STALLED on the divider and we are not, while issuing 2.12x its instructions to do identical work.
+
+### The instrument defect this found, which is not about this lever at all
+
+`blas_thread_server` burns **4.347 Gcycles - 18.4% of all user cycles in the measurement process -
+at IPC 0.408**, i.e. spinning. `THREAD_CONFIGURATION` on every run of this group reports
+`OPENBLAS_NUM_THREADS=unset`, and the arms are pinned to `taskset -c 0-15`, so OpenBLAS's spinners
+are contending for the same physical cores (and SMT siblings) as the thing being timed. R3-R5 pinned
+it to 1: the head-to-head tightened, but the boolean-vs-numpy ratio did NOT move out of its existing
+range, so this is **proven waste, not yet a proven bias**. Pin it anyway - a fifth of the process's
+cycles doing nothing is not a condition to measure in.
+
+### The number that should worry the divide lane most
+
+Across every run of this group, the boolean arm's ratio against numpy read:
+`0.750216, 0.799745, 0.724934, 0.750419, 0.748243, 0.731758` - **median 0.749229, min 0.724934, max
+0.799745, a 10.3% spread on the same ELF and the same host within one hour.** Any divide row quoted
+to six figures from a single run is quoting the schedule, not the kernel. This does not overturn the
+direction - we are ~1.33x slower than numpy on this kernel in every single run - but it does mean
+`1.2652`, `1.5372` and friends should be read as "about 1.3x" and "about 1.5x".
+
+### Where this leaves the lever
+
+A ~2.7% median self-speedup on the kernel arm is roughly 12 us of the ~190 us divide deficit. It is
+a strict improvement with a proved isomorphism and an asserted negative case, and it is NOT a win -
+the arm remains ~1.33x slower than numpy either way. **I did not take it into
+`zerocopy_f64_binary_flat`:** `lib.rs` is a peer's declared active edit surface, and 2.7% sits at
+the edge of what this instrument resolves in a single run, so it should be landed by whoever holds
+that file and measured together with the accumulate work rather than alone. The patch is exactly the
+body of `divide_bitmask_fused_serial` in
+`crates/fnp-python/benches/criterion_python_elementwise.rs`.
+
+A/A NULL CONTROLS on the run this correction's counters come from, both clean and both straddling
+unity: incumbent A/A ci95=[0.987747,1.004397] with null_bias=0.004330; candidate A/A
+ci95=[0.991551,1.009512] with null_bias=0.000460.
+
+RETRY PREDICATE: do not re-decide the bitmask lever from a single run - it needs at least five, and
+its answer is already known to be ~1.027 median. Do re-run anything else in the divide lane that was
+banked from ONE dual-null contract at an effect size under 5%, because the between-run term
+(stdev 0.0159) is larger than the CI those rows carry. Do pin `OPENBLAS_NUM_THREADS=1` in every
+future run of this bench.
+AGENT_NAME=AzureCarp.
