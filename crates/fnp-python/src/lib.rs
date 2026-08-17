@@ -1029,7 +1029,7 @@ impl PyUFunc {
         let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         Ok(np_ufunc
-            .getattr("outer")?
+            .getattr(intern!(py, "outer"))?
             .call((a.bind(py), b.bind(py)), kwargs)?
             .unbind())
     }
@@ -78889,7 +78889,7 @@ fn outer(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
-    let outer_fn = numpy.getattr("outer")?;
+    let outer_fn = numpy.getattr(intern!(py, "outer"))?;
     let kwargs = PyDict::new(py);
     if let Some(ref value) = out {
         kwargs.set_item("out", value.bind(py))?;
@@ -104835,7 +104835,10 @@ fn linalg_outer(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let np_linalg = py.import("numpy.linalg")?;
-    Ok(np_linalg.getattr("outer")?.call(args, kwargs)?.unbind())
+    Ok(np_linalg
+        .getattr(intern!(py, "outer"))?
+        .call(args, kwargs)?
+        .unbind())
 }
 
 #[pyfunction]
