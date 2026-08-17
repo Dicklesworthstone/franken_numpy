@@ -1132,11 +1132,28 @@ impl PyUFunc {
             return Ok(py.None()); // ufunc.at mutates in place and returns None
         }
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
-        let args = match b {
-            Some(b_val) => PyTuple::new(py, [a.bind(py), indices.bind(py), b_val.bind(py)])?,
-            None => PyTuple::new(py, [a.bind(py), indices.bind(py)])?,
-        };
-        Ok(np_ufunc.getattr(intern!(py, "at"))?.call1(args)?.unbind())
+        // VECTORCALL PER ARITY (`deadlock-audit-v46rn`).
+        //
+        // `at` was the one method that could NOT take the vectorcall lever, and the
+        // measurement showed it: `reduceat` went 1.3509x -> 1.1246x on that change while
+        // `at` stayed at 1.2817x. The reason is here - `at` takes two operands or three,
+        // so it built a `PyTuple` to carry either, and pyo3 routes `PyObject_VectorcallMethod`
+        // only for RUST TUPLES (`tuple_conversion!` in pyo3 0.28.3); a `Bound<PyTuple>`
+        // falls back to an explicit `getattr` and a materialised bound method.
+        //
+        // Branching on the arity gives each case a Rust tuple, so both take the vectorcall
+        // path AND stop allocating the intermediate `PyTuple`.
+        match b {
+            Some(b_val) => Ok(np_ufunc
+                .call_method1(
+                    intern!(py, "at"),
+                    (a.bind(py), indices.bind(py), b_val.bind(py)),
+                )?
+                .unbind()),
+            None => Ok(np_ufunc
+                .call_method1(intern!(py, "at"), (a.bind(py), indices.bind(py)))?
+                .unbind()),
+        }
     }
 }
 
@@ -112004,6 +112021,107 @@ mod tests {
                 ours.call_method1("outer", (&v, &v))?.hasattr("shape")?,
                 "numpy.add must be restored once the guard drops"
             );
+            Ok(())
+        });
+    }
+
+    /// `at` must behave identically at BOTH arities after taking the vectorcall path
+    /// (`deadlock-audit-v46rn`).
+    ///
+    /// `at` accepts two operands or three, and it used to build a `PyTuple` to carry
+    /// either - which is precisely why it could not take the vectorcall lever that moved
+    /// `reduceat` from 1.3509x to 1.1246x, while `at` stayed at 1.2817x. Branching on the
+    /// arity gives each case a Rust tuple.
+    ///
+    /// A branch is a new way to be wrong: the two-argument form and the three-argument
+    /// form now go down different code, and `at` MUTATES in place and returns None, so
+    /// picking the wrong one leaves the target holding wrong numbers rather than raising.
+    /// Both arities are checked against NumPy on identical copies - the 3-arg form with
+    /// DUPLICATE indices, since unbuffered accumulation is the point of `at`, and the
+    /// 2-arg form (negative, which takes no operand) on the same fixture.
+    #[test]
+    fn at_vectorcall_matches_numpy_at_both_arities() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_at_arity")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            // Three-argument form: add.at(target, idx, values), duplicate indices.
+            for dt in ["int64", "int32", "float64"] {
+                let locals = PyDict::new(py);
+                locals.set_item("np", &numpy)?;
+                locals.set_item("dt", dt)?;
+                py.run(
+                    std::ffi::CString::new(
+                        "base = (np.arange(24) % 9 + 1).astype(dt)\n\
+                         ours_t = base.copy()\n\
+                         theirs_t = base.copy()\n\
+                         idx = ((np.arange(18) % 6) * 3).astype(np.intp)\n\
+                         vals = (np.arange(18) % 4 + 1).astype(dt)\n",
+                    )
+                    .unwrap()
+                    .as_c_str(),
+                    Some(&locals),
+                    Some(&locals),
+                )?;
+                let ours_t = locals.get_item("ours_t")?.expect("ours");
+                let theirs_t = locals.get_item("theirs_t")?.expect("theirs");
+                let idx = locals.get_item("idx")?.expect("idx");
+                let vals = locals.get_item("vals")?.expect("vals");
+                module
+                    .getattr("add")?
+                    .call_method1("at", (&ours_t, &idx, &vals))?;
+                numpy
+                    .getattr("add")?
+                    .call_method1("at", (&theirs_t, &idx, &vals))?;
+                assert_eq!(
+                    ours_t.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs_t.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "3-arg add.at on {dt} must leave the target byte-identical to numpy"
+                );
+            }
+
+            // Two-argument form. Every UFuncKind here is BINARY - there is no unary
+            // PyUFunc in this module - so numpy REFUSES add.at without values, and the
+            // None branch is reachable only as that error path. Outcome parity is the
+            // property to pin: we must refuse exactly where numpy refuses, rather than
+            // silently doing something with two operands.
+            for op in ["add", "multiply"] {
+                let locals = PyDict::new(py);
+                locals.set_item("np", &numpy)?;
+                py.run(
+                    std::ffi::CString::new(
+                        "base = (np.arange(24) % 9 + 1).astype(\"int64\")\n\
+                         ours_t = base.copy()\n\
+                         theirs_t = base.copy()\n\
+                         idx = ((np.arange(18) % 6) * 3).astype(np.intp)\n",
+                    )
+                    .unwrap()
+                    .as_c_str(),
+                    Some(&locals),
+                    Some(&locals),
+                )?;
+                let ours_t = locals.get_item("ours_t")?.expect("ours");
+                let theirs_t = locals.get_item("theirs_t")?.expect("theirs");
+                let idx = locals.get_item("idx")?.expect("idx");
+                let got = module.getattr(op)?.call_method1("at", (&ours_t, &idx));
+                let want = numpy.getattr(op)?.call_method1("at", (&theirs_t, &idx));
+                assert_eq!(
+                    got.is_ok(),
+                    want.is_ok(),
+                    "2-arg {op}.at must succeed or refuse exactly as numpy does"
+                );
+                if want.is_ok() {
+                    assert_eq!(
+                        ours_t.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        theirs_t.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "2-arg {op}.at must leave the target byte-identical to numpy"
+                    );
+                }
+            }
             Ok(())
         });
     }
