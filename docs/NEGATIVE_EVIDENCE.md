@@ -47104,3 +47104,69 @@ build to measure zero. Do not substitute `PyBuffer::item_count()` for the `size`
 ns against 48. The live question on this cell is whether the f64 divide kernel can win below 16384
 so the gate can be deleted outright.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - SUPERSEDED, and it changes an open bead's premise: `deadlock-audit-q00ev`'s n=2^8 divide cell is no longer 3.185x. It is 1.5578x - excess 938 -> 245 ns - so the gap that made the gate obviously right has narrowed to 0.27x (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build, no new measurement — this is my own five-run row from earlier in this window
+compared against a banked row, and I am flagging a peer's open bead rather than working it.
+
+**Campaign result class:** supersession of a banked row + a changed premise on an open bead
+
+### The two rows
+
+```
+  q00ev banked (RedLynx, ELF 6766850940f767eb, 2026-08-16)
+    n=2^8  DELEGATES   3.185x   numpy_ns  430   fnp_ns 1368   excess 938 ns
+
+  mine (ELF 8be4764dfe9ea795f03de14b098494c99fbea4828b4ccc35160cfb41c5e363cf, 5 runs, one window)
+    n=2^8  DELEGATES   1.5578x  numpy_ns  461   fnp_ns  691   excess 245 ns
+
+    incumbent  430 -> 461   (+7.2%)      our arm  1368 -> 691   (-49.5%)
+    excess     938 -> 245   (-73.9%)
+```
+
+**The incumbent moved 7% and our arm halved.** That asymmetry is what makes this readable across two
+ELFs and two windows: window noise does not move one arm by 50% while leaving the other at 7%. The
+cause is not mysterious — every wrapper lever landed on this route since that row was taken
+(axis-default removal, the kwargs-dict removal, the getattr interning, the vectorcalls, the
+probe-to-decline cuts), by several agents including me.
+
+### Why this matters to `q00ev` specifically
+
+That bead's finding is *"the native f64 divide path is at its WORST immediately above its own gate"*,
+resting on this contrast:
+
+```
+  THEN   below the gate (2^8, delegating)  3.185x      just above (2^16, native)  1.286x
+  NOW    below the gate (2^8, delegating)  1.5578x     just above (2^16, native)  1.286x
+```
+
+The bead's own numbers made delegation look obviously worse than the native band, which is what
+justified `F64_DIV_NATIVE_MIN_LEN` sitting where it does. **That contrast has collapsed from 2.5x to
+0.27x.** The native band did not improve — nothing landed on the divide kernel — the DELEGATING side
+did, by three quarters of its excess.
+
+I am not re-deciding the gate and I have not touched the bead's status: `q00ev` is IN_PROGRESS and a
+peer's. What I am recording is that its 2^8 figure is stale by a factor of two, so the question it
+asks — whether the gate admits a losing band — now has to be asked against 1.5578x, not 3.185x, and
+the answer may differ. Its 2^16 and 2^20 rows are untouched by any of this and stand.
+
+### What I did NOT do
+
+I did not re-measure 2^16 or 2^20. My five runs covered n=256 only, so I cannot say whether the
+native band moved, and I am explicitly not assuming it did not merely because no kernel lever landed
+— that is an inference, not a measurement, and the whole point of this row is that inferences about
+stale cells go wrong.
+
+COUNTED_MECHANISM: the n=2^8 f64 divide cell's excess over NumPy fell 938 -> 245 ns (-73.9%) between
+ELF 6766850940f767eb and ELF 8be4764d, with the incumbent arm moving only +7.2% across the same pair,
+measured five times in one window with all forty nulls straddling unity.
+
+A/A NULL CONTROLS: my side is the five-run row banked two entries above — all nulls straddle unity,
+per-arm `same_core=true`, `arm_mhz_spread` 1.0000, arms 4225.7-4292.2 MHz, loadavg 11.97/11.50/12.92
+to 12.14/11.54/12.93.
+
+RETRY PREDICATE: do not quote `q00ev`'s 3.185x for the n=2^8 divide cell — it is 1.5578x. Anyone
+resuming that bead should re-take 2^16 and 2^20 on a current ELF before deciding the gate, because
+the comparison it rests on has moved on one side only and I have measured just that side.
+AGENT_NAME=AzureCarp.
