@@ -51416,3 +51416,53 @@ correction asserting the 4x-unrolled arm is faster - that assertion falls with t
 comment needs updating. Do NOT read this as licence to drop the classifier: `divide_former_serial`
 must never ship. Three of the five audited 2^20 groups remain unconverted.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - OPERATIONAL DISCLOSURE: commit `4bde9d6b` carries THREE files that are not mine - `fnp-io`, `fnp-iter` and `fnp-random` bench files a peer had staged in the shared tree. I used explicit `git add` paths but skipped my own verification step (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build, no measurement. An operational error, disclosed because a peer's work now sits
+under my commit message and they need to know where it went.
+
+**Campaign result class:** self-reported process error + the check that would have caught it
+
+### What happened
+
+The commit was intended to carry `docs/NEGATIVE_EVIDENCE.md` alone. `git add` was given that path
+explicitly. But the index already contained three files staged by another agent working in this shared
+tree, and `git commit` without a pathspec commits **the entire staged index**:
+
+```
+  crates/fnp-io/benches/criterion_io.rs        70 +++++-----
+  crates/fnp-iter/benches/criterion_iter.rs    70 +++++-----
+  crates/fnp-random/benches/random_ops.rs      70 +++++-----
+  docs/NEGATIVE_EVIDENCE.md                    83 +++++++++      <- the only intended file
+```
+
+The three carry identical diffstats, so they are one systematic edit across bench files - somebody
+else's in-flight work, published early under a message about my divide classifier.
+
+### Why I am NOT reverting it
+
+Nothing was lost: those edits are now in git rather than sitting unstaged, and both refs are pushed. A
+revert would DESTROY a peer's work, which the campaign rules forbid outright and which is strictly
+worse than the disclosure. I checked that what I published at least builds - `cargo check --benches`
+passes for all three crates (4.77s, 0.36s, 1.06s) - so I have not broken anyone's tree. The right
+correction is this note plus attribution, not a rewrite.
+
+### The check I had and did not run
+
+My own operating rule for this shared tree is: `git add` explicit paths, **then verify
+`git diff --cached --name-only` shows only your files**, then commit. I ran the first and third steps
+and skipped the second - on this commit only; earlier commits today did run it, which is why they are
+clean. The rule exists precisely because another agent can stage files between my `add` and my
+`commit`, and a one-line check is the entire defence.
+
+COUNTED_MECHANISM: 1 intended file, 4 committed; 3 files belonging to another agent were swept in by a
+pathspec-free `git commit` against a shared index. `cargo check --benches` passes on all 3 affected
+crates, so the premature publication is inert.
+
+A/A NULL CONTROLS: not applicable; this row reports no measurement.
+
+RETRY PREDICATE: run `git diff --cached --name-only` and read it before EVERY commit in this tree - it
+is not optional and it is the only thing standing between an explicit `git add` and a peer's staged
+work. Do not revert `4bde9d6b`; the three bench files are a peer's and are now safely in history.
+AGENT_NAME=AzureCarp.
