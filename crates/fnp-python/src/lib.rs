@@ -34516,9 +34516,20 @@ fn try_zerocopy_f64_searchsorted_merge(
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+    // ALL THREE OF THESE RUN ON THE PATH THAT ENGAGES (`deadlock-audit-v46rn`), which is
+    // the filter that separates this from four levers that measured zero: rows 60, 62 and
+    // 63 all changed something a caller had already guarded, and row 64 could not separate
+    // a change that ran but was small. This function is where the f64 array-needle cell -
+    // 5.7x slower than NumPy - actually does its work.
+    //
+    //   * `py.import("numpy")` per call. This is not a `#[pyfunction]`, so the 338-site
+    //     wrapper sweep never reached it; the import measured 656 ns on the ufunc methods.
+    //   * `getattr("ndarray")` builds and hashes a fresh `PyString`; the cached `PyType`
+    //     answers the same question for both operands.
+    //   * the output allocation passed `dtype` through a `PyDict`, where `numpy.empty`
+    //     takes it as the SECOND POSITIONAL parameter (`d16ee71a`).
+    let numpy = cached_numpy(py)?;
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, v)? {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1 {
@@ -34612,9 +34623,20 @@ fn try_zerocopy_f64_searchsorted(
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+    // ALL THREE OF THESE RUN ON THE PATH THAT ENGAGES (`deadlock-audit-v46rn`), which is
+    // the filter that separates this from four levers that measured zero: rows 60, 62 and
+    // 63 all changed something a caller had already guarded, and row 64 could not separate
+    // a change that ran but was small. This function is where the f64 array-needle cell -
+    // 5.7x slower than NumPy - actually does its work.
+    //
+    //   * `py.import("numpy")` per call. This is not a `#[pyfunction]`, so the 338-site
+    //     wrapper sweep never reached it; the import measured 656 ns on the ufunc methods.
+    //   * `getattr("ndarray")` builds and hashes a fresh `PyString`; the cached `PyType`
+    //     answers the same question for both operands.
+    //   * the output allocation passed `dtype` through a `PyDict`, where `numpy.empty`
+    //     takes it as the SECOND POSITIONAL parameter (`d16ee71a`).
+    let numpy = cached_numpy(py)?;
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, v)? {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1 {
@@ -34635,9 +34657,7 @@ fn try_zerocopy_f64_searchsorted(
         return Ok(None);
     };
     let m = v_s.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
-    let flat = numpy.call_method("empty", (m,), Some(&kwargs))?;
+    let flat = numpy.call_method1("empty", (m, "intp"))?;
     if m > 0 {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -34860,9 +34880,20 @@ fn try_zerocopy_int_searchsorted_merge(
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+    // ALL THREE OF THESE RUN ON THE PATH THAT ENGAGES (`deadlock-audit-v46rn`), which is
+    // the filter that separates this from four levers that measured zero: rows 60, 62 and
+    // 63 all changed something a caller had already guarded, and row 64 could not separate
+    // a change that ran but was small. This function is where the f64 array-needle cell -
+    // 5.7x slower than NumPy - actually does its work.
+    //
+    //   * `py.import("numpy")` per call. This is not a `#[pyfunction]`, so the 338-site
+    //     wrapper sweep never reached it; the import measured 656 ns on the ufunc methods.
+    //   * `getattr("ndarray")` builds and hashes a fresh `PyString`; the cached `PyType`
+    //     answers the same question for both operands.
+    //   * the output allocation passed `dtype` through a `PyDict`, where `numpy.empty`
+    //     takes it as the SECOND POSITIONAL parameter (`d16ee71a`).
+    let numpy = cached_numpy(py)?;
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, v)? {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1 {
@@ -34903,9 +34934,20 @@ fn try_zerocopy_int_searchsorted(
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+    // ALL THREE OF THESE RUN ON THE PATH THAT ENGAGES (`deadlock-audit-v46rn`), which is
+    // the filter that separates this from four levers that measured zero: rows 60, 62 and
+    // 63 all changed something a caller had already guarded, and row 64 could not separate
+    // a change that ran but was small. This function is where the f64 array-needle cell -
+    // 5.7x slower than NumPy - actually does its work.
+    //
+    //   * `py.import("numpy")` per call. This is not a `#[pyfunction]`, so the 338-site
+    //     wrapper sweep never reached it; the import measured 656 ns on the ufunc methods.
+    //   * `getattr("ndarray")` builds and hashes a fresh `PyString`; the cached `PyType`
+    //     answers the same question for both operands.
+    //   * the output allocation passed `dtype` through a `PyDict`, where `numpy.empty`
+    //     takes it as the SECOND POSITIONAL parameter (`d16ee71a`).
+    let numpy = cached_numpy(py)?;
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, v)? {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1 {
@@ -34953,9 +34995,20 @@ fn try_zerocopy_f32_searchsorted_merge(
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+    // ALL THREE OF THESE RUN ON THE PATH THAT ENGAGES (`deadlock-audit-v46rn`), which is
+    // the filter that separates this from four levers that measured zero: rows 60, 62 and
+    // 63 all changed something a caller had already guarded, and row 64 could not separate
+    // a change that ran but was small. This function is where the f64 array-needle cell -
+    // 5.7x slower than NumPy - actually does its work.
+    //
+    //   * `py.import("numpy")` per call. This is not a `#[pyfunction]`, so the 338-site
+    //     wrapper sweep never reached it; the import measured 656 ns on the ufunc methods.
+    //   * `getattr("ndarray")` builds and hashes a fresh `PyString`; the cached `PyType`
+    //     answers the same question for both operands.
+    //   * the output allocation passed `dtype` through a `PyDict`, where `numpy.empty`
+    //     takes it as the SECOND POSITIONAL parameter (`d16ee71a`).
+    let numpy = cached_numpy(py)?;
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, v)? {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1 {
@@ -35042,9 +35095,20 @@ fn try_zerocopy_f32_searchsorted(
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+    // ALL THREE OF THESE RUN ON THE PATH THAT ENGAGES (`deadlock-audit-v46rn`), which is
+    // the filter that separates this from four levers that measured zero: rows 60, 62 and
+    // 63 all changed something a caller had already guarded, and row 64 could not separate
+    // a change that ran but was small. This function is where the f64 array-needle cell -
+    // 5.7x slower than NumPy - actually does its work.
+    //
+    //   * `py.import("numpy")` per call. This is not a `#[pyfunction]`, so the 338-site
+    //     wrapper sweep never reached it; the import measured 656 ns on the ufunc methods.
+    //   * `getattr("ndarray")` builds and hashes a fresh `PyString`; the cached `PyType`
+    //     answers the same question for both operands.
+    //   * the output allocation passed `dtype` through a `PyDict`, where `numpy.empty`
+    //     takes it as the SECOND POSITIONAL parameter (`d16ee71a`).
+    let numpy = cached_numpy(py)?;
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, v)? {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1 {
@@ -106603,9 +106667,20 @@ fn try_native_int_convolve(
     if !matches!(mode, "full" | "same" | "valid") {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+    // ALL THREE OF THESE RUN ON THE PATH THAT ENGAGES (`deadlock-audit-v46rn`), which is
+    // the filter that separates this from four levers that measured zero: rows 60, 62 and
+    // 63 all changed something a caller had already guarded, and row 64 could not separate
+    // a change that ran but was small. This function is where the f64 array-needle cell -
+    // 5.7x slower than NumPy - actually does its work.
+    //
+    //   * `py.import("numpy")` per call. This is not a `#[pyfunction]`, so the 338-site
+    //     wrapper sweep never reached it; the import measured 656 ns on the ufunc methods.
+    //   * `getattr("ndarray")` builds and hashes a fresh `PyString`; the cached `PyType`
+    //     answers the same question for both operands.
+    //   * the output allocation passed `dtype` through a `PyDict`, where `numpy.empty`
+    //     takes it as the SECOND POSITIONAL parameter (`d16ee71a`).
+    let numpy = cached_numpy(py)?;
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, v)? {
         return Ok(None);
     }
     let a_shape: Vec<usize> = a.getattr("shape")?.extract()?;
