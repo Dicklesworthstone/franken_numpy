@@ -44083,3 +44083,82 @@ moves every absolute in the table while leaving the ratio intact. (3) The floor 
 (~210-220 ns) is now the target, and it is a different lever family from this one: it is paid by
 ops that never enter the block. AGENT_NAME=RedLynx.
 
+
+## 2026-08-16 - REPLICATED across a 3x load range (11.2 to 37.2) and the within-invocation ratio is LOAD-INVARIANT - plus I RETRACT the printing-artifact finding I accepted without qualification: every `median_ms` site prints `{:.6}`, so one tick is 1 ns, not 20-33% (`deadlock-audit-v46rn`, `deadlock-audit-ei9jz`)
+
+`RedLynx`. Seven runs of the same ELF, four of them in the quietest window of the session.
+
+**Campaign result class:** methodology (replication + a self-correction that voids a retry predicate)
+
+```
+bench_elf_sha256=6b5ec4ad0b6f326986374687edfdae3d57b8893a44c2e1985b5d9b9459a0274e
+  re-verified byte-identical before this window; SAME ELF as the row above
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256  nproc=64
+harness=common::run_dual_null_median_ci_contract  ABBAABBA, 41 rounds, min-of-3
+
+  run  loadavg(1/5/15)      divide ratio  div excess  mul excess  div/mul
+  1    31.87/29.57/28.48    0.640449         257         210       1.224
+  2    37.21/31.79/29.32    0.603627         307         311       0.987
+  3    35.11/31.45/29.22    0.660194         245         215       1.140
+  4    11.17/16.41/21.83    0.636612         265         215       1.233
+  5    11.17/16.41/21.83    0.644970         246         210       1.171
+  6    11.17/16.41/21.83    0.630970         256         270       0.948
+  7    14.29/16.54/21.67    0.639885         250         206       1.214
+
+ALL 28 cells verdict=DECIDABLE_REGRESSION; ALL 56 A/A nulls straddle unity.
+PER-ARM (CPU_WITNESS, run 7, effect phases): arm_a_cpu==arm_b_cpu on every phase,
+  same_core=true, arm_a_mhz_mean 4289.8-4291.4 vs arm_b 4289.8-4291.4, spread 1.0000.
+  Loaded window read 4037 MHz on the same witness, so the quiet arms ran 6.3% FASTER.
+System-wide MHz sampling is instantaneous and noisy: run4 median 1429 (idle cores parked),
+  run6 min 4039 max 4043 spread 1.001. Read the PER-ARM witness, not the system spread.
+```
+
+**THE WORST CELL, seven-run median: divide 0.639885 = 1.5628x.** Range 0.603627-0.660194 (9.4%).
+The figure banked in the row above (1.5613x) sits inside that and needs no revision.
+
+**THE WITHIN-INVOCATION RATIO IS LOAD-INVARIANT, which was the point of the exercise.**
+`divide_excess / multiply_excess` means 1.117 over the loaded runs (loadavg 31.9-37.2) and 1.142
+over the quiet runs (11.2-14.3) - a 2% difference across a 3x change in host load. That is the
+claim the row above rests on, tested against the variable it was supposed to be immune to.
+
+**BUT MY OWN CAVEAT WAS WRONG, AND IN THE DIRECTION THAT FLATTERED MY STORY.** The row above
+explained run2 as "depressed, above the ~32 saturation threshold" and implied a quiet window would
+show lower absolutes. **It did not.** Quiet divide excess reads 265/246/256/250 against 257/245 in
+the loaded window - indistinguishable - even though the arms clocked 6.3% higher. So loadavg 11
+versus 35 does not move this cell at all: it is a SINGLE-CORE serial measurement on a 64-thread
+box, and a load of 35 still leaves cores idle. The ~32 saturation threshold was established for
+BANDWIDTH-HEAVY PARALLEL cells (the maximum 2^22 rows) and does not transfer here. Run 2 is an
+outlier, not a load effect, and run 6 has its own outlier arm (multiply numpy_ns 532 against
+406-441 everywhere else). **Do not attribute run-to-run spread on a single-core small-n cell to
+host load without testing it; here it cost me a wrong explanation of my own data.**
+
+**RETRACTION: THE PRINTING-ARTIFACT FINDING IS REFUTED FOR THIS HARNESS.** A row banked earlier
+today accepted, in its own words "without qualification", that `arm_*_median_ms` prints four
+decimals, so that at a 0.0003 ms median one print tick is 20-33%, and that this "invalidates the
+read-off at small n in BOTH directions". I did not check the format string. It is `{:.6}`:
+
+```
+  crates/fnp-python/benches/common/mod.rs:1119   arm_a_median_ms={:.6} arm_b_median_ms={:.6}
+  every median_ms print site in the bench tree   {:.6}   (36 sites, ZERO at 4 decimals)
+  introduced at {:.6} in 84e10e85 (2026-07-26)   and never changed since
+```
+
+At six decimals of a millisecond one tick is **1 ns**, which at a 431 ns median is **0.23%**, not
+20-33%. So print granularity does not invalidate small-n row-pair comparison in this repo, and
+**retry predicate (2) of that row - "fix arm_*_median_ms to print nanoseconds or more decimals,
+worth a one-line change" - is VOID: there is nothing to fix.** If the original finding referred to
+some other artifact, it needs to name the file and line; I checked every one in this tree.
+
+**WHAT THE RETRACTION DOES NOT TOUCH.** The other half of what I accepted - that common-mode
+movement is what the balanced square cancels - stands. And the substantive disagreement in that
+row, about whether the A/A-versus-effect read-off can detect contamination at all, is untouched:
+it rests on phase-time drift, not on print precision.
+
+RETRY PREDICATE: (1) Verify a peer's mechanical claim against the source before accepting it in a
+ledger row; a format string is a five-second check and I banked a wrong one instead. (2) The
+~206-221 ns floor common to all four ops is now the target and is a different lever family - it is
+paid by ops that never enter the f64 block, so the within-invocation control used here CANNOT
+measure it, and a new control is needed before that work starts. (3) Do not re-run this cell for
+load reasons; seven runs across 11-37 loadavg say the window does not matter for it.
+AGENT_NAME=RedLynx.
+
