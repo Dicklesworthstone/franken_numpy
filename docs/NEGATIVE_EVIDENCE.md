@@ -46192,3 +46192,79 @@ all carry the same cost - the `__call__` rows at 206-221 ns are the nearest thin
 bound and the gap to 263-378 ns is where a method-entry cost would still hide.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - CERTIFIED: vectorcalling the ufunc methods removes 223 ns from `outer`, 1.2027x -> 1.0798x. The prediction named the cell that had to move and it moved MOST - and `reduce`, which the lever does not touch, is the control (`deadlock-audit-v46rn`)
+
+`RedLynx`. The shared-floor lever, measured against row 47's four-run before-figure on this
+same host.
+
+**Campaign result class:** maintenance-self-speedup (cells remain regressions vs NumPy)
+
+```
+BEFORE elf=7aad8d7cdb96f4c044c6c24b05b71f459dad6ff6789b2d36eb80ba8eae0ec44f (row 47, 4 runs)
+AFTER  elf=aa84de7f0d2da73e158e07062bfc1fe5db79f762206eb2062ff702a380b03493 (5 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench  n=256
+LOADAVG 22.42/26.71/24.74 identical BEFORE and AFTER the four-run block; 20.25 for run 5
+CPU MHz system-wide min 1429 max 4046-4069 median 3144-3254 spread 2.832-2.847x
+PER-ARM (CPU_WITNESS, effect, run 5): arm_a_cpu==arm_b_cpu=23 on ALL FOUR phases,
+  same_core=true, 4117.4/4117.4, 4004.1/4004.1, 4024.0/4024.0, 4171.4/4171.3,
+  every spread 1.0000
+
+  method      BEFORE excess   AFTER excess (5 runs)        BEFORE ratio  AFTER ratio
+  outer          378          146 166 155 (155) 160         1.2027x      1.0798x
+  accumulate     362          265 300 290 280 281           1.2528x      1.1977x
+  reduce         263          221 241 265 221 229           1.2376x      1.2016x
+
+11 of 12 nulls in the four-run block admit unity; run 4's `outer` incumbent null reads
+[0.991416,0.997835] and EXCLUDES unity, so that cell is VOID and is bracketed above.
+```
+
+**`fnp.add.outer` is 1.0798x, from 1.2027x - 223 ns of 378 removed, the largest single
+reduction this family has seen from one change.**
+
+**THE PREDICTION NAMED THE CELL BEFORE THE RUN.** The commit registered: *"`outer` is pure
+delegation and the floor by construction, so if this lever is worth anything it must show there;
+a result that moves accumulate or reduceat but not outer would mean I am measuring something
+other than the method lookup."* Outer moved **most**, by a wide margin.
+
+**`reduce` IS THE CONTROL AND IT IS UNTOUCHED BY THE LEVER.** `reduce` takes `(*args, **kwargs)`
+and forwards a `&Bound<PyTuple>`, which has no vectorcall variant, so it was deliberately left
+alone. It reads 263 -> ~231 ns, a ~12% drift matching NumPy's own arm movement between windows.
+Against it:
+
+```
+  outer excess / reduce excess     BEFORE 378/263 = 1.44x     AFTER 155/231 = 0.67x
+```
+
+**Outer went from costing 1.44x what the untouched method costs to 0.67x**, inside a single
+binary in a single run, which is what makes this robust to the window.
+
+**THE MECHANISM, verified in the dependency rather than assumed.** `getattr(name)` on a ufunc
+OBJECT builds a bound method that is called once and dropped. In pyo3 0.28.3 the
+`tuple_conversion!` macro emits `PyObject_VectorcallMethod` for RUST TUPLE arguments, while the
+generic `call_method_positional` falls back to an explicit `.getattr` - so `call_method1` with a
+tuple skips the allocation and the same call with a `Bound<PyTuple>` does not. That asymmetry is
+why `reduce` could not take the lever and why it makes a clean control.
+
+**THE FAMILY NOW READS:**
+
+```
+  outer       1.0798x   excess 155 ns
+  accumulate  1.1977x   excess 285 ns
+  reduce      1.2016x   excess 231 ns
+  reduceat    unmeasured since the lever landed
+  at (f64)    unmeasured since the lever landed
+```
+
+**WHAT IS NOT CLAIMED.** `reduceat` and `at` also took the lever but are not in this group, so
+their figures are stale and are not quoted. And a peer's decide-first change (removing a `PyDict`
+allocation worth ~165 instructions/call) landed one commit before this one; the `outer` path
+never built that dict, so outer's 223 ns cannot come from it - but accumulate's 77 ns may be
+partly theirs and **this row does not apportion accumulate between the two changes**.
+
+RETRY PREDICATE: (1) Re-run the `reduceat` and `at` groups; both took the lever and both have
+stale figures. (2) `reduce` is now the family's worst cell at 1.2016x and is the one method that
+could NOT take the vectorcall path - giving it a Rust-tuple call shape is the named next lever,
+and its excess should fall toward outer's 155 ns if the mechanism is what this row says it is.
+(3) Do not read accumulate's 77 ns as this lever's alone. AGENT_NAME=RedLynx.
+
