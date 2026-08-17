@@ -1412,6 +1412,10 @@ fn main() {
                 bench_signature_shape_pyclass_control,
             ),
             (
+                "bench_divide_out_route_delegation_sweep",
+                bench_divide_out_route_delegation_sweep,
+            ),
+            (
                 "bench_divide_allocation_split_vs_numpy",
                 bench_divide_allocation_split_vs_numpy,
             ),
@@ -7253,6 +7257,209 @@ fn bench_percall_floor_across_ops_vs_numpy(_c: &mut Criterion) {
 // The `out=` contract allocates on neither side and is immune to all of it: DECIDABLE
 // REGRESSION in all five runs, i.e. our divide kernel is ~1.21x SLOWER than NumPy's at
 // this size. That is the quotable number from this group.
+// DOES THE `out=` DIVIDE ROUTE EARN ITS KEEP AT ANY SIZE? With a DELEGATION control,
+// not a NumPy control (`deadlock-audit-6y5wp`).
+//
+// `f64_binary_route_is_worth_taking` has exactly ONE call site - the ALLOCATING branch
+// of `PyUFunc::__call__`. The `out=` branch reaches `try_zerocopy_f64_binary_into`
+// without consulting it, so the native divide kernel runs at EVERY size on the `out=`
+// path while the allocating path concedes to NumPy below `F64_DIV_NATIVE_MIN_LEN`. The
+// unit test `out_route_divide_engages_below_the_gate_the_allocating_route_obeys` pins
+// that asymmetry; this group is what can decide whether it should exist.
+//
+// WHY A DELEGATION CONTROL AND NOT A NUMPY CONTROL. "Are we slower than NumPy?" is the
+// WRONG question for a gate. Declining does not teleport the caller into NumPy - it
+// costs a trip through `PyUFunc::__call__` and out the delegation tail. The right
+// question is whether taking the native route beats DECLINING it, and declining is not
+// free. Measuring against bare NumPy would condemn the route for overhead it cannot
+// avoid either way.
+//
+// `add` supplies that control for free: `UFuncKind::Add` maps to `_ => None` in the
+// `out=` binop match, so `fnp.add(a, b, out=o)` MUST fall to the delegation tail. Its
+// excess over `numpy.add(a, b, out=o)` therefore measures the wrapper alone, at the same
+// size, in the same invocation, through the same code path a declining divide would take.
+//
+// THE ARITHMETIC, all four terms from ONE invocation at ONE size:
+//
+//   wrapper_ns             = fnp_add_ns    - numpy_add_ns
+//   predicted_delegate_ns  = numpy_div_ns  + wrapper_ns
+//   actual_native_ns       = fnp_div_ns
+//   native is worth taking IFF actual_native_ns < predicted_delegate_ns
+//
+// This is the same shape as the subtraction I got burned by earlier: the difference is
+// that every term here comes from one invocation on one host, not from four banked rows
+// across two binaries. Cross-row subtraction is what `deadlock-audit-q00ev` refused and
+// was right to refuse.
+//
+// IT IS ALSO THE ROUTE-LEVEL ENGAGEMENT PROOF I have owed for several rows. An identity
+// check cannot supply one, because `numpy.divide(a, b, out=o)` returns `o` just as our
+// route does. But if `actual_native_ns` tracked `predicted_delegate_ns` across the sweep,
+// divide would be delegating too - so a decidable SEPARATION between them is the proof
+// that our kernel ran, and its SIGN is simultaneously the gate answer.
+//
+// Both ops use `out=` on both arms, so nothing allocates inside any timed region and the
+// mmap-churn regime that voided this route's earlier numbers cannot reach these ratios.
+// The allocator regime is printed anyway - absolute nanoseconds here DO move with it.
+fn bench_divide_out_route_delegation_sweep(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let mmap_threshold =
+            std::env::var("MALLOC_MMAP_THRESHOLD_").unwrap_or_else(|_| "unset".to_owned());
+
+        for shift in [10usize, 14, 18, 19, 20, 21] {
+            let n = 1usize << shift;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            // Hazard-free operands, same generator the other divide groups use, so the
+            // fused classifier never takes its rare second pass and every size measures
+            // the same branch.
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\no1 = np.empty(n)\no2 = np.empty(n)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a_py = locals.get_item("a").expect("a operand");
+            let b_py = locals.get_item("b").expect("b operand");
+            let o1_py = locals.get_item("o1").expect("numpy out buffer");
+            let o2_py = locals.get_item("o2").expect("fnp out buffer");
+            let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs.set_item("out", &o1_py).expect("bind o1");
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("out", &o2_py).expect("bind o2");
+
+            let numpy_divide = numpy.getattr("divide").expect("numpy.divide");
+            let fnp_divide = module.getattr("divide").expect("fnp divide");
+            let numpy_add = numpy.getattr("add").expect("numpy.add");
+            let fnp_add = module.getattr("add").expect("fnp add");
+
+            // Parity and the no-swallow gate for all four callables, before timing.
+            for (label, target, kwargs, buffer) in [
+                ("numpy.divide", &numpy_divide, &numpy_kwargs, &o1_py),
+                ("fnp.divide", &fnp_divide, &fnp_kwargs, &o2_py),
+                ("numpy.add", &numpy_add, &numpy_kwargs, &o1_py),
+                ("fnp.add", &fnp_add, &fnp_kwargs, &o2_py),
+            ] {
+                let written = target
+                    .call(&args, Some(kwargs))
+                    .unwrap_or_else(|_| panic!("{label} out= probe failed at n={n}"));
+                assert!(
+                    written.is(buffer),
+                    "{label} at n={n} returned a different object - that arm is ALLOCATING \
+                     and the wrapper subtraction below would be measuring the wrong thing"
+                );
+            }
+            // Cross-check the two divide arms agree bit for bit at this size, so the
+            // ratio is two timings of ONE computation.
+            let numpy_div_ref = numpy_divide
+                .call(&args, Some(&numpy_kwargs))
+                .expect("numpy divide reference");
+            let expected_div = numpy_divide_checksum(&numpy_div_ref, n);
+            let fnp_div_ref = fnp_divide
+                .call(&args, Some(&fnp_kwargs))
+                .expect("fnp divide reference");
+            assert_eq!(
+                numpy_divide_checksum(&fnp_div_ref, n),
+                expected_div,
+                "the native out= divide diverged from numpy.divide at n={n}"
+            );
+
+            let divide_incumbent = || {
+                let started = Instant::now();
+                let result = numpy_divide
+                    .call(&args, Some(&numpy_kwargs))
+                    .expect("numpy.divide out=");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&result, n);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let divide_candidate = || {
+                let started = Instant::now();
+                let result = fnp_divide
+                    .call(&args, Some(&fnp_kwargs))
+                    .expect("fnp.divide out=");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&result, n);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let (divide, _din, _dcn) = common::run_dual_null_median_ci_contract(
+                &format!("divide_out_route_2e{shift}_vs_numpy"),
+                divide_incumbent,
+                divide_candidate,
+            );
+
+            let add_incumbent = || {
+                let started = Instant::now();
+                let result = numpy_add
+                    .call(&args, Some(&numpy_kwargs))
+                    .expect("numpy.add out=");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&result, n);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let add_candidate = || {
+                let started = Instant::now();
+                let result = fnp_add
+                    .call(&args, Some(&fnp_kwargs))
+                    .expect("fnp.add out=");
+                let elapsed = started.elapsed();
+                let checksum = numpy_divide_checksum(&result, n);
+                common::ContractObservation { elapsed, checksum }
+            };
+            let (add, _ain, _acn) = common::run_dual_null_median_ci_contract(
+                &format!("add_out_route_delegation_control_2e{shift}"),
+                add_incumbent,
+                add_candidate,
+            );
+
+            let wrapper_ns = add.arm_b_median_ns - add.arm_a_median_ns;
+            let predicted_delegate_ns = divide.arm_a_median_ns + wrapper_ns;
+            let actual_native_ns = divide.arm_b_median_ns;
+            let native_is_worth_taking = actual_native_ns < predicted_delegate_ns;
+            let native_over_delegate = actual_native_ns / predicted_delegate_ns;
+            println!(
+                "DIVIDE_OUT_ROUTE_DELEGATION_SWEEP n=2^{shift} n_elems={n} \
+                 numpy_version={numpy_version} worker={} malloc_mmap_threshold={mmap_threshold} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 control_is_delegation_not_numpy=true add_takes_the_underscore_none_arm=true \
+                 divide_vs_numpy_ratio={:.6} divide_ci95=[{:.6},{:.6}] \
+                 add_vs_numpy_ratio={:.6} add_ci95=[{:.6},{:.6}] \
+                 numpy_divide_ns={:.1} fnp_divide_ns={actual_native_ns:.1} \
+                 numpy_add_ns={:.1} fnp_add_ns={:.1} \
+                 wrapper_ns={wrapper_ns:.1} predicted_delegate_ns={predicted_delegate_ns:.1} \
+                 native_over_delegate={native_over_delegate:.6} \
+                 native_is_worth_taking={native_is_worth_taking} \
+                 gate_currently_applies_to_this_route=false",
+                measurement_worker(),
+                divide.ratio_median,
+                divide.ratio_ci_low,
+                divide.ratio_ci_high,
+                add.ratio_median,
+                add.ratio_ci_low,
+                add.ratio_ci_high,
+                divide.arm_a_median_ns,
+                add.arm_a_median_ns,
+                add.arm_b_median_ns,
+            );
+        }
+    });
+}
+
 fn bench_divide_allocation_split_vs_numpy(_c: &mut Criterion) {
     // The same constant the kernel row used, so the two rows are provably at one size
     // rather than at two literals that happen to be equal today.
