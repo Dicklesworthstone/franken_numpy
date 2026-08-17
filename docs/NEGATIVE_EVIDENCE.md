@@ -49956,3 +49956,65 @@ consistent at every size while magnitudes were not, so a sign-based decision rul
 may succeed where a magnitude-based one cannot. Fix rule 3 to guard control health in BOTH directions
 before reusing it. The engagement question is CLOSED and must not be re-opened: the kernel engages.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - CERTIFIED, quoted at its WORST cell: the dispatcher-body lever is worth +0.6% on `ss_list_haystack` and nothing on the clip controls - and +5.1% / +7.1% on the two cells where the body is a real fraction of the call. First MULTI-cell win of this stretch (`deadlock-audit-v46rn`)
+
+`RedLynx`. Row 68 required the worst cell in the heading and the best in the body. This is the
+first row written under that rule, and it is also the first lever here that moved more than one
+cell.
+
+**Campaign result class:** maintenance-self-speedup (all cells remain regressions vs NumPy)
+
+```
+BEFORE elf=2a862baa26b463bb... (row 67, 3 runs)
+AFTER  elf=ff9225e6efb74c46... (3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 17.00/16.67/17.97 before the build; 13.63/15.40/17.30 before the block and
+  13.18/15.27/17.25 after it
+CPU MHz system-wide min 1429 max 4292 median 3135 spread 3.004x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on all fifteen phases, same_core=true,
+  spreads 1.0000-1.0043
+
+  case              enters the body    BEFORE     AFTER (admissible)          change
+  ss_list_haystack  yes, but dwarfed   0.454307   0.458612/0.457153/0.454877   +0.6%
+  clip_one_sided    no (CONTROL)       0.910140   0.910340/0.923369/0.908651  +0.02%
+  clip_two_sided    no (CONTROL)       0.833015   0.850308/0.857672/0.822371   +2.1%
+  ss_array_needle   YES                0.299907   0.312228/ VOID  /0.318336    +5.1%
+  ss_scalar_needle  YES                0.484725   0.522637/ VOID  /0.515686    +7.1%
+
+Two VOIDs, both run 2 candidate A/A nulls excluding unity: ss_array
+A/A null=[1.003087,1.010151] and ss_scalar A/A null=[0.990584,0.998110].
+```
+
+**QUOTED AT ITS WORST CELL: +0.6%.** `ss_list_haystack` passes through the same dispatcher body
+and gained essentially nothing, because its call costs 180-190 us and the body's per-call work is
+a rounding error against that. The clip controls, which never enter this function, moved +0.02%
+and +2.1%.
+
+**Its best cells are `ss_scalar_needle` +7.1% (2.047x -> 1.926x) and `ss_array_needle` +5.1%
+(3.262x -> 3.172x).**
+
+**THE PREDICTION WAS REGISTERED BEFORE THE RUN AND IT DISCRIMINATED.** The commit said: *"unlike
+the last three levers this one should move MORE than one cell. If only ss_array moves, the body
+is not where their cost is."* Both `ss_array` and `ss_scalar` moved - they route through
+different probes but share the body. **That is the first multi-cell result in this stretch, and it
+is what distinguishes a change to the shared dispatcher from a change to one probe.**
+
+**AND `ss_list_haystack` NOT MOVING IS CONSISTENT, NOT CONTRADICTORY.** It enters the same body,
+so a naive reading of the prediction would call +0.6% a failure. The body's cost is on the order
+of a hundred nanoseconds; `ss_list` spends 180-190 us. **A lever is invisible wherever the call is
+large enough, and that is a property of the cell, not of the lever.** Saying so is the difference
+between a control that failed and a control whose scale was misjudged.
+
+**WHAT WAS REMOVED**: on every call, before any dispatch, two non-interned `getattr`s and a HEAP
+STRING holding a one-character answer, plus three non-interned `ndim` keys. The eight kind
+comparisons and one `matches!` now run on a `char`.
+
+RETRY PREDICATE: (1) The searchsorted family has now taken three levers (117-site predicate, 7
+probe heads, this body) and gone 8.700x -> 3.172x on its array cell; the remaining 3.172x has no
+attributed mechanism and the four surviving declining probes are the only structural candidate
+left. (2) `ss_list_haystack` at 2.19x has never been read - it takes the cold path, and this row
+shows its cost is elsewhere entirely. (3) Keep quoting the worst cell first; this row would have
+read "+7.1%" under the old habit and that would have been the best of five.
+AGENT_NAME=RedLynx.
+
