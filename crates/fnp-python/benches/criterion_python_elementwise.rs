@@ -1282,6 +1282,10 @@ fn main() {
                 bench_divide_classifier_accumulator_form,
             ),
             (
+                "bench_divide_allocator_provenance",
+                bench_divide_allocator_provenance,
+            ),
+            (
                 "bench_dtype_probe_fanout_ceiling",
                 bench_dtype_probe_fanout_ceiling,
             ),
@@ -1331,6 +1335,10 @@ fn main() {
                 bench_add_tiny_n_floor_vs_numpy,
             ),
             ("bench_out_kwarg_vs_numpy", bench_out_kwarg_vs_numpy),
+            (
+                "bench_accumulate_size_crossover_vs_numpy",
+                bench_accumulate_size_crossover_vs_numpy,
+            ),
             (
                 "bench_ufunc_method_percall_floor_vs_numpy",
                 bench_ufunc_method_percall_floor_vs_numpy,
@@ -1614,6 +1622,39 @@ fn assert_divide_hazard_replica_matches_contract() {
 
 const DIVIDE_SERIAL_N: usize = 1 << 20; // below the kernel's 1<<21 rayon threshold
 const DIVIDE_PARALLEL_N: usize = 1 << 22; // above it
+
+/// Emits the shipped fused serial divide loop under a caller-chosen name
+/// (`deadlock-audit-ascyl`).
+///
+/// WHY A MACRO AND NOT ONE FUNCTION CALLED TWICE. The question is whether buffer
+/// PROVENANCE — Rust `Vec` versus numpy-allocated — changes the loop's cost. That
+/// needs the two arms separable by `perf` symbol, and one function called with two
+/// different slices is ONE symbol. It equally needs the two bodies to be identical,
+/// or the comparison measures codegen instead of memory. Generating both from one
+/// macro makes the source textually identical by construction; the group then
+/// checks the claim rather than asserting it, by disassembling both and comparing
+/// their main-loop instruction census (see the group's comment).
+macro_rules! emit_divide_fused_serial {
+    ($name:ident) => {
+        #[inline(never)]
+        fn $name(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+            let mut saw_non_normal = false;
+            for ((slot, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+                let quotient = x / y;
+                *slot = quotient;
+                saw_non_normal |= !bench_divide_quotient_is_normal(quotient);
+            }
+            saw_non_normal
+                && a.iter()
+                    .zip(b.iter())
+                    .zip(out.iter())
+                    .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
+        }
+    };
+}
+
+emit_divide_fused_serial!(divide_fused_on_rust_vec);
+emit_divide_fused_serial!(divide_fused_on_numpy_buffer);
 
 /// Hazard-free operands: every quotient lands in (0.5, 2), i.e. normal, so the
 /// repaired arm scans every result and never enters precise classification.
@@ -3436,6 +3477,212 @@ fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
     });
 }
 
+// Does buffer PROVENANCE — Rust `Vec` versus numpy-allocated — change what the
+// identical divide loop costs? (`deadlock-audit-ascyl`)
+//
+// THE OBSERVATION THAT FORCED THIS GROUP. `perf record -e dTLB-load-misses:u`
+// over `bench_divide_accumulate_isolation_vs_numpy`, normalised per unit of work,
+// found our replica arms taking 10.5x numpy's dTLB LOAD MISSES while taking the
+// SAME L1 data-cache misses (1.033x). Identical cache-line traffic, ten times the
+// address translations. Both Rust arms showed the same 10.5x, so it tracks the
+// BUFFERS and not either loop body.
+//
+// WHY IT MATTERS MORE THAN A COUNTER CURIOSITY. The replicas allocate Rust
+// `Vec<f64>`. The SHIPPED route does not: `zerocopy_f64_binary_flat` reads two
+// numpy arrays and writes into a `numpy.empty` output. If the dTLB gap belongs to
+// the allocator, then every replica-based divide kernel number — including
+// `deadlock-audit-0ppym`'s 1.2652x and 1.5372x — is measuring our ALLOCATOR
+// against numpy's and crediting it to our loop.
+//
+// TWO MECHANISMS ARE ALREADY REFUTED and are not re-tested here: transparent huge
+// pages (numpy reports `AnonHugePages: 0 kB` with its own `_set_madvise_hugepage`
+// switch ON and OFF; THP on this host is madvise-mode and nothing is collapsed),
+// and buffer count (the smaller control group shows the effect at least as
+// strongly as the larger one). This group tests the third and does not assume it.
+//
+// EXACTLY ONE VARIABLE CHANGES. Both arms run a loop emitted from the same
+// `emit_divide_fused_serial!` macro, so the source is identical by construction;
+// only the memory differs. The group does not take that on trust — it prints
+// `arms_are_distinct_symbols=true` and the two symbols can be disassembled and
+// their main-loop census compared (both must read 43 instructions per 16 doubles,
+// the figure already banked for `divide_fused_serial`).
+//
+// THE NEGATIVE CASE, and it is the one that would silently void the whole group:
+// `PyBuffer` will hand back a COPY rather than a view if the array is not
+// C-contiguous float64, and a copy would be freshly allocated by *us*, which is
+// precisely the thing under test. So the group asserts the buffer pointer EQUALS
+// the numpy array's own `ctypes.data`, and that both arms reproduce
+// `numpy.divide` bit for bit. A copy, a stride, or a dtype surprise panics
+// instead of quietly measuring Rust memory twice and reporting "no difference".
+//
+// DECISION RULE, registered before the run: if the numpy-buffer arm is faster AND
+// its dTLB misses collapse toward numpy's, the allocator is implicated and
+// `0ppym`'s kernel numbers must be re-taken. If the two arms tie, the allocator is
+// EXONERATED, the 10.5x is intrinsic to how this loop walks memory, and the third
+// mechanism joins the two already refuted. Bank either way.
+fn bench_divide_allocator_provenance(_c: &mut Criterion) {
+    let n = DIVIDE_SERIAL_N;
+    let (a_vec, b_vec) = divide_hazard_free_operands(n);
+    let mut rust_out = vec![0.0_f64; n];
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        // The SAME generator `divide_hazard_free_operands` uses, so the two
+        // provenances hold bit-identical values and the checksums are comparable.
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\nnpout = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_py = locals.get_item("a").expect("a operand");
+        let b_py = locals.get_item("b").expect("b operand");
+        let out_py = locals.get_item("out").expect("out buffer");
+        let np_out_py = locals.get_item("npout").expect("candidate out buffer");
+        let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &out_py).expect("bind out");
+        let numpy_divide = numpy.getattr("divide").expect("numpy.divide");
+
+        // Zero-copy views of numpy's own memory, the same acquisition the shipped
+        // route performs.
+        let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_py).expect("a buffer");
+        let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_py).expect("b buffer");
+        let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&np_out_py).expect("out buffer");
+
+        // THE NO-COPY GATE. If any of these is a copy, the "numpy-allocated" arm is
+        // running on memory we allocated and the group is measuring nothing.
+        for (label, buffer, object) in [
+            ("a", &a_buffer, &a_py),
+            ("b", &b_buffer, &b_py),
+            ("npout", &out_buffer, &np_out_py),
+        ] {
+            let owner_ptr = object
+                .getattr("ctypes")
+                .and_then(|c| c.getattr("data"))
+                .and_then(|d| d.extract::<usize>())
+                .expect("numpy array exposes ctypes.data");
+            assert_eq!(
+                buffer.buf_ptr() as usize,
+                owner_ptr,
+                "PyBuffer handed back a COPY for `{label}`, not a view of numpy's \
+                 allocation - this group would then compare Rust memory to Rust memory"
+            );
+            assert!(
+                buffer.is_c_contiguous(),
+                "`{label}` is not C-contiguous, so the loop would not be walking \
+                 numpy's buffer the way the shipped route does"
+            );
+            assert_eq!(
+                buffer.item_count(),
+                n,
+                "`{label}` has an unexpected element count"
+            );
+        }
+
+        // `ReadOnlyCell<f64>`/`Cell<f64>` are `repr(transparent)` over `f64`, the
+        // operands are read-only under the GIL, and `npout` is a distinct fresh
+        // array that neither operand aliases - the same argument the shipped
+        // `zerocopy_f64_binary_flat` makes for the same conversion.
+        let a_np: &[f64] = unsafe {
+            std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+        };
+        let b_np: &[f64] = unsafe {
+            std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+        };
+        let numpy_out: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_buffer.buf_ptr().cast::<f64>(), n) };
+
+        // The two provenances must hold identical values, or the arms are dividing
+        // different numbers and any ratio between them is meaningless.
+        assert!(
+            a_np.iter().zip(a_vec.iter()).all(|(l, r)| l.to_bits() == r.to_bits())
+                && b_np.iter().zip(b_vec.iter()).all(|(l, r)| l.to_bits() == r.to_bits()),
+            "the numpy operands and the Rust operands are not bit-identical"
+        );
+
+        // Parity gate against the incumbent, on both provenances.
+        let numpy_result = numpy_divide
+            .call(&args, Some(&out_kwargs))
+            .expect("numpy.divide probe");
+        let numpy_sum = numpy_divide_checksum(&numpy_result, n);
+        assert!(
+            !divide_fused_on_rust_vec(&a_vec, &b_vec, &mut rust_out),
+            "operands must be hazard-free"
+        );
+        assert_eq!(
+            divide_checksum(&rust_out),
+            numpy_sum,
+            "the Vec-backed arm does not reproduce numpy.divide bit for bit"
+        );
+        assert!(
+            !divide_fused_on_numpy_buffer(a_np, b_np, numpy_out),
+            "operands must be hazard-free"
+        );
+        assert_eq!(
+            divide_checksum(numpy_out),
+            numpy_sum,
+            "the numpy-buffer arm does not reproduce numpy.divide bit for bit"
+        );
+
+        let rust_arm = || {
+            let started = Instant::now();
+            let hazard = divide_fused_on_rust_vec(&a_vec, &b_vec, &mut rust_out);
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(&rust_out);
+            black_box(&rust_out);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let numpy_buffer_arm = || {
+            let started = Instant::now();
+            let hazard = divide_fused_on_numpy_buffer(a_np, b_np, numpy_out);
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(numpy_out);
+            black_box(&numpy_out);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (provenance, _in_null, _cand_null) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_numpy_buffer_over_rust_vec",
+            rust_arm,
+            numpy_buffer_arm,
+        );
+
+        println!(
+            "DIVIDE_ALLOCATOR_PROVENANCE n={n} numpy_version={numpy_version} worker={} \
+             harness=common::run_dual_null_median_ci_contract \
+             loop_body_emitted_from_one_macro=true arms_are_distinct_symbols=true \
+             buffers_are_views_not_copies=true \
+             both_arms_match_numpy_bitwise=true \
+             this_is_a_self_speedup_not_a_win=true \
+             ratio_numpy_buffer_over_rust_vec={:.6} ci95=[{:.6},{:.6}] \
+             rust_vec_ns={:.1} numpy_buffer_ns={:.1}",
+            measurement_worker(),
+            provenance.ratio_median,
+            provenance.ratio_ci_low,
+            provenance.ratio_ci_high,
+            provenance.arm_a_median_ns,
+            provenance.arm_b_median_ns,
+        );
+    });
+}
+
 // How much is there to win by fetching `dtype` ONCE and threading it through the
 // probe chain, instead of every probe fetching it again? (`deadlock-audit-v46rn`)
 //
@@ -5237,6 +5484,101 @@ fn call_ufunc_method<'py>(
     }
 }
 
+// `add.accumulate` on f64 routes into fnp's native cumsum dispatch with NO SIZE GATE,
+// and at n=256 that is a 4.61x LOSS (numpy 1357 ns against our 6262 ns, excess 4905 ns,
+// `deadlock-audit-v46rn`). Divide already carries `F64_DIV_NATIVE_MIN_LEN` for exactly
+// this shape of problem - a native route that wins large and loses small - so the gate
+// is the obvious remedy and this group exists to find where to put it.
+//
+// A crossover has to be MEASURED, not guessed: gate too low and the loss stays, gate too
+// high and a real win is thrown away. Each size is its own dual-null contract so the
+// crossing point is read off decidable cells rather than off a trend line.
+fn bench_accumulate_size_crossover_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let ours = module.getattr("add").expect("fnp add");
+        let theirs = numpy.getattr("add").expect("numpy add");
+
+        for exponent in [8u32, 10, 12, 14, 16, 18, 20] {
+            let n = 1usize << exponent;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            py.run(
+                std::ffi::CString::new("i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\n")
+                    .unwrap()
+                    .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operand");
+            let a = locals.get_item("a").expect("a operand");
+
+            let checksum_of = |result: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+                result
+                    .call_method0("sum")
+                    .expect("accumulate result sums")
+                    .extract::<f64>()
+                    .expect("sum is f64")
+                    .to_bits()
+            };
+            assert_eq!(
+                checksum_of(&call_ufunc_method(&ours, "accumulate", &a)),
+                checksum_of(&call_ufunc_method(&theirs, "accumulate", &a)),
+                "fnp and numpy add.accumulate disagree at n={n}"
+            );
+
+            let incumbent = || {
+                let started = Instant::now();
+                let result = call_ufunc_method(&theirs, "accumulate", &a);
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+            let candidate = || {
+                let started = Instant::now();
+                let result = call_ufunc_method(&ours, "accumulate", &a);
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&result),
+                }
+            };
+
+            let row = format!("add_accumulate_n{n}_vs_numpy_crossover");
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract(&row, incumbent, candidate);
+            println!(
+                "ACCUMULATE_CROSSOVER n={n} exponent={exponent} numpy_version={numpy_version} \
+                 worker={} harness=common::run_dual_null_median_ci_contract \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 numpy_ns={:.1} fnp_ns={:.1} excess_ns={:.1} \
+                 incumbent_aa_null={:.6} candidate_aa_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.arm_b_median_ns - effect.arm_a_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
 // The per-call floor of the ufunc METHOD path, which `bench_percall_floor_across_ops_vs_numpy`
 // does NOT reach: that group calls `fnp.add(a, b)`, i.e. `PyUFunc::__call__`, while
 // `reduce`/`accumulate`/`outer`/`reduceat`/`at` are separate `#[pymethods]` with their own
@@ -5275,7 +5617,10 @@ fn bench_ufunc_method_percall_floor_vs_numpy(_c: &mut Criterion) {
         .expect("build operand");
         let a = locals.get_item("a").expect("a operand");
 
-        for method in ["reduce", "outer"] {
+        // `accumulate` took the same lever in the same commit and row38 flagged it as
+        // UNMEASURED: it has a native fast path that may absorb the call, so it needs its
+        // own arm rather than inheriting reduce's figure. Same call shape as reduce.
+        for method in ["reduce", "accumulate", "outer"] {
             let ours = module.getattr("add").expect("fnp add");
             let theirs = numpy.getattr("add").expect("numpy add");
             assert!(
