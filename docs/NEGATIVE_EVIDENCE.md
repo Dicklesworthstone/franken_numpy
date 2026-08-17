@@ -47327,3 +47327,60 @@ the absolutes — min-of-3 medians and `perf stat` totals are different statisti
 sweep already refuted that. If anyone attacks the floor it is the 363 insns/call inside
 `PyUFunc::__call__` itself, which is routing logic and is the only item here large enough to matter.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - TWO MORE WRAPPER CELLS MEASURED (`chebder` 1.0657-1.0792x, `geomspace` 1.0945-1.1077x) - the family is NOT uniform, and the before-arm was ABANDONED rather than taken in a window that had spiked to 47.5 (`deadlock-audit-v46rn`)
+
+`RedLynx`. Row 52's retry predicate asked for two cells that are not `linspace` or `fft`. These
+are them. The A/B that would have attributed them is not here, and why it is not is the second
+half of this row.
+
+**Campaign result class:** incumbent-win (first measurement of two cells) + an abandoned arm,
+disclosed
+
+```
+bench_elf_sha256=6050409c1e8ab29d165b095c970c000aa57b41e5f6141ea49cf36ca0d6fb3f52
+worker=thinkstation1  numpy 2.4.3  profile=bench
+group=bench_axis_default_wrappers_vs_numpy (registered), post-sweep state (`abe61f1f`)
+LOADAVG 11.20/18.97/19.58 before the block -> 16.71/19.98/19.91 after
+CPU MHz system-wide min 1429 max 4087 median 2506 spread 2.860x
+
+  fn          ratio (2 runs)          numpy_ns        fnp_ns          excess_ns
+  chebder     0.926589 / 0.938329     12639 / 13270   13626 / 14147    987 /  877
+  geomspace   0.913678 / 0.902809     25658 / 25383   28129 / 28109   2471 / 2726
+  linspace    0.868557 / 0.864017      10179 / 9754   11732 / 11276   1553 / 1522
+  fft         0.893309 / 0.869340       6382 / 5019    7139 / 5766     757 /  747
+
+All sixteen A/A nulls admit unity. Every cell DECIDABLE_REGRESSION.
+```
+
+**THE FAMILY IS NOT UNIFORM, which is the answer to what row 52 asked.** Post-sweep, the four
+wrappers sit at 1.066-1.157x with per-call excesses from 747 ns to 2726 ns - a 3.6x spread in
+excess across four members of one family, all measured in the same binary in the same runs. **A
+single figure does not characterise this class**, which is exactly why row 52 withheld the
+extrapolation and asked for these cells rather than assuming.
+
+**`geomspace` CARRIES THE LARGEST EXCESS (2471-2726 ns) YET THE SECOND-BEST RATIO**, because
+NumPy's own `geomspace` costs 25 us against `linspace`'s 10 us. Excess and ratio rank the family
+differently, and any future row here must say which it is quoting.
+
+**THE BEFORE-ARM WAS ABANDONED, AND I AM RECORDING THAT RATHER THAN THE NUMBER IT WOULD HAVE
+PRODUCED.** The plan was an A/B: reverse-apply the sweep (`abe61f1f`), rebuild, measure the same
+four cells unswept. The revert and rebuild succeeded - and the rebuild left loadavg at **47.50**,
+against **11.20** for the after-arm. A before/after across a 4x load difference is the confound
+this ledger has voided other rows for, so no before-arm was taken. **The tree was restored
+immediately** (`git diff` against HEAD empty, `chebder` verified back on `cached_numpy`) rather
+than left reverted where a peer could commit it, and the ELF was rebuilt to the committed state
+so no stale reverted-state binary is left on disk to mislead a later run.
+
+**SO THESE FOUR CELLS ARE A STATE, NOT AN ATTRIBUTION.** They do not tell us what the 338-site
+sweep was worth on `chebder` or `geomspace`. What they do establish is the post-sweep level for
+two cells outside the pair that produced the ~656 ns figure, and that the level varies 3.6x
+within the family.
+
+RETRY PREDICATE: (1) The A/B is still owed and is cheap - reverse-apply `abe61f1f`, rebuild, and
+measure in a window whose loadavg matches the after-arm's ~11-19. Do not take it at 47. (2) When
+quoting this class, say whether the figure is an EXCESS or a RATIO; `geomspace` ranks worst by one
+and second-best by the other. (3) `linspace` remains the worst RATIO of the four at ~1.15x with
+1522-1553 ns of residual, and its native path has still never been read - that is the open lead.
+AGENT_NAME=RedLynx.
+
