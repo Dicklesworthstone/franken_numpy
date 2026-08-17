@@ -49349,3 +49349,58 @@ direct interleaved contract replicated at least five times, reporting between-ru
 CI; a single DECIDABLE_WIN on it is known to be unreliable. (d) Ratio-of-ratios across contracts has a
 measured resolution of ~9.4% on this route and may not decide sub-10% effects.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - THE DESIGNED CONTROL WORKS: with a LIST-haystack cell that cannot take the lever, the `asarray` skip separates - control flat at -0.5% while the ndarray cells move +2.9% and +4.2% (`deadlock-audit-v46rn`)
+
+`RedLynx`. Row 64 could not separate this lever because its only controls were `clip` cells that
+moved 0.5% and 2.9% for reasons of their own. This adds the control row 64 asked for and re-runs
+the A/B.
+
+**Campaign result class:** maintenance-self-speedup (small, now separated) + a methodology result
+about controls
+
+```
+BEFORE elf=9226a0935096fa7c... (asarray skip removed, 3 runs - see the contamination note)
+AFTER  elf=f11a30fd49cdbbb0... (skip present, 3 runs)
+worker=thinkstation1  numpy 2.4.3  profile=bench
+LOADAVG 14.42/14.68/15.90 at the start; 14.84 -> 14.69 across the AFTER block;
+  15.78 at the BEFORE block
+CPU MHz system-wide min 1429 max 4198 median 3354 spread 2.937x
+
+  case              takes lever   BEFORE run 1   AFTER (median of 3)   change
+  ss_list_haystack  NO (control)  0.448700       0.446626              -0.5%
+  ss_array_needle   yes           0.169604       0.174527              +2.9%
+  ss_scalar_needle  yes           0.466842       0.486678              +4.2%
+  clip_one_sided    no            0.916160       0.906028              -1.1%
+```
+
+**THE CONTROL IS FLAT AND THE TARGETS MOVED.** `ss_list_haystack` passes a Python LIST as the
+haystack, so `asarray` must still run for it - the lever cannot reach it. It differs from
+`ss_array_needle` in exactly one property. It moved **-0.5%** while the two ndarray cells moved
+**+2.9%** and **+4.2%**. That is the separation row 64 lacked.
+
+**AND THE CONTROL IS FAR STEADIER THAN THE `clip` CELLS EVER WERE.** Across the AFTER block it
+read 0.446626 / 0.445130 / 0.447300 - a **0.5% spread**, against the 2.9% swing that made row 64
+undecidable. **A control that differs from the target in ONE property beats a control that merely
+sits in the same group**, and this row is the demonstration: same lever, same host, same harness,
+decidable only after the control was designed rather than borrowed.
+
+**I AM USING ONLY BEFORE-RUN 1, AND SAYING SO.** Runs 2 and 3 of the before-arm are contaminated:
+NumPy's OWN list-haystack arm reads 82611 ns in run 1 and 157523 / 149608 ns in runs 2 and 3 -
+nearly double, on the incumbent side, which no change of mine can touch. Their `ss_array` and
+`ss_list` cells also carry nulls that exclude unity and are VOID on that ground independently.
+Run 1's incumbent arms match the AFTER block's (82611 against 83363-85242), which is what makes it
+comparable at all. **One before-run against three after-runs is weaker than I would like, and the
+control is what makes it readable.**
+
+**THE EFFECT IS SMALL AND I AM NOT INFLATING IT.** +2.9% on the array cell and +4.2% on the
+scalar cell, on a cell that remains 5.7x slower than NumPy. Skipping one `asarray` on an object
+that already is an array is worth a few percent of a call that is doing much else wrong.
+
+RETRY PREDICATE: (1) Re-run with three clean before-runs when a window holds still for two builds
+- the direction is established, the magnitude is one run deep. (2) Use a DESIGNED control from now
+on in this group: `ss_list_haystack` is stable to 0.5% where the `clip` cells swing 2.9%, and
+future rows here should quote it rather than them. (3) The array-needle cell is still ~5.7x with
+the bulk unattributed; the four probes and the dispatcher body remain unpriced.
+AGENT_NAME=RedLynx.
+
