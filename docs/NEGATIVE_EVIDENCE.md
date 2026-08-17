@@ -50900,3 +50900,77 @@ four-arm split, so that measurement will pin manually and record the env in its 
 assertion lands as a separate hardening commit rather than triggering a second 30-minute rebuild of
 a 110k-line crate for a guard that changes no measured code.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 - THE BUFFER ARTIFACT IS A NEAR-CACHE-SIZE PHENOMENON, NOT A "BIGGER IS WORSE" ONE: at 2^22 (32 MiB) the separate-vs-shared difference is small and NOT consistently signed, so the certified `out=` cells are neither cleared nor condemned. And I RETRACT the "resolves in the peer's favour" reading I formed from a single run (`deadlock-audit-6y5wp`, `deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+
+`AzureCarp`. One build (`release-perf`, 2m58s, `df` 215G immediately before, `proj_builds` = 0 at
+start). Four invocations of ELF
+`2be2c513d93ff54ba9a4e3e7562e82cce2920c95f33cc72840a505ee2e778524`, worker `thinkstation1`, numpy
+2.4.3. **ALL FOUR ARE DISQUALIFIED** - C1 started at loadavg 54.87 against a 5-minute of 28.08, and
+C2-C4 ran with a peer build live in this project (`proj_builds` = 1) and 1-min above 5-min. Nothing
+here is certified.
+
+**Campaign result class:** a retraction + a mechanism refinement that narrows the defect class
+
+### The retraction, first
+
+From C1 alone I read `separate_over_shared` of 0.8603 / 0.9187 / 0.9011 and concluded the
+separate-buffer configuration UNDERSTATES our win, i.e. that the certified cells are conservative and
+the concern resolves in the peer's favour. **Four runs do not support that.**
+
+```
+  op        separate_over_shared, 4 runs                mean     consistently <1?
+  maximum   0.8603  0.9781  0.8464  1.0909            0.9439           NO
+  minimum   0.9187  0.9875  0.8237  1.1359            0.9664           NO
+  divide    0.9011  0.9460  0.8069  0.9836            0.9094          yes
+```
+
+Run 4 crosses unity for two of the three ops. The means all sit below 1, so a mild tendency to
+understate is the best guess, but **"the certified wins are conservative" is not established and I
+should not have said it after one run.** That is the same single-run error this campaign has now
+caught in me repeatedly; the difference this time is that I replicated before anyone acted on it.
+
+### The mechanism refinement, which is the useful part
+
+At 2^20 (8 MiB buffers) the separate-vs-shared artifact was large and consistent: the worst divide
+cell moved 0.5904 -> 0.7798, a 32% shift, with the run-to-run spread collapsing 0.1948 -> 0.0506. At
+2^22 (32 MiB buffers) the same configuration moves the answer by roughly 3-9% on average and changes
+sign between runs.
+
+**Bigger buffers are not worse. Buffers NEAR the cache size are worse.** This host has ~32 MiB of L3.
+At 8-16 MiB, two output buffers plus operands sit right at the boundary where residency is contested
+and which buffer wins is decidable - so a systematic difference appears. At 32 MiB per buffer, neither
+arm's output can be resident whatever the schedule does, so there is nothing for the race to win.
+
+That prediction is confirmed by data already banked: in the divide sweep, 2^19 and 2^20 showed the big
+separate-vs-shared shifts while **2^21 (16 MiB) showed overlapping ranges** (separate 1.2700-1.5181
+against shared 1.1504-1.5411) - the effect already fading as the buffers outgrew the cache.
+
+### What this means for the seven flagged groups
+
+The audit stands, but its priority ordering changes. The groups at **2^20 with 8 MiB buffers are the
+exposed ones**: `bench_divide_accumulate_isolation_vs_numpy`,
+`bench_divide_classifier_accumulator_form`, `bench_divide_allocator_provenance`,
+`bench_divide_kernel_on_numpy_buffers`, `bench_divide_allocation_split_vs_numpy` - five groups, all in
+the worst regime, and one of them produced my own classifier finding which is already downgraded to
+UNPROVEN.
+
+The **2^22 groups are the least exposed**, which includes `bench_out_kwarg_vs_numpy`'s certified cells
+and `bench_maximum_arms_vs_numpy`. So the headline I flagged hardest is, on this evidence, the one
+least likely to be materially wrong - though "least likely" is not "cleared", and the control group is
+now committed and can settle it in a qualifying window.
+
+COUNTED_MECHANISM: at 8 MiB per buffer the separate-vs-shared change moved a ratio by 32% (0.5904 ->
+0.7798) with a 3.9x spread collapse; at 32 MiB per buffer, across 4 runs and 3 ops, it moves the ratio
+by a mean of 3-9% and reverses sign in 2 of 12 cells. The host's L3 is ~32 MiB, so the 8 MiB case is
+contested-residency and the 32 MiB case is neither-resident.
+
+A/A NULL CONTROLS: the contracts' nulls straddle unity throughout, and are again not the basis of
+anything here - all four runs are disqualified on load and build preconditions, which no null reports.
+
+RETRY PREDICATE: re-run `bench_out_kwarg_shared_buffer_control` in a window with `proj_builds` = 0 and
+1-min <= 5-min, five times, before drawing any conclusion about the certified cells - the single-run
+reading is retracted and must not be requoted. Prioritise converting the five 2^20 groups over the two
+2^22 ones; that is where the artifact is proven large. Do not treat "bigger buffer" as "worse
+artifact" - the ordering is by proximity to L3, not by size.
+AGENT_NAME=AzureCarp.
