@@ -50018,3 +50018,94 @@ shows its cost is elsewhere entirely. (3) Keep quoting the worst cell first; thi
 read "+7.1%" under the old habit and that would have been the best of five.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - INSTRUMENT DEFECT FOUND AND FIXED: the delegation control measured a NEGATIVE wrapper (-3967, -6087, -170488, -516965 ns), which is impossible - the two arms had separate output buffers and were racing page residency, not code. Both arms now share one buffer. And the SIGN-based confirmatory test is registered here BEFORE it runs (`deadlock-audit-6y5wp`)
+
+`AzureCarp`. One build (`release-perf`, 7m46s, `pgrep` showed 0 builds in this project at its start),
+no measurement in this row. Load 15.84/16.25/17.70, disk 99G.
+
+**Campaign result class:** instrument defect found + fixed + a confirmatory test pre-registered
+
+### The defect, found by asking whether a measured quantity was PHYSICAL
+
+`wrapper_ns = fnp_add_ns - numpy_add_ns` measures a pure-delegation wrapper, and a wrapper can only
+ADD cost. Across the five certification runs:
+
+```
+  n      wrapper_ns per run                                       median
+  2^10     330    471    356    430    356                          356
+  2^14     847    517    480    677    902                          677
+  2^18     966    611   3455    816    417                          816
+  2^19   25343    752  18840  21732    551                        18840
+  2^20   30970  -3967  11661  36385  -6087                        11661
+  2^21    5229 -170488 -269286 -516965  -8205                   -170488
+```
+
+**Negative at 2^20 and 2^21, and growing with n at 2^19 where a fixed per-call cost should be flat.**
+The control is broken above 2^18 - not merely noisy, but measuring something that cannot exist.
+
+**Cause: the two arms had SEPARATE output buffers.** `numpy` wrote `o1`, `fnp` wrote `o2`. Harmless
+while both fit in cache; at 8-16 MiB it becomes a residency race in which whichever buffer happened to
+be in a better page state won its arm. That is not a property of the code being compared. Both arms
+compute bit-identical values, so **both now share ONE buffer**: each call overwrites the other's result
+with the same bytes, the checksum is still taken after the timer stops, and the interleaved schedule
+hands both arms the same freshly-touched memory. The group also now prints `wrapper_ns_is_physical`.
+
+**THIS DEFECT IS NOT CONFINED TO THIS GROUP.** `bench_divide_allocation_split_vs_numpy` (`o1`/`o2`) and
+`bench_divide_kernel_on_numpy_buffers` (`former_out`/`fused_out`) use separate per-arm output buffers
+at the same sizes. Any large-n row from either may carry the same asymmetry, and rows from them should
+be re-taken on the shared-buffer pattern before being quoted at 2^19 and above.
+
+### A SECOND ONE-DIRECTIONAL BLIND SPOT IN MY OWN RULES
+
+I had drafted a health criterion of "median `wrapper_ns` within 3x of the small-size baseline". Applied
+to the table above it **passes 2^21**, because -170488 is comfortably below 3 x 677 = 2031. A
+one-sided upper bound accepts arbitrarily negative values. This is the SAME defect as pre-registered
+rule 3, which guarded only `add_vs_numpy < 0.95` and so missed 2^21 reading 1.3149 in the other
+direction. Twice in one day, so it is a pattern in how I write these, not an accident: **a health
+criterion on a signed quantity must bound BOTH directions explicitly.**
+
+### PRE-REGISTERED, before the run it governs
+
+**Control health (fixed, both directions).** A size is control-healthy iff, across all runs,
+`wrapper_ns > 0` in EVERY run AND the median `wrapper_ns` is at most 3x the small-size baseline
+(median of the 2^10/2^14/2^18 medians). A size failing either half is void for the delegation
+comparison no matter what its sign does.
+
+**The sign test.** Magnitudes did not replicate (between-run stdev 3-35x the within-run CI) but SIGNS
+were 5/5 consistent at every size. So the confirmatory statistic is the sign of
+`native_over_delegate - 1`, and the predictions below are fixed NOW, from the old ELF, before the new
+one is run:
+
+```
+  2^10  predict native_over_delegate < 1   (native worth taking)
+  2^14  predict > 1                        (not worth taking)
+  2^18  predict > 1                        (not worth taking)
+  2^19  predict > 1                        (control likely unhealthy - prediction recorded anyway)
+  2^20  predict > 1                        (control likely unhealthy)
+  2^21  predict < 1                        (control unhealthy)
+```
+
+**Verdict rule:** at a control-healthy size, **7 of 7 fresh invocations must agree with the predicted
+sign** to certify it. One-sided, direction fixed in advance, so 7/7 is p = 1/128. Anything less is
+UNDECIDED and the route keeps current behaviour.
+
+**Accepted risk, stated in advance:** the shared-buffer fix changes the instrument, so these
+predictions come from a DIFFERENT ELF than the one that will test them. They may fail. That is what
+makes it a test rather than a restatement, and a failure is a reportable result about the old
+instrument.
+
+COUNTED_MECHANISM: 4 measured `wrapper_ns` values are negative (-3967, -6087, -170488, -516965) on a
+path where the quantity is physically bounded below by 0, and the 2^19 median of 18840 ns is 27.8x the
+816 ns median at 2^18 for what should be a size-independent per-call cost.
+
+A/A NULL CONTROLS: not applicable - this row takes no measurement. The nulls from the runs whose
+`wrapper_ns` is shown all straddled unity, which is again recorded as evidence that they do not bound
+this failure: every negative wrapper above came from a run whose A/A nulls passed.
+
+RETRY PREDICATE: do not quote any delegation-based number at 2^19 or above from the separate-buffer
+ELF (`7dd037723ee6ae91...`); it is superseded by the shared-buffer build. Re-take
+`bench_divide_allocation_split_vs_numpy` and `bench_divide_kernel_on_numpy_buffers` on the
+shared-buffer pattern before quoting their large-n rows. The sign test above must be run on 7 fresh
+invocations and may not be re-run to a better answer.
+AGENT_NAME=AzureCarp.

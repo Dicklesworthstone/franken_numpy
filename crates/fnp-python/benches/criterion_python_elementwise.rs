@@ -7325,7 +7325,7 @@ fn bench_divide_out_route_delegation_sweep(_c: &mut Criterion) {
             // the same branch.
             py.run(
                 std::ffi::CString::new(
-                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\no1 = np.empty(n)\no2 = np.empty(n)\n",
+                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\no = np.empty(n)\n",
                 )
                 .unwrap()
                 .as_c_str(),
@@ -7335,13 +7335,28 @@ fn bench_divide_out_route_delegation_sweep(_c: &mut Criterion) {
             .expect("build operands");
             let a_py = locals.get_item("a").expect("a operand");
             let b_py = locals.get_item("b").expect("b operand");
-            let o1_py = locals.get_item("o1").expect("numpy out buffer");
-            let o2_py = locals.get_item("o2").expect("fnp out buffer");
+            // ONE shared output buffer for BOTH arms (`deadlock-audit-6y5wp`).
+            //
+            // The first version of this group gave each arm its own `np.empty(n)`. That is
+            // harmless while both fit in cache and becomes a RESIDENCY ASYMMETRY once they
+            // do not: at 2^20 and 2^21 the measured `wrapper_ns` went NEGATIVE (-3967,
+            // -6087, -170488, -516965), which is physically impossible on a path proven to
+            // be pure delegation - a wrapper can only add cost. Whichever 8-16 MiB buffer
+            // happened to be in a better page state won its arm, and that has nothing to do
+            // with the code being compared.
+            //
+            // Both arms compute bit-identical values, so sharing one buffer is sound: each
+            // call overwrites the other's result with the same bytes, the checksum is taken
+            // after the timer stops, and the interleaved schedule gives both arms the same
+            // freshly-touched buffer instead of two buffers in different states.
+            let o_py = locals.get_item("o").expect("shared out buffer");
             let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
             let numpy_kwargs = PyDict::new(py);
-            numpy_kwargs.set_item("out", &o1_py).expect("bind o1");
+            numpy_kwargs
+                .set_item("out", &o_py)
+                .expect("bind shared out");
             let fnp_kwargs = PyDict::new(py);
-            fnp_kwargs.set_item("out", &o2_py).expect("bind o2");
+            fnp_kwargs.set_item("out", &o_py).expect("bind shared out");
 
             let numpy_divide = numpy.getattr("divide").expect("numpy.divide");
             let fnp_divide = module.getattr("divide").expect("fnp divide");
@@ -7350,10 +7365,10 @@ fn bench_divide_out_route_delegation_sweep(_c: &mut Criterion) {
 
             // Parity and the no-swallow gate for all four callables, before timing.
             for (label, target, kwargs, buffer) in [
-                ("numpy.divide", &numpy_divide, &numpy_kwargs, &o1_py),
-                ("fnp.divide", &fnp_divide, &fnp_kwargs, &o2_py),
-                ("numpy.add", &numpy_add, &numpy_kwargs, &o1_py),
-                ("fnp.add", &fnp_add, &fnp_kwargs, &o2_py),
+                ("numpy.divide", &numpy_divide, &numpy_kwargs, &o_py),
+                ("fnp.divide", &fnp_divide, &fnp_kwargs, &o_py),
+                ("numpy.add", &numpy_add, &numpy_kwargs, &o_py),
+                ("fnp.add", &fnp_add, &fnp_kwargs, &o_py),
             ] {
                 let written = target
                     .call(&args, Some(kwargs))
@@ -7430,6 +7445,9 @@ fn bench_divide_out_route_delegation_sweep(_c: &mut Criterion) {
             let wrapper_ns = add.arm_b_median_ns - add.arm_a_median_ns;
             let predicted_delegate_ns = divide.arm_a_median_ns + wrapper_ns;
             let actual_native_ns = divide.arm_b_median_ns;
+            // A wrapper can only ADD cost, so a non-positive value means the control is
+            // broken at this size and the delegation comparison must not be used there.
+            let wrapper_is_physical = wrapper_ns > 0.0;
             let native_is_worth_taking = actual_native_ns < predicted_delegate_ns;
             let native_over_delegate = actual_native_ns / predicted_delegate_ns;
             println!(
@@ -7441,7 +7459,9 @@ fn bench_divide_out_route_delegation_sweep(_c: &mut Criterion) {
                  add_vs_numpy_ratio={:.6} add_ci95=[{:.6},{:.6}] \
                  numpy_divide_ns={:.1} fnp_divide_ns={actual_native_ns:.1} \
                  numpy_add_ns={:.1} fnp_add_ns={:.1} \
-                 wrapper_ns={wrapper_ns:.1} predicted_delegate_ns={predicted_delegate_ns:.1} \
+                 wrapper_ns={wrapper_ns:.1} wrapper_ns_is_physical={wrapper_is_physical} \
+                 shared_output_buffer=true \
+                 predicted_delegate_ns={predicted_delegate_ns:.1} \
                  native_over_delegate={native_over_delegate:.6} \
                  native_is_worth_taking={native_is_worth_taking} \
                  gate_currently_applies_to_this_route=false",
