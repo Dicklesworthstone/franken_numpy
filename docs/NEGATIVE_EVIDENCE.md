@@ -47170,3 +47170,76 @@ RETRY PREDICATE: do not quote `q00ev`'s 3.185x for the n=2^8 divide cell — it 
 resuming that bead should re-take 2^16 and 2^20 on a current ELF before deciding the gate, because
 the comparison it rests on has moved on one side only and I have measured just that side.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - SWEPT AND CLEAN: the binary route's shared 197 ns floor has NO remaining wrapper lever. Four candidates checked on static reads, all already done or load-bearing - so the worst lane's larger half is not a wrapper problem (`deadlock-audit-ei9jz`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. Static reads only, no build — loadavg was 57.97 and rising, which is not a window for
+anything else.
+
+**Campaign result class:** systematic negative (a swept surface, no lever proposed)
+
+### Why sweep it
+
+Two rows up I measured the binary route floor at n=256 and found `divide` 1.5578x, `add` 1.4745x,
+`subtract` 1.4951x, `multiply` 1.4567x — a worse lane than the entire ufunc method family — and
+established that **197 of divide's 245 ns is the shared floor every binary op pays**. The 48 ns
+divide-specific part is already refuted as a lever. This is the larger half, so I went looking for a
+wrapper lever in it. There isn't one.
+
+### The four candidates, and why each is dead
+
+**1. Bare-`&str` getattrs in the hot prologue — NONE EXIST.** The only bare-`&str` attribute work in
+`PyUFunc::__call__`'s range is in `resolve_dtypes` and the `__signature__` builder (`inspect`,
+`Parameter`, `Signature`, `POSITIONAL_ONLY`…), neither of which is on the call path. Everything on
+the hot path is `intern!`. Given a bare getattr measured at ~795 insns/call earlier in this session,
+this was the candidate with the largest prize and it is simply not there.
+
+**2. Hoisting `x1_dtype_char` into the `binop` block — WOULD BREAK IT.** It looked unused by
+`add`/`subtract`/`multiply`, since only the divide path reads it at the `binop` site. It is read
+three more times below the block, by `x1_is_maybe_f16`, `x1_is_maybe_temporal` and
+`x1_is_maybe_complex`, which run for every op. Moving it in would disengage the f16, temporal and
+complex native routes for the ops that currently reach them.
+
+**3. Vectorcalling `__call__`'s own delegation — ALREADY DONE.** The tail is
+`np_ufunc.call1((x1.bind(py), x2.bind(py)))`, a RUST tuple, which is the vectorcall path. The lever
+that was worth 400-800 insns/call on the four ufunc METHODS has already been taken on the route
+itself.
+
+**4. Gating the f16/temporal/complex probes more cheaply — ALREADY DONE, and carefully.** All three
+are gated on a match against the single `x1_dtype_char` already in hand, so a f64 operand skips all
+three without another read. The comments record why each typechar set is what it is — `'e'` is
+float16 and nothing else; `'G'` is included in the complex set because its kind IS `'c'` and omitting
+it would silently disengage clongdouble.
+
+### What the floor actually consists of
+
+After the sweep: two interned getattrs plus an extract for `x1_dtype_char`, a free enum match, three
+free char matches, one interned getattr for the ufunc name, and a vectorcalled `call1`. **One shared
+dtype read serving four consumers, and nothing computed that is not used.** The remaining 197 ns is
+PyO3 argument binding and CPython call overhead around three necessary attribute operations.
+
+### No lever is proposed, deliberately
+
+I checked four candidates and each was already taken or load-bearing. Landing something anyway — a
+reorder that saves nothing, or an interning of an already-interned site — would be a green diff that
+improves nothing, and this ledger has a name for that. **The binary route floor is a solved wrapper
+surface; its remaining cost is structural.**
+
+That redirects the worst lane: 1.4567-1.5578x at n=256 is not going to fall to wrapper work, so it
+falls to either (a) `ei9jz`'s question of what the unaccounted per-call cost actually is, measured
+rather than swept, or (b) making the native routes win at small n so the delegation is not the path
+taken at all — which is the same conclusion the two size-gate refutations reached from the other
+direction.
+
+COUNTED_MECHANISM: none is claimed — this row proposes no change. The measurements it rests on are
+the five-run floor table two rows above (medians 191/197/200/245 ns excess, all forty nulls
+straddling unity) and the ~795 insns/call bare-getattr figure banked earlier in this session.
+
+A/A NULL CONTROLS: not applicable — static reads of evaluation order and call shape.
+
+RETRY PREDICATE: do not re-sweep `PyUFunc::__call__` for wrapper levers — interning, vectorcalling,
+dtype-read sharing and probe gating are all done, and the four specific candidates above are
+recorded so they are not re-walked. Do not hoist `x1_dtype_char`: it has three consumers below the
+`binop` block. The floor's remaining 197 ns needs measurement of what it IS, not another sweep for
+what it might contain.
+AGENT_NAME=AzureCarp.
