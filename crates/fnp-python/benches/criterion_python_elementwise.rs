@@ -3039,7 +3039,51 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
             kwargs.set_item("subok", true).expect("set subok");
             black_box(kwargs);
         });
-        let kwargs_overhead_ns = (numpy_kwargs_ns - numpy_ns) + pydict_build_ns;
+        // THE THIRD TERM, missing from this partition until now (`deadlock-audit-ei9jz`).
+        //
+        // `uj3r3` corrected `kwargs_overhead` for TWO of the three things the keyword tail
+        // costs: NumPy's parse of the forwarded keyword, and our `PyDict` construction. It
+        // never priced the third - what pyo3 charges to BIND the keyword on the way in,
+        // before our tail builds anything. That binding is real and it is ours: the
+        // all-defaults arm is called positionally and never pays it.
+        //
+        // Counted rows put it at 832.2 insns/call and a direct wall-clock pair at 86.5 ns,
+        // against a `pydict_build_ns` of the same order - so omitting it is not a rounding
+        // error, it is a term of comparable size to one already included. Its absence
+        // understated `probe_chain_ns` and overstated `wrapper_residual_ns` by that amount,
+        // which is why the banked 91/370 split should not be quoted without this row.
+        //
+        // Priced on a replica whose signature MIRRORS `PyUFunc::__call__`'s nine parameters,
+        // called positionally versus with one keyword, bodies identical - under THIS group's
+        // own `min_ns` harness, so the term arrives in the same currency and the same
+        // aggregation as the two siblings it joins rather than being imported from another
+        // instrument or another host.
+        let kb_probe_mod = PyModule::new(py, "fnp_partition_kwbind").expect("kwbind module");
+        kb_probe_mod
+            .add_function(
+                pyo3::wrap_pyfunction!(probe_ufunc_sig, &kb_probe_mod).expect("wrap kwbind"),
+            )
+            .expect("register kwbind probe");
+        let kb_probe = kb_probe_mod
+            .getattr("probe_ufunc_sig")
+            .expect("kwbind probe");
+        let kb_kwargs = PyDict::new(py);
+        kb_kwargs
+            .set_item("casting", "unsafe")
+            .expect("bind kwbind casting");
+        let kb_positional_ns = min_ns(TRIALS, || {
+            black_box(kb_probe.call1(&args).expect("kwbind positional"));
+        });
+        let kb_keyword_ns = min_ns(TRIALS, || {
+            black_box(
+                kb_probe
+                    .call(&args, Some(&kb_kwargs))
+                    .expect("kwbind keyword"),
+            );
+        });
+        let keyword_binding_ns = kb_keyword_ns - kb_positional_ns;
+        let kwargs_overhead_ns =
+            (numpy_kwargs_ns - numpy_ns) + pydict_build_ns + keyword_binding_ns;
         // What the probe-skipping arm WOULD have cost had it taken the fast tail, i.e. the
         // arm the probed one should have been compared against all along.
         let skipped_fast_tail_ns = skipped_ns - kwargs_overhead_ns;
@@ -3110,9 +3154,11 @@ fn bench_percall_floor_partition(_c: &mut Criterion) {
              probe_separation=shipped_casting_guard_deadlock-audit-wsd7h \
              fnp_multiply_ns={whole_ns:.1} probes_skipped_raw_ns={skipped_ns:.1} \
              numpy_kwargs_ns={numpy_kwargs_ns:.1} pydict_build_ns={pydict_build_ns:.1} \
+             keyword_binding_ns={keyword_binding_ns:.1} \
+             kb_positional_ns={kb_positional_ns:.1} kb_keyword_ns={kb_keyword_ns:.1} \
              kwargs_overhead_ns={kwargs_overhead_ns:.1} \
              kwargs_overhead_vs_s2fkk_727ns={kwargs_overhead_vs_s2fkk:.3} \
-             correction=deadlock-audit-uj3r3_keyword_tail_cancelled \
+             correction=deadlock-audit-uj3r3_keyword_tail_plus_ei9jz_keyword_binding \
              probes_skipped_ns={skipped_fast_tail_ns:.1} \
              numpy_multiply_ns={numpy_ns:.1} probe_chain_ns={probe_chain_ns:.1} \
              wrapper_residual_ns={wrapper_residual_ns:.1} \

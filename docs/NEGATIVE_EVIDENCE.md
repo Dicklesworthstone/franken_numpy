@@ -52080,3 +52080,93 @@ replicate. To decide whether taking the native route at 2^19 is worth it, use an
 where nothing allocates. Do NOT extend the bitmask accumulator to the parallel arm without measuring at
 n >= 2^21. Two of the five audited 2^20 groups remain unconverted.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 - `F64_DIV_NATIVE_MIN_LEN` = 1<<19 IS SET TOO LOW, and it is now decided rather than merely uncertified: under the churn control the ALLOCATING route at 2^19 costs 8.6% MORE than declining, 5/5 runs - agreeing with the independent `out=` sign test that said the same thing 7/7 (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
+
+`AzureCarp`. **No build** - five invocations of the already-built ELF `67c61c442e9e45e7...`
+(`release-perf`, `thinkstation1`, numpy 2.4.3) under
+`MALLOC_MMAP_THRESHOLD_=1073741824 MALLOC_TRIM_THRESHOLD_=1073741824`.
+
+```
+  every run qualifies: 1-min far below 5-min, no build of the ELF under test
+    C1  load 7.45/12.29/13.90  idle 88%  2581 MHz  proj_builds=0
+    C2  load 7.45/12.29/13.90  idle 87%  2287 MHz  proj_builds=0
+    C3  load 7.41/12.20/13.86  idle 87%  2142 MHz  proj_builds=0
+    C4  load 7.54/12.15/13.83  idle 85%  2503 MHz  proj_builds=0
+    C5  load 7.66/12.09/13.81  idle 86%  2370 MHz  proj_builds=0
+```
+
+**Campaign result class:** a constant that has been UNCERTIFIED all day, now DECIDED - against its
+current value
+
+### The problem this had to get around
+
+The allocating route cannot be measured bare: this morning one comparison read 1.0045 / 8.2191 /
+8.4647 on one ELF, and yesterday's post-ship check gave 2^19 a between-run stdev of 0.0863 with the
+sign flipping. The `out=` instrument that could have answered is no longer available for this size -
+**my own decline band, shipped this morning, makes the `out=` route delegate across [2^14, 2^21)**, so
+it can no longer exercise the native arm there. The instrument that would answer was removed by the
+fix it helped justify.
+
+What remains is to stabilise the allocating regime itself. The churn control does that, and its known
+side effects (it perturbs even non-allocating arms) land on BOTH arms of a within-invocation
+comparison, so the divide-versus-delegating-control ratio survives them.
+
+### The measurement, `divide` against the `multiply` delegating control in the same invocation
+
+```
+  n      BARE regime, 5 runs                          stdev  |  MMAP-CONTROLLED, 5 runs                     stdev
+  2^8    0.9788 0.9536 0.9551 0.9365 0.9530          0.0151  |  0.9583 0.9734 0.9669 0.9610 0.9576         0.0066
+  2^17   0.9972 0.9993 0.9995 0.9989 1.0000          0.0011  |  1.0011 0.9992 1.0014 1.0035 0.9994         0.0018
+  2^18   0.9997 1.0004 1.0002 0.9995 0.9991          0.0005  |  1.0010 0.9997 1.0020 0.9993 0.9998         0.0011
+  2^19   1.0740 1.0691 0.8752 0.9650 1.0550          0.0863  |  0.9068 0.9027 0.8952 0.9735 0.8930         0.0336
+```
+
+**At 2^19 the controlled regime gives 5 of 5 below unity, mean 0.9143** - taking the native route
+costs about 8.6% more than declining - where the bare regime gave mean 1.0076 with the sign flipping.
+The control cut the between-run stdev 2.6x and resolved a question the bare regime could not.
+
+2^17 and 2^18 sit at 0.999-1.002 in both regimes, which is the expected signature of a route that
+DELEGATES there: it should equal its delegating control, and it does.
+
+### TWO INDEPENDENT ROUTES NOW AGREE
+
+```
+  out= route, pre-registered sign test, no allocation      native NOT worth taking at 2^19   7/7
+  allocating route, churn-controlled, this row             native NOT worth taking at 2^19   5/5
+```
+
+These share no arms, no regime and no statistic - one compares against a delegation tail with nothing
+allocating, the other against an allocating delegating control with the allocator pinned. **Convergence
+across independent methods has been the strongest evidence available in this campaign** (it settled the
+classifier at ~0.93 when the mmap control and the shared buffer agreed from opposite directions), and
+it applies here.
+
+### What follows
+
+`F64_DIV_NATIVE_MIN_LEN` = 1<<19 lets `fnp.divide(a, b)` - the plain allocating API, the common one -
+take a native path at 2^19 that is measurably worse than delegating. The gate should rise to the rayon
+threshold `1 << 21`, matching the `out=` band already shipped, since above that the parallel arm wins
+outright (`divide_vs_numpy` 1.15-1.54x loaded, 1.94x quiet).
+
+**Evidence at 2^20, the other size the raise would cover, is indirect but one-sided:** the shared-buffer
+`out=` sweep put our kernel at 0.7798-0.8304 against NumPy there (1.20-1.28x slower) while declining
+costs a fixed ~600 ns on a ~400,000 ns call. Both terms point the same way and the margin is three
+orders of magnitude, but 2^20 has not been measured against a delegating control on the allocating
+route and that is stated rather than glossed.
+
+COUNTED_MECHANISM: at 2^19 the controlled allocating route gives divide/multiply of 0.9068, 0.9027,
+0.8952, 0.9735, 0.8930 - 5 of 5 below unity, mean 0.9143, stdev 0.0336 against the bare regime's 0.0863
+with 2 of 5 above unity; at 2^17 and 2^18, where the route delegates, the same statistic is 0.9990-1.0035
+in both regimes.
+
+A/A NULL CONTROLS: the route contracts' A/A nulls straddle unity across all five runs. The claim rests
+on a within-invocation ratio against a structurally-delegating control (`multiply` maps to `_ => None`),
+which is the statistic that has survived every regime tested today.
+
+RETRY PREDICATE: raise `F64_DIV_NATIVE_MIN_LEN` to `1 << 21` and update both its tripwire test and the
+bench mirror in the same commit - the constant is pinned in three places. Do NOT quote the bare-regime
+2^19 numbers; they are superseded by the controlled ones. Before raising, confirm 2^20 on the allocating
+route against the `multiply` control under the same churn control, since the raise covers a size this
+row only reaches by inference.
+AGENT_NAME=AzureCarp.
