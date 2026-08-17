@@ -32,6 +32,64 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-08-16 - CORRECTION + FIX: `eac4d567` did NOT change the f32 binary route - a file-wide first-occurrence replace hit the UNARY writer, and my test passed trivially because it exercised the untouched path (`deadlock-audit-ei9jz`)
+
+`SlateHeron`. The f32 binary route is now actually fixed, and the row that claimed it already was is
+corrected. The interesting part is not the fix; it is that a green test proved nothing.
+
+**Campaign result class:** methodology (corrects a prior row of mine) + capability (the real fix)
+
+**LOADAVG AND CPU MHz, observed:** `13.07/22.60/27.57` at the start - settled - then my own build pushed
+it to `39.79/32.18/30.28` and an external Python at 421% CPU held it there, so **nothing was
+certified**. `14.05/18.45/23.02` at the gate. **CPU MHz max 4217** from the settled sample.
+
+**WHAT WENT WRONG IN `eac4d567`.** My patch script used
+`s.replace(old, new, 1)` - a FILE-WIDE first-occurrence replace. `zerocopy_f32_unary_flat` contains
+byte-identical allocation code and sits at a LOWER line number than
+`zerocopy_f32_binary_flat`, so the edit landed on the unary writer. The paired reshape removal landed
+in `try_zerocopy_f64_unary` - a THIRD function. The commit message and ledger row both describe the
+f32 BINARY route, which was never touched.
+
+**WHY IT WAS NOT CAUGHT: THE TEST PASSED TRIVIALLY.** `f32_route_preserves_rank_without_a_reshape`
+exercised `fnp.remainder` on f32 - the binary route - which was UNCHANGED. NumPy produced the same
+values and shapes, so the test went green. **A rank/value test cannot distinguish "my change worked"
+from "my change went somewhere else entirely."** That is a sharper version of the engagement trap this
+ledger already records, and it caught me even though I had written engagement proofs for three other
+levers the same day.
+
+**WAS ANYTHING BROKEN? NO, AND I CHECKED BEFORE ASSUMING.** Both misplaced edits happen to be
+individually safe:
+- `zerocopy_f32_unary_flat` now allocates at final shape while `try_zerocopy_f32_unary` still
+  reshapes - a reshape to the shape it already has, i.e. a no-op, not a rank bug;
+- `try_zerocopy_f64_unary` lost its reshape, and `zerocopy_f64_unary_flat` **already** allocated at
+  final shape (verified at its `empty` call sites), so that removal is correct and is a real saving.
+
+The worst case here would have been a caller losing its reshape while its writer still allocated flat,
+which returns a FLAT array at rank >= 2 while holding the right values in the right order. That did not
+happen, but only by luck of which functions the replace happened to hit.
+
+**THE ACTUAL FIX.** `zerocopy_f32_binary_flat` now allocates at the final shape, positionally, and
+`try_zerocopy_f32_binary` no longer reshapes. The patch is **line-anchored per function** - it computes
+each function's line range and asserts the pattern occurs EXACTLY ONCE inside it - so a first-occurrence
+collision cannot recur.
+
+**THE TEST NOW PROVES ENGAGEMENT.** It sabotages `numpy.remainder` to raise and repeats the call: only
+the native f32 binary route can succeed once NumPy's own function throws. Had this assertion existed,
+`eac4d567` would have failed instead of passing green.
+
+**GATES:** `cargo test -p fnp-python --lib f32_route_preserves` 1 passed 0 failed; `cargo clippy -p
+fnp-python --all-targets` exit 0 with zero warnings; `rustfmt --check` exit 0.
+
+**NO RATIO IS CLAIMED**, and `eac4d567`'s row should be read as describing a change to the f32 UNARY
+writer and the f64 UNARY caller, not the binary route.
+
+RETRY PREDICATE: never patch this file with a file-wide first-occurrence replace - several writers
+share byte-identical allocation blocks, and the f32/f64 unary and binary variants differ only by name.
+Scope every edit to a computed function range and assert single occurrence. And when a change is meant
+to alter a hot path, require an ENGAGEMENT assertion in the same commit: a value or rank test cannot
+tell a working change from a misplaced one.
+AGENT_NAME=SlateHeron.
+
 ## 2026-08-16 - CODE: the complex writer was the LAST flat-then-reshape instance - audited f16 (already clean), fixed complex, pattern now closed across every f64/f32/f16/complex writer (`deadlock-audit-ei9jz`)
 
 `SlateHeron`. Load peaked at 78.6 and read `34.25/42.08/33.86` at the gate, so nothing was certified.
