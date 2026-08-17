@@ -368,7 +368,25 @@ impl PyUFunc {
         Ok(sig_cls.call1((params,))?.unbind())
     }
 
-    #[pyo3(signature = (x1, x2, /, out=None, *, r#where=None, casting="same_kind", order="K", dtype=None, subok=true, signature=None))]
+    // `casting` and `order` DEFAULT TO None, NOT to their string values
+    // (`deadlock-audit-ei9jz`). Profiling `PyUFunc::__call__` found its single
+    // hottest instruction — 17.93% of the function's samples — was
+    // `movabs $0x6e696b5f656d6173`, which is the ASCII for "same_kin": the wrapper
+    // loaded the 9-byte literal "same_kind" and string-compared it on EVERY binary
+    // ufunc call, which is also where `__strcmp_avx2` (99 insns/call in the
+    // symbol diff) was coming from. `order == "K"` sits beside it and is the same
+    // shape.
+    //
+    // With an `Option`, the overwhelmingly common call — one that passes neither
+    // keyword — tests a null instead of comparing nine bytes. A caller who DOES
+    // pass `casting="same_kind"` explicitly still compares, and still takes the
+    // fast path, because `Some("same_kind")` is treated exactly as the default was.
+    //
+    // THE REPORTED SIGNATURE IS UNAFFECTED, which is why this is safe: `__signature__`
+    // is constructed separately (it sets `default` to "same_kind" and "K" explicitly),
+    // so `inspect.signature(fnp.add)` still shows the NumPy-matching defaults. Only the
+    // internal representation of "caller said nothing" changes.
+    #[pyo3(signature = (x1, x2, /, out=None, *, r#where=None, casting=None, order=None, dtype=None, subok=true, signature=None))]
     #[allow(clippy::too_many_arguments)]
     fn __call__(
         &self,
@@ -377,8 +395,8 @@ impl PyUFunc {
         x2: Py<PyAny>,
         out: Option<Py<PyAny>>,
         r#where: Option<Py<PyAny>>,
-        casting: &str,
-        order: &str,
+        casting: Option<&str>,
+        order: Option<&str>,
         dtype: Option<Py<PyAny>>,
         subok: bool,
         signature: Option<Py<PyAny>>,
@@ -403,8 +421,8 @@ impl PyUFunc {
             && r#where.is_none()
             && dtype.is_none()
             && signature.is_none()
-            && casting == "same_kind"
-            && order == "K"
+            && casting.is_none_or(|c| c == "same_kind")
+            && order.is_none_or(|o| o == "K")
             && subok
         {
             let binop = match self.kind {
@@ -431,8 +449,8 @@ impl PyUFunc {
             && r#where.is_none()
             && dtype.is_none()
             && signature.is_none()
-            && casting == "same_kind"
-            && order == "K"
+            && casting.is_none_or(|c| c == "same_kind")
+            && order.is_none_or(|o| o == "K")
             && subok
         {
             // ONE dtype sniff for the whole probe run below (`deadlock-audit-v46rn`).
@@ -778,8 +796,8 @@ impl PyUFunc {
             && r#where.is_none()
             && dtype.is_none()
             && signature.is_none()
-            && casting == "same_kind"
-            && order == "K"
+            && casting.is_none_or(|c| c == "same_kind")
+            && order.is_none_or(|o| o == "K")
             && subok
         {
             return Ok(np_ufunc.call1((x1.bind(py), x2.bind(py)))?.unbind());
@@ -811,11 +829,18 @@ impl PyUFunc {
         if let Some(w) = r#where {
             kwargs.set_item("where", w.bind(py))?;
         }
-        if casting != "same_kind" {
-            kwargs.set_item("casting", casting)?;
+        // Forward only a NON-default casting, exactly as before: a caller who passed
+        // "same_kind" explicitly is indistinguishable from one who passed nothing, and
+        // NumPy assumes that value anyway.
+        if let Some(c) = casting
+            && c != "same_kind"
+        {
+            kwargs.set_item("casting", c)?;
         }
-        if order != "K" {
-            kwargs.set_item("order", order)?;
+        if let Some(o) = order
+            && o != "K"
+        {
+            kwargs.set_item("order", o)?;
         }
         if let Some(d) = dtype.as_ref() {
             kwargs.set_item("dtype", d.bind(py))?;
@@ -111657,6 +111682,101 @@ mod tests {
                     .str()?
                     .extract::<String>()?,
                 "an explicit dtype must survive the empty-dict fast path"
+            );
+            Ok(())
+        });
+    }
+
+    /// `casting` and `order` now default to `None` instead of to `"same_kind"`/`"K"`
+    /// (`deadlock-audit-ei9jz`), so "the caller said nothing" is a null test rather than
+    /// a nine-byte string comparison on every binary ufunc call.
+    ///
+    /// The failure this pins is silent: an implementation that treated ANY `casting` or
+    /// `order` as the default - say by testing `is_none()` and forgetting the
+    /// `Some(non_default)` case - would take the native fast path for a call that asked
+    /// for different casting or a different memory order, and would never forward the
+    /// keyword to NumPy. The result would be correctly shaped, plausibly valued, and
+    /// wrong. So this asserts BOTH directions: the defaults still take the fast path and
+    /// match NumPy, and non-defaults still reach NumPy and still change the answer.
+    #[test]
+    fn casting_and_order_defaults_are_none_without_swallowing_non_defaults() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_casting_order")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("add")?;
+            let theirs = numpy.getattr("add")?;
+
+            let shape = PyTuple::new(py, [3_usize, 4])?;
+            let a = numpy
+                .call_method1("arange", (12,))?
+                .call_method1("astype", ("float64",))?
+                .call_method1("reshape", (&shape,))?;
+
+            let bytes_of = |v: &Bound<'_, PyAny>| -> PyResult<Vec<u8>> {
+                v.call_method0("tobytes")?.extract::<Vec<u8>>()
+            };
+            let f_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
+                v.getattr("flags")?
+                    .getattr("f_contiguous")?
+                    .extract::<bool>()
+            };
+
+            // The default path still matches NumPy.
+            assert_eq!(
+                bytes_of(&ours.call1((&a, &a))?)?,
+                bytes_of(&theirs.call1((&a, &a))?)?,
+                "the no-keyword fast path must match numpy"
+            );
+
+            // Passing the DEFAULTS explicitly must behave as the defaults.
+            let kw_default = PyDict::new(py);
+            kw_default.set_item("casting", "same_kind")?;
+            kw_default.set_item("order", "K")?;
+            assert_eq!(
+                bytes_of(&ours.call((&a, &a), Some(&kw_default))?)?,
+                bytes_of(&theirs.call1((&a, &a))?)?,
+                "explicitly passing the defaults must behave as the defaults"
+            );
+
+            // A NON-default `order` must reach numpy and change the layout.
+            let kw_f = PyDict::new(py);
+            kw_f.set_item("order", "F")?;
+            let np_f = theirs.call((&a, &a), Some(&kw_f))?;
+            // Guard the fixture: if order made no difference here, the assertion below
+            // could not fail even for an implementation that swallowed the keyword.
+            assert!(
+                f_contig(&np_f)? != f_contig(&theirs.call1((&a, &a))?)?,
+                "fixture is degenerate: order='F' and the default agree on contiguity"
+            );
+            assert_eq!(
+                f_contig(&ours.call((&a, &a), Some(&kw_f))?)?,
+                f_contig(&np_f)?,
+                "order='F' must be forwarded, not swallowed by the None fast path"
+            );
+
+            // A NON-default `casting` must reach numpy and still REFUSE. int8 + float64
+            // under casting='no' is an error in numpy; a wrapper that swallowed
+            // `casting` would delegate with the default and return an array instead.
+            let i8 = numpy
+                .call_method1("arange", (4,))?
+                .call_method1("astype", ("int8",))?;
+            let f64a = numpy
+                .call_method1("arange", (4,))?
+                .call_method1("astype", ("float64",))?;
+            let kw_no = PyDict::new(py);
+            kw_no.set_item("casting", "no")?;
+            assert!(
+                theirs.call((&i8, &f64a), Some(&kw_no)).is_err(),
+                "fixture is degenerate: numpy accepted casting='no' on mixed dtypes"
+            );
+            assert!(
+                ours.call((&i8, &f64a), Some(&kw_no)).is_err(),
+                "casting='no' must be forwarded, not swallowed - swallowing it turns an \
+                 error into a plausible array"
             );
             Ok(())
         });
