@@ -1363,6 +1363,10 @@ fn main() {
                 bench_ufunc_at_percall_floor_vs_numpy,
             ),
             (
+                "bench_axis_default_wrappers_vs_numpy",
+                bench_axis_default_wrappers_vs_numpy,
+            ),
+            (
                 "bench_reduceat_percall_floor_vs_numpy",
                 bench_reduceat_percall_floor_vs_numpy,
             ),
@@ -6115,6 +6119,124 @@ fn call_reduceat<'py>(
 // correction is that its 771 ns excess is call SHAPE, which is what made the axis-default
 // lever findable.
 //
+// The axis-default tranche has never been measured, and its own ledger row says it must be
+// before anyone extrapolates to it (`deadlock-audit-v46rn`). 24 wrappers stopped forwarding
+// an `axis` NumPy already defaults to; the measured instance of that lever was 2003
+// instructions/call on `accumulate`/`reduceat`, which are per-op entry points, while these
+// are cold wrappers whose own work may dwarf a dict entry.
+//
+// Two representatives, chosen because they bracket the tranche's cost range: `linspace`
+// does a trivial amount of real work, so a per-call dict entry is the largest fraction of
+// it available anywhere in the tranche; `fft` does a genuine transform, so it is the case
+// where the lever should be invisible. If the lever is worth anything on cold wrappers it
+// has to show on `linspace`; if it shows on neither, the lane is closed.
+//
+// n is small for the same reason the method rows are: it maximises the share a fixed
+// per-call cost can occupy, which is the regime that makes a small lever detectable at all.
+fn bench_axis_default_wrappers_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        py.run(
+            std::ffi::CString::new(
+                "start = np.zeros(4)\n\
+                 stop = np.ones(4)\n\
+                 sig = np.arange(64.0)\n\
+                 NPFN = {'linspace': np.linspace, 'fft': np.fft.fft}\n\
+                 ARGS = {'linspace': (start, stop, 8), 'fft': (sig,)}\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let npfn = locals.get_item("NPFN").expect("NPFN");
+        let argtbl = locals.get_item("ARGS").expect("ARGS");
+
+        for name in ["linspace", "fft"] {
+            let ours = module.getattr(name).expect("fnp wrapper");
+            let theirs = npfn.get_item(name).expect("numpy callable");
+            assert!(
+                !ours.is(&theirs),
+                "fnp.{name} IS numpy's object - there is no candidate arm"
+            );
+            let args = argtbl
+                .get_item(name)
+                .expect("args")
+                .cast_into::<PyTuple>()
+                .expect("args tuple");
+
+            // Both arms must agree before either is timed; `fft` returns complex, so the
+            // checksum goes through `abs().sum()` rather than assuming a real result.
+            let checksum_of = |r: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+                r.call_method0("__abs__")
+                    .expect("abs")
+                    .call_method0("sum")
+                    .expect("sum")
+                    .extract::<f64>()
+                    .expect("f64 sum")
+                    .to_bits()
+            };
+            assert_eq!(
+                checksum_of(&ours.call1(&args).expect("fnp probe")),
+                checksum_of(&theirs.call1(&args).expect("numpy probe")),
+                "fnp.{name} and numpy disagree on these operands"
+            );
+
+            let incumbent = || {
+                let started = Instant::now();
+                let r = theirs.call1(&args).expect("numpy call");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&r),
+                }
+            };
+            let candidate = || {
+                let started = Instant::now();
+                let r = ours.call1(&args).expect("fnp call");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum_of(&r),
+                }
+            };
+
+            let row = format!("{name}_axis_default_wrapper_vs_numpy");
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract(&row, incumbent, candidate);
+            println!(
+                "AXIS_DEFAULT_WRAPPER fn={name} numpy_version={numpy_version} worker={} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] \
+                 numpy_ns={:.1} fnp_ns={:.1} excess_ns={:.1} \
+                 incumbent_aa_null={:.6} candidate_aa_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.arm_b_median_ns - effect.arm_a_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
 // `reduceat` is the last ufunc METHOD entry point with a clean measurable shape and no
 // row of its own (`deadlock-audit-v46rn`). The one before it, `accumulate`, turned out to
 // be 4.76x SLOWER than NumPy while nobody was looking, because every per-call row in this

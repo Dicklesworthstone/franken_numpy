@@ -46579,3 +46579,73 @@ has been attacked since the vectorcall work; `reduce` is still off the vectorcal
 by - this one named a number that a two-minute source read would have corrected.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - THE AXIS-DEFAULT QUESTION IS ANSWERED AND IT OPENS A BIGGER LANE: the lever is negligible on cold wrappers, because those wrappers carry 1582-3571 ns of excess - TEN TO TWENTY-FIVE TIMES the ufunc methods' (`deadlock-audit-v46rn`)
+
+`RedLynx`. Discharges the debt banked with the 22-site landing: *"one of them should be measured
+before anyone extrapolates."* Measured. The extrapolation was correctly refused, and the
+measurement found something larger than the lever.
+
+**Campaign result class:** incumbent-win (first measurement of a new class) + closes an
+extrapolation question
+
+```
+bench_elf_sha256=d41c15dea9109f67a30c52ad641318c68127c1c950443fd7e04d8719f37576d4
+worker=thinkstation1  numpy 2.4.3  profile=bench
+group=bench_axis_default_wrappers_vs_numpy (registered)
+harness=common::run_dual_null_median_ci_contract
+LOADAVG 11.24/14.65/17.82 identical BEFORE and AFTER both runs
+CPU MHz system-wide min 1429 max 4184 median 1429 spread 2.928x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu==arm_b_cpu on every phase, same_core=true;
+  3361.8/3362.1 (1.0001), 4222.6/4223.2 (1.0001), 4204.0/4204.0 (1.0000),
+  4271.1/4271.0 (1.0000), 4233.7/4234.0 (1.0001), 4219.3/4219.3 (1.0000)
+
+  fn         ratio (2 runs)         numpy_ns      fnp_ns       excess_ns
+  linspace   0.734458 / 0.735405    9829/10014    13400/13590   3571 / 3576
+  fft        0.761110 / 0.750407    5105/5049      6687/6722    1582 / 1673
+
+All eight A/A nulls admit unity. Both cells DECIDABLE_REGRESSION.
+```
+
+**THE QUESTION THAT WAS ASKED: is the axis-default omission worth anything on these 24 cold
+wrappers? NO, and now measurably so.** The lever removes ONE dict entry and one keyword parse
+from a call whose measured excess is **3571 ns** on `linspace`. Even taking the whole of the
+2003 instructions/call that the same lever was worth on `accumulate`/`reduceat` - which it cannot
+be, those being per-op entry points - it would be a small fraction of this. **The refusal to
+extrapolate was right, and the lane of sweeping the remaining default-forwarding sites for
+performance is CLOSED on cold wrappers.** They should still be swept for consistency if someone
+is in the file, but not for a ratio.
+
+**WHAT THE MEASUREMENT ACTUALLY FOUND, which is worth far more than the lever.** `fnp.linspace`
+is **1.3616x slower than `numpy.linspace`** and `fnp.fft` is **1.3139x slower**, with per-call
+excesses of **3571 ns and 1582 ns**. For comparison, the entire ufunc method family - after all
+this session's work - carries 125-285 ns:
+
+```
+  reduceat    125 ns        fft         1582 ns    (12.7x the worst method)
+  outer       155 ns        linspace    3571 ns    (28.6x the worst method)
+  reduce      231 ns
+  at (f64)    261 ns
+  accumulate  285 ns
+```
+
+**A DELEGATING WRAPPER COSTS AN ORDER OF MAGNITUDE MORE PER CALL THAN A UFUNC METHOD, and nobody
+has measured one until now.** Every per-call row in this campaign has gone through
+`PyUFunc::__call__` or a ufunc method; `linspace` and `fft` are plain `#[pyfunction]` wrappers,
+a different door again - which is exactly how `accumulate` hid at 4.76x and `at` at 2.39x.
+
+**NO MECHANISM IS CLAIMED.** I have not read `linspace`'s body. 3571 ns is far too large to be
+a keyword dict, so the cost is elsewhere - argument conversion, an eager `asarray`, a
+re-import, or real duplicated work - and guessing here is what the last two refuted predictions
+were made of.
+
+**SIZE CAVEAT.** Both cells are small-input (4-element `linspace`, 64-point `fft`), chosen to
+maximise the share a fixed per-call cost occupies. At large inputs these ratios will fall toward
+1.0 as real work dominates; the row claims a PER-CALL EXCESS, not a fleet-wide ratio.
+
+RETRY PREDICATE: (1) Read `linspace`'s body before proposing anything - 3571 ns is not a dict
+entry and the mechanism is unknown. (2) Measure two or three more wrappers before treating
+1582-3571 ns as typical of the class; two cells is enough to open a lane, not to characterise it.
+(3) Do NOT sweep the remaining axis-default sites for performance; this row closes that question
+for cold wrappers. AGENT_NAME=RedLynx.
+
