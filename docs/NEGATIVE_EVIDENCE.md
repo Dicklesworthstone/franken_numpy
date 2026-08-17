@@ -48362,3 +48362,79 @@ not compare this row's excess figures with row 57's; the windows differ by 70% i
 NumPy's own arm moved 60%. Compare ratios. (3) `clip_two_sided` at 1.6771x is now the
 second-worst cell here and nothing has been attributed to it at all. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - AUDIT: the wrong-gate defect class has exactly TWO members and only one was ever defective - and the reason gives a criterion that says when a delegating control is needed at all (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. No build. An audit prompted by the gate I just fixed, asking whether the same defect
+sits anywhere else.
+
+**Campaign result class:** bounded defect class (zero remaining instances) + a reusable criterion
+
+### Two kinds of gate, and only one can have this defect
+
+The crate has ~25 size-gate constants. They are not one class:
+
+- **`*_PARALLEL_MIN` (23 of them)** choose between OUR serial and OUR parallel implementation. A
+  wrong threshold costs us, but the fallback is our own code and NumPy is not involved. They cannot
+  have the defect described below.
+- **`*_NATIVE_MIN_LEN` (exactly 2)** choose between our native route and DELEGATING to NumPy. This is
+  the class where the divide gate was wrong.
+
+```
+  F64_DIV_NATIVE_MIN_LEN         was 1 << 14, now 1 << 19 (fixed one row up)
+  F64_ACCUMULATE_NATIVE_MIN_LEN      1 << 12
+```
+
+### Why one was defective and the other is not — the criterion
+
+Compare each gate against the native route's measured ratio AT its own threshold:
+
+```
+  divide, old gate 1<<14:  native at 2^16 = 0.916951  -> 1.0906x SLOWER than NumPy
+  accumulate, gate 1<<12:  native at 2^12 = 1.407742  -> 1.4077x FASTER than NumPy
+```
+
+**That difference is the whole story.** If the native route is FASTER than NumPy at the gate, the
+gate is safe without any delegating control — because delegating costs NumPy *plus* our wrapper, so
+anything beating NumPy necessarily beats delegating. No control can change that ordering.
+
+If the native route is still SLOWER than NumPy at the gate, the comparison is between two losing
+options and the ordering is **not** determined: you are asking whether our route loses by less than
+our wrapper does, and only an in-invocation delegating control can answer it. Divide's old gate sat
+squarely in that regime — 1.0906x slower at 2^16 — which is exactly why it admitted a band where
+routing cost 5-10x what delegating would.
+
+**The criterion, stated for reuse:**
+
+> A native-vs-delegate size gate needs a delegating control if and only if the native route is still
+> SLOWER than the incumbent at the threshold. A gate placed where the native route already WINS is
+> self-justifying.
+
+`F64_ACCUMULATE_NATIVE_MIN_LEN` was set by `deadlock-audit-v46rn` as "the smallest size that MEASURED
+a decidable win", which places it in the self-justifying regime by construction. **It needs no
+re-measurement and I am not proposing one.** The defect class is closed with zero remaining members.
+
+### What this does NOT claim
+
+It does not say `1<<12` is OPTIMAL for accumulate — only that it is not *wrong* in the way divide's
+was. A lower threshold might also win, and the estimated crossing point was noted near 2^11; finding
+that would be a widening exercise, not a defect fix, and is worth much less than the divide band was.
+
+It also says nothing about the 23 `*_PARALLEL_MIN` constants. Those may well be mis-set — the ledger
+already contains one such finding (`hzl1w`, maximum/minimum declining the parallel arm) — but a wrong
+`PARALLEL_MIN` is a different defect with a different control (our serial arm, not NumPy), and
+nothing here bears on them.
+
+COUNTED_MECHANISM: the crate contains exactly two native-vs-delegate size gates; at its own threshold
+the divide gate sat where the native route measured 1.0906x SLOWER than NumPy (requiring a control,
+which it never had), while the accumulate gate sits where the native route measures 1.4077x FASTER
+(requiring none).
+
+A/A NULL CONTROLS: not applicable — this row re-reads banked ratios and enumerates constants; it
+takes no new measurement.
+
+RETRY PREDICATE: do not audit the `*_PARALLEL_MIN` constants against a NumPy control - their control
+is our own serial arm. Do not re-measure `F64_ACCUMULATE_NATIVE_MIN_LEN` for correctness; it is in
+the self-justifying regime. When any future native-vs-delegate gate is proposed, apply the criterion
+above first: it decides whether a delegating control is required before a single build is spent.
+AGENT_NAME=AzureCarp.
