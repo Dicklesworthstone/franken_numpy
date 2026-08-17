@@ -39613,8 +39613,14 @@ fn fft(
     // length n, axis selector, norm conventions ('backward'/'ortho'/
     // 'forward'), optional `out=` destination, and complex output dtype
     // all match numpy exactly.
-    let numpy = py.import("numpy")?;
-    let fft_fn = numpy.getattr("fft")?.getattr("fft")?;
+    // MEASURED CELL (`deadlock-audit-v46rn`): 1.3139x with 1582 ns of per-call excess.
+    // The import is the same 656 ns shape converted on the ufunc methods, and the two
+    // `getattr`s were non-interned - `numpy.fft` then `.fft` - so each built and hashed a
+    // fresh `PyString` on every call.
+    let numpy = cached_numpy(py)?;
+    let fft_fn = numpy
+        .getattr(intern!(py, "fft"))?
+        .getattr(intern!(py, "fft"))?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
         kwargs.set_item("n", n_val)?;
@@ -53781,13 +53787,32 @@ fn linspace(
     axis: isize,
     device: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    // MEASURED CELL (`deadlock-audit-v46rn`): `fnp.linspace` is 1.3616x slower than
+    // NumPy's with 3571 ns of per-call excess - 23x the whole ufunc method family. Three
+    // costs are visible here and all three are the shapes already validated elsewhere in
+    // this file:
+    //
+    //   * `py.import("numpy")` on EVERY call, priced at 656 ns on the ufunc methods and
+    //     converted there; the sweep was scoped to the `PyUFunc` impl and never reached
+    //     the wrapper family, of which this is one.
+    //   * a non-interned `getattr`, which builds a fresh `PyString` and hashes it.
+    //   * `num`, `endpoint` and `retstep` sent UNCONDITIONALLY. NumPy's own defaults are
+    //     50, True and False - verified against the installed interpreter - and this
+    //     signature declares exactly those, so at defaults all three are dict entries and
+    //     keyword parses that communicate nothing.
+    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let linspace_fn = numpy.getattr("linspace")?;
+        let linspace_fn = numpy.getattr(intern!(py, "linspace"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("num", num)?;
-        kwargs.set_item("endpoint", endpoint)?;
-        kwargs.set_item("retstep", retstep)?;
+        if num != 50 {
+            kwargs.set_item("num", num)?;
+        }
+        if !endpoint {
+            kwargs.set_item("endpoint", endpoint)?;
+        }
+        if retstep {
+            kwargs.set_item("retstep", retstep)?;
+        }
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item("dtype", dtype_val.bind(py))?;
         }
@@ -53800,9 +53825,11 @@ fn linspace(
         if let Some(device_val) = device.as_ref() {
             kwargs.set_item("device", device_val.bind(py))?;
         }
-        Ok(linspace_fn
-            .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
-            .unbind())
+        let args = (start.bind(py), stop.bind(py));
+        if kwargs.is_empty() {
+            return Ok(linspace_fn.call1(args)?.unbind());
+        }
+        Ok(linspace_fn.call(args, Some(&kwargs))?.unbind())
     };
     if device
         .as_ref()
@@ -112245,6 +112272,127 @@ mod tests {
                         "2-arg {op}.at must leave the target byte-identical to numpy"
                     );
                 }
+            }
+            Ok(())
+        });
+    }
+
+    /// The delegating wrappers must be unchanged after dropping their per-call import and
+    /// their default keywords (`deadlock-audit-v46rn`).
+    ///
+    /// `linspace` measured 1.3616x with 3571 ns of per-call excess and `fft` 1.3139x with
+    /// 1582 ns - 12-28x the entire ufunc method family - so these are the first two cells
+    /// of the wrapper class. Three changes, each already validated elsewhere: the cached
+    /// module handle, interned attribute keys, and not sending keywords whose value is
+    /// already NumPy's default.
+    ///
+    /// The risk is the third one, and it is silent: `num`, `endpoint` and `retstep` change
+    /// the RESULT, not just its speed. Dropping a non-default `num` would return the wrong
+    /// number of points; a non-default `endpoint` shifts every value; `retstep` changes the
+    /// return TYPE from an array to a tuple. So each is exercised at its default and away
+    /// from it, and `retstep` is checked for the tuple shape rather than just for values.
+    #[test]
+    fn delegating_wrappers_keep_numpy_results_after_default_omission() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_wrappers")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("linspace")?;
+            let theirs = numpy.getattr("linspace")?;
+
+            // num at and away from 50; endpoint both ways; a non-default axis on 1-D
+            // endpoints so the axis actually applies.
+            let start = numpy.call_method1("zeros", (3,))?;
+            let stop = numpy.call_method1("ones", (3,))?;
+            for num in [50_i64, 8] {
+                for endpoint in [true, false] {
+                    for axis in [0_i64, 1] {
+                        let kw = PyDict::new(py);
+                        kw.set_item("num", num)?;
+                        kw.set_item("endpoint", endpoint)?;
+                        kw.set_item("axis", axis)?;
+                        assert_eq!(
+                            ours.call((&start, &stop), Some(&kw))?
+                                .call_method0("tobytes")?
+                                .extract::<Vec<u8>>()?,
+                            theirs
+                                .call((&start, &stop), Some(&kw))?
+                                .call_method0("tobytes")?
+                                .extract::<Vec<u8>>()?,
+                            "linspace num={num} endpoint={endpoint} axis={axis} must match numpy"
+                        );
+                    }
+                }
+            }
+
+            // retstep changes the RETURN TYPE, so compare the repr of the whole result.
+            for retstep in [false, true] {
+                let kw = PyDict::new(py);
+                kw.set_item("retstep", retstep)?;
+                kw.set_item("num", 5)?;
+                assert_eq!(
+                    ours.call((&start, &stop), Some(&kw))?
+                        .repr()?
+                        .extract::<String>()?,
+                    theirs
+                        .call((&start, &stop), Some(&kw))?
+                        .repr()?
+                        .extract::<String>()?,
+                    "linspace retstep={retstep} must match numpy in VALUE and in return shape"
+                );
+            }
+
+            // And with every keyword omitted, which is the path that now skips the dict.
+            assert_eq!(
+                ours.call1((&start, &stop))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                theirs
+                    .call1((&start, &stop))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                "bare linspace must match numpy"
+            );
+
+            // fft: bare, and with each keyword that shares the dict.
+            let ours_fft = module.getattr("fft")?;
+            let theirs_fft = numpy.getattr("fft")?.getattr("fft")?;
+            let sig = numpy
+                .call_method1("arange", (16,))?
+                .call_method1("astype", ("float64",))?;
+            assert_eq!(
+                ours_fft
+                    .call1((&sig,))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                theirs_fft
+                    .call1((&sig,))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                "bare fft must match numpy"
+            );
+            for (key, value) in [("n", "8"), ("norm", "'ortho'"), ("axis", "0")] {
+                let kw = PyDict::new(py);
+                match key {
+                    "n" => kw.set_item("n", 8)?,
+                    "norm" => kw.set_item("norm", "ortho")?,
+                    _ => kw.set_item("axis", 0)?,
+                }
+                let _ = value;
+                assert_eq!(
+                    ours_fft
+                        .call((&sig,), Some(&kw))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    theirs_fft
+                        .call((&sig,), Some(&kw))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    "fft with {key} must match numpy"
+                );
             }
             Ok(())
         });
