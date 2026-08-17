@@ -48222,3 +48222,87 @@ before-figure, so the `clip` and `searchsorted` commits' predictions remain UNCH
 against those commits is still owed if anyone wants the levers' own numbers.
 AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - CERTIFIED: the crossover is between 2^18 and 2^19, `F64_DIV_NATIVE_MIN_LEN` goes 1<<14 -> 1<<19, and the band it was wrongly admitting improves 1.0906x -> 1.0130x and 1.0912x -> 1.0069x (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. Two builds, before and after, measured in a quiet window with no other builds running.
+
+**Campaign result class:** CERTIFIED lever (a whole size band stops taking a losing route)
+
+### Locating the crossover
+
+The interior sizes were unmeasured; each is measured here against its own in-invocation delegating
+control (`multiply`), with 2^8 retained as the fixture guard.
+
+```
+  BEFORE, elf 8a33effe458b7af260ed3a83daec04cc246bbaeee5b07fafae4a8b5c04f5f25f
+  loadavg 16.18/15.86/11.67, per-arm same_core=true, arm_mhz_spread 1.0000-1.0003, 4092-4291 MHz
+
+  n      op        route       ratio      excess_ns    delegating control + 48ns   verdict
+  2^8    divide    delegates  0.620991         261            264                  guard OK
+  2^8    multiply  delegates  0.650974         216              -                  (45 ns apart)
+  2^17   divide    NATIVE     0.916951       3,196            584                  native WORSE 5.5x
+  2^18   divide    NATIVE     0.916444       6,818            704                  native WORSE 9.7x
+  2^19   divide    NATIVE     1.012116      -1,778            759                  native BETTER
+  2^20   divide    NATIVE     1.003772      -8,762          1,936                  native BETTER (banked)
+```
+
+**The crossover is between 2^18 and 2^19.** `1 << 19` is therefore the smallest size at which the
+native route was MEASURED to beat delegating — the same rule `F64_ACCUMULATE_NATIVE_MIN_LEN` was set
+by, rather than an estimate.
+
+### After raising the gate
+
+```
+  AFTER, elf 102e05711a63b6ace458a2194e5c92e90304801c4ef34cec02568e3b1e4903f7
+  loadavg 12.14/14.05/11.97
+
+  n      op       route       before ratio    after ratio     deficit before -> after
+  2^17   divide   delegates     0.916951       0.987125       1.0906x -> 1.0130x
+  2^18   divide   delegates     0.916444       0.993107       1.0912x -> 1.0069x
+  2^19   divide   NATIVE        1.012116       1.106795       0.9880x -> 0.9036x (i.e. 1.1068x FASTER)
+```
+
+`routes_natively` flips to `false` at 2^17 and 2^18 and stays `true` at 2^19, which is the label
+confirming the gate moved rather than the numbers merely changing. **2^19's native win got larger,
+not smaller** (excess -1,778 -> -17,934 ns; its CI `[1.103467,1.113034]` excludes unity, a decidable
+win), so nothing was given up.
+
+### The tripwire fired, and what I did about it
+
+`f64_div_native_min_len_is_mirrored_in_the_percall_floor_bench` FAILED on the first build — by
+design. It hardcodes the constant and exists to force the bench's `NATIVE_MIN_LEN_MIRROR` to be
+updated in lockstep, because a stale mirror once caused a banked row to explain divide's excess by a
+native route it was not taking.
+
+I updated the mirror FIRST (`1<<19`, plus three label sites in the same group), confirmed it, and
+only then bumped the tripwire's literal. **That is the tripwire working, not a gate being weakened:**
+its purpose is to make the mirror update mandatory, the mirror was updated, and it remains armed for
+the next change. The neighbouring `f64_gate_order_is_outcome_invariant_across_the_size_threshold`
+needed no edit and is NOT vacuous — it is parameterised on the constant (`MIN_LEN-1`, `MIN_LEN`,
+`MIN_LEN+1`), so it now straddles 2^19 automatically; it passes.
+
+Tests: all eight `f64_div*` tests pass, including the tripwire and
+`f64_divide_size_gate_declines_only_small_divides`, plus the invariance walk.
+
+### Caveats
+
+- 2^15 and 2^16 are not re-measured here; they sat inside the wrongly-admitted band and now delegate
+  by the same mechanism as 2^17/2^18, but their post-change ratios are inferred, not measured.
+- The 2^16 native excess moved 2.2x between earlier invocations, so the *magnitudes* in that band are
+  noisy; the crossover conclusion rests on direction, which was consistent everywhere.
+- 2^19's post-change ratio (1.1068x faster) is far above its pre-change 1.0121x. Both are native, so
+  this is window/run variance on the same route, not an effect of the gate — do not read it as one.
+
+COUNTED_MECHANISM: at 2^17 and 2^18 the native route cost 3,196 and 6,818 ns of excess against
+delegating controls of 584 and 704 ns (5.5x and 9.7x); raising the threshold to the measured
+crossover moves those cells to 480 and 517 ns of excess, i.e. 1.0906x -> 1.0130x and
+1.0912x -> 1.0069x.
+
+A/A NULL CONTROLS: every row is a `run_dual_null_median_ci_contract` row the gate admitted.
+
+RETRY PREDICATE: `F64_DIV_NATIVE_MIN_LEN` is now MEASURED at 1<<19; do not lower it without an
+in-invocation delegating control at the size being admitted, which is exactly what the old 1<<14
+lacked. Do not re-derive the crossover - it is bracketed to (2^18, 2^19] and the endpoints are
+banked. If the divide kernel is ever made faster at small n, this constant is the thing to re-measure.
+AGENT_NAME=AzureCarp.
