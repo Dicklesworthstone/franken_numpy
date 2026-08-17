@@ -7359,8 +7359,8 @@ fn bench_divide_allocation_split_vs_numpy(_c: &mut Criterion) {
         // it this group has read both 1.00 and 8.46 for the same comparison on the same
         // binary. Emit the tunable's actual value so no row can be quoted without its
         // allocator regime attached, and say so in words on a bare run.
-        let mmap_threshold = std::env::var("MALLOC_MMAP_THRESHOLD_")
-            .unwrap_or_else(|_| "unset".to_owned());
+        let mmap_threshold =
+            std::env::var("MALLOC_MMAP_THRESHOLD_").unwrap_or_else(|_| "unset".to_owned());
         if mmap_threshold == "unset" {
             println!(
                 "DIVIDE_ALLOCATION_SPLIT_WARNING allocator_churn_control=ABSENT \
