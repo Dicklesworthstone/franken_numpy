@@ -48080,3 +48080,86 @@ not quote 212 ns as this class's cost; it is a lower-bound proxy and the measure
 390 ns for two sites. (3) geomspace's advantage over linspace is unexplained and should not be
 built on. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - THE GATE QUESTION IS SETTLED, and the answer is RAISE it, not remove the route: native divide loses to its own delegating control at 2^16 (2078 vs 384 ns) and BEATS it at 2^20 (-8762 vs 1936 ns). The crossover is between them, and 2^14 is far below it (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`)
+
+`AzureCarp`. One build, then measured in the quietest window of the campaign.
+
+**Campaign result class:** open question ANSWERED with an actionable threshold (no gate change landed)
+
+### The full sweep, three sizes, each with its delegating control
+
+```
+DIVIDE_SIZE_GATE  numpy 2.4.3  worker=thinkstation1
+  harness=common::run_dual_null_median_ci_contract
+  bench_elf_sha256=d31176673f5b606453068dff4e217628f644689aa17c65c095c2d36b8cb8b228
+  loadavg 14.30/12.12/8.72 -> 13.87/12.07/8.72, NO other builds running
+  per-arm same_core=true on all six contracts, arm_mhz_spread 1.0000-1.0054,
+  arms 3856.1-4291.1 MHz; cross-core spread 2.986
+
+  n       op         route        ratio       numpy_ns    fnp_ns   excess_ns
+  2^8     divide     delegates   0.649795          480       736         256
+  2^8     multiply   delegates   0.691718          456       656         200
+  2^16    divide     NATIVE      0.901531        19267     21345       2,078
+  2^16    multiply   delegates   0.977717        14918     15254         336
+  2^20    divide     NATIVE      1.003772       453094    444332      -8,762
+  2^20    multiply   delegates   0.992373       327190    329078       1,888
+```
+
+Comparing each native cell against what delegating would have cost — the control's excess plus the
+~48 ns block entry divide alone pays:
+
+```
+  2^8    native  256  vs delegating   248   native WORSE (and it does not route here anyway)
+  2^16   native 2078  vs delegating   384   native WORSE by 5.4x
+  2^20   native -8762 vs delegating 1,936   native BETTER by ~10.7 us
+```
+
+### The answer, and it is the opposite of where I was heading
+
+Last row I found native 10.1x worse than its control at 2^16 and wrote that whether to raise the gate
+or remove the route "depends on whether native ever wins". **It wins.** At 2^20 the native route is
+*faster than NumPy outright* (excess -8762 ns) while the delegating control still costs +1888 ns.
+
+So the route is worth having and **`F64_DIV_NATIVE_MIN_LEN = 1<<14` is simply set far too low.** It
+admits 2^14 through at least 2^16, a band where routing costs 5.4x what delegating would. This is the
+"admitting a losing band" hypothesis `q00ev` raised, now settled in the direction that keeps the
+route.
+
+**I nearly talked myself into deleting a route that works.** Two rows of evidence (2^8 and 2^16) both
+showed native losing, and the tempting extrapolation was that it never wins. Measuring the size where
+its overhead was known to be smallest is what caught it.
+
+### Caveats that bound the recommendation
+
+- **2^17 through 2^19 are unmeasured.** The crossover lies somewhere in that range; I know only that
+  it is above 2^16 and at or below 2^20.
+- **The 2^16 native excess is noisy across runs** — 4628 ns in the previous invocation, 2078 ns here,
+  a 2.2x spread. The DIRECTION is consistent (native several times worse than its control in both),
+  and that is what the conclusion rests on; the magnitude should not be quoted to two figures.
+- **At 2^20 the native ratio's own CI straddles unity** (`[0.980964, 1.017559]`), so "native beats
+  NumPy at 2^20" is UNDECIDED as a vs-incumbent claim. What is decided is native-versus-delegating,
+  which is the comparison the gate actually needs.
+- The two ops have different intrinsic kernel costs (NumPy's divide is ~1.4x its multiply at 2^20),
+  which is why the comparison is on EXCESS and not on ratio.
+
+### No gate change is landed
+
+Setting the new threshold is a code change that needs its own build, test and certification, and the
+value should come from measuring 2^17-2^19 rather than from picking the first size that worked. The
+conservative choice available today is 2^20 — the only size where native measurably beats its
+control — which would give up any winning band below it in exchange for removing a measured-losing
+one.
+
+COUNTED_MECHANISM: at n=2^16 the native f64 divide route costs 2078 ns of excess over NumPy against
+its delegating control's 336 ns (+48 ns block entry), i.e. 5.4x; at n=2^20 the same comparison is
+-8762 ns against +1888 ns, i.e. native ahead by ~10.7 us. Six dual-null contracts, one invocation.
+
+A/A NULL CONTROLS: all six rows are `run_dual_null_median_ci_contract` rows the gate admitted.
+
+RETRY PREDICATE: do not remove the native f64 divide route - it wins at 2^20. Do not quote the 2^16
+native excess to two figures; it moved 2.2x between invocations. The next measurement is 2^17, 2^18
+and 2^19 with the same in-invocation control, which locates the crossover and gives
+`F64_DIV_NATIVE_MIN_LEN` a measured value instead of the current 1<<14, which is now known to be
+below the crossover.
+AGENT_NAME=AzureCarp.

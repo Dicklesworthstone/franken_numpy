@@ -7043,11 +7043,19 @@ fn bench_divide_size_gate_vs_numpy(_c: &mut Criterion) {
             .extract::<String>()
             .expect("numpy version is a string");
 
-        // Two cells, one either side of the 1<<14 gate. A four-cell sweep did not
-        // fit rch's 1800s SSH ceiling: the bench compile alone consumed it and
-        // ZERO cells landed. Both sides is the minimum that can detect a gate
-        // which helps below the threshold and hurts above it.
-        for exponent in [8u32, 16] {
+        // Three sizes spanning the 1<<14 gate, each with its delegating control:
+        // 2^8 delegates, 2^16 and 2^20 route natively. The earlier note here said a
+        // four-cell sweep did not fit rch's 1800 s SSH ceiling - that constraint is on
+        // REMOTE runs; these are built and measured locally, where six contracts fit.
+        //
+        // 2^20 is here because 2^16 alone cannot decide the gate
+        // (`deadlock-audit-q00ev`). At 2^16 the native route measured 10.1x the
+        // delegating control's excess, which says the gate admits a losing band - but
+        // whether the fix is to RAISE the threshold or to REMOVE the route depends on
+        // whether native ever wins, and 2^20 is where its proportional overhead was
+        // smallest (5.4%). If native loses to its own control at 2^20 as well, then the
+        // route has no winning band that has ever been measured.
+        for exponent in [8u32, 16, 20] {
             let n = 1usize << exponent;
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");
