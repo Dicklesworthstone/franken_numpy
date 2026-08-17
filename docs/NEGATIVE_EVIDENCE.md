@@ -47578,3 +47578,68 @@ linspace-only. (3) Do NOT re-derive the endpoint-kind table: `np.float32`, `np.i
 and 0-d arrays are all non-ndarray, non-`float`, non-`int` values that convert successfully, and
 any predicate here must account for all four. AGENT_NAME=RedLynx.
 
+
+## 2026-08-17 - DO NOT SWEEP the "same_kind" lever to the cold wrappers: it is ~20% of the ufunc route's floor and ~1% of theirs. Plus a static self-consistency check on `34a67fdc`, which is still UNCOMPILED on main (`deadlock-audit-ei9jz`, `deadlock-audit-v46rn`)
+
+`AzureCarp`. No build — the host was at loadavg 377-651 with 78-82% iowait after a bulk resume, and
+the one remote job I had in flight before the throttle is still queued.
+
+**Campaign result class:** scoping decision that CLOSES a sweep + a disclosed static check
+
+### The sweep that should not happen
+
+`34a67fdc` removed a 9-byte string comparison (`casting == "same_kind"`, plus `order == "K"`) from
+`PyUFunc::__call__`, found by annotation at 17.93% of that function's samples. The obvious next move
+is to sweep the same pattern to every other `casting="same_kind"` / `order="K"` PyO3 default in the
+file — there are at least five more, on `concatenate`/`stack`-shaped functions, `copyto`, and the
+`*_like` family.
+
+**It is not worth taking, and the arithmetic is already banked.** `RedLynx` measured those cold
+wrappers directly: `linspace` carries **3571 ns** of excess and `fft` **1582 ns**, against the ufunc
+binary route's **197 ns**. A string compare worth roughly 40 ns is ~20% of the ufunc floor and
+**~1% of a cold wrapper's**. Their row closed the equivalent lane for the axis-default lever with the
+same reasoning; this is the same conclusion reached independently for a different lever, which is
+worth recording precisely because the two agree.
+
+**The general rule this establishes:** *a fixed-cost wrapper lever is worth taking in inverse
+proportion to the cell's floor.* The ufunc route is the only per-call surface measured here small
+enough for a 40 ns item to matter. Sweeping it into 3571 ns cells would be a green diff bought with
+builds, and the ledger has a name for that.
+
+They should still be converted if someone is already editing those functions — consistency is free
+when you are in the file — but **not as a lever and not with a build spent on measuring it.**
+
+### Static self-consistency check on `34a67fdc`, and its limits
+
+That commit is on `main` **uncompiled**: it was swept into a peer's emergency-preservation commit
+during the disk emergency, and the remote test I started when the halt lifted is still queued behind
+the bulk-resume backlog. Since unverified code on `main` is everyone's problem, I read it rather than
+leaving it entirely unchecked:
+
+```
+  all 12 references to casting/order inside __call__ (lines 389-843):
+    389        signature, both defaults now None
+    398,399    parameters, both now Option<&str>
+    424,425 / 452,453 / 799,800    three fast-path gates, all is_none_or
+    835,838 / 840,843              two forwarding sites, both if-let + non-default test
+  no unconverted use remains; `is_none_or` and let-chains are both already used
+  elsewhere in this same file, so neither is a new language requirement
+```
+
+**This is NOT a compile and I am not presenting it as one.** It rules out the specific failure I
+could check for — a straggler use still typed `&str` — and nothing else. The owed verification is
+unchanged: `cargo check`, `clippy --all-targets`, and the test
+`casting_and_order_defaults_are_none_without_swallowing_non_defaults`, none of which have run, then
+the measurement against the binary counter baseline of 1,796 insns/call.
+
+COUNTED_MECHANISM: none claimed — this row proposes no change and measures nothing. It rests on
+`RedLynx`'s banked cold-wrapper excesses (linspace 3571 ns, fft 1582 ns, both DECIDABLE_REGRESSION
+with all eight nulls admitting unity) and on my own banked 197 ns binary-route floor.
+
+A/A NULL CONTROLS: not applicable — a scoping decision and a static read.
+
+RETRY PREDICATE: do not sweep `casting`/`order` string defaults into the cold wrappers for
+performance; at 1% of a 1582-3571 ns excess it cannot be measured against the between-run spread
+this host produces. Do not treat the static check above as verification of `34a67fdc` — it is on
+main uncompiled until the three named gates run.
+AGENT_NAME=AzureCarp.
