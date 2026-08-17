@@ -44880,3 +44880,72 @@ them with numpy-allocated buffers, which `bench_divide_allocator_provenance` now
 The open question is the page-level cause, and settling it needs `CAP_SYS_ADMIN` for
 `/proc/self/pagemap` or a host where huge pages are actually available.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-16 - CERTIFIED, and the incumbent arm reads 1397 ns in BOTH runs: the attributed probe-to-decline was worth 1036 ns. `add.accumulate` on 256 f64 is now 1.55x, from 4.76x - a 3.07x self-speedup on the cell (`deadlock-audit-v46rn`)
+
+`RedLynx`. Discharges the prediction registered with `760a03e9`. The residual was attributed
+from source BEFORE the fix, and the fix removed what the attribution named.
+
+**Campaign result class:** maintenance-self-speedup (cell remains a regression vs NumPy)
+
+```
+elf=8b0461d3cb5b4d95943c116bec0d85dfa5c3e29ecd2b7565cb4877799aafa198
+worker=thinkstation1  numpy 2.4.3  profile=bench  f64 `add.accumulate`
+harness=common::run_dual_null_median_ci_contract, one contract PER SIZE
+group=bench_accumulate_size_crossover_vs_numpy (registered)
+LOADAVG 32.53/26.99/26.32 -> 29.92/26.61/26.20 (converged, falling)
+CPU MHz system-wide min 1429 max 4078 median 3083 spread 2.853x
+PER-ARM (CPU_WITNESS, effect): arm_a_cpu=14 arm_b_cpu=14 same_core=true
+  arm_a_mhz_mean=4051.6 arm_b_mhz_mean=4051.3 arm_mhz_spread=1.0001
+
+THE CELL, across all three states (numpy's arm in brackets):
+
+  state                       ratio      fnp_ns   excess_ns   [numpy_ns]
+  no gate, no pre-decline     0.210258    6652       5255       [1397]
+  + size gate (95ed2802)      0.450164    3286       1803       [1483]  <- high-load window
+  + pre-decline (760a03e9)    0.646704    2164        767       [1397]
+
+  n=2^10   0.503727 -> 0.672109 -> 0.814663   excess 3667 -> 1948 -> 857
+  n=2^12   1.326448 -> 1.302701 -> 1.410330   (routed side, see below)
+  n=2^20   3.882718 -> 3.794495 -> 3.880722
+
+2 DECIDABLE_REGRESSION (2^8, 2^10) and 5 DECIDABLE_WIN in every run; all nulls straddle unity.
+```
+
+**THE INCUMBENT IS THE CONTROL AND IT IS EXACT.** NumPy's arm reads **1397 ns in the original
+run and 1397 ns in this one** - the same integer, two hours and three builds apart. The middle
+row's 1483 ns is the high-load window I flagged in its own row. So the candidate movement
+6652 -> 2164 ns is read against an incumbent that did not move at all.
+
+**`add.accumulate` at n=256 is now 1.55x slower than NumPy, from 4.76x.** Total removed: 4488 ns
+per call, of which the size gate took ~3366 and the probe-to-decline ~1036.
+
+**THE ATTRIBUTION PREDICTED THE MAGNITUDE, WHICH IS WHY THIS ROW EXISTS.** `760a03e9` was
+committed with the residual attributed from SOURCE - `try_zerocopy_int_cumsum` running
+`py.import("numpy")`, `getattr("ndarray")`, and a `dtype.kind` extracted into a heap `String`,
+on every call, only to decline for float input. The predicted saving was "toward the wrapper
+floor" from 1803 ns; the measured saving is 1036 ns, landing at 767 ns against a 210-320 ns floor
+measured on the other method rows. Close, and in the right direction, from a source read alone.
+
+**ONE HALF OF THE PREDICTION IS UNTESTED, AND THE OTHER HALF CAME OUT DIFFERENTLY THAN I SAID.**
+I wrote that "the routed integer dtypes do not move, since they still run the original probe."
+This group measures f64 only, so the integer claim is **untested** - it is not supported by this
+row and must not be quoted from it. And the f64 sizes ABOVE the gate did move: 2^12 reads
+1.326448 -> 1.410330. That is consistent rather than contradictory - those sizes take the FLOAT
+route, and the int probe declines for float at every size, so they collect the same 1036 ns - but
+I had not thought it through when I wrote the prediction, and a reader should see the correction
+rather than a tidy story.
+
+**WHAT REMAINS.** 767 ns of excess at n=256 against a 210-320 ns wrapper floor. The gap is ~450 ns
+and is no longer attributed to anything specific.
+
+RETRY PREDICATE: (1) The class this instance came from is now licensed to sweep, but only with a
+measurement per tranche: **75 sites extract `dtype.kind` into a `String` and 262 fetch
+`getattr("ndarray")` after an import**, and this instance was worth 1036 ns, so the class is
+plausibly worth a great deal - but the ufunc-methods tranche was worth 656 ns and the signature
+tranche only 10 ns, so tranches differ by 65x and none may be assumed. (2) Measure the integer
+dtypes before quoting anything about them; the int route still runs the original probe and its
+cost there is unmeasured. (3) The remaining ~450 ns above the floor needs its own attribution -
+do not guess at it, the last two guesses that were checked (the signature shape, and "the routed
+dtypes will not move") were both wrong. AGENT_NAME=RedLynx.
+
