@@ -108077,19 +108077,34 @@ fn histogram2d(
     //
     // Weights and density change WHAT is accumulated, not just how fast, so any keyword
     // beyond `bins`/`range` falls through untouched.
-    if args.len() == 2
-        && kwargs.is_some_and(|kw| {
-            kw.keys().iter().all(|k| {
-                matches!(k.extract::<String>().as_deref(), Ok("bins") | Ok("range"))
+    // POSITIONAL `bins`/`range` COUNT TOO. NumPy's signature is
+    // `histogram2d(x, y, bins=10, range=None, density=None, weights=None)`, so both are
+    // routinely passed positionally. Keying only off keywords would have left
+    // `histogram2d(x, y, 8, [[0, 2], [0, 2]])` - a perfectly ordinary call - on the
+    // fallback while the keyword spelling of the SAME call went native.
+    //
+    // Anything beyond the first four positionals is `density`/`weights`, which change what
+    // is accumulated rather than how fast, so those decline here as they do by keyword.
+    if (2..=4).contains(&args.len())
+        && kwargs.is_none_or(|kw| {
+            kw.keys().into_iter().all(|key| {
+                key.extract::<String>()
+                    .map(|k| k == "bins" || k == "range")
+                    .unwrap_or(false)
             })
         })
         && let Ok(x) = args.get_item(0)
         && let Ok(y) = args.get_item(1)
     {
         let numpy = cached_numpy(py)?;
-        let kw = kwargs.expect("guarded by is_some_and above");
-        let bins = kw.get_item("bins").ok().flatten();
-        let range_arg = kw.get_item("range").ok().flatten();
+        // A keyword wins over its positional slot only because NumPy would already have
+        // raised for supplying both; this never sees that case.
+        let bins = kwargs
+            .and_then(|kw| kw.get_item("bins").ok().flatten())
+            .or_else(|| args.get_item(2).ok());
+        let range_arg = kwargs
+            .and_then(|kw| kw.get_item("range").ok().flatten())
+            .or_else(|| args.get_item(3).ok());
         let counts: Option<(usize, usize)> = match bins.as_ref() {
             None => Some((10, 10)),
             Some(b) => {
