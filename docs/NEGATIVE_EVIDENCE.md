@@ -53600,3 +53600,82 @@ A/A NULL CONTROLS: not applicable - source-derived, no measurement in this row.
 RETRY PREDICATE: quote the CLASS (entry count dominates, one sniff is the removable core), not the
 integer. The integer has now been wrong once and is still read rather than measured.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — MEASURED CONFIRMATION that neither probe body executes for f64 multiply: all three skip-deltas are inside the noise floor, so the 660.9 insns/call is the DECISION MACHINERY, not the probes (deadlock-audit-ei9jz)
+
+**Campaign result class:** a source claim of mine converted into a measured one — and it re-labels a
+banked quantity
+
+Isolated worktree off `3e99bb51`, ELF `criterion_python_elementwise-ea6828603f008c3e`, release-perf,
+threading pinned, 400,000 calls/arm, 3 reps x 4 arms interleaved. PRE loadavg 9.64/10.00/11.10, CPU
+idle 88%, runnable 6/64, iowait 0, 2307 MHz, /data 125G. POST idle 89%. Both switch strings verified
+present in the binary before measuring.
+
+```
+  arm      median insns     spread
+  base     3,915,869,046     0.193%     both probes reachable
+  nocx     3,913,274,533     0.066%     FNP_SKIP_COMPLEX_PROBE=1
+  nof16    3,913,335,534     0.496%     FNP_SKIP_F16_PROBE=1
+  noboth   3,926,793,363     0.366%     both skipped
+
+  worst within-arm spread 0.496% = 48.5 insns/call of noise
+
+  complex probe cost = base - nocx   =   +6.5 insns/call   BELOW NOISE
+  f16 probe     cost = base - nof16  =   +6.3              BELOW NOISE
+  both probes   cost = base - noboth =  -27.3              BELOW NOISE (and NEGATIVE)
+```
+
+**Registered prediction: "both switches ~0 because the guards short-circuit for typechar 'd'."
+CONFIRMED.** The "both probes" delta is even negative, which is the clearest possible statement that
+nothing is being removed - you cannot remove work and get more instructions except by noise.
+
+### What this establishes
+
+One row ago I corrected my own call-shape enumeration after reading that
+`x1_is_maybe_f16 = (c=='e')` and `x1_is_maybe_complex = (c=='F'||'D'||'G')` are both FALSE for
+float64's typechar `'d'`. That was a source claim. **It is now measured:** skipping the probe bodies
+changes nothing because they were never entered.
+
+**CONSEQUENCE FOR A BANKED NUMBER.** The 660.9 insns/call measured by the
+`FNP_DISABLE_NATIVE_ROUTES` A/B has been called "the probe chain" throughout this bead, including by
+me. That label is wrong for this cell. The switch skips the whole native-route decision SECTION, and
+for f64 multiply that section contains no executing probe. What the 660.9 actually buys is:
+
+```
+  the hoisted dtype sniff   getattr("dtype") -> getattr("char") -> extract::<char>()   3 entries
+  the guard computations    x1_is_maybe_f16 / _complex / _temporal, the binop match
+  the out= block predicate  and the surrounding branch logic
+```
+
+It should be read as **decision machinery**, and the sniff is its only Python-level cost. Rename it
+in your head; the number stands, its meaning does not.
+
+### The lever this points at, with its caveats
+
+NumPy's builtin dtype objects are SINGLETONS - verified directly:
+`a.dtype is np.dtype(np.float64)` is True, `c.dtype is np.dtype(np.complex128)` is True, and
+identity is stable across separately created arrays. So every decision the sniff makes by fetching
+`.char` and extracting a Rust `char` can instead be made by ONE `getattr("dtype")` plus pointer
+comparisons against a small set of dtype objects cached at module init, the way `cached_numpy`
+already caches the module. That removes ~2 of the ~7 CPython entries on this route.
+
+TWO CAVEATS that must survive any implementation, neither hypothetical:
+ 1. The guards' `None => true` fallback exists for objects with no `dtype` at all. An identity check
+    must preserve that conservative direction - unknown must still mean "maybe", never "decline".
+ 2. Singleton identity holds for BUILTIN dtypes. Parameterised ones (datetime64 with units,
+    structured) may not be interned, and `'M'`/`'m'` ARE in the guard set, so an identity miss must
+    fall back to the char path rather than silently mis-routing.
+
+COUNTED_MECHANISM: 3 skip-deltas of +6.5, +6.3 and -27.3 insns/call against a 48.5 insns/call noise
+floor; both switch strings verified in the ELF; 4 arms x 3 reps on one ELF.
+
+A/A NULL CONTROLS: not applicable - counter differences on one ELF. The control that matters here is
+the noise floor itself, computed from the worst within-arm spread and reported alongside every
+delta, so "below noise" is a stated comparison rather than an impression.
+
+RETRY PREDICATE: this experiment cannot decompose the 660.9 further - there is nothing in it to
+decompose, which is the finding. To attack it, measure the SNIFF directly: an arm that skips the
+`getattr("dtype")->getattr("char")->extract` chain and forces the conservative `None => true` path.
+That is one more switch and one more build, and unlike this one it targets code that actually
+executes.
+AGENT_NAME=SlateFinch.
