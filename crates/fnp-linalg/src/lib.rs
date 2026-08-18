@@ -8088,6 +8088,126 @@ fn packed_row_tail(a: &[f64], b: &[f64], out: &mut [f64], i: usize, k: usize, n:
     }
 }
 
+/// Row-block-major packed copy of `a`, for the register-tiled GEMM micro-kernel.
+///
+/// The micro-kernel holds an `MR x PACKED_NR` accumulator and walks `k`. It needs, at each `kk`,
+/// the `MR` values `a[i0..i0+MR][kk]` - which in row-major `a` are `k` elements apart, so an
+/// `MR`-row tile touches `MR` separate cache lines per `kk` and re-streams all of `a` again for
+/// every column panel. This lays those `MR` values out CONTIGUOUSLY:
+///
+/// ```text
+///   ap[block * k * MR + kk * MR + ii] == a[(block * MR + ii) * k + kk]
+/// ```
+///
+/// so the kernel reads `MR` consecutive f64 per `kk`, and the packed copy is built once and
+/// reused across every column panel. `m` must be a multiple of `MR`; the caller passes `m_full`
+/// and handles remainder rows through the scalar tail.
+fn pack_a_rowblocks<const MR: usize>(a: &[f64], m: usize, k: usize) -> Vec<f64> {
+    let blocks = m / MR;
+    let mut ap = vec![0.0f64; blocks * k * MR];
+    for bi in 0..blocks {
+        let i0 = bi * MR;
+        let dst = &mut ap[bi * k * MR..(bi + 1) * k * MR];
+        for kk in 0..k {
+            let slot = &mut dst[kk * MR..kk * MR + MR];
+            for (ii, cell) in slot.iter_mut().enumerate() {
+                *cell = a[(i0 + ii) * k + kk];
+            }
+        }
+    }
+    ap
+}
+
+/// `out += a * b`, register-tiled with BOTH operands packed (`franken_numpy-ixs5y`).
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
+/// `packed_gemm_serial` still dispatches to `packed_gemm_serial_tiled`. Wiring is a one-line
+/// follow-up once this has been compiled, tested and A/B'd.
+///
+/// WHAT THIS ADDS OVER `packed_gemm_serial_tiled`: that kernel packs `b` into a `k x PACKED_NR`
+/// panel but reads `a` in place, `a[(i0 + ii) * k + kk]`, so every `MR`-row tile strides by `k`
+/// and all of `a` is re-streamed for each column panel. Here `a` is packed once, row-block-major,
+/// and both operands stream contiguously in the inner loop.
+///
+/// FP-BIT PARITY IS EXACT, and that is a hard requirement of the flagship bead, not a nicety.
+/// The accumulation is unchanged in both value and ORDER: for a given tile the loops are still
+/// `kk` ascending, then `ii`, then `jj`, into a single `MR x PACKED_NR` accumulator that is added
+/// to `out` once. Only the ADDRESS the `a` value is loaded from differs, so every partial sum is
+/// bit-identical to the existing kernel's. `packed_apack_is_bit_exact_vs_tiled` pins that.
+///
+/// WHY THERE IS NO `KC` BLOCKING, deliberately. Splitting `k` into cache-sized blocks is the
+/// other half of a Goto-style GEMM and it would keep `b`'s panel inside L1 for large `k`. It is
+/// NOT done here because it requires flushing the register accumulator to `out` once per `k`
+/// block, which regroups the summation and CHANGES THE ROUNDING. That breaks the absolute
+/// FP-bit parity the bead demands. A `KC`-blocked variant is only admissible if it is offered as
+/// a separate, explicitly non-bit-exact route with its own opt-in, not as a drop-in.
+fn packed_gemm_serial_tiled_apacked<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    out: &mut [f64],
+) {
+    let m_full = m - m % MR;
+    let n_full = n - n % PACKED_NR;
+    // Packed once, reused by every column panel below - that reuse is the point of packing.
+    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    // Same L2-resident column-block width as the incumbent kernel, so this change is the
+    // A-packing and nothing else.
+    let nc = {
+        let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
+        (cols / PACKED_NR).max(1) * PACKED_NR
+    };
+    let mut bp = vec![0.0f64; k * PACKED_NR];
+    let mut jc = 0;
+    while jc < n_full {
+        let jc_end = (jc + nc).min(n_full);
+        let mut j0 = jc;
+        while j0 < jc_end {
+            for kk in 0..k {
+                bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]
+                    .copy_from_slice(&b[kk * n + j0..kk * n + j0 + PACKED_NR]);
+            }
+            let mut i0 = 0;
+            while i0 < m_full {
+                let block = i0 / MR;
+                let apanel = &ap[block * k * MR..(block + 1) * k * MR];
+                let mut acc = [[0.0f64; PACKED_NR]; MR];
+                for kk in 0..k {
+                    let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                    let arow = &apanel[kk * MR..kk * MR + MR];
+                    for (ii, row) in acc.iter_mut().enumerate() {
+                        let av = arow[ii];
+                        for (slot, &bv) in row.iter_mut().zip(brow) {
+                            *slot += av * bv;
+                        }
+                    }
+                }
+                for (ii, row) in acc.iter().enumerate() {
+                    let base = (i0 + ii) * n + j0;
+                    for (slot, &v) in out[base..base + PACKED_NR].iter_mut().zip(row) {
+                        *slot += v;
+                    }
+                }
+                i0 += MR;
+            }
+            j0 += PACKED_NR;
+        }
+        jc += nc;
+    }
+    // Identical tail handling to the incumbent kernel: remainder columns for the full row
+    // blocks, then every remainder row. Both read `a` in place, which is correct - the packed
+    // copy covers only the `m_full` rows the tiled path consumes.
+    for i in 0..m_full {
+        packed_row_tail(a, b, out, i, k, n, n_full);
+    }
+    for i in m_full..m {
+        packed_row_tail(a, b, out, i, k, n, 0);
+    }
+}
+
+
 // Band-parallel driver shared by the square and rectangular wrappers: split the
 // output rows into bands (several per thread for work-stealing balance), each
 // band runs the packed serial kernel on its disjoint row slice. Per-row k-order
@@ -21481,4 +21601,66 @@ except Exception as exc:
             .is_err()
         );
     }
+
+    /// The A-packed GEMM kernel must agree with the incumbent tiled kernel to the BIT.
+    ///
+    /// This is the load-bearing test for `packed_gemm_serial_tiled_apacked`: the flagship bead
+    /// requires identical output bits, so an approximate match is a failure. Packing `a` changes
+    /// only WHERE each value is loaded from - the accumulation stays `kk` ascending into one
+    /// register accumulator - so the results must be bit-identical, not merely close.
+    ///
+    /// Bits are compared via `to_bits`, not `==`: `0.0 == -0.0` is true and `NaN == NaN` is
+    /// false, so value equality is simultaneously too weak and too strict for a parity check.
+    ///
+    /// The shapes deliberately include remainder rows (`m % MR != 0`) and remainder columns
+    /// (`n % PACKED_NR != 0`) so the scalar tail paths are exercised too, and a `k` larger than
+    /// one column block so the `nc` loop iterates more than once.
+    #[test]
+    fn packed_apack_is_bit_exact_vs_tiled() {
+        const MR: usize = super::PACKED_MR;
+        for &(m, k, n) in &[(4, 3, 8), (8, 5, 16), (9, 7, 19), (12, 33, 24), (5, 2, 9)] {
+            let a: Vec<f64> = (0..m * k)
+                .map(|i| ((i * 37 % 101) as f64) - 50.5)
+                .collect();
+            let b: Vec<f64> = (0..k * n)
+                .map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25)
+                .collect();
+            let mut want = vec![0.0f64; m * n];
+            let mut got = vec![0.0f64; m * n];
+            super::packed_gemm_serial_tiled::<MR>(&a, &b, m, k, n, &mut want);
+            super::packed_gemm_serial_tiled_apacked::<MR>(&a, &b, m, k, n, &mut got);
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                want_bits, got_bits,
+                "A-packed kernel diverged in BITS at m={m} k={k} n={n}"
+            );
+        }
+    }
+
+    /// `pack_a_rowblocks` must be a faithful permutation of the rows it covers.
+    ///
+    /// Checked independently of the kernel so a packing bug cannot hide behind a kernel bug:
+    /// every packed slot must equal the exact source element the layout formula names.
+    #[test]
+    fn pack_a_rowblocks_places_every_element() {
+        const MR: usize = super::PACKED_MR;
+        for &(m, k) in &[(4, 1), (8, 3), (12, 7)] {
+            let a: Vec<f64> = (0..m * k).map(|i| i as f64 * 1.5 - 3.25).collect();
+            let ap = super::pack_a_rowblocks::<MR>(&a, m, k);
+            assert_eq!(ap.len(), (m / MR) * k * MR);
+            for bi in 0..m / MR {
+                for kk in 0..k {
+                    for ii in 0..MR {
+                        assert_eq!(
+                            ap[bi * k * MR + kk * MR + ii],
+                            a[(bi * MR + ii) * k + kk],
+                            "packed slot mismatch at block={bi} kk={kk} ii={ii}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
 }
