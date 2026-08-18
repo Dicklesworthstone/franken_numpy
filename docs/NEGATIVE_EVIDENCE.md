@@ -55218,3 +55218,40 @@ pre-predicate ELF (`elf_before`, preserved) run against numpy on the argsort arm
 invocations, no build. Not done here because /data is 5G above the brake and losing ~1G/tick to
 other projects, and it answers nothing currently open.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — CORRECTNESS AUDIT of all 219 ndarray-cache conversions: every site uses the object solely as a TYPE, so the substitution is sound throughout (deadlock-audit-c5ecm)
+
+Build-free audit, prompted by the risk that a mechanical substitution could hit a site where
+`numpy.getattr("ndarray")` was wanted for something OTHER than a type test — the cached handle is a
+`&Bound<PyAny>` to a class object, and a site that called it, subscripted it, or read an attribute
+off it could behave differently.
+
+```
+  219 call sites of cached_ndarray_type, classified exhaustively:
+    197   X.is_exact_instance(cached_ndarray_type(py)?)        exact-type test
+      6   X.is_instance(cached_ndarray_type(py)?)              subclass-permitting test
+      1   X.get_type().is(cached_ndarray_type(py)?)            pointer identity
+     15   let <v> = cached_ndarray_type(py)?.clone();          binding, uses audited below
+    ---
+      0   ANY OTHER USE
+```
+
+The 15 clone bindings resolve to `is_exact_instance` at every use, either directly or via
+`f16_dtype_ok(arr, nd)`, whose body is `arr.is_exact_instance(nd)` and nothing else. Traced rather
+than assumed.
+
+**So all 219 sites consume the handle only as a type for an instance or identity test**, which is
+exactly the property that makes caching it safe: the object is immutable, and the failure mode of a
+stale handle would be a test returning false, i.e. declining to a NumPy delegation. No site can
+observe the difference between the fetched and the cached object.
+
+The 6 `is_instance` (non-exact) sites are worth naming since they are the ones a careless audit
+would miss: they permit ndarray SUBCLASSES, and the substitution preserves that because it is the
+same type object being tested against, not a narrower one.
+
+COUNTED_MECHANISM: none - this is a classification, and it is exhaustive (197+6+1+15 = 219, with an
+explicit zero in the "any other use" bucket rather than an unexamined remainder).
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: none. Re-run this classification after any further tranche; the check is one grep
+and costs nothing.
+AGENT_NAME=SlateFinch.
