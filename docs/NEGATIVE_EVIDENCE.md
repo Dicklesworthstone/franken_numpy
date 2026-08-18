@@ -53862,3 +53862,61 @@ RETRY PREDICATE: before merging, run the same cell with datetime64 and structure
 confirm the fallback produces byte-identical routing decisions to the char path. If it does, this is
 a 388.7 insns/call lever on the delegating binary-ufunc route - about 21% of the pre-lever excess.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — THE LEVER'S FALLBACK PATHS ARE PARITY-CLEAN: 22/22 BIT-IDENTICAL, including the datetime64-with-units case the design depends on — and my test was wrong before the code was (deadlock-audit-ei9jz)
+
+**Campaign result class:** the merge gate I registered, discharged — plus a test defect caught before
+it became a false bug report
+
+No build. The worktree build already produced `libfnp_python.so`; copied under the module name it
+imports directly into the local CPython 3.13.7, which turns parity work from a 25-minute
+`cargo test` cycle into seconds of Python. Host: loadavg 7.10/9.03/10.23, CPU idle 90%, /data 124G.
+
+```
+  IDENTITY HITS      float64 / complex128 / complex64 multiply, float16 add          4/4
+  FALLBACK (param.)  timedelta64[ns] rem+add, timedelta64[s]*int,
+                     datetime64[D] subtract, datetime64[D] multiply (raises)         5/5
+  FALLBACK (exotic)  structured (raises), float32, int64 mul+rem, bool,
+                     unicode (raises)                                                6/6
+  NO-DTYPE BRANCH    lists, scalars, list x ndarray, None operand (raises)           4/4
+  EDGE VALUES        signed zeros / inf / nan, non-contiguous, broadcast             3/3
+  ------------------------------------------------------------------------------------
+  TOTAL 22 cases, 0 mismatches, every one BIT-IDENTICAL to NumPy
+```
+
+This discharges the gate registered with the lever: `np.dtype('M8[ns]')` is NOT the interned `M8`
+object, so datetime64-with-units MUST take the fallback - and it does, returning bit-identical
+values, and raising the same `UFuncTypeError` where NumPy raises. Error behaviour is compared by
+exception type, not merely by "both failed".
+
+### MY TEST WAS WRONG BEFORE THE CODE WAS, in both directions at once
+
+The first run reported one mismatch: `f64 signed zeros / inf / nan`. Rather than report a bug I
+checked it, and the results were bit-identical - `np.array_equal` returns False on NaN because
+NaN != NaN.
+
+The deeper problem is the other direction. **`np.array_equal` treats `0.0 == -0.0` as EQUAL**, so it
+would have silently PASSED a genuine signed-zero routing bug - which is precisely the failure mode
+the complex and f16 guards can cause, and precisely what `multiply_signed_zero_parity` exists to
+catch elsewhere in this repo. The check was simultaneously too strict (false alarm on NaN) and too
+weak (blind to sign bits).
+
+Comparing `tobytes()` fixes both: it catches sign bits and NaN payloads, needs no `equal_nan` flag,
+and is the strictest available statement. **A parity test that cannot see -0.0 is not a parity test
+for a route whose guards dispatch on dtype.** Rewritten accordingly; the 22/22 above is under the
+hardened comparison.
+
+That is the second false failure this session that would have been reported as real if taken at face
+value - the first being `RCH-E104` presenting as a test failure. Both were caught by checking the
+instrument before believing it.
+
+COUNTED_MECHANISM: 22 cases across 5 categories, 0 mismatches under byte comparison; identity path,
+parameterised-dtype fallback, non-interned fallback, and the no-dtype branch each exercised
+explicitly.
+
+A/A NULL CONTROLS: not applicable - correctness comparison against the incumbent, not a ratio.
+
+STILL OWED BEFORE MERGE: the repo's own test suite must pass with the lever (running now in the
+worktree), and these 22 cases belong in a committed conformance test rather than a scratchpad
+script - a parity result that lives only in a ledger row is not a regression gate.
+AGENT_NAME=SlateFinch.
