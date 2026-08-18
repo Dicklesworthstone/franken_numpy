@@ -4922,21 +4922,24 @@ fn svd_bidiag_qr_values(
 /// see `bidiag_reduce_blocked` for why it cannot simply replace the current path.
 const BIDIAG_PANEL_NB: usize = 32;
 
-/// Householder reflector in the LAPACK `dlarfg` convention: returns `(v, tau)` with `v[0] == 1`
-/// and `(I - tau v v^T) x = beta e1`.
+/// Householder reflector in the LAPACK `dlarfg` convention: writes `v` with `v[0] == 1` into
+/// `v_out[..x.len()]` and returns `tau`, so that `(I - tau v v^T) x = beta e1`.
 ///
 /// `tau == 0` means "no reflection needed" - the tail is already zero - and every caller must skip
 /// the update in that case rather than applying a zero reflector.
-fn bidiag_reflector(x: &[f64]) -> (Vec<f64>, f64) {
-    let mut v = vec![0.0; x.len()];
-    if x.is_empty() {
-        return (v, 0.0);
+fn bidiag_reflector_into(x: &[f64], v_out: &mut [f64]) -> f64 {
+    let len = x.len();
+    if len == 0 {
+        return 0.0;
     }
-    v[0] = 1.0;
+    v_out[0] = 1.0;
+    for t in v_out[1..len].iter_mut() {
+        *t = 0.0;
+    }
     let alpha = x[0];
     let sigma: f64 = x[1..].iter().map(|t| t * t).sum();
     if sigma == 0.0 {
-        return (v, 0.0);
+        return 0.0;
     }
     let mu = (alpha * alpha + sigma).sqrt();
     // Choosing the sign that avoids cancellation in `alpha - mu`: the classic dlarfg guard.
@@ -4946,16 +4949,28 @@ fn bidiag_reflector(x: &[f64]) -> (Vec<f64>, f64) {
         -sigma / (alpha + mu)
     };
     let tau = 2.0 * v0 * v0 / (sigma + v0 * v0);
-    for (dst, &src) in v[1..].iter_mut().zip(x[1..].iter()) {
+    for (dst, &src) in v_out[1..len].iter_mut().zip(x[1..].iter()) {
         *dst = src / v0;
     }
-    (v, tau)
+    tau
 }
 
-/// `A x` for the `rows x cols` submatrix whose first element is `a[0]`, with row pitch `stride`.
-fn bidiag_gemv(a: &[f64], rows: usize, cols: usize, stride: usize, x: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0; rows];
-    for (i, o) in out.iter_mut().enumerate() {
+/// `out[..rows] = A x` for the `rows x cols` submatrix whose first element is `a[0]`, row pitch
+/// `stride`.
+///
+/// Writes into caller-owned scratch rather than returning a `Vec`. The panel loop issues fourteen
+/// of these per column, so allocating a fresh result each time churned O(n^2) of allocation across
+/// a factorisation for no arithmetic benefit - and this crate has already been bitten by
+/// large-buffer allocation churn dominating a kernel's measured time.
+fn bidiag_gemv_into(
+    a: &[f64],
+    rows: usize,
+    cols: usize,
+    stride: usize,
+    x: &[f64],
+    out: &mut [f64],
+) {
+    for (i, o) in out.iter_mut().enumerate().take(rows) {
         let base = i * stride;
         let mut acc = 0.0;
         for (j, &xj) in x.iter().enumerate().take(cols) {
@@ -4963,19 +4978,27 @@ fn bidiag_gemv(a: &[f64], rows: usize, cols: usize, stride: usize, x: &[f64]) ->
         }
         *o = acc;
     }
-    out
 }
 
-/// `A^T x`, same submatrix convention as `bidiag_gemv`.
-fn bidiag_gemv_t(a: &[f64], rows: usize, cols: usize, stride: usize, x: &[f64]) -> Vec<f64> {
-    let mut out = vec![0.0; cols];
+/// `out[..cols] = A^T x`, same submatrix convention. `out[..cols]` is zeroed first, since this one
+/// accumulates.
+fn bidiag_gemv_t_into(
+    a: &[f64],
+    rows: usize,
+    cols: usize,
+    stride: usize,
+    x: &[f64],
+    out: &mut [f64],
+) {
+    for o in out.iter_mut().take(cols) {
+        *o = 0.0;
+    }
     for (i, &xi) in x.iter().enumerate().take(rows) {
         let base = i * stride;
-        for (j, o) in out.iter_mut().enumerate() {
+        for (j, o) in out.iter_mut().enumerate().take(cols) {
             *o += a[base + j] * xi;
         }
     }
-    out
 }
 
 /// Golub-Kahan bidiagonal reduction, BLOCKED: reduces `nb` columns and rows per panel and applies
@@ -4991,7 +5014,7 @@ fn bidiag_gemv_t(a: &[f64], rows: usize, cols: usize, stride: usize, x: &[f64]) 
 /// WHY THIS IS THE REMAINING FLAGSHIP GAP. LU, Cholesky and QR all have level-3 blocked paths
 /// (`LU_BLOCK_MIN`, `CHOL_MID_MIN`, `QR_BLOCK_MIN`). The SVD's reduction does not: its loop applies
 /// a rank-1 update across the whole trailing submatrix once per column, which is O(n^3) work at
-/// level-2 BLAS intensity - memory bound, and the single largest remaining term in a large SVD.
+/// level-2 BLAS intensity - memory bound, and the largest remaining term in a large SVD.
 ///
 /// THE RECURRENCE, and why it is exact. Within a panel the up-to-date trailing matrix is never
 /// formed; it is represented as
@@ -5003,13 +5026,19 @@ fn bidiag_gemv_t(a: &[f64], rows: usize, cols: usize, stride: usize, x: &[f64]) 
 ///
 /// I verified this in Python against numpy's singular values before writing it: two independent
 /// implementations - one forming `Acur` explicitly, one using only the deferred form below - agree
-/// with each other and with numpy across 7 shapes x 5 panel widths, worst relative error 1.4e-15.
+/// with each other and with numpy across 7 shapes x 5 panel widths, worst relative error 1.4e-15;
+/// then a literal flat-array mirror of this code, offset for offset, at worst 5.6e-16.
 ///
 /// NOT BIT-EXACT with the current unblocked reduction, and it CANNOT be. Deferring the updates
 /// reassociates every trailing-element sum, so the FP bits differ - exactly as blocked LU differs
 /// from unblocked LU. That is why this lands unwired: switching the SVD over needs a size gate in
 /// the shape of `LU_BLOCK_MIN` plus regenerated golden digests, which is a separate decision that
 /// must be taken with measurements in hand, not folded into the kernel that enables it.
+///
+/// Nor is `nb == 1` bit-identical to a natural unblocked loop, which is why the test asserts an
+/// invariant rather than bits: an unblocked loop materialises the post-left-update matrix before
+/// forming `x`, whereas this dots the ORIGINAL panel and subtracts `v (y . u)` afterwards. Equal in
+/// exact arithmetic, different in the last bit.
 ///
 /// The trailing update is the payoff: it routes through
 /// `packed_gemm_sub_assign_strided_blocked`, whose bit-exactness against the incumbent kernel is
@@ -5023,6 +5052,18 @@ fn bidiag_reduce_blocked(a: &[f64], m: usize, n: usize, nb: usize) -> (Vec<f64>,
         return (d, e);
     }
     let nb = nb.max(1);
+
+    // Scratch allocated ONCE for the whole factorisation. Sized by `m`/`n` rather than by the
+    // current panel so no step ever reallocates.
+    let mut col = vec![0.0; m];
+    let mut vvec = vec![0.0; m];
+    let mut xc = vec![0.0; m];
+    let mut tmp_m = vec![0.0; m];
+    let mut yvec = vec![0.0; n];
+    let mut rowv = vec![0.0; n];
+    let mut uvec = vec![0.0; n];
+    let mut tmp_n = vec![0.0; n];
+    let mut tmp_k = vec![0.0; n];
 
     let mut i0 = 0;
     while i0 < n {
@@ -5042,128 +5083,166 @@ fn bidiag_reduce_blocked(a: &[f64], m: usize, n: usize, nb: usize) -> (Vec<f64>,
         let sub = i0 * n + i0;
 
         for i in 0..nbi {
+            let mrows = bm - i;
+            let ncols = bn - i;
+
             // --- column i of the up-to-date trailing matrix
-            let mut col = vec![0.0; bm - i];
-            for (r, c) in col.iter_mut().enumerate() {
+            for (r, c) in col[..mrows].iter_mut().enumerate() {
                 *c = work[sub + (i + r) * n + i];
             }
             if i > 0 {
-                let t1 = bidiag_gemv(
+                bidiag_gemv_into(
                     &vmat[i * nbi..],
-                    bm - i,
+                    mrows,
                     i,
                     nbi,
                     &ymat[i * nbi..i * nbi + i],
+                    &mut tmp_m,
                 );
-                for (c, t) in col.iter_mut().zip(t1.iter()) {
+                for (c, t) in col[..mrows].iter_mut().zip(tmp_m[..mrows].iter()) {
                     *c -= t;
                 }
-                let t2 = bidiag_gemv(
+                bidiag_gemv_into(
                     &xmat[i * nbi..],
-                    bm - i,
+                    mrows,
                     i,
                     nbi,
                     &umat[i * nbi..i * nbi + i],
+                    &mut tmp_m,
                 );
-                for (c, t) in col.iter_mut().zip(t2.iter()) {
+                for (c, t) in col[..mrows].iter_mut().zip(tmp_m[..mrows].iter()) {
                     *c -= t;
                 }
             }
 
-            let (v, tq) = bidiag_reflector(&col);
-            for (r, &vr) in v.iter().enumerate() {
+            let tq = bidiag_reflector_into(&col[..mrows], &mut vvec);
+            for (r, &vr) in vvec[..mrows].iter().enumerate() {
                 vmat[(i + r) * nbi + i] = vr;
             }
 
             // --- Y[i.., i] = tau * (Acur[i.., i..]^T v)
-            let mut y = bidiag_gemv_t(&work[sub + i * n + i..], bm - i, bn - i, n, &v);
+            bidiag_gemv_t_into(
+                &work[sub + i * n + i..],
+                mrows,
+                ncols,
+                n,
+                &vvec[..mrows],
+                &mut yvec,
+            );
             if i > 0 {
-                let vtv = bidiag_gemv_t(&vmat[i * nbi..], bm - i, i, nbi, &v);
-                let t1 = bidiag_gemv(&ymat[i * nbi..], bn - i, i, nbi, &vtv);
-                for (yy, t) in y.iter_mut().zip(t1.iter()) {
+                bidiag_gemv_t_into(&vmat[i * nbi..], mrows, i, nbi, &vvec[..mrows], &mut tmp_k);
+                bidiag_gemv_into(&ymat[i * nbi..], ncols, i, nbi, &tmp_k[..i], &mut tmp_n);
+                for (yy, t) in yvec[..ncols].iter_mut().zip(tmp_n[..ncols].iter()) {
                     *yy -= t;
                 }
-                let xtv = bidiag_gemv_t(&xmat[i * nbi..], bm - i, i, nbi, &v);
-                let t2 = bidiag_gemv(&umat[i * nbi..], bn - i, i, nbi, &xtv);
-                for (yy, t) in y.iter_mut().zip(t2.iter()) {
+                bidiag_gemv_t_into(&xmat[i * nbi..], mrows, i, nbi, &vvec[..mrows], &mut tmp_k);
+                bidiag_gemv_into(&umat[i * nbi..], ncols, i, nbi, &tmp_k[..i], &mut tmp_n);
+                for (yy, t) in yvec[..ncols].iter_mut().zip(tmp_n[..ncols].iter()) {
                     *yy -= t;
                 }
             }
-            for yy in y.iter_mut() {
+            for yy in yvec[..ncols].iter_mut() {
                 *yy *= tq;
             }
-            for (c, &yc) in y.iter().enumerate() {
+            for (c, &yc) in yvec[..ncols].iter().enumerate() {
                 ymat[(i + c) * nbi + i] = yc;
             }
 
-            d[i0 + i] = col[0] - y[0];
+            d[i0 + i] = col[0] - yvec[0];
 
             if i0 + i < n - 1 {
+                let rcols = ncols - 1;
                 // --- row i of the trailing matrix, after the left reflector
-                let mut row = vec![0.0; bn - i - 1];
-                for (c, rr) in row.iter_mut().enumerate() {
+                for (c, rr) in rowv[..rcols].iter_mut().enumerate() {
                     *rr = work[sub + i * n + i + 1 + c];
                 }
                 if i > 0 {
-                    let t1 = bidiag_gemv(
+                    bidiag_gemv_into(
                         &ymat[(i + 1) * nbi..],
-                        bn - i - 1,
+                        rcols,
                         i,
                         nbi,
                         &vmat[i * nbi..i * nbi + i],
+                        &mut tmp_n,
                     );
-                    for (rr, t) in row.iter_mut().zip(t1.iter()) {
+                    for (rr, t) in rowv[..rcols].iter_mut().zip(tmp_n[..rcols].iter()) {
                         *rr -= t;
                     }
-                    let t2 = bidiag_gemv(
+                    bidiag_gemv_into(
                         &umat[(i + 1) * nbi..],
-                        bn - i - 1,
+                        rcols,
                         i,
                         nbi,
                         &xmat[i * nbi..i * nbi + i],
+                        &mut tmp_n,
                     );
-                    for (rr, t) in row.iter_mut().zip(t2.iter()) {
+                    for (rr, t) in rowv[..rcols].iter_mut().zip(tmp_n[..rcols].iter()) {
                         *rr -= t;
                     }
                 }
-                for (c, rr) in row.iter_mut().enumerate() {
-                    *rr -= v[0] * y[1 + c];
+                let v0 = vvec[0];
+                for (c, rr) in rowv[..rcols].iter_mut().enumerate() {
+                    *rr -= v0 * yvec[1 + c];
                 }
 
                 if i0 + i < n - 2 {
-                    let (u, tp) = bidiag_reflector(&row);
-                    for (c, &uc) in u.iter().enumerate() {
+                    let tp = bidiag_reflector_into(&rowv[..rcols], &mut uvec);
+                    for (c, &uc) in uvec[..rcols].iter().enumerate() {
                         umat[(i + 1 + c) * nbi + i] = uc;
                     }
 
                     // --- X[i.., i] = tau_p * (A1[i.., i+1..] u)
-                    let mut xc =
-                        bidiag_gemv(&work[sub + i * n + i + 1..], bm - i, bn - i - 1, n, &u);
+                    bidiag_gemv_into(
+                        &work[sub + i * n + i + 1..],
+                        mrows,
+                        rcols,
+                        n,
+                        &uvec[..rcols],
+                        &mut xc,
+                    );
                     if i > 0 {
-                        let ytu = bidiag_gemv_t(&ymat[(i + 1) * nbi..], bn - i - 1, i, nbi, &u);
-                        let t1 = bidiag_gemv(&vmat[i * nbi..], bm - i, i, nbi, &ytu);
-                        for (xx, t) in xc.iter_mut().zip(t1.iter()) {
+                        bidiag_gemv_t_into(
+                            &ymat[(i + 1) * nbi..],
+                            rcols,
+                            i,
+                            nbi,
+                            &uvec[..rcols],
+                            &mut tmp_k,
+                        );
+                        bidiag_gemv_into(&vmat[i * nbi..], mrows, i, nbi, &tmp_k[..i], &mut tmp_m);
+                        for (xx, t) in xc[..mrows].iter_mut().zip(tmp_m[..mrows].iter()) {
                             *xx -= t;
                         }
-                        let utu = bidiag_gemv_t(&umat[(i + 1) * nbi..], bn - i - 1, i, nbi, &u);
-                        let t2 = bidiag_gemv(&xmat[i * nbi..], bm - i, i, nbi, &utu);
-                        for (xx, t) in xc.iter_mut().zip(t2.iter()) {
+                        bidiag_gemv_t_into(
+                            &umat[(i + 1) * nbi..],
+                            rcols,
+                            i,
+                            nbi,
+                            &uvec[..rcols],
+                            &mut tmp_k,
+                        );
+                        bidiag_gemv_into(&xmat[i * nbi..], mrows, i, nbi, &tmp_k[..i], &mut tmp_m);
+                        for (xx, t) in xc[..mrows].iter_mut().zip(tmp_m[..mrows].iter()) {
                             *xx -= t;
                         }
                     }
-                    let yu: f64 = y[1..].iter().zip(u.iter()).map(|(p, q)| p * q).sum();
-                    for (r, xx) in xc.iter_mut().enumerate() {
-                        *xx -= v[r] * yu;
+                    let yu: f64 = yvec[1..ncols]
+                        .iter()
+                        .zip(uvec[..rcols].iter())
+                        .map(|(p, q)| p * q)
+                        .sum();
+                    for (r, xx) in xc[..mrows].iter_mut().enumerate() {
+                        *xx -= vvec[r] * yu;
                     }
-                    for xx in xc.iter_mut() {
+                    for xx in xc[..mrows].iter_mut() {
                         *xx *= tp;
                     }
-                    for (r, &xr) in xc.iter().enumerate() {
+                    for (r, &xr) in xc[..mrows].iter().enumerate() {
                         xmat[(i + r) * nbi + i] = xr;
                     }
-                    e[i0 + i] = row[0] - xc[0] * u[0];
+                    e[i0 + i] = rowv[0] - xc[0] * uvec[0];
                 } else {
-                    e[i0 + i] = row[0];
+                    e[i0 + i] = rowv[0];
                 }
             }
         }
