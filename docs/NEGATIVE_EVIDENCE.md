@@ -56130,3 +56130,61 @@ would credit the lever at its worst cell only, which is the correct thing to QUO
 thing to MEASURE. Use the dual-null contract that produced 3.172x, so the result is comparable to
 the banked figure rather than to a counter probe.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — `ss_list_haystack` READ for the first time (RedLynx flagged it as never read): its cold path pays a NON-INTERNED `asarray` method lookup per call — and crate-wide there are 3,448 non-interned `call_method` sites against SIX interned (deadlock-audit-v46rn)
+
+**Result class:** a first read of an explicitly-unexplored cell, which surfaced a defect class 7x
+larger than the 487-site one this session already swept. Source reading only, build freeze in force.
+/data 34G, load 5.04.
+
+RedLynx's retry predicate: *"`ss_list_haystack` at 2.19x has never been read - it takes the cold path,
+and this row shows its cost is elsewhere entirely."* Read now.
+
+### What the cold path does
+
+```rust
+  let mut a_arr = if is_exact_numpy_ndarray(py, a_bound)? {
+      a_bound.clone()
+  } else {
+      numpy.call_method1("asarray", (a_bound,))?      // <- LIST HAYSTACK LANDS HERE
+  };
+```
+
+A list haystack misses the ndarray fast path and converts through `asarray`. The conversion itself is
+unavoidable — NumPy does it internally too — but **`call_method1("asarray", ...)` with a `&str`
+builds a fresh `PyString` for the method name on every call**, the same non-interned-key defect this
+campaign already priced. The needle side adds up to two more (`reshape`), and the `sorter` path a
+`take`: **six non-interned method lookups in this one dispatcher.**
+
+### The defect class is much larger than the one I just finished sweeping
+
+```
+  crate-wide  call_method[01]("literal", ..)   NON-interned      3,448 sites
+  crate-wide  call_method1(intern!(py, ..), ..)                      6 sites
+```
+
+For comparison, the `getattr("ndarray")` class I swept this session was 487 sites. This is **7x
+larger** and essentially unconverted — six sites out of 3,454.
+
+### Sizing it HONESTLY, which means not the way I sized the last one
+
+The per-site figure that applies here is the **~795 insns/call** banked for interning a hot
+`getattr(&str)` — NOT the 1,360.9 measured on the ndarray sweep. Those are different operations: the
+ndarray lever replaced the lookup with a cached singleton and eliminated it; interning a method name
+only avoids building the key, and the attribute lookup still happens. Using 1,360.9 here would be the
+same category error as applying the 13.2 insns/ns rate across levers, which failed its test today.
+
+And 3,448 x 795 is exactly the product-of-banked-numbers construct that has been wrong repeatedly in
+this session. **Most of those 3,448 sites are cold.** The number that matters is how many are on a
+hot path, and that is unmeasured.
+
+COUNTED_MECHANISM: none - static census. 3,448 non-interned vs 6 interned `call_method` sites
+crate-wide; 6 non-interned in the searchsorted dispatcher; ~795 insns/call banked for interning a hot
+attribute key.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: pick ONE hot site and price it before touching the class - the obvious candidate is
+`asarray` on this cold path, since `ss_list_haystack` at 2.19x is a named cell with no attributed
+mechanism. Convert that single site, measure it under the dual-null contract, and only then decide
+whether a sweep is justified. Do NOT open with a 3,448-site pass: the ndarray sweep taught that the
+reachable subset, not the site count, is the prize, and that lesson cost several rows to learn.
+AGENT_NAME=SlateFinch.
