@@ -38608,6 +38608,189 @@ fn hstack(
 }
 
 
+
+// Zero-copy N-D histogram counting for an (N, D) f64 sample with precomputed edges
+// (`deadlock-audit-6y5wp`).
+//
+// The D-dimensional generalisation of `try_zerocopy_f64_histogram2d`, and it exists for
+// the same reason: `histogramdd_native` covers only auto-range, unweighted calls, so
+// `range=` and `weights=` - the two options anyone pinning a histogram across frames
+// reaches for - dropped the whole call to NumPy.
+//
+// SAME ALGORITHM, SAME SEMANTICS, ONE MORE LOOP. NumPy computes per-axis indices with
+// `searchsorted(..., side='right')`, decrements samples sitting on the last edge, ravels
+// the D index vectors into one key, and `bincount`s it - D+2 passes and D+1 n-sized
+// temporaries. Here each sample walks its D coordinates once, accumulating a row-major
+// flat index as it goes, and drops out the moment any coordinate falls outside its range.
+// `side='right'` is "number of edges <= v", so `partition_point(|e| e <= v)`; the last
+// edge decrements, which closes the final bin on both sides; the real bin is `k - 1`,
+// valid only for `1 <= k <= nbins`. NaN yields 0 from `partition_point` because
+// `e <= NaN` is false for every edge, so it is dropped exactly as NumPy's outlier trim
+// drops it.
+//
+// EARLY EXIT IS SAFE HERE, unlike in the hazard guards elsewhere in this file, because a
+// sample outside ANY axis contributes to no bin at all - there is no accumulator that
+// would miss an update.
+fn try_zerocopy_f64_histogramdd(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    sample: &Bound<'_, PyAny>,
+    edges: &[Py<PyAny>],
+    weights: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    const MAX_BINS_TOTAL: usize = 1 << 16;
+    const MAX_DIMS: usize = 8;
+    let ndim = edges.len();
+    if ndim == 0 || ndim > MAX_DIMS {
+        return Ok(None);
+    }
+    if !sample.is_exact_instance(cached_ndarray_type(py)?)
+        || !numpy_dtype_is_f64(py, sample)
+        || sample.getattr("ndim")?.extract::<usize>()? != 2
+        || !sample
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = sample.getattr("shape")?.extract()?;
+    if shape.len() != 2 || shape[1] != ndim {
+        return Ok(None);
+    }
+    let nrows = shape[0];
+
+    let Ok(sample_buffer) = PyBuffer::<f64>::get(sample) else {
+        return Ok(None);
+    };
+    let Some(sample_cells) = sample_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if sample_cells.len() != nrows * ndim {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the sample is a read-only
+    // C-contiguous f64 ndarray held under the GIL.
+    let sv: &[f64] = unsafe {
+        std::slice::from_raw_parts(sample_cells.as_ptr().cast::<f64>(), sample_cells.len())
+    };
+
+    // Edge buffers must outlive the slices taken from them, so they are collected first.
+    let mut edge_buffers = Vec::with_capacity(ndim);
+    for e in edges {
+        let bound = e.bind(py);
+        if !bound.is_exact_instance(cached_ndarray_type(py)?)
+            || !numpy_dtype_is_f64(py, bound)
+            || bound.getattr("ndim")?.extract::<usize>()? != 1
+        {
+            return Ok(None);
+        }
+        let Ok(buffer) = PyBuffer::<f64>::get(bound) else {
+            return Ok(None);
+        };
+        edge_buffers.push(buffer);
+    }
+    let mut edge_slices: Vec<&[f64]> = Vec::with_capacity(ndim);
+    for buffer in &edge_buffers {
+        let Some(cells) = buffer.as_slice(py) else {
+            return Ok(None);
+        };
+        if cells.len() < 2 {
+            return Ok(None);
+        }
+        // SAFETY: as above.
+        edge_slices
+            .push(unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) });
+    }
+
+    let nbins: Vec<usize> = edge_slices.iter().map(|e| e.len() - 1).collect();
+    let total = nbins.iter().try_fold(1usize, |acc, n| acc.checked_mul(*n));
+    let Some(total) = total.filter(|t| *t <= MAX_BINS_TOTAL) else {
+        return Ok(None);
+    };
+    // Row-major strides over the bin grid, so the flat index is built as each coordinate
+    // is resolved rather than in a separate ravel pass.
+    let mut strides = vec![1usize; ndim];
+    for d in (0..ndim.saturating_sub(1)).rev() {
+        strides[d] = strides[d + 1] * nbins[d + 1];
+    }
+
+    let weight_buffer = match weights {
+        None => None,
+        Some(w) => {
+            if !w.is_exact_instance(cached_ndarray_type(py)?)
+                || !numpy_dtype_is_f64(py, w)
+                || w.getattr("ndim")?.extract::<usize>()? != 1
+                || !w
+                    .getattr("flags")?
+                    .getattr("c_contiguous")?
+                    .extract::<bool>()?
+            {
+                return Ok(None);
+            }
+            let Ok(buffer) = PyBuffer::<f64>::get(w) else {
+                return Ok(None);
+            };
+            Some(buffer)
+        }
+    };
+    let weight_values: Option<&[f64]> = match weight_buffer.as_ref() {
+        None => None,
+        Some(buffer) => {
+            let Some(cells) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            if cells.len() != nrows {
+                return Ok(None);
+            }
+            // SAFETY: as above.
+            Some(unsafe {
+                std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len())
+            })
+        }
+    };
+
+    let mut counts = vec![0.0_f64; total];
+    for row in 0..nrows {
+        let mut flat = 0usize;
+        let mut inside = true;
+        for d in 0..ndim {
+            let value = sv[row * ndim + d];
+            let e = edge_slices[d];
+            let mut k = e.partition_point(|&edge| edge <= value);
+            if value == e[e.len() - 1] {
+                k -= 1;
+            }
+            if k < 1 || k > nbins[d] {
+                inside = false;
+                break;
+            }
+            flat += (k - 1) * strides[d];
+        }
+        if inside {
+            counts[flat] += weight_values.map_or(1.0, |w| w[row]);
+        }
+    }
+
+    let out_shape = PyTuple::new(py, nbins.iter().copied())?;
+    let out = numpy.call_method1("empty", (&out_shape, cached_float64_dtype(py)?))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if out_cells.len() != counts.len() {
+            return Ok(None);
+        }
+        for (slot, value) in out_cells.iter().zip(counts.iter()) {
+            slot.set(*value);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 // Zero-copy 2-D histogram counting for f64 samples with precomputed edges
 // (`deadlock-audit-6y5wp`).
 //
@@ -108301,6 +108484,110 @@ fn histogramdd(
     if let Some(result) = histogramdd_native(py, args, kwargs)? {
         return Ok(result);
     }
+
+    // THE `range=` AND `weights=` CASES (`deadlock-audit-6y5wp`). `histogramdd_native`
+    // above covers auto-range, unweighted calls only, so pinning the extent or weighting
+    // the samples - the two things anyone comparing histograms across frames does - sent
+    // the whole call to NumPy. Same treatment as `histogram2d`, of which this is the
+    // general case: NumPy derives the edges, we do the O(n) counting.
+    //
+    // `density=` RESCALES rather than reweights, so it is not a faster path to the same
+    // answer and declines. Everything the counting kernel cannot see is filtered here;
+    // everything it can - dtype, contiguity, shapes, bin-grid size - it decides itself.
+    if (1..=4).contains(&args.len())
+        && kwargs.is_none_or(|kw| {
+            kw.keys().into_iter().all(|key| {
+                key.extract::<String>()
+                    .map(|k| k == "bins" || k == "range" || k == "weights")
+                    .unwrap_or(false)
+            })
+        })
+        && let Ok(sample) = args.get_item(0)
+    {
+        let numpy = cached_numpy(py)?;
+        let bins = kwargs
+            .and_then(|kw| kw.get_item("bins").ok().flatten())
+            .or_else(|| args.get_item(1).ok());
+        let range_arg = kwargs
+            .and_then(|kw| kw.get_item("range").ok().flatten())
+            .or_else(|| args.get_item(2).ok())
+            .filter(|r| !r.is_none());
+        let density = kwargs
+            .and_then(|kw| kw.get_item("density").ok().flatten())
+            .or_else(|| args.get_item(3).ok());
+        let weights_arg = kwargs
+            .and_then(|kw| kw.get_item("weights").ok().flatten())
+            .filter(|w| !w.is_none());
+        if density.is_some_and(|d| !d.is_none()) {
+            return core_numpy_passthrough(py, "histogramdd", args, kwargs);
+        }
+        // Only the `(N, D)` array form; a sequence of D arrays is NumPy's other accepted
+        // spelling and keeps the general path.
+        if sample.is_exact_instance(cached_ndarray_type(py)?)
+            && let Ok(shape) = sample.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
+            && shape.len() == 2
+        {
+            let ndim = shape[1];
+            // `bins` as one int for every axis, or one int per axis. Edge arrays and the
+            // string estimators stay with NumPy.
+            let per_axis: Option<Vec<usize>> = match bins.as_ref() {
+                None => Some(vec![10; ndim]),
+                Some(b) => {
+                    if let Ok(n) = b.extract::<usize>() {
+                        Some(vec![n; ndim])
+                    } else {
+                        b.extract::<Vec<usize>>().ok().filter(|v| v.len() == ndim)
+                    }
+                }
+            };
+            if let Some(counts_per_axis) = per_axis {
+                let mut edges: Vec<Py<PyAny>> = Vec::with_capacity(ndim);
+                let mut ok = true;
+                for (axis, n) in counts_per_axis.iter().copied().enumerate() {
+                    // The axis column as a view; `histogram_bin_edges` accepts strided
+                    // input, so no copy is taken to compute edges.
+                    let Ok(column) = sample.get_item((pyo3::types::PySlice::full(py), axis)) else {
+                        ok = false;
+                        break;
+                    };
+                    let ekw = PyDict::new(py);
+                    if ekw.set_item("bins", n).is_err() {
+                        ok = false;
+                        break;
+                    }
+                    if let Some(r) = range_arg.as_ref()
+                        && let Ok(item) = r.get_item(axis)
+                        && !item.is_none()
+                        && ekw.set_item("range", item).is_err()
+                    {
+                        ok = false;
+                        break;
+                    }
+                    match numpy.call_method("histogram_bin_edges", (&column,), Some(&ekw)) {
+                        Ok(e) => edges.push(e.unbind()),
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok
+                    && let Some(hist) = try_zerocopy_f64_histogramdd(
+                        py,
+                        numpy,
+                        &sample,
+                        &edges,
+                        weights_arg.as_ref(),
+                    )?
+                {
+                    let edge_list = pyo3::types::PyList::new(py, edges.iter())?;
+                    return Ok(PyTuple::new(py, [hist, edge_list.unbind().into_any()])?
+                        .unbind()
+                        .into_any());
+                }
+            }
+        }
+    }
     core_numpy_passthrough(py, "histogramdd", args, kwargs)
 }
 
@@ -123630,6 +123917,119 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// `histogramdd` with `range=` and `weights=` must match NumPy at D > 2
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// `histogram2d` is this at D = 2, and its tests cover the boundary rules. What only
+    /// shows up at D >= 3 is the part those cannot reach:
+    ///
+    ///   1. THE ROW-MAJOR FLAT INDEX. The kernel accumulates `bin[d] * stride[d]` as it
+    ///      walks each sample instead of ravelling in a separate pass, so a stride built
+    ///      in the wrong order puts counts in transposed cells. A CUBIC grid would hide
+    ///      that completely, so the bins here are 2 x 3 x 4 - all different.
+    ///   2. PER-AXIS RANGES. `range` is a sequence of D pairs and each axis must get its
+    ///      own; reusing one pair for every axis still produces a plausible histogram.
+    ///      The three ranges below are deliberately different widths.
+    ///
+    /// The out-of-range rows carry heavy weights for the same reason as in the 2-D test:
+    /// banking them into an end bin instead of dropping them must not be able to hide.
+    #[test]
+    fn histogramdd_range_and_weights_match_numpy_at_three_dimensions() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_histdd")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("histogramdd")?;
+            let theirs = numpy.getattr("histogramdd")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(19)\n\
+                  s = rng.standard_normal((4000, 3))\n\
+                  w = rng.standard_normal(4000)\n\
+                  edge = np.array([[0.0, 0.0, 0.0],\n\
+                                   [2.0, 3.0, 4.0],\n\
+                                   [1.0, 1.5, 2.0],\n\
+                                   [-9.0, 1.0, 1.0],\n\
+                                   [1.0, 9.0, 1.0]])\n\
+                  ew = np.array([1.0, 2.0, 3.0, 100.0, 100.0])\n\
+                  rng3 = [[-2.0, 2.0], [-1.5, 1.5], [-3.0, 3.0]]\n\
+                  rngE = [[0.0, 2.0], [0.0, 3.0], [0.0, 4.0]]\n\
+                  bins3 = [2, 3, 4]\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| locals.get_item(k).expect("histdd fixture");
+
+            let compare = |mine: &Bound<'_, PyAny>,
+                           theirs_out: &Bound<'_, PyAny>,
+                           what: &str|
+             -> PyResult<()> {
+                let h_mine = mine.get_item(0)?;
+                let h_theirs = theirs_out.get_item(0)?;
+                assert_eq!(
+                    h_mine.getattr("shape")?.extract::<Vec<usize>>()?,
+                    h_theirs.getattr("shape")?.extract::<Vec<usize>>()?,
+                    "{what}: H shape diverged"
+                );
+                assert_eq!(
+                    h_mine.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    h_theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{what}: H diverged - transposed cells here mean the row-major \
+                     strides are built in the wrong order"
+                );
+                let e_mine = mine.get_item(1)?;
+                let e_theirs = theirs_out.get_item(1)?;
+                for axis in 0..3usize {
+                    assert_eq!(
+                        e_mine.get_item(axis)?.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        e_theirs.get_item(axis)?.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "{what}: edges for axis {axis} diverged"
+                    );
+                }
+                Ok(())
+            };
+
+            // Non-cubic bins and per-axis ranges, weighted.
+            let kw = PyDict::new(py);
+            kw.set_item("bins", g("bins3"))?;
+            kw.set_item("range", g("rng3"))?;
+            kw.set_item("weights", g("w"))?;
+            compare(
+                &ours.call((g("s"),), Some(&kw))?,
+                &theirs.call((g("s"),), Some(&kw))?,
+                "3-D weighted with per-axis ranges",
+            )?;
+
+            // Boundary + out-of-range rows, where the edges land exactly on sample values.
+            let ekw = PyDict::new(py);
+            ekw.set_item("bins", g("bins3"))?;
+            ekw.set_item("range", g("rngE"))?;
+            ekw.set_item("weights", g("ew"))?;
+            compare(
+                &ours.call((g("edge"),), Some(&ekw))?,
+                &theirs.call((g("edge"),), Some(&ekw))?,
+                "3-D boundary and out-of-range rows with heavy weights",
+            )?;
+
+            // density= must still reach numpy.
+            let dkw = PyDict::new(py);
+            dkw.set_item("bins", g("bins3"))?;
+            dkw.set_item("range", g("rng3"))?;
+            dkw.set_item("density", true)?;
+            compare(
+                &ours.call((g("s"),), Some(&dkw))?,
+                &theirs.call((g("s"),), Some(&dkw))?,
+                "density declines to numpy",
+            )?;
             Ok(())
         });
     }
