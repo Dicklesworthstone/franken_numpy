@@ -8973,6 +8973,78 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
     }
 }
 
+/// `target -= a * b` for one row band against ONE packed column block of `b`.
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
+///
+/// THE REDUNDANCY THIS EXISTS TO REMOVE. `packed_gemm_sub_assign` parallelises by row band and
+/// hands each band the whole serial kernel, which packs `b` panel by panel as it goes - so every
+/// thread rebuilds the identical panels. That is the same waste already removed from the plain
+/// GEMM, but on the path that matters more: this is the trailing-update kernel for blocked LU,
+/// blocked Cholesky and the blocked TRSM.
+///
+/// The scale is not marginal. Blocked LU drives it with `k = LU_PANEL_NB` (64), so `b` is about
+/// 491 KiB at `trail = 960`; with a 64-thread pool that is roughly 31 MiB of duplicate copying per
+/// block step, and a 1024x1024 factorisation takes sixteen of them.
+///
+/// ONE KERNEL COVERS BOTH VARIANTS. `row_stride` is `target`'s row pitch, which is `n` for
+/// `packed_gemm_sub_assign` and an independent stride for `packed_gemm_sub_assign_strided`; `b` is
+/// always indexed by `n`. Keeping them one function avoids the near-duplicate pair the plain GEMM
+/// accumulated before it was cleaned up.
+///
+/// NO TAILS, deliberately: under a block loop remainder columns and rows must be applied once at
+/// the end, not once per block.
+///
+/// BIT-IDENTICAL to the scalar kernel - lane `jj` accumulates `kk` ascending into one register
+/// tile with no cross-lane interaction, multiply and add kept SEPARATE, and the store subtracts in
+/// the same direction (`target - acc`, matching `*slot -= v`). No `mul_add`, which would round once
+/// instead of twice and drift the golden digests this path is pinned by.
+fn packed_gemm_sub_assign_band_block<const MR: usize>(
+    a: &[f64],
+    bp: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    row_stride: usize,
+    panel0: usize,
+    panels: usize,
+    target: &mut [f64],
+) {
+    use std::simd::Simd;
+    type Lane = Simd<f64, PACKED_NR>;
+
+    let m_full = m - m % MR;
+    if panels == 0 || m_full == 0 {
+        return;
+    }
+    let _ = n;
+    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    for p in 0..panels {
+        // `p` indexes within the packed block; `j0` is the absolute column in `target`.
+        let j0 = (panel0 + p) * PACKED_NR;
+        let bpanel = &bp[p * k * PACKED_NR..(p + 1) * k * PACKED_NR];
+        let mut i0 = 0;
+        while i0 < m_full {
+            let block = i0 / MR;
+            let apanel = &ap[block * k * MR..(block + 1) * k * MR];
+            let mut acc = [Lane::splat(0.0); MR];
+            for kk in 0..k {
+                let bvec = Lane::from_slice(&bpanel[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]);
+                let arow = &apanel[kk * MR..kk * MR + MR];
+                for (ii, slot) in acc.iter_mut().enumerate() {
+                    *slot += Lane::splat(arow[ii]) * bvec;
+                }
+            }
+            for (ii, slot) in acc.iter().enumerate() {
+                let base = (i0 + ii) * row_stride + j0;
+                let current = Lane::from_slice(&target[base..base + PACKED_NR]);
+                (current - *slot).copy_to_slice(&mut target[base..base + PACKED_NR]);
+            }
+            i0 += MR;
+        }
+    }
+}
+
 fn packed_row_tail_sub_assign(
     a: &[f64],
     b: &[f64],
@@ -22565,6 +22637,78 @@ except Exception as exc:
             super::packed_block_panels(4096) <= super::packed_block_panels(64),
             "block width must not grow with k"
         );
+    }
+
+
+    /// Driving the sub_assign block kernel over every column block, then tails once, must equal
+    /// the serial sub_assign kernel to the BIT - at several block widths.
+    ///
+    /// This pins the property a block-wise sub_assign driver will rest on, before that driver
+    /// exists. The failures it catches are the ones a single full-width block cannot: a wrong
+    /// `panel0` offset, a block boundary that double-counts or skips a panel, and tails applied
+    /// per block rather than once. Sweeping the width also proves the answer is INDEPENDENT of
+    /// blocking granularity, which is what lets a driver pick a width for cache reasons.
+    ///
+    /// A non-zero seed in `target` matters here in a way it does not for the plain GEMM: this
+    /// kernel SUBTRACTS into an existing buffer, so a seed of zeros would hide a sign or
+    /// accumulation error that only shows up against live data.
+    #[test]
+    fn sub_assign_band_block_over_all_blocks_is_bit_exact() {
+        for &(m, k, n) in &[(4usize, 3usize, 8usize), (8, 5, 16), (9, 7, 19), (12, 33, 24)] {
+            // Use the SAME tile height the reference dispatcher picks. It selects the narrow
+            // tile for small `k`, and all four test shapes are small, so hardcoding PACKED_MR
+            // would compare MR=4 against a reference built at MR=2. The file asserts those are
+            // bit-identical, so it would still pass - but a FAILURE would then be ambiguous
+            // between "the blocking is wrong" and "that invariant broke", which is exactly the
+            // information this test exists to give.
+            if super::packed_sub_assign_tile_rows(k) == super::PACKED_MR_NARROW {
+                sub_assign_block_bit_exact_at::<{ super::PACKED_MR_NARROW }>(m, k, n);
+            } else {
+                sub_assign_block_bit_exact_at::<{ super::PACKED_MR }>(m, k, n);
+            }
+        }
+    }
+
+    fn sub_assign_block_bit_exact_at<const MR: usize>(m: usize, k: usize, n: usize) {
+        const NR: usize = super::PACKED_NR;
+        {
+            let a: Vec<f64> = (0..m * k).map(|i| ((i * 29 % 83) as f64) / 2.0 - 20.25).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| ((i * 47 % 71) as f64) / 8.0 - 4.375).collect();
+            let seed: Vec<f64> = (0..m * n).map(|i| ((i * 17 % 61) as f64) - 30.5).collect();
+
+            let mut want = seed.clone();
+            super::packed_gemm_sub_assign_serial(&a, &b, m, k, n, &mut want);
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+
+            let n_full = n - n % NR;
+            let total_panels = n_full / NR;
+            let m_full = m - m % MR;
+            for block_panels in 1..=3usize {
+                let mut got = seed.clone();
+                let mut p0 = 0;
+                while p0 < total_panels {
+                    let count = block_panels.min(total_panels - p0);
+                    let bp = super::pack_b_panel_block(&b, k, n, p0, count);
+                    // row_stride == n here: the non-strided variant.
+                    super::packed_gemm_sub_assign_band_block::<MR>(
+                        &a, &bp, m, k, n, n, p0, count, &mut got,
+                    );
+                    p0 += count;
+                }
+                for i in 0..m_full {
+                    super::packed_row_tail_sub_assign(&a, &b, &mut got, i, k, n, n_full);
+                }
+                for i in m_full..m {
+                    super::packed_row_tail_sub_assign(&a, &b, &mut got, i, k, n, 0);
+                }
+                let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(
+                    want_bits, got_bits,
+                    "block-driven sub_assign diverged in BITS at m={m} k={k} n={n} \
+                     block_panels={block_panels}"
+                );
+            }
+        }
     }
 
 }

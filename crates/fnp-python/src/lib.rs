@@ -109099,22 +109099,7 @@ fn try_zerocopy_busday_count(
     let (begin_len, end_len) = (begin_cells.len(), end_cells.len());
     let begin_shape: Vec<usize> = begin.getattr("shape")?.extract()?;
     let end_shape: Vec<usize> = end.getattr("shape")?.extract()?;
-    // Only the two broadcasts that need no shape arithmetic: identical shapes, or one
-    // side a single date spread over the other. A SINGLE ELEMENT IS NOT ENOUGH TO CLAIM
-    // THE OTHER SIDE'S SHAPE - it must also have no more axes, because broadcasting aligns
-    // from the right and *adds* the leftover leading axes. `(1, 1)` against `(3,)` is the
-    // case that bites: numpy returns `(1, 3)`, not `(3,)`, so taking the other operand's
-    // shape would hand back correct numbers wearing the wrong `.shape`. With `ndim <=`
-    // enforced the broadcast result IS the other operand's shape, every axis of a
-    // one-element array being 1. Checked against the incumbent over a grid of shape pairs.
-    // Anything else is NumPy's.
-    let shape = if begin_shape == end_shape {
-        begin_shape
-    } else if begin_len == 1 && begin_shape.len() <= end_shape.len() {
-        end_shape
-    } else if end_len == 1 && end_shape.len() <= begin_shape.len() {
-        begin_shape
-    } else {
+    let Some(shape) = busday_broadcast_shape(begin_shape, begin_len, end_shape, end_len) else {
         return Ok(None);
     };
     // 0-d ON BOTH SIDES RETURNS A SCALAR, NOT A 0-d ARRAY. `np.busday_count` of two 0-d
@@ -109182,6 +109167,37 @@ fn busday_offset(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kw| {
+        kw.keys().into_iter().all(|key| {
+            key.extract::<String>()
+                .map(|k| k == "roll" || k == "weekmask" || k == "holidays")
+                .unwrap_or(false)
+        })
+    }) && (2..=5).contains(&args.len())
+        && !busday_keyword_is_doubly_supplied(args, kwargs, "roll", 2)
+        && !busday_keyword_is_doubly_supplied(args, kwargs, "weekmask", 3)
+        && !busday_keyword_is_doubly_supplied(args, kwargs, "holidays", 4)
+        && let (Ok(dates), Ok(offsets)) = (args.get_item(0), args.get_item(1))
+        && let Some(result) = try_zerocopy_busday_offset(
+            py,
+            &dates,
+            &offsets,
+            kwargs
+                .and_then(|kw| kw.get_item("roll").ok().flatten())
+                .or_else(|| args.get_item(2).ok())
+                .as_ref(),
+            kwargs
+                .and_then(|kw| kw.get_item("weekmask").ok().flatten())
+                .or_else(|| args.get_item(3).ok())
+                .as_ref(),
+            kwargs
+                .and_then(|kw| kw.get_item("holidays").ok().flatten())
+                .or_else(|| args.get_item(4).ok())
+                .as_ref(),
+        )?
+    {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "busday_offset", args, kwargs)
 }
 
@@ -109335,6 +109351,396 @@ fn datetime64_day_buffer(
     }
     let viewed = value.call_method1("view", ("int64",))?;
     Ok(PyBuffer::<i64>::get(&viewed).ok())
+}
+
+/// The output shape for two business-day operands, or `None` when the broadcast needs more
+/// arithmetic than this route does: identical shapes, or one side a single value spread
+/// over the other.
+///
+/// A SINGLE ELEMENT IS NOT ENOUGH TO CLAIM THE OTHER SIDE'S SHAPE - it must also have no
+/// more axes, because broadcasting aligns from the right and *adds* the leftover leading
+/// axes. `(1, 1)` against `(3,)` is the case that bites: numpy returns `(1, 3)`, not
+/// `(3,)`, so taking the other operand's shape would hand back correct numbers wearing the
+/// wrong `.shape`. With `ndim <=` enforced the result IS the other operand's shape, every
+/// axis of a one-element array being 1. Checked against the incumbent over a grid of shape
+/// pairs, where the unguarded rule was wrong in 17 of 100.
+fn busday_broadcast_shape(
+    left_shape: Vec<usize>,
+    left_len: usize,
+    right_shape: Vec<usize>,
+    right_len: usize,
+) -> Option<Vec<usize>> {
+    if left_shape == right_shape {
+        Some(left_shape)
+    } else if left_len == 1 && left_shape.len() <= right_shape.len() {
+        Some(right_shape)
+    } else if right_len == 1 && right_shape.len() <= left_shape.len() {
+        Some(left_shape)
+    } else {
+        None
+    }
+}
+
+/// How `np.busday_offset` treats a date that is not itself a business day.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BusdayRoll {
+    Raise,
+    Nat,
+    Forward,
+    Backward,
+    ModifiedFollowing,
+    ModifiedPreceding,
+}
+
+/// The `roll=` spelling, or `None` for anything this route will not handle.
+///
+/// NumPy spells each plain direction two ways - 'forward'/'following' and
+/// 'backward'/'preceding' - and both are live in the wild, so both are accepted. An
+/// unknown spelling raises `Invalid business day roll parameter` there and `roll=None` is
+/// a `TypeError`; both decline so NumPy is the one to say so.
+fn parse_busday_roll(roll: Option<&Bound<'_, PyAny>>) -> PyResult<Option<BusdayRoll>> {
+    let Some(value) = roll else {
+        return Ok(Some(BusdayRoll::Raise));
+    };
+    let Ok(text) = value.extract::<String>() else {
+        return Ok(None);
+    };
+    Ok(match text.as_str() {
+        "raise" => Some(BusdayRoll::Raise),
+        "nat" => Some(BusdayRoll::Nat),
+        "forward" | "following" => Some(BusdayRoll::Forward),
+        "backward" | "preceding" => Some(BusdayRoll::Backward),
+        "modifiedfollowing" => Some(BusdayRoll::ModifiedFollowing),
+        "modifiedpreceding" => Some(BusdayRoll::ModifiedPreceding),
+        _ => None,
+    })
+}
+
+/// Is this day number a business day under `mask`, with `holidays` removed?
+#[inline]
+fn is_business_day(day: i64, mask: &[bool; 7], holidays: &[i64]) -> bool {
+    mask[busday_weekday_index(day)] && holidays.binary_search(&day).is_err()
+}
+
+/// The most days a roll or an offset walk will step before this route gives up and hands
+/// the call back to NumPy. A weekmask alone never needs more than six steps to reach a
+/// business day; only a holiday list dense enough to blank out months on end can exceed
+/// this, and that is not a shape worth carrying a slow path for.
+const BUSDAY_WALK_BUDGET: i64 = 8192;
+
+/// The widest offset the native route will take, so that `day + 7 * offset` stays far
+/// inside `i64` given a date already bounded by `BUSDAY_MAX_ABS_DAY`.
+const BUSDAY_MAX_ABS_OFFSET: i64 = 1 << 20;
+
+/// The nearest business day strictly in `step`'s direction, or `None` if the walk runs
+/// past its budget.
+fn walk_to_business_day(day: i64, step: i64, mask: &[bool; 7], holidays: &[i64]) -> Option<i64> {
+    let mut cursor = day;
+    for _ in 0..BUSDAY_WALK_BUDGET {
+        cursor += step;
+        if is_business_day(cursor, mask, holidays) {
+            return Some(cursor);
+        }
+    }
+    None
+}
+
+/// What a `roll=` rule makes of one date.
+enum BusdayRolled {
+    /// A business day, ready to be offset from.
+    Day(i64),
+    /// The result is NaT: `roll='nat'` on a non-business day, or a NaT input under any
+    /// rule other than `'raise'`.
+    Nat,
+    /// NumPy would raise, or a walk ran past its budget. Either way the whole call goes
+    /// back to NumPy rather than this route guessing at it.
+    Decline,
+}
+
+/// Apply `roll` to one date, exactly as `np.busday_offset` does before it offsets.
+///
+/// NaT IS NOT UNIFORM ACROSS THE RULES, which is the trap. `roll='raise'` RAISES on a NaT
+/// input - "NaT input in busday_offset" - while every other rule returns NaT. Read off the
+/// incumbent; the obvious reading, that NaT simply propagates, answers a call NumPy
+/// refuses.
+///
+/// The two `modified` rules roll in their named direction unless doing so lands in a
+/// different MONTH, in which case they turn round and go the other way. Also read off the
+/// incumbent: Sunday 2024-03-31 under `modifiedfollowing` gives Fri 2024-03-29, not Mon
+/// 2024-04-01.
+fn roll_to_business_day(
+    day: i64,
+    roll: BusdayRoll,
+    mask: &[bool; 7],
+    holidays: &[i64],
+) -> BusdayRolled {
+    if day == i64::MIN {
+        return match roll {
+            BusdayRoll::Raise => BusdayRolled::Decline,
+            _ => BusdayRolled::Nat,
+        };
+    }
+    if is_business_day(day, mask, holidays) {
+        return BusdayRolled::Day(day);
+    }
+    let step_to = |direction: i64| match walk_to_business_day(day, direction, mask, holidays) {
+        Some(rolled) => BusdayRolled::Day(rolled),
+        None => BusdayRolled::Decline,
+    };
+    // The `modified` rules: roll `direction`, and if that leaves the month, go the other
+    // way instead.
+    let turn_at_month_end = |direction: i64| -> BusdayRolled {
+        let Some(rolled) = walk_to_business_day(day, direction, mask, holidays) else {
+            return BusdayRolled::Decline;
+        };
+        if civil_from_days(rolled).1 == civil_from_days(day).1 {
+            return BusdayRolled::Day(rolled);
+        }
+        step_to(-direction)
+    };
+    match roll {
+        BusdayRoll::Raise => BusdayRolled::Decline,
+        BusdayRoll::Nat => BusdayRolled::Nat,
+        BusdayRoll::Forward => step_to(1),
+        BusdayRoll::Backward => step_to(-1),
+        BusdayRoll::ModifiedFollowing => turn_at_month_end(1),
+        BusdayRoll::ModifiedPreceding => turn_at_month_end(-1),
+    }
+}
+
+/// Does any holiday in `[lo, hi]` fall on a day the weekmask would have counted?
+///
+/// A holiday on a masked-off day was never a business day, so it cannot change a
+/// business-day count and must not veto the whole-weeks jump below.
+fn any_business_holiday_in(lo: i64, hi: i64, mask: &[bool; 7], holidays: &[i64]) -> bool {
+    if hi < lo {
+        return false;
+    }
+    let start = holidays.partition_point(|&h| h < lo);
+    let end = holidays.partition_point(|&h| h <= hi);
+    holidays[start..end]
+        .iter()
+        .any(|&h| mask[busday_weekday_index(h)])
+}
+
+/// Move `offset` business days from `day`, which must already BE a business day.
+///
+/// Whole weeks go in one jump: seven days on is the same weekday, so a week free of
+/// holidays contributes exactly `popcount(weekmask)` business days. The jump is taken only
+/// when no holiday that WOULD have counted falls in the span it crosses, since such a
+/// holiday is one the jump would silently have counted as a business day. Whatever is left
+/// over walks a day at a time - at most `per_week - 1` business days plus the non-business
+/// days between them.
+fn offset_business_days(
+    day: i64,
+    offset: i64,
+    mask: &[bool; 7],
+    per_week: i64,
+    holidays: &[i64],
+) -> Option<i64> {
+    if offset == 0 {
+        return Some(day);
+    }
+    let step = if offset > 0 { 1 } else { -1 };
+    let mut remaining = offset.checked_abs()?;
+    let mut cursor = day;
+    let mut budget = BUSDAY_WALK_BUDGET;
+    while remaining > 0 {
+        let weeks = remaining / per_week;
+        if weeks > 0 {
+            let landing = cursor + step * 7 * weeks;
+            // The span the jump crosses, excluding the day it starts from and including
+            // the one it lands on.
+            let (lo, hi) = if step > 0 {
+                (cursor + 1, landing)
+            } else {
+                (landing, cursor - 1)
+            };
+            if !any_business_holiday_in(lo, hi, mask, holidays) {
+                cursor = landing;
+                remaining -= weeks * per_week;
+                continue;
+            }
+        }
+        cursor += step;
+        if is_business_day(cursor, mask, holidays) {
+            remaining -= 1;
+        }
+        budget -= 1;
+        if budget <= 0 {
+            return None;
+        }
+    }
+    Some(cursor)
+}
+
+/// A contiguous `int64` array's values, or `None` if it is not that exact dtype.
+///
+/// int64 only. NumPy takes int32 offsets too and converts them, but reading an int32
+/// buffer as `i64` would pair up adjacent halves rather than fail visibly, so the
+/// conversion is left to NumPy.
+fn int64_value_buffer(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<PyBuffer<i64>>> {
+    if !value.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let dtype = value.getattr("dtype")?;
+    if dtype.getattr("str")?.extract::<String>()? != "<i8"
+        || !value
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    Ok(PyBuffer::<i64>::get(value).ok())
+}
+
+/// `np.busday_offset` for contiguous `datetime64[D]` dates (`deadlock-audit-6y5wp`).
+///
+/// THE ORDER IS ROLL THEN OFFSET, not offset then roll, and the two are not interchangeable
+/// on a non-business day. `busday_offset(Sat 2024-01-06, -1, roll='forward')` is Friday
+/// 2024-01-05: the Saturday first rolls FORWARD to Mon 2024-01-08, and the -1 then steps
+/// back off the Monday. Applying the offset first would give Thursday. Read off the
+/// incumbent.
+fn try_zerocopy_busday_offset(
+    py: Python<'_>,
+    dates: &Bound<'_, PyAny>,
+    offsets: &Bound<'_, PyAny>,
+    roll: Option<&Bound<'_, PyAny>>,
+    weekmask: Option<&Bound<'_, PyAny>>,
+    holidays: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = cached_numpy(py)?;
+    let Some(roll) = parse_busday_roll(roll)? else {
+        return Ok(None);
+    };
+    let Some(mask) = parse_busday_weekmask(weekmask)? else {
+        return Ok(None);
+    };
+    let per_week = mask.iter().filter(|day| **day).count() as i64;
+    let Some(holiday_days) = collect_busday_holidays(py, holidays)? else {
+        return Ok(None);
+    };
+
+    let Some(date_buffer) = datetime64_day_buffer(py, dates)? else {
+        return Ok(None);
+    };
+    let Some(date_cells) = date_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+
+    // `offsets` is either a plain Python integer spread over every date, or a contiguous
+    // int64 array. `is_exact_instance` keeps `bool` out: it is an `int` SUBCLASS in
+    // Python, and while numpy does read `True` as an offset of 1, a bool ARRAY is not
+    // int64, so admitting the scalar would leave the two paths disagreeing with each other.
+    let offset_scalar = if offsets.is_exact_instance(&py.get_type::<PyInt>()) {
+        match offsets.extract::<i64>() {
+            Ok(value) => Some(value),
+            Err(_) => return Ok(None),
+        }
+    } else {
+        None
+    };
+    let offset_buffer = if offset_scalar.is_some() {
+        None
+    } else {
+        match int64_value_buffer(py, offsets)? {
+            Some(buffer) => Some(buffer),
+            None => return Ok(None),
+        }
+    };
+    let offset_cells = match offset_buffer.as_ref() {
+        Some(buffer) => match buffer.as_slice(py) {
+            Some(cells) => Some(cells),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+
+    let date_shape: Vec<usize> = dates.getattr("shape")?.extract()?;
+    let date_len = date_cells.len();
+    // A scalar offset takes whatever shape the dates have, so the broadcast is a no-op.
+    let (offset_shape, offset_len) = match offset_cells {
+        Some(cells) => (
+            offsets.getattr("shape")?.extract::<Vec<usize>>()?,
+            cells.len(),
+        ),
+        None => (date_shape.clone(), date_len),
+    };
+    let Some(shape) = busday_broadcast_shape(date_shape, date_len, offset_shape, offset_len) else {
+        return Ok(None);
+    };
+    // 0-d ON BOTH SIDES RETURNS A SCALAR, NOT A 0-d ARRAY - `np.busday_offset` of a 0-d
+    // date and a Python int is a `numpy.datetime64`, not an `ndarray`. Filling one here
+    // would return the right day wearing the wrong type. Read off the incumbent.
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let count: usize = shape.iter().product();
+
+    // NaT IS A VALUE HERE, NOT AN ERROR - unlike `busday_count` - so it passes through and
+    // the roll decides what it means. Everything else must sit inside a band where the
+    // week jumps below cannot overflow.
+    if !date_cells.iter().all(|cell| {
+        let day = cell.get();
+        day == i64::MIN || (-BUSDAY_MAX_ABS_DAY..=BUSDAY_MAX_ABS_DAY).contains(&day)
+    }) {
+        return Ok(None);
+    }
+    if let Some(cells) = offset_cells
+        && !cells
+            .iter()
+            .all(|cell| (-BUSDAY_MAX_ABS_OFFSET..=BUSDAY_MAX_ABS_OFFSET).contains(&cell.get()))
+    {
+        return Ok(None);
+    }
+    if let Some(value) = offset_scalar
+        && !(-BUSDAY_MAX_ABS_OFFSET..=BUSDAY_MAX_ABS_OFFSET).contains(&value)
+    {
+        return Ok(None);
+    }
+
+    let out = numpy.call_method1(
+        "empty",
+        (&PyTuple::new(py, shape.iter().copied())?, "datetime64[D]"),
+    )?;
+    // Flatten and view as int64 before taking the buffer, as `is_busday` does: an N-d
+    // C-contiguous array is writable through a 1-d view, so the fill loop indexes the flat
+    // operands directly and the output keeps the shape numpy would have given it.
+    let flat_out = out.call_method1("reshape", (-1i64,))?;
+    let viewed_out = flat_out.call_method1("view", ("int64",))?;
+    let Ok(out_buffer) = PyBuffer::<i64>::get(&viewed_out) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != count {
+        return Ok(None);
+    }
+
+    for (index, slot) in out_cells.iter().enumerate() {
+        let day = date_cells[if date_len == 1 { 0 } else { index }].get();
+        let offset = match (offset_scalar, offset_cells) {
+            (Some(value), _) => value,
+            (None, Some(cells)) => cells[if offset_len == 1 { 0 } else { index }].get(),
+            (None, None) => return Ok(None),
+        };
+        let value = match roll_to_business_day(day, roll, &mask, &holiday_days) {
+            BusdayRolled::Day(rolled) => {
+                match offset_business_days(rolled, offset, &mask, per_week, &holiday_days) {
+                    Some(result) => result,
+                    // Declining mid-fill is safe: `out` is this function's own fresh array
+                    // and no caller has seen it.
+                    None => return Ok(None),
+                }
+            }
+            BusdayRolled::Nat => i64::MIN,
+            BusdayRolled::Decline => return Ok(None),
+        };
+        slot.set(value);
+    }
+    Ok(Some(out.unbind()))
 }
 
 /// `np.is_busday` for contiguous `datetime64[D]` input (`deadlock-audit-6y5wp`).
@@ -112383,17 +112789,18 @@ mod tests {
         f64_divide_quotient_bits_are_normal, f64_divide_quotient_non_normal_evidence,
         f64_divide_raises_fp_error, f64_out_route_is_worth_taking, fill_diagonal, flatnonzero,
         flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name,
-        interp, is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native,
-        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
+        interp, is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native,
+        isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, numpy_dtype_is_f64, place, put, put_along_axis, putmask,
-        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        narrow_bitmap_setop, nextafter, numpy_dtype_is_f64, offset_business_days, place, put,
+        put_along_axis, putmask, python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
         sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
         trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
-        try_native_lstsq_tsqr, try_zerocopy_busday_count, try_zerocopy_f64_binary_into,
-        unravel_index, where_py, wide_int_table_bounds, zerocopy_f64_binary_flat,
+        try_native_lstsq_tsqr, try_zerocopy_busday_count, try_zerocopy_busday_offset,
+        try_zerocopy_f64_binary_into, unravel_index, where_py, wide_int_table_bounds,
+        zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -124629,7 +125036,10 @@ mod tests {
             )?;
             let g = |k: &str| locals.get_item(k).expect("busday fixture");
 
-            let same = |mine: &Bound<'_, PyAny>, theirs_out: &Bound<'_, PyAny>, what: &str| -> PyResult<()> {
+            let same = |mine: &Bound<'_, PyAny>,
+                        theirs_out: &Bound<'_, PyAny>,
+                        what: &str|
+             -> PyResult<()> {
                 assert_eq!(
                     mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
                     theirs_out
@@ -124648,11 +125058,7 @@ mod tests {
 
             // Default weekmask, across the epoch and before it.
             for name in ["fortnight", "pre_epoch", "with_nat", "epoch_edge"] {
-                same(
-                    &ours.call1((g(name),))?,
-                    &theirs.call1((g(name),))?,
-                    name,
-                )?;
+                same(&ours.call1((g(name),))?, &theirs.call1((g(name),))?, name)?;
             }
 
             // Both weekmask spellings, including one that makes every day valid - which is
@@ -124996,6 +125402,374 @@ mod tests {
             );
             Ok(())
         });
+    }
+
+    /// `np.busday_offset` must match NumPy across all eight `roll=` spellings, including
+    /// the two traps that a reasonable implementation gets wrong (`deadlock-audit-6y5wp`).
+    ///
+    /// TRAP ONE: THE ORDER IS ROLL THEN OFFSET. Measured against the incumbent before a
+    /// line was written:
+    ///
+    ///   busday_offset(Sat 2024-01-06, -1, roll='forward')  == Fri 2024-01-05
+    ///
+    /// The Saturday rolls FORWARD to Mon 2024-01-08 first, and the -1 then steps back off
+    /// the Monday. Offsetting first and rolling after would give Thursday 2024-01-04. The
+    /// fixture below pins both directions of that case.
+    ///
+    /// TRAP TWO: NaT IS NOT UNIFORM ACROSS THE ROLL RULES. `roll='raise'` RAISES on a NaT
+    /// input - "NaT input in busday_offset" - while every other rule returns NaT. Copying
+    /// `busday_count`, where NaT always raises, or assuming NaT simply propagates, is
+    /// wrong in opposite directions for different rules.
+    ///
+    /// The two `modified` rules roll in their named direction unless that lands in a
+    /// different MONTH, in which case they turn round: Sunday 2024-03-31 under
+    /// `modifiedfollowing` is Fri 2024-03-29, not Mon 2024-04-01. The fixtures include
+    /// month-end dates in both directions, since a fixture that never straddles a month
+    /// boundary cannot tell `modifiedfollowing` from `forward`.
+    ///
+    /// ENGAGEMENT IS ASSERTED SEPARATELY from parity, because a passthrough satisfies every
+    /// equality here.
+    #[test]
+    fn busday_offset_matches_numpy_across_every_roll_rule() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_busday_offset")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("busday_offset")?;
+            let theirs = numpy.getattr("busday_offset")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"d = lambda *s: np.array(list(s), dtype='datetime64[D]')\n\
+                  # Business days, weekend days, month ends in both directions, and a\n\
+                  # pre-epoch date so the negative weekday index is exercised.\n\
+                  dates = d('2024-01-01', '2024-01-06', '2024-03-31', '2024-06-01', '1969-12-20')\n\
+                  # Every business day, so `roll='raise'` has something it can accept.\n\
+                  bdays = d('2024-01-01', '2024-01-02', '2024-03-29', '2024-05-31', '1969-12-19')\n\
+                  offs  = np.array([0, 1, -1, 5, -7], dtype='int64')\n\
+                  hols  = d('2024-01-02', '2024-01-03', '2024-01-06')\n\
+                  grid  = d('2024-01-01','2024-01-06','2024-03-31','2024-06-01').reshape(2, 2)\n\
+                  goffs = np.array([1, -1, 2, -2], dtype='int64').reshape(2, 2)\n\
+                  scalar_d = np.array('2024-01-06', dtype='datetime64[D]')\n\
+                  many_o = np.array([-2, -1, 0, 1, 2], dtype='int64')\n\
+                  nat_d = d('2024-01-01', 'NaT')\n\
+                  i32o  = np.array([1, 1], dtype='int32')\n\
+                  # One element rather than 0-d, so the order literal below runs through\n\
+                  # the NATIVE route - a 0-d date with a scalar offset declines.\n\
+                  one_sat = d('2024-01-06')\n\
+                  # Dates and offsets chosen so the weekday holidays below actually MOVE\n\
+                  # the answer; the obvious fixture leaves it unchanged and proves nothing.\n\
+                  hdates = d('2024-01-01', '2024-01-04', '2024-01-05')\n\
+                  hoffs = np.array([1, -1, -2], dtype='int64')\n\
+                  weekend_only = d('2024-01-06', '2024-01-07')\n\
+                  strided = np.arange('2024-01-01', '2024-03-01', dtype='datetime64[D]')[::2]\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("busday_offset fixture missing")
+            };
+
+            let same = |mine: &Bound<'_, PyAny>,
+                        theirs_out: &Bound<'_, PyAny>,
+                        what: &str|
+             -> PyResult<()> {
+                assert_eq!(
+                    mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    theirs_out
+                        .getattr("dtype")?
+                        .getattr("str")?
+                        .extract::<String>()?,
+                    "{what}: dtype diverged from numpy"
+                );
+                assert_eq!(
+                    mine.getattr("shape")?.extract::<Vec<usize>>()?,
+                    theirs_out.getattr("shape")?.extract::<Vec<usize>>()?,
+                    "{what}: shape diverged from numpy"
+                );
+                assert_eq!(
+                    mine.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs_out.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{what}: busday_offset diverged from numpy"
+                );
+                Ok(())
+            };
+
+            // THE ORDER, spelled out as a literal so a regression reads as the rule it
+            // broke. Rolling forward off a Saturday and then stepping back one business day
+            // is Friday, NOT Thursday.
+            let sat = PyDict::new(py);
+            sat.set_item("roll", "forward")?;
+            assert_eq!(
+                ours.call((g("one_sat"), -1i64), Some(&sat))?
+                    .call_method0("item")?
+                    .call_method0("isoformat")?
+                    .extract::<String>()?,
+                "2024-01-05",
+                "roll happens BEFORE the offset: Sat rolls forward to Mon, then -1 lands \
+                 on Fri - offsetting first would give Thu"
+            );
+
+            for roll in [
+                "nat",
+                "forward",
+                "following",
+                "backward",
+                "preceding",
+                "modifiedfollowing",
+                "modifiedpreceding",
+            ] {
+                let kw = PyDict::new(py);
+                kw.set_item("roll", roll)?;
+                same(
+                    &ours.call((g("dates"), g("offs")), Some(&kw))?,
+                    &theirs.call((g("dates"), g("offs")), Some(&kw))?,
+                    roll,
+                )?;
+                // Again with holidays, which move the rolled landing point and can push a
+                // whole-weeks jump onto the day-by-day path.
+                let hkw = PyDict::new(py);
+                hkw.set_item("roll", roll)?;
+                hkw.set_item("holidays", g("hols"))?;
+                same(
+                    &ours.call((g("dates"), g("offs")), Some(&hkw))?,
+                    &theirs.call((g("dates"), g("offs")), Some(&hkw))?,
+                    roll,
+                )?;
+                // And under a weekmask that is not Mon-Fri, so `per_week` is not 5.
+                let wkw = PyDict::new(py);
+                wkw.set_item("roll", roll)?;
+                wkw.set_item("weekmask", "1010101")?;
+                same(
+                    &ours.call((g("dates"), g("offs")), Some(&wkw))?,
+                    &theirs.call((g("dates"), g("offs")), Some(&wkw))?,
+                    roll,
+                )?;
+            }
+
+            // `roll='raise'` on dates that are ALL business days must take the native route
+            // and agree; on a non-business day it must reach numpy and raise.
+            let rkw = PyDict::new(py);
+            rkw.set_item("roll", "raise")?;
+            same(
+                &ours.call((g("bdays"), g("offs")), Some(&rkw))?,
+                &theirs.call((g("bdays"), g("offs")), Some(&rkw))?,
+                "raise on business days",
+            )?;
+            assert!(
+                ours.call((g("dates"), g("offs")), Some(&rkw)).is_err(),
+                "roll='raise' on a non-business day must reach numpy and raise"
+            );
+
+            // HOLIDAYS MUST ACTUALLY BIND. Compared against numpy alone, a fixture whose
+            // holidays change nothing passes an implementation that ignores them outright,
+            // and the obvious date/offset pairs here do exactly that. These three move.
+            let hkw = PyDict::new(py);
+            hkw.set_item("roll", "forward")?;
+            hkw.set_item("holidays", g("hols"))?;
+            same(
+                &ours.call((g("hdates"), g("hoffs")), Some(&hkw))?,
+                &theirs.call((g("hdates"), g("hoffs")), Some(&hkw))?,
+                "holidays that bind",
+            )?;
+            let bare = PyDict::new(py);
+            bare.set_item("roll", "forward")?;
+            let without = ours.call((g("hdates"), g("hoffs")), Some(&bare))?;
+            assert_ne!(
+                ours.call((g("hdates"), g("hoffs")), Some(&hkw))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                without.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "these holidays fall on business days and must move the answer; a fixture \
+                 they leave unchanged would pass a route that ignored holidays entirely"
+            );
+            // ...and the mirror: a holiday on a day the weekmask already excludes was never
+            // a business day, so it must leave the result BIT-IDENTICAL.
+            let wkend = PyDict::new(py);
+            wkend.set_item("roll", "forward")?;
+            wkend.set_item("holidays", g("weekend_only"))?;
+            assert_eq!(
+                ours.call((g("hdates"), g("hoffs")), Some(&wkend))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                without.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "a holiday on a non-business day must not be subtracted"
+            );
+
+            // Shapes: two dimensions, a scalar Python int offset, and a 0-d date against a
+            // real offsets array.
+            for (dates, offs, what) in [
+                ("grid", "goffs", "two dimensions"),
+                (
+                    "scalar_d",
+                    "many_o",
+                    "0-d date broadcast over an offsets array",
+                ),
+            ] {
+                let kw = PyDict::new(py);
+                kw.set_item("roll", "forward")?;
+                same(
+                    &ours.call((g(dates), g(offs)), Some(&kw))?,
+                    &theirs.call((g(dates), g(offs)), Some(&kw))?,
+                    what,
+                )?;
+            }
+            let fkw = PyDict::new(py);
+            fkw.set_item("roll", "forward")?;
+            same(
+                &ours.call((g("dates"), 3i64), Some(&fkw))?,
+                &theirs.call((g("dates"), 3i64), Some(&fkw))?,
+                "python int offset",
+            )?;
+
+            // NaT: returns NaT under every rule EXCEPT `raise`, which raises.
+            for roll in ["nat", "forward", "backward", "modifiedfollowing"] {
+                let kw = PyDict::new(py);
+                kw.set_item("roll", roll)?;
+                same(
+                    &ours.call((g("nat_d"), 2i64), Some(&kw))?,
+                    &theirs.call((g("nat_d"), 2i64), Some(&kw))?,
+                    roll,
+                )?;
+            }
+            assert!(
+                ours.call((g("nat_d"), 2i64), Some(&rkw)).is_err(),
+                "a NaT date under roll='raise' must raise, as numpy does - every OTHER \
+                 rule returns NaT, so propagating it unconditionally would be wrong here"
+            );
+
+            // An unknown roll spelling, `roll=None` and an all-zero weekmask all raise in
+            // the incumbent, so all three must decline into it.
+            for value in ["bogus", "FORWARD", "modified_following"] {
+                let kw = PyDict::new(py);
+                kw.set_item("roll", value)?;
+                assert!(
+                    ours.call((g("bdays"), g("offs")), Some(&kw)).is_err(),
+                    "an unknown roll spelling ({value}) must reach numpy and raise"
+                );
+            }
+            let nkw = PyDict::new(py);
+            nkw.set_item("roll", py.None())?;
+            assert!(
+                ours.call((g("bdays"), g("offs")), Some(&nkw)).is_err(),
+                "roll=None must raise, as numpy does"
+            );
+
+            // ENGAGEMENT, and the declines. Parity above is satisfied by a passthrough.
+            let forward = "forward".into_pyobject(py)?;
+            let engaged = |dates: &str, offs: &Bound<'_, PyAny>| -> PyResult<bool> {
+                Ok(try_zerocopy_busday_offset(
+                    py,
+                    &g(dates),
+                    offs,
+                    Some(forward.as_any()),
+                    None,
+                    None,
+                )?
+                .is_some())
+            };
+            for dates in ["dates", "grid", "nat_d"] {
+                let offs = if dates == "grid" {
+                    g("goffs")
+                } else {
+                    1i64.into_pyobject(py)?.into_any()
+                };
+                assert!(
+                    engaged(dates, &offs)?,
+                    "the native busday_offset route declined {dates}; every equality above \
+                     is satisfied by the passthrough, so parity alone proves nothing"
+                );
+            }
+            for (dates, offs, why) in [
+                (
+                    "strided",
+                    "i32o",
+                    "non-contiguous dates have no zero-copy buffer",
+                ),
+                (
+                    "dates",
+                    "i32o",
+                    "int32 offsets are numpy's to convert, not ours to reinterpret",
+                ),
+            ] {
+                assert!(
+                    !engaged(dates, &g(offs))?,
+                    "the native route should have declined: {why}"
+                );
+            }
+            let scalar_offset = 1i64.into_pyobject(py)?;
+            assert!(
+                !engaged("scalar_d", scalar_offset.as_any())?,
+                "a 0-d date with a scalar offset returns a numpy scalar, not a 0-d array"
+            );
+            Ok(())
+        });
+    }
+
+    /// `offset_business_days` must equal a day-by-day walk (`deadlock-audit-6y5wp`).
+    ///
+    /// The shipped mover jumps whole weeks at a time - `remaining / per_week` weeks in one
+    /// step - and only falls back to walking when a holiday lands in the span it would
+    /// cross. That shortcut is worth having only if it is exactly the walk it replaces, and
+    /// the two can disagree in ways a hand-picked fixture misses: the jump must be vetoed
+    /// by a holiday that WOULD have counted and not by one on a masked-off day, and the
+    /// leftover walk must start from the jumped-to day. This walks both directions across
+    /// several weekmasks and holiday sets and compares.
+    #[test]
+    fn offset_business_days_week_jump_equals_a_day_by_day_walk() {
+        let masks: &[[bool; 7]] = &[
+            [true, true, true, true, true, false, false],
+            [true, true, true, true, true, true, true],
+            [true, false, false, false, false, false, false],
+            [false, false, false, false, false, true, true],
+            [true, false, true, false, true, false, true],
+        ];
+        // Straddles the epoch, and mixes holidays that fall on business days with ones on
+        // days the weekmask already excludes - only the former may veto a jump.
+        let holiday_sets: &[&[i64]] = &[
+            &[],
+            &[-370, -3, 0, 1, 2, 5, 9, 400],
+            &[-2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        ];
+        for mask in masks {
+            let per_week = mask.iter().filter(|day| **day).count() as i64;
+            for holidays in holiday_sets {
+                for start in [-400_i64, -7, -1, 0, 1, 13] {
+                    // The starting point must itself be a business day, which is the
+                    // contract `offset_business_days` is given.
+                    let Some(begin) =
+                        (start..start + 400).find(|day| is_business_day(*day, mask, holidays))
+                    else {
+                        continue;
+                    };
+                    for offset in -25_i64..=25 {
+                        let mut walked = begin;
+                        let step = if offset >= 0 { 1 } else { -1 };
+                        for _ in 0..offset.abs() {
+                            loop {
+                                walked += step;
+                                if is_business_day(walked, mask, holidays) {
+                                    break;
+                                }
+                            }
+                        }
+                        assert_eq!(
+                            offset_business_days(begin, offset, mask, per_week, holidays),
+                            Some(walked),
+                            "the whole-weeks jump disagrees with the walk at begin={begin} \
+                             offset={offset} per_week={per_week}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The whole-weeks shortcut in `busdays_in_span` must equal a day-by-day walk
