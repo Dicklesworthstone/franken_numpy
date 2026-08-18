@@ -54963,3 +54963,64 @@ RETRY PREDICATE: price the BINDING shape before sweeping it - add a cumsum count
 counted A/B, register the sign only. Until then the 220 binding sites stay unconverted regardless of
 how mechanical the change looks.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — the two deletion conditions on `5l9iv` examined build-free: condition 1 UNMET, condition 2 has strong evidence but is UNDECIDABLE AS WRITTEN — and deleting on it would repeat today's own retracted inference (deadlock-audit-5l9iv)
+
+**Result class:** two owed cleanups examined without a build, neither taken, one of them
+deliberately not taken for a reason I had to learn twice today.
+
+`/data` sat at 52-53G against a 42G brake all turn, so remote-only work; both conditions are
+inspection questions, which makes this the right turn for them.
+
+### Condition 1 — `null_straddles_unity`: UNMET, and it needs a bench run
+
+Delete once a full sweep of the io/iter/random suites shows zero nulls excluding unity. Evidence
+stands at **19/19 admissible** (10 in the visibility run, 9 in the harmonisation run) and has not
+moved, because moving it requires running those suites — a build. Unchanged, still owed.
+
+### Condition 2 — `verdict_legacy_weak`: the referent is now CONCRETE, the condition is not
+
+"Delete once no pre-2026-08-17 row is still cited" had no definite referent, so I established one.
+**Exactly seven** ledger rows dated before the 2026-08-17 harmonisation have io/iter/random in their
+header:
+
+```
+  2026-06-19  fnp-random full-range uint8 integers byte stream   (BOLD-VERIFY Keep)
+  2026-06-19  fnp-random PCG bytes direct final-buffer fill
+  2026-06-19  fnp-random PCG gumbel/laplace distribution cluster
+  2026-06-19  fnp-random PCG raw fill and bytes cluster
+  2026-06-20  fnp-random small PCG bytes direct append fill      (BOLD-VERIFY Keep)
+  2026-06-21  fnp-random PCG vs NumPy is 10/0/0 current wins     (BOLD-VERIFY Recheck)
+  2026-07-16  python-surface `loadtxt` is 0.574x vs numpy        (LOSS BASELINE)
+```
+
+Citations of those seven across the **8,994 lines of ledger written since harmonisation**:
+
+```
+  PCG 0    gumbel 0    laplace 0    "uint8 integers" 0    BOLD-VERIFY 0
+  loadtxt 1  -> and that one is NOT a citation: it names the bench
+                `loadtxt_usecols_scatter_resurrection` in a post-08-17 straddling-CI discussion,
+                which is condition 1's subject, not the June/July row.
+```
+
+**So: zero citations in nine thousand lines. And I am still not deleting it.**
+
+Absence of a citation in one window is not proof that no reader holds such a row — it is the same
+inference I RETRACTED EARLIER TODAY, when absence of a perf symbol from a sampled profile turned out
+not to mean the code had not run (the symbols were present in the ELF; they were merely too cheap to
+sample). Same shape, same trap: treating "I did not observe it" as "it does not exist". The shim's
+whole purpose is to serve a reader I cannot enumerate.
+
+**PROPOSED REPLACEMENT, which IS decidable** — for whoever owns this next, not applied unilaterally:
+delete `verdict_legacy_weak`, `legacy_weak_verdict()` and the pinning assertions in
+`verify_median_ci_gate_semantics` **on or after 2026-09-17** (one month post-harmonisation),
+unconditionally, unless one of the seven rows above has by then been re-measured under the canonical
+gate — in which case delete immediately, since a superseded row needs no compatibility shim. A
+sunset date is decidable by a clock; "nobody is citing it" is not decidable by anyone.
+
+COUNTED_MECHANISM: none - this row is a bookkeeping determination, not a measurement.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: condition 1 needs a full io/iter/random bench sweep, which needs a build and a
+quiet host and >=8G of headroom on /data. Condition 2 needs a clock, under the replacement rule
+above, or someone's explicit decision to adopt it.
+AGENT_NAME=SlateFinch.
