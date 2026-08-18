@@ -8685,6 +8685,106 @@ fn packed_gemm_band_block<const MR: usize>(
     }
 }
 
+/// Column-block width, in `PACKED_NR`-wide panels, for `packed_gemm_blocked`.
+///
+/// Sized so the packed block `k * panels * PACKED_NR * 8` stays near 256 KiB - the same L2 target
+/// the existing kernels already use for their `nc` loop, so this introduces no new constant, only
+/// the same one expressed in panels. At least one panel always, or the block loop cannot advance.
+fn packed_block_panels(k: usize) -> usize {
+    let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
+    (cols / PACKED_NR).max(1)
+}
+
+/// `a * b`, blocked over column blocks of `b` with each block packed ONCE and shared by every row
+/// band.
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
+/// `packed_gemm` is unchanged.
+///
+/// THIS IS THE STRUCTURE `packed_gemm_shared_b` SHOULD HAVE HAD. That driver packs the whole of
+/// `b` so bands can share it, which removes the redundant per-thread packing but replaces a
+/// ~4 KiB L1-hot buffer with an array up to the size of `b` streamed from memory - redundant work
+/// traded for worse locality. Here the shared unit is ONE L2-sized column block: the sharing is
+/// kept and the locality is not given up. `packed_gemm_shared_b` should be rebuilt on this or
+/// deleted; it must not be wired as it stands.
+///
+/// LOOP ORDER, and it is forced rather than chosen. The block loop is outermost so each block is
+/// packed once for all bands; the band loop is inside it so bands can run in parallel over that
+/// block. `a` is therefore re-packed per block, which a Goto-style GEMM also does: a band's packed
+/// `a` is reused across every panel in the block, so the cost is amortised by the block width, and
+/// the alternative - hoisting `a` - would force `b` to be packed per band, restoring the exact
+/// redundancy this removes.
+///
+/// SAFETY OF THE PARALLEL WRITES: bands own disjoint ROW ranges of `c`, and blocks are visited
+/// sequentially, so no two writers ever touch the same element and no accumulation crosses a
+/// thread boundary. Each output element still accumulates over the full `k` inside one register
+/// tile, in one block, so the summation order is the scalar kernel's.
+///
+/// TAILS RUN ONCE, after every block, because remainder columns span all blocks and remainder rows
+/// span all of `c`. Running them per block would apply them repeatedly.
+fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+    let mut c = vec![0.0; m * n];
+    let n_full = n - n % PACKED_NR;
+    let total_panels = n_full / PACKED_NR;
+    let narrow = packed_tile_rows() == PACKED_MR_NARROW;
+    let mr = if narrow { PACKED_MR_NARROW } else { PACKED_MR };
+
+    let parallel = m >= MATMUL_PARALLEL_MIN_DIM
+        && k >= MATMUL_PARALLEL_MIN_DIM
+        && n >= MATMUL_PARALLEL_MIN_DIM
+        && rayon::current_num_threads() >= 2;
+    // MR-aligned bands, as in `packed_gemm`: a band that is not a whole number of register tiles
+    // leaves a remainder row on the scalar tail path.
+    let band_rows = if parallel {
+        let threads = rayon::current_num_threads();
+        (m.div_ceil(threads * 4).div_ceil(mr).max(1)) * mr
+    } else {
+        m.max(1)
+    };
+
+    let block_panels = packed_block_panels(k);
+    let mut p0 = 0;
+    while p0 < total_panels {
+        let count = block_panels.min(total_panels - p0);
+        // Packed once here, outside the band loop - that is the whole point of the ordering.
+        let bp = pack_b_panel_block(b, k, n, p0, count);
+        if parallel {
+            c.par_chunks_mut(band_rows * n)
+                .enumerate()
+                .for_each(|(bi, c_band)| {
+                    let row_start = bi * band_rows;
+                    let rows = c_band.len() / n;
+                    let a_band = &a[row_start * k..row_start * k + rows * k];
+                    if narrow {
+                        packed_gemm_band_block::<PACKED_MR_NARROW>(
+                            a_band, &bp, rows, k, n, p0, count, c_band,
+                        );
+                    } else {
+                        packed_gemm_band_block::<PACKED_MR>(
+                            a_band, &bp, rows, k, n, p0, count, c_band,
+                        );
+                    }
+                });
+        } else if narrow {
+            packed_gemm_band_block::<PACKED_MR_NARROW>(a, &bp, m, k, n, p0, count, &mut c);
+        } else {
+            packed_gemm_band_block::<PACKED_MR>(a, &bp, m, k, n, p0, count, &mut c);
+        }
+        p0 += count;
+    }
+
+    // Tails once. Band heights are MR-aligned, so the global remainder rows fall entirely in the
+    // last band and the global `m_full` boundary is the same one each band would compute.
+    let m_full = m - m % mr;
+    for i in 0..m_full {
+        packed_row_tail(a, b, &mut c, i, k, n, n_full);
+    }
+    for i in m_full..m {
+        packed_row_tail(a, b, &mut c, i, k, n, 0);
+    }
+    c
+}
+
 /// `out += a * b`, register micro-kernel written in EXPLICIT portable SIMD.
 ///
 /// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
@@ -22687,6 +22787,57 @@ except Exception as exc:
                 );
             }
         }
+    }
+
+
+    /// The block-wise driver must equal `packed_gemm` to the BIT.
+    ///
+    /// Valid on EITHER path: with a multi-threaded rayon pool and dimensions past
+    /// `MATMUL_PARALLEL_MIN_DIM` it takes the parallel band loop, otherwise the serial branch, and
+    /// both must reproduce `packed_gemm` exactly. So it cannot pass by taking the easy branch - it
+    /// exercises whichever this pool provides, which is stated rather than implied.
+    ///
+    /// The shapes matter: 130x129x132 gives a ragged final column panel AND a band height that
+    /// does not divide the row count, so remainder rows and remainder columns both run - and those
+    /// are exactly what a per-block tail application would corrupt.
+    #[test]
+    fn gemm_blocked_is_bit_exact_vs_packed_gemm() {
+        for &(m, k, n) in &[
+            (8usize, 5usize, 16usize),
+            (12, 33, 24),
+            (128, 128, 128),
+            (130, 129, 132),
+        ] {
+            let a: Vec<f64> = (0..m * k).map(|i| ((i * 31 % 89) as f64) / 4.0 - 11.125).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| ((i * 43 % 79) as f64) / 16.0 - 2.4375).collect();
+            let want = super::packed_gemm(&a, &b, m, k, n);
+            let got = super::packed_gemm_blocked(&a, &b, m, k, n);
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                want_bits, got_bits,
+                "blocked driver diverged in BITS at m={m} k={k} n={n}"
+            );
+        }
+    }
+
+    /// `packed_block_panels` must stay positive and hold the L2 target as `k` grows.
+    ///
+    /// A zero width would make the block loop spin forever; a width that does not shrink with `k`
+    /// would let the shared packed block outgrow L2, which is the whole reason this driver blocks
+    /// by column rather than packing all of `b`.
+    #[test]
+    fn packed_block_panels_holds_the_l2_target() {
+        for &k in &[1usize, 8, 64, 512, 4096] {
+            let panels = super::packed_block_panels(k);
+            assert!(panels >= 1, "block width {panels} not positive at k={k}");
+            let bytes = k * panels * super::PACKED_NR * 8;
+            assert!(bytes <= 512 * 1024, "block {bytes} B exceeds the L2 target at k={k}");
+        }
+        assert!(
+            super::packed_block_panels(4096) <= super::packed_block_panels(64),
+            "block width must not grow with k"
+        );
     }
 
 }
