@@ -104798,7 +104798,11 @@ fn datetime_like_i64_buffer(
     {
         return Ok(None);
     }
-    let viewed = value.call_method1("view", ("int64",))?;
+    // Flattened first, for the same reason as `datetime64_day_buffer`: a 0-d operand's
+    // buffer has ndim 0 and yields no slice.
+    let viewed = value
+        .call_method1("view", ("int64",))?
+        .call_method1("reshape", (-1i64,))?;
     Ok(PyBuffer::<i64>::get(&viewed).ok())
 }
 
@@ -109441,7 +109445,14 @@ fn datetime64_day_buffer(
     {
         return Ok(None);
     }
-    let viewed = value.call_method1("view", ("int64",))?;
+    // FLATTENED BEFORE THE BUFFER IS TAKEN. A 0-d operand's buffer has ndim 0 and yields no
+    // slice, so a 0-d date silently declined even where numpy broadcasts it happily - the
+    // engagement assertion on `busday_count(0-d, array)` is what caught it, and parity
+    // alone never would have. Contiguity is established above, so this reshape is a view
+    // and the route stays zero-copy.
+    let viewed = value
+        .call_method1("view", ("int64",))?
+        .call_method1("reshape", (-1i64,))?;
     Ok(PyBuffer::<i64>::get(&viewed).ok())
 }
 
@@ -109684,7 +109695,10 @@ fn int64_value_buffer(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Opti
     {
         return Ok(None);
     }
-    Ok(PyBuffer::<i64>::get(value).ok())
+    // Flattened first, for the same reason as `datetime64_day_buffer`: a 0-d offsets array
+    // has no usable buffer otherwise.
+    let flat = value.call_method1("reshape", (-1i64,))?;
+    Ok(PyBuffer::<i64>::get(&flat).ok())
 }
 
 /// `np.busday_offset` for contiguous `datetime64[D]` dates (`deadlock-audit-6y5wp`).
@@ -109858,6 +109872,14 @@ fn try_zerocopy_is_busday(
         return Ok(None);
     };
     let shape: Vec<usize> = dates.getattr("shape")?.extract()?;
+    // A 0-d OPERAND RETURNS A `numpy.bool_` SCALAR, NOT A 0-d ARRAY - `np.is_busday` of a
+    // 0-d date is `np.True_`. This route was correct here only by ACCIDENT: a 0-d buffer
+    // used to yield no slice, so it declined before ever reaching this point. Now that the
+    // buffer above is flattened and 0-d input does arrive, the guard has to be explicit, or
+    // this would hand back the right answer wearing the wrong type.
+    if shape.is_empty() {
+        return Ok(None);
+    }
     let out = numpy.call_method1("empty", (&PyTuple::new(py, shape.iter().copied())?, "bool"))?;
     let flat_out = out.call_method1("reshape", (-1i64,))?;
     let viewed_out = flat_out.call_method1("view", ("uint8",))?;
@@ -125191,6 +125213,22 @@ mod tests {
             assert!(
                 ours.call((g("fortnight"),), Some(&zkw)).is_err(),
                 "an all-zero weekmask must reach numpy and raise, not return all-False"
+            );
+
+            // A 0-d DATE RETURNS A `numpy.bool_` SCALAR, NOT A 0-d ARRAY. This route used to
+            // get that right only by accident - a 0-d buffer yielded no slice, so it
+            // declined before it could build anything - and the accident ended when the
+            // input buffers were flattened to make 0-d BROADCASTS work in `busday_count`.
+            // Asserted on the type, not the value, because the value is right either way.
+            let zero_d = numpy.call_method1("array", ("2024-01-01", "datetime64[D]"))?;
+            let mine = ours.call1((&zero_d,))?;
+            assert_eq!(
+                mine.is_instance(numpy.getattr("ndarray")?.as_any())?,
+                theirs
+                    .call1((&zero_d,))?
+                    .is_instance(numpy.getattr("ndarray")?.as_any())?,
+                "a 0-d date must come back as the same KIND of object numpy returns - a \
+                 numpy.bool_ scalar, not a 0-d ndarray wearing the right value"
             );
             Ok(())
         });
