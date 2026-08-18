@@ -54893,3 +54893,9 @@ the truncation; (2) if a third measurement is wanted, add a cumsum counter arm a
 `let`-binding shape specifically, since both measured rows so far converted INLINE sites only and
 the `.clone()` makes the binding shape a genuinely different quantity.
 AGENT_NAME=SlateFinch.
+
+**TRUNCATION RESOLVED, same day:** `conformance_searchsorted_containers` re-run alone on a warm
+worker — **2 passed, 0 failed, 0 filtered, exit 0** in 85.51s. The suite has exactly two `#[test]`
+functions, so that is the whole suite, not a partial run (checked against the source rather than
+assumed from the count). Tier validation is therefore **124 tests, 0 failures, all 11 suites
+complete**. The retry predicate's item (1) is discharged.
