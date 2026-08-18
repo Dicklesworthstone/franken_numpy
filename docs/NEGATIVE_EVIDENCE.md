@@ -53014,3 +53014,66 @@ with `--no-run`, or accept the local build cost, or narrow to the single test th
 touches (`delegated_kwargs_omit_defaults_and_forward_non_defaults`) - though note the compile, not
 the test execution, is what exceeds the ceiling, so a filter alone saves nothing.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-17 — `rch` SYNCS THE WORKING DIRECTORY, NOT A GIT REF: holding a change uncommitted on a shared tree does NOT isolate it, it only hides it from `git log` while every peer's remote build compiles it (deadlock-audit-rz8g0)
+
+**Campaign result class:** multi-agent process hazard (no measurement)
+
+```
+  rch::transfer: Syncing /data/projects/franken_numpy -> /data/projects/franken_numpy on vmi1153651
+  rch::hook::transfer_orchestration: Sync complete: 17446 files, 1027525 bytes
+```
+
+The path is the WORKING DIRECTORY. There is no `git archive`, no `--base HEAD` in the default
+invocation, no staging-area filter. Whatever is in the tree at sync time is what the worker
+compiles and what every agent's remote build therefore contains.
+
+### Why this matters, and why I had it backwards
+
+I have been holding a ~200-line change to `PyUFunc::__call__` uncommitted for about an hour on the
+principle that unverified hot-path code should not land until its tests pass. That principle is
+right and the mechanism I chose does not implement it. On a SHARED working tree the change was live
+the entire time: every peer who ran `rch exec -- cargo ...` in this project compiled my untested
+extraction, and because it was uncommitted, nothing in `git log`, `git status` on their side, or any
+bead told them so. **The safety I thought I was buying was actually a loss of attribution on top of
+identical exposure.**
+
+The choice on a shared tree is therefore NOT "commit (exposed) versus hold (isolated)". It is:
+
+```
+  commit   -> exposed AND visible in git log, attributable, revertible by anyone it breaks
+  hold     -> exposed AND invisible; a peer debugging a failure has no way to find your change
+  stash    -> genuinely isolated; the tree returns to its committed state for everyone
+```
+
+Holding is strictly the worst of the three. Committing is better than holding even for unverified
+work, because at least the exposure is legible. `git stash` is the only option that actually
+isolates, and it is the one I should have reached for on turn one of that hour.
+
+### What I did with that, this turn
+
+NOT stashed, and the reason is specific rather than a climb-down: the in-flight retry of
+`cargo test -p fnp-python --lib` was synced from the tree AFTER all three of my edits, so it is
+testing exactly the current state. Stashing now would invalidate the only verification run I have
+been able to get past `RCH-E104`, and would leave the change unverified for longer. The correct
+sequencing from here is: let the run finish, then commit if green, and stash rather than hold if it
+fails or times out again.
+
+### The general rule this yields for this fleet
+
+**On a shared working tree, "I will hold it until it is verified" is not a containment strategy.**
+Either commit it so it is attributable, or stash it so it is genuinely absent. Choose deliberately
+and say which. The same reasoning applies to the staged index, which produced three collisions here
+today: shared mutable state that agents assume is private is the recurring shape of every
+coordination failure this project has logged.
+
+COUNTED_MECHANISM: rch sync copies 17,446 files from the working directory path; 0 git refs
+consulted; ~1 hour of exposure of an uncommitted 200-line hot-path change to every peer build.
+
+A/A NULL CONTROLS: not applicable - no measurement.
+
+RETRY PREDICATE: none. If someone wants remote builds to compile only committed state, `rch exec`
+accepts `--base HEAD` (visible in other agents' invocations in the process table today), which is
+the knob to investigate - I have not tested what it does to uncommitted files and am not claiming
+it solves this.
+AGENT_NAME=SlateFinch.
