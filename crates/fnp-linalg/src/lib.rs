@@ -8488,11 +8488,41 @@ fn packed_gemm_serial_tiled_apacked<const MR: usize>(
 /// thread runs the whole serial kernel over its own row band and re-derives the identical `b`
 /// panels. This builds them once so the bands can share one read-only copy.
 fn pack_b_panels(b: &[f64], k: usize, n: usize) -> Vec<f64> {
-    let panels = n / PACKED_NR;
+    pack_b_panel_block(b, k, n, 0, n / PACKED_NR)
+}
+
+/// Pack `panels` consecutive `PACKED_NR`-wide column panels of `b`, starting at panel `panel0`.
+///
+/// `n` is `b`'s ROW STRIDE throughout; the block's width is `panels * PACKED_NR` and is
+/// independent of it. Layout within the block matches `pack_b_panels`:
+///
+/// ```text
+///   bp[p * k * PACKED_NR + kk * PACKED_NR + jj] == b[kk * n + (panel0 + p) * PACKED_NR + jj]
+/// ```
+///
+/// WHY A BLOCK AND NOT ALL OF `b`, which is the correction this function exists to enable.
+/// `packed_gemm_shared_b` currently packs the WHOLE of `b` so its row bands can share one copy.
+/// That removes the redundant per-thread packing, but it replaces a `k * PACKED_NR` buffer -
+/// about 4 KiB, L1-hot and reused across panels - with an array up to the size of `b`, streamed
+/// from memory by every band. It trades redundant WORK for worse LOCALITY, so it is not the
+/// improvement its name suggests, and that is why it is still unwired.
+///
+/// The right granularity is the one a Goto-style GEMM uses: pack ONE column block, sized so the
+/// packed copy stays L2-resident, share it across the bands working on that block, then move to
+/// the next block. The existing kernels already compute exactly that width - `nc` is chosen so
+/// `k * nc * 8` is about 256 KiB - so the block size is already established here; only the
+/// sharing granularity was wrong.
+///
+/// This function is the packing half of that structure. The driver half - block loop outer,
+/// parallel band loop inner, tails once at the end - is deliberately NOT written in the same
+/// change: it needs coordinated edits to the band kernel's signature, its tail handling, the
+/// driver, and the test that calls the kernel directly, and that is more than should be changed
+/// blind under a build freeze.
+fn pack_b_panel_block(b: &[f64], k: usize, n: usize, panel0: usize, panels: usize) -> Vec<f64> {
     let mut bp = vec![0.0f64; panels * k * PACKED_NR];
-    for panel in 0..panels {
-        let j0 = panel * PACKED_NR;
-        let dst = &mut bp[panel * k * PACKED_NR..(panel + 1) * k * PACKED_NR];
+    for p in 0..panels {
+        let j0 = (panel0 + p) * PACKED_NR;
+        let dst = &mut bp[p * k * PACKED_NR..(p + 1) * k * PACKED_NR];
         for kk in 0..k {
             dst[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]
                 .copy_from_slice(&b[kk * n + j0..kk * n + j0 + PACKED_NR]);
@@ -22494,6 +22524,50 @@ except Exception as exc:
                 want_bits, got_bits,
                 "shared-B driver diverged in BITS at m={m} k={k} n={n}"
             );
+        }
+    }
+
+
+    /// `pack_b_panel_block` must place every element the layout formula names, at any offset.
+    ///
+    /// The offset is the part worth testing: `pack_b_panels` only ever asks for `panel0 = 0`, so
+    /// a bug in the offset arithmetic would be invisible until the block-wise driver starts using
+    /// non-zero starts. `n` is also the ROW STRIDE, and `n = 19` is in the table because a block
+    /// that ends before the ragged tail must still index `b` by the full stride.
+    #[test]
+    fn pack_b_panel_block_places_every_element_at_any_offset() {
+        const NR: usize = super::PACKED_NR;
+        for &(k, n) in &[(1usize, 8usize), (3, 16), (5, 19), (7, 32)] {
+            let b: Vec<f64> = (0..k * n).map(|i| i as f64 * 0.375 - 1.25).collect();
+            let total = n / NR;
+            for panel0 in 0..=total {
+                for panels in 0..=(total - panel0) {
+                    let bp = super::pack_b_panel_block(&b, k, n, panel0, panels);
+                    assert_eq!(bp.len(), panels * k * NR);
+                    for p in 0..panels {
+                        for kk in 0..k {
+                            for jj in 0..NR {
+                                assert_eq!(
+                                    bp[p * k * NR + kk * NR + jj],
+                                    b[kk * n + (panel0 + p) * NR + jj],
+                                    "block mismatch k={k} n={n} panel0={panel0} p={p} kk={kk} jj={jj}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The whole-`b` wrapper must agree with the block form covering every panel.
+    #[test]
+    fn pack_b_panels_matches_full_width_block() {
+        for &(k, n) in &[(1usize, 8usize), (3, 16), (5, 19), (7, 32)] {
+            let b: Vec<f64> = (0..k * n).map(|i| i as f64 * 0.5 - 3.0).collect();
+            let whole = super::pack_b_panels(&b, k, n);
+            let block = super::pack_b_panel_block(&b, k, n, 0, n / super::PACKED_NR);
+            assert_eq!(whole, block, "wrapper diverged from block form at k={k} n={n}");
         }
     }
 
