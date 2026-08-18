@@ -8618,6 +8618,73 @@ fn packed_gemm_band_prepacked_b<const MR: usize>(
     }
 }
 
+/// `out += a * b` for one row band against ONE packed column block of `b`.
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
+///
+/// This is the band half of the block-wise structure whose packing half is `pack_b_panel_block`.
+/// It differs from `packed_gemm_band_prepacked_b` in two ways that matter:
+///
+///   - it works on a COLUMN BLOCK, taking the block's absolute start panel so it can address
+///     `out`, rather than assuming the packed `b` covers every panel; and
+///   - it handles NO tails. Remainder rows and remainder columns are the driver's job, because
+///     under a block loop they must run once at the end, not once per block.
+///
+/// WHY `a` IS PACKED HERE, per band AND per block, rather than hoisted. A-packing wants the band
+/// loop outermost so each band packs once; B-block sharing wants the block loop outermost so a
+/// block is packed once for all bands. Those pull in opposite directions, and a Goto-style GEMM
+/// resolves it the way this does: block outermost, and `a` re-packed for each block. That
+/// re-packing is not waste - a band's packed `a` is `m_full * k`, and it is reused across every
+/// panel in the block, so its cost is amortised by the block's width. Hoisting it instead would
+/// force B to be packed per band, which is the redundancy this structure exists to remove.
+///
+/// BIT-IDENTICAL to the scalar kernel: lane `jj` accumulates `kk` ascending into one register
+/// tile with no cross-lane interaction, multiply and add kept SEPARATE so both roundings survive.
+/// No `mul_add`.
+fn packed_gemm_band_block<const MR: usize>(
+    a: &[f64],
+    bp: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    panel0: usize,
+    panels: usize,
+    out: &mut [f64],
+) {
+    use std::simd::Simd;
+    type Lane = Simd<f64, PACKED_NR>;
+
+    let m_full = m - m % MR;
+    if panels == 0 || m_full == 0 {
+        return;
+    }
+    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    for p in 0..panels {
+        // `p` indexes within the packed block; `j0` is the absolute column in `out`.
+        let j0 = (panel0 + p) * PACKED_NR;
+        let bpanel = &bp[p * k * PACKED_NR..(p + 1) * k * PACKED_NR];
+        let mut i0 = 0;
+        while i0 < m_full {
+            let block = i0 / MR;
+            let apanel = &ap[block * k * MR..(block + 1) * k * MR];
+            let mut acc = [Lane::splat(0.0); MR];
+            for kk in 0..k {
+                let bvec = Lane::from_slice(&bpanel[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]);
+                let arow = &apanel[kk * MR..kk * MR + MR];
+                for (ii, slot) in acc.iter_mut().enumerate() {
+                    *slot += Lane::splat(arow[ii]) * bvec;
+                }
+            }
+            for (ii, slot) in acc.iter().enumerate() {
+                let base = (i0 + ii) * n + j0;
+                let current = Lane::from_slice(&out[base..base + PACKED_NR]);
+                (current + *slot).copy_to_slice(&mut out[base..base + PACKED_NR]);
+            }
+            i0 += MR;
+        }
+    }
+}
+
 /// `out += a * b`, register micro-kernel written in EXPLICIT portable SIMD.
 ///
 /// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
@@ -22568,6 +22635,57 @@ except Exception as exc:
             let whole = super::pack_b_panels(&b, k, n);
             let block = super::pack_b_panel_block(&b, k, n, 0, n / super::PACKED_NR);
             assert_eq!(whole, block, "wrapper diverged from block form at k={k} n={n}");
+        }
+    }
+
+
+    /// Driving the block kernel over every column block, then tails once, must equal the scalar
+    /// kernel to the BIT - at SEVERAL block widths.
+    ///
+    /// This is the property the block-wise driver will rest on, so it is worth pinning before
+    /// that driver exists. Three things could break and only this shape catches them: a wrong
+    /// `panel0` offset (invisible at width 1 covering the whole matrix), a block boundary that
+    /// double-counts or skips a panel, and tails applied per block instead of once.
+    ///
+    /// Sweeping the block width proves the result is INDEPENDENT of blocking granularity, which
+    /// is the whole claim - a driver may choose any width for cache reasons and must not thereby
+    /// change the answer.
+    #[test]
+    fn gemm_band_block_over_all_blocks_is_bit_exact_vs_tiled() {
+        const MR: usize = super::PACKED_MR;
+        const NR: usize = super::PACKED_NR;
+        for &(m, k, n) in &[(4usize, 3usize, 8usize), (8, 5, 16), (9, 7, 19), (12, 33, 24)] {
+            let a: Vec<f64> = (0..m * k).map(|i| ((i * 37 % 101) as f64) - 50.5).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25).collect();
+            let mut want = vec![0.0f64; m * n];
+            super::packed_gemm_serial_tiled::<MR>(&a, &b, m, k, n, &mut want);
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+
+            let n_full = n - n % NR;
+            let total_panels = n_full / NR;
+            let m_full = m - m % MR;
+            for block_panels in 1..=3usize {
+                let mut got = vec![0.0f64; m * n];
+                let mut p0 = 0;
+                while p0 < total_panels {
+                    let count = block_panels.min(total_panels - p0);
+                    let bp = super::pack_b_panel_block(&b, k, n, p0, count);
+                    super::packed_gemm_band_block::<MR>(&a, &bp, m, k, n, p0, count, &mut got);
+                    p0 += count;
+                }
+                // Tails ONCE, as the driver must do them - not once per block.
+                for i in 0..m_full {
+                    super::packed_row_tail(&a, &b, &mut got, i, k, n, n_full);
+                }
+                for i in m_full..m {
+                    super::packed_row_tail(&a, &b, &mut got, i, k, n, 0);
+                }
+                let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(
+                    want_bits, got_bits,
+                    "block-driven GEMM diverged in BITS at m={m} k={k} n={n} block_panels={block_panels}"
+                );
+            }
         }
     }
 
