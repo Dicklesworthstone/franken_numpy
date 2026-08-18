@@ -38609,6 +38609,44 @@ fn hstack(
 
 
 
+
+/// How an N-D histogram sample is laid out in memory (`deadlock-audit-6y5wp`).
+///
+/// NumPy accepts two spellings and normalises them into one: `histogramdd(sample)` takes
+/// either an `(N, D)` array or a sequence of D length-N arrays, and for the latter it
+/// does `np.atleast_2d(sample).T`, which MATERIALISES a `(D, N)` array before
+/// transposing. When the caller's D arrays are already contiguous there is nothing to
+/// materialise - each is a column already - so this enum lets one counting loop read
+/// either layout and the sequence form copies nothing at all.
+///
+/// The match is on the layout, not per element: it is loop-invariant, so it hoists.
+enum HistogramSample<'a> {
+    /// One `(N, D)` C-contiguous buffer: coordinate `d` of row `r` is at `r * D + d`.
+    Interleaved { values: &'a [f64], ndim: usize },
+    /// D separate contiguous columns, each of length N.
+    Columns(&'a [&'a [f64]]),
+}
+
+impl HistogramSample<'_> {
+    #[inline]
+    fn rows(&self) -> usize {
+        match self {
+            Self::Interleaved { values, ndim } => {
+                if *ndim == 0 { 0 } else { values.len() / ndim }
+            }
+            Self::Columns(columns) => columns.first().map_or(0, |c| c.len()),
+        }
+    }
+
+    #[inline]
+    fn value(&self, row: usize, dim: usize) -> f64 {
+        match self {
+            Self::Interleaved { values, ndim } => values[row * ndim + dim],
+            Self::Columns(columns) => columns[dim][row],
+        }
+    }
+}
+
 // Zero-copy N-D histogram counting for an (N, D) f64 sample with precomputed edges
 // (`deadlock-audit-6y5wp`).
 //
@@ -38634,7 +38672,7 @@ fn hstack(
 fn try_zerocopy_f64_histogramdd(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
-    sample: &Bound<'_, PyAny>,
+    sample: &HistogramSample<'_>,
     edges: &[Py<PyAny>],
     weights: Option<&Bound<'_, PyAny>>,
     density: bool,
@@ -38645,36 +38683,14 @@ fn try_zerocopy_f64_histogramdd(
     if ndim == 0 || ndim > MAX_DIMS {
         return Ok(None);
     }
-    if !sample.is_exact_instance(cached_ndarray_type(py)?)
-        || !numpy_dtype_is_f64(py, sample)
-        || sample.getattr("ndim")?.extract::<usize>()? != 2
-        || !sample
-            .getattr("flags")?
-            .getattr("c_contiguous")?
-            .extract::<bool>()?
+    // Layout validation belongs to the caller, which is the only place that knows which
+    // spelling arrived; by here the sample is already D coordinates per row.
+    if let HistogramSample::Columns(columns) = sample
+        && (columns.len() != ndim || columns.iter().any(|c| c.len() != columns[0].len()))
     {
         return Ok(None);
     }
-    let shape: Vec<usize> = sample.getattr("shape")?.extract()?;
-    if shape.len() != 2 || shape[1] != ndim {
-        return Ok(None);
-    }
-    let nrows = shape[0];
-
-    let Ok(sample_buffer) = PyBuffer::<f64>::get(sample) else {
-        return Ok(None);
-    };
-    let Some(sample_cells) = sample_buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    if sample_cells.len() != nrows * ndim {
-        return Ok(None);
-    }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; the sample is a read-only
-    // C-contiguous f64 ndarray held under the GIL.
-    let sv: &[f64] = unsafe {
-        std::slice::from_raw_parts(sample_cells.as_ptr().cast::<f64>(), sample_cells.len())
-    };
+    let nrows = sample.rows();
 
     // Edge buffers must outlive the slices taken from them, so they are collected first.
     let mut edge_buffers = Vec::with_capacity(ndim);
@@ -38766,7 +38782,7 @@ fn try_zerocopy_f64_histogramdd(
         let mut flat = 0usize;
         let mut inside = true;
         for d in 0..ndim {
-            let value = sv[row * ndim + d];
+            let value = sample.value(row, d);
             let e = edge_slices[d];
             let mut k = e.partition_point(|&edge| edge <= value);
             if value == e[e.len() - 1] {
@@ -108619,11 +108635,51 @@ fn histogramdd(
         }
         // Only the `(N, D)` array form; a sequence of D arrays is NumPy's other accepted
         // spelling and keeps the general path.
-        if sample.is_exact_instance(cached_ndarray_type(py)?)
-            && let Ok(shape) = sample.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
-            && shape.len() == 2
+        // BOTH SPELLINGS OF `sample` (`deadlock-audit-6y5wp`). NumPy accepts an `(N, D)`
+        // array or a sequence of D length-N arrays, normalising the latter with
+        // `np.atleast_2d(sample).T` - which materialises a `(D, N)` array first. When the
+        // caller's D arrays are already contiguous there is nothing to materialise, so the
+        // sequence form is read in place and copies NOTHING, which is strictly less work
+        // than the incumbent does before it even starts binning.
+        //
+        // `column_objects` is what the edge derivation reads; for the array form that is a
+        // strided column view, for the sequence form the caller's own array.
+        let is_array_form = sample.is_exact_instance(cached_ndarray_type(py)?)
+            && sample
+                .getattr("ndim")
+                .and_then(|n| n.extract::<usize>())
+                .is_ok_and(|n| n == 2);
+        let mut column_objects: Vec<Bound<'_, PyAny>> = Vec::new();
+        if is_array_form {
+            if let Ok(shape) = sample.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
+                && shape.len() == 2
+            {
+                for axis in 0..shape[1] {
+                    match sample.get_item((pyo3::types::PySlice::full(py), axis)) {
+                        Ok(column) => column_objects.push(column),
+                        Err(_) => {
+                            column_objects.clear();
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if !sample.is_instance_of::<pyo3::types::PyString>()
+            && let Ok(items) = sample.try_iter()
         {
-            let ndim = shape[1];
+            // A sequence of per-axis arrays. Strings iterate too, hence the guard.
+            for item in items {
+                match item {
+                    Ok(column) => column_objects.push(column),
+                    Err(_) => {
+                        column_objects.clear();
+                        break;
+                    }
+                }
+            }
+        }
+        if !column_objects.is_empty() {
+            let ndim = column_objects.len();
             // `bins` as one int for every axis, or one int per axis. Edge arrays and the
             // string estimators stay with NumPy.
             // Per-axis spec: an int COUNT, or an array of explicit EDGES. NumPy's rule
@@ -108690,12 +108746,10 @@ fn histogramdd(
                         .as_ref()
                         .and_then(|s| s.extract::<usize>().ok())
                         .unwrap_or(10);
-                    // The axis column as a view; `histogram_bin_edges` accepts strided
-                    // input, so no copy is taken to compute edges.
-                    let Ok(column) = sample.get_item((pyo3::types::PySlice::full(py), axis)) else {
-                        ok = false;
-                        break;
-                    };
+                    // Already resolved above, as a strided view for the array form and
+                    // the caller's own array for the sequence form; `histogram_bin_edges`
+                    // accepts either, so no copy is taken to compute edges.
+                    let column = &column_objects[axis];
                     let ekw = PyDict::new(py);
                     if ekw.set_item("bins", n).is_err() {
                         ok = false;
@@ -108709,7 +108763,7 @@ fn histogramdd(
                         ok = false;
                         break;
                     }
-                    match numpy.call_method("histogram_bin_edges", (&column,), Some(&ekw)) {
+                    match numpy.call_method("histogram_bin_edges", (column,), Some(&ekw)) {
                         Ok(e) => edges.push(e.unbind()),
                         Err(_) => {
                             ok = false;
@@ -108717,11 +108771,86 @@ fn histogramdd(
                         }
                     }
                 }
+                // Bind the sample buffers here so they outlive the counting call.
+                let mut column_buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(ndim);
+                let mut interleaved: Option<PyBuffer<f64>> = None;
+                if ok {
+                    if is_array_form {
+                        match PyBuffer::<f64>::get(&sample) {
+                            Ok(buffer) => interleaved = Some(buffer),
+                            Err(_) => ok = false,
+                        }
+                    } else {
+                        for column in &column_objects {
+                            let usable = column.is_exact_instance(cached_ndarray_type(py)?)
+                                && numpy_dtype_is_f64(py, column)
+                                && column
+                                    .getattr("ndim")
+                                    .and_then(|n| n.extract::<usize>())
+                                    .is_ok_and(|n| n == 1)
+                                && column
+                                    .getattr("flags")
+                                    .and_then(|f| f.getattr("c_contiguous"))
+                                    .and_then(|c| c.extract::<bool>())
+                                    .unwrap_or(false);
+                            if !usable {
+                                ok = false;
+                                break;
+                            }
+                            match PyBuffer::<f64>::get(column) {
+                                Ok(buffer) => column_buffers.push(buffer),
+                                Err(_) => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut column_slices: Vec<&[f64]> = Vec::with_capacity(ndim);
+                if ok && !is_array_form {
+                    for buffer in &column_buffers {
+                        match buffer.as_slice(py) {
+                            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and
+                            // each column is a read-only contiguous f64 ndarray under the
+                            // GIL.
+                            Some(cells) => column_slices.push(unsafe {
+                                std::slice::from_raw_parts(
+                                    cells.as_ptr().cast::<f64>(),
+                                    cells.len(),
+                                )
+                            }),
+                            None => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                let interleaved_slice: Option<&[f64]> = match interleaved.as_ref() {
+                    None => None,
+                    Some(buffer) => match buffer.as_slice(py) {
+                        // SAFETY: as above, for the `(N, D)` form.
+                        Some(cells) => Some(unsafe {
+                            std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len())
+                        }),
+                        None => {
+                            ok = false;
+                            None
+                        }
+                    },
+                };
+                let layout = if is_array_form {
+                    interleaved_slice.map(|values| HistogramSample::Interleaved { values, ndim })
+                } else {
+                    Some(HistogramSample::Columns(&column_slices))
+                };
                 if ok
+                    && let Some(layout) = layout.as_ref()
                     && let Some(hist) = try_zerocopy_f64_histogramdd(
                         py,
                         numpy,
-                        &sample,
+                        layout,
                         &edges,
                         weights_arg.as_ref(),
                         want_density,
@@ -124064,6 +124193,88 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// `histogramdd` must accept a SEQUENCE of per-axis arrays as well as an `(N, D)`
+    /// array, and agree with NumPy on both (`deadlock-audit-6y5wp`).
+    ///
+    /// NumPy normalises the sequence form with `np.atleast_2d(sample).T`, which
+    /// materialises a `(D, N)` array before transposing. When the caller's arrays are
+    /// already contiguous there is nothing to materialise, so this path reads them in
+    /// place - which is why the two spellings now travel different code and both need
+    /// covering.
+    ///
+    /// The two forms are asserted against EACH OTHER as well as against NumPy: they
+    /// describe identical data, so any disagreement between them is a layout bug in the
+    /// sample accessor - reading `row * D + d` where it should read `column[d][row]`
+    /// transposes the histogram, and against a NON-SQUARE bin grid that changes the shape
+    /// rather than merely the values.
+    #[test]
+    fn histogramdd_accepts_a_sequence_of_per_axis_arrays() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_histdd_seq")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("histogramdd")?;
+            let theirs = numpy.getattr("histogramdd")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(31)\n\
+                  a = rng.standard_normal(2500)\n\
+                  b = rng.standard_normal(2500)\n\
+                  c = rng.standard_normal(2500)\n\
+                  stacked = np.ascontiguousarray(np.stack([a, b, c], axis=-1))\n\
+                  seq = [a, b, c]\n\
+                  bins3 = [2, 3, 5]\n\
+                  rng3 = [[-2.0, 2.0], [-1.0, 1.5], [-3.0, 3.0]]\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| locals.get_item(k).expect("seq fixture");
+
+            let bytes_of = |o: &Bound<'_, PyAny>, index: usize| -> PyResult<Vec<u8>> {
+                o.get_item(index)?.call_method0("tobytes")?.extract::<Vec<u8>>()
+            };
+
+            let kw = PyDict::new(py);
+            kw.set_item("bins", g("bins3"))?;
+            kw.set_item("range", g("rng3"))?;
+
+            let seq_ours = ours.call((g("seq"),), Some(&kw))?;
+            let seq_theirs = theirs.call((g("seq"),), Some(&kw))?;
+            let arr_ours = ours.call((g("stacked"),), Some(&kw))?;
+
+            assert_eq!(
+                bytes_of(&seq_ours, 0)?,
+                bytes_of(&seq_theirs, 0)?,
+                "sequence-of-arrays H diverged from numpy"
+            );
+            // Non-square bins (2 x 3 x 5), so a transposed read changes the SHAPE.
+            assert_eq!(
+                seq_ours.get_item(0)?.getattr("shape")?.extract::<Vec<usize>>()?,
+                seq_theirs.get_item(0)?.getattr("shape")?.extract::<Vec<usize>>()?,
+                "sequence-of-arrays H shape diverged from numpy"
+            );
+            assert_eq!(
+                bytes_of(&seq_ours, 0)?,
+                bytes_of(&arr_ours, 0)?,
+                "the two sample spellings describe identical data but produced different \
+                 histograms - the sample accessor is reading the wrong layout"
+            );
+            for axis in 0..3usize {
+                assert_eq!(
+                    seq_ours.get_item(1)?.get_item(axis)?.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    seq_theirs.get_item(1)?.get_item(axis)?.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "sequence-of-arrays edges for axis {axis} diverged from numpy"
+                );
+            }
             Ok(())
         });
     }
