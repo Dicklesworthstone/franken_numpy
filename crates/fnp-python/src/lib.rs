@@ -235,6 +235,136 @@ fn interned_ufunc_name<'py>(py: Python<'py>, kind: UFuncKind) -> &'py Bound<'py,
     }
 }
 
+/// Is the native-route section of `PyUFunc::__call__` switched off? (`deadlock-audit-rz8g0`)
+///
+/// Read ONCE per process from `FNP_DISABLE_NATIVE_ROUTES` and cached, so the shipped cost of
+/// carrying this switch is one relaxed atomic load and a predictable branch per call - present
+/// in BOTH arms of the A/B it exists to enable, so it cancels in the difference.
+///
+/// ONLY the exact value "1" enables it. `var_os(..).is_some()` would have made
+/// `FNP_DISABLE_NATIVE_ROUTES=0` turn every native route OFF, which is the opposite of
+/// what anyone typing that would mean, and an empty value would have done the same.
+///
+/// It is a measurement affordance, not a feature. Nothing in the library sets it, no test
+/// depends on it being set, and with it unset the route is byte-for-byte the route that
+/// shipped before it existed.
+fn probe_chain_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DISABLED.get_or_init(|| {
+        std::env::var("FNP_DISABLE_NATIVE_ROUTES")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// The delegation tail of `PyUFunc::__call__`, lifted out verbatim (`deadlock-audit-rz8g0`).
+///
+/// WHY IT EXISTS: `deadlock-audit-ei9jz` established that the probe chain is 1189.4 of the
+/// route's 1830.5 instructions/call of excess over NumPy (65%), but that is an
+/// INSTRUCTIONS-ONLY result with no time-domain confirmation, and the replica-sum partition
+/// that might have supplied one was retired after five refusals. The tractable replacement
+/// is a route-level A/B between two builds differing ONLY in whether the probe chain runs.
+/// That switch needs somewhere to jump TO, and lifting the tail gives it one without
+/// re-indenting ~370 lines of probe section in a file several agents commit to hourly.
+///
+/// NEUTRALITY IS A PRECONDITION, NOT AN ASSUMPTION. This puts a call boundary with two call
+/// sites on the hottest path in the crate, which is the shape LLVM is least likely to
+/// inline. It must be shown neutral at route level BEFORE the switch it enables is trusted,
+/// or a null A/B result cannot be told from a refactor that cost what the probes saved. The
+/// check is counted, not timed: `bench_binary_counter_multiply_fnp_plain` minus
+/// `..._numpy_plain` put the route excess at 1830.5 insns/call with 0.08% run-to-run spread
+/// across three separately built ELFs, so a non-neutral extraction shows up immediately and
+/// needs no quiet host.
+///
+/// The body is unchanged from its previous position.
+#[allow(clippy::too_many_arguments)]
+fn delegate_binary_to_numpy(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyAny>,
+    kind: UFuncKind,
+    x1: &Py<PyAny>,
+    x2: &Py<PyAny>,
+    out: Option<&Py<PyAny>>,
+    r#where: Option<&Py<PyAny>>,
+    casting: &str,
+    order: &str,
+    dtype: Option<&Py<PyAny>>,
+    subok: bool,
+    signature: Option<&Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let np_ufunc = numpy.getattr(interned_ufunc_name(py, kind))?;
+    // FAST PATH: every keyword already at its NumPy default, so send none of
+    // them. The slow path below sets `casting`, `order` and `subok`
+    // UNCONDITIONALLY, which allocates a PyDict and then makes NumPy parse
+    // three keywords in order to be told exactly what it would have assumed:
+    // its own defaults are `same_kind`, `K` and True. Omitting a keyword whose
+    // value equals its default cannot change behaviour, so this is a change to
+    // the CALL SHAPE, not to semantics.
+    //
+    // This is charged to every delegating call, which is most of them: `add`,
+    // `subtract` and `multiply` map to `None` in the f64 binop match and reach
+    // here on every invocation. `deadlock-audit-cydda` measured 6968-8375 ns of
+    // excess on exactly those three and bounded the four obvious stages (numpy
+    // re-import, dtype guard, ndarray getattr, output allocation) at 700 ns
+    // combined, so the remainder is argument handling and this call shape.
+    // Bead `deadlock-audit-s2fkk`.
+    if out.is_none()
+        && r#where.is_none()
+        && dtype.is_none()
+        && signature.is_none()
+        && casting == "same_kind"
+        && order == "K"
+        && subok
+    {
+        return Ok(np_ufunc.call1((x1.bind(py), x2.bind(py)))?.unbind());
+    }
+    // SEND ONLY THE KEYWORDS THAT ARE NOT ALREADY AT NUMPY'S DEFAULT
+    // (`deadlock-audit-v46rn`).
+    //
+    // This path used to set `casting`, `order` and `subok` UNCONDITIONALLY, so a
+    // caller who passed nothing but `out=` still built a FOUR-entry dict and made
+    // NumPy parse three keywords to be told exactly what it would have assumed:
+    // its own defaults are `same_kind`, `K` and True.
+    //
+    // That is the same argument the fast path above already makes and is already
+    // tested by - omitting a keyword whose value equals its default cannot change
+    // behaviour, because the callee's default IS that value. The fast path applied
+    // it only when EVERY keyword was default; the mixed case, which is the common
+    // one (`out=` alone), kept paying. Measured context: passing seven keywords at
+    // their defaults costs 156 ns against a 651 ns bare call, a 24% surcharge on
+    // the keyword-using call shape.
+    //
+    // Non-default values are still forwarded, and that is the half that must not
+    // break: `casting="unsafe"` is what permits a narrowing `out=`, `order` decides
+    // the result's memory layout, and `subok=False` strips an ndarray subclass.
+    // `delegated_kwargs_omit_defaults_and_forward_non_defaults` pins all three.
+    let kwargs = PyDict::new(py);
+    if let Some(o) = out.as_ref() {
+        kwargs.set_item("out", o.bind(py))?;
+    }
+    if let Some(w) = r#where {
+        kwargs.set_item("where", w.bind(py))?;
+    }
+    if casting != "same_kind" {
+        kwargs.set_item("casting", casting)?;
+    }
+    if order != "K" {
+        kwargs.set_item("order", order)?;
+    }
+    if let Some(d) = dtype.as_ref() {
+        kwargs.set_item("dtype", d.bind(py))?;
+    }
+    if !subok {
+        kwargs.set_item("subok", subok)?;
+    }
+    if let Some(s) = signature.as_ref() {
+        kwargs.set_item("signature", s.bind(py))?;
+    }
+    Ok(np_ufunc
+        .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
 #[pyclass(name = "ufunc", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyUFunc {
@@ -405,6 +535,47 @@ impl PyUFunc {
         // is the route that floor belongs to. See `cached_numpy` for why holding the
         // handle is sound and why the module — not a bound callable — is what is held.
         let numpy = cached_numpy(py)?;
+        // THE NATIVE-ROUTE SWITCH (`deadlock-audit-rz8g0`). Off unless
+        // FNP_DISABLE_NATIVE_ROUTES is set in the environment, read ONCE per process.
+        //
+        // WHAT IT IS FOR: `deadlock-audit-ei9jz` measured the probe chain at 1189.4 of the
+        // route's 1830.5 instructions/call of excess over NumPy (65%), but that is an
+        // INSTRUCTIONS-ONLY result. The replica-sum partition that might have given it a
+        // time-domain twin was retired after five refusals, because a residual of five timed
+        // replicas is ill-posed: instructions are additively decomposable and time is not.
+        // The well-conditioned replacement is a route-level A/B - one arm taking the probes,
+        // one skipping straight to delegation - which is a single difference of two large,
+        // directly measured quantities rather than a residual.
+        //
+        // WHAT IT DISABLES, stated precisely because the name could mislead: EVERY native
+        // route attempt in this function, not only the ones that decline. For the measured
+        // cell (`multiply`, f64, no `out=`) all of them decline anyway, so skipping them is
+        // exactly "do not pay the probe chain"; for any cell that would have ENGAGED a native
+        // route, setting this variable changes which code computes the answer and the result
+        // is no longer a fair A/B. Use it on delegating cells only.
+        //
+        // WHAT IT DOES NOT MEASURE: this is a RUNTIME branch, so the probe code is still
+        // present in the binary. It prices "the probes were not executed", NOT "the probes
+        // were not compiled in", so it cannot see icache or code-layout effects of removing
+        // them. A build-time const would; it also needs a second 218 MB ELF, which is not
+        // affordable at the current disk pressure. Registered on the bead as a deliberate
+        // scope choice rather than an oversight.
+        if probe_chain_disabled() {
+            return delegate_binary_to_numpy(
+                py,
+                numpy,
+                self.kind,
+                &x1,
+                &x2,
+                out.as_ref(),
+                r#where.as_ref(),
+                casting,
+                order,
+                dtype.as_ref(),
+                subok,
+                signature.as_ref(),
+            );
+        }
         // Fast parallel f64 path for the high-compute binary ufuncs numpy runs single-threaded
         // (remainder = floored-mod, power = libm pow). Only the plain call surface (every kwarg
         // at its default) routes to the zero-copy parallel kernel; any out/where/dtype/casting/
@@ -778,77 +949,24 @@ impl PyUFunc {
                 return Ok(out_val);
             }
         }
-        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
-        // FAST PATH: every keyword already at its NumPy default, so send none of
-        // them. The slow path below sets `casting`, `order` and `subok`
-        // UNCONDITIONALLY, which allocates a PyDict and then makes NumPy parse
-        // three keywords in order to be told exactly what it would have assumed:
-        // its own defaults are `same_kind`, `K` and True. Omitting a keyword whose
-        // value equals its default cannot change behaviour, so this is a change to
-        // the CALL SHAPE, not to semantics.
-        //
-        // This is charged to every delegating call, which is most of them: `add`,
-        // `subtract` and `multiply` map to `None` in the f64 binop match and reach
-        // here on every invocation. `deadlock-audit-cydda` measured 6968-8375 ns of
-        // excess on exactly those three and bounded the four obvious stages (numpy
-        // re-import, dtype guard, ndarray getattr, output allocation) at 700 ns
-        // combined, so the remainder is argument handling and this call shape.
-        // Bead `deadlock-audit-s2fkk`.
-        if out.is_none()
-            && r#where.is_none()
-            && dtype.is_none()
-            && signature.is_none()
-            && casting == "same_kind"
-            && order == "K"
-            && subok
-        {
-            return Ok(np_ufunc.call1((x1.bind(py), x2.bind(py)))?.unbind());
-        }
-        // SEND ONLY THE KEYWORDS THAT ARE NOT ALREADY AT NUMPY'S DEFAULT
-        // (`deadlock-audit-v46rn`).
-        //
-        // This path used to set `casting`, `order` and `subok` UNCONDITIONALLY, so a
-        // caller who passed nothing but `out=` still built a FOUR-entry dict and made
-        // NumPy parse three keywords to be told exactly what it would have assumed:
-        // its own defaults are `same_kind`, `K` and True.
-        //
-        // That is the same argument the fast path above already makes and is already
-        // tested by - omitting a keyword whose value equals its default cannot change
-        // behaviour, because the callee's default IS that value. The fast path applied
-        // it only when EVERY keyword was default; the mixed case, which is the common
-        // one (`out=` alone), kept paying. Measured context: passing seven keywords at
-        // their defaults costs 156 ns against a 651 ns bare call, a 24% surcharge on
-        // the keyword-using call shape.
-        //
-        // Non-default values are still forwarded, and that is the half that must not
-        // break: `casting="unsafe"` is what permits a narrowing `out=`, `order` decides
-        // the result's memory layout, and `subok=False` strips an ndarray subclass.
-        // `delegated_kwargs_omit_defaults_and_forward_non_defaults` pins all three.
-        let kwargs = PyDict::new(py);
-        if let Some(o) = out.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
-        }
-        if let Some(w) = r#where {
-            kwargs.set_item("where", w.bind(py))?;
-        }
-        if casting != "same_kind" {
-            kwargs.set_item("casting", casting)?;
-        }
-        if order != "K" {
-            kwargs.set_item("order", order)?;
-        }
-        if let Some(d) = dtype.as_ref() {
-            kwargs.set_item("dtype", d.bind(py))?;
-        }
-        if !subok {
-            kwargs.set_item("subok", subok)?;
-        }
-        if let Some(s) = signature.as_ref() {
-            kwargs.set_item("signature", s.bind(py))?;
-        }
-        Ok(np_ufunc
-            .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
-            .unbind())
+        // Delegation tail lifted into `delegate_binary_to_numpy` (`deadlock-audit-rz8g0`)
+        // so a build-time probe-chain switch has somewhere to jump to without re-indenting
+        // the whole probe section above. Body unchanged; see the helper for why neutrality
+        // of this extraction is a precondition rather than an assumption.
+        delegate_binary_to_numpy(
+            py,
+            numpy,
+            self.kind,
+            &x1,
+            &x2,
+            out.as_ref(),
+            r#where.as_ref(),
+            casting,
+            order,
+            dtype.as_ref(),
+            subok,
+            signature.as_ref(),
+        )
     }
 
     // Forward `reduce` verbatim to NumPy's own ufunc.reduce. Manually
