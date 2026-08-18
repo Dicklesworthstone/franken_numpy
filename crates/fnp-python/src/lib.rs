@@ -5829,8 +5829,22 @@ fn stack_helper_default(
     // rebuilt the result across the export bridge — 4-15x slower than numpy even for
     // float64 (column_stack of 1-D arrays, dstack), and never faster. numpy's stack
     // is a typed concatenate that owns the exact shape/dtype/promotion surface, so
-    // delegate. (vstack/hstack/column_stack/dstack hit try_zerocopy_reshaped_concat
-    // first for the cases it covers; this is only the residual.)
+    // delegate.
+    //
+    // CORRECTED 2026-08-18: the previous sentence here read "vstack/hstack/column_stack/
+    // dstack hit try_zerocopy_reshaped_concat first for the cases it covers; this is only
+    // the residual." THAT WAS FALSE and it was dangerous. `try_zerocopy_reshaped_concat`
+    // has NO call sites - it is `#[allow(dead_code)]` and deliberately so, because
+    // `a22ada4e` measured it at 4-15x SLOWER than numpy (column_stack(int8) 14.7x) and
+    // unwired it. `vstack`/`hstack` do have zero-copy paths, but they are
+    // `try_zerocopy_f64_concatenate` / `try_zerocopy_bytes_concatenate`, not that helper;
+    // `column_stack`/`dstack` delegate outright.
+    //
+    // Why this mattered enough to correct: an audit for implemented-but-unwired kernels
+    // lands on `reshaped_concat` immediately, and this comment was the evidence that it
+    // SHOULD be reachable. Acting on it would have re-introduced a measured 4-15x
+    // regression. The reject is recorded at the helper itself now, so the next reader
+    // finds it there rather than inferring reachability from here.
     stack_helper_numpy_fallback(py, kind, tup, None, None)
 }
 
@@ -38599,6 +38613,20 @@ fn hstack(
 //   column_stack: 1-D -> (n,1), 2-D kept; concatenate axis=1.
 //   dstack (atleast_3d): 1-D -> (1,n,1), 2-D -> (r,c,1), 3-D kept; concatenate axis=2.
 // Mismatched off-axis shapes / dtypes / non-contiguous inputs fall through to numpy.
+//
+// DEAD ON PURPOSE - DO NOT WIRE THIS UP. `#[allow(dead_code)]` below is not an oversight
+// and not a TODO. `a22ada4e` measured this path at 4-15x SLOWER than numpy and removed
+// its call sites: reshaping each input to a thin (n,1)/(n,1,1) slice makes the following
+// concatenate strided along axis 1 or 2, which interleaves columns instead of copying
+// runs. numpy's column_stack/dstack do the same job at memcpy speed.
+//
+//   column_stack/dstack @2M, np/fnp after delegating: 0.79-1.14x across f64/f32/int32/int8
+//   the same cells through THIS helper:               4-15x SLOWER (column_stack(int8) 14.7x)
+//
+// It is retained only as a record of the shape that was tried. An audit for
+// implemented-but-unwired kernels will land here - that is expected, and the answer is
+// that the kernel works and is simply slower than the incumbent. Re-wiring it needs a
+// measurement that beats those numbers, not a reading of the code.
 #[allow(dead_code)]
 fn try_zerocopy_reshaped_concat(
     py: Python<'_>,
