@@ -56008,3 +56008,54 @@ disassemble the loop FIRST (expect 2 vdivpd retained, 0 stack reloads, no bounds
 only then measure - >=5 runs, because this route's single-run CI understates its between-run spread
 by 3.4x. Do not touch the parallel arm; its ratio is unmeasured at n >= 2^21.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — DISAMBIGUATION: `5.838x` and `3.172x` both describe searchsorted's array cell and BOTH ARE CORRECT in different frames; and my corrected `sort` figure (5.228x) may have TAKEN the worst-cell title (deadlock-audit-c5ecm)
+
+**Result class:** a ledger-hygiene finding plus a candidate re-ranking that needs a build to certify.
+Source/ledger reading only, build freeze in force. /data 34G, load 6.81.
+
+### The two figures are not in conflict, and the ledger currently invites the confusion
+
+```
+  8.700x  searchsorted array-needle BEFORE the numpy_dtype_is_f64 fast path
+  5.838x  the same cell AFTER that lever   <- the LEVER's worst cell; the correct thing to quote
+                                              when crediting `dtype_is_f64`
+  3.262x  the cell after RedLynx's 7-probe-head lever (certified, largest single move on this cell)
+  3.172x  the cell after the dispatcher-body lever   <- the CELL's CURRENT state
+```
+
+So `5.838x` answers "what did the `dtype_is_f64` lever achieve at its worst cell" and `3.172x`
+answers "how far behind is this cell today". Four levers separate them, none of them
+`dtype_is_f64`'s.
+
+**I have used both in this ledger without distinguishing them** — a row I wrote today refers to
+"`searchsorted`'s 3.172x worst cell" while the standing instruction I work under quotes 5.838x. Both
+are right; a reader hitting them a few thousand lines apart cannot tell why they differ. Hence this
+row. **Rule: when crediting a LEVER, quote the lever's after-state at its worst cell. When stating
+how far behind the incumbent we are, quote the cell's current state. Never let one stand in for the
+other.**
+
+### The candidate re-ranking, flagged and NOT certified
+
+Today's floor-corrected figures put `fnp.sort(int64, n=256)` at **5.228x** NumPy in wall clock after
+every lever shipped. The banked worst cell is searchsorted array-needle at **3.172x**. If both hold,
+**`sort` is now the campaign's worst known cell by a wide margin.**
+
+I am not claiming that, for one specific reason: the two numbers come from different harnesses.
+`3.172x` is from a criterion-timed dual-null contract measuring inside the process; `5.228x` is a
+counter-probe ratio with the startup floor subtracted arithmetically. The subtraction was validated
+against an independent contract-harness figure to 1.4% on the multiply cell, which is real support
+but is not the same as measuring `sort` under the contract.
+
+**To certify or refute: run `sort` int64 n=256 under a dual-null contract harness** — the same
+machinery that produced 3.172x — and compare like with like. That needs a bench arm and a build, so
+it waits for the freeze to lift. Until then the worst-cell title stays with searchsorted at 3.172x,
+with `sort` recorded as a strong candidate.
+
+COUNTED_MECHANISM: none new - reconciliation of banked figures.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: measure `sort` int64 n=256 under the dual-null contract before re-ranking the worst
+cell. Do not re-rank on a cross-harness comparison, however well the correction validated elsewhere -
+this campaign has a standing rule that cross-entry comparisons are invalid, and harness differences
+are exactly that.
+AGENT_NAME=SlateFinch.
