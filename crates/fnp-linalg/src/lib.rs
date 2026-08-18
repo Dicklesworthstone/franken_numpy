@@ -8531,6 +8531,82 @@ fn packed_gemm_band_prepacked_b<const MR: usize>(
     }
 }
 
+/// `out += a * b`, register micro-kernel written in EXPLICIT portable SIMD.
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
+///
+/// The flagship bead asks for a register micro-kernel in portable SIMD; the existing kernels get
+/// their vector code from the autovectoriser instead, which is a hope rather than a guarantee -
+/// a borrow pattern or an index expression the optimiser cannot follow silently drops the loop
+/// back to scalar with nothing in the source to show it. This states the vector shape directly:
+/// one `Simd<f64, PACKED_NR>` per accumulator row, `MR` of them live at once, which is the
+/// register tile the scalar kernel was already trying to express.
+///
+/// BIT-IDENTICAL TO THE SCALAR KERNEL, and the reason is worth being precise about because it is
+/// easy to lose. Lane `jj` of `acc[ii]` accumulates `a[i0+ii][kk] * b[kk][j0+jj]` for `kk`
+/// ascending - exactly the sequence, and exactly the order, the scalar loop performs for that
+/// element. Lanes never interact, so no cross-lane reassociation occurs.
+///
+/// `mul_add` IS DELIBERATELY NOT USED. Fusing the multiply and add would round once instead of
+/// twice and change the result, which is precisely the parity the bead forbids trading. The
+/// separate `Simd` multiply and add keep both roundings, matching both the scalar kernel and what
+/// the autovectoriser is permitted to emit without fast-math.
+///
+/// `PACKED_NR` is 8, so each accumulator row is one 512-bit or two 256-bit vectors depending on
+/// what the target supports; portable SIMD picks that, which is the point of using it rather than
+/// naming a width.
+fn packed_gemm_serial_tiled_simd<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    out: &mut [f64],
+) {
+    use std::simd::Simd;
+    type Lane = Simd<f64, PACKED_NR>;
+
+    let m_full = m - m % MR;
+    let n_full = n - n % PACKED_NR;
+    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    let mut bp = vec![0.0f64; k * PACKED_NR];
+    let mut j0 = 0;
+    while j0 < n_full {
+        for kk in 0..k {
+            bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]
+                .copy_from_slice(&b[kk * n + j0..kk * n + j0 + PACKED_NR]);
+        }
+        let mut i0 = 0;
+        while i0 < m_full {
+            let block = i0 / MR;
+            let apanel = &ap[block * k * MR..(block + 1) * k * MR];
+            let mut acc = [Lane::splat(0.0); MR];
+            for kk in 0..k {
+                let bvec = Lane::from_slice(&bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]);
+                let arow = &apanel[kk * MR..kk * MR + MR];
+                for (ii, slot) in acc.iter_mut().enumerate() {
+                    // Separate multiply and add - see the note above on `mul_add`.
+                    *slot += Lane::splat(arow[ii]) * bvec;
+                }
+            }
+            for (ii, slot) in acc.iter().enumerate() {
+                let base = (i0 + ii) * n + j0;
+                let current = Lane::from_slice(&out[base..base + PACKED_NR]);
+                (current + *slot).copy_to_slice(&mut out[base..base + PACKED_NR]);
+            }
+            i0 += MR;
+        }
+        j0 += PACKED_NR;
+    }
+    // Identical tail handling to every other kernel here.
+    for i in 0..m_full {
+        packed_row_tail(a, b, out, i, k, n, n_full);
+    }
+    for i in m_full..m {
+        packed_row_tail(a, b, out, i, k, n, 0);
+    }
+}
+
 /// `a * b` with `b` packed ONCE and shared by every row band.
 ///
 /// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
@@ -22215,6 +22291,35 @@ except Exception as exc:
             super::trsm_panel_width(4096) <= super::trsm_panel_width(128),
             "panel width must not grow with n"
         );
+    }
+
+
+    /// The explicit-SIMD micro-kernel must equal the scalar tiled kernel to the BIT.
+    ///
+    /// This is the test that makes the SIMD rewrite safe to consider at all. Lane `jj` of an
+    /// accumulator row must reproduce exactly the sequence the scalar loop performs for that
+    /// element - so any cross-lane reassociation, or a `mul_add` fusing the multiply and add into
+    /// one rounding, shows up here as differing bits rather than as a quietly better-or-worse
+    /// answer that `allclose` would wave through.
+    ///
+    /// Shapes include remainder rows and remainder columns so both scalar tail paths run.
+    #[test]
+    fn gemm_simd_kernel_is_bit_exact_vs_tiled() {
+        const MR: usize = super::PACKED_MR;
+        for &(m, k, n) in &[(4usize, 3usize, 8usize), (8, 5, 16), (9, 7, 19), (12, 33, 24)] {
+            let a: Vec<f64> = (0..m * k).map(|i| ((i * 37 % 101) as f64) - 50.5).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25).collect();
+            let mut want = vec![0.0f64; m * n];
+            let mut got = vec![0.0f64; m * n];
+            super::packed_gemm_serial_tiled::<MR>(&a, &b, m, k, n, &mut want);
+            super::packed_gemm_serial_tiled_simd::<MR>(&a, &b, m, k, n, &mut got);
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                want_bits, got_bits,
+                "SIMD micro-kernel diverged in BITS at m={m} k={k} n={n}"
+            );
+        }
     }
 
 }
