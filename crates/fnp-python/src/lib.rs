@@ -38607,6 +38607,128 @@ fn hstack(
     stack_helper_default(py, tup, StackHelperKind::Horizontal)
 }
 
+
+// Zero-copy 2-D histogram counting for f64 samples with precomputed edges
+// (`deadlock-audit-6y5wp`).
+//
+// THE INCUMBENT'S ALGORITHM, read from `numpy.histogramdd`:
+//     Ncount[i] = np.searchsorted(edges[i], sample[:, i], side='right')
+//     on_edge   = (sample[:, i] == edges[i][-1]); Ncount[i][on_edge] -= 1
+//     xy        = np.ravel_multi_index(Ncount, nbin)
+//     hist      = np.bincount(xy, weights, minlength=nbin.prod()).reshape(nbin)
+// then the outlier row/column at each end is trimmed away.
+//
+// That is four passes over n and THREE n-sized temporaries - two index arrays and the
+// ravelled key - before a single counting pass. Every one of them exists only to hand
+// work to the next vectorised primitive. Fused into one pass there are no temporaries at
+// all: each sample computes its two bin indices and increments one counter.
+//
+// SEMANTICS ARE COPIED EXACTLY, not approximated. `side='right'` means "number of edges
+// <= v", so `k = partition_point(|e| e <= v)`; a sample sitting exactly on the last edge
+// gets `k -= 1`, which is what makes the final bin closed on both sides; and the real bin
+// is `k - 1`, valid only for `1 <= k <= nbins`. Samples outside the range land in the
+// outlier slots NumPy trims, so here they are simply not counted - the observable result
+// is identical.
+//
+// NaN IS HANDLED BY THE SAME RULE, not by a special case: `e <= NaN` is false for every
+// edge, so `partition_point` yields 0, which fails `k >= 1` and is dropped. That matches
+// NumPy, whose searchsorted places NaN past the end and whose outlier trim then discards
+// it.
+//
+// Declines to NumPy on anything it does not cover, including a bin grid large enough that
+// the counter array would dominate the sample pass.
+fn try_zerocopy_f64_histogram2d(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    x: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+    xedges: &Bound<'_, PyAny>,
+    yedges: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    // A grid this size makes the counter array itself the cost; NumPy's bincount is
+    // better shaped for it. Bounded so a pathological `bins=` cannot allocate wildly.
+    const MAX_BINS_TOTAL: usize = 1 << 16;
+    for operand in [x, y, xedges, yedges] {
+        if !operand.is_exact_instance(cached_ndarray_type(py)?)
+            || !numpy_dtype_is_f64(py, operand)
+            || operand.getattr("ndim")?.extract::<usize>()? != 1
+            || !operand
+                .getattr("flags")?
+                .getattr("c_contiguous")?
+                .extract::<bool>()?
+        {
+            return Ok(None);
+        }
+    }
+    let (Ok(xb), Ok(yb), Ok(xeb), Ok(yeb)) = (
+        PyBuffer::<f64>::get(x),
+        PyBuffer::<f64>::get(y),
+        PyBuffer::<f64>::get(xedges),
+        PyBuffer::<f64>::get(yedges),
+    ) else {
+        return Ok(None);
+    };
+    let (Some(xs), Some(ys), Some(xe), Some(ye)) = (
+        xb.as_slice(py),
+        yb.as_slice(py),
+        xeb.as_slice(py),
+        yeb.as_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    if xs.len() != ys.len() || xe.len() < 2 || ye.len() < 2 {
+        return Ok(None);
+    }
+    let (nbx, nby) = (xe.len() - 1, ye.len() - 1);
+    if nbx.saturating_mul(nby) > MAX_BINS_TOTAL {
+        return Ok(None);
+    }
+
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and every operand is a
+    // read-only C-contiguous f64 ndarray held under the GIL.
+    let xv: &[f64] = unsafe { std::slice::from_raw_parts(xs.as_ptr().cast::<f64>(), xs.len()) };
+    let yv: &[f64] = unsafe { std::slice::from_raw_parts(ys.as_ptr().cast::<f64>(), ys.len()) };
+    let xed: &[f64] = unsafe { std::slice::from_raw_parts(xe.as_ptr().cast::<f64>(), xe.len()) };
+    let yed: &[f64] = unsafe { std::slice::from_raw_parts(ye.as_ptr().cast::<f64>(), ye.len()) };
+
+    let bin_of = |edges: &[f64], v: f64, nbins: usize| -> Option<usize> {
+        let mut k = edges.partition_point(|&e| e <= v);
+        if v == edges[edges.len() - 1] {
+            k -= 1;
+        }
+        if k >= 1 && k <= nbins { Some(k - 1) } else { None }
+    };
+
+    let mut counts = vec![0.0_f64; nbx * nby];
+    for (&xv_i, &yv_i) in xv.iter().zip(yv.iter()) {
+        if let Some(ix) = bin_of(xed, xv_i, nbx)
+            && let Some(iy) = bin_of(yed, yv_i, nby)
+        {
+            counts[ix * nby + iy] += 1.0;
+        }
+    }
+
+    // NumPy returns H as float64 (verified against the installed 2.4.3), so the counter is
+    // accumulated in f64 directly rather than counted in u64 and converted.
+    let shape = PyTuple::new(py, [nbx, nby])?;
+    let out = numpy.call_method1("empty", (&shape, cached_float64_dtype(py)?))?;
+    {
+        let Ok(ob) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(oc) = ob.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if oc.len() != counts.len() {
+            return Ok(None);
+        }
+        for (slot, value) in oc.iter().zip(counts.iter()) {
+            slot.set(*value);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 // Zero-copy column_stack / dstack: both are a per-input reshape (adding a trailing or
 // leading singleton axis) followed by a concatenate, so once the inputs are reshaped
 // (a view for contiguous data) the now-fast all-dtype concatenate does the work.
@@ -107941,6 +108063,65 @@ fn histogram2d(
     if let Some(result) = histogram2d_native(py, args, kwargs)? {
         return Ok(result);
     }
+
+    // THE `range=` CASE, which the native path above declines (`deadlock-audit-6y5wp`).
+    // `histogram2d_native` derives its edges from the data, so supplying `range=` - the
+    // usual way to pin a histogram's extent across frames - dropped the whole call back to
+    // NumPy. This covers it without touching that kernel.
+    //
+    // THE EDGES ARE NOT COMPUTED HERE, DELIBERATELY. Bin-edge derivation is the delicate
+    // half: outer-edge widening for degenerate ranges, and a linspace that must land on
+    // the same floats NumPy chose. Reproducing it invites disagreement in the last ULP, so
+    // `histogram_bin_edges` is asked for exactly the edges NumPy would use and only the
+    // O(n) counting is ours.
+    //
+    // Weights and density change WHAT is accumulated, not just how fast, so any keyword
+    // beyond `bins`/`range` falls through untouched.
+    if args.len() == 2
+        && kwargs.is_some_and(|kw| {
+            kw.keys().iter().all(|k| {
+                matches!(k.extract::<String>().as_deref(), Ok("bins") | Ok("range"))
+            })
+        })
+        && let Ok(x) = args.get_item(0)
+        && let Ok(y) = args.get_item(1)
+    {
+        let numpy = cached_numpy(py)?;
+        let kw = kwargs.expect("guarded by is_some_and above");
+        let bins = kw.get_item("bins").ok().flatten();
+        let range_arg = kw.get_item("range").ok().flatten();
+        let counts: Option<(usize, usize)> = match bins.as_ref() {
+            None => Some((10, 10)),
+            Some(b) => {
+                if let Ok(n) = b.extract::<usize>() {
+                    Some((n, n))
+                } else {
+                    b.extract::<(usize, usize)>().ok()
+                }
+            }
+        };
+        if let Some((nx, ny)) = counts {
+            let per_dim =
+                |index: usize, n: usize, sample: &Bound<'_, PyAny>| -> PyResult<Py<PyAny>> {
+                    let ekw = PyDict::new(py);
+                    ekw.set_item("bins", n)?;
+                    if let Some(r) = range_arg.as_ref()
+                        && let Ok(item) = r.get_item(index)
+                    {
+                        ekw.set_item("range", item)?;
+                    }
+                    Ok(numpy
+                        .call_method("histogram_bin_edges", (sample,), Some(&ekw))?
+                        .unbind())
+                };
+            if let (Ok(xe), Ok(ye)) = (per_dim(0, nx, &x), per_dim(1, ny, &y))
+                && let Some(hist) =
+                    try_zerocopy_f64_histogram2d(py, numpy, &x, &y, xe.bind(py), ye.bind(py))?
+            {
+                return Ok(PyTuple::new(py, [hist, xe, ye])?.unbind().into_any());
+            }
+        }
+    }
     core_numpy_passthrough(py, "histogram2d", args, kwargs)
 }
 
@@ -123373,6 +123554,89 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// `histogram2d` with an explicit `range=` must match NumPy exactly, including the
+    /// boundary rules that make a histogram a histogram (`deadlock-audit-6y5wp`).
+    ///
+    /// The native path declines when `range=` is supplied, so this case fell back to NumPy
+    /// entirely. The new route computes the counting itself, which means it now owns three
+    /// rules that are easy to get subtly wrong and that no shape assertion would catch:
+    ///
+    ///   1. THE LAST BIN IS CLOSED ON BOTH SIDES. A sample exactly on the final edge
+    ///      belongs to the last bin, not to an overflow bin. `edge_hits` places points on
+    ///      every edge, including both extremes.
+    ///   2. OUT-OF-RANGE SAMPLES ARE DROPPED, not clamped into the end bins - clamping
+    ///      would still produce a plausible histogram whose total is simply wrong, so the
+    ///      totals are asserted too.
+    ///   3. NaN IS DROPPED. It reaches the same code path as an out-of-range value only
+    ///      because `edge <= NaN` is false for every edge; a comparison written the other
+    ///      way round would silently bucket it.
+    #[test]
+    fn histogram2d_with_explicit_range_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_hist2d")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("histogram2d")?;
+            let theirs = numpy.getattr("histogram2d")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(7)\n\
+                  x = rng.standard_normal(10000)\n\
+                  y = rng.standard_normal(10000)\n\
+                  edge_hits_x = np.array([0.0, 0.5, 1.0, 1.5, 2.0, -3.0, 5.0, np.nan])\n\
+                  edge_hits_y = np.array([0.0, 2.0, 1.0, 0.5, 1.5, 1.0, 1.0, 1.0])\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| locals.get_item(k).expect("hist2d fixture");
+
+            // (x, y, bins, range) - the last case is the boundary/outlier/NaN fixture on a
+            // range whose edges land exactly on the sample values.
+            let cases: &[(&str, &str, &str, &str)] = &[
+                ("x", "y", "8", "[[-2.0, 2.0], [-2.0, 2.0]]"),
+                ("x", "y", "(5, 9)", "[[-1.0, 1.0], [-3.0, 3.0]]"),
+                ("edge_hits_x", "edge_hits_y", "4", "[[0.0, 2.0], [0.0, 2.0]]"),
+            ];
+            for (xs, ys, bins, rng_expr) in cases.iter() {
+                let kw = PyDict::new(py);
+                let code = std::ffi::CString::new(format!("__b = {bins}\n__r = {rng_expr}\n"))
+                    .expect("fixture code");
+                py.run(code.as_c_str(), Some(&locals), Some(&locals))?;
+                kw.set_item("bins", locals.get_item("__b").expect("bins"))?;
+                kw.set_item("range", locals.get_item("__r").expect("range"))?;
+
+                let mine = ours.call((g(xs), g(ys)), Some(&kw))?;
+                let theirs_out = theirs.call((g(xs), g(ys)), Some(&kw))?;
+                for (index, what) in [(0usize, "H"), (1, "xedges"), (2, "yedges")] {
+                    let a = mine.get_item(index)?;
+                    let b = theirs_out.get_item(index)?;
+                    assert_eq!(
+                        a.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        b.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "{what} diverged from numpy for bins={bins} range={rng_expr}"
+                    );
+                }
+                // Totals catch clamping: a clamped out-of-range sample keeps the shape and
+                // the edges identical and only moves counts around.
+                let sum_of = |o: &Bound<'_, PyAny>| -> PyResult<f64> {
+                    o.get_item(0)?.call_method0("sum")?.extract::<f64>()
+                };
+                assert_eq!(
+                    sum_of(&mine)?,
+                    sum_of(&theirs_out)?,
+                    "total count diverged for bins={bins} range={rng_expr} - out-of-range \
+                     or NaN samples are being counted instead of dropped"
+                );
+            }
             Ok(())
         });
     }
