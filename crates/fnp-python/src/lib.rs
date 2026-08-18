@@ -94662,12 +94662,12 @@ fn einsum_kwargs_are_native_eligible(kwargs: Option<&Bound<'_, PyDict>>) -> PyRe
 }
 
 fn is_exact_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    static NUMPY_NDARRAY_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-    let ndarray_type = NUMPY_NDARRAY_TYPE.get_or_try_init(py, || -> PyResult<Py<PyType>> {
-        let ty = py.import("numpy")?.getattr("ndarray")?;
-        Ok(ty.cast_into::<PyType>()?.unbind())
-    })?;
-    Ok(value.get_type().is(ndarray_type.bind(py)))
+    // ONE cache for this type object, not two (`deadlock-audit-c5ecm`). This function used to
+    // hold its OWN `PyOnceLock<Py<PyType>>`, and `cached_ndarray_type` was later added holding
+    // the same object for the probe guards - two statics, one immutable type. Harmless but
+    // redundant, and a second cache is a second thing to reason about when someone asks whether
+    // the handle can go stale. Both now read the same `PyOnceLock`.
+    Ok(value.get_type().is(cached_ndarray_type(py)?))
 }
 
 fn build_f64_scalar(py: Python<'_>, value: f64) -> PyResult<Py<PyAny>> {
