@@ -106497,7 +106497,89 @@ fn issubdtype(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && args.len() == 2
+        && let (Ok(arg1), Ok(arg2)) = (args.get_item(0), args.get_item(1))
+    {
+        return native_issubdtype(py, &arg1, &arg2);
+    }
     core_numpy_passthrough(py, "issubdtype", args, kwargs)
+}
+
+/// `numpy.generic`, the base of every numpy scalar type, cached for the process.
+fn cached_numpy_generic(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static NUMPY_GENERIC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(NUMPY_GENERIC
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "generic"))?.unbind())
+        })?
+        .bind(py))
+}
+
+/// The builtin `issubclass`, cached so the two normalisation tests and the final comparison
+/// do not re-resolve it from `builtins` on every call.
+fn cached_issubclass(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static ISSUBCLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(ISSUBCLASS
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(py
+                .import("builtins")?
+                .getattr(intern!(py, "issubclass"))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
+/// `np.issubdtype(arg1, arg2)`; the incumbent is five lines of Python behind a Python call.
+///
+/// Its shape is: normalise each operand to a numpy SCALAR TYPE, then `issubclass`. An
+/// operand that is already a `np.generic` subclass is used as-is; anything else - a string,
+/// a `dtype` object, a Python builtin type - goes through `np.dtype(x).type`.
+///
+/// `numpy.issubclass_` IS NOT `issubclass`: it swallows the `TypeError` that `issubclass`
+/// raises when its first argument is not a class at all, and returns False, which is what
+/// routes a string or a `dtype` instance down the `np.dtype(...)` branch. Calling
+/// `issubclass` directly here without first testing that the operand IS a class would raise
+/// where numpy quietly normalises - so the cast to a type object is the guard, not an
+/// optimisation.
+///
+/// TWO THINGS THAT LOOK LIKE THEY SHOULD BE SPECIAL AND ARE NOT: `float` and `int` are
+/// classes, but NOT `np.generic` subclasses, so they take the `dtype` branch and become
+/// `np.float64`/`np.int64` - `issubdtype(float, np.floating)` is True by that route, not by
+/// a special case. And `np.bool_` is NOT a subclass of `np.integer`, so
+/// `issubdtype(np.bool_, np.integer)` is False.
+///
+/// A bad dtype spelling raises here exactly as it does there, because it is the SAME
+/// `np.dtype()` call that raises - `issubdtype('bad_name', np.floating)` is a `TypeError`
+/// either way, with numpy's own message.
+fn native_issubdtype(
+    py: Python<'_>,
+    arg1: &Bound<'_, PyAny>,
+    arg2: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = cached_numpy(py)?;
+    let generic = cached_numpy_generic(py)?;
+    let issubclass = cached_issubclass(py)?;
+
+    let as_scalar_type = |arg: &Bound<'_, PyAny>| -> PyResult<Bound<'_, PyAny>> {
+        // `cast_into` succeeding IS the "is it a class" test that `issubclass_` performs by
+        // catching TypeError.
+        if arg.clone().cast_into::<PyType>().is_ok()
+            && issubclass
+                .call1((arg, generic))?
+                .extract::<bool>()
+                .unwrap_or(false)
+        {
+            return Ok(arg.clone());
+        }
+        numpy
+            .call_method1(intern!(py, "dtype"), (arg,))?
+            .getattr(intern!(py, "type"))
+    };
+
+    let scalar1 = as_scalar_type(arg1)?;
+    let scalar2 = as_scalar_type(arg2)?;
+    Ok(issubclass.call1((scalar1, scalar2))?.unbind())
 }
 
 #[pyfunction]
@@ -126067,6 +126149,110 @@ mod tests {
                 "isfortran of a list must raise AttributeError, as numpy does - a list has \
                  no `.flags` at all"
             );
+            Ok(())
+        });
+    }
+
+    /// `np.issubdtype` must match NumPy across every way an operand can be spelled
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// The incumbent normalises each operand to a numpy SCALAR TYPE and then calls
+    /// `issubclass`. The subtlety is that it normalises with `numpy.issubclass_`, which is
+    /// NOT `issubclass`: it swallows the `TypeError` that `issubclass` raises when its first
+    /// argument is not a class, and returns False. That swallowed error is exactly what
+    /// routes a string, or a `dtype` instance, down the `np.dtype(...)` branch. Calling
+    /// `issubclass` directly without first checking the operand is a class would raise where
+    /// numpy quietly normalises, so the class test is a correctness guard.
+    ///
+    /// TWO CASES THAT LOOK SPECIAL AND ARE NOT, both asserted below:
+    ///   - `float` and `int` are classes but NOT `np.generic` subclasses, so they take the
+    ///     `dtype` branch. `issubdtype(float, np.floating)` is True by normalisation, not by
+    ///     a special case - an implementation that only handled numpy types would miss it.
+    ///   - `np.bool_` is NOT a subclass of `np.integer`, so `issubdtype(np.bool_, np.integer)`
+    ///     is FALSE. A "bool is an int" assumption gets this backwards.
+    #[test]
+    fn issubdtype_matches_numpy_for_every_operand_spelling() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_issubdtype")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("issubdtype")?;
+            let theirs = numpy.getattr("issubdtype")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"pairs = [\n\
+                      (np.float64, np.floating), (np.float32, np.floating),\n\
+                      (np.int64, np.integer), (np.int64, np.signedinteger),\n\
+                      (np.uint8, np.unsignedinteger), (np.bool_, np.integer),\n\
+                      ('float64', np.floating), ('int32', np.integer),\n\
+                      (np.dtype('f8'), np.floating), (np.dtype('M8[D]'), np.datetime64),\n\
+                      (float, np.floating), (int, np.integer),\n\
+                      (np.complex128, np.complexfloating), (np.str_, np.character),\n\
+                      (np.datetime64, np.generic), (np.float64, np.generic),\n\
+                      (np.floating, np.floating), (np.integer, np.number),\n\
+                      ('S5', np.bytes_), (np.void, np.generic),\n\
+                      (np.float64, np.number), (np.int8, np.floating),\n\
+                      (np.float64, np.integer), ('u1', 'u1'),\n\
+                      # `np.dtype(None)` IS float64 - None is a dtype spelling, not an\n\
+                      # error - so this is True, and belongs here rather than in `bad`.\n\
+                      (None, np.floating),\n\
+                  ]\n\
+                  bad = ['bad_dtype_name', 5, 3.7, [1, 2]]\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let pairs = locals
+                .get_item("pairs")
+                .expect("fixture lookup failed")
+                .expect("pairs missing");
+            let bad = locals
+                .get_item("bad")
+                .expect("fixture lookup failed")
+                .expect("bad missing");
+
+            for index in 0..pairs.len()? {
+                let pair = pairs.get_item(index)?;
+                let (a, b) = (pair.get_item(0)?, pair.get_item(1)?);
+                assert_eq!(
+                    ours.call1((&a, &b))?.extract::<bool>()?,
+                    theirs.call1((&a, &b))?.extract::<bool>()?,
+                    "issubdtype pair {index} diverged from numpy"
+                );
+            }
+
+            // The two that a plausible implementation gets wrong, spelled out.
+            assert!(
+                ours.call1((numpy.getattr("float64")?, numpy.getattr("floating")?))?
+                    .extract::<bool>()?,
+                "np.float64 is a np.floating"
+            );
+            assert!(
+                !ours
+                    .call1((numpy.getattr("bool_")?, numpy.getattr("integer")?))?
+                    .extract::<bool>()?,
+                "np.bool_ is NOT a np.integer - a 'bool is an int' assumption gets this \
+                 backwards"
+            );
+
+            // A bad spelling must raise, and with numpy's own message, because it is the
+            // SAME `np.dtype()` call that raises in both.
+            for index in 0..bad.len()? {
+                let value = bad.get_item(index)?;
+                let floating = numpy.getattr("floating")?;
+                assert!(
+                    theirs.call1((&value, &floating)).is_err(),
+                    "fixture bad[{index}] is supposed to be un-dtype-able"
+                );
+                assert!(
+                    ours.call1((&value, &floating)).is_err(),
+                    "an operand numpy cannot interpret as a dtype must raise here too"
+                );
+            }
             Ok(())
         });
     }
