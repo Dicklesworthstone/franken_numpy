@@ -55885,3 +55885,55 @@ is not a spread estimate on this route. The register-pressure hypothesis from th
 is unaffected and remains the live lever. The fused ns/ratio inconsistency should be resolved by
 re-deriving that row, not by picking whichever column suits.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — the "0 to 16" bound TIGHTENS TO A PROVEN ZERO: my earlier call-graph walk matched inside COMMENTS and on METHOD names, inflating the reachable set 2.4x (deadlock-audit-c5ecm)
+
+**Result class:** an interval I published replaced by a proven value, after finding the defect that
+made it an interval. Source reading only — build freeze in force, /data 38G against a 42G brake.
+
+I recorded that "between 0 and 16 of the 220 remaining binding sites can execute on the two measured
+cells, and the observed count is 0", deliberately refusing to collapse a weak upper bound into the
+observed zero. Good instinct, bad upper bound: **the 16 was an artefact of my own walk.**
+
+Tracing the paths that produced it:
+
+```
+  copy                    argsort -> ..._argsort_lastaxis -> any -> build_numpy_array_from_ufunc -> copy
+                          matched line: "// values), then `.copy(order='F')` to get an F-contig..."
+                          ^ MATCHED INSIDE A COMMENT
+  try_zerocopy_f64_take   argsort -> ..._argsort_lastaxis -> extract -> ... -> take -> try_zerocopy_f64_take
+                          ^ routed through `extract`, which is PyO3's `.extract()` METHOD, not a free fn
+  try_zerocopy_int_unique argsort -> try_native_struct_argsort_valuelex -> unique -> try_zerocopy_int_unique
+```
+
+Two of three sampled edges were spurious. My regex was `\b([a-z_][a-z0-9_]*)\(` over raw source: it
+matches call-shaped text in comments, and cannot distinguish a free function from a method with the
+same name (`.copy(`, `.extract(`, `.take(`).
+
+### The sound walk
+
+Comments stripped, method/path calls excluded (`(?<![\w.:])`), closure run to FIXPOINT rather than a
+depth cap:
+
+```
+  functions genuinely reachable from argsort + sort        94   (was 228 - inflated 2.4x)
+  of those, holders of a remaining binding site             0
+```
+
+**So the answer is zero, by a structural argument rather than by absence of profile samples.** The
+two methods now agree, and crucially they agree for independent reasons: the profile saw none
+(weak alone — absence of samples is not absence of execution, as I had to retract earlier today),
+and the call graph contains none (strong — a function not reachable cannot run).
+
+That closes the scoping question properly: **none of the 220 remaining binding sites can execute on
+either measured cell**, so the deprioritisation recorded earlier stands on proof rather than on
+observation. It also means the earlier row's careful "0 to 16" hedge was hedging against my own bug,
+not against real uncertainty — the right fix was to debug the bound, not to widen the claim.
+
+COUNTED_MECHANISM: sound reachability closure from `argsort` and `sort` over comment-stripped source
+with method calls excluded: 94 functions reachable, 0 of them holding a binding-shape site; the prior
+over-inclusive walk reported 228 and 16.
+A/A NULL CONTROLS: not applicable - static analysis.
+RETRY PREDICATE: none. Reusable note: a call-graph walk over Rust source MUST strip comments and
+exclude `.method(` forms, or it will invent edges. Mine invented enough to turn a zero into a 16.
+AGENT_NAME=SlateFinch.
