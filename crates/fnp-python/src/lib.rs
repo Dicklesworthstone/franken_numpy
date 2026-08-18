@@ -106517,6 +106517,26 @@ fn isfortran(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // `np.isfortran` is `return a.flags.fnc` behind a Python function; the native route is
+    // the same two attribute reads without the call.
+    //
+    // `fnc` IS NOT `f_contiguous`. It is Fortran-contiguous AND NOT C-contiguous, which is
+    // why `isfortran` of any 1-d array is False even though its `f_contiguous` flag is True
+    // - a 1-d array is both. Reading `f_contiguous` here, which is the obvious shortcut,
+    // would report True for every 1-d, 0-d and empty array. Read off the incumbent.
+    //
+    // Only an exact `ndarray`: a list or an int has no `.flags` at all and raises
+    // `AttributeError` there, and a subclass is left to numpy so its own `flags` is used.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && args.len() == 1
+        && let Ok(a) = args.get_item(0)
+        && a.is_exact_instance(cached_ndarray_type(py)?)
+    {
+        return Ok(a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "fnc"))?
+            .unbind());
+    }
     core_numpy_passthrough(py, "isfortran", args, kwargs)
 }
 
@@ -108409,6 +108429,20 @@ fn shape(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // `np.shape` is `try: a.shape / except AttributeError: asarray(a).shape`, behind an
+    // `@array_function_dispatch` wrapper. For an array the answer IS the attribute, so the
+    // native route is the attribute read and nothing else.
+    //
+    // Anything without a `.shape` - a list, an int, a string - takes numpy's `asarray`
+    // branch and is left to it. A subclass is left to it too, so whatever `.shape` that
+    // subclass defines is the one that answers.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && args.len() == 1
+        && let Ok(a) = args.get_item(0)
+        && a.is_exact_instance(cached_ndarray_type(py)?)
+    {
+        return Ok(a.getattr(intern!(py, "shape"))?.unbind());
+    }
     core_numpy_passthrough(py, "shape", args, kwargs)
 }
 
@@ -125977,6 +126011,61 @@ mod tests {
                 pair.len()?,
                 2,
                 "atleast_1d of two operands must still return a 2-tuple via numpy"
+            );
+
+            // `np.isfortran` and `np.shape` share this fixture set, so they are checked here
+            // rather than in a test that would rebuild the same ten arrays.
+            //
+            // `isfortran` IS NOT `f_contiguous`. It is `flags.fnc` - Fortran-contiguous AND
+            // NOT C-contiguous - so it is False for every 1-d, 0-d and empty array even
+            // though their `f_contiguous` flag is True, because those are BOTH. The obvious
+            // shortcut gets all of `a1`, `s1`, `z` and `e1` wrong, which is why the fixture
+            // list deliberately carries a Fortran-order array AND several both-contiguous
+            // ones rather than just a C-order/F-order pair.
+            let ours_isf = module.getattr("isfortran")?;
+            let theirs_isf = numpy.getattr("isfortran")?;
+            let ours_shape = module.getattr("shape")?;
+            let theirs_shape = numpy.getattr("shape")?;
+            for fixture in fixtures {
+                let arg = g(fixture);
+                assert_eq!(
+                    ours_isf.call1((&arg,))?.extract::<bool>()?,
+                    theirs_isf.call1((&arg,))?.extract::<bool>()?,
+                    "isfortran({fixture}) diverged from numpy - `fnc` is f_contiguous AND \
+                     NOT c_contiguous, not f_contiguous alone"
+                );
+                assert_eq!(
+                    ours_shape.call1((&arg,))?.extract::<Vec<usize>>()?,
+                    theirs_shape.call1((&arg,))?.extract::<Vec<usize>>()?,
+                    "shape({fixture}) diverged from numpy"
+                );
+            }
+            // The one that pins the rule: a Fortran-order 2-d is True, and a 1-d - which is
+            // ALSO f_contiguous - is False.
+            assert!(
+                ours_isf.call1((g("f2"),))?.extract::<bool>()?,
+                "a Fortran-order 2-d array must be True"
+            );
+            assert!(
+                !ours_isf.call1((g("a1"),))?.extract::<bool>()?,
+                "a 1-d array must be False despite f_contiguous being True - it is BOTH \
+                 contiguous, and `fnc` excludes C-contiguous"
+            );
+
+            // Inputs without `.flags` raise there, and inputs without `.shape` take numpy's
+            // `asarray` branch; both must reach numpy rather than being answered here.
+            for fixture in ["lst", "masked"] {
+                let arg = g(fixture);
+                assert_eq!(
+                    ours_shape.call1((&arg,))?.extract::<Vec<usize>>()?,
+                    theirs_shape.call1((&arg,))?.extract::<Vec<usize>>()?,
+                    "shape({fixture}) must still match numpy through the passthrough"
+                );
+            }
+            assert!(
+                ours_isf.call1((g("lst"),)).is_err(),
+                "isfortran of a list must raise AttributeError, as numpy does - a list has \
+                 no `.flags` at all"
             );
             Ok(())
         });
