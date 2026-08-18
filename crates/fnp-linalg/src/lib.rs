@@ -8239,12 +8239,35 @@ fn packed_sub_assign_tile_rows(k: usize) -> usize {
 }
 
 fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
+    // A-PACKING GATE, and the threshold is DERIVED rather than picked (`franken_numpy-ixs5y`).
+    //
+    // The unpacked kernel reads `a` in place, so it re-streams the whole of `a` once per column
+    // panel: `panels = n_full / PACKED_NR` times. Packing costs about two passes over `a` - the
+    // allocation's zero-fill and the copy - and then makes every panel's reads contiguous.
+    //
+    // So packing pays when `panels - 1 > 2`, i.e. from `panels >= 3`, which is `n_full >= 3 *
+    // PACKED_NR` = 24 columns. That is arithmetic on pass counts, not a tuned constant: below it
+    // the copy cannot be amortised and the unpacked kernel is the right call. The bound is
+    // CONSERVATIVE, because it counts only the number of passes and ignores that the packed reads
+    // are contiguous where the unpacked ones stride by `k`.
+    //
+    // Bit-exactness is not at stake either way: `packed_apack_is_bit_exact_vs_tiled` pins the two
+    // kernels to identical bits, so this gate chooses between two implementations of the same
+    // function, never between two answers.
+    //
+    // UNMEASURED. The arithmetic justifies the gate's EXISTENCE and its shape; the exact
+    // crossover deserves a measurement, and until then the conservative side is the unpacked
+    // kernel, which is what every caller got before.
+    let n_full = n - n % PACKED_NR;
+    let pack_a_pays = n_full >= 3 * PACKED_NR;
+
     // Tile height is chosen once per call, then the body is monomorphized for
     // that height so the register tile stays a compile-time-sized array.
-    if packed_tile_rows() == PACKED_MR_NARROW {
-        packed_gemm_serial_tiled::<PACKED_MR_NARROW>(a, b, m, k, n, out);
-    } else {
-        packed_gemm_serial_tiled::<PACKED_MR>(a, b, m, k, n, out);
+    match (packed_tile_rows() == PACKED_MR_NARROW, pack_a_pays) {
+        (true, false) => packed_gemm_serial_tiled::<PACKED_MR_NARROW>(a, b, m, k, n, out),
+        (true, true) => packed_gemm_serial_tiled_apacked::<PACKED_MR_NARROW>(a, b, m, k, n, out),
+        (false, false) => packed_gemm_serial_tiled::<PACKED_MR>(a, b, m, k, n, out),
+        (false, true) => packed_gemm_serial_tiled_apacked::<PACKED_MR>(a, b, m, k, n, out),
     }
 }
 
@@ -22184,7 +22207,16 @@ except Exception as exc:
     /// one column block so the `nc` loop iterates more than once.
     #[test]
     fn packed_apack_is_bit_exact_vs_tiled() {
-        const MR: usize = super::PACKED_MR;
+        // BOTH tile heights, because both are LIVE. `packed_tile_rows()` returns
+        // `PACKED_MR_NARROW` on avx512f hosts and `PACKED_MR` elsewhere, and
+        // `packed_gemm_serial` now dispatches the A-packed kernel at either width. Testing only
+        // `PACKED_MR` would leave the narrow instantiation - the one that runs on the fleet's
+        // AVX-512 machine - unpinned, which is exactly the gap wiring this kernel opened.
+        packed_apack_bit_exact_at::<{ super::PACKED_MR }>();
+        packed_apack_bit_exact_at::<{ super::PACKED_MR_NARROW }>();
+    }
+
+    fn packed_apack_bit_exact_at<const MR: usize>() {
         for &(m, k, n) in &[(4, 3, 8), (8, 5, 16), (9, 7, 19), (12, 33, 24), (5, 2, 9)] {
             let a: Vec<f64> = (0..m * k)
                 .map(|i| ((i * 37 % 101) as f64) - 50.5)
@@ -22200,7 +22232,7 @@ except Exception as exc:
             let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
             assert_eq!(
                 want_bits, got_bits,
-                "A-packed kernel diverged in BITS at m={m} k={k} n={n}"
+                "A-packed kernel diverged in BITS at m={m} k={k} n={n} MR={MR}"
             );
         }
     }
