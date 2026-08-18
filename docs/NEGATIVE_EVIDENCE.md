@@ -55824,3 +55824,64 @@ RETRY PREDICATE: none for the measurement. For the bead: re-scope `v46rn` agains
 close it - and if anyone wants the credit assignment for the 15x, that is a bisect across
 2026-08-16..18, not an inference.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — `6y5wp`'s premise is NOT stale (unlike `v46rn`'s), and I nearly banked the opposite off ONE run: two runs of one ELF gave DISJOINT CIs, and five runs put the banked figure inside the range — plus the banked row's fused line is internally INCONSISTENT (deadlock-audit-6y5wp)
+
+**Result class:** a staleness hypothesis tested and NOT confirmed, after a single-run result that
+would have confirmed it. Build-free, group already compiled into a preserved ELF. /data 47G, load
+4.8-6.5, idle 88-93%, CPU_WITNESS same_core=true arms at 4288.8-4289.0 MHz.
+
+`v46rn`'s floor moved 15x in two days, so I checked whether `6y5wp`'s divide figures had moved too.
+**Run 1 said yes** — accumulate-free ratio 0.867887 against a banked 0.790499, which reads as the
+kernel deficit shrinking from 1.2652x to 1.1523x. **Run 2 of the SAME ELF said 0.783909**, and its
+CI [0.724471, 0.833833] is DISJOINT from run 1's [0.851628, 0.894449].
+
+Five runs, one ELF:
+
+```
+  accumulate-FREE ratio   0.8679  0.7839  0.7915  0.8903  0.8385
+    median 0.8385   min 0.7839   max 0.8903   spread 12.7%   stdev 0.0416
+    as x-slower: median 1.1926x, range 1.1232x - 1.2757x
+
+  FUSED ratio             0.7556  0.6769  0.7226  0.7238  0.7335
+    median 0.7238   spread 10.9%   stdev 0.0257    as x-slower 1.3817x
+
+  BANKED accumulate-free 0.790499, ci95 [0.776663, 0.801489] -> 1.2650x
+    inside the 5-run range?  YES (at its pessimistic edge)
+    banked CI half-width 0.0124  vs  BETWEEN-RUN stdev 0.0416  ->  3.4x WIDER
+```
+
+**So the premise stands.** The banked 1.2652x sits inside the run-to-run range; the 5-run median is
+1.1926x, modestly better but not decidably so. This matters as a counterexample: `v46rn`'s staleness
+was real and specific (15x, unambiguous), NOT evidence that every 08-16 number has drifted. I went
+looking for a second stale premise and did not find one.
+
+**And I would have published the opposite on one run.** The route's single-run CI understates its own
+between-run spread by 3.4x — a direct replication of the standing warning for this exact route, which
+I had to rediscover by nearly violating it. All five runs agree on the SIGN (both arms regress); only
+the magnitude is unstable.
+
+### A defect in the banked row itself
+
+```
+  banked: numpy 354,387 ns | accumulate-free 448,374 ns | fused 544,772 ns
+    accumulate-free  stated 1.2652x / ratio 0.790499   -> computed 1.2652x / 0.790383   CONSISTENT
+    fused            stated 1.5372x / ratio 0.764919   -> computed 1.5372x / 0.650524   INCONSISTENT
+```
+
+The fused line's stated ratio implies ours = 463,300 ns, not the 544,772 ns printed beside it. The ns
+column and the ratio column cannot both be right, so a reader cannot tell which to trust. My 5-run
+fused median (0.7238) is nearer the STATED ratio (0.7649) than the ns-implied one (0.6505), which
+suggests the ratio is the measured quantity and the ns column came from a different arm or run.
+**Anyone quoting "1.5372x fused" should treat it as unverified until that row is re-derived.**
+
+COUNTED_MECHANISM: 5 runs of one ELF, accumulate-free ratio median 0.8385 (stdev 0.0416, spread
+12.7%), fused median 0.7238 (stdev 0.0257); banked single-run CI half-width 0.0124, i.e. 3.4x
+narrower than the between-run stdev; sign consistent 5/5 in both arms.
+A/A NULL CONTROLS: the group's own dual-null contract ran each time; both rows returned
+DECIDABLE_REGRESSION on every run.
+RETRY PREDICATE: 6y5wp keeps its premise but its NUMBERS need >=5 runs to quote - the single-run CI
+is not a spread estimate on this route. The register-pressure hypothesis from the disassembly census
+is unaffected and remains the live lever. The fused ns/ratio inconsistency should be resolved by
+re-deriving that row, not by picking whichever column suits.
+AGENT_NAME=SlateFinch.
