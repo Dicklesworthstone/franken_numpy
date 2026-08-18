@@ -56242,3 +56242,54 @@ RETRY PREDICATE: unchanged - convert ONE hot site (`asarray` on searchsorted's c
 under the dual-null contract before any sweep. The premise is now verified, so that measurement tests
 the SIZE of the effect and no longer has to establish that an effect exists at all.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — LEDGER CORRECTION: my blast-radius audit reached the RIGHT answer through an UNSOUND filter — the sound test finds 4 signature-bearing rows, and 3 are safe because they quote DIFFERENCES (deadlock-audit-c5ecm)
+
+**Result class:** correcting the method behind a conclusion that survives. Source/ledger reading only,
+build freeze in force. /data 32-34G against a 42G brake.
+
+I concluded "exactly TWO banked rows are exposed" to the startup-floor flaw. The conclusion holds. The
+filter that produced it does not: I matched ratios with `\d\.\d{3}x`, three decimal places, so a row
+writing `1.32x` or a bare `ratio=0.7649` would have been invisible to it. A looser pattern surfaces
+**11** candidate rows, not 2 — my filter was 5.5x too narrow and I got the right answer by luck.
+
+### The sound test, and it is a two-stage one
+
+Exposure requires BOTH a whole-process total divided by the call count AND a ratio taken from it. So:
+
+```
+  stage 1 - rows using the whole-process/400k signature                        4
+  stage 2 - of those, do they quote a RATIO (exposed) or a DIFFERENCE (safe)?
+
+    2026-08-16  I CORRECT MY OWN COUNTED ATTRIBUTION        "excess insns/call", "delta/call"   SAFE
+    2026-08-16  my registered prediction was WRONG BY 5-8x  "counted excesses over NumPy, not
+                                                             wall-clock ratios ... No wall-clock
+                                                             ratio is claimed"                  SAFE
+    2026-08-18  ONE CPython ATTRIBUTE ENTRY COSTS 201.7     a difference of two arms             SAFE
+    2026-08-18  CORRECTION OF YESTERDAY'S CORRECTION        the correction row itself             --
+```
+
+**A difference cancels the floor exactly**, which is why all three survive. The 11 rows the loose
+pattern flagged resolve the same way on inspection: one of them explicitly "subtracts a measured empty
+loop (0.59 ns/iteration)" — in-process replicas, the correct method, with a floor three orders of
+magnitude below the whole-process one — and another states its number "should be read as an
+attribution, not as a competitive ratio."
+
+### The part worth keeping
+
+**Every earlier agent's row that used these probes quoted EXCESSES and explicitly disclaimed ratios.**
+One of them wrote "No wall-clock ratio is claimed" in its own COUNTED_MECHANISM. They had the
+discipline the flaw punishes; taking ratios off whole-process totals was a novel error of mine, not a
+campaign-wide one. My earlier row said "both are mine" almost in passing — that was the substantive
+finding and I under-sold it.
+
+Durable form of the test, for anyone auditing this class again: **stage 1, does the row divide a
+whole-process total by a call count; stage 2, does it then take a RATIO.** Both, or it is not exposed.
+Pattern-matching on ratio formatting tests neither.
+
+COUNTED_MECHANISM: none - audit-method correction. Stage-1 signature matches 4 rows; stage-2
+inspection leaves 0 newly exposed.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: none. The exposed set is unchanged at the two rows already corrected; the audit that
+established it is now reproducible instead of lucky.
+AGENT_NAME=SlateFinch.
