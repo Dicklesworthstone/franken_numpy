@@ -54899,3 +54899,67 @@ worker — **2 passed, 0 failed, 0 filtered, exit 0** in 85.51s. The suite has e
 functions, so that is the whole suite, not a partial run (checked against the source rather than
 assumed from the count). Tier validation is therefore **124 tests, 0 failures, all 11 suites
 complete**. The retry predicate's item (1) is discharged.
+
+## 2026-08-18 — the INLINE shape swept file-wide: 136 sites, plus 9 dead `py.import("numpy")` calls DELETED and 4 dead parameters removed; clippy 326, two below baseline; 159 tests green (deadlock-audit-c5ecm)
+
+**Result class:** a bounded file-wide sweep of the ONE shape whose per-site cost is replicated,
+with the unmeasured shape deliberately left alone.
+
+The split is the point. Of the 405 remaining occurrences:
+
+```
+  inline   `&numpy.getattr("ndarray")?`   138   <- SWEPT (136 converted, 2 lack `py`)
+  binding  `let X = numpy.getattr(..)?;`  220   <- LEFT ALONE, cost NOT measured
+  other shapes                             28   <- LEFT ALONE
+  no `py` in scope                          3
+  in comments                              18
+```
+
+The inline shape is exactly what both counted rows measured (argsort 1,360.9/site, sort
+1,456.0/site, independent and 6.8% apart). The binding shape needs a `.clone()` and has never been
+priced, so sweeping it would be converting on faith. It stays until someone measures it.
+
+### Two things fell out that are worth more than the warning fix
+
+**9 dead `let numpy = py.import("numpy")?;` bindings deleted.** Once the conversion removed their
+last use, these were unused locals — but each was a real `py.import("numpy")` executed on every
+call of its route. Deleting them removes actual work, not just a lint. Verified each target line was
+exactly that statement before deleting rather than trusting line numbers.
+
+**4 dead `numpy: &Bound<PyModule>` parameters removed** (8 call sites updated), which also dropped
+their `&numpy` argument expressions. Net clippy: **326, two BELOW the 328 baseline.**
+
+### Three of my own errors, caught by assertions rather than by luck
+
+1. **The script refused to write on a count mismatch.** I asserted 136 inline sites; it found 138
+   and exited without touching the file. 136 was the inline-WITH-`py` count; 2 more inline sites
+   lack `py`. The assertion was wrong, not the sweep — but it failed CLOSED.
+2. **`py:\s*Python` also matches `_py: Python`.** Two helpers with a deliberately-unused `_py` got
+   converted and failed to compile (`cannot find value py`). They genuinely use it now, so the fix
+   was to un-underscore the parameter — and the other 4 `_py` params in the file are untouched.
+3. **zsh does not word-split unquoted variables**, so a `for t in $REST` loop built malformed
+   `--test` arguments and a re-run compiled for 9 minutes measuring nothing before I noticed.
+
+```
+  VALIDATED   check    0 errors
+              clippy   326 (baseline 328, delta -2), 0 unused variables
+              test     159 passed, 0 failed, 10 suites: setops, setops_wide,
+                       count_nonzero_containers, count_nonzero_zerocopy, nonzero_containers,
+                       flatnonzero, linalg, linalg_basic, sorting, arithmetic
+                       (setops matters most here - it covers the `unique` routes where the 9
+                        dead imports were deleted)
+  NOT DONE    any counted measurement. /data sat at 58G, the stated floor, all turn; each ELF
+              pair costs ~4G, so no local build was taken. Remote check/clippy/test cost
+              almost nothing locally, which is why those ran.
+```
+
+RUNNING TOTAL: 219 of ~488 sites converted (55 of them measured), 269 remain — 220 of which are
+the unpriced binding shape.
+
+COUNTED_MECHANISM: none claimed for the sweep. It converts the shape measured at 1,360.9 and
+1,456.0 insns/site in two prior rows.
+A/A NULL CONTROLS: not applicable - no ratio claimed.
+RETRY PREDICATE: price the BINDING shape before sweeping it - add a cumsum counter arm, two ELFs,
+counted A/B, register the sign only. Until then the 220 binding sites stay unconverted regardless of
+how mechanical the change looks.
+AGENT_NAME=SlateFinch.
