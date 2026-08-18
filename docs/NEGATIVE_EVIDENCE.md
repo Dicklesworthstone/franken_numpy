@@ -55373,3 +55373,62 @@ RETRY PREDICATE: to revive the remaining sweep, name a dispatcher whose chain co
 number of the 219 holders, add a counter arm for it, and measure. Do not restart on the strength of
 the argsort/sort numbers.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — `6y5wp`'s registered FIRST STEP executed build-free: the shipped f64 divide kernel is ALREADY packed AND 2x-unrolled (2 x vdivpd on ymm, 8 doubles/iteration), so "restore packing" is DEAD and the accumulate is NOT inhibiting vectorisation (deadlock-audit-6y5wp)
+
+**Result class:** a registered hypothesis refuted by disassembly, eliminating one of the bead's three
+candidate levers before any build was spent on it. Artifact reuse, /data 47G, load ~5.
+
+`6y5wp` says: *"FIRST STEP, cheap and build-free: disassemble the shipped `zerocopy_f64_binary_flat`
+Div arm and count vdivpd vs vdivsd. If the shipped loop is emitting scalar vdivsd rather than packed
+vdivpd, that is the whole finding and the lever is to restore packing."*
+
+Done, on a preserved local ELF (`elf_sort_after`, release-perf, `+avx2`), symbol
+`fnp_python::zerocopy_f64_binary_flat_with_out` at `0x15657a0`, 4,464 bytes / 1,053 instructions:
+
+```
+  vdivpd  2      vdivsd  1      ymm refs 63    xmm refs 24    zmm refs 0
+  the two closures and the Zip<Zip<..>> iterator body contain ZERO divides
+```
+
+The hot loop, read directly:
+
+```
+  vmovupd (%rdi,%rsi,8),%ymm5           load  a[i..i+4]
+  vmovupd 0x20(%rdi,%rsi,8),%ymm6       load  a[i+4..i+8]
+  vdivpd  (%rdi,%rsi,8),%ymm5,%ymm5     divide by b[i..i+4]      <- PACKED
+  vdivpd  0x20(%rdi,%rsi,8),%ymm6,%ymm6 divide by b[i+4..i+8]    <- PACKED, 2x UNROLLED
+  vmovupd %ymm5,(%rdi,%rsi,8)           store
+  vmovupd %ymm6,0x20(%rdi,%rsi,8)       store
+  vandpd  %ymm1,%ymm5,%ymm5             FE-hazard accumulate, INSIDE the loop, also packed
+```
+
+**Eight f64 per iteration on 256-bit ymm.** The single `vdivsd` is the scalar remainder tail.
+
+### What this refutes and what it leaves
+
+1. **"Restore packing" is DEAD.** The loop was never scalar. This independently confirms the
+   08-17 finding that recorded the same conclusion from the other direction — worth noting that two
+   different routes to the same answer agree, since this campaign has had several confident
+   conclusions reverse.
+2. **"Split the hazard accumulate out so it cannot inhibit vectorisation" is dead AS STATED.** The
+   accumulate (`vandpd %ymm1`) sits inside the loop and the loop is vectorised anyway, so it is not
+   inhibiting anything. It still costs one packed op per 8 elements, which is a DIFFERENT and much
+   smaller claim than the one the bead registered.
+3. **"Wider unroll" SURVIVES and is now the only one of the three still standing.** We are at 2x.
+   Whether NumPy's `DOUBLE_divide_X86_V3` is wider is the next question, and the divide-loop census
+   memory already covers how to check it without a build.
+
+**DISCLOSED — and the bead itself warns about this:** local and remote toolchains here emit different
+code for identical source (2211 vs 2207 instructions on a previous comparison). This ELF is a LOCAL
+build, so the exact counts are local codegen. Presence-of-packing and unroll factor are coarse
+structural features unlikely to differ, but a before/after instruction comparison must still build
+both halves in one environment, as the bead requires.
+
+COUNTED_MECHANISM: 2 vdivpd + 1 vdivsd in 1,053 instructions; loop body loads/divides/stores two
+ymm registers per iteration = 8 f64/iteration; zero divides in the closures or the Zip body.
+A/A NULL CONTROLS: not applicable - this is a static census, not a ratio.
+RETRY PREDICATE: the surviving lever is WIDER UNROLL. Before building anything, census NumPy's
+`DOUBLE_divide_X86_V3` for its unroll factor the same way; if NumPy is also 2x, the codegen gap is
+not unroll either and the whole 93,987 ns kernel half needs a different explanation.
+AGENT_NAME=SlateFinch.
