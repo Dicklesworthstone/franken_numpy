@@ -10621,10 +10621,43 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // nothing about the parallel arm. The transformation is semantics-preserving
             // there too, but its ratio is unmeasured and this campaign does not ship
             // extrapolations - converting it needs its own measurement at n >= 2^21.
+            // INDEXED, NOT A ZIP-OF-ZIP (`deadlock-audit-6y5wp`). UNMEASURED AT THE TIME OF
+            // WRITING - landed unbuilt under a disk freeze; see the retry predicate below.
+            //
+            // WHY: a per-iteration disassembly census put this loop at 22 instructions per 8
+            // doubles against NumPy's `DOUBLE_divide_X86_V3` at 10, and three of our twelve
+            // extra instructions are `mov ..(%rsp),%rdi` - RELOADS of the a/b/out base pointers
+            // from the stack, once per iteration. NumPy keeps all three bases live in registers
+            // (%rbx/%r10/%r11) and walks them with ONE index in %rax. We spill because the
+            // zip-of-zip below held three independent iterator states live at once, on top of
+            // the FE-hazard accumulate's three vector constants and its accumulator.
+            //
+            // So this mirrors the incumbent's loop shape: one induction variable, three
+            // invariant bases. Both forms are already vectorised - the census found 2 x `vdivpd`
+            // on ymm in each, 8 doubles per iteration - so this is NOT about packing or unroll
+            // width. Those two hypotheses are DEAD and their rows say so.
+            //
+            // CHUNKING IS NOT THE FIX AND MUST NOT BE RE-TRIED: the blocked form was measured
+            // and rejected, with `insns 1440 -> 2211, vdivpd 1 -> 0, vdivsd 1 -> 15`. It
+            // DEVECTORISED the divide entirely. Chunking is the textbook answer to register
+            // pressure and it is the wrong answer here.
+            //
+            // THE THREE-WAY `min` PRESERVES BEHAVIOUR EXACTLY. `zip` stops at the shortest
+            // sequence, so slicing all three to the common length keeps that and cannot panic;
+            // `&output[..len]` alone would panic where the old loop silently truncated. Callers
+            // already guarantee `a_in.len() == b_in.len()` (identical shapes are checked above,
+            // and a mismatch declines), so `len` is `n` on every reachable path - the `min` is
+            // here to keep the failure mode, not because it is expected to bind.
+            //
+            // ONE CHANGE ONLY, deliberately. A second candidate exists - reformulating the
+            // evidence test as a single unsigned range check to free one more vector register -
+            // and it is NOT bundled here, because two changes in one A/B cannot be attributed.
             let mut evidence: u64 = 0;
-            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-                let quotient = a_cell.get() / b_cell.get();
-                slot.set(quotient);
+            let len = output.len().min(a_in.len()).min(b_in.len());
+            let (a_s, b_s, o_s) = (&a_in[..len], &b_in[..len], &output[..len]);
+            for i in 0..len {
+                let quotient = a_s[i].get() / b_s[i].get();
+                o_s[i].set(quotient);
                 evidence |= f64_divide_quotient_non_normal_evidence(quotient.to_bits());
             }
             if f64_divide_evidence_saw_non_normal(evidence)
