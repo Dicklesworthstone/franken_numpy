@@ -55644,3 +55644,50 @@ RETRY PREDICATE: none - the correction is arithmetic on banked medians. **Standi
 harness: a `total_process_time / N` figure is NOT a per-call cost. Subtract the empty_loop arm, or
 quote differences only.** Differences were always safe; ratios never were.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — BLAST-RADIUS AUDIT of the startup-floor flaw: exactly TWO banked rows are exposed, both mine, and one row my correction table MISSED is corrected here (deadlock-audit-c5ecm)
+
+**Result class:** bounding a correction rather than leaving its scope implicit. Build-free.
+
+Having found that `total_process_time / N` charges every call ~1,281 ns of process startup, the
+obvious next question is how much of this campaign's 1,100+ banked rows the flaw reaches. Audited by
+searching for rows that BOTH cite a counter-probe arm AND quote a ratio:
+
+```
+  ledger rows citing a counter-probe arm                  7
+  ...of those that also quote an N.NNNx ratio             2   <- the entire exposed set
+  both are mine, from the last two days; one IS the correction row itself
+```
+
+**The campaign's headline figures are NOT exposed**, and there is a clean structural reason rather
+than an assumption: the `5.838x` worst cell quotes NumPy at **1.2 us**, which is BELOW the 1,281 ns
+startup floor and therefore cannot contain it. Those rows come from criterion-timed benches that
+measure inside the process, not from whole-process counter probes. The flaw is specific to the
+counter-probe arms I built for instruction attribution.
+
+### The row my own correction table missed
+
+My correction listed five cells but not the predicate-lever row's own instruction ratios, because
+that row's before-state never appeared in the wall-clock run. Correcting it here:
+
+```
+  f32/f16/complex predicate lever, argsort int64 n=256, INSTRUCTION ratio vs NumPy
+    published    3.872x -> 3.511x
+    CORRECTED    4.118x -> 3.727x
+    effect unchanged at -14,201.0 insns/call (the floor cancels in the difference)
+```
+
+So the complete corrected picture for that cell across both levers is **4.118x -> 3.727x
+(predicate) -> 2.806x (ndarray cache)** in instructions, and **3.305x -> 2.610x** in time for the
+segment that was measured in time. Every one of those is worse than what I published.
+
+**A correction is not finished until its scope is bounded.** I banked the floor correction with a
+five-cell table and moved on; the sixth cell sat uncorrected in a row that reads as authoritative.
+Auditing my own correction for completeness is what found it, and that audit was three greps.
+
+COUNTED_MECHANISM: none new - arithmetic on banked medians with the measured 3,098.4 insns/call
+floor subtracted from both arms.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: none. Standing rule unchanged: subtract the empty_loop arm before quoting any ratio
+from the counter-probe harness, or quote differences only. Criterion-timed rows are unaffected.
+AGENT_NAME=SlateFinch.
