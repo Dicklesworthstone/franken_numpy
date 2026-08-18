@@ -8805,6 +8805,11 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
         let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
         (cols / PACKED_NR).max(1) * PACKED_NR
     };
+    // A PACKED ONCE, above the panel loops (`franken_numpy-ixs5y`). This kernel packed `b` but
+    // read `a` in place, so an `MR`-row tile strode by `k` and all of `a` was re-streamed for
+    // every column panel. Hoisted here so the packed copy is built a single time and reused -
+    // packing inside the loops would move the same work rather than remove it.
+    let ap = pack_a_rowblocks::<MR>(a, m - m % MR, k);
     let mut bp = vec![0.0f64; k * PACKED_NR];
     let mut jc = 0;
     while jc < n_full {
@@ -8817,11 +8822,17 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
             }
             let mut i0 = 0;
             while i0 < m_full {
+                // Read `a` from its packed copy. BIT-IDENTICAL: only the address changes;
+                // the accumulation stays `kk` ascending, then `ii`, then `jj`, into one
+                // register tile applied to `target` once.
+                let block = i0 / MR;
+                let apanel = &ap[block * k * MR..(block + 1) * k * MR];
                 let mut acc = [[0.0f64; PACKED_NR]; MR];
                 for kk in 0..k {
                     let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                    let arow = &apanel[kk * MR..kk * MR + MR];
                     for (ii, row) in acc.iter_mut().enumerate() {
-                        let av = a[(i0 + ii) * k + kk];
+                        let av = arow[ii];
                         for (slot, &bv) in row.iter_mut().zip(brow) {
                             *slot += av * bv;
                         }
@@ -8903,6 +8914,11 @@ fn packed_gemm_sub_assign_strided_serial_tiled<const MR: usize>(
         let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
         (cols / PACKED_NR).max(1) * PACKED_NR
     };
+    // A PACKED ONCE, above the panel loops (`franken_numpy-ixs5y`). This kernel packed `b` but
+    // read `a` in place, so an `MR`-row tile strode by `k` and all of `a` was re-streamed for
+    // every column panel. Hoisted here so the packed copy is built a single time and reused -
+    // packing inside the loops would move the same work rather than remove it.
+    let ap = pack_a_rowblocks::<MR>(a, m - m % MR, k);
     let mut bp = vec![0.0f64; k * PACKED_NR];
     let mut jc = 0;
     while jc < n_full {
@@ -8915,11 +8931,17 @@ fn packed_gemm_sub_assign_strided_serial_tiled<const MR: usize>(
             }
             let mut i0 = 0;
             while i0 < m_full {
+                // Read `a` from its packed copy. BIT-IDENTICAL: only the address changes;
+                // the accumulation stays `kk` ascending, then `ii`, then `jj`, into one
+                // register tile applied to `target` once.
+                let block = i0 / MR;
+                let apanel = &ap[block * k * MR..(block + 1) * k * MR];
                 let mut acc = [[0.0f64; PACKED_NR]; MR];
                 for kk in 0..k {
                     let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                    let arow = &apanel[kk * MR..kk * MR + MR];
                     for (ii, row) in acc.iter_mut().enumerate() {
-                        let av = a[(i0 + ii) * k + kk];
+                        let av = arow[ii];
                         for (slot, &bv) in row.iter_mut().zip(brow) {
                             *slot += av * bv;
                         }
