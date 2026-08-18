@@ -68451,7 +68451,7 @@ fn try_native_string_argsort_stable(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const STRING_ARGSORT_MIN: usize = 1 << 18;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -72015,7 +72015,7 @@ fn try_zerocopy_f64_argsort_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -72087,7 +72087,7 @@ fn try_zerocopy_f32_argsort_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -72158,7 +72158,7 @@ fn try_zerocopy_c128_argsort_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -72259,7 +72259,7 @@ fn try_zerocopy_c64_argsort_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -72354,7 +72354,7 @@ fn try_zerocopy_c64_argsort_lastaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -72497,7 +72497,7 @@ fn try_zerocopy_c128_argsort_lastaxis(
     // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
     // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
     // recognise, never raise.
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -72597,7 +72597,7 @@ fn try_zerocopy_c128_argsort_axis0(
     // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
     // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
     // recognise, never raise.
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -72713,7 +72713,7 @@ fn try_zerocopy_c128_argsort_midaxis(
     // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
     // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
     // recognise, never raise.
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -72870,7 +72870,7 @@ fn try_zerocopy_c64_argsort_axis0(
     // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
     // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
     // recognise, never raise.
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -72983,7 +72983,7 @@ fn try_zerocopy_c64_argsort_midaxis(
     // decided the dtype was not complex (deadlock-audit-nkvau). Same remedy as
     // deadlock-audit-3fvvr: a fast-path probe must decline what it does not
     // recognise, never raise.
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -73620,7 +73620,7 @@ fn try_native_float_argsort_default_radix(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<FloatArgsortRadixOutcome> {
     const MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -73674,7 +73674,7 @@ fn try_native_int_argsort_default_radix(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -73763,7 +73763,7 @@ fn try_native_argsort_stable_flat(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -73841,7 +73841,7 @@ fn try_native_datetime_argsort_stable(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -74073,7 +74073,7 @@ fn try_native_complex_argsort_stable(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -74121,7 +74121,7 @@ fn try_native_int_argsort_flat(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -74166,7 +74166,7 @@ fn try_native_datetime_argsort_flat(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -74227,7 +74227,7 @@ fn try_native_datetime_argsort_axes(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -74473,7 +74473,7 @@ fn try_native_argsort_stable_lastaxis(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -74570,7 +74570,7 @@ fn try_native_int_argsort_lastaxis(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -74705,7 +74705,7 @@ fn try_native_int_argsort_axis0(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -74847,7 +74847,7 @@ fn try_native_int_argsort_midaxis(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ARGSORT_MIDAXIS_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -74901,7 +74901,7 @@ fn try_zerocopy_f64_argsort_lastaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -74994,7 +74994,7 @@ fn try_zerocopy_f64_argsort_axis0(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -75110,7 +75110,7 @@ fn try_zerocopy_f64_argsort_midaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -75236,7 +75236,7 @@ fn try_zerocopy_f32_argsort_lastaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -75324,7 +75324,7 @@ fn try_zerocopy_f32_argsort_axis0(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -75430,7 +75430,7 @@ fn try_zerocopy_f32_argsort_midaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -81677,6 +81677,32 @@ fn cached_numpy(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     Ok(NUMPY_MODULE
         .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
             Ok(py.import("numpy")?.unbind())
+        })?
+        .bind(py))
+}
+
+/// The `numpy.ndarray` TYPE OBJECT, fetched once per process (`deadlock-audit-c5ecm`).
+///
+/// WHY THIS EXISTS: every `try_zerocopy_*` / `try_native_*` probe opens by testing its operand
+/// against `numpy.getattr("ndarray")`. That re-reads a module-level class - one that cannot change
+/// for the life of the process - BY NAME, with a NON-INTERNED key, so each call also builds a fresh
+/// `PyString`. There are 487 such sites in this file and a dispatcher chains many of them: an
+/// `argsort` call reaches up to 32, every one of them fetching the same object again.
+///
+/// COUNTED, this host 2026-08-18: one INTERNED attribute read is 201.7 insns, and a non-interned
+/// one additionally allocates. A `PyOnceLock` turns the whole thing into a pointer deref.
+///
+/// FAILS SOFT IS NOT AN OPTION HERE, and that is deliberate: unlike the dtype predicates, a caller
+/// cannot carry on without the type object - it is the thing being compared against - so this
+/// returns `PyResult` and propagates, exactly as the `getattr` it replaces did.
+///
+/// SAFE TO CACHE: `numpy.ndarray` is bound once at module import and is not reassigned by any
+/// supported use. Caching it is the same bet `cached_numpy` already makes about the module itself.
+fn cached_ndarray_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static NDARRAY_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(NDARRAY_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "ndarray"))?.unbind())
         })?
         .bind(py))
 }
@@ -96170,7 +96196,7 @@ fn try_native_argsort_struct_stable(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN: usize = 1 << 16;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -96309,7 +96335,7 @@ fn try_native_struct_argsort_valuelex(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN: usize = 1 << 16;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
