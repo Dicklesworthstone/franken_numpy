@@ -108990,7 +108990,151 @@ fn is_busday(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // NATIVE BUSINESS-DAY TEST for `datetime64[D]` (`deadlock-audit-6y5wp`). This was a
+    // bare passthrough; the whole family (`is_busday`, `busday_count`, `busday_offset`)
+    // is C in the incumbent and was entirely delegated here.
+    //
+    // THE CONVENTION IS MEASURED, NOT ASSUMED. `datetime64[D]` is a day count from
+    // 1970-01-01, and the weekmask is indexed from Monday - but day 0 is a THURSDAY, so
+    // the index is `(day + 3) mod 7`, not `day mod 7`. That offset was read off the
+    // incumbent by asking which single-bit weekmask accepts each of the first days of
+    // 1970, which returned 3, 4, 5, 6, 0, 1, 2 for days 0..6. `rem_euclid` rather than `%`
+    // because dates before 1970 are negative and `%` would index backwards.
+    //
+    // NaT IS FALSE UNCONDITIONALLY, checked rather than derived: its representation is
+    // `i64::MIN`, and letting that fall through the modulo would return whatever bit the
+    // weekmask happens to hold at that index - True for a full weekmask. Confirmed against
+    // the incumbent, which returns False for NaT.
+    if kwargs.is_none_or(|kw| {
+        kw.keys().into_iter().all(|key| {
+            key.extract::<String>()
+                .map(|k| k == "weekmask" || k == "holidays")
+                .unwrap_or(false)
+        })
+    }) && args.len() >= 1
+        && let Ok(dates) = args.get_item(0)
+        && let Some(result) = try_zerocopy_is_busday(
+            py,
+            &dates,
+            kwargs
+                .and_then(|kw| kw.get_item("weekmask").ok().flatten())
+                .or_else(|| args.get_item(1).ok())
+                .as_ref(),
+            kwargs
+                .and_then(|kw| kw.get_item("holidays").ok().flatten())
+                .or_else(|| args.get_item(2).ok())
+                .filter(|h| !h.is_none())
+                .as_ref(),
+        )?
+    {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "is_busday", args, kwargs)
+}
+
+/// A `datetime64[D]` array's day numbers, or `None` if it is not that exact dtype.
+///
+/// Day resolution specifically: `datetime64[s]` and friends count seconds, so reading them
+/// as days would be wrong by a factor of 86400 rather than obviously broken. NumPy accepts
+/// coarser and finer units by converting; that conversion is left to NumPy.
+fn datetime64_day_buffer(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<PyBuffer<i64>>> {
+    if !value.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let dtype = value.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "M"
+        || dtype.getattr("str")?.extract::<String>()? != "<M8[D]"
+        || !value
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let viewed = value.call_method1("view", ("int64",))?;
+    Ok(PyBuffer::<i64>::get(&viewed).ok())
+}
+
+/// `np.is_busday` for contiguous `datetime64[D]` input (`deadlock-audit-6y5wp`).
+fn try_zerocopy_is_busday(
+    py: Python<'_>,
+    dates: &Bound<'_, PyAny>,
+    weekmask: Option<&Bound<'_, PyAny>>,
+    holidays: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = cached_numpy(py)?;
+    let Some(date_buffer) = datetime64_day_buffer(py, dates)? else {
+        return Ok(None);
+    };
+
+    // Weekmask: the default, a 7-character '0'/'1' string, or a 7-element integer
+    // sequence. NumPy also accepts day-name spellings like "Mon Tue"; those decline.
+    let mut mask = [true, true, true, true, true, false, false];
+    if let Some(w) = weekmask {
+        if let Ok(text) = w.extract::<String>() {
+            let bytes = text.as_bytes();
+            if bytes.len() != 7 || bytes.iter().any(|b| !matches!(b, b'0' | b'1')) {
+                return Ok(None);
+            }
+            for (slot, byte) in mask.iter_mut().zip(bytes) {
+                *slot = *byte == b'1';
+            }
+        } else if let Ok(values) = w.extract::<Vec<i64>>() {
+            if values.len() != 7 {
+                return Ok(None);
+            }
+            for (slot, value) in mask.iter_mut().zip(values) {
+                *slot = value != 0;
+            }
+        } else {
+            return Ok(None);
+        }
+    }
+
+    // Holidays are compared as day numbers. Sorted once so the per-date test is a binary
+    // search rather than a scan; NumPy sorts them internally too.
+    let mut holiday_days: Vec<i64> = Vec::new();
+    if let Some(h) = holidays {
+        let Some(holiday_buffer) = datetime64_day_buffer(py, h)? else {
+            return Ok(None);
+        };
+        let Some(cells) = holiday_buffer.as_slice(py) else {
+            return Ok(None);
+        };
+        holiday_days.reserve(cells.len());
+        for cell in cells {
+            holiday_days.push(cell.get());
+        }
+        holiday_days.sort_unstable();
+        holiday_days.dedup();
+    }
+
+    let Some(date_cells) = date_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = dates.getattr("shape")?.extract()?;
+    let out = numpy.call_method1("empty", (&PyTuple::new(py, shape.iter().copied())?, "bool"))?;
+    let flat_out = out.call_method1("reshape", (-1i64,))?;
+    let viewed_out = flat_out.call_method1("view", ("uint8",))?;
+    let Ok(out_buffer) = PyBuffer::<u8>::get(&viewed_out) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != date_cells.len() {
+        return Ok(None);
+    }
+
+    for (slot, date) in out_cells.iter().zip(date_cells.iter()) {
+        let day = date.get();
+        // NaT first: see the note at the call site.
+        let valid = day != i64::MIN
+            && mask[(day + 3).rem_euclid(7) as usize]
+            && holiday_days.binary_search(&day).is_err();
+        slot.set(u8::from(valid));
+    }
+    Ok(Some(out.unbind()))
 }
 
 // Howard Hinnant's civil_from_days: days since 1970-01-01 -> (year, month, day). Rust's `/` truncates toward
@@ -124192,6 +124336,103 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// `np.is_busday` must match NumPy across the weekday offset, negative dates, NaT,
+    /// holidays and both weekmask spellings (`deadlock-audit-6y5wp`).
+    ///
+    /// Three things in this function are easy to get plausibly wrong, and each has a case:
+    ///
+    ///   1. THE WEEKDAY OFFSET. `datetime64[D]` day 0 is a THURSDAY while the weekmask is
+    ///      indexed from Monday, so the index is `(day + 3) mod 7`. An implementation
+    ///      using `day mod 7` is wrong by three days - which still produces a plausible
+    ///      five-on two-off pattern, just shifted. The fixture spans a full fortnight from
+    ///      a known Monday so a shift cannot align.
+    ///   2. DATES BEFORE 1970 are negative, where `%` in Rust returns a negative remainder
+    ///      and would index backwards off the mask. `rem_euclid` is required, and the 1969
+    ///      fixture is what distinguishes them.
+    ///   3. NaT is `i64::MIN`. Left to the modulo it would return whatever bit sits at that
+    ///      index - True under a full weekmask - so it must be special-cased to False.
+    ///
+    /// Holidays are also checked on a day that IS otherwise a business day, since a
+    /// holiday landing on a weekend changes nothing and would pass a broken check.
+    #[test]
+    fn is_busday_matches_numpy_including_negative_dates_and_nat() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_busday")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("is_busday")?;
+            let theirs = numpy.getattr("is_busday")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"fortnight = np.arange('2024-01-01', '2024-01-15', dtype='datetime64[D]')\n\
+                  pre_epoch = np.arange('1969-12-15', '1970-01-05', dtype='datetime64[D]')\n\
+                  with_nat = np.array(['2024-01-03', 'NaT', '2024-01-06'], dtype='datetime64[D]')\n\
+                  hols = np.array(['2024-01-03', '2024-01-06'], dtype='datetime64[D]')\n\
+                  epoch_edge = np.arange('1970-01-01', '1970-01-08', dtype='datetime64[D]')\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| locals.get_item(k).expect("busday fixture");
+
+            let same = |mine: &Bound<'_, PyAny>, theirs_out: &Bound<'_, PyAny>, what: &str| -> PyResult<()> {
+                assert_eq!(
+                    mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    theirs_out.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    "{what}: dtype diverged from numpy"
+                );
+                assert_eq!(
+                    mine.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs_out.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{what}: is_busday diverged from numpy"
+                );
+                Ok(())
+            };
+
+            // Default weekmask, across the epoch and before it.
+            for name in ["fortnight", "pre_epoch", "with_nat", "epoch_edge"] {
+                same(
+                    &ours.call1((g(name),))?,
+                    &theirs.call1((g(name),))?,
+                    name,
+                )?;
+            }
+
+            // Both weekmask spellings, including one that makes every day valid - which is
+            // the mask under which a mishandled NaT would read as True.
+            for spelling in ["0111110", "1111111"] {
+                let kw = PyDict::new(py);
+                kw.set_item("weekmask", spelling)?;
+                same(
+                    &ours.call((g("with_nat"),), Some(&kw))?,
+                    &theirs.call((g("with_nat"),), Some(&kw))?,
+                    spelling,
+                )?;
+            }
+            let lkw = PyDict::new(py);
+            lkw.set_item("weekmask", vec![1i64, 1, 1, 1, 1, 1, 0])?;
+            same(
+                &ours.call((g("fortnight"),), Some(&lkw))?,
+                &theirs.call((g("fortnight"),), Some(&lkw))?,
+                "list weekmask",
+            )?;
+
+            // Holidays, one of which falls on a weekday and one on a weekend.
+            let hkw = PyDict::new(py);
+            hkw.set_item("holidays", g("hols"))?;
+            same(
+                &ours.call((g("fortnight"),), Some(&hkw))?,
+                &theirs.call((g("fortnight"),), Some(&hkw))?,
+                "holidays",
+            )?;
             Ok(())
         });
     }
