@@ -55024,3 +55024,71 @@ RETRY PREDICATE: condition 1 needs a full io/iter/random bench sweep, which need
 quiet host and >=8G of headroom on /data. Condition 2 needs a clock, under the replacement rule
 above, or someone's explicit decision to adopt it.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — WALL CLOCK, measured at last by artifact reuse: the levers DO save time (-2,584 and -2,528 ns/call) but my INSTRUCTION ROWS OVERSTATE THE SAVING BY 13-28% — and they also OVERSTATE how far behind NumPy we are (deadlock-audit-c5ecm)
+
+**Result class:** a currency check that corrects my own prior rows in BOTH directions. No build:
+existing ELFs only, /data at 50G against a 42G brake.
+
+Every counted row on this lever is in RETIRED INSTRUCTIONS. The campaign's competitive claims are
+wall-clock. I had said those are different currencies and then never checked. They are different.
+
+### The levers do save time — sign confirmed on both cells
+
+```
+                     before      after     EFFECT     NULL (numpy arm)   separation
+  argsort  ns/call  13,384.0   10,800.0   -2,584.0     -15.4 (0.312%)      168x
+  sort     ns/call  12,495.8    9,967.3   -2,528.5     +22.4 (0.766%)      113x
+```
+
+5 reps per arm (never 3 again — established today). argsort: per-arm loadavg 4.55-5.68, idle
+91%->92%, 2058->2177 MHz. sort: loadavg 6.75-8.04, idle 93%, 2415 MHz. /data 50G throughout.
+
+### But time does NOT track instructions — the registered comparison FAILED
+
+```
+                instruction cut    wall-clock cut    ratio
+  argsort            24.7%             19.3%         0.782
+  sort               23.4%             20.2%         0.866
+```
+
+**Every instruction figure I have banked on this lever overstates the user-visible saving**, by 28%
+on argsort and 15% on sort. And the two ratios differ, so there is no conversion constant — which is
+the same lesson as every other quotient this campaign has tried to build: measure the currency you
+intend to quote.
+
+### The mechanism, and the correction that runs the OTHER way
+
+```
+  INSTRUCTIONS PER NANOSECOND (IPC proxy, same host, same run)
+    fnp before   11.15        fnp after   10.71        numpy   7.19
+```
+
+Our dispatch code retires ~1.5x more instructions per nanosecond than NumPy's actual sorting work —
+it is branch-predictable, cache-resident, ILP-friendly overhead. NumPy's instructions are the
+expensive kind. Two consequences:
+
+1. Removing our cheap instructions buys proportionally less time than the count suggests. The
+   after-arm IPC proxy DROPS (11.15 -> 10.71) because what remains is a denser mix.
+2. **The instruction ratio OVERSTATES how far behind NumPy we are.** The honest competitive figures
+   are the TIME ratios:
+
+```
+                    INSTRUCTION ratio         TIME ratio          <- quote THIS one
+  argsort           3.531x -> 2.663x        2.707x -> 2.192x
+  sort              6.686x -> 5.091x        4.279x -> 3.387x
+```
+
+I have been writing "still 5.091x behind NumPy" for sort. In the currency that matters it is
+**3.387x**. That is still a loss and still not quotable as a win — but it is the correct number, and
+I was quoting a worse one than reality. Prior rows on this lever should be read with the TIME ratios
+above substituted wherever an instruction ratio was used competitively.
+
+COUNTED_MECHANISM: task-clock medians of 5 reps per arm; effects -2,584.0 and -2,528.5 ns/call
+against numpy-arm nulls of -15.4 and +22.4 (168x and 113x separation); fractional time/instruction
+reduction ratios 0.782 and 0.866; IPC proxy 11.15/10.71 vs numpy 7.19 insns/ns.
+A/A NULL CONTROLS: the numpy arm IS the null - same operand, same harness, untouched by the lever.
+RETRY PREDICATE: none for these two cells. For the campaign: any row quoting an instruction ratio
+COMPETITIVELY must be re-expressed in time, because the two are not proportional and the direction
+of the error is not constant (0.782 vs 0.866 on two cells of the same lever).
+AGENT_NAME=SlateFinch.
