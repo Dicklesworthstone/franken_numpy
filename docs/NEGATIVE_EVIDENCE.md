@@ -53522,3 +53522,81 @@ RETRY PREDICATE: the entry count above is READ, not measured. It can be checked 
 number 11 should do that first - the CLASS of the finding (many small entries, not one large stage)
 is what the three measured results support, and that is what should be quoted.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — CORRECTING MY OWN CALL-SHAPE ROW FROM ONE ROW AGO: for f64 multiply NEITHER probe body runs — both are gated off by the hoisted dtype-char sniff. The count is ~6 entries, not ~11, and the 660.9 insns/call is almost entirely ONE dtype sniff plus branch logic (deadlock-audit-ei9jz)
+
+**Campaign result class:** correction of my own source-derived row, before its first use
+
+One row ago I enumerated ~11 CPython entries per call for `fnp.multiply(f64, f64)` and listed among
+them the complex probe's three `getattr`s (entries 5-7) and the f16 probe's `getattr` plus two
+`is_exact_instance` (entries 8-9). **Those seven entries do not happen.** I read the probe bodies and
+failed to read the guards immediately above them:
+
+```
+  x1_dtype_char = getattr("dtype") -> getattr("char") -> extract::<char>()   // 'd' for float64
+  x1_is_maybe_f16     = (c == 'e')                     -> FALSE for 'd'
+  x1_is_maybe_complex = (c=='F' || c=='D' || c=='G')   -> FALSE for 'd'
+```
+
+`'d'` is float64's typechar and `'D'` is complex128's - the test is case-sensitive and correctly
+excludes f64. So for this cell both probes are short-circuited before their bodies are entered, and
+the entries I attributed to them are never made.
+
+**CORRECTED COUNT for `fnp.multiply(f64, f64)`, all keywords default:**
+
+```
+  NUMPY DIRECT                                            1 entry
+  OURS
+    1  tp_call into PyUFunc::__call__
+    2  PyO3 argument extraction, 9-parameter signature
+    3  x1.getattr("dtype")        }
+    4  dtype.getattr("char")      }  the hoisted sniff - THE dominant removable cost
+    5  extract::<char>()          }
+    6  numpy.getattr(interned ufunc name)
+    7  PyTuple build + tp_call into numpy.multiply
+```
+
+~7 entries against the incumbent's 1, not ~11. There is no x2 sniff at all
+(`grep x2_dtype_char` returns nothing), which is itself notable: the guards are decided from x1
+alone.
+
+### What this does and does not change
+
+**UNCHANGED, and this is the important part:** every MEASURED result stands. The 660.9 insns/call
+probe chain, the 1249.6 wrapper residual, the 0.16% closure, and `sjpmo`'s 5.63x rejection are all
+measurements; none depended on my entry enumeration. The CLASS of the finding - many small entries
+rather than one large stage - also stands, and stands more sharply now.
+
+**CHANGED:** what the 660.9 insns/call actually BUYS. I described it as seven probe entries plus a
+sniff. It is really ONE dtype sniff (3 entries) plus the branch logic of a decision section that,
+for this dtype, can only ever answer "decline". That makes it a better lever than I thought, not a
+worse one: a single hoisted sniff is a far more tractable target than seven scattered probe entries,
+and `deadlock-audit-v46rn` is already working exactly that seam.
+
+### PRE-REGISTERED CONSEQUENCE for the experiment now building
+
+I built a worktree ELF with per-probe skip switches (`FNP_SKIP_COMPLEX_PROBE`, `FNP_SKIP_F16_PROBE`)
+to decompose the 660.9 into its two probe components. **On this reading that experiment must return
+approximately ZERO for both**, because the probe bodies are already skipped for f64. Registering
+that before the numbers land:
+
+```
+  both switches ~0 (within run-to-run spread)  -> CONFIRMS the guards short-circuit as read, and
+                                                  the 660.9 is sniff + branch logic, not probes
+  either switch materially > 0                 -> my reading of the guards is WRONG and the entry
+                                                  enumeration needs redoing from execution, not source
+```
+
+Either outcome is worth the build: the first turns a source claim into a measured one, the second
+catches a second reading error. What it will NOT do is decompose the 660.9, because on this reading
+there is nothing there to decompose - the decomposition I designed was aimed at components that do
+not execute.
+
+COUNTED_MECHANISM: two boolean guards computed from one hoisted `dtype.char` sniff exclude both
+probe bodies for typechar 'd'; corrected entry count 7 versus the previously banked 11.
+
+A/A NULL CONTROLS: not applicable - source-derived, no measurement in this row.
+
+RETRY PREDICATE: quote the CLASS (entry count dominates, one sniff is the removable core), not the
+integer. The integer has now been wrong once and is still read rather than measured.
+AGENT_NAME=SlateFinch.
