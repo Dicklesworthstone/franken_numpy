@@ -53132,3 +53132,57 @@ build ONE ELF containing both the old and new tail as separate symbols and dispa
 runtime, so the comparison is within-ELF where the spread is 0.08%. That is a different experiment
 and it is not worth building for a question this small unless the A/B later hinges on it.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — I CORRECT THE RATIONALE FOR MY OWN REVERT: the A/B never needed a neutral base, because the extraction's cost is COMMON-MODE and cancels. The revert was right for a different reason (deadlock-audit-rz8g0)
+
+**Campaign result class:** correction of my own registered reasoning + a cheaper design it unlocks
+
+I registered the neutrality gate with this justification: "nothing may be concluded from the A/B
+until it reads clean, because a null result would otherwise be indistinguishable from a refactor
+that cost what the probes saved." I repeated it in three commits. **It is wrong.**
+
+The A/B is `FNP_DISABLE_NATIVE_ROUTES` unset versus set, measured on ONE ELF. The extraction's cost
+sits in BOTH arms identically and cancels exactly in the difference, the same way the per-process
+setup constant cancels between the counter arms. A null A/B would mean "the probe chain costs
+nothing", not "the refactor ate the difference". The confound I registered does not exist.
+
+**WHAT DOES SURVIVE, and it is what actually justified the revert:** `1c77e966` was a
+**+57 to +76 insns/call regression on the hottest path in the crate**, on a route whose entire
+excess over NumPy is 1830.5 insns/call. Shipping a 3-4% regression to main in order to *measure* a
+gap is self-defeating regardless of whether the measurement would have been valid. That reason
+stands on its own and the revert stays.
+
+**THE DESIGN THIS UNLOCKS, and it is strictly cheaper than what I registered:** the A/B does not
+need a base neutral enough to SHIP. It needs a base that is never shipped. Build the extraction plus
+the switch in a **git worktree**, run both arms there, discard the build, merge nothing. Then:
+
+```
+  the extraction's cost      irrelevant - identical in both arms, cancels in the difference
+  the neutrality gate        NOT REQUIRED - it was gating shippability, not measurement validity
+  main                       never carries the regression at all
+  the shared working tree    untouched, so no peer compiles the perturbed route
+```
+
+That last point matters more than it looks: this session established that rch syncs the WORKING
+DIRECTORY, so an experimental change to the shared tree is compiled by every peer's remote build. A
+worktree is the only way to run this experiment without exposing them to it - and it makes the
+neutrality question moot rather than merely tolerable.
+
+**WHY I DID NOT NOTICE EARLIER.** The neutrality gate was a good instinct applied to the wrong
+target. It IS the right gate for "may this land on main", and I conflated that with "may this be
+measured on". Two different questions with two different answers, and I let one threshold stand for
+both across four commits. The tell was available: I had already argued that the switch's own branch
+cost "cancels in the difference, present in BOTH arms" - the identical argument applies to the
+extraction and I did not carry it across.
+
+COUNTED_MECHANISM: extraction cost 1913.5 - 1837.0 = +76.5 insns/call against the pre-change mean,
++57.3 against the neutral band's top; that quantity appears in both A/B arms and subtracts to zero.
+
+A/A NULL CONTROLS: not applicable - this row corrects reasoning and publishes no new measurement.
+
+RETRY PREDICATE: run rz8g0's A/B in a git worktree off `9450a237` with `1c77e966` re-applied there,
+one ELF, both arms, threading pinned, against the pre-registered 60-250 ns band (upper branch
+unreachable by a runtime switch). Do NOT re-land the extraction on main to do it, and do NOT gate
+the experiment on neutrality - gate only a merge on neutrality, and there is currently no reason to
+merge it at all.
+AGENT_NAME=SlateFinch.
