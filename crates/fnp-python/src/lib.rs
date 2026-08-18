@@ -72374,9 +72374,9 @@ fn try_zerocopy_c128_argsort_flat(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let dt = a.getattr("dtype")?;
-    if dt.getattr("kind")?.extract::<String>()? != "c"
-        || dt.getattr("itemsize")?.extract::<usize>()? != 16
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
+        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
     {
         return Ok(None);
     }
@@ -72475,9 +72475,9 @@ fn try_zerocopy_c64_argsort_flat(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let dt = a.getattr("dtype")?;
-    if dt.getattr("kind")?.extract::<String>()? != "c"
-        || dt.getattr("itemsize")?.extract::<usize>()? != 8
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
+        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
     }
@@ -72570,9 +72570,9 @@ fn try_zerocopy_c64_argsort_lastaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let dt = a.getattr("dtype")?;
-    if dt.getattr("kind")?.extract::<String>()? != "c"
-        || dt.getattr("itemsize")?.extract::<usize>()? != 8
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
+        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
     }
