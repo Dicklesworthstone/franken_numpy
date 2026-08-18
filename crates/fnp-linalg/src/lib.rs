@@ -8301,6 +8301,149 @@ fn packed_gemm_serial_tiled_apacked<const MR: usize>(
     }
 }
 
+/// Panel-major packed copy of every full `PACKED_NR`-wide column block of `b`.
+///
+/// Layout: `bp[panel * k * PACKED_NR + kk * PACKED_NR + jj] == b[kk * n + panel * PACKED_NR + jj]`.
+///
+/// The kernels pack `b` a panel at a time, inside the loop that walks column blocks. Under
+/// `packed_gemm`'s parallel arm that packing is repeated IN FULL BY EVERY THREAD, because each
+/// thread runs the whole serial kernel over its own row band and re-derives the identical `b`
+/// panels. This builds them once so the bands can share one read-only copy.
+fn pack_b_panels(b: &[f64], k: usize, n: usize) -> Vec<f64> {
+    let panels = n / PACKED_NR;
+    let mut bp = vec![0.0f64; panels * k * PACKED_NR];
+    for panel in 0..panels {
+        let j0 = panel * PACKED_NR;
+        let dst = &mut bp[panel * k * PACKED_NR..(panel + 1) * k * PACKED_NR];
+        for kk in 0..k {
+            dst[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]
+                .copy_from_slice(&b[kk * n + j0..kk * n + j0 + PACKED_NR]);
+        }
+    }
+    bp
+}
+
+/// `out += a * b` for one row band, against a `b` that is ALREADY packed by `pack_b_panels`.
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
+///
+/// This is `packed_gemm_serial_tiled_apacked` with the per-panel `b` packing lifted out to the
+/// caller. `a` is still packed here, per band, which is correct rather than wasteful: each band
+/// owns distinct rows of `a`, so there is nothing to share.
+///
+/// BIT-IDENTICAL to the in-kernel-packing form. Packing moves values without touching them, and
+/// the accumulation is still `kk` ascending, then `ii`, then `jj`, into one `MR x PACKED_NR`
+/// register accumulator added to `out` once. Only the address each operand is read from changes.
+///
+/// `nc` blocking is intentionally absent here. In the incumbent kernel `nc` bounds how much of
+/// `b` is re-packed before moving on; once `b` is packed ONCE up front there is nothing for that
+/// loop to amortise, and keeping it would only add an index layer that cannot change the result.
+fn packed_gemm_band_prepacked_b<const MR: usize>(
+    a: &[f64],
+    b: &[f64],
+    bp: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    out: &mut [f64],
+) {
+    let m_full = m - m % MR;
+    let n_full = n - n % PACKED_NR;
+    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    let panels = n_full / PACKED_NR;
+    for panel in 0..panels {
+        let j0 = panel * PACKED_NR;
+        let bpanel = &bp[panel * k * PACKED_NR..(panel + 1) * k * PACKED_NR];
+        let mut i0 = 0;
+        while i0 < m_full {
+            let block = i0 / MR;
+            let apanel = &ap[block * k * MR..(block + 1) * k * MR];
+            let mut acc = [[0.0f64; PACKED_NR]; MR];
+            for kk in 0..k {
+                let brow = &bpanel[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                let arow = &apanel[kk * MR..kk * MR + MR];
+                for (ii, row) in acc.iter_mut().enumerate() {
+                    let av = arow[ii];
+                    for (slot, &bv) in row.iter_mut().zip(brow) {
+                        *slot += av * bv;
+                    }
+                }
+            }
+            for (ii, row) in acc.iter().enumerate() {
+                let base = (i0 + ii) * n + j0;
+                for (slot, &v) in out[base..base + PACKED_NR].iter_mut().zip(row) {
+                    *slot += v;
+                }
+            }
+            i0 += MR;
+        }
+    }
+    // Same tail handling as every other kernel here: remainder columns for the full row blocks,
+    // then all remainder rows. Both read the ORIGINAL `a` and `b`, which is why those two stay in
+    // the signature alongside the packed copy.
+    for i in 0..m_full {
+        packed_row_tail(a, b, out, i, k, n, n_full);
+    }
+    for i in m_full..m {
+        packed_row_tail(a, b, out, i, k, n, 0);
+    }
+}
+
+/// `a * b` with `b` packed ONCE and shared by every row band.
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
+/// `packed_gemm` is unchanged. Wiring is a one-line follow-up once this is built and A/B'd.
+///
+/// WHAT THIS FIXES: `packed_gemm`'s parallel arm hands each thread a row band and runs the whole
+/// serial kernel on it. That kernel packs `b` panel by panel as it goes, so with `T` threads the
+/// identical `b` panels are built `T` times over - `T * k * n_full` f64 of pure duplicate copying,
+/// growing with the thread count rather than amortising against it. Here `b` is packed once and
+/// the bands borrow it read-only.
+///
+/// `a` is deliberately still packed per band: bands own disjoint rows of `a`, so there is nothing
+/// to share and packing it centrally would only move the same work.
+///
+/// BIT-IDENTICAL to `packed_gemm`. The band decomposition, the tile height, and the ascending-`k`
+/// accumulation into one register tile are all unchanged; only the provenance of the packed `b`
+/// bytes differs, and packing copies values without touching them. Bands write disjoint row ranges
+/// of `c`, so no accumulation crosses a thread boundary and there is no order to disagree about.
+fn packed_gemm_shared_b(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+    let mut c = vec![0.0; m * n];
+    let parallel = m >= MATMUL_PARALLEL_MIN_DIM
+        && k >= MATMUL_PARALLEL_MIN_DIM
+        && n >= MATMUL_PARALLEL_MIN_DIM
+        && rayon::current_num_threads() >= 2;
+    if !parallel {
+        // Below the parallel gate there is exactly one band, so sharing buys nothing and the
+        // packed copy would be pure overhead. Defer to the incumbent serial path.
+        packed_gemm_serial(a, b, m, k, n, &mut c);
+        return c;
+    }
+    // FULL `n` here, not `n_full`: `pack_b_panels` uses this argument as `b`'s ROW STRIDE while
+    // deriving the panel count by flooring it, so passing a rounded-down width would read the
+    // wrong elements for any `n` that is not a multiple of `PACKED_NR`.
+    let bp = pack_b_panels(b, k, n);
+    let threads = rayon::current_num_threads();
+    // Same MR-aligned band height as `packed_gemm`: a band that is not a whole number of register
+    // tiles leaves a remainder row on the scalar tail path, which measured ~4x slower overall.
+    let band_rows = (m.div_ceil(threads * 4).div_ceil(PACKED_MR).max(1)) * PACKED_MR;
+    c.par_chunks_mut(band_rows * n)
+        .enumerate()
+        .for_each(|(bi, c_band)| {
+            let row_start = bi * band_rows;
+            let rows = c_band.len() / n;
+            let a_band = &a[row_start * k..row_start * k + rows * k];
+            if packed_tile_rows() == PACKED_MR_NARROW {
+                packed_gemm_band_prepacked_b::<PACKED_MR_NARROW>(
+                    a_band, b, &bp, rows, k, n, c_band,
+                );
+            } else {
+                packed_gemm_band_prepacked_b::<PACKED_MR>(a_band, b, &bp, rows, k, n, c_band);
+            }
+        });
+    c
+}
+
 
 // Band-parallel driver shared by the square and rectangular wrappers: split the
 // output rows into bands (several per thread for work-stealing balance), each
@@ -21808,6 +21951,63 @@ except Exception as exc:
             let w = super::inv_panel_width(n);
             assert!(w >= 1, "panel width {w} is not positive at n={n}");
             assert!(w <= n.max(1), "panel width {w} exceeds n={n}");
+        }
+    }
+
+
+    /// `pack_b_panels` must place every element the layout formula names.
+    ///
+    /// Checked independently of any kernel so a layout bug cannot hide behind a kernel bug. The
+    /// `n = 19` case matters most: `n` is the ROW STRIDE of `b` as well as the source of the panel
+    /// count, and passing a rounded-down width instead would read the wrong elements for exactly
+    /// this shape.
+    #[test]
+    fn pack_b_panels_places_every_element() {
+        const NR: usize = super::PACKED_NR;
+        for &(k, n) in &[(1usize, 8usize), (3, 16), (5, 19), (7, 24)] {
+            let b: Vec<f64> = (0..k * n).map(|i| i as f64 * 0.75 - 2.5).collect();
+            let bp = super::pack_b_panels(&b, k, n);
+            let panels = n / NR;
+            assert_eq!(bp.len(), panels * k * NR);
+            for panel in 0..panels {
+                for kk in 0..k {
+                    for jj in 0..NR {
+                        assert_eq!(
+                            bp[panel * k * NR + kk * NR + jj],
+                            b[kk * n + panel * NR + jj],
+                            "packed b mismatch at panel={panel} kk={kk} jj={jj} (k={k}, n={n})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The prepacked-B band kernel must equal the incumbent tiled kernel to the BIT.
+    ///
+    /// Exercised directly rather than through `packed_gemm_shared_b`, because that driver only
+    /// reaches the shared-B path when rayon reports two or more threads and the dimensions clear
+    /// `MATMUL_PARALLEL_MIN_DIM`; a single-threaded test pool would silently take the serial
+    /// fallback and prove nothing about this kernel.
+    ///
+    /// Shapes include remainder rows and remainder columns so the scalar tail paths run too.
+    #[test]
+    fn gemm_prepacked_b_is_bit_exact_vs_tiled() {
+        const MR: usize = super::PACKED_MR;
+        for &(m, k, n) in &[(4usize, 3usize, 8usize), (8, 5, 16), (9, 7, 19), (12, 33, 24)] {
+            let a: Vec<f64> = (0..m * k).map(|i| ((i * 37 % 101) as f64) - 50.5).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25).collect();
+            let bp = super::pack_b_panels(&b, k, n);
+            let mut want = vec![0.0f64; m * n];
+            let mut got = vec![0.0f64; m * n];
+            super::packed_gemm_serial_tiled::<MR>(&a, &b, m, k, n, &mut want);
+            super::packed_gemm_band_prepacked_b::<MR>(&a, &b, &bp, m, k, n, &mut got);
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                want_bits, got_bits,
+                "prepacked-B kernel diverged in BITS at m={m} k={k} n={n}"
+            );
         }
     }
 
