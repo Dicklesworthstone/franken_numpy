@@ -5133,17 +5133,38 @@ fn bidiag_gemv_t_into(
 /// [`bidiag_reduce_blocked`] at the default panel width.
 ///
 /// UNMEASURED and UNWIRED, like the reduction it calls.
-fn bidiag_reduce_blocked_default(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+fn bidiag_reduce_blocked_default(
+    a: &[f64],
+    m: usize,
+    n: usize,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
     bidiag_reduce_blocked(a, m, n, BIDIAG_PANEL_NB)
 }
 
-fn bidiag_reduce_blocked(a: &[f64], m: usize, n: usize, nb: usize) -> (Vec<f64>, Vec<f64>) {
-    debug_assert!(m >= n);
+fn bidiag_reduce_blocked(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    nb: usize,
+) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    // FAILS CLOSED rather than on a debug_assert. `m < n` would walk the panel loops off the end of
+    // `work` in a release build, and this is destined to sit behind a size gate where the caller's
+    // orientation is not obvious at the call site. `tsqr_r` states its shape contract the same way.
+    if Some(a.len()) != m.checked_mul(n) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "bidiag_reduce_blocked: input must be m*n",
+        ));
+    }
+    if m < n {
+        return Err(LinAlgError::ShapeContractViolation(
+            "bidiag_reduce_blocked: requires m >= n (transpose a wide input first)",
+        ));
+    }
     let mut work = a.to_vec();
     let mut d = vec![0.0; n];
     let mut e = vec![0.0; n.saturating_sub(1)];
     if n == 0 {
-        return (d, e);
+        return Ok((d, e));
     }
     let nb = nb.max(1);
 
@@ -5379,7 +5400,7 @@ fn bidiag_reduce_blocked(a: &[f64], m: usize, n: usize, nb: usize) -> (Vec<f64>,
         }
         i0 += nbi;
     }
-    (d, e)
+    Ok((d, e))
 }
 
 fn transpose_mat(a: &[f64], m: usize, n: usize) -> Vec<f64> {
@@ -23568,9 +23589,9 @@ except Exception as exc:
             let a: Vec<f64> = (0..m * n)
                 .map(|i| (((i * 37) % 101) as f64) / 7.0 - 6.5)
                 .collect();
-            let (d, e) = super::bidiag_reduce_blocked(&a, m, n, nb);
+            let (d, e) = super::bidiag_reduce_blocked(&a, m, n, nb).expect("blocked reduction");
             // The default entry must satisfy the same invariant, not just the swept widths.
-            let (dd, ed) = super::bidiag_reduce_blocked_default(&a, m, n);
+            let (dd, ed) = super::bidiag_reduce_blocked_default(&a, m, n).expect("default reduction");
             assert_eq!(dd.len(), d.len(), "default entry length m={m} n={n}");
             assert_eq!(ed.len(), e.len(), "default entry length m={m} n={n}");
 
@@ -23665,6 +23686,18 @@ except Exception as exc:
                 );
             }
         }
+    }
+
+    #[test]
+    fn bidiag_reduce_blocked_fails_closed_on_a_wide_input() {
+        // Would have been a release-build out-of-bounds walk under the old debug_assert.
+        let a = vec![1.0f64; 3 * 7];
+        let err = super::bidiag_reduce_blocked(&a, 3, 7, 4).expect_err("wide must be refused");
+        assert_eq!(err.reason_code(), "linalg_shape_contract_violation");
+        let err = super::bidiag_reduce_blocked(&a, 4, 4, 4).expect_err("length must be checked");
+        assert_eq!(err.reason_code(), "linalg_shape_contract_violation");
+        // the tall case still works
+        assert!(super::bidiag_reduce_blocked(&a, 7, 3, 4).is_ok());
     }
 
     #[test]
