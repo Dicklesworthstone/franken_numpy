@@ -8489,6 +8489,9 @@ fn packed_gemm_band_prepacked_b<const MR: usize>(
     n: usize,
     out: &mut [f64],
 ) {
+    use std::simd::Simd;
+    type Lane = Simd<f64, PACKED_NR>;
+
     let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     let ap = pack_a_rowblocks::<MR>(a, m_full, k);
@@ -8500,22 +8503,27 @@ fn packed_gemm_band_prepacked_b<const MR: usize>(
         while i0 < m_full {
             let block = i0 / MR;
             let apanel = &ap[block * k * MR..(block + 1) * k * MR];
-            let mut acc = [[0.0f64; PACKED_NR]; MR];
+            // EXPLICIT SIMD accumulator, composing this band kernel with the register
+            // micro-kernel rather than leaving the vector code to the autovectoriser. With
+            // `a` packed above and `b` packed once by the caller, this is the full
+            // Goto-style inner loop: both operands stream contiguously and the tile is
+            // stated as `MR` vectors.
+            //
+            // Bit-identical, by the same lane argument as `packed_gemm_serial_tiled_simd`:
+            // lane `jj` accumulates `kk` ascending with no cross-lane interaction, and the
+            // multiply and add stay SEPARATE so both roundings are preserved. No `mul_add`.
+            let mut acc = [Lane::splat(0.0); MR];
             for kk in 0..k {
-                let brow = &bpanel[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                let bvec = Lane::from_slice(&bpanel[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]);
                 let arow = &apanel[kk * MR..kk * MR + MR];
-                for (ii, row) in acc.iter_mut().enumerate() {
-                    let av = arow[ii];
-                    for (slot, &bv) in row.iter_mut().zip(brow) {
-                        *slot += av * bv;
-                    }
+                for (ii, slot) in acc.iter_mut().enumerate() {
+                    *slot += Lane::splat(arow[ii]) * bvec;
                 }
             }
-            for (ii, row) in acc.iter().enumerate() {
+            for (ii, slot) in acc.iter().enumerate() {
                 let base = (i0 + ii) * n + j0;
-                for (slot, &v) in out[base..base + PACKED_NR].iter_mut().zip(row) {
-                    *slot += v;
-                }
+                let current = Lane::from_slice(&out[base..base + PACKED_NR]);
+                (current + *slot).copy_to_slice(&mut out[base..base + PACKED_NR]);
             }
             i0 += MR;
         }
@@ -22318,6 +22326,37 @@ except Exception as exc:
             assert_eq!(
                 want_bits, got_bits,
                 "SIMD micro-kernel diverged in BITS at m={m} k={k} n={n}"
+            );
+        }
+    }
+
+
+    /// The shared-B parallel driver must equal `packed_gemm` to the BIT.
+    ///
+    /// This closes a coverage gap I left when the driver was written: its band kernel was tested
+    /// directly, but the driver itself - the band decomposition, the MR-aligned band height, and
+    /// the single shared packed copy of `b` - was not exercised end to end.
+    ///
+    /// The assertion is valid on EITHER path. With a multi-threaded rayon pool the driver takes
+    /// the shared-B route; with a single-threaded pool it falls back to `packed_gemm_serial`. Both
+    /// must reproduce `packed_gemm` exactly, so the test cannot silently pass by taking the easy
+    /// branch - it just tests whichever branch this pool provides, and says so rather than
+    /// pretending to guarantee the parallel one.
+    ///
+    /// Dimensions clear `MATMUL_PARALLEL_MIN_DIM` (128) so the parallel gate is at least
+    /// reachable, and `n = 132` leaves a ragged final column panel.
+    #[test]
+    fn gemm_shared_b_is_bit_exact_vs_packed_gemm() {
+        for &(m, k, n) in &[(128usize, 128usize, 128usize), (130, 129, 132)] {
+            let a: Vec<f64> = (0..m * k).map(|i| ((i * 31 % 89) as f64) / 4.0 - 11.125).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| ((i * 43 % 79) as f64) / 16.0 - 2.4375).collect();
+            let want = super::packed_gemm(&a, &b, m, k, n);
+            let got = super::packed_gemm_shared_b(&a, &b, m, k, n);
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                want_bits, got_bits,
+                "shared-B driver diverged in BITS at m={m} k={k} n={n}"
             );
         }
     }
