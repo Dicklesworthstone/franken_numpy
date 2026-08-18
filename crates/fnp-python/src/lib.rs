@@ -14772,6 +14772,133 @@ fn try_zerocopy_f32_nan_to_num(
     Ok(Some(output))
 }
 
+
+/// The element-wise select at the heart of `np.where(cond, x, y)`, over any element type
+/// of the right width (`deadlock-audit-6y5wp`).
+#[inline]
+fn where_select_typed<T: Copy>(cond: &[u8], x: &[T], y: &[T], out: &mut [T]) {
+    for (((slot, &c), &xv), &yv) in out.iter_mut().zip(cond).zip(x).zip(y) {
+        *slot = if c != 0 { xv } else { yv };
+    }
+}
+
+// Zero-copy `np.where(cond, x, y)` for ANY single dtype, by width
+// (`deadlock-audit-6y5wp`).
+//
+// WHY ONE KERNEL COVERS EVERY DTYPE. `where` is a verbatim select: the chosen value is
+// COPIED, never converted, so the result is bit-identical for free - nan payloads, signed
+// zeros, subnormals, complex halves, datetime64 units, all of it. Nothing about the
+// operation depends on what the bytes MEAN, only on how many there are. So dispatching on
+// itemsize covers f32 and f16, every int width, bool, complex64/128 and datetime64 in one
+// implementation, where a per-dtype kernel would have been a copy each time.
+//
+// The existing f64 and int paths run first and are left alone: they additionally accept a
+// SCALAR branch (`np.where(cond, arr, 0.0)`), which needs dtype-aware promotion and is not
+// a byte select. This handles the array/array case they decline.
+//
+// SAME DTYPE ON BOTH SIDES IS REQUIRED, not merely convenient. NumPy promotes `x` and `y`
+// to a common type, and a promoting select is a conversion, not a copy - `where(c, f32,
+// f64)` must produce f64 values that were never in either input buffer. Anything but an
+// exact dtype match declines, so promotion stays with NumPy.
+fn try_zerocopy_any_dtype_where(
+    py: Python<'_>,
+    condition: &Bound<'_, PyAny>,
+    x: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = cached_numpy(py)?;
+    let ndarray_type = cached_ndarray_type(py)?;
+    for operand in [condition, x, y] {
+        if !operand.is_exact_instance(ndarray_type)
+            || !operand
+                .getattr("flags")?
+                .getattr("c_contiguous")?
+                .extract::<bool>()?
+        {
+            return Ok(None);
+        }
+    }
+    if condition
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
+    {
+        return Ok(None);
+    }
+    let x_dtype = x.getattr("dtype")?;
+    if !x_dtype.eq(y.getattr("dtype")?)? {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = condition.getattr("shape")?.extract()?;
+    if x.getattr("shape")?.extract::<Vec<usize>>()? != shape
+        || y.getattr("shape")?.extract::<Vec<usize>>()? != shape
+    {
+        return Ok(None);
+    }
+    let itemsize = x_dtype.getattr("itemsize")?.extract::<usize>()?;
+    if !matches!(itemsize, 1 | 2 | 4 | 8 | 16) {
+        return Ok(None);
+    }
+    let count: usize = shape.iter().product();
+
+    // The bool buffer's format is '?', which `PyBuffer::<u8>` rejects, so the condition is
+    // viewed as uint8 - its bytes are 0x00/0x01. The value buffers are viewed the same way
+    // because their own formats are arbitrary; the pointer is then read at the element
+    // width, which is sound since NumPy aligns each array to its itemsize.
+    let uint8 = numpy.getattr("uint8")?;
+    let as_bytes = |operand: &Bound<'_, PyAny>| -> PyResult<Option<PyBuffer<u8>>> {
+        let flat = operand.call_method1("reshape", (-1i64,))?;
+        let viewed = flat.call_method1("view", (&uint8,))?;
+        Ok(PyBuffer::<u8>::get(&viewed).ok())
+    };
+    let (Some(cond_buffer), Some(x_buffer), Some(y_buffer)) =
+        (as_bytes(condition)?, as_bytes(x)?, as_bytes(y)?)
+    else {
+        return Ok(None);
+    };
+    if cond_buffer.item_count() != count
+        || x_buffer.item_count() != count * itemsize
+        || y_buffer.item_count() != count * itemsize
+    {
+        return Ok(None);
+    }
+
+    let out = numpy.call_method1("empty_like", (x,))?;
+    let Some(out_buffer) = as_bytes(&out)? else {
+        return Ok(None);
+    };
+    if out_buffer.item_count() != count * itemsize {
+        return Ok(None);
+    }
+
+    // SAFETY: every pointer is a C-contiguous NumPy buffer held under the GIL, read at the
+    // array's own element width and therefore at its natural alignment. `out` is a fresh
+    // `empty_like` that neither input aliases.
+    let cond_bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(cond_buffer.buf_ptr().cast::<u8>(), count) };
+    macro_rules! select_at_width {
+        ($ty:ty) => {{
+            let xs: &[$ty] =
+                unsafe { std::slice::from_raw_parts(x_buffer.buf_ptr().cast::<$ty>(), count) };
+            let ys: &[$ty] =
+                unsafe { std::slice::from_raw_parts(y_buffer.buf_ptr().cast::<$ty>(), count) };
+            let os: &mut [$ty] =
+                unsafe { std::slice::from_raw_parts_mut(out_buffer.buf_ptr().cast::<$ty>(), count) };
+            where_select_typed(cond_bytes, xs, ys, os);
+        }};
+    }
+    match itemsize {
+        1 => select_at_width!(u8),
+        2 => select_at_width!(u16),
+        4 => select_at_width!(u32),
+        8 => select_at_width!(u64),
+        16 => select_at_width!(u128),
+        _ => return Ok(None),
+    }
+    Ok(Some(out.unbind()))
+}
+
 // Zero-copy np.where(cond, x, y) for the common select form: a bool cond ndarray
 // with float64 x and y of the identical shape. out[i] = x[i] if cond[i] else
 // y[i] — a pure element-wise select (the chosen value is copied verbatim, so it
@@ -23105,6 +23232,15 @@ fn where_py(
         // Typed branchless select for int/bool x,y of equal dtype+shape; skips the
         // cold, for-wide-ints lossy extract Vecs. Bit-identical (pure select).
         if let Some(out) = try_zerocopy_int_where(py, condition_bound, &x_arg, &y_arg)? {
+            return Ok(out);
+        }
+        // Array + ARRAY select for any dtype the two paths above decline - f32, f16,
+        // complex64/128, datetime64 - by dispatching on itemsize rather than on meaning
+        // (`deadlock-audit-6y5wp`). `where` copies the chosen value verbatim, so the
+        // result is bit-identical for free and nothing depends on what the bytes are. The
+        // array+SCALAR case below stays separate because a scalar branch needs NumPy's
+        // promotion rules and is not a byte select.
+        if let Some(out) = try_zerocopy_any_dtype_where(py, condition_bound, &x_arg, &y_arg)? {
             return Ok(out);
         }
         // Array + SCALAR select for any numeric dtype (the common np.where(c, arr, 0)),
@@ -124056,6 +124192,100 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// `np.where(cond, x, y)` must match NumPy for the array/array dtypes that had no
+    /// native path - f32, f16, complex, datetime64 (`deadlock-audit-6y5wp`).
+    ///
+    /// Only f64 and the integer widths had array/array kernels; everything else fell back.
+    /// The new path dispatches on ITEMSIZE rather than dtype, which is sound precisely
+    /// because `where` copies the chosen value verbatim - so the test is written to catch
+    /// the two ways that reasoning could be wrong in practice:
+    ///
+    ///   1. VALUES THAT ARE NOT PRESERVED BY A CONVERSION. NaN payloads, signed zeros and
+    ///      subnormals survive a byte copy and would NOT survive a widen/narrow round
+    ///      trip, so they are in the fixtures. Byte-identity is asserted, not `allclose`,
+    ///      which would pass on a -0.0 that became +0.0.
+    ///   2. MIXED DTYPES MUST STILL DELEGATE. `where(c, f32, f64)` promotes, and a
+    ///      promoting select is a conversion rather than a copy - the result contains
+    ///      values present in NEITHER input buffer. If the width dispatch ever accepted a
+    ///      mismatched pair it would silently reinterpret f64 bytes as f32.
+    #[test]
+    fn where_array_array_matches_numpy_for_dtypes_without_a_native_path() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_where_any")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("where")?;
+            let theirs = numpy.getattr("where")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(41)\n\
+                  n = 4096\n\
+                  c = rng.random(n) < 0.5\n\
+                  f32a = rng.standard_normal(n).astype('float32')\n\
+                  f32b = rng.standard_normal(n).astype('float32')\n\
+                  f32a[0] = np.float32('nan'); f32b[1] = np.float32('-nan')\n\
+                  f32a[2] = np.float32('-0.0'); f32b[3] = np.float32('0.0')\n\
+                  f32a[4] = np.float32(1e-45)\n\
+                  f16a = f32a.astype('float16'); f16b = f32b.astype('float16')\n\
+                  c64a = (f32a + 1j*f32b).astype('complex64')\n\
+                  c64b = (f32b - 1j*f32a).astype('complex64')\n\
+                  c128a = c64a.astype('complex128'); c128b = c64b.astype('complex128')\n\
+                  i16a = (rng.integers(-30000, 30000, n)).astype('int16')\n\
+                  i16b = (rng.integers(-30000, 30000, n)).astype('int16')\n\
+                  dta = np.arange(n, dtype='datetime64[s]')\n\
+                  dtb = (np.arange(n, dtype='datetime64[s]') + np.timedelta64(5, 's'))\n\
+                  f64a = f32a.astype('float64')\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| locals.get_item(k).expect("where fixture");
+
+            for (xa, yb, what) in [
+                ("f32a", "f32b", "float32"),
+                ("f16a", "f16b", "float16"),
+                ("c64a", "c64b", "complex64"),
+                ("c128a", "c128b", "complex128"),
+                ("i16a", "i16b", "int16"),
+                ("dta", "dtb", "datetime64[s]"),
+            ] {
+                let mine = ours.call1((g("c"), g(xa), g(yb)))?;
+                let numpys = theirs.call1((g("c"), g(xa), g(yb)))?;
+                assert_eq!(
+                    mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    numpys.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    "{what}: where dtype diverged from numpy"
+                );
+                assert_eq!(
+                    mine.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    numpys.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{what}: where is not byte-identical to numpy - a NaN payload, a \
+                     signed zero or a subnormal survives a copy but not a conversion"
+                );
+            }
+
+            // Mixed dtypes promote, so they must reach numpy and still agree.
+            let mixed = ours.call1((g("c"), g("f32a"), g("f64a")))?;
+            let mixed_numpy = theirs.call1((g("c"), g("f32a"), g("f64a")))?;
+            assert_eq!(
+                mixed.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                mixed_numpy.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                "mixed f32/f64 must promote exactly as numpy does"
+            );
+            assert_eq!(
+                mixed.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                mixed_numpy.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "mixed f32/f64 diverged - a width dispatch that accepted a mismatched \
+                 pair would reinterpret f64 bytes as f32"
+            );
             Ok(())
         });
     }
