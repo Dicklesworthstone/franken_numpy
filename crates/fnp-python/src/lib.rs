@@ -37965,8 +37965,27 @@ fn diff(
                 Some(out)
             } else if let Some(out) = try_zerocopy_int_diff(py, cur, 1, axis)? {
                 Some(out)
+            } else if let Some(out) = try_zerocopy_f32_diff(py, cur, 1, axis)? {
+                Some(out)
             } else {
-                try_zerocopy_f32_diff(py, cur, 1, axis)?
+                // f16 COMPLETES THIS CHAIN (`deadlock-audit-6y5wp`). Every other dtype the
+                // first-difference path supports was already reachable from here, so
+                // `np.diff(x, n)` stayed native for f64, int and f32 at any order - but f16
+                // was wired ONLY into the `n == 1` early return above, which meant
+                // `np.diff(f16_array, n=2)` fell past this loop, past the datetime block,
+                // and delegated the WHOLE call to NumPy. One dtype missing from one chain
+                // cost every higher-order f16 diff.
+                //
+                // Sound for the same reason the rest of the chain is: NumPy defines the
+                // n-th difference as the first difference applied n times, and each step
+                // here runs on the previous step's buffer. The f16 helper takes `&numpy`
+                // and no order argument because it IS the first difference; the others take
+                // an explicit `1` for the same reason.
+                //
+                // Declining mid-way is already handled: `all_ok` falls false and the whole
+                // call restarts from the ORIGINAL array with the full `n`, so a partial
+                // chain can never leak a partially-differenced result.
+                try_zerocopy_f16_diff_1d(py, &numpy, cur, axis)?
             };
             match step {
                 Some(out) => current = out,
@@ -123256,6 +123275,65 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// HIGHER-ORDER f16 diff must be byte-identical to NumPy at every order
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// f16 was wired only into the `n == 1` early return, so `np.diff(x, n=2)` on float16
+    /// fell past the repeated-first-difference chain and delegated the whole call. Adding
+    /// it to that chain makes the native path reachable for n >= 2, and this pins the
+    /// property that makes doing so legitimate: NumPy defines the n-th difference as the
+    /// first difference applied n times, so iterating our first-difference kernel must
+    /// reproduce NumPy exactly, not approximately.
+    ///
+    /// float16 is where that is least obvious and most worth testing. Each step rounds to
+    /// half precision, so an implementation that accumulated in f32 and narrowed once at
+    /// the end would agree at n == 1 and drift at n >= 2 - passing the old coverage and
+    /// failing here. The 0.1-spaced values are chosen because they are not representable
+    /// in binary16, so every step actually rounds.
+    #[test]
+    fn f16_higher_order_diff_matches_numpy_byte_for_byte() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_f16_diff_n")?;
+            fnp_python(&module)?;
+            let diff_fn = module.getattr("diff")?;
+            let numpy = py.import("numpy")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"x = (np.arange(64) * 0.1).astype('float16')",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let x = locals.get_item("x").expect("f16 fixture");
+
+            // n = 0 is the identity, n = 1 the old fast path, n >= 2 the chain this change
+            // opened. Walk past the point where the array would run out (64 elements) is
+            // deliberately NOT done here - `diff` shrinks by one per order, so 5 orders is
+            // well inside the domain and keeps the comparison about arithmetic.
+            for n in 0..=5i64 {
+                let ours = diff_fn.call1((&x, n))?;
+                let theirs = numpy.call_method1("diff", (&x, n))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    theirs.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    "n={n}: dtype diverged from numpy.diff on float16"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "n={n}: float16 diff is not byte-identical to numpy - if this fails only \
+                     for n >= 2, the chain is accumulating in wider precision instead of \
+                     rounding to half at every step"
+                );
+            }
             Ok(())
         });
     }
