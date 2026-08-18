@@ -105721,6 +105721,31 @@ fn vecmat(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // NATIVE 1-D x 2-D VECMAT (`deadlock-audit-6y5wp`). `np.vecmat(v, A)` with v (N,) and
+    // A (N, M) sums `v[i] * A[i, j]` over i - which is the einsum contraction `ij,i->j`,
+    // and that contraction already has a zero-copy f64 kernel in
+    // `try_zerocopy_f64_einsum_matvec`. Nothing but `einsum` could reach it; `vecmat` was
+    // a bare `core_numpy_passthrough`.
+    //
+    // ARGUMENT ORDER IS SWAPPED ON PURPOSE. The kernel is written matrix-first (its `lhs`
+    // is the two-label operand), while `np.vecmat` takes the VECTOR first. Passing them
+    // through in call order would silently ask for the wrong contraction.
+    //
+    // NO EXTRA GATING HERE, DELIBERATELY. The kernel already checks f64 on both operands,
+    // a 2-D matrix, a 1-D vector whose length equals the contracted axis, contiguity, and
+    // buffer lengths, returning `None` on any mismatch. Duplicating those checks at the
+    // call site would create a second, divergable definition of "eligible"; the only
+    // things filtered here are what the kernel cannot see - keywords (`out=`, `axes=`) and
+    // an argument count other than two. Batched inputs, complex dtypes and shape
+    // mismatches all fall through to NumPy, which raises exactly as before.
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty())
+        && args.len() == 2
+        && let Ok(v) = args.get_item(0)
+        && let Ok(m) = args.get_item(1)
+        && let Some(out) = try_zerocopy_f64_einsum_matvec(py, "ij,i->j", &m, &v)?
+    {
+        return Ok(out);
+    }
     core_numpy_passthrough(py, "vecmat", args, kwargs)
 }
 
@@ -105731,6 +105756,18 @@ fn matvec(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // NATIVE 2-D x 1-D MATVEC (`deadlock-audit-6y5wp`). `np.matvec(A, v)` with A (M, N)
+    // and v (N,) is exactly the einsum contraction `ij,j->i`, which already has a
+    // zero-copy f64 kernel. See `vecmat` above for why the call site adds no gating of its
+    // own; here the operands are already matrix-first, so they pass through in order.
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty())
+        && args.len() == 2
+        && let Ok(m) = args.get_item(0)
+        && let Ok(v) = args.get_item(1)
+        && let Some(out) = try_zerocopy_f64_einsum_matvec(py, "ij,j->i", &m, &v)?
+    {
+        return Ok(out);
+    }
     core_numpy_passthrough(py, "matvec", args, kwargs)
 }
 
@@ -123336,6 +123373,92 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// `matvec` and `vecmat` must match NumPy exactly, including on the shapes and dtypes
+    /// the native kernel declines (`deadlock-audit-6y5wp`).
+    ///
+    /// Both were bare passthroughs while the contraction they perform already had a
+    /// zero-copy f64 kernel reachable only from `einsum`. Wiring them raises two risks
+    /// that a naive "does 2-D x 1-D work" test would not catch:
+    ///
+    ///   1. ARGUMENT ORDER. The kernel is matrix-first; `np.vecmat` is vector-first. Pass
+    ///      them through in call order and you compute `A^T v` where NumPy computes `v A`
+    ///      - which for a SQUARE matrix still returns the right shape and merely wrong
+    ///      numbers. The non-square and asymmetric cases below are what expose it.
+    ///   2. OVER-CAPTURE. The kernel covers only unbatched, contiguous, f64 operands, so
+    ///      batched / f32 / strided inputs must still reach NumPy unchanged rather than
+    ///      being declined into a different answer.
+    #[test]
+    fn matvec_and_vecmat_match_numpy_including_where_the_kernel_declines() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            // np.matvec / np.vecmat are NumPy >= 2.2; skip rather than fail on older.
+            if numpy.getattr("matvec").is_err() || numpy.getattr("vecmat").is_err() {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_matvec")?;
+            fnp_python(&module)?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(0)\n\
+                  A = rng.standard_normal((7, 5))\n\
+                  v5 = rng.standard_normal(5)\n\
+                  v7 = rng.standard_normal(7)\n\
+                  A32 = A.astype('float32')\n\
+                  v5_32 = v5.astype('float32')\n\
+                  Abatch = rng.standard_normal((3, 7, 5))\n\
+                  Astrided = np.asfortranarray(A)\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| locals.get_item(k).expect("matvec fixture");
+
+            // (fn, our args, numpy args). A is 7x5 and NON-SQUARE on purpose: a swapped
+            // argument order cannot survive it.
+            let cases: &[(&str, [&str; 2])] = &[
+                ("matvec", ["A", "v5"]),        // native: (7,5) x (5,) -> (7,)
+                ("vecmat", ["v7", "A"]),        // native: (7,) x (7,5) -> (5,)
+                ("matvec", ["A32", "v5_32"]),   // declines: f32
+                ("matvec", ["Abatch", "v5"]),   // declines: batched
+                ("matvec", ["Astrided", "v5"]), // declines: non-contiguous
+            ];
+            for (name, argnames) in cases.iter() {
+                let ours = module
+                    .getattr(*name)?
+                    .call1((g(argnames[0]), g(argnames[1])))?;
+                let theirs = numpy
+                    .getattr(*name)?
+                    .call1((g(argnames[0]), g(argnames[1])))?;
+                assert_eq!(
+                    ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                    theirs.getattr("shape")?.extract::<Vec<usize>>()?,
+                    "{name}{argnames:?}: shape diverged from numpy"
+                );
+                assert!(
+                    numpy
+                        .call_method1("allclose", (&ours, &theirs))?
+                        .extract::<bool>()?,
+                    "{name}{argnames:?}: values diverged from numpy - if only the \
+                     non-square cases fail, the matrix/vector argument order is swapped"
+                );
+            }
+
+            // A shape mismatch must still raise, not silently take a native path.
+            assert!(
+                module
+                    .getattr("matvec")?
+                    .call1((g("A"), g("v7")))
+                    .is_err(),
+                "matvec with a mismatched contracted axis must raise as numpy does"
+            );
             Ok(())
         });
     }
