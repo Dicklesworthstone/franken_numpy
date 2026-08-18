@@ -38700,8 +38700,18 @@ fn try_zerocopy_f64_histogramdd(
             return Ok(None);
         }
         // SAFETY: as above.
-        edge_slices
-            .push(unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) });
+        let slice: &[f64] =
+            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+        // STRICTLY INCREASING, checked because edges may now be CALLER-SUPPLIED
+        // (`deadlock-audit-6y5wp`). `partition_point` assumes a sorted predicate; on
+        // unsorted edges it returns a meaningless index and would bin silently wrong.
+        // NumPy raises for non-monotonic bins, so declining here produces that error
+        // instead of a plausible histogram. Equal edges are rejected too: a zero-width
+        // bin divides by zero under `density=`.
+        if slice.windows(2).any(|w| !(w[0] < w[1])) {
+            return Ok(None);
+        }
+        edge_slices.push(slice);
     }
 
     let nbins: Vec<usize> = edge_slices.iter().map(|e| e.len() - 1).collect();
@@ -38938,6 +38948,11 @@ fn try_zerocopy_f64_histogram2d(
     let yv: &[f64] = unsafe { std::slice::from_raw_parts(ys.as_ptr().cast::<f64>(), ys.len()) };
     let xed: &[f64] = unsafe { std::slice::from_raw_parts(xe.as_ptr().cast::<f64>(), xe.len()) };
     let yed: &[f64] = unsafe { std::slice::from_raw_parts(ye.as_ptr().cast::<f64>(), ye.len()) };
+    // Strictly increasing, for the reason given in the N-D kernel: edges may be
+    // caller-supplied, and `partition_point` on unsorted edges bins silently wrong.
+    if xed.windows(2).any(|w| !(w[0] < w[1])) || yed.windows(2).any(|w| !(w[0] < w[1])) {
+        return Ok(None);
+    }
 
     let bin_of = |edges: &[f64], v: f64, nbins: usize| -> Option<usize> {
         let mut k = edges.partition_point(|&e| e <= v);
@@ -108388,31 +108403,59 @@ fn histogram2d(
         if want_density && weights_arg.is_some() {
             return core_numpy_passthrough(py, "histogram2d", args, kwargs);
         }
-        let counts: Option<(usize, usize)> = match bins.as_ref() {
-            None => Some((10, 10)),
-            Some(b) => {
-                if let Ok(n) = b.extract::<usize>() {
-                    Some((n, n))
-                } else {
-                    b.extract::<(usize, usize)>().ok()
-                }
-            }
+        // NumPy's own disambiguation, copied rather than guessed:
+        //     N = len(bins)                    (TypeError -> N = 1, i.e. a scalar)
+        //     if N not in {1, 2}: xedges = yedges = asarray(bins)
+        // So `[3, 4]` is two COUNTS, `[0.0, 1.0, 2.0]` is ONE shared EDGE ARRAY, and the
+        // difference is the length. Getting this backwards would silently histogram a
+        // 3-edge request into 3 bins per axis.
+        let specs: Option<[Option<Bound<'_, PyAny>>; 2]> = match bins.as_ref() {
+            None => Some([None, None]),
+            Some(b) => match b.len() {
+                // No length: a scalar count, shared by both axes.
+                Err(_) => Some([Some(b.clone()), Some(b.clone())]),
+                Ok(2) => match (b.get_item(0), b.get_item(1)) {
+                    (Ok(first), Ok(second)) => Some([Some(first), Some(second)]),
+                    _ => None,
+                },
+                // Length 1 is an error in NumPy (D mismatch); leave it to raise.
+                Ok(1) => None,
+                // Any other length: the sequence IS the edge array, for both axes.
+                Ok(_) => Some([Some(b.clone()), Some(b.clone())]),
+            },
         };
-        if let Some((nx, ny)) = counts {
-            let per_dim =
-                |index: usize, n: usize, sample: &Bound<'_, PyAny>| -> PyResult<Py<PyAny>> {
-                    let ekw = PyDict::new(py);
-                    ekw.set_item("bins", n)?;
-                    if let Some(r) = range_arg.as_ref()
-                        && let Ok(item) = r.get_item(index)
-                    {
-                        ekw.set_item("range", item)?;
-                    }
-                    Ok(numpy
-                        .call_method("histogram_bin_edges", (sample,), Some(&ekw))?
-                        .unbind())
-                };
-            if let (Ok(xe), Ok(ye)) = (per_dim(0, nx, &x), per_dim(1, ny, &y))
+        if let Some(specs) = specs {
+            let per_dim = |index: usize,
+                           spec: Option<&Bound<'_, PyAny>>,
+                           sample: &Bound<'_, PyAny>|
+             -> PyResult<Py<PyAny>> {
+                // A non-integer spec is already the edges; normalise it the way NumPy
+                // does and skip derivation. `range` is ignored for such an axis, as it is
+                // by NumPy when edges are supplied.
+                if let Some(s) = spec
+                    && s.extract::<usize>().is_err()
+                {
+                    let akw = PyDict::new(py);
+                    akw.set_item("dtype", cached_float64_dtype(py)?)?;
+                    return Ok(numpy.call_method("asarray", (s,), Some(&akw))?.unbind());
+                }
+                let n = spec.and_then(|s| s.extract::<usize>().ok()).unwrap_or(10);
+                let ekw = PyDict::new(py);
+                ekw.set_item("bins", n)?;
+                if let Some(r) = range_arg.as_ref()
+                    && let Ok(item) = r.get_item(index)
+                    && !item.is_none()
+                {
+                    ekw.set_item("range", item)?;
+                }
+                Ok(numpy
+                    .call_method("histogram_bin_edges", (sample,), Some(&ekw))?
+                    .unbind())
+            };
+            if let (Ok(xe), Ok(ye)) = (
+                per_dim(0, specs[0].as_ref(), &x),
+                per_dim(1, specs[1].as_ref(), &y),
+            )
                 && let Some(hist) = try_zerocopy_f64_histogram2d(
                     py,
                     numpy,
@@ -108583,20 +108626,70 @@ fn histogramdd(
             let ndim = shape[1];
             // `bins` as one int for every axis, or one int per axis. Edge arrays and the
             // string estimators stay with NumPy.
-            let per_axis: Option<Vec<usize>> = match bins.as_ref() {
-                None => Some(vec![10; ndim]),
-                Some(b) => {
-                    if let Ok(n) = b.extract::<usize>() {
-                        Some(vec![n; ndim])
-                    } else {
-                        b.extract::<Vec<usize>>().ok().filter(|v| v.len() == ndim)
+            // Per-axis spec: an int COUNT, or an array of explicit EDGES. NumPy's rule
+            // for histogramdd is that `bins` is either a scalar applied to every axis or
+            // a sequence of exactly D items, each of which may itself be a count or an
+            // edge array.
+            let per_axis: Option<Vec<Option<Bound<'_, PyAny>>>> = match bins.as_ref() {
+                None => Some(vec![None; ndim]),
+                Some(b) => match b.len() {
+                    // No length: a scalar count for every axis.
+                    Err(_) => Some(vec![Some(b.clone()); ndim]),
+                    Ok(m) if m == ndim => {
+                        let mut specs = Vec::with_capacity(ndim);
+                        let mut ok = true;
+                        for axis in 0..ndim {
+                            match b.get_item(axis) {
+                                Ok(item) => specs.push(Some(item)),
+                                Err(_) => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok { Some(specs) } else { None }
                     }
-                }
+                    Ok(_) => None,
+                },
             };
-            if let Some(counts_per_axis) = per_axis {
+            if let Some(specs) = per_axis {
                 let mut edges: Vec<Py<PyAny>> = Vec::with_capacity(ndim);
                 let mut ok = true;
-                for (axis, n) in counts_per_axis.iter().copied().enumerate() {
+                for (axis, spec) in specs.iter().enumerate() {
+                    // EXPLICIT EDGES SHORT-CIRCUIT THE DERIVATION. A spec that is not an
+                    // integer is already the edge array; NumPy normalises it with
+                    // `asarray(..., float)` and so does this, which also lets a list or an
+                    // int-typed array through. `range` is ignored for such an axis, exactly
+                    // as NumPy ignores it when the edges are given.
+                    let is_count = spec.as_ref().is_some_and(|s| s.extract::<usize>().is_ok());
+                    if let Some(s) = spec.as_ref()
+                        && !is_count
+                    {
+                        let akw = PyDict::new(py);
+                        let dtype = match cached_float64_dtype(py) {
+                            Ok(d) => d,
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        };
+                        if akw.set_item("dtype", dtype).is_err() {
+                            ok = false;
+                            break;
+                        }
+                        match numpy.call_method("asarray", (s,), Some(&akw)) {
+                            Ok(e) => edges.push(e.unbind()),
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    let n = spec
+                        .as_ref()
+                        .and_then(|s| s.extract::<usize>().ok())
+                        .unwrap_or(10);
                     // The axis column as a view; `histogram_bin_edges` accepts strided
                     // input, so no copy is taken to compute edges.
                     let Ok(column) = sample.get_item((pyo3::types::PySlice::full(py), axis)) else {
@@ -123971,6 +124064,106 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// Explicit bin EDGES must match NumPy, and NumPy's length rule must be honoured
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// `bins=` accepts a count, a per-axis sequence of counts, or explicit edge arrays -
+    /// and NumPy disambiguates the last two BY LENGTH:
+    ///
+    ///     N = len(bins);  if N not in {1, 2}:  xedges = yedges = asarray(bins)
+    ///
+    /// so `[3, 4]` is two counts while `[0.0, 1.0, 2.0]` is ONE shared edge array. Get it
+    /// backwards and a 3-edge request silently becomes 3 bins per axis - same dtype, same
+    /// rank, plausible values. `three_edges` below is exactly that case.
+    ///
+    /// NON-MONOTONIC EDGES MUST RAISE, NOT BIN. The counting kernel finds a bin with
+    /// `partition_point`, which assumes sorted input; on unsorted edges it returns a
+    /// meaningless index. Declining hands the call to NumPy, which raises - so the test
+    /// asserts an error rather than a value.
+    #[test]
+    fn histogram_explicit_edges_match_numpy_and_bad_edges_raise() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_hist_edges")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("histogram2d")?;
+            let theirs = numpy.getattr("histogram2d")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(23)\n\
+                  x = rng.standard_normal(3000)\n\
+                  y = rng.standard_normal(3000)\n\
+                  xe = np.array([-3.0, -1.0, -0.25, 0.0, 0.75, 3.0])\n\
+                  ye = np.array([-3.0, -0.5, 0.5, 3.0])\n\
+                  three_edges = np.array([-2.0, 0.0, 2.0])\n\
+                  uneven = [xe, 4]\n\
+                  bad = np.array([0.0, 1.0, 0.5, 2.0])\n\
+                  flat = np.array([0.0, 1.0, 1.0, 2.0])\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| locals.get_item(k).expect("edge fixture");
+
+            let compare = |mine: &Bound<'_, PyAny>,
+                           theirs_out: &Bound<'_, PyAny>,
+                           what: &str|
+             -> PyResult<()> {
+                for (index, part) in [(0usize, "H"), (1, "xedges"), (2, "yedges")] {
+                    assert_eq!(
+                        mine.get_item(index)?.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        theirs_out.get_item(index)?.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "{what}: {part} diverged from numpy"
+                    );
+                }
+                Ok(())
+            };
+
+            // Per-axis edge arrays of DIFFERENT lengths, so a swapped pair changes shape.
+            let kw = PyDict::new(py);
+            kw.set_item("bins", (g("xe"), g("ye")))?;
+            compare(
+                &ours.call((g("x"), g("y")), Some(&kw))?,
+                &theirs.call((g("x"), g("y")), Some(&kw))?,
+                "per-axis explicit edges",
+            )?;
+
+            // Length 3: numpy's rule makes this ONE shared edge array, not three counts.
+            let kw3 = PyDict::new(py);
+            kw3.set_item("bins", g("three_edges"))?;
+            compare(
+                &ours.call((g("x"), g("y")), Some(&kw3))?,
+                &theirs.call((g("x"), g("y")), Some(&kw3))?,
+                "length-3 sequence is a shared edge array",
+            )?;
+
+            // Mixed: explicit edges on one axis, a count on the other.
+            let kwm = PyDict::new(py);
+            kwm.set_item("bins", g("uneven"))?;
+            compare(
+                &ours.call((g("x"), g("y")), Some(&kwm))?,
+                &theirs.call((g("x"), g("y")), Some(&kwm))?,
+                "edges on one axis, count on the other",
+            )?;
+
+            // Non-monotonic and zero-width edges must raise, exactly as numpy does.
+            for (name, why) in [("bad", "non-monotonic"), ("flat", "zero-width bin")] {
+                let bkw = PyDict::new(py);
+                bkw.set_item("bins", (g(name), g("ye")))?;
+                assert!(
+                    ours.call((g("x"), g("y")), Some(&bkw)).is_err(),
+                    "{why} edges must raise rather than bin - partition_point on unsorted \
+                     edges returns a meaningless index"
+                );
+            }
             Ok(())
         });
     }
