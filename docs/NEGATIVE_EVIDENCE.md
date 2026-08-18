@@ -54706,3 +54706,75 @@ run the counted A/B on `bench_sort_counter_fnp_i64` with `bench_sort_counter_num
 null, on a host under load < ~10 with per-arm loadavg and MHz recorded. Register the SIGN only; do
 NOT register a magnitude band derived from 23 x a per-site figure.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — `sort`'s ndarray-cache conversion measures -33,489 insns/call against a null 14,218x smaller; 1,456.0 per site, independently agreeing with argsort's 1,360.9 — AND the reached-count recipe I registered last turn is UNSOUND (deadlock-audit-c5ecm)
+
+**Result class:** a pre-registered sign test that passed, plus the retraction of a METHOD I put on
+the bead one turn ago and told others to use.
+
+**STILL FAR BEHIND THE INCUMBENT.** `fnp.sort(int64, n=256)` costs **5.091x** NumPy's retired
+instructions after this lever, improved from 6.686x, leaving 85,833 insns/call of excess. This is a
+worse instruction ratio than argsort's 2.663x. Nothing here is a win against NumPy. (Instruction
+ratio is NOT the wall-clock currency in which `searchsorted`'s 3.172x worst cell is quoted — the
+two are different measurements and must not be ranked against each other.)
+
+### Result
+
+```
+                     median insns        per call     spread
+  before fnp        56,120,922,649       140,302.3     2.228%
+  after  fnp        42,725,334,794       106,813.3     0.523%
+  before numpy       8,393,261,707        20,983.2     0.006%
+  after  numpy       8,392,319,583        20,980.8     0.008%
+
+  NULL   (numpy arm)         -2.4 insns/call  = 0.0112%
+  EFFECT (fnp arm)      -33,489.0 insns/call
+  separation                14,218x the null      <- the cleanest null in this campaign
+  per site (23 converted)    1,456.0 insns
+```
+
+BEFORE `10bd19b2455aab5a`, AFTER `f73349a713eede08`, distinct, both carrying the sort arm; the ONLY
+source difference is sort's 23 sites (verified: 46 diff lines, argsort's chain already converted in
+both). `release-perf`, `+avx2`, threading pinned, 3 reps x 4 arms interleaved, per-arm loadavg
+7.01-7.35, idle 89%->92%, CPU 2471->2140 MHz, /data 62G. Every arm `selected_groups=1`, probe
+printed, 0 panics, checked before reading counts; checksum `00000000007e8280` identical on all 12
+runs. Source already validated at 139 tests / 0 failures and clippy delta 0 (commit 70f720d6);
+unchanged since, so no re-run.
+
+**Two dispatchers now price the same redundant fetch independently: 1,360.9 (argsort) and 1,456.0
+(sort), 6.8% apart, neither derived from the other.**
+
+**DISCLOSED:** the before-fnp arm spread 2.228%, and the before arm has now had the widest spread in
+BOTH counted rows on this lever (2.255% on argsort). That is a pattern I do not have an explanation
+for and am recording rather than smoothing; the effect is 3-4 orders of magnitude larger so the
+sign is unaffected, but quote "about 33,500".
+
+### RETRACTION: the reached-count recipe on this bead is UNSOUND as written
+
+Last turn I registered a recipe — `perf record -c 50000`, then read which probe symbols appear — and
+told anyone extending this bead to use it. **Absence of a symbol from that profile does not mean the
+probe did not run.**
+
+Here it failed openly. The profile showed 22 of sort's probes and omitted `try_native_struct_sort`
+and `try_native_struct_sort_valuelex`. But their guards say both MUST run for this cell:
+`_valuelex` is gated only on `order_spec.is_none()` (true — the bench passes no kwargs) and
+`try_native_struct_sort` is UNGATED. And the symbols are present in the ELF (82 distinct sort-probe
+symbols exist; only 22 drew samples). They ran and drew no samples, being cheap declines.
+
+So the recipe yields a LOWER BOUND on the reached set, not the reached set.
+
+**What survives:** argsort's 25/31 stands, because I did not rest it on symbol absence — all six
+absentees were verified against a single shared guard (`kind_spec` stable/mergesort, false by
+default) in source. That was the proof; the profile was corroboration. The general recipe lacked
+that step.
+
+**Corrected method:** read the GUARDS to determine reachability, and use the profile only to
+corroborate presence. Absence is evidence of cheapness, not of non-execution. For `sort`, the guards
+say all 23 converted sites are reached, which is the denominator used above.
+
+COUNTED_MECHANISM: -33,489.0 insns/call, medians of 3 reps, against a numpy-arm null of -2.4
+(0.0112%), 14,218x separation, checksums identical across 12 runs, 1,456.0 per converted site.
+A/A NULL CONTROLS: the numpy arm IS the null - same operand, same harness, untouched by the lever.
+RETRY PREDICATE: none for this lever. For the bead: the next dispatcher must have its reachable set
+derived from GUARDS, not from symbol presence.
+AGENT_NAME=SlateFinch.
