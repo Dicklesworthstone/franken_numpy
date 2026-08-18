@@ -55174,3 +55174,47 @@ RETRY PREDICATE: the time magnitude on the delegating route needs >=15 reps or a
 estimator to be quotable to better than "roughly". The SIGN and the instruction figures need
 nothing further.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — CROSS-REFERENCE: every instruction ratio banked today, paired with its measured TIME ratio; and the campaign's worst-cell figure CONFIRMED to be wall clock already (deadlock-audit-c5ecm)
+
+**Result class:** discharging an instruction I left myself. The currency row said "any row quoting
+an instruction ratio competitively must be re-expressed in time"; that is not actionable unless the
+rows are named. Build-free inspection, no perf dumps.
+
+**FIRST, THE GOOD NEWS ON THE STANDING FIGURE.** The campaign's worst cell — `fnp.searchsorted`
+with an array needle, 8.700x -> 5.838x — is **already wall clock**, not instructions: the banking
+row states it as "10.7 us against 1.2 us". It needs no correction and the standing instruction to
+quote 5.838x rather than 8.700x stands exactly as written.
+
+**THE ROWS THAT NEED THE PAIRING.** All three are honestly LABELLED as instructions (they say
+"retired instructions" in the text), so none is wrong — but a reader taking the number competitively
+would overstate our deficit. Measured equivalents:
+
+```
+  cell / row                              INSTRUCTION ratio      TIME ratio (measured)
+  argsort, predicate lever   (L54391)     3.872x -> 3.511x       ~2.71x at the after-state*
+  argsort, ndarray cache     (L54474)     3.531x -> 2.663x       2.707x -> 2.192x
+  sort, ndarray cache        (L54716)     6.686x -> 5.091x       4.279x -> 3.387x
+  multiply, delegating route (L55115)     1.1829x                1.0931x  ("roughly 9%")
+
+  * the predicate row's BEFORE state (3.872x insns) has NO measured time equivalent - the
+    wall-clock run started from the predicate-AFTER ELF. Do not interpolate one; it is unmeasured.
+```
+
+Already dual-currency and needing nothing: the native-f64-multiply REJECT row (L53347) states both
+"5.63x" instructions and "wall clock ratio 1.545x slower" — that row got it right the first time,
+which is the standard the others should have met.
+
+**WHAT IS NOT CLAIMED HERE.** No new measurement. The time figures are lifted from the two
+wall-clock rows banked earlier today; the instruction figures from their own rows. The pairing is
+bookkeeping, and the one gap above is left as a gap rather than filled by conversion — applying
+13.2 insns/ns to an unmeasured cell would be exactly the constructed-quotient move that has been
+wrong repeatedly today, and the measured rates are class-specific anyway.
+
+COUNTED_MECHANISM: none - cross-reference only.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: if the predicate lever's BEFORE time ratio is ever wanted, it needs the
+pre-predicate ELF (`elf_before`, preserved) run against numpy on the argsort arm - about 10 arm
+invocations, no build. Not done here because /data is 5G above the brake and losing ~1G/tick to
+other projects, and it answers nothing currently open.
+AGENT_NAME=SlateFinch.
