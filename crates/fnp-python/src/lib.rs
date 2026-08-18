@@ -34341,10 +34341,26 @@ fn searchsorted(
     // this is worth landing where three micro-gates were not: nothing else in this function
     // guards it, so it genuinely runs every time.
     let a_bound = a.bind(py);
+    // INTERNED METHOD KEY (`deadlock-audit-s70kb`). UNMEASURED - landed unbuilt under a disk
+    // freeze.
+    //
+    // A LIST haystack misses the ndarray fast path and lands here on every call. The `asarray`
+    // conversion itself is unavoidable - NumPy does it internally too - but the METHOD NAME was
+    // not: `call_method1` with a `&str` is `PyString::new(py, ..)` per call, verified in
+    // pyo3-0.28.3 (`conversions/std/string.rs`: `impl IntoPyObject for &str`). No fast path, no
+    // cache, no short-string case. So every call allocated a fresh `PyUnicode`, copied seven
+    // bytes, and dropped it. `intern!` is a `PyOnceLock<Py<PyString>>` in a static: built once
+    // per process, a deref thereafter.
+    //
+    // WHY THIS SITE AND NOT THE OTHER 3,447: `ss_list_haystack` at 2.19x is a NAMED cell whose
+    // cost has no attributed mechanism, so a change here is attributable. The census of that
+    // whole class is on the bead and is explicitly NOT to be swept on the strength of a site
+    // count - the ndarray sweep established that the reachable subset is the prize, and its own
+    // remaining 220 sites turned out provably unreachable from both measured cells.
     let mut a_arr = if is_exact_numpy_ndarray(py, a_bound)? {
         a_bound.clone()
     } else {
-        numpy.call_method1("asarray", (a_bound,))?
+        numpy.call_method1(intern!(py, "asarray"), (a_bound,))?
     };
     // A non-1-D haystack is a pure error case, and it takes the same treatment as
     // an invalid `side` above: numpy raises `ValueError: object too deep for
