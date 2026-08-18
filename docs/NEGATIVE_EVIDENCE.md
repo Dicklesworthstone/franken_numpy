@@ -53280,3 +53280,82 @@ probe chain, and REVERSES the recommendation I left on that bead. The replica-ov
 should also be checked against any other row in this ledger that derived a quantity by subtracting
 standalone replicas.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — NATIVE f64 MULTIPLY AT n=256 IS 5.63x WORSE, NOT BETTER: my registered sign prediction is REFUTED and the lane CLOSES. The "SIMD-bound, no parallel win" exclusion holds at small n too, for a different reason than it was written for (deadlock-audit-sjpmo)
+
+**Campaign result class:** REJECT — a lead I filed and argued for, killed by its own first measurement
+
+Run in an ISOLATED GIT WORKTREE off `63049f59`; main and the shared tree never carried the change,
+so no peer's rch build compiled it. One line: `UFuncKind::Multiply => Some(BinaryOp::Mul)` on the
+plain binary route only (the `out=` route left untouched). ELF
+`criterion_python_elementwise-ea6828603f008c3e`, release-perf, `OPENBLAS/OMP/MKL_NUM_THREADS=1`,
+400,000 calls/arm, 5 interleaved reps, `selected_groups=1` on every arm. PRE loadavg
+13.16/13.99/19.21, CPU idle 88%, runnable 12/64, iowait 0, 2501 MHz, /data 128G. POST idle 84%.
+
+```
+  numpy_plain  median 3,193,711,032  spread 0.064%   wall 0.6803 s
+  fnp_plain    median 7,318,017,189  spread 0.262%   wall 1.0518 s
+  -----------------------------------------------------------------
+  excess over NumPy   10,310.8 insns/call     (delegating baseline: 1830.5)
+                      = 5.63x the delegating route's excess
+  fnp / numpy wall     1.545x                 (we are SLOWER)
+```
+
+### Every registered prediction, scored
+
+```
+  1 SIGN (decisive): native makes fnp FASTER than numpy at n=256   REFUTED - 1.545x SLOWER
+  2 MAGNITUDE band 0.45-0.85                                       REFUTED - 1.545
+  3 ENGAGEMENT: counted difference must be large                   CONFIRMED - fnp moved 1.86x
+    parity assertion against NumPy's own oracle                    PASSED on every arm
+```
+
+Predictions 1 and 2 were mine, argued at length on this bead, and they are wrong by a wide margin
+rather than narrowly. Prediction 3 and the parity gate are what make the refutation trustworthy: the
+route unambiguously ENGAGED (fnp's instruction count nearly doubled) and it computed NumPy's answer
+(the probe's built-in oracle assertion would have panicked otherwise). So this is not a
+non-engagement artifact and not a wrong-answer artifact. The native route works, and it is far
+slower.
+
+### Why the reasoning failed, which is the part worth keeping
+
+My argument was: at n=256 the arithmetic is ~20 ns and everything else is dispatch, so removing
+NumPy's dispatch must win. The arithmetic half was right and the conclusion did not follow, because
+**taking the native route is not free** — it replaces NumPy's dispatch with OUR zero-copy setup:
+buffer acquisition on both operands, dtype and contiguity validation, output array construction, and
+the write-back path. Measured, that bundle costs ~10,300 insns/call MORE than the delegation it
+replaces. The delegating route pays NumPy's dispatch once; the native route pays our entry
+machinery, and at 256 elements the kernel it enables has nothing to amortise it against.
+
+The historical exclusion — "f64 mul is SIMD-bound, no parallel win" — is therefore VINDICATED at
+small n, but the ledger should record that it is right for a reason its author did not state: not
+because the parallel kernel fails to beat NumPy's SIMD loop (true, but a large-n argument), but
+because the zero-copy ENTRY cost exceeds the dispatch saving by 5.6x at small n.
+
+### What this closes and what it does not
+
+CLOSES: `deadlock-audit-sjpmo`. f64 multiply/add/subtract should stay OFF the native route. Do not
+re-propose adding them on a small-n dispatch-overhead argument; the argument is measured and wrong.
+
+DOES NOT CLOSE, and this is the useful residue: the same measurement bounds what a native route
+would have to achieve. Any future native path for these ops must get its ENTRY cost under ~1830
+insns/call before the arithmetic even matters, because that is what delegation costs end to end. The
+five ops that ARE routed natively (Remainder, Power, Maximum, Minimum, Divide) clear that bar only
+because their per-element work is expensive enough to amortise the same entry cost — which is a
+sharper statement of the size gate than "SIMD-bound".
+
+COUNTED_MECHANISM: one match arm added; fnp instruction count 3.925e9 -> 7.318e9 (1.86x); excess
+over NumPy 1830.5 -> 10310.8 insns/call (5.63x); wall clock ratio 1.545x slower; parity oracle
+passed on 5/5 arms.
+
+A/A NULL CONTROLS: not applicable - this is a counted difference between two arms on one ELF plus a
+wall-clock ratio reported alongside, not a competitive certification. The controls that apply held:
+selected_groups=1 per arm, parity assertion vs NumPy per arm, threading pinned, engagement proven by
+the magnitude of the change itself.
+
+RETRY PREDICATE: do not retry this as a size-gated route hoping a lower gate helps - the cost
+measured here is per-CALL entry overhead, not per-element, so it does not shrink with n. A retry is
+only justified if someone first reduces the zero-copy entry cost itself, and that is a different
+bead about the wrapper, which the corrected ei9jz split now identifies as the larger half (64%) of
+the delegating route's excess anyway.
+AGENT_NAME=SlateFinch.
