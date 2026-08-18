@@ -54130,3 +54130,66 @@ RETRY PREDICATE: do NOT retry with `initial-exec` hoping for more. The measured 
 model, it is that the TLS accesses live in libpython. Any future attempt on this line must first
 show, at the binary level, that the accesses it targets are in a binary we compile.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — CORRECTING THE CONVERGENCE ARITHMETIC I PUBLISHED LAST ROW: I divided the WRAPPER's diffuse remainder by the WHOLE ROUTE's extra entry count. Corrected, it is 313 insns per entry, not 157, and it does NOT support the account as cleanly as I claimed (deadlock-audit-56vq8)
+
+**Campaign result class:** correction of my own consistency check, weakening a conclusion I had just
+closed a bead on
+
+I closed `56vq8` stating that the diffuse remainder is "quantitatively consistent" with entry count:
+939.9 insns/call over 6 extra CPython entries = 157 each, "an ordinary figure". **The 6 is wrong for
+that numerator.**
+
+```
+  the WRAPPER-ONLY arm runs with FNP_DISABLE_NATIVE_ROUTES=1, so the ENTIRE decision section -
+  including the three-entry dtype sniff - is SKIPPED. Its entries are:
+
+    1  tp_call into PyUFunc::__call__          EXTRA vs the incumbent
+    2  pyo3 argument extraction (9 params)     EXTRA
+    3  cached_numpy                            NOT an entry (PyOnceLock, cached)
+    4  numpy.getattr(interned ufunc name)      EXTRA
+    5  vectorcall into numpy.multiply          SHARED - the incumbent makes this one too
+
+  -> 3 extra entries, not 6.
+
+  what I published    939.9 / 6 = 157 insns per entry   "an ordinary figure"
+  corrected           939.9 / 3 = 313 insns per entry   roughly DOUBLE a typical attribute lookup
+```
+
+The 6 came from the WHOLE-ROUTE entry count, which includes the sniff's three entries - and the
+sniff is precisely what the wrapper arm excludes. I mixed a whole-route numerator's denominator with
+a wrapper-only numerator.
+
+**WHAT THIS DOES AND DOES NOT CHANGE.**
+
+UNCHANGED, because none of it depended on the quotient: the wrapper residual 1249.6, the 309.7
+attributed above the 60.2 floor, the 75% diffuse, the zero direct `__tls_get_addr` sites in our
+`.so`, and `sjpmo`'s 5.63x. Those are measurements. The three qualitative lines still agree that
+this route is entry-bound - the TLS result and the sjpmo result argue it independently of any
+arithmetic.
+
+WEAKENED: the claim that the diffuse remainder is quantitatively ACCOUNTED FOR. At 313 insns per
+extra entry the account is loose - either those three entries are unusually expensive (the tp_call
+bridge alone was measured around 100, which makes 313 less implausible for that one but not for the
+other two), or some of the 939.9 is not entry cost at all. **I do not know which, and last row I
+wrote as though I did.**
+
+**THE CONCLUSION SURVIVES BUT ON WEAKER EVIDENCE.** `56vq8` stays closed: every remaining entry is
+still shipped-minimised, required by the monkeypatch contract, or blocked on pyo3, and that
+inventory is independent of this arithmetic. But nobody should cite "157 insns per entry" - it was
+mine, it was wrong, and the corrected figure argues less than I said it did.
+
+**WHY I CAUGHT IT:** re-reading my own closing comment on a no-build turn and checking which arm the
+denominator belonged to. The tell was available in the row itself - it says the wrapper arm "skips
+the whole native-route decision section" three paragraphs above where I counted the sniff's entries
+against it.
+
+COUNTED_MECHANISM: 939.9 diffuse insns/call over 3 extra CPython entries (not 6) = 313 each.
+
+A/A NULL CONTROLS: not applicable - arithmetic correction, no measurement.
+
+RETRY PREDICATE: to establish the entry-cost account properly, price ONE CPython entry directly on
+this host - a probe that adds a single `getattr` to an otherwise identical arm - rather than
+inferring a per-entry cost by division. That is a cheap experiment and it would settle whether 313
+is real or whether part of the 939.9 is something else.
+AGENT_NAME=SlateFinch.
