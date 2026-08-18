@@ -8648,6 +8648,27 @@ fn packed_gemm_shared_b(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> V
     // FULL `n` here, not `n_full`: `pack_b_panels` uses this argument as `b`'s ROW STRIDE while
     // deriving the panel count by flooring it, so passing a rounded-down width would read the
     // wrong elements for any `n` that is not a multiple of `PACKED_NR`.
+    // BOUND THE SHARED PACKED COPY. Sharing `b` trades T per-thread panel buffers (k * NR each,
+    // kilobytes) for ONE copy of the whole packed `b` (k * n_full, up to hundreds of megabytes) -
+    // a memory regression I did not bound when this driver was first written. At k = n = 8192
+    // that is 512 MB against the incumbent's 512 KB per thread.
+    //
+    // The cap is a SAFETY bound, not a tuned performance threshold, and it is reasoned rather
+    // than picked: the copying sharing saves is T * k * n against m * k * n of compute, so its
+    // RELATIVE benefit is about T/m. It matters when `m` is small next to the thread count and
+    // fades as `m` grows - and a `k * n` large enough to breach the cap is precisely the regime
+    // where the duplicated packing is already a negligible fraction of the compute. The cap
+    // therefore binds only where the benefit has already faded, which is why no measurement is
+    // needed to justify its existence (its exact value is still worth tuning once measurable).
+    //
+    // Over the cap, defer to the incumbent parallel path, which packs per thread in kilobytes.
+    const SHARED_PACK_MAX_BYTES: usize = 64 * 1024 * 1024;
+    let packed_bytes = k
+        .saturating_mul(n - n % PACKED_NR)
+        .saturating_mul(core::mem::size_of::<f64>());
+    if packed_bytes > SHARED_PACK_MAX_BYTES {
+        return packed_gemm(a, b, m, k, n);
+    }
     let bp = pack_b_panels(b, k, n);
     let threads = rayon::current_num_threads();
     // Same MR-aligned band height as `packed_gemm`: a band that is not a whole number of register
