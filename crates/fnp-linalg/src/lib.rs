@@ -986,16 +986,24 @@ fn lu_forward_back_multi_panelled(
         for i in 1..n {
             for j in 0..i {
                 let l_ij = lu[i * n + j];
-                for col in c0..c1 {
-                    x[i * m + col] -= l_ij * x[j * m + col];
+                // Split borrow, sub-ranged to the panel. Same reasoning as the unpanelled
+                // routine; the slices are narrowed to `c0..c1` so the panel bound is preserved.
+                let (row_i, row_j) = two_rows_mut(&mut x, i, j, m);
+                for (target, &src) in
+                    row_i[c0..c1].iter_mut().zip(row_j[c0..c1].iter())
+                {
+                    *target -= l_ij * src;
                 }
             }
         }
         for i in (0..n).rev() {
             for j in (i + 1)..n {
                 let u_ij = lu[i * n + j];
-                for col in c0..c1 {
-                    x[i * m + col] -= u_ij * x[j * m + col];
+                let (row_i, row_j) = two_rows_mut(&mut x, i, j, m);
+                for (target, &src) in
+                    row_i[c0..c1].iter_mut().zip(row_j[c0..c1].iter())
+                {
+                    *target -= u_ij * src;
                 }
             }
             let u_ii = lu[i * n + i];
@@ -1118,24 +1126,35 @@ fn solve_nxn_multi_into_out(
             out[i * m + col] = b[p_i * m + col];
         }
     }
+    // SPLIT BORROWS so both m-wide axpys can vectorise (`franken_numpy-ixs5y`).
+    //
+    // `out[i * m + col] -= factor * out[j * m + col]` loads and stores through the SAME
+    // `&mut [f64]`, so the compiler must assume they may alias and cannot vectorise the `col`
+    // loop - the only loop here wide enough to matter. `i != j` throughout and rows `i` and `j`
+    // of an `n x m` matrix are disjoint, so the aliasing never occurs; `two_rows_mut` says so,
+    // taking the ROW STRIDE `m` rather than `n`.
+    //
+    // BIT-IDENTICAL: same operands, same order, same count; only the borrow structure changes.
     for i in 1..n {
         for j in 0..i {
             let l_ij = lu[i * n + j];
-            for col in 0..m {
-                out[i * m + col] -= l_ij * out[j * m + col];
+            let (row_i, row_j) = two_rows_mut(out, i, j, m);
+            for (target, &src) in row_i.iter_mut().zip(row_j.iter()) {
+                *target -= l_ij * src;
             }
         }
     }
     for i in (0..n).rev() {
         for j in (i + 1)..n {
             let u_ij = lu[i * n + j];
-            for col in 0..m {
-                out[i * m + col] -= u_ij * out[j * m + col];
+            let (row_i, row_j) = two_rows_mut(out, i, j, m);
+            for (target, &src) in row_i.iter_mut().zip(row_j.iter()) {
+                *target -= u_ij * src;
             }
         }
         let u_ii = lu[i * n + i];
-        for col in 0..m {
-            out[i * m + col] /= u_ii;
+        for value in &mut out[i * m..i * m + m] {
+            *value /= u_ii;
         }
     }
     Ok(())
@@ -2341,8 +2360,14 @@ pub fn cholesky_solve_multi(
     for i in 0..n {
         for j in 0..i {
             let l_ij = l[i * n + j];
-            for col in 0..m {
-                x[i * m + col] -= l_ij * x[j * m + col];
+            // SPLIT BORROW so the m-wide axpy can vectorise (`franken_numpy-ixs5y`). Load and
+            // store index the SAME `&mut [f64]`, so the compiler must assume they may alias and
+            // cannot vectorise this loop; `i != j` throughout, so the aliasing never occurs.
+            // `two_rows_mut` takes the ROW STRIDE `m`, not `n`. BIT-IDENTICAL - only the borrow
+            // structure changes.
+            let (row_i, row_j) = two_rows_mut(&mut x, i, j, m);
+            for (target, &src) in row_i.iter_mut().zip(row_j.iter()) {
+                *target -= l_ij * src;
             }
         }
         let l_ii = l[i * n + i];
@@ -2355,8 +2380,12 @@ pub fn cholesky_solve_multi(
     for i in (0..n).rev() {
         for j in (i + 1)..n {
             let l_ji = l[j * n + i];
-            for col in 0..m {
-                x[i * m + col] -= l_ji * x[j * m + col]; // L^T[i,j] = L[j,i]
+            // Same split borrow as the forward pass. `l_ji` is read from `l` at the TRANSPOSE
+            // position `l[j * n + i]` and is untouched here - only the `x` accesses are
+            // reborrowed, so the L^T indexing is preserved exactly.
+            let (row_i, row_j) = two_rows_mut(&mut x, i, j, m);
+            for (target, &src) in row_i.iter_mut().zip(row_j.iter()) {
+                *target -= l_ji * src;
             }
         }
         let l_ii = l[i * n + i];
