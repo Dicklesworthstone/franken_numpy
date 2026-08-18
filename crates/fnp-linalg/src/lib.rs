@@ -9045,6 +9045,105 @@ fn packed_gemm_sub_assign_band_block<const MR: usize>(
     }
 }
 
+/// `target -= a * b`, blocked over column blocks of `b` with each block packed ONCE and shared by
+/// every row band.
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
+/// `packed_gemm_sub_assign` is unchanged.
+///
+/// This is the sub_assign counterpart of `packed_gemm_blocked`, and it targets the redundancy that
+/// matters most in this crate: `packed_gemm_sub_assign` parallelises by row band and gives each
+/// band the whole serial kernel, so every thread rebuilds the identical packed `b` panels. That
+/// kernel is the trailing update for blocked LU, blocked Cholesky and the blocked TRSM.
+///
+/// TILE HEIGHT COMES FROM `packed_sub_assign_tile_rows(k)`, NOT `packed_tile_rows()`. The
+/// sub_assign path picks the narrow tile for small `k` regardless of ISA, so using the plain
+/// selector here would silently factorise at a different tile height than the kernel this
+/// replaces. Both are bit-identical by the invariant this file asserts, so the mistake would not
+/// change results - it would just make any future divergence ambiguous.
+///
+/// NON-STRIDED ONLY, and deliberately so. `packed_row_tail_sub_assign` uses `n` for both `b`'s
+/// stride and the target's row base, so it cannot serve a target whose row pitch differs; the
+/// strided kernel carries its own inline tail. A strided driver needs that tail extracted first,
+/// which is a separate change rather than something to bodge in here.
+///
+/// Correctness of the parallel writes, the summation order, and the once-only tails is exactly as
+/// argued for `packed_gemm_blocked`: bands own disjoint row ranges, blocks are visited
+/// sequentially, each element accumulates over the full `k` inside one register tile within a
+/// single block, and remainder rows and columns are applied after every block rather than per
+/// block.
+fn packed_gemm_sub_assign_blocked(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    target: &mut [f64],
+) {
+    debug_assert_eq!(target.len(), m * n);
+    let n_full = n - n % PACKED_NR;
+    let total_panels = n_full / PACKED_NR;
+    let narrow = packed_sub_assign_tile_rows(k) == PACKED_MR_NARROW;
+    let mr = if narrow { PACKED_MR_NARROW } else { PACKED_MR };
+
+    let parallel = m >= MATMUL_PARALLEL_MIN_DIM
+        && k >= MATMUL_PARALLEL_MIN_DIM
+        && n >= MATMUL_PARALLEL_MIN_DIM
+        && rayon::current_num_threads() >= 2;
+    let band_rows = if parallel {
+        let threads = rayon::current_num_threads();
+        (m.div_ceil(threads * 4).div_ceil(mr).max(1)) * mr
+    } else {
+        m.max(1)
+    };
+
+    let block_panels = packed_block_panels(k);
+    let mut p0 = 0;
+    while p0 < total_panels {
+        let count = block_panels.min(total_panels - p0);
+        // Packed once here, outside the band loop - the whole point of the ordering.
+        let bp = pack_b_panel_block(b, k, n, p0, count);
+        if parallel {
+            target
+                .par_chunks_mut(band_rows * n)
+                .enumerate()
+                .for_each(|(bi, target_band)| {
+                    let row_start = bi * band_rows;
+                    let rows = target_band.len() / n;
+                    let a_band = &a[row_start * k..row_start * k + rows * k];
+                    if narrow {
+                        packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
+                            a_band, &bp, rows, k, n, n, p0, count, target_band,
+                        );
+                    } else {
+                        packed_gemm_sub_assign_band_block::<PACKED_MR>(
+                            a_band, &bp, rows, k, n, n, p0, count, target_band,
+                        );
+                    }
+                });
+        } else if narrow {
+            packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
+                a, &bp, m, k, n, n, p0, count, target,
+            );
+        } else {
+            packed_gemm_sub_assign_band_block::<PACKED_MR>(
+                a, &bp, m, k, n, n, p0, count, target,
+            );
+        }
+        p0 += count;
+    }
+
+    // Tails once. Band heights are MR-aligned, so the global remainder rows fall entirely in the
+    // last band and the global `m_full` boundary is the one each band would compute.
+    let m_full = m - m % mr;
+    for i in 0..m_full {
+        packed_row_tail_sub_assign(a, b, target, i, k, n, n_full);
+    }
+    for i in m_full..m {
+        packed_row_tail_sub_assign(a, b, target, i, k, n, 0);
+    }
+}
+
 fn packed_row_tail_sub_assign(
     a: &[f64],
     b: &[f64],
@@ -22708,6 +22807,46 @@ except Exception as exc:
                      block_panels={block_panels}"
                 );
             }
+        }
+    }
+
+
+    /// The blocked sub_assign driver must equal `packed_gemm_sub_assign` to the BIT.
+    ///
+    /// Valid on EITHER path: a multi-threaded pool past `MATMUL_PARALLEL_MIN_DIM` takes the
+    /// parallel band loop, a single-threaded one takes the serial branch, and both must reproduce
+    /// the reference exactly - so it cannot pass by taking the easy branch, and this says so
+    /// rather than implying it pins the parallel one.
+    ///
+    /// The seed is non-zero because this path SUBTRACTS into existing data: a zero seed would hide
+    /// a sign or accumulation error that only shows against live values.
+    ///
+    /// 130x129x132 carries a ragged final column panel AND a band height that does not divide the
+    /// row count, so remainder rows and remainder columns both run - exactly what a per-block tail
+    /// application would corrupt.
+    #[test]
+    fn sub_assign_blocked_is_bit_exact_vs_reference() {
+        for &(m, k, n) in &[
+            (8usize, 5usize, 16usize),
+            (12, 33, 24),
+            (128, 128, 128),
+            (130, 129, 132),
+        ] {
+            let a: Vec<f64> = (0..m * k).map(|i| ((i * 29 % 83) as f64) / 2.0 - 20.25).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| ((i * 47 % 71) as f64) / 8.0 - 4.375).collect();
+            let seed: Vec<f64> = (0..m * n).map(|i| ((i * 17 % 61) as f64) - 30.5).collect();
+
+            let mut want = seed.clone();
+            super::packed_gemm_sub_assign(&a, &b, m, k, n, &mut want);
+            let mut got = seed;
+            super::packed_gemm_sub_assign_blocked(&a, &b, m, k, n, &mut got);
+
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                want_bits, got_bits,
+                "blocked sub_assign driver diverged in BITS at m={m} k={k} n={n}"
+            );
         }
     }
 
