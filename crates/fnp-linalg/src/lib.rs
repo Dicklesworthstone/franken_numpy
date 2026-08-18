@@ -4899,6 +4899,27 @@ fn svd_values_from_bidiag(
     Ok(d)
 }
 
+/// Singular values via the BLOCKED reduction: the drop-in counterpart of `svd_bidiag_qr_values`.
+///
+/// UNMEASURED and UNWIRED. It exists so that turning the blocked path on is a one-line swap at the
+/// `match` in `svd_bidiag_values_with_max_iters` rather than a restructure - and so the thing a
+/// future gate would select is a single named function that can be tested as a unit.
+///
+/// Same signature and same error contract as `svd_bidiag_qr_values`, deliberately: it returns
+/// `SvdNonConvergence` on failure, which is what the existing caller already catches to fall back
+/// to `svd_via_jacobi_full`. Swapping it in therefore keeps the Jacobi fallback intact for free.
+///
+/// Requires `m >= n`; the caller transposes wide inputs before reaching here.
+fn svd_values_blocked(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    max_iter: usize,
+) -> Result<Vec<f64>, LinAlgError> {
+    let (d, mut e) = bidiag_reduce_blocked_default(a, m, n)?;
+    svd_values_from_bidiag(d, &mut e, n, m.min(n), max_iter)
+}
+
 fn svd_bidiag_qr_values(
     a: &[f64],
     m: usize,
@@ -23724,6 +23745,16 @@ except Exception as exc:
             let max_iter = super::SVD_QR_ITERATION_COEFF * n * n;
             let got = super::svd_values_from_bidiag(d, &mut e, n, n, max_iter)
                 .expect("qr iteration on the blocked reduction");
+
+            // The packaged entry a gate would call must agree with the hand-composed pair.
+            let packaged =
+                super::svd_values_blocked(&a, m, n, max_iter).expect("packaged blocked values");
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            let packaged_bits: Vec<u64> = packaged.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                got_bits, packaged_bits,
+                "svd_values_blocked diverged in BITS from the hand-composed pair at m={m} n={n}"
+            );
 
             let want = super::svd_mxn(&a, m, n).expect("direct svd");
             assert_eq!(want.len(), got.len(), "count m={m} n={n}");
