@@ -8648,7 +8648,13 @@ fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Ve
     // `mr`-aligned and `pack_a_rowblocks` lays blocks out in row order, so each band's packed rows
     // are a CONTIGUOUS slice of this single buffer. Bit-exact: only the address changes.
     let m_full_global = m - m % mr;
-    let ap_all = if narrow {
+    // Skip the pack when nothing will consume it. The block loop is bounded by `total_panels`, so
+    // an update narrower than one panel runs entirely on the scalar tail path and would otherwise
+    // pay for a full copy of A it never reads. Blocked LU drives this with a SHRINKING `trail`, so
+    // the final steps land in exactly that regime.
+    let ap_all = if total_panels == 0 || m_full_global == 0 {
+        Vec::new()
+    } else if narrow {
         pack_a_rowblocks::<PACKED_MR_NARROW>(a, m_full_global, k)
     } else {
         pack_a_rowblocks::<PACKED_MR>(a, m_full_global, k)
@@ -9116,7 +9122,13 @@ fn packed_gemm_sub_assign_blocked(
     // `mr`-aligned and `pack_a_rowblocks` lays blocks out in row order, so each band's packed rows
     // are a CONTIGUOUS slice of this single buffer. Bit-exact: only the address changes.
     let m_full_global = m - m % mr;
-    let ap_all = if narrow {
+    // Skip the pack when nothing will consume it. The block loop is bounded by `total_panels`, so
+    // an update narrower than one panel runs entirely on the scalar tail path and would otherwise
+    // pay for a full copy of A it never reads. Blocked LU drives this with a SHRINKING `trail`, so
+    // the final steps land in exactly that regime.
+    let ap_all = if total_panels == 0 || m_full_global == 0 {
+        Vec::new()
+    } else if narrow {
         pack_a_rowblocks::<PACKED_MR_NARROW>(a, m_full_global, k)
     } else {
         pack_a_rowblocks::<PACKED_MR>(a, m_full_global, k)
@@ -9226,7 +9238,13 @@ fn packed_gemm_sub_assign_strided_blocked(
     // `mr`-aligned and `pack_a_rowblocks` lays blocks out in row order, so each band's packed rows
     // are a CONTIGUOUS slice of this single buffer. Bit-exact: only the address changes.
     let m_full_global = m - m % mr;
-    let ap_all = if narrow {
+    // Skip the pack when nothing will consume it. The block loop is bounded by `total_panels`, so
+    // an update narrower than one panel runs entirely on the scalar tail path and would otherwise
+    // pay for a full copy of A it never reads. Blocked LU drives this with a SHRINKING `trail`, so
+    // the final steps land in exactly that regime.
+    let ap_all = if total_panels == 0 || m_full_global == 0 {
+        Vec::new()
+    } else if narrow {
         pack_a_rowblocks::<PACKED_MR_NARROW>(a, m_full_global, k)
     } else {
         pack_a_rowblocks::<PACKED_MR>(a, m_full_global, k)
