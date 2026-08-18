@@ -53077,3 +53077,58 @@ accepts `--base HEAD` (visible in other agents' invocations in the process table
 the knob to investigate - I have not tested what it does to uncommitted files and am not claiming
 it solves this.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — AMENDING MY OWN NEUTRALITY GATE BEFORE THE BUILD FINISHES: I set it at ±0.1%, which is 17x TIGHTER than this instrument's cross-ELF reproducibility, so a perfectly neutral refactor would have failed it (deadlock-audit-rz8g0)
+
+**Campaign result class:** registered gate corrected before the measurement exists
+
+The neutrality check for `1c77e966` is registered as: with `FNP_DISABLE_NATIVE_ROUTES` unset, the
+counted route excess must land within **~0.1%** of 1830.5 insns/call, else revert. The build that
+produces that number is compiling as this is written. The gate is wrong and I am fixing it now
+rather than after seeing the result.
+
+**THE ERROR: I used a WITHIN-ELF spread to gate a CROSS-ELF comparison.**
+
+```
+  the same quantity, measured on three separately built ELFs:  1856.2, 1824.3, 1830.5 insns/call
+    mean 1837.0   min 1824.3   max 1856.2   spread 1.74%
+
+  within-ELF run-to-run spread (3 reps on ONE ELF):   0.08%
+  cross-ELF spread (3 ELFs, source unchanged):        1.74%      <- 21x larger
+
+  registered gate  ±0.1% of 1830.5  =  [1828.7, 1832.3]
+  historical range of a NEUTRAL rebuild =  [1824.3, 1856.2]
+```
+
+0.08% is how reproducibly one binary measures itself. **1.74% is how reproducibly the same source
+rebuilt produces the same cost** — codegen, inlining decisions, and code layout differ run to run,
+and this campaign has already banked that the whole-route excess replicates at 1856.2 / 1824.3 /
+1830.5 across three builds of unchanged source. Gating a REFACTOR — which is necessarily a cross-ELF
+question — on the within-ELF figure would have rejected `1c77e966` with probability near 1 even if
+it were perfectly neutral, and I would have reverted a correct change on the strength of my own
+arithmetic error.
+
+This is the same conflation that has cost me twice already today: quoting a within-run CI where a
+between-run spread was needed, and building a conversion rate from another host's number. **Match
+the spread to the comparison you are actually making.**
+
+**AMENDED GATE, replacing the ±0.1% clause:**
+1. **PASS** if the new excess falls within [1824.3, 1856.2] — the observed range of a neutral
+   rebuild. Nothing in that band is evidence of a cost.
+2. **FAIL, revert `1c77e966`** if it exceeds 1856.2 by more than the band's own width (1.74%), i.e.
+   above ~1888. That is a change larger than rebuild noise has ever produced here.
+3. **UNDECIDED** in between (1856.2–1888): report as undecided and take more ELFs rather than
+   guessing. A single ELF cannot resolve an effect smaller than the cross-ELF spread — which is
+   exactly the lesson of `single-run-dual-null-cannot-decide-sub-5pct`, applied to builds instead of
+   runs.
+
+**WHAT THIS COSTS ME, stated plainly:** the amended gate cannot detect a neutrality violation
+smaller than ~1.7%, i.e. ~31 insns/call. A call boundary that costs 10-20 insns/call would pass
+undetected. That is a real limit of this instrument and I am not going to pretend otherwise — the
+honest claim after a PASS is "no cost larger than rebuild noise", not "no cost".
+
+RETRY PREDICATE: to resolve a sub-1.7% refactor cost, the instrument must not be cross-ELF at all —
+build ONE ELF containing both the old and new tail as separate symbols and dispatch between them at
+runtime, so the comparison is within-ELF where the spread is 0.08%. That is a different experiment
+and it is not worth building for a question this small unless the A/B later hinges on it.
+AGENT_NAME=SlateFinch.
