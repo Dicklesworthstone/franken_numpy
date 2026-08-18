@@ -8479,29 +8479,17 @@ fn packed_gemm_serial_tiled_apacked<const MR: usize>(
     }
 }
 
-/// Panel-major packed copy of every full `PACKED_NR`-wide column block of `b`.
-///
-/// Layout: `bp[panel * k * PACKED_NR + kk * PACKED_NR + jj] == b[kk * n + panel * PACKED_NR + jj]`.
-///
-/// The kernels pack `b` a panel at a time, inside the loop that walks column blocks. Under
-/// `packed_gemm`'s parallel arm that packing is repeated IN FULL BY EVERY THREAD, because each
-/// thread runs the whole serial kernel over its own row band and re-derives the identical `b`
-/// panels. This builds them once so the bands can share one read-only copy.
-fn pack_b_panels(b: &[f64], k: usize, n: usize) -> Vec<f64> {
-    pack_b_panel_block(b, k, n, 0, n / PACKED_NR)
-}
-
 /// Pack `panels` consecutive `PACKED_NR`-wide column panels of `b`, starting at panel `panel0`.
 ///
 /// `n` is `b`'s ROW STRIDE throughout; the block's width is `panels * PACKED_NR` and is
-/// independent of it. Layout within the block matches `pack_b_panels`:
+/// independent of it. Layout within the block is panel-major:
 ///
 /// ```text
 ///   bp[p * k * PACKED_NR + kk * PACKED_NR + jj] == b[kk * n + (panel0 + p) * PACKED_NR + jj]
 /// ```
 ///
 /// WHY A BLOCK AND NOT ALL OF `b`, which is the correction this function exists to enable.
-/// `packed_gemm_shared_b` currently packs the WHOLE of `b` so its row bands can share one copy.
+/// An earlier driver packed the WHOLE of `b` so its row bands could share one copy.
 /// That removes the redundant per-thread packing, but it replaces a `k * PACKED_NR` buffer -
 /// about 4 KiB, L1-hot and reused across panels - with an array up to the size of `b`, streamed
 /// from memory by every band. It trades redundant WORK for worse LOCALITY, so it is not the
@@ -8531,99 +8519,12 @@ fn pack_b_panel_block(b: &[f64], k: usize, n: usize, panel0: usize, panels: usiz
     bp
 }
 
-/// `out += a * b` for one row band, against a `b` that is ALREADY packed by `pack_b_panels`.
-///
-/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
-///
-/// This is `packed_gemm_serial_tiled_apacked` with the per-panel `b` packing lifted out to the
-/// caller. `a` is still packed here, per band, which is correct rather than wasteful: each band
-/// owns distinct rows of `a`, so there is nothing to share.
-///
-/// BIT-IDENTICAL to the in-kernel-packing form. Packing moves values without touching them, and
-/// the accumulation is still `kk` ascending, then `ii`, then `jj`, into one `MR x PACKED_NR`
-/// register accumulator added to `out` once. Only the address each operand is read from changes.
-///
-/// `nc` blocking is intentionally absent here. In the incumbent kernel `nc` bounds how much of
-/// `b` is re-packed before moving on; once `b` is packed ONCE up front there is nothing for that
-/// loop to amortise, and keeping it would only add an index layer that cannot change the result.
-fn packed_gemm_band_prepacked_b<const MR: usize>(
-    a: &[f64],
-    b: &[f64],
-    bp: &[f64],
-    m: usize,
-    k: usize,
-    n: usize,
-    out: &mut [f64],
-) {
-    use std::simd::Simd;
-    type Lane = Simd<f64, PACKED_NR>;
-
-    let m_full = m - m % MR;
-    let n_full = n - n % PACKED_NR;
-    // SKIP THE PACK WHEN NOTHING WILL CONSUME IT. The panel loop below is bounded by `n_full`,
-    // so with fewer than `PACKED_NR` columns it never runs, and packing would allocate and fill a
-    // copy of `a` for no reader at all.
-    //
-    // HOW OFTEN THIS FIRES, verified rather than assumed: for blocked LU it is NARROW. That
-    // caller breaks out at `trail == 0`, and with `LU_PANEL_NB = 64` a non-zero `trail` lands
-    // under `PACKED_NR` only when `n mod 64` is 1..7 - `n = 65` gives `trail = 1`. The wasted
-    // allocation there is also small. The guard is kept because it is free and strictly correct,
-    // not because it recovers a measurable amount; it also covers any caller passing a narrow `n`.
-    let ap = if n_full == 0 {
-        Vec::new()
-    } else {
-        pack_a_rowblocks::<MR>(a, m_full, k)
-    };
-    let panels = n_full / PACKED_NR;
-    for panel in 0..panels {
-        let j0 = panel * PACKED_NR;
-        let bpanel = &bp[panel * k * PACKED_NR..(panel + 1) * k * PACKED_NR];
-        let mut i0 = 0;
-        while i0 < m_full {
-            let block = i0 / MR;
-            let apanel = &ap[block * k * MR..(block + 1) * k * MR];
-            // EXPLICIT SIMD accumulator, composing this band kernel with the register
-            // micro-kernel rather than leaving the vector code to the autovectoriser. With
-            // `a` packed above and `b` packed once by the caller, this is the full
-            // Goto-style inner loop: both operands stream contiguously and the tile is
-            // stated as `MR` vectors.
-            //
-            // Bit-identical, by the same lane argument as `packed_gemm_serial_tiled_simd`:
-            // lane `jj` accumulates `kk` ascending with no cross-lane interaction, and the
-            // multiply and add stay SEPARATE so both roundings are preserved. No `mul_add`.
-            let mut acc = [Lane::splat(0.0); MR];
-            for kk in 0..k {
-                let bvec = Lane::from_slice(&bpanel[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]);
-                let arow = &apanel[kk * MR..kk * MR + MR];
-                for (ii, slot) in acc.iter_mut().enumerate() {
-                    *slot += Lane::splat(arow[ii]) * bvec;
-                }
-            }
-            for (ii, slot) in acc.iter().enumerate() {
-                let base = (i0 + ii) * n + j0;
-                let current = Lane::from_slice(&out[base..base + PACKED_NR]);
-                (current + *slot).copy_to_slice(&mut out[base..base + PACKED_NR]);
-            }
-            i0 += MR;
-        }
-    }
-    // Same tail handling as every other kernel here: remainder columns for the full row blocks,
-    // then all remainder rows. Both read the ORIGINAL `a` and `b`, which is why those two stay in
-    // the signature alongside the packed copy.
-    for i in 0..m_full {
-        packed_row_tail(a, b, out, i, k, n, n_full);
-    }
-    for i in m_full..m {
-        packed_row_tail(a, b, out, i, k, n, 0);
-    }
-}
-
 /// `out += a * b` for one row band against ONE packed column block of `b`.
 ///
 /// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path.
 ///
 /// This is the band half of the block-wise structure whose packing half is `pack_b_panel_block`.
-/// It differs from `packed_gemm_band_prepacked_b` in two ways that matter:
+/// It differs from a whole-`b` band kernel in two ways that matter:
 ///
 ///   - it works on a COLUMN BLOCK, taking the block's absolute start panel so it can address
 ///     `out`, rather than assuming the packed `b` covers every panel; and
@@ -8701,12 +8602,11 @@ fn packed_block_panels(k: usize) -> usize {
 /// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
 /// `packed_gemm` is unchanged.
 ///
-/// THIS IS THE STRUCTURE `packed_gemm_shared_b` SHOULD HAVE HAD. That driver packs the whole of
+/// THIS IS THE STRUCTURE THE FIRST SHARED-B DRIVER SHOULD HAVE HAD. That driver packed the whole of
 /// `b` so bands can share it, which removes the redundant per-thread packing but replaces a
 /// ~4 KiB L1-hot buffer with an array up to the size of `b` streamed from memory - redundant work
 /// traded for worse locality. Here the shared unit is ONE L2-sized column block: the sharing is
-/// kept and the locality is not given up. `packed_gemm_shared_b` should be rebuilt on this or
-/// deleted; it must not be wired as it stands.
+/// kept and the locality is not given up. That earlier driver has been deleted in favour of this.
 ///
 /// LOOP ORDER, and it is forced rather than chosen. The block loop is outermost so each block is
 /// packed once for all bands; the band loop is inside it so bands can run in parallel over that
@@ -8872,82 +8772,6 @@ fn packed_gemm_serial_tiled_simd<const MR: usize>(
     for i in m_full..m {
         packed_row_tail(a, b, out, i, k, n, 0);
     }
-}
-
-/// `a * b` with `b` packed ONCE and shared by every row band.
-///
-/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
-/// `packed_gemm` is unchanged. Wiring is a one-line follow-up once this is built and A/B'd.
-///
-/// WHAT THIS FIXES: `packed_gemm`'s parallel arm hands each thread a row band and runs the whole
-/// serial kernel on it. That kernel packs `b` panel by panel as it goes, so with `T` threads the
-/// identical `b` panels are built `T` times over - `T * k * n_full` f64 of pure duplicate copying,
-/// growing with the thread count rather than amortising against it. Here `b` is packed once and
-/// the bands borrow it read-only.
-///
-/// `a` is deliberately still packed per band: bands own disjoint rows of `a`, so there is nothing
-/// to share and packing it centrally would only move the same work.
-///
-/// BIT-IDENTICAL to `packed_gemm`. The band decomposition, the tile height, and the ascending-`k`
-/// accumulation into one register tile are all unchanged; only the provenance of the packed `b`
-/// bytes differs, and packing copies values without touching them. Bands write disjoint row ranges
-/// of `c`, so no accumulation crosses a thread boundary and there is no order to disagree about.
-fn packed_gemm_shared_b(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
-    let mut c = vec![0.0; m * n];
-    let parallel = m >= MATMUL_PARALLEL_MIN_DIM
-        && k >= MATMUL_PARALLEL_MIN_DIM
-        && n >= MATMUL_PARALLEL_MIN_DIM
-        && rayon::current_num_threads() >= 2;
-    if !parallel {
-        // Below the parallel gate there is exactly one band, so sharing buys nothing and the
-        // packed copy would be pure overhead. Defer to the incumbent serial path.
-        packed_gemm_serial(a, b, m, k, n, &mut c);
-        return c;
-    }
-    // FULL `n` here, not `n_full`: `pack_b_panels` uses this argument as `b`'s ROW STRIDE while
-    // deriving the panel count by flooring it, so passing a rounded-down width would read the
-    // wrong elements for any `n` that is not a multiple of `PACKED_NR`.
-    // BOUND THE SHARED PACKED COPY. Sharing `b` trades T per-thread panel buffers (k * NR each,
-    // kilobytes) for ONE copy of the whole packed `b` (k * n_full, up to hundreds of megabytes) -
-    // a memory regression I did not bound when this driver was first written. At k = n = 8192
-    // that is 512 MB against the incumbent's 512 KB per thread.
-    //
-    // The cap is a SAFETY bound, not a tuned performance threshold, and it is reasoned rather
-    // than picked: the copying sharing saves is T * k * n against m * k * n of compute, so its
-    // RELATIVE benefit is about T/m. It matters when `m` is small next to the thread count and
-    // fades as `m` grows - and a `k * n` large enough to breach the cap is precisely the regime
-    // where the duplicated packing is already a negligible fraction of the compute. The cap
-    // therefore binds only where the benefit has already faded, which is why no measurement is
-    // needed to justify its existence (its exact value is still worth tuning once measurable).
-    //
-    // Over the cap, defer to the incumbent parallel path, which packs per thread in kilobytes.
-    const SHARED_PACK_MAX_BYTES: usize = 64 * 1024 * 1024;
-    let packed_bytes = k
-        .saturating_mul(n - n % PACKED_NR)
-        .saturating_mul(core::mem::size_of::<f64>());
-    if packed_bytes > SHARED_PACK_MAX_BYTES {
-        return packed_gemm(a, b, m, k, n);
-    }
-    let bp = pack_b_panels(b, k, n);
-    let threads = rayon::current_num_threads();
-    // Same MR-aligned band height as `packed_gemm`: a band that is not a whole number of register
-    // tiles leaves a remainder row on the scalar tail path, which measured ~4x slower overall.
-    let band_rows = (m.div_ceil(threads * 4).div_ceil(PACKED_MR).max(1)) * PACKED_MR;
-    c.par_chunks_mut(band_rows * n)
-        .enumerate()
-        .for_each(|(bi, c_band)| {
-            let row_start = bi * band_rows;
-            let rows = c_band.len() / n;
-            let a_band = &a[row_start * k..row_start * k + rows * k];
-            if packed_tile_rows() == PACKED_MR_NARROW {
-                packed_gemm_band_prepacked_b::<PACKED_MR_NARROW>(
-                    a_band, b, &bp, rows, k, n, c_band,
-                );
-            } else {
-                packed_gemm_band_prepacked_b::<PACKED_MR>(a_band, b, &bp, rows, k, n, c_band);
-            }
-        });
-    c
 }
 
 
@@ -22514,62 +22338,6 @@ except Exception as exc:
     }
 
 
-    /// `pack_b_panels` must place every element the layout formula names.
-    ///
-    /// Checked independently of any kernel so a layout bug cannot hide behind a kernel bug. The
-    /// `n = 19` case matters most: `n` is the ROW STRIDE of `b` as well as the source of the panel
-    /// count, and passing a rounded-down width instead would read the wrong elements for exactly
-    /// this shape.
-    #[test]
-    fn pack_b_panels_places_every_element() {
-        const NR: usize = super::PACKED_NR;
-        for &(k, n) in &[(1usize, 8usize), (3, 16), (5, 19), (7, 24)] {
-            let b: Vec<f64> = (0..k * n).map(|i| i as f64 * 0.75 - 2.5).collect();
-            let bp = super::pack_b_panels(&b, k, n);
-            let panels = n / NR;
-            assert_eq!(bp.len(), panels * k * NR);
-            for panel in 0..panels {
-                for kk in 0..k {
-                    for jj in 0..NR {
-                        assert_eq!(
-                            bp[panel * k * NR + kk * NR + jj],
-                            b[kk * n + panel * NR + jj],
-                            "packed b mismatch at panel={panel} kk={kk} jj={jj} (k={k}, n={n})"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// The prepacked-B band kernel must equal the incumbent tiled kernel to the BIT.
-    ///
-    /// Exercised directly rather than through `packed_gemm_shared_b`, because that driver only
-    /// reaches the shared-B path when rayon reports two or more threads and the dimensions clear
-    /// `MATMUL_PARALLEL_MIN_DIM`; a single-threaded test pool would silently take the serial
-    /// fallback and prove nothing about this kernel.
-    ///
-    /// Shapes include remainder rows and remainder columns so the scalar tail paths run too.
-    #[test]
-    fn gemm_prepacked_b_is_bit_exact_vs_tiled() {
-        const MR: usize = super::PACKED_MR;
-        for &(m, k, n) in &[(4usize, 3usize, 8usize), (8, 5, 16), (9, 7, 19), (12, 33, 24)] {
-            let a: Vec<f64> = (0..m * k).map(|i| ((i * 37 % 101) as f64) - 50.5).collect();
-            let b: Vec<f64> = (0..k * n).map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25).collect();
-            let bp = super::pack_b_panels(&b, k, n);
-            let mut want = vec![0.0f64; m * n];
-            let mut got = vec![0.0f64; m * n];
-            super::packed_gemm_serial_tiled::<MR>(&a, &b, m, k, n, &mut want);
-            super::packed_gemm_band_prepacked_b::<MR>(&a, &b, &bp, m, k, n, &mut got);
-            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
-            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
-            assert_eq!(
-                want_bits, got_bits,
-                "prepacked-B kernel diverged in BITS at m={m} k={k} n={n}"
-            );
-        }
-    }
-
 
     /// The column-panelled multi-RHS solve must equal the unblocked one to the BIT.
     ///
@@ -22664,40 +22432,10 @@ except Exception as exc:
     }
 
 
-    /// The shared-B parallel driver must equal `packed_gemm` to the BIT.
-    ///
-    /// This closes a coverage gap I left when the driver was written: its band kernel was tested
-    /// directly, but the driver itself - the band decomposition, the MR-aligned band height, and
-    /// the single shared packed copy of `b` - was not exercised end to end.
-    ///
-    /// The assertion is valid on EITHER path. With a multi-threaded rayon pool the driver takes
-    /// the shared-B route; with a single-threaded pool it falls back to `packed_gemm_serial`. Both
-    /// must reproduce `packed_gemm` exactly, so the test cannot silently pass by taking the easy
-    /// branch - it just tests whichever branch this pool provides, and says so rather than
-    /// pretending to guarantee the parallel one.
-    ///
-    /// Dimensions clear `MATMUL_PARALLEL_MIN_DIM` (128) so the parallel gate is at least
-    /// reachable, and `n = 132` leaves a ragged final column panel.
-    #[test]
-    fn gemm_shared_b_is_bit_exact_vs_packed_gemm() {
-        for &(m, k, n) in &[(128usize, 128usize, 128usize), (130, 129, 132)] {
-            let a: Vec<f64> = (0..m * k).map(|i| ((i * 31 % 89) as f64) / 4.0 - 11.125).collect();
-            let b: Vec<f64> = (0..k * n).map(|i| ((i * 43 % 79) as f64) / 16.0 - 2.4375).collect();
-            let want = super::packed_gemm(&a, &b, m, k, n);
-            let got = super::packed_gemm_shared_b(&a, &b, m, k, n);
-            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
-            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
-            assert_eq!(
-                want_bits, got_bits,
-                "shared-B driver diverged in BITS at m={m} k={k} n={n}"
-            );
-        }
-    }
-
 
     /// `pack_b_panel_block` must place every element the layout formula names, at any offset.
     ///
-    /// The offset is the part worth testing: `pack_b_panels` only ever asks for `panel0 = 0`, so
+    /// The offset is the part worth testing: a whole-matrix pack only ever asks for `panel0 = 0`, so
     /// a bug in the offset arithmetic would be invisible until the block-wise driver starts using
     /// non-zero starts. `n` is also the ROW STRIDE, and `n = 19` is in the table because a block
     /// that ends before the ragged tail must still index `b` by the full stride.
@@ -22724,17 +22462,6 @@ except Exception as exc:
                     }
                 }
             }
-        }
-    }
-
-    /// The whole-`b` wrapper must agree with the block form covering every panel.
-    #[test]
-    fn pack_b_panels_matches_full_width_block() {
-        for &(k, n) in &[(1usize, 8usize), (3, 16), (5, 19), (7, 32)] {
-            let b: Vec<f64> = (0..k * n).map(|i| i as f64 * 0.5 - 3.0).collect();
-            let whole = super::pack_b_panels(&b, k, n);
-            let block = super::pack_b_panel_block(&b, k, n, 0, n / super::PACKED_NR);
-            assert_eq!(whole, block, "wrapper diverged from block form at k={k} n={n}");
         }
     }
 
