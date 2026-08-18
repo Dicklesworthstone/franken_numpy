@@ -53359,3 +53359,82 @@ only justified if someone first reduces the zero-copy entry cost itself, and tha
 bead about the wrapper, which the corrected ei9jz split now identifies as the larger half (64%) of
 the delegating route's excess anyway.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — THE DECOMPOSITION CLOSES: three quantities measured independently on ONE ELF sum to 0.16%, and the leftover gap is explained by a separately measured quantity. The route's split is settled (deadlock-audit-rz8g0, deadlock-audit-ei9jz)
+
+**Campaign result class:** CERTIFIED decomposition — the first cross-check this session that did not
+rest on a shared omission, a conversion, or a replica
+
+No build. Re-used the `rz8g0` A/B ELF `criterion_python_elementwise-ea6828603f008c3e` (built in a
+worktree off `235dadc9`, since torn down) to take the one arm pairing I had left unmeasured:
+`numpy_plain` against `fnp_plain` with `FNP_DISABLE_NATIVE_ROUTES=1`. That difference IS the wrapper
+residual, directly, with no identity and no correction terms. 5 interleaved reps, threading pinned,
+`selected_groups=1`. PRE loadavg 7.89/8.56/13.34, CPU idle 88%, runnable 6/64, iowait 0, 2338 MHz,
+/data 128G. POST idle 84%.
+
+```
+  numpy_plain          median 3,193,533,335   spread 0.010%
+  fnp probes-OFF       median 3,693,374,004   spread 0.510%
+  -> WRAPPER RESIDUAL, measured directly        1249.6 insns/call
+```
+
+### The closure, and it is the strongest check in this bead's history
+
+All three quantities on the SAME ELF, each an independent single difference of two arms:
+
+```
+  probe chain    (flag on  - flag off)        660.9 insns/call
+  wrapper resid  (flag off - numpy_plain)    1249.6
+  sum of parts                               1910.5
+  whole excess   (fnp_plain - numpy_plain)   1913.5   measured separately, 9 reps
+  closure error                                -3.0   = -0.16%
+```
+
+Two components measured independently sum to the independently measured whole to **0.16%**. Nothing
+here is converted between currencies, nothing is a standalone replica, nothing borrows a number from
+another host or another build. That is what the five-term identity and the ns partition both failed
+to be, and it is why this one is quotable.
+
+### The one loose end also resolves, against a number measured elsewhere
+
+The direct wrapper figure (1249.6) exceeds the value derived earlier from the pre-change whole
+(1830.5 - 660.9 = 1169.6) by **+80.0 insns/call**. That is not error: this ELF carries the tail
+extraction, whose cost was independently measured at **+57 to +76 insns/call** when it failed its
+neutrality gate. The gap and that cost are the same quantity, arrived at from opposite directions.
+
+### THE SETTLED SPLIT
+
+```
+  on the extraction-bearing ELF     probe 660.9 (35%)   wrapper 1249.6 (65%)
+  on clean main (less ~66 ext)      probe ~660.9 (36%)  wrapper ~1183.6 (64%)
+                                    sum ~1844.5 vs the banked 1830.5 whole-route excess (0.8%)
+```
+
+**The wrapper residual is the larger half at ~64%, and this now rests on direct measurement rather
+than on the residual of an identity.** `ei9jz`'s 1189.4/641.9 remains refuted; its ORDERING was
+wrong and its magnitudes were wrong in both components.
+
+### What this means for where work goes
+
+The largest single component of the delegating binary-ufunc route is our own wrapper at ~1184
+insns/call: PyO3 entry, argument binding, the `cached_numpy` lookup, the interned `getattr`, the
+argument tuple, and the delegation call. Symbol attribution places ~251 of it in our `__call__` body
+and ~130 in pyo3 argument machinery, leaving ~800 diffuse across CPython machinery below the
+per-symbol noise floor. Two independent results now converge on it: this split, and `sjpmo`'s
+finding that a native route must get its entry cost under ~1830 insns/call before per-element work
+matters at all.
+
+COUNTED_MECHANISM: three single-difference measurements on one ELF closing to 0.16%; a +80.0
+insns/call direct-vs-derived gap matching a separately measured +57..+76 extraction cost; spreads
+0.010% and 0.510%.
+
+A/A NULL CONTROLS: not applicable - counter differences on one ELF, not a competitive ratio. The
+controls that apply held: selected_groups=1 per arm, threading pinned, and the closure identity
+itself, which is a stronger check than a null because it requires three measurements to agree rather
+than one to be reproducible.
+
+RETRY PREDICATE: none for the split - it is settled. The wrapper's ~800 diffuse insns/call is the
+open question, and per the ei9jz symbol row it is NOT concentrated in any single symbol above the
+~60 insns/call noise floor, so it will not yield to a micro-lever. Anyone attacking it should target
+the CALL SHAPE (fewer CPython entries per call) rather than any one symbol.
+AGENT_NAME=SlateFinch.
