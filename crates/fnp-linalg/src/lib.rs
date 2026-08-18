@@ -8793,7 +8793,6 @@ fn packed_gemm_serial_tiled_simd<const MR: usize>(
     }
 }
 
-
 // Band-parallel driver shared by the square and rectangular wrappers: split the
 // output rows into bands (several per thread for work-stealing balance), each
 // band runs the packed serial kernel on its disjoint row slice. Per-row k-order
@@ -9151,11 +9150,27 @@ fn packed_gemm_sub_assign_blocked(
                     let a_band = &ap_all[blk * k * mr..(blk + rows / mr) * k * mr];
                     if narrow {
                         packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
-                            a_band, &bp, rows, k, n, n, p0, count, target_band,
+                            a_band,
+                            &bp,
+                            rows,
+                            k,
+                            n,
+                            n,
+                            p0,
+                            count,
+                            target_band,
                         );
                     } else {
                         packed_gemm_sub_assign_band_block::<PACKED_MR>(
-                            a_band, &bp, rows, k, n, n, p0, count, target_band,
+                            a_band,
+                            &bp,
+                            rows,
+                            k,
+                            n,
+                            n,
+                            p0,
+                            count,
+                            target_band,
                         );
                     }
                 });
@@ -9272,11 +9287,27 @@ fn packed_gemm_sub_assign_strided_blocked(
                     let a_band = &ap_all[blk * k * mr..(blk + rows / mr) * k * mr];
                     if narrow {
                         packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
-                            a_band, &bp, rows, k, n, row_stride, p0, count, target_band,
+                            a_band,
+                            &bp,
+                            rows,
+                            k,
+                            n,
+                            row_stride,
+                            p0,
+                            count,
+                            target_band,
                         );
                     } else {
                         packed_gemm_sub_assign_band_block::<PACKED_MR>(
-                            a_band, &bp, rows, k, n, row_stride, p0, count, target_band,
+                            a_band,
+                            &bp,
+                            rows,
+                            k,
+                            n,
+                            row_stride,
+                            p0,
+                            count,
+                            target_band,
                         );
                     }
                 });
