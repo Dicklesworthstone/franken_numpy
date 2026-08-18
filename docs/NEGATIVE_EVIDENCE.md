@@ -54564,3 +54564,59 @@ This is the SAME shared-tree collision I inflicted on AzureCarp earlier today in
 direction (`364a4933`, disclosed in `744df646`). Recording it in both directions: on this tree, an
 uncommitted edit is not safe from a peer's commit, so the window between "edit" and "commit" is a
 hazard to BOTH agents. Commit source before starting a long measurement, not after.
+
+## 2026-08-18 — THE REACHED COUNT, measured: 25 of the 31 converted sites execute, so my per-site figure was UNDERSTATED — 1,360.9 insns per reached site, not 1,097.5 (deadlock-audit-c5ecm)
+
+**Result class:** a correction to a number I published one turn ago, in the FLATTERING direction,
+plus the discharge of the "count the reached fetches" step this bead required before any sweep.
+
+I divided the 34,022.4 insns/call effect by 31 — the number of sites I CONVERTED — and published
+1,097.5 per site. That was the wrong denominator: it assumes every converted site executes. It does
+not.
+
+```
+  converted sites (argsort probe helpers)   31
+  REACHED for the measured cell             25
+  not reached                                6
+```
+
+The six are `try_native_{argsort_stable_flat, argsort_stable_lastaxis, argsort_struct_stable,
+complex_argsort_stable, datetime_argsort_stable, string_argsort_stable}` — **all six sit behind the
+same guard**, `matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))`, which is false
+for the default `kind_spec = None`. That is a SOURCE-LEVEL MECHANISM, not an inference from
+absence: a sampled profile alone could not certify non-execution (a sampled probe cannot clear the
+route it misses), so the profile is corroboration and the guard is the proof. Both agree, and they
+agree on exactly the same six.
+
+```
+  34,022.4 / 31 converted  = 1,097.5   <- published last turn, WRONG DENOMINATOR
+  34,022.4 / 25 reached    = 1,360.9   <- correct, 24.0% higher
+```
+
+**The same method applied to the PREVIOUS lever, which turns out to have been right.** The
+f32/f16/complex predicate row assumed 12 reached probes. The profile shows exactly 12 reached
+probes carrying those predicates — `f32_argsort_{flat,lastaxis,axis0,midaxis}`,
+`c128_argsort_{...}`, `c64_argsort_{...}` — and no f16 argsort probe exists at all. So that row's
+denominator was correct by luck of the same guard structure, and its per-predicate-call cost is
+14,201.0 / 12 = **1,183.4 insns**.
+
+Two independent site shapes on the same dispatcher therefore price a redundant CPython attribute
+fetch at 1,183.4 and 1,360.9 insns — the same order, which is the first time two of this campaign's
+per-entry figures have agreed without one being derived from the other.
+
+### What this does NOT license
+
+It still does not license sizing the remaining 457 sites by multiplication. The reached fraction
+here was 25/31 = 81% for ONE cell of ONE dispatcher, and it is a property of that cell's `kind_spec`
+and axis form: pass `kind="stable"` and a different six run. **The reached count must be measured
+per cell**, and the method is now cheap and needs no build — `perf record -c 50000` on an existing
+ELF, then read which probe symbols appear, and confirm any absence against its guard in source.
+
+COUNTED_MECHANISM: 25 of 31 converted helpers appear in a fixed-period profile of the measured arm;
+the 6 absent are exactly the set behind the `kind_spec` stable/mergesort guard, verified in source.
+Per reached site 34,022.4/25 = 1,360.9 insns; prior lever 14,201.0/12 = 1,183.4 insns.
+A/A NULL CONTROLS: not applicable - this row counts REACHED SYMBOLS, it does not measure a ratio.
+The controls that apply are the guard read (mechanism) and the profile (corroboration), which agree.
+RETRY PREDICATE: none - this is a corrected denominator, not a lever. Anyone extending `c5ecm` must
+run the reached-count recipe above for THEIR cell first.
+AGENT_NAME=SlateFinch.
