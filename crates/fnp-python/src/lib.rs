@@ -109072,8 +109072,8 @@ fn busday_count(
                 .unwrap_or(false)
         })
     }) && (2..=4).contains(&args.len())
-        && !busday_keyword_is_doubly_supplied(args, kwargs, "weekmask", 2)
-        && !busday_keyword_is_doubly_supplied(args, kwargs, "holidays", 3)
+        && !keyword_is_doubly_supplied(args, kwargs, "weekmask", 2)
+        && !keyword_is_doubly_supplied(args, kwargs, "holidays", 3)
         && let (Ok(begin), Ok(end)) = (args.get_item(0), args.get_item(1))
         && let Some(result) = try_zerocopy_busday_count(
             py,
@@ -109094,14 +109094,14 @@ fn busday_count(
     core_numpy_passthrough(py, "busday_count", args, kwargs)
 }
 
-/// True when a business-day keyword ALSO arrives positionally, which the incumbent rejects
-/// with `TypeError: busday_count() got multiple values for argument 'weekmask'`.
+/// True when a keyword ALSO arrives positionally, which the incumbent rejects with
+/// `TypeError: busday_count() got multiple values for argument 'weekmask'`.
 ///
-/// Both `busday_count` and `is_busday` take `(*args, **kwargs)` here, so PyO3 raises
-/// nothing for the duplicate and the native route would happily prefer one of the two and
-/// return a number for a call NumPy refuses to accept. `position` is the index at which
-/// that keyword also appears in the positional signature.
-fn busday_keyword_is_doubly_supplied(
+/// Every route here takes `(*args, **kwargs)`, so PyO3 raises nothing for the duplicate and
+/// the native path would happily prefer one of the two and answer a call NumPy refuses to
+/// accept. `position` is the index at which that keyword also appears in the positional
+/// signature.
+fn keyword_is_doubly_supplied(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
     name: &str,
@@ -109269,9 +109269,9 @@ fn busday_offset(
                 .unwrap_or(false)
         })
     }) && (2..=5).contains(&args.len())
-        && !busday_keyword_is_doubly_supplied(args, kwargs, "roll", 2)
-        && !busday_keyword_is_doubly_supplied(args, kwargs, "weekmask", 3)
-        && !busday_keyword_is_doubly_supplied(args, kwargs, "holidays", 4)
+        && !keyword_is_doubly_supplied(args, kwargs, "roll", 2)
+        && !keyword_is_doubly_supplied(args, kwargs, "weekmask", 3)
+        && !keyword_is_doubly_supplied(args, kwargs, "holidays", 4)
         && let (Ok(dates), Ok(offsets)) = (args.get_item(0), args.get_item(1))
         && let Some(result) = try_zerocopy_busday_offset(
             py,
@@ -109325,8 +109325,8 @@ fn is_busday(
                 .unwrap_or(false)
         })
     }) && (1..=3).contains(&args.len())
-        && !busday_keyword_is_doubly_supplied(args, kwargs, "weekmask", 1)
-        && !busday_keyword_is_doubly_supplied(args, kwargs, "holidays", 2)
+        && !keyword_is_doubly_supplied(args, kwargs, "weekmask", 1)
+        && !keyword_is_doubly_supplied(args, kwargs, "holidays", 2)
         && let Ok(dates) = args.get_item(0)
         && let Some(result) = try_zerocopy_is_busday(
             py,
@@ -110233,7 +110233,127 @@ fn binary_repr(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kw| {
+        kw.keys().into_iter().all(|key| {
+            key.extract::<String>()
+                .map(|k| k == "num" || k == "width")
+                .unwrap_or(false)
+        })
+    }) && args.len() <= 2
+        && !keyword_is_doubly_supplied(args, kwargs, "width", 1)
+        && let Some(num) = kwargs
+            .and_then(|kw| kw.get_item("num").ok().flatten())
+            .or_else(|| args.get_item(0).ok())
+        && let Some(result) = native_binary_repr(
+            py,
+            &num,
+            kwargs
+                .and_then(|kw| kw.get_item("width").ok().flatten())
+                .or_else(|| args.get_item(1).ok())
+                .as_ref(),
+        )?
+    {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "binary_repr", args, kwargs)
+}
+
+/// A Python integer as `i64`, or `None` for anything this route will not take.
+///
+/// `operator.index` is what the incumbent uses, so a `float` is a `TypeError` there and must
+/// NOT be silently truncated - only objects with `__index__` qualify. An exact `int` short
+/// circuits, so the common case costs no method call; `np.int64` and `bool` go the long way
+/// round, which is what makes `binary_repr(np.int64(-3))` and `binary_repr(True)` work.
+///
+/// Anything outside `i64` declines: `binary_repr` is defined on arbitrary-precision Python
+/// integers and numpy answers for `2**70` quite happily, so the bound is this route's limit,
+/// not the function's.
+fn python_index_as_i64(py: Python<'_>, value: &Bound<'_, PyAny>) -> Option<i64> {
+    if value.is_exact_instance(&py.get_type::<PyInt>()) {
+        return value.extract::<i64>().ok();
+    }
+    let indexed = value.call_method0(intern!(py, "__index__")).ok()?;
+    if !indexed.is_exact_instance(&py.get_type::<PyInt>()) {
+        return None;
+    }
+    indexed.extract::<i64>().ok()
+}
+
+/// `np.binary_repr(num, width=None)` in native code; the incumbent is 105 lines of Python.
+///
+/// Returns `None` wherever numpy would RAISE, so the passthrough carries its exact message
+/// rather than this route inventing one. That is the whole of the insufficient-width rule:
+/// numpy raises `Insufficient bit width=1 provided for binwidth=2`, and reproducing that
+/// string here would be one more thing to keep in sync.
+///
+/// THREE THINGS READ OFF THE INCUMBENT, none of which a reasonable implementation guesses:
+///
+///   1. `binary_repr(0, width=0)` is `'0'`, not `''`. NumPy writes `'0' * (width or 1)`, and
+///      `0` is FALSY, so a zero width means one digit.
+///   2. `binary_repr(0, width=-3)` is the EMPTY STRING - the same expression, with `'0' * -3`.
+///      A negative width is not an error in this branch, unlike every other branch.
+///   3. THE gh-8679 BOUNDARY. For a negative `num` whose magnitude is an exact power of two,
+///      the two's-complement width is one SHORT of what the magnitude's bit length suggests,
+///      so `binary_repr(-8, 4)` is `'1000'` and not `'11000'`. Without that correction every
+///      power-of-two boundary comes out one bit too wide.
+fn native_binary_repr(
+    py: Python<'_>,
+    num: &Bound<'_, PyAny>,
+    width: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(num) = python_index_as_i64(py, num) else {
+        return Ok(None);
+    };
+    let width = match width {
+        None => None,
+        Some(value) if value.is_none() => None,
+        Some(value) => match python_index_as_i64(py, value) {
+            Some(w) => Some(w),
+            None => return Ok(None),
+        },
+    };
+    // i128 throughout: `-num` overflows for `i64::MIN`, and the two's complement below is
+    // computed at `2^(poswidth + 1)`, which for a 64-bit magnitude does not fit in `i64`.
+    let num = i128::from(num);
+
+    let text = if num == 0 {
+        // `'0' * (width or 1)` - zero width is falsy and means one digit; a negative width
+        // means no digits at all.
+        let repeat = match width {
+            None | Some(0) => 1,
+            Some(w) => w,
+        };
+        "0".repeat(repeat.max(0) as usize)
+    } else if num > 0 {
+        let binary = format!("{num:b}");
+        let binwidth = binary.len() as i64;
+        if width.is_some_and(|w| w < binwidth) {
+            return Ok(None); // numpy raises; let it
+        }
+        let outwidth = width.map_or(binwidth, |w| binwidth.max(w));
+        let mut out = "0".repeat((outwidth - binwidth) as usize);
+        out.push_str(&binary);
+        out
+    } else if let Some(w) = width {
+        let magnitude = -num;
+        let mut poswidth = format!("{magnitude:b}").len() as u32;
+        // gh-8679: at an exact power of two the sign bit is already accounted for.
+        if poswidth >= 1 && 1i128 << (poswidth - 1) == magnitude {
+            poswidth -= 1;
+        }
+        let twocomp = (1i128 << (poswidth + 1)) + num;
+        let binary = format!("{twocomp:b}");
+        let binwidth = binary.len() as i64;
+        if w < binwidth {
+            return Ok(None); // numpy raises; let it
+        }
+        let mut out = "1".repeat((w.max(binwidth) - binwidth) as usize);
+        out.push_str(&binary);
+        out
+    } else {
+        format!("-{:b}", -num)
+    };
+    Ok(Some(PyString::new(py, &text).into_any().unbind()))
 }
 
 #[pyfunction]
@@ -110243,7 +110363,103 @@ fn base_repr(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kw| {
+        kw.keys().into_iter().all(|key| {
+            key.extract::<String>()
+                .map(|k| k == "number" || k == "base" || k == "padding")
+                .unwrap_or(false)
+        })
+    }) && args.len() <= 3
+        && !keyword_is_doubly_supplied(args, kwargs, "base", 1)
+        && !keyword_is_doubly_supplied(args, kwargs, "padding", 2)
+        && let Some(number) = kwargs
+            .and_then(|kw| kw.get_item("number").ok().flatten())
+            .or_else(|| args.get_item(0).ok())
+        && let Some(result) = native_base_repr(
+            py,
+            &number,
+            kwargs
+                .and_then(|kw| kw.get_item("base").ok().flatten())
+                .or_else(|| args.get_item(1).ok())
+                .as_ref(),
+            kwargs
+                .and_then(|kw| kw.get_item("padding").ok().flatten())
+                .or_else(|| args.get_item(2).ok())
+                .as_ref(),
+        )?
+    {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "base_repr", args, kwargs)
+}
+
+/// `np.base_repr(number, base=2, padding=0)` in native code.
+///
+/// TWO PLACES WHERE THE OBVIOUS IMPLEMENTATION IS WRONG, both read off the incumbent:
+///
+///   1. THE PADDING GOES BETWEEN THE SIGN AND THE DIGITS. NumPy pushes the pad, then the
+///      '-', onto a LSB-first list and reverses the whole thing at the end, so
+///      `base_repr(-5, 2, 4)` is `'-0000101'` - not `'0000-101'` and not `'-101'` padded on
+///      the left as a unit.
+///   2. A NEGATIVE PADDING IS NOT A NO-OP WHEN THE NUMBER IS ZERO. NumPy guards with
+///      `if padding:`, which is TRUE for `-2`, and then appends `'0' * -2` - an EMPTY
+///      STRING. That empty element makes its list non-empty, which defeats the `res or '0'`
+///      fallback, so `base_repr(0, 10, -2)` is `''` and not `'0'`. Guarding on
+///      `padding > 0` instead gets that one case wrong, which is how it was caught here.
+///
+/// Non-integers decline. `base_repr` uses `int(number)` rather than `operator.index`, so
+/// numpy accepts a float and truncates it - and takes the SIGN from the original, so
+/// `base_repr(-0.5, 2)` is a lone `'-'`. That is numpy's to answer, not this route's to
+/// reproduce.
+fn native_base_repr(
+    py: Python<'_>,
+    number: &Bound<'_, PyAny>,
+    base: Option<&Bound<'_, PyAny>>,
+    padding: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if !number.is_exact_instance(&py.get_type::<PyInt>()) {
+        return Ok(None);
+    }
+    let Some(number) = number.extract::<i64>().ok().map(i128::from) else {
+        return Ok(None);
+    };
+    let base = match base {
+        None => 2i128,
+        Some(value) => match python_index_as_i64(py, value) {
+            // Outside 2..=36 numpy raises one of two distinct messages; decline to it.
+            Some(b) if (2..=36).contains(&b) => i128::from(b),
+            _ => return Ok(None),
+        },
+    };
+    let padding = match padding {
+        None => 0i64,
+        Some(value) => match python_index_as_i64(py, value) {
+            Some(p) => p,
+            None => return Ok(None),
+        },
+    };
+
+    // Built LSB-first and reversed at the end, exactly as the incumbent does - which is what
+    // puts the padding inside the sign rather than outside it.
+    let mut parts: Vec<String> = Vec::new();
+    let mut magnitude = number.abs();
+    while magnitude > 0 {
+        parts.push((DIGITS[(magnitude % base) as usize] as char).to_string());
+        magnitude /= base;
+    }
+    if padding != 0 {
+        parts.push("0".repeat(padding.max(0) as usize));
+    }
+    if number < 0 {
+        parts.push("-".to_string());
+    }
+    let text = if parts.is_empty() {
+        "0".to_string()
+    } else {
+        parts.iter().rev().map(String::as_str).collect()
+    };
+    Ok(Some(PyString::new(py, &text).into_any().unbind()))
 }
 
 // Array display helpers (3).
@@ -112905,15 +113121,16 @@ mod tests {
         interp, is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native,
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, nextafter, numpy_dtype_is_f64, offset_business_days, place, put,
-        put_along_axis, putmask, python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
-        python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
-        required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
-        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
-        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
-        try_native_lstsq_tsqr, try_zerocopy_busday_count, try_zerocopy_busday_offset,
-        try_zerocopy_f64_binary_into, try_zerocopy_isnat, unravel_index, where_py,
-        wide_int_table_bounds, zerocopy_f64_binary_flat,
+        narrow_bitmap_setop, native_base_repr, native_binary_repr, nextafter, numpy_dtype_is_f64,
+        offset_business_days, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
+        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate,
+        radians_native, ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted,
+        select, sign, signbit_native, sinc, solve_triangular, spacing, take, take_along_axis,
+        tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from,
+        triu_indices, triu_indices_from, trunc_native, try_native_lstsq_tsqr,
+        try_zerocopy_busday_count, try_zerocopy_busday_offset, try_zerocopy_f64_binary_into,
+        try_zerocopy_isnat, unravel_index, where_py, wide_int_table_bounds,
+        zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -125528,6 +125745,232 @@ mod tests {
                 )?
                 .is_none(),
                 "an empty weekmask must decline so numpy raises"
+            );
+            Ok(())
+        });
+    }
+
+    /// `np.binary_repr` and `np.base_repr` must match NumPy, including the four edge cases
+    /// where the obvious implementation is wrong (`deadlock-audit-6y5wp`).
+    ///
+    /// Both are PURE PYTHON in the incumbent - 105 and 56 lines - which is where the headroom
+    /// is, and also why every quirk below is a quirk of Python expressions rather than of any
+    /// numeric rule:
+    ///
+    ///   1. `binary_repr(0, width=0)` is `'0'`, not `''`. NumPy writes `'0' * (width or 1)`
+    ///      and `0` is FALSY, so a zero width means one digit.
+    ///   2. `binary_repr(0, width=-3)` is the EMPTY STRING - the same expression with
+    ///      `'0' * -3`. A negative width is an error in every other branch but not this one.
+    ///   3. THE gh-8679 BOUNDARY: for a negative number whose magnitude is an exact power of
+    ///      two the two's complement is one bit NARROWER than the magnitude's bit length
+    ///      suggests, so `binary_repr(-8, 4)` is `'1000'`, not `'11000'`.
+    ///   4. `base_repr(0, 10, -2)` is `''`, not `'0'`. NumPy guards the pad with
+    ///      `if padding:`, which is TRUE for `-2`, and appends `'0' * -2` - an EMPTY string.
+    ///      That empty element makes its list non-empty, defeating the `res or '0'` fallback.
+    ///      Guarding on `padding > 0` instead gets exactly this one case wrong, which is how
+    ///      it was caught: a fuzz against the installed numpy, before any Rust was written.
+    ///
+    /// And the placement rule: `base_repr` builds LSB-first and reverses at the end, so the
+    /// PADDING LANDS BETWEEN THE SIGN AND THE DIGITS - `base_repr(-5, 2, 4)` is `'-0000101'`.
+    ///
+    /// ENGAGEMENT IS ASSERTED SEPARATELY from parity, since a passthrough satisfies every
+    /// equality here.
+    #[test]
+    fn binary_and_base_repr_match_numpy_including_the_falsy_width_cases() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_reprs")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("binary_repr")?;
+            let theirs = numpy.getattr("binary_repr")?;
+            let ours_base = module.getattr("base_repr")?;
+            let theirs_base = numpy.getattr("base_repr")?;
+
+            // binary_repr(num) and binary_repr(num, width) across sign, zero, powers of two
+            // and both i64 extremes.
+            let ordinary = [0i64, 1, 2, 3, 7, 8, 255, -1, -2, -3, -4, -8, -255];
+            let extremes = [i64::MAX, i64::MIN, i64::MAX - 1, i64::MIN + 1];
+            for num in ordinary.into_iter().chain(extremes) {
+                let mine = ours.call1((num,))?.extract::<String>()?;
+                let theirs_out = theirs.call1((num,))?.extract::<String>()?;
+                assert_eq!(mine, theirs_out, "binary_repr({num}) diverged from numpy");
+                for width in [0i64, 1, 2, 3, 8, 16, 64, 65, 66, 70, 128] {
+                    // Where numpy raises, we must raise too (by declining into it); where it
+                    // answers, we must answer identically.
+                    match theirs.call1((num, width)) {
+                        Ok(expected) => assert_eq!(
+                            ours.call1((num, width))?.extract::<String>()?,
+                            expected.extract::<String>()?,
+                            "binary_repr({num}, {width}) diverged from numpy"
+                        ),
+                        Err(_) => assert!(
+                            ours.call1((num, width)).is_err(),
+                            "binary_repr({num}, {width}) must raise, as numpy does"
+                        ),
+                    }
+                }
+            }
+
+            // THE FOUR EDGE CASES, spelled out as literals so a regression reads as the rule
+            // it broke rather than as a fuzz mismatch.
+            for (num, width, expected) in [
+                (0i64, 0i64, ""),
+                (0, -3, ""),
+                (0, 1, "0"),
+                (0, 5, "00000"),
+                (-8, 4, "1000"),
+                (-4, 3, "100"),
+                (-1, 1, "1"),
+                (-3, 5, "11101"),
+            ] {
+                assert_eq!(
+                    ours.call1((num, width))?.extract::<String>()?,
+                    expected,
+                    "binary_repr({num}, {width}) must be {expected:?}"
+                );
+            }
+            // ...and the one that is NOT `'0'`: a zero width is falsy and means one digit,
+            // while a negative width means none at all.
+            assert_eq!(ours.call1((0i64, 0i64))?.extract::<String>()?, "0");
+            assert_eq!(ours.call1((0i64, -3i64))?.extract::<String>()?, "");
+
+            // An insufficient width RAISES there, so it must raise here.
+            for (num, width) in [(3i64, 1i64), (3, -1), (-3, 2), (255, 4)] {
+                assert!(
+                    ours.call1((num, width)).is_err(),
+                    "binary_repr({num}, {width}) must raise, as numpy does - a width narrower \
+                     than the value needs is an error, not a silent widening"
+                );
+            }
+
+            // base_repr across every base, sign, and padding - including the negative padding
+            // that is only visible at zero.
+            let numbers = [0i64, 1, 5, 6, 7, 10, 32, 35, 36, -5, -32];
+            for number in numbers.into_iter().chain([i64::MAX, i64::MIN]) {
+                for base in [2i64, 3, 8, 10, 16, 36] {
+                    for padding in [0i64, 1, 3, 7, -2] {
+                        let args = (number, base, padding);
+                        assert_eq!(
+                            ours_base.call1(args)?.extract::<String>()?,
+                            theirs_base.call1(args)?.extract::<String>()?,
+                            "base_repr({number}, {base}, {padding}) diverged from numpy"
+                        );
+                    }
+                }
+            }
+            for (number, base, padding, expected) in [
+                (0i64, 10i64, -2i64, ""),
+                (0, 2, 3, "000"),
+                (0, 2, 0, "0"),
+                (-5, 2, 4, "-0000101"),
+                (7, 5, 3, "00012"),
+                (10, 16, 0, "A"),
+            ] {
+                assert_eq!(
+                    ours_base
+                        .call1((number, base, padding))?
+                        .extract::<String>()?,
+                    expected,
+                    "base_repr({number}, {base}, {padding}) must be {expected:?}"
+                );
+            }
+            // A base outside 2..=36 raises there, so it must raise here.
+            for base in [1i64, 0, -2, 37, 64] {
+                assert!(
+                    ours_base.call1((5i64, base)).is_err(),
+                    "base_repr(5, {base}) must raise, as numpy does"
+                );
+            }
+
+            // Keyword spellings, including the first parameter by name.
+            let kw = PyDict::new(py);
+            kw.set_item("width", 8)?;
+            assert_eq!(
+                ours.call((3i64,), Some(&kw))?.extract::<String>()?,
+                theirs.call((3i64,), Some(&kw))?.extract::<String>()?,
+                "binary_repr(3, width=8) diverged from numpy"
+            );
+            let nkw = PyDict::new(py);
+            nkw.set_item("num", 3)?;
+            assert_eq!(
+                ours.call((), Some(&nkw))?.extract::<String>()?,
+                "11",
+                "binary_repr(num=3) must work with the first parameter passed by keyword"
+            );
+            // A keyword supplied positionally AND by name is a TypeError there.
+            let dup = PyDict::new(py);
+            dup.set_item("width", 8)?;
+            assert!(
+                ours.call((3i64, 4i64), Some(&dup)).is_err(),
+                "width given both positionally and by keyword must raise, as numpy does"
+            );
+
+            // `np.int64` and `bool` go through `__index__`, exactly as `operator.index` does
+            // in the incumbent; a FLOAT is a TypeError there and must not be truncated here.
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"i64v = np.int64(-3)\n\
+                  u8v = np.uint8(200)\n\
+                  boolv = True\n\
+                  floatv = 5.0\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            // Double unwrap: `PyDictMethods` is in scope in this module, so `get_item`
+            // yields `PyResult<Option<_>>` - the same form the busday fixtures use.
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("repr fixture missing")
+            };
+            for name in ["i64v", "u8v", "boolv"] {
+                assert_eq!(
+                    ours.call1((g(name),))?.extract::<String>()?,
+                    theirs.call1((g(name),))?.extract::<String>()?,
+                    "binary_repr({name}) diverged from numpy"
+                );
+            }
+            assert!(
+                ours.call1((g("floatv"),)).is_err(),
+                "a float must raise, as numpy's operator.index does - NOT be truncated"
+            );
+
+            // ENGAGEMENT. Parity above is satisfied by the passthrough, so the native route
+            // is called directly and must claim these.
+            for num in [0i64, 3, -3, i64::MAX, i64::MIN] {
+                let arg = num.into_pyobject(py)?;
+                assert!(
+                    native_binary_repr(py, arg.as_any(), None)?.is_some(),
+                    "the native binary_repr route declined {num}; parity alone proves nothing"
+                );
+            }
+            let five = 5i64.into_pyobject(py)?;
+            assert!(
+                native_base_repr(py, five.as_any(), None, None)?.is_some(),
+                "the native base_repr route declined 5"
+            );
+            // ...and the documented declines, each of which would otherwise be a WRONG answer.
+            let huge = py.eval(c"2**70", None, None)?;
+            assert!(
+                native_binary_repr(py, &huge, None)?.is_none(),
+                "an integer past i64 must decline - numpy answers for 2**70 and this route \
+                 cannot"
+            );
+            assert!(
+                native_base_repr(py, &g("floatv"), None, None)?.is_none(),
+                "a float must decline: base_repr uses int(), not operator.index, and takes \
+                 the SIGN from the original, so base_repr(-0.5, 2) is a lone '-'"
+            );
+            let narrow = 1i64.into_pyobject(py)?;
+            let three = 3i64.into_pyobject(py)?;
+            assert!(
+                native_binary_repr(py, three.as_any(), Some(narrow.as_any()))?.is_none(),
+                "an insufficient width must decline so numpy raises with its own message"
             );
             Ok(())
         });
