@@ -54269,3 +54269,92 @@ explained, ~335 insns/call unexplained**. The next probe on this line should pri
 bridge directly the same way (an arm that calls through tp_call vs one that does not), rather than
 carrying the ~100 figure over from a per-symbol profile.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — the f32/f16/complex dtype predicates get the typechar fast path their f64 SIBLING already had — 69 call sites, equivalence proven over 26 dtypes; SHIPPED as correctness-neutral, PERFORMANCE NOT YET MEASURED (deadlock-audit-v46rn)
+
+**Result class:** a source change landed on proven equivalence + strictly-fewer-operations, with its
+speed claim explicitly UNBANKED and a prediction registered before the fact.
+
+### What was wrong
+
+`numpy_dtype_is_f64` was given a `dtype.char` fast path and its worst cell went 8.700x -> 5.838x
+(quote 5.838x, the worst bound, never the 8.700x before-state). Its three siblings never got it:
+
+```
+  numpy_dtype_is_f32       40 call sites     slow shape
+  numpy_dtype_is_f16       25 call sites     slow shape
+  numpy_dtype_is_complex    4 call sites     slow shape
+  numpy_dtype_is_f64      119 call sites     FAST PATH, shipped earlier
+```
+
+The slow shape is three attribute reads (`dtype`, `kind`, `itemsize`) with NON-INTERNED names - so
+each also builds a fresh `PyString` for the key - plus a heap `String` for `kind`, all to compare
+one character. These predicates exist to DECLINE, so on most operands that was the entire cost of
+learning "no".
+
+### Equivalence, verified rather than argued
+
+Against the INSTALLED numpy 2.4.3 (not the vendored oracle), over 26 distinct dtypes:
+
+```
+  kind=='f' && itemsize==4  <=>  char=='f'          0 violations
+  kind=='f' && itemsize==2  <=>  char=='e'          0 violations
+  kind=='c'                 <=>  char in {F,D,G}    0 violations
+  kind-'f' chars present: d e f g   (longdouble 'g' is itemsize 16, so it cannot collide)
+  kind-'c' chars present: D F G     (clongdouble MUST be accepted - this predicate tests kind alone)
+```
+
+### The design mistake I made first, and why the obvious version was wrong
+
+The obvious implementation calls the existing `dtype_char_of` helper and falls through on `None`.
+That re-reads `dtype` in the fallback, so an operand with NO `dtype` - a list, a Python scalar -
+raises and swallows TWO `AttributeError`s where the original raised one. `numpy_dtype_is_f64` can
+afford that because ITS fallback runs `asarray` and is expensive regardless; these fallbacks are
+three cheap reads, so doubling the exception cost would be a REGRESSION on non-ndarray inputs.
+
+I had already built and started testing that version before catching it. The shipped form reads
+`dtype` ONCE and branches on the object, leaving the miss path exactly as cheap as before.
+
+### What is verified, and what is NOT
+
+```
+  cargo check -p fnp-python            0 errors, 0 warnings          (ovh-a, 9.3s)
+  cargo clippy -p fnp-python           328 warnings = BASELINE, delta 0, none citing these fns
+                                       ...but measured on the SUPERSEDED variant, not this one
+  cargo test -p fnp-python             712 passed, 0 failed          on THIS source
+                                       = 612 lib unit tests + 7 conformance suites
+                                       run TRUNCATED by RCH-E104 at the 1800s SSH ceiling
+```
+
+**RCH-E104 IS NOT A TEST FAILURE** and reads exactly like one. The suite has **2328 conformance
+targets**; compiling them cannot fit in one SSH session, so the full-suite command can never
+complete here. Targeted `--test` batches are the only viable form. A batch covering
+sorting / sort_search / searching / searchsorted_containers / lexsort / arithmetic / complex /
+complex_ops / dtype_sniff_fallback is still running at the time of this row.
+
+**NO PERFORMANCE NUMBER IS CLAIMED HERE.** The prediction is registered on the bead BEFORE the
+measurement: the decidable claim is the SIGN (retired instructions per call must DECREASE on
+`fnp.argsort` over a non-f32 input), with a magnitude band of 24,000-31,000 insns/call flagged as
+the weaker claim because it is a PRODUCT OF TWO BANKED NUMBERS - the exact shape that was wrong
+twice today (157 -> 313 -> a measured 201.7).
+
+### Operational findings that cost most of the wall clock
+
+**KILLING THE LOCAL `rch` CLIENT DOES NOT STOP THE REMOTE CARGO.** It orphans it, and the orphan
+keeps holding the worker's build-directory lock, so the NEXT job blocks behind your own zombie. I
+diagnosed this backwards first: I checked for an orphan, found a peer's `frankenengine` build
+holding the lock, and reported "no orphan, rch confirms clean cancellation" - quoting an rch status
+line that was about a different cancellation. An hour later `ps` on the worker showed my own
+`cargo test` at etimes=3289s. **Kill remote work ON THE WORKER, by PID.**
+
+**`pkill -f <pattern>` MATCHES YOUR OWN SHELL** when the pattern appears in the command you are
+running. It killed my own pane twice locally (exit 144) and self-matched once more on the worker.
+Capture the PID at launch and kill by PID only.
+
+COUNTED_MECHANISM: not applicable - no ratio is claimed in this row.
+A/A NULL CONTROLS: not applicable - no ratio is claimed in this row.
+RETRY PREDICATE: measure the registered SIGN on `fnp.argsort` over int64/f64 at n=256, counted
+retired instructions, matched arms, per-arm loadavg and CPU MHz recorded, on a quiet window. If the
+sign is flat, check FIRST whether the caller already gates the probes - that pattern has zeroed
+five levers in this campaign - and bank a REJECT with that reason rather than retrying.
+AGENT_NAME=SlateFinch.

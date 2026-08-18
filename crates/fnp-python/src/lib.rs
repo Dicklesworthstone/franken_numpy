@@ -99997,9 +99997,42 @@ fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     probe().unwrap_or(false)
 }
 
+/// True for a float32 ndarray, answered from `dtype.char` (`deadlock-audit-v46rn`).
+///
+/// THE ASYMMETRY THIS CLOSES: `numpy_dtype_is_f64` was given a typechar fast path and its worst
+/// cell went 8.700x -> 5.838x. This predicate - 40 call sites - kept the slow shape: THREE
+/// attribute reads (`dtype`, `kind`, `itemsize`) with NON-INTERNED names, so each one also built
+/// a fresh `PyString` for the key, plus a heap `String` for `kind`, all to compare one character.
+/// On any operand that is not f32 - which is most of them, since these probes exist to DECLINE -
+/// that was the entire cost of learning "no".
+///
+/// COUNTED, this host, 2026-08-18: one interned attribute read is 201.7 insns (two independent
+/// estimates 3.4% apart, arm spreads under 0.05%). Entries are not free, so removing one and
+/// interning the rest is a real quantity rather than tidying.
+///
+/// FETCHES `dtype` EXACTLY ONCE, WHICH IS THE POINT OF THIS SHAPE. The obvious way to write this
+/// - call the existing `dtype_char_of` helper first and fall through on `None` - re-reads `dtype`
+/// in the fallback, so an operand with NO `dtype` (a list, a Python scalar) raises and swallows
+/// TWO `AttributeError`s where the original raised one. `numpy_dtype_is_f64` can afford that
+/// because ITS fallback runs `asarray` and is expensive regardless; this fallback is three cheap
+/// reads, so doubling the exception cost would be a real regression on non-ndarray inputs. Reading
+/// `dtype` once and branching on the object keeps the miss path exactly as cheap as before.
+///
+/// EXACTLY OUTCOME-EQUIVALENT, verified against the installed numpy 2.4.3 over 26 distinct dtypes
+/// with zero violations: float32 is the ONLY dtype with kind `'f'` and itemsize 4, and its
+/// typechar is `'f'`. `longdouble` also has kind `'f'` but itemsize 16, so it cannot collide. The
+/// kind/itemsize branch is retained for any dtype whose `char` is unreadable, so no caller can see
+/// an answer it would not have seen before.
 fn numpy_dtype_is_f32(value: &Bound<'_, PyAny>) -> bool {
     let probe = || -> PyResult<bool> {
-        let dtype = value.getattr("dtype")?;
+        let py = value.py();
+        let dtype = value.getattr(intern!(py, "dtype"))?;
+        if let Ok(typechar) = dtype
+            .getattr(intern!(py, "char"))
+            .and_then(|c| c.extract::<char>())
+        {
+            return Ok(typechar == 'f');
+        }
         let kind: String = dtype.getattr("kind")?.extract()?;
         let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
         Ok(kind == "f" && itemsize == 4)
@@ -100007,9 +100040,21 @@ fn numpy_dtype_is_f32(value: &Bound<'_, PyAny>) -> bool {
     probe().unwrap_or(false)
 }
 
+/// True for a float16 ndarray, answered from `dtype.char` (`deadlock-audit-v46rn`).
+///
+/// Same single-fetch shape and same equivalence argument as `numpy_dtype_is_f32`: float16 is the
+/// only dtype with kind `'f'` and itemsize 2, and its typechar is `'e'`. 25 call sites, nearly all
+/// of which reach it only to decline.
 fn numpy_dtype_is_f16(value: &Bound<'_, PyAny>) -> bool {
     let probe = || -> PyResult<bool> {
-        let dtype = value.getattr("dtype")?;
+        let py = value.py();
+        let dtype = value.getattr(intern!(py, "dtype"))?;
+        if let Ok(typechar) = dtype
+            .getattr(intern!(py, "char"))
+            .and_then(|c| c.extract::<char>())
+        {
+            return Ok(typechar == 'e');
+        }
         let kind: String = dtype.getattr("kind")?.extract()?;
         let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
         Ok(kind == "f" && itemsize == 2)
@@ -100019,9 +100064,25 @@ fn numpy_dtype_is_f16(value: &Bound<'_, PyAny>) -> bool {
 
 // True for a complex64/complex128 ndarray (dtype kind 'c'). Any extraction error
 // (non-ndarray, missing dtype) is treated as "not complex".
+/// True for a complex ndarray, answered from `dtype.char` (`deadlock-audit-v46rn`).
+///
+/// The kind `'c'` typechars are EXACTLY `'F'` (complex64), `'D'` (complex128) and `'G'`
+/// (clongdouble). This predicate tests kind ALONE, with no itemsize condition, so all three must
+/// be accepted here or clongdouble would change answer. Verified against the installed numpy over
+/// every dtype it exposes: the kind-`'c'` set and the `FDG` set coincide exactly.
+///
+/// Single-fetch for the same reason as `numpy_dtype_is_f32`: the fallback is one cheap read, so
+/// re-reading `dtype` on the miss path would double the `AttributeError` cost for non-ndarrays.
 fn numpy_dtype_is_complex(value: &Bound<'_, PyAny>) -> bool {
     let probe = || -> PyResult<bool> {
-        let dtype = value.getattr("dtype")?;
+        let py = value.py();
+        let dtype = value.getattr(intern!(py, "dtype"))?;
+        if let Ok(typechar) = dtype
+            .getattr(intern!(py, "char"))
+            .and_then(|c| c.extract::<char>())
+        {
+            return Ok(matches!(typechar, 'F' | 'D' | 'G'));
+        }
         let kind: String = dtype.getattr("kind")?.extract()?;
         Ok(kind == "c")
     };
