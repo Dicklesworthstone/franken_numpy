@@ -55571,3 +55571,76 @@ RETRY PREDICATE: measure how much of the 681 ns the shipped hoist already captur
 same group against an ELF built before `d29b508e` — or accept the ceiling as an upper bound and
 measure the real route directly. Do NOT derive it from the 352.5 insns/call the sniff lever saved.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — CORRECTION OF YESTERDAY'S CORRECTION: every per-call figure I published carries ~1,281 ns/call of PROCESS STARTUP, so all my RATIOS were diluted toward 1.0 — we are FURTHER behind NumPy than I said, and the multiply cell's headline REVERSES (deadlock-audit-c5ecm)
+
+**Result class:** a measurement-design flaw in my own harness usage, found by chasing a discrepancy
+rather than by being told. Build-free. /data 47G, load ~6, idle 91%.
+
+### How it surfaced
+
+`v46rn`'s route-floor sweep states NumPy's **entire** multiply call at n=256 is **410 ns**. I had
+published NumPy's multiply arm at **1,765.9 ns**. Those cannot both describe the same thing, and a
+4x discrepancy is not a rounding difference — so I ran the `bench_binary_counter_multiply_empty_loop`
+arm, whose body is `sink += 1; black_box(&sink)` and nothing else.
+
+```
+  empty_loop arm:  1,281.1 ns/call   3,098.4 insns/call
+```
+
+A loop that increments a counter cannot cost 1,281 ns. **That is process startup** — `Python::
+initialize()`, the numpy import, module construction, criterion setup — amortised across the 400,000
+iterations by my own `total / 400_000` arithmetic. It is **72.5% of the NumPy multiply arm's time**
+and 38.8% of its instructions.
+
+### What survives and what does not
+
+**DIFFERENCES ARE UNAFFECTED.** The floor is identical in both arms of every pair, so it cancels
+exactly in a subtraction. Every lever effect I have banked stands unchanged: -2,584.0 and -2,528.5
+ns/call, -34,022.4 and -33,489.0 insns/call, +164.4 ns and +1,460.0 insns of multiply excess.
+
+**EVERY RATIO WAS DILUTED TOWARD 1.0 AND IS WRONG.** Corrected by subtracting the common floor:
+
+```
+  cell                    TIME  published -> corrected     INSN  published -> corrected
+  multiply delegating       1.093x ->  1.339x                1.183x ->  1.299x
+  argsort pre-ndcache       2.707x ->  3.305x                3.531x ->  3.748x
+  argsort post-ndcache      2.192x ->  2.610x                2.663x ->  2.806x
+  sort pre-ndcache          4.279x ->  6.842x                6.686x ->  7.672x
+  sort post-ndcache         3.387x ->  5.228x                5.091x ->  5.800x
+```
+
+VALIDITY CHECK: the corrected NumPy multiply arm is **484.8 ns**, against the independent
+route-floor bead's **410 ns** for NumPy's whole call — same order, reconciling the discrepancy that
+started this. The diluted 1,765.9 reconciled with nothing.
+
+### Yesterday's headline, re-examined honestly
+
+I wrote that instruction ratios overstate our deficit, and that the divergence was **worst on the
+delegating route** (time/instruction excess ratio 0.509). With the floor removed:
+
+```
+  multiply    time excess 33.91%  vs  insn excess 29.90%   ratio 1.134   <- REVERSES: time is WORSE
+  argsort     ratio 0.839 / 0.891
+  sort        ratio 0.876 / 0.881
+```
+
+So the finding **holds for the two native-dispatch cells** (time excess ~85-89% of instruction
+excess) and **reverses for the delegating route**, where time is 13% worse than instructions
+suggest. The 0.509 I published was an artifact of the floor, which diluted the small multiply ratio
+far more than the large sort/argsort ones.
+
+**And the correction runs against me twice over.** Yesterday I said "I was quoting a worse number
+than reality" and revised sort from 5.091x down to 3.387x. **That revision was wrong.** Corrected
+for startup, sort is **5.228x** in time — worse than the instruction figure I was trying to soften,
+and 54% worse than the number I published as the honest one. Every competitive figure from that row
+should be replaced by the corrected column above.
+
+COUNTED_MECHANISM: empty_loop floor 1,281.1 ns / 3,098.4 insns per call (3 reps, spread 3.1%),
+subtracted from both arms of five cells; corrected NumPy multiply arm 484.8 ns reconciles with an
+independently banked 410 ns.
+A/A NULL CONTROLS: not applicable - this is a harness-arithmetic correction, not a new ratio.
+RETRY PREDICATE: none - the correction is arithmetic on banked medians. **Standing rule for this
+harness: a `total_process_time / N` figure is NOT a per-call cost. Subtract the empty_loop arm, or
+quote differences only.** Differences were always safe; ratios never were.
+AGENT_NAME=SlateFinch.
