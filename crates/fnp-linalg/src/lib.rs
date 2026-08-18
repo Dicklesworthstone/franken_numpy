@@ -543,9 +543,23 @@ fn lu_factor_unblocked_into(
         for i in (k + 1)..n {
             let factor = lu[i * n + k] / pivot;
             lu[i * n + k] = factor;
-            for j in (k + 1)..n {
-                let u_val = lu[k * n + j];
-                lu[i * n + j] -= factor * u_val;
+            // SPLIT BORROW so the trailing axpy can vectorise (`franken_numpy-ixs5y`).
+            //
+            // Written as `lu[i * n + j] -= factor * lu[k * n + j]` both operands index the SAME
+            // `&mut [f64]`, so the compiler cannot prove the store does not alias the load and
+            // must re-read the pivot-row element on every iteration - which blocks
+            // autovectorisation of the inner loop, the hottest loop in the unblocked
+            // factorisation. `two_rows_mut` hands out row `i` mutably and row `k` immutably as
+            // disjoint slices, which is the same remedy `inv_from_lu_unblocked` already uses.
+            //
+            // BIT-IDENTICAL: same operands, same order, same count. Only the borrow structure
+            // changes, so no rounding can move. `factor` is still computed and stored before the
+            // split, since the split borrows the whole buffer.
+            let (row_i, row_k) = two_rows_mut(lu, i, k, n);
+            let dst = &mut row_i[(k + 1)..];
+            let src = &row_k[(k + 1)..];
+            for (target, &u_val) in dst.iter_mut().zip(src.iter()) {
+                *target -= factor * u_val;
             }
         }
     }
