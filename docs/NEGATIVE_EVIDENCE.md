@@ -52962,3 +52962,55 @@ finds it flagged in my earlier audit row, this row supersedes that entry. Conver
 is permitted, and add a NOT-TO-BE-CONVERTED comment at the head of the provenance group so the warning
 lives where someone would act rather than only in this ledger.
 AGENT_NAME=AzureCarp.
+
+## 2026-08-17 — OPERATIONAL: `rch exec` has a 1800s SSH ceiling that a COLD `cargo test -p fnp-python` cannot fit inside — it dies at 30 minutes with the crate still compiling (deadlock-audit-rz8g0)
+
+**Campaign result class:** operational finding (no measurement)
+
+```
+  WARN rch::hook: Remote execution failed on vmi1153651 with SSH timeout;
+       refusing local fallback: SSH command timed out after 1800s
+  [RCH] remote vmi1153651 failed [RCH-E104] SSH command timed out (no local fallback)
+```
+
+Elapsed 32:31 wall, 84 dependency crates compiled, `Compiling fnp-python` was the last line, and
+ZERO `test result` lines were produced. The run exited 1.
+
+**READ THE EXIT CODE, NOT THE SHAPE OF THE FAILURE.** `TEST_EXIT=1` with no `test result` lines
+looks exactly like a test failure or a compile error in whatever you just changed, and I was one
+step from treating it as a verdict on my own edit. It is neither: the crate never finished
+compiling. Anyone gating a change on `cargo test -p fnp-python` over rch will meet this, and the
+tell is the `RCH-E104` line at the very bottom, below hundreds of `Compiling` lines - not visible
+unless you tail past them.
+
+WHY IT BITES THIS CRATE SPECIFICALLY: a cold worker builds ~84 dependency crates before reaching
+`fnp-python`, which is itself a 110k-line crate. `cargo clippy -p fnp-python --benches` completes
+comfortably because the pooled target dir is warm for the CHECK profile; the TEST profile needs its
+own artifacts (`cfg(test)`, different flags), so a clippy run does not warm a test run.
+
+NO EXPOSED OVERRIDE. `rch --help` documents `RCH_DAEMON_TIMEOUT_MS` (daemon comms) and
+`RCH_SYNC_TIMEOUT_MS` (source sync) but nothing for the SSH command itself; the 1800s appears to be
+fixed. `RCH_SSH_SERVER_ALIVE_INTERVAL_SECS` and `RCH_SSH_CONTROL_PERSIST_SECS` exist but address
+keepalive and connection reuse, not command duration.
+
+WORKAROUNDS, in the order worth trying:
+ 1. Re-run immediately. The timed-out attempt leaves dev-profile artifacts in the pooled target
+    dir, so a retry can resume near where it died - IF another job has not reclaimed the pool
+    first, which is a documented hazard of that directory.
+ 2. `--no-run` first, then the run, splitting one 30-minute command into two shorter ones.
+ 3. Build and test locally, which costs local disk - and `/data` is at 70G and falling, so this is
+    the last resort rather than the first.
+
+CONSEQUENCE FOR THE CHANGE THIS WAS GATING: the tail extraction remains UNVERIFIED by tests. It has
+a static byte-equivalence proof (md5 match after normalising indentation and the one intended
+`self.kind` -> `kind`), `cargo fmt --check` exit 0, and `cargo clippy` exit 0 on rch - but the
+extraction also changes four parameters from by-value `Option<Py<PyAny>>` to by-reference
+`Option<&Py<PyAny>>`, and no gate short of the test suite exercises that. It stays uncommitted.
+
+A/A NULL CONTROLS: not applicable - no measurement.
+
+RETRY PREDICATE: if the retry also times out, do NOT lower the bar and commit on clippy alone. Split
+with `--no-run`, or accept the local build cost, or narrow to the single test the change actually
+touches (`delegated_kwargs_omit_defaults_and_forward_non_defaults`) - though note the compile, not
+the test execution, is what exceeds the ceiling, so a filter alone saves nothing.
+AGENT_NAME=SlateFinch.
