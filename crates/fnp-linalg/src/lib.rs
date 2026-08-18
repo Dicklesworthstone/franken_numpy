@@ -8388,7 +8388,20 @@ fn packed_gemm_serial_tiled_apacked<const MR: usize>(
     let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     // Packed once, reused by every column panel below - that reuse is the point of packing.
-    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    // SKIP THE PACK WHEN NOTHING WILL CONSUME IT. The panel loop below is bounded by `n_full`,
+    // so with fewer than `PACKED_NR` columns it never runs, and packing would allocate and fill a
+    // copy of `a` for no reader at all.
+    //
+    // HOW OFTEN THIS FIRES, verified rather than assumed: for blocked LU it is NARROW. That
+    // caller breaks out at `trail == 0`, and with `LU_PANEL_NB = 64` a non-zero `trail` lands
+    // under `PACKED_NR` only when `n mod 64` is 1..7 - `n = 65` gives `trail = 1`. The wasted
+    // allocation there is also small. The guard is kept because it is free and strictly correct,
+    // not because it recovers a measurable amount; it also covers any caller passing a narrow `n`.
+    let ap = if n_full == 0 {
+        Vec::new()
+    } else {
+        pack_a_rowblocks::<MR>(a, m_full, k)
+    };
     // Same L2-resident column-block width as the incumbent kernel, so this change is the
     // A-packing and nothing else.
     let nc = {
@@ -8494,7 +8507,20 @@ fn packed_gemm_band_prepacked_b<const MR: usize>(
 
     let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
-    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    // SKIP THE PACK WHEN NOTHING WILL CONSUME IT. The panel loop below is bounded by `n_full`,
+    // so with fewer than `PACKED_NR` columns it never runs, and packing would allocate and fill a
+    // copy of `a` for no reader at all.
+    //
+    // HOW OFTEN THIS FIRES, verified rather than assumed: for blocked LU it is NARROW. That
+    // caller breaks out at `trail == 0`, and with `LU_PANEL_NB = 64` a non-zero `trail` lands
+    // under `PACKED_NR` only when `n mod 64` is 1..7 - `n = 65` gives `trail = 1`. The wasted
+    // allocation there is also small. The guard is kept because it is free and strictly correct,
+    // not because it recovers a measurable amount; it also covers any caller passing a narrow `n`.
+    let ap = if n_full == 0 {
+        Vec::new()
+    } else {
+        pack_a_rowblocks::<MR>(a, m_full, k)
+    };
     let panels = n_full / PACKED_NR;
     for panel in 0..panels {
         let j0 = panel * PACKED_NR;
@@ -8576,7 +8602,20 @@ fn packed_gemm_serial_tiled_simd<const MR: usize>(
 
     let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
-    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    // SKIP THE PACK WHEN NOTHING WILL CONSUME IT. The panel loop below is bounded by `n_full`,
+    // so with fewer than `PACKED_NR` columns it never runs, and packing would allocate and fill a
+    // copy of `a` for no reader at all.
+    //
+    // HOW OFTEN THIS FIRES, verified rather than assumed: for blocked LU it is NARROW. That
+    // caller breaks out at `trail == 0`, and with `LU_PANEL_NB = 64` a non-zero `trail` lands
+    // under `PACKED_NR` only when `n mod 64` is 1..7 - `n = 65` gives `trail = 1`. The wasted
+    // allocation there is also small. The guard is kept because it is free and strictly correct,
+    // not because it recovers a measurable amount; it also covers any caller passing a narrow `n`.
+    let ap = if n_full == 0 {
+        Vec::new()
+    } else {
+        pack_a_rowblocks::<MR>(a, m_full, k)
+    };
     let mut bp = vec![0.0f64; k * PACKED_NR];
     let mut j0 = 0;
     while j0 < n_full {
@@ -8833,7 +8872,13 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
     // read `a` in place, so an `MR`-row tile strode by `k` and all of `a` was re-streamed for
     // every column panel. Hoisted here so the packed copy is built a single time and reused -
     // packing inside the loops would move the same work rather than remove it.
-    let ap = pack_a_rowblocks::<MR>(a, m - m % MR, k);
+    // Skip the pack when nothing will consume it - see the note in the plain kernel. The
+    // panel loop is bounded by `n_full`, and blocked LU drives this with a shrinking `trail`.
+    let ap = if n_full == 0 {
+        Vec::new()
+    } else {
+        pack_a_rowblocks::<MR>(a, m - m % MR, k)
+    };
     let mut bp = vec![0.0f64; k * PACKED_NR];
     let mut jc = 0;
     while jc < n_full {
@@ -8947,7 +8992,13 @@ fn packed_gemm_sub_assign_strided_serial_tiled<const MR: usize>(
     // read `a` in place, so an `MR`-row tile strode by `k` and all of `a` was re-streamed for
     // every column panel. Hoisted here so the packed copy is built a single time and reused -
     // packing inside the loops would move the same work rather than remove it.
-    let ap = pack_a_rowblocks::<MR>(a, m - m % MR, k);
+    // Skip the pack when nothing will consume it - see the note in the plain kernel. The
+    // panel loop is bounded by `n_full`, and blocked LU drives this with a shrinking `trail`.
+    let ap = if n_full == 0 {
+        Vec::new()
+    } else {
+        pack_a_rowblocks::<MR>(a, m - m % MR, k)
+    };
     let mut bp = vec![0.0f64; k * PACKED_NR];
     let mut jc = 0;
     while jc < n_full {
