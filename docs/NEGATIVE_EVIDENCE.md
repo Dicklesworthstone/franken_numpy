@@ -53769,3 +53769,96 @@ RETRY PREDICATE: implement the dtype-identity check behind the two hazards above
 same cell; the change is worth taking only if it lands within the 250-400 insns/call ceiling, and it
 must be measured on the multiply arm where the sniff's cost is established rather than inferred.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — THE DTYPE-IDENTITY LEVER SAVES 388.7 INSNS/CALL, inside its pre-registered band, cutting the sniff from 593.5 to 204.8 — and my own cross-check "failed" because I made the within-ELF/cross-ELF conflation AGAIN (deadlock-audit-ei9jz)
+
+**Campaign result class:** lever measured and inside its registered band + a repeated methodological
+error of mine, caught by the control rather than by luck
+
+Isolated worktree, ELF `criterion_python_elementwise-ea6828603f008c3e` (worktree build off
+`3e99bb51` plus the lever), release-perf, threading pinned, 400,000 calls/arm, 4 interleaved reps,
+parity asserted against NumPy's oracle on every arm (0 failures). PRE loadavg 12.42/13.10/11.43,
+CPU idle 85%, runnable 7/64, iowait 0, 2200 MHz, /data 125G. POST idle 90%.
+
+```
+  sniff ON   median 3,770,493,140   spread 0.092%
+  sniff OFF  median 3,688,556,252   spread 0.197%
+  numpy      median 3,175,895,588   spread 0.065%
+  noise floor (worst spread)                     18.5 insns/call
+
+  NEW sniff cost   204.8 insns/call      (was 593.5 on the pre-lever ELF)
+  SAVING           388.7 insns/call      registered band [250, 400] -> INSIDE
+```
+
+### The control that makes the saving trustworthy
+
+The lever changes only the sniff path, so with `FNP_SKIP_DTYPE_SNIFF=1` the two ELFs execute
+identical code and must agree:
+
+```
+  sniff_off, pre-lever ELF   3,684,985,104
+  sniff_off, lever ELF       3,688,556,252
+  delta                              8.9 insns/call   <- well inside the 18.5 noise floor
+```
+
+The baseline is unchanged, so comparing the two switch deltas (593.5 vs 204.8) is a like-for-like
+comparison rather than a cross-ELF one. That control is why the 388.7 stands.
+
+### MY CROSS-CHECK FAILED, AND IT WAS THE CHECK THAT WAS WRONG
+
+I registered: "the whole-route excess must fall by the SAME amount as the sniff delta, within
+noise." Measured: route excess fell 344.0 while the sniff saving was 388.7 - a 44.7 gap against a
+2x18.5 threshold. By the letter, the row is void.
+
+It is not, and the reason is diagnosable rather than convenient:
+
+```
+  numpy_plain, pre-lever ELF   3,193,533,335
+  numpy_plain, lever ELF       3,175,895,588
+  delta                              -44.1 insns/call
+```
+
+**NumPy's own arm moves 44.1 insns/call between the two ELFs**, which accounts for 99% of a 44.7
+discrepancy. NumPy's code did not change; the build did. My route-level cross-check compared THIS
+ELF's excess against a figure measured on OTHER ELFs - a CROSS-ELF comparison, whose spread this
+ledger already measures at 1.74% (~32 insns/call) - while I tested it against the 18.5 within-ELF
+noise.
+
+**This is the third time today I have matched the wrong spread to a comparison** (a within-run CI
+where a between-run one was needed; a conversion rate borrowed from another host; a ±0.1% neutrality
+gate on a cross-ELF question). The pattern is stable enough to name as a standing hazard: **any
+comparison that crosses a build boundary inherits ~1.74% / ~32 insns/call of noise here, and no
+within-ELF figure may gate it.**
+
+The correctly-scoped controls both pass: sniff_off agrees to 8.9, and the saving is a within-ELF
+delta-of-deltas.
+
+### What the route looks like now
+
+```
+  route excess, pre-lever  ~1830.5 insns/call   (clean main, 3 ELFs)
+  route excess, lever ELF   1486.5              (this ELF)
+  drop                       ~344 +- 32          <- CROSS-ELF, quote with that band
+  better-controlled figure   388.7 +- 18.5       <- within-ELF delta-of-deltas
+```
+
+Either way the sniff is no longer the largest identified cost on this route: at 204.8 it is 14% of
+what remains, and the wrapper residual (~1169.6) is now unambiguously dominant.
+
+COUNTED_MECHANISM: sniff 593.5 -> 204.8 insns/call (388.7 saved) via one `getattr("dtype")` plus
+pointer compares against interned builtin dtype singletons; baseline control agrees to 8.9
+insns/call; numpy arm's cross-ELF drift 44.1 explains 99% of the failed cross-check.
+
+A/A NULL CONTROLS: not applicable - counter differences. The controls that apply held: parity vs
+NumPy's oracle on every arm, the sniff_off baseline control across ELFs, and a stated noise floor.
+
+NOT MERGEABLE YET, and the reasons are unchanged: parity here covers ordinary finite f64 only. The
+design depends on a FALLBACK path for parameterised dtypes (`np.dtype('M8[ns]')` is not the interned
+`M8` object, and 'M'/'m' are in the guard sets) and that path is exercised by NO test in this run. A
+merge needs datetime64-with-units, structured dtypes, and a non-array operand (the `None => true`
+branch) exercised explicitly.
+
+RETRY PREDICATE: before merging, run the same cell with datetime64 and structured-dtype operands and
+confirm the fallback produces byte-identical routing decisions to the char path. If it does, this is
+a 388.7 insns/call lever on the delegating binary-ufunc route - about 21% of the pre-lever excess.
+AGENT_NAME=SlateFinch.
