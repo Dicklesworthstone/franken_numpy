@@ -54065,3 +54065,68 @@ comparison on this route, use a band of at least +-50 insns/call, or avoid cross
 entirely by keeping both conditions in one ELF behind a runtime switch, which is what made the
 388.7 measurement clean in the first place.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — TLS-MODEL PROBE: NULL. `-Z tls-model=local-dynamic` changes the binary (DTPMOD64 10 -> 4) and moves the route by -0.6 insns/call, i.e. nothing. The lead closes, and the reason is that the flag was aimed at the wrong binary (deadlock-audit-56vq8)
+
+**Campaign result class:** REJECT — a lead I raised, closed by its own first measurement, at the cost
+of one build
+
+Flag-only change (`-Z tls-model=local-dynamic`), no source edit, built from unmodified main.
+PRE loadavg 8.40/8.35/9.02, CPU idle 81%, iowait 0, 2516 MHz, /data 101G.
+
+```
+  the flag DID take effect          R_X86_64_DTPMOD64 relocations  10 -> 4
+  the .so still imports             yes
+  parity                            f64 multiply and signed-zero/inf/nan both BIT-IDENTICAL
+  route excess                      1477.4 vs the shipped 1478.0   =  -0.6 insns/call
+  __tls_get_addr share              1.72% -> 2.17%   (it went UP)
+```
+
+**Registered prediction 1 (a fall between 0 and 68.7): NOT OBSERVED.** Registered prediction 3 (null
+is a good outcome and closes the lead for one build): that is what happened.
+
+### Why it was never going to work, found BEFORE the numbers landed
+
+While the build ran I checked what the shipped `.so` actually contains:
+
+```
+  R_X86_64_DTPMOD64 relocations in libfnp_python.so   10
+  direct `callq __tls_get_addr` sites in our code      0
+  where the resolver calls come from                   libpython3.13.so (the @plt entry confirms)
+```
+
+**Our crate barely uses dynamic TLS at all.** The `__tls_get_addr` cost is CPython's thread-state
+access, compiled into `libpython3.13.so`, which a RUSTFLAGS setting on our crates cannot touch. The
+flag was aimed at the wrong binary. Consolidating our own 10 relocations to 4 changed nothing
+measurable because our 10 were never the cost.
+
+The 0.45 percentage-point RISE in the resolver share is within profile-to-profile variation on a
+symbol at this magnitude and I am not treating it as a regression - but it is certainly not a win,
+and quoting the route delta (-0.6) as "a small improvement" would be reading noise as signal.
+
+### The finding that survives, and it points back where the bead already pointed
+
+The +68.7 insns/call of `__tls_get_addr` in the earlier wrapper attribution is real, but it is not
+OUR TLS being slow - it is **CPython's TLS being touched more often**, because our route makes more
+CPython entries than the incumbent's. TLS cost is a SYMPTOM of entry count, not an independent
+lever. That is the same conclusion the entry-count analysis reached from the other direction, and it
+means build-flag tuning is a dead end for this residual: the accesses have to stop happening, not
+get cheaper.
+
+**METHOD NOTE WORTH KEEPING:** the binary-level check (`readelf -r`, `objdump | grep
+__tls_get_addr`) cost seconds and would have predicted this null before the 20-minute build. When a
+lever is "change how X is accessed", first confirm the binary under your control is the one doing
+the accessing.
+
+COUNTED_MECHANISM: DTPMOD64 10 -> 4 confirms the flag applied; route excess 1478.0 -> 1477.4
+(-0.6, against a ~50 insns/call cross-build band); resolver share 1.72% -> 2.17%; 0 direct
+`__tls_get_addr` call sites in our own `.so`.
+
+A/A NULL CONTROLS: not applicable - counter difference, parity-gated. The controls that held: the
+`.so` imports, parity is bit-identical on both the ordinary and the signed-zero/NaN cases, and the
+relocation count proves the flag was actually applied rather than silently ignored.
+
+RETRY PREDICATE: do NOT retry with `initial-exec` hoping for more. The measured obstacle is not the
+model, it is that the TLS accesses live in libpython. Any future attempt on this line must first
+show, at the binary level, that the accesses it targets are in a binary we compile.
+AGENT_NAME=SlateFinch.
