@@ -55092,3 +55092,85 @@ RETRY PREDICATE: none for these two cells. For the campaign: any row quoting an 
 COMPETITIVELY must be re-expressed in time, because the two are not proportional and the direction
 of the error is not constant (0.782 vs 0.866 on two cells of the same lever).
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — the divergence GENERALISES to the delegating route and is WORSE there: instructions say we are 18.29% behind NumPy on multiply, time says ~9.3% — plus the first MEASURED conversion rates, 13.2 insns/ns for redundant getattrs (two cells, 0.5% apart) (deadlock-audit-c5ecm)
+
+**Result class:** a generality check that strengthens yesterday's correction and produces the first
+conversion factor in this campaign that is measured rather than assumed. Artifact reuse, no build,
+/data 50G against a 42G brake.
+
+### The delegating route, where both arms do IDENTICAL NumPy work
+
+`fnp.multiply` delegates, so the arms differ only by our wrapper — the cleanest possible isolate.
+
+```
+  n=256 f64, 5 reps, elf_sort_after, threading pinned
+  per-arm loadavg 6.90-7.07, idle 91%->92%, CPU 2564->2124 MHz
+
+           time ns/call   insns/call
+  fnp         1930.3        9441.7
+  numpy       1765.9        7981.7
+  EXCESS      +166.1        +1460.4      <- paired per-rep medians
+
+  RATIO vs NumPy:   instructions 1.1829x     TIME 1.0931x
+  instruction deficit 18.29%  vs  time deficit ~9.3%   ratio 0.509
+```
+
+**The instruction accounting overstates our deficit on this route by about two-fold.** That is a
+larger divergence than the native-dispatch cells (0.782 argsort, 0.866 sort), so the effect is not
+only general — it is worst exactly where this campaign has done most of its instruction accounting.
+
+### DISCLOSED WEAKNESS, and it changes what may be quoted
+
+The paired per-rep differences separate cleanly into a solid sign and a soft magnitude:
+
+```
+  rep      time excess    insn excess
+   1          128.5 ns       1466.4
+   2          176.4          1458.8
+   3          146.6          1463.5
+   4          166.1          1451.7
+   5          336.9          1460.4     <- outlier
+
+  time excess: median 166.1, stdev 74.8 = 45% OF ITS MEDIAN   -> NOISY
+  insn excess: median 1460.4, stdev 5.0 = 0.34% of its median -> tight
+  sign: positive 5/5 in both
+```
+
+So: **the sign is solid, the time magnitude is approximate.** Quote "roughly 9%, approximately
+165 ns", never 9.31% or 166.1. The instruction figure is the precise one — which is exactly why
+instructions are seductive and exactly why they must not be quoted as time.
+
+### The first MEASURED conversion rates, and they are PER WORK CLASS
+
+Marginal rate — delta instructions divided by delta time — is the quantity that actually converts,
+and it is not universal:
+
+```
+  redundant getattr work   argsort  13.17 insns/ns
+                           sort     13.24 insns/ns     <- 0.5% apart, INDEPENDENT cells
+  wrapper/dispatch work    multiply  8.79 insns/ns     (approximate; rests on the noisy delta above)
+```
+
+Two independent cells put the getattr class at **13.2 insns/ns**, agreeing to 0.5% with neither
+derived from the other. That is the first conversion factor in this campaign that was measured
+rather than constructed by dividing one banked number by another — and note it is class-specific:
+the wrapper class converts at a materially different rate, so even this must not be applied across
+work types.
+
+### Consequence for the wrapper-residual accounting
+
+`deadlock-audit-56vq8` decomposed this route's excess entirely in instructions: 1830.5 total,
+1249.6 wrapper residual, 939.9 diffuse, 201.7 per CPython entry. All of it stands as INSTRUCTION
+accounting. In time, the whole excess is **approximately 165 ns/call**, and the route is ~9% slower
+than NumPy rather than the ~18% the instruction ratio states. Anyone sizing work against that
+decomposition should halve it first.
+
+COUNTED_MECHANISM: paired per-rep excesses, 5 reps; insn excess 1460.4 (stdev 0.34%), time excess
+166.1 ns (stdev 45%), sign positive 5/5 in both; marginal rates 13.17 / 13.24 / 8.79 insns/ns.
+A/A NULL CONTROLS: the numpy arm is the incumbent, not a null - this row measures a vs-incumbent
+ratio, not a lever, so the control is the paired interleaving and the 5/5 sign.
+RETRY PREDICATE: the time magnitude on the delegating route needs >=15 reps or a lower-noise
+estimator to be quotable to better than "roughly". The SIGN and the instruction figures need
+nothing further.
+AGENT_NAME=SlateFinch.
