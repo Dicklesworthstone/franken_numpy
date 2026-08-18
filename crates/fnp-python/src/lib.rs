@@ -66166,7 +66166,7 @@ fn try_zerocopy_f64_sort_flat(
     if !f64_flat_sort_native_is_profitable() {
         return Ok(None); // avx512 host, or too few workers to beat numpy's SIMD qsort
     }
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -66243,7 +66243,7 @@ fn try_zerocopy_c128_sort_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -67021,7 +67021,7 @@ fn try_zerocopy_c128_sort_lastaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -67107,7 +67107,7 @@ fn try_zerocopy_c128_sort_axis0(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -67216,7 +67216,7 @@ fn try_zerocopy_c128_sort_midaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -67340,7 +67340,7 @@ fn try_zerocopy_c64_sort_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -67416,7 +67416,7 @@ fn try_zerocopy_c64_sort_lastaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -67500,7 +67500,7 @@ fn try_zerocopy_c64_sort_axis0(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -67606,7 +67606,7 @@ fn try_zerocopy_c64_sort_midaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -67922,7 +67922,7 @@ fn try_native_int_sort_flat(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -68021,7 +68021,7 @@ fn try_native_string_sort_lastaxis(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const STRING_LANE_SORT_MIN: usize = 1 << 18;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
@@ -68324,7 +68324,7 @@ fn try_native_string_sort_flat(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const STRING_SORT_MIN: usize = 1 << 18;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -70707,7 +70707,7 @@ fn try_native_datetime_sort_flat(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1
@@ -70782,7 +70782,7 @@ fn try_native_datetime_sort_axes(
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
     const SORT_LANE_PARALLEL_MIN: usize = 256;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dtype = a.getattr("dtype")?;
@@ -70986,7 +70986,7 @@ fn try_native_int_sort_lastaxis(
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
     const SORT_LANE_PARALLEL_MIN: usize = 256;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -71101,7 +71101,7 @@ fn try_native_int_sort_axis0(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -71214,7 +71214,7 @@ fn try_native_int_sort_midaxis(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_MIDAXIS_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let ndim = a.getattr("ndim")?.extract::<usize>()?;
@@ -71288,7 +71288,7 @@ fn try_zerocopy_f64_sort_lastaxis(
     axis_spec: Option<Option<isize>>,
     require_distinct: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     if !f64_axis_sort_native_is_profitable() {
@@ -71388,7 +71388,7 @@ fn try_zerocopy_f64_sort_axis0(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     if !f64_axis_sort_native_is_profitable() {
@@ -71494,7 +71494,7 @@ fn try_zerocopy_f64_sort_midaxis(
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     if !f64_axis_sort_native_is_profitable() {
@@ -71600,7 +71600,7 @@ fn try_native_f16_sort(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN: usize = 1 << 17;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -71682,7 +71682,7 @@ fn try_native_struct_sort(
     axis_spec: Option<Option<isize>>,
     order: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dtype = a.getattr("dtype")?;
@@ -96047,7 +96047,7 @@ fn try_native_struct_sort_valuelex(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN: usize = 1 << 16;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if a.getattr("ndim")?.extract::<usize>()? != 1

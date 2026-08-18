@@ -1362,6 +1362,14 @@ fn main() {
                 bench_binary_counter_divide_numpy,
             ),
             (
+                "bench_sort_counter_fnp_i64",
+                bench_sort_counter_fnp_i64,
+            ),
+            (
+                "bench_sort_counter_numpy_i64",
+                bench_sort_counter_numpy_i64,
+            ),
+            (
                 "bench_argsort_counter_fnp_i64",
                 bench_argsort_counter_fnp_i64,
             ),
@@ -7166,6 +7174,77 @@ fn argsort_counter_probe(use_fnp: bool) {
             if use_fnp { "fnp" } else { "numpy" },
         );
     });
+}
+
+// The `sort` twin of `argsort_counter_probe` (`deadlock-audit-c5ecm`).
+//
+// `sort` is the second-densest probe chain in the crate: 24 helpers, 23 of which fetched
+// `numpy.ndarray` by name before this conversion. Same one-sided design and same reason - the
+// comparison is the SAME arm across two ELFs, and the numpy arm is a NULL (numpy's sort cannot be
+// affected by our dispatch), never a ratio denominator.
+//
+// int64 for the same reason as the argsort arm: it is neither f32 nor f16 nor complex, so the
+// typed probes all run to DECLINE, which is where the fetch cost lives.
+fn sort_counter_probe(use_fnp: bool) {
+    const N: usize = 256;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new("i = np.arange(n)\na = ((i * 1103515245 + 12345) % 65536).astype(np.int64)\n")
+                .unwrap()
+                .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operand");
+        let a = locals.get_item("a").expect("a operand");
+
+        let ours = module.getattr("sort").expect("fnp sort");
+        let theirs = numpy.getattr("sort").expect("numpy sort");
+        let target = if use_fnp { &ours } else { &theirs };
+
+        let checksum_of = |r: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            r.call_method0("sum")
+                .expect("result sums")
+                .extract::<i64>()
+                .expect("sum is an integer")
+                .cast_unsigned()
+        };
+        let oracle = checksum_of(&theirs.call1((&a,)).expect("oracle call"));
+
+        let mut last = None;
+        for _ in 0..ACCUMULATE_COUNTER_CALLS {
+            let r = target.call1((&a,)).expect("sort call");
+            black_box(&r);
+            last = Some(r);
+        }
+        let last = checksum_of(&last.expect("the loop ran at least once"));
+        assert_eq!(
+            last, oracle,
+            "the sort counter probe did not reproduce NumPy's answer, so its instruction \
+             count describes the wrong computation"
+        );
+        println!(
+            "SORT_COUNTER_PROBE arm={} dtype=int64 n={N} calls={ACCUMULATE_COUNTER_CALLS} \
+             checksum={last:016x} run_this_under_perf_stat=true",
+            if use_fnp { "fnp" } else { "numpy" },
+        );
+    });
+}
+
+fn bench_sort_counter_fnp_i64(_c: &mut Criterion) {
+    sort_counter_probe(true);
+}
+
+fn bench_sort_counter_numpy_i64(_c: &mut Criterion) {
+    sort_counter_probe(false);
 }
 
 fn bench_argsort_counter_fnp_i64(_c: &mut Criterion) {

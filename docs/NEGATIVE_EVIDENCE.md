@@ -54667,3 +54667,42 @@ VALIDATION: 139 tests, 0 failures, 6 suites; clippy 328 = baseline, delta 0.
 RETRY PREDICATE: none. The sweep is not rejected, it is SEQUENCED - take the next dispatcher on the
 list above, run the build-free reached-count recipe for its cell, then convert and price it.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — `sort`'s probe chain converted (23 sites), validated, and NOT MEASURED: the host was at load 27 with redis mid-build, so no counted row is claimed (deadlock-audit-c5ecm)
+
+**Result class:** source work landed under a DISCLOSED non-quiet window, with the measurement
+deliberately deferred rather than taken and caveated.
+
+`sort` is the second-densest chain on the sequenced list: 24 probe helpers, 23 of them fetching
+`numpy.ndarray` by name. All 23 converted to `cached_ndarray_type(py)`, same scoped technique and
+same single shape (`&numpy.getattr("ndarray")?` in `is_exact_instance` argument position) — the
+conversion script reports any shape it does not handle rather than mangling it, and reported none.
+
+```
+  VALIDATED   cargo check --benches   0 errors
+              cargo clippy            328 warnings = BASELINE, delta 0, 0 doc-list items
+              cargo test              139 passed, 0 failed, 6 suites
+                                      (incl. conformance_sorting AND conformance_sort_search,
+                                       the two that actually exercise this chain)
+  NOT DONE    any counted measurement
+```
+
+**WHY NO NUMBER.** Local load was 27 with redis mid-build. Retired-instruction counting is a LOCAL
+measurement here, so a row taken now would be contention-shaped; remote check/clippy/test are
+unaffected, which is why those ran. The standing order is to prefer a quiet window before
+certifying, and the honest reading of that is to defer the row, not to take it and attach a
+caveat. **A `sort` counter arm (`bench_sort_counter_{fnp,numpy}_i64`) is landed with this commit so
+the measurement is a build-and-run next quiet window, with no further source change needed.**
+
+DO NOT ASSUME THIS REPEATS ARGSORT'S -34,022. argsort converted 31 sites of which 25 were REACHED;
+`sort` converts 23 and its reached count is UNMEASURED. Its guards differ (`sort` has no
+`kind_spec`-gated stable family in the same shape), so the reached fraction is its own question.
+Run the build-free reached-count recipe on the new arm before dividing anything by 23.
+
+COUNTED_MECHANISM: none - explicitly not claimed in this row.
+A/A NULL CONTROLS: not applicable - no ratio claimed.
+RETRY PREDICATE: build the two ELFs (BEFORE from a worktree with `lib.rs` at the parent commit) and
+run the counted A/B on `bench_sort_counter_fnp_i64` with `bench_sort_counter_numpy_i64` as the
+null, on a host under load < ~10 with per-arm loadavg and MHz recorded. Register the SIGN only; do
+NOT register a magnitude band derived from 23 x a per-site figure.
+AGENT_NAME=SlateFinch.
