@@ -4808,6 +4808,97 @@ fn svd_bidiag_qr_full(
     Ok((u, sigmas, sorted_vt))
 }
 
+/// Golub-Reinsch implicit QR iteration on an upper-bidiagonal `B`, returning its singular values.
+///
+/// PURE EXTRACTION from `svd_bidiag_qr_values` - the body below was MOVED verbatim, not rewritten,
+/// so it is bit-identical by construction rather than by argument.
+///
+/// This exists to give the reduction and the iteration a SEAM. They were welded together in one
+/// 183-line function, which meant `bidiag_reduce_blocked` had nowhere to send its `(d, e)` and
+/// could not be wired no matter how it performed. Splitting them is the enabling change; it is not
+/// itself an optimisation and changes no behaviour.
+///
+/// `d` is taken by value because the final step truncates it to `k`.
+fn svd_values_from_bidiag(
+    mut d: Vec<f64>,
+    e: &mut [f64],
+    n: usize,
+    k: usize,
+    max_iter: usize,
+) -> Result<Vec<f64>, LinAlgError> {
+    let eps_mach = f64::EPSILON;
+    let mut converged = false;
+    for _iter in 0..max_iter {
+        for i in 0..e.len() {
+            if e[i].abs() <= eps_mach * (d[i].abs() + d[i + 1].abs()) {
+                e[i] = 0.0;
+            }
+        }
+
+        let mut hi = n - 1;
+        while hi > 0 && e[hi - 1] == 0.0 {
+            hi -= 1;
+        }
+        if hi == 0 {
+            converged = true;
+            break;
+        }
+        let mut lo = hi - 1;
+        while lo > 0 && e[lo - 1] != 0.0 {
+            lo -= 1;
+        }
+
+        let shift = svd_shift_2x2(d[hi - 1], e[hi - 1], d[hi]);
+        let (mut f, mut g) = if d[lo].abs() > 0.0 {
+            let sign_d = if d[lo] >= 0.0 { 1.0 } else { -1.0 };
+            ((d[lo].abs() - shift) * (sign_d + shift / d[lo]), e[lo])
+        } else {
+            (0.0, e[lo])
+        };
+
+        for kk in lo..hi {
+            let r = f.hypot(g);
+            let (cs, sn) = if r > 0.0 { (f / r, g / r) } else { (1.0, 0.0) };
+
+            if kk > lo {
+                e[kk - 1] = r;
+            }
+
+            f = cs * d[kk] + sn * e[kk];
+            e[kk] = cs * e[kk] - sn * d[kk];
+            g = sn * d[kk + 1];
+            d[kk + 1] *= cs;
+
+            let r = f.hypot(g);
+            let (cs, sn) = if r > 0.0 { (f / r, g / r) } else { (1.0, 0.0) };
+
+            d[kk] = r;
+            f = cs * e[kk] + sn * d[kk + 1];
+            d[kk + 1] = cs * d[kk + 1] - sn * e[kk];
+
+            if kk + 1 < hi {
+                g = sn * e[kk + 1];
+                e[kk + 1] *= cs;
+            }
+        }
+        e[hi - 1] = f;
+    }
+
+    if !converged {
+        return Err(LinAlgError::SvdNonConvergence);
+    }
+
+    for value in &mut d {
+        if *value < 0.0 {
+            *value = -*value;
+        }
+    }
+
+    sort_singular_values_descending_in_place(&mut d);
+    d.truncate(k);
+    Ok(d)
+}
+
 fn svd_bidiag_qr_values(
     a: &[f64],
     m: usize,
@@ -4920,77 +5011,7 @@ fn svd_bidiag_qr_values(
         }
     }
 
-    let eps_mach = f64::EPSILON;
-    let mut converged = false;
-    for _iter in 0..max_iter {
-        for i in 0..e.len() {
-            if e[i].abs() <= eps_mach * (d[i].abs() + d[i + 1].abs()) {
-                e[i] = 0.0;
-            }
-        }
-
-        let mut hi = n - 1;
-        while hi > 0 && e[hi - 1] == 0.0 {
-            hi -= 1;
-        }
-        if hi == 0 {
-            converged = true;
-            break;
-        }
-        let mut lo = hi - 1;
-        while lo > 0 && e[lo - 1] != 0.0 {
-            lo -= 1;
-        }
-
-        let shift = svd_shift_2x2(d[hi - 1], e[hi - 1], d[hi]);
-        let (mut f, mut g) = if d[lo].abs() > 0.0 {
-            let sign_d = if d[lo] >= 0.0 { 1.0 } else { -1.0 };
-            ((d[lo].abs() - shift) * (sign_d + shift / d[lo]), e[lo])
-        } else {
-            (0.0, e[lo])
-        };
-
-        for kk in lo..hi {
-            let r = f.hypot(g);
-            let (cs, sn) = if r > 0.0 { (f / r, g / r) } else { (1.0, 0.0) };
-
-            if kk > lo {
-                e[kk - 1] = r;
-            }
-
-            f = cs * d[kk] + sn * e[kk];
-            e[kk] = cs * e[kk] - sn * d[kk];
-            g = sn * d[kk + 1];
-            d[kk + 1] *= cs;
-
-            let r = f.hypot(g);
-            let (cs, sn) = if r > 0.0 { (f / r, g / r) } else { (1.0, 0.0) };
-
-            d[kk] = r;
-            f = cs * e[kk] + sn * d[kk + 1];
-            d[kk + 1] = cs * d[kk + 1] - sn * e[kk];
-
-            if kk + 1 < hi {
-                g = sn * e[kk + 1];
-                e[kk + 1] *= cs;
-            }
-        }
-        e[hi - 1] = f;
-    }
-
-    if !converged {
-        return Err(LinAlgError::SvdNonConvergence);
-    }
-
-    for value in &mut d {
-        if *value < 0.0 {
-            *value = -*value;
-        }
-    }
-
-    sort_singular_values_descending_in_place(&mut d);
-    d.truncate(k);
-    Ok(d)
+    svd_values_from_bidiag(d, &mut e, n, k, max_iter)
 }
 
 /// Transpose an m×n matrix (row-major) to n×m.
@@ -23677,6 +23698,34 @@ except Exception as exc:
                 .collect();
             let want = super::svd_mxn(&a, m, n).expect("direct svd");
             let got = super::svd_values_via_r_any(&a, m, n).expect("svd via R, either orientation");
+            assert_eq!(want.len(), got.len(), "count m={m} n={n}");
+            let scale = want.iter().cloned().fold(0.0f64, f64::max).max(1.0);
+            for (idx, (w, g)) in want.iter().zip(got.iter()).enumerate() {
+                assert!(
+                    (w - g).abs() <= 1e-9 * scale,
+                    "singular value {idx} drifted at m={m} n={n}: {w} vs {g}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_reduction_composes_with_the_extracted_qr_iteration() {
+        // THE WHOLE POINT of the seam: the blocked reduction hands (d, e) straight to the QR
+        // iteration and the pair produces correct singular values. This is precisely what a future
+        // size gate would switch on, exercised end to end without wiring anything.
+        for &(m, n) in &[(40usize, 17usize), (33, 33), (64, 64), (30, 23)] {
+            let a: Vec<f64> = (0..m * n)
+                .map(|i| (((i * 37) % 101) as f64) / 7.0 - 6.5)
+                .collect();
+
+            let (d, mut e) =
+                super::bidiag_reduce_blocked_default(&a, m, n).expect("blocked reduction");
+            let max_iter = super::SVD_QR_ITERATION_COEFF * n * n;
+            let got = super::svd_values_from_bidiag(d, &mut e, n, n, max_iter)
+                .expect("qr iteration on the blocked reduction");
+
+            let want = super::svd_mxn(&a, m, n).expect("direct svd");
             assert_eq!(want.len(), got.len(), "count m={m} n={n}");
             let scale = want.iter().cloned().fold(0.0f64, f64::max).max(1.0);
             for (idx, (w, g)) in want.iter().zip(got.iter()).enumerate() {
