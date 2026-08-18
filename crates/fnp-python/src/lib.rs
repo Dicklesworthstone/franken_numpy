@@ -104752,7 +104752,99 @@ fn isnat(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // Exactly one operand and no keywords. `np.isnat` is a ufunc there, so `out=`,
+    // `where=`, `casting=` and a positional `out` are all live; every one of them declines
+    // rather than being half-honoured.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && args.len() == 1
+        && let Ok(value) = args.get_item(0)
+        && let Some(result) = try_zerocopy_isnat(py, &value)?
+    {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "isnat", args, kwargs)
+}
+
+/// A contiguous `datetime64`/`timedelta64` array's raw counts, whatever its unit.
+///
+/// ONE BUFFER COVERS EVERY UNIT, which is what makes a single kernel enough: NaT is the
+/// sentinel `i64::MIN` in `datetime64[Y]` through `datetime64[as]` and in every
+/// `timedelta64` unit alike, and all of them are 8 bytes wide. Checked against the
+/// installed numpy for all thirteen units of both kinds, so the unit itself never has to be
+/// parsed here - only the kind.
+///
+/// BYTE ORDER IS NOT OPTIONAL. A big-endian `>M8[D]` array read through a native `int64`
+/// view turns NaT into 128, not `i64::MIN`, so a kind-only guard would quietly report every
+/// element as not-NaT rather than fail visibly. Only native order is taken.
+fn datetime_like_i64_buffer(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyBuffer<i64>>> {
+    if !value.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let dtype = value.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if (kind != "M" && kind != "m")
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        || !matches!(
+            dtype.getattr("byteorder")?.extract::<String>()?.as_str(),
+            "=" | "<"
+        )
+        || !value
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let viewed = value.call_method1("view", ("int64",))?;
+    Ok(PyBuffer::<i64>::get(&viewed).ok())
+}
+
+/// `np.isnat` for contiguous `datetime64`/`timedelta64` input of any unit.
+///
+/// The whole test is `count == i64::MIN`, once the buffer above has established that the
+/// operand is one of the two kinds this is defined for at all. Everything else - float NaN
+/// included, which is NOT NaT - is a `TypeError` in the incumbent ("ufunc 'isnat' is only
+/// defined for np.datetime64 and np.timedelta64"), so it declines and NumPy raises rather
+/// than this route answering False to a question NumPy refuses.
+fn try_zerocopy_isnat(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = cached_numpy(py)?;
+    let Some(buffer) = datetime_like_i64_buffer(py, value)? else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = value.getattr("shape")?.extract()?;
+    // A 0-d OPERAND RETURNS A `numpy.bool_` SCALAR, NOT A 0-d ARRAY. Filling one here would
+    // return the right answer wearing the wrong type; read off the incumbent, where
+    // `np.isnat(np.array(np.datetime64('NaT', 'D')))` is `np.True_`.
+    if shape.is_empty() {
+        return Ok(None);
+    }
+
+    let out = numpy.call_method1("empty", (&PyTuple::new(py, shape.iter().copied())?, "bool"))?;
+    // Flatten and view as uint8 before taking the buffer, as `is_busday` does: an N-d
+    // C-contiguous array is writable through a 1-d view, so the loop below walks the flat
+    // operand and the output still carries the shape numpy would have given it.
+    let flat_out = out.call_method1("reshape", (-1i64,))?;
+    let viewed_out = flat_out.call_method1("view", ("uint8",))?;
+    let Ok(out_buffer) = PyBuffer::<u8>::get(&viewed_out) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != cells.len() {
+        return Ok(None);
+    }
+
+    for (slot, cell) in out_cells.iter().zip(cells.iter()) {
+        slot.set(u8::from(cell.get() == i64::MIN));
+    }
+    Ok(Some(out.unbind()))
 }
 
 // Generic typed core for integer sign: write sign_fn(v) into a fresh same-dtype
@@ -112799,8 +112891,8 @@ mod tests {
         sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
         trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
         try_native_lstsq_tsqr, try_zerocopy_busday_count, try_zerocopy_busday_offset,
-        try_zerocopy_f64_binary_into, unravel_index, where_py, wide_int_table_bounds,
-        zerocopy_f64_binary_flat,
+        try_zerocopy_f64_binary_into, try_zerocopy_isnat, unravel_index, where_py,
+        wide_int_table_bounds, zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -125404,6 +125496,165 @@ mod tests {
         });
     }
 
+    /// `np.isnat` must match NumPy for every `datetime64`/`timedelta64` unit, and must
+    /// decline everything NumPy refuses to answer (`deadlock-audit-6y5wp`).
+    ///
+    /// ONE KERNEL COVERS ALL TWENTY-SIX DTYPES, which is the whole reason this is cheap:
+    /// NaT is the sentinel `i64::MIN` in `datetime64[Y]` through `datetime64[as]` and in
+    /// every `timedelta64` unit alike, and all of them are 8 bytes wide, so the unit never
+    /// has to be parsed. That is a property of the incumbent, not an assumption - this test
+    /// walks every unit of both kinds rather than sampling `[D]` and trusting the rest,
+    /// because a sampled probe cannot certify the units it never ran.
+    ///
+    /// THE TWO TRAPS:
+    ///
+    ///   1. BYTE ORDER. A big-endian `>M8[D]` array read through a native `int64` view
+    ///      turns NaT into 128, not `i64::MIN`, so a kind-only guard reports every element
+    ///      as not-NaT - a wrong answer that looks like a plausible one. It must decline.
+    ///   2. FLOAT NaN IS NOT NaT. `np.isnat` raises `TypeError` for float64, int, bool,
+    ///      complex and string input rather than returning False, so answering False for
+    ///      any of them would be inventing an answer NumPy refuses to give.
+    ///
+    /// ENGAGEMENT IS ASSERTED SEPARATELY from parity, since a passthrough satisfies every
+    /// equality here.
+    #[test]
+    fn isnat_matches_numpy_for_every_datetime_and_timedelta_unit() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_isnat")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("isnat")?;
+            let theirs = numpy.getattr("isnat")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"units = ['Y','M','W','D','h','m','s','ms','us','ns','ps','fs','as']\n\
+                  # One-line constructors only: the `\\n\\` continuations above strip the\n\
+                  # leading whitespace of every following line, so an indented `def` body\n\
+                  # would arrive unindented. NaT is taken FROM numpy rather than written as\n\
+                  # a sentinel, so the fixture does not bake in the very fact under test.\n\
+                  nat = lambda k, u: np.array(['NaT'], dtype=f'{k}64[{u}]')\n\
+                  mk = lambda k, u: np.concatenate([np.array([0, -5], dtype=f'{k}64[{u}]'), nat(k, u), np.array([7], dtype=f'{k}64[{u}]'), nat(k, u)])\n\
+                  cases = {f'{k}_{u}': mk(k, u) for k in ('datetime','timedelta') for u in units}\n\
+                  # No NaT at all, and nothing but NaT - the two ends the loop above misses.\n\
+                  cases['none_nat'] = np.arange('2024-01-01','2024-01-06',dtype='datetime64[D]')\n\
+                  cases['all_nat'] = np.array(['NaT']*4, dtype='datetime64[ns]')\n\
+                  cases['empty'] = np.array([], dtype='datetime64[D]')\n\
+                  cases['grid'] = np.array(['NaT','2024-01-01','NaT','2024-01-02'],\n\
+                                           dtype='datetime64[D]').reshape(2, 2)\n\
+                  # Declines.\n\
+                  big_endian = np.array(['NaT','2024-01-01'], dtype='datetime64[D]').astype('>M8[D]')\n\
+                  strided = np.arange('2024-01-01','2024-01-10',dtype='datetime64[D]')[::2]\n\
+                  zero_d = np.array(np.datetime64('NaT','D'))\n\
+                  floats = np.array([np.nan, 1.0])\n\
+                  ints = np.array([1, 2], dtype='int64')\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("isnat fixture missing")
+            };
+            let cases = locals
+                .get_item("cases")?
+                .expect("cases missing")
+                .cast_into::<PyDict>()
+                .expect("cases is a dict");
+
+            // Every unit of both kinds, plus the all/none/empty/2-D edges.
+            for (name, array) in cases.iter() {
+                let what = name.extract::<String>()?;
+                let mine = ours.call1((&array,))?;
+                let theirs_out = theirs.call1((&array,))?;
+                assert_eq!(
+                    mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    theirs_out
+                        .getattr("dtype")?
+                        .getattr("str")?
+                        .extract::<String>()?,
+                    "{what}: dtype diverged from numpy"
+                );
+                assert_eq!(
+                    mine.getattr("shape")?.extract::<Vec<usize>>()?,
+                    theirs_out.getattr("shape")?.extract::<Vec<usize>>()?,
+                    "{what}: shape diverged from numpy"
+                );
+                assert_eq!(
+                    mine.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs_out.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{what}: isnat diverged from numpy"
+                );
+                // ENGAGEMENT, per unit. Sampling one dtype and trusting the other
+                // twenty-five is exactly the probe that cannot certify what it skipped.
+                assert!(
+                    try_zerocopy_isnat(py, &array)?.is_some(),
+                    "{what}: the native isnat route declined; parity alone is satisfied by \
+                     the passthrough and proves nothing"
+                );
+            }
+
+            // Everything NumPy raises on must reach NumPy and raise, not answer False.
+            for name in ["floats", "ints"] {
+                assert!(
+                    ours.call1((g(name),)).is_err(),
+                    "isnat on {name} must raise as numpy does - float NaN is NOT NaT, and \
+                     answering False would invent an answer numpy refuses to give"
+                );
+            }
+
+            // The declines, each for a reason that would otherwise be a WRONG answer rather
+            // than a slow one.
+            for (name, why) in [
+                (
+                    "big_endian",
+                    "a big-endian array read as native int64 turns NaT into 128, so a \
+                     kind-only guard would report every element as not-NaT",
+                ),
+                ("strided", "non-contiguous input has no zero-copy buffer"),
+                (
+                    "zero_d",
+                    "a 0-d operand returns a numpy.bool_ scalar, not a 0-d array",
+                ),
+                ("floats", "float64 is a TypeError there, not a False"),
+            ] {
+                assert!(
+                    try_zerocopy_isnat(py, &g(name))?.is_none(),
+                    "the native route should have declined {name}: {why}"
+                );
+            }
+            // The big-endian decline must still produce numpy's ANSWER through the
+            // passthrough, which is what makes declining safe rather than merely cautious.
+            assert_eq!(
+                ours.call1((g("big_endian"),))?
+                    .call_method0("tolist")?
+                    .extract::<Vec<bool>>()?,
+                theirs
+                    .call1((g("big_endian"),))?
+                    .call_method0("tolist")?
+                    .extract::<Vec<bool>>()?,
+                "the big-endian decline must still agree with numpy via the passthrough"
+            );
+
+            // `out=` and `where=` are live on numpy's ufunc, so they must decline into it
+            // rather than be silently dropped.
+            let okw = PyDict::new(py);
+            okw.set_item("out", numpy.call_method1("empty", (2, "bool"))?)?;
+            let with_out = ours.call((g("big_endian"),), Some(&okw))?;
+            assert_eq!(
+                with_out.call_method0("tolist")?.extract::<Vec<bool>>()?,
+                vec![true, false],
+                "out= must be honoured by delegating, not dropped"
+            );
+            Ok(())
+        });
+    }
+
     /// `np.busday_offset` must match NumPy across all eight `roll=` spellings, including
     /// the two traps that a reasonable implementation gets wrong (`deadlock-audit-6y5wp`).
     ///
@@ -126294,7 +126545,11 @@ mod tests {
 
             // Positional spelling, and the out-of-range samples carry HEAVY weights so
             // banking them into an end bin instead of dropping them cannot go unnoticed.
-            let pos = (g("ox"), g("oy"), 4, g("rng3"), py.None(), g("ow"));
+            // `py.None()` is a `Py<PyAny>`, which pyo3 only makes `Clone` under its
+            // `py-clone` feature - so a tuple holding one cannot be cloned either. A
+            // `Bound` can, and is what the call wants anyway.
+            let none = py.None().into_bound(py);
+            let pos = (g("ox"), g("oy"), 4, g("rng3"), none, g("ow"));
             compare(
                 &ours.call1(pos.clone())?,
                 &theirs.call1(pos)?,
