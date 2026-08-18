@@ -4994,10 +4994,19 @@ fn svd_bidiag_qr_values(
 }
 
 /// Transpose an m×n matrix (row-major) to n×m.
-/// Panel width for the blocked bidiagonal reduction.
+/// Default panel width for the blocked bidiagonal reduction.
 ///
-/// UNWIRED. The gate that would select the blocked reduction is deliberately not written yet -
-/// see `bidiag_reduce_blocked` for why it cannot simply replace the current path.
+/// This is LAPACK's tuned `ilaenv` value for `dgebrd`, carried over as a starting point and NOT
+/// derived here - it must be swept on this crate before it can be called anything better.
+///
+/// A DERIVATION I TRIED AND REJECTED, recorded so it is not "fixed" back in later: the obvious move
+/// is to size the panel so its accumulators stay L2-resident, the way `packed_block_panels` does.
+/// That model does not apply. `V` and `X` are `m x nb` while `Y` and `U` are `n x nb`, so holding
+/// `2(m + n) * nb` doubles under a 256 KiB target gives `nb <= 16384 / (m + n)` - which is 8 at
+/// m = n = 1000 and clamps to 1 beyond m + n = 16384. It would switch blocking OFF for precisely
+/// the large matrices blocking exists to serve. The panel accumulators are inherently O(m) tall;
+/// they are not meant to be cache-resident, and the quantity that wants tuning is the ratio of
+/// level-2 panel work to the level-3 trailing update, which is not a cache-capacity question.
 const BIDIAG_PANEL_NB: usize = 32;
 
 /// Householder reflector in the LAPACK `dlarfg` convention: writes `v` with `v[0] == 1` into
@@ -5121,6 +5130,13 @@ fn bidiag_gemv_t_into(
 /// The trailing update is the payoff: it routes through
 /// `packed_gemm_sub_assign_strided_blocked`, whose bit-exactness against the incumbent kernel is
 /// already covered by `strided_sub_assign_blocked_is_bit_exact_and_leaves_padding_alone`.
+/// [`bidiag_reduce_blocked`] at the default panel width.
+///
+/// UNMEASURED and UNWIRED, like the reduction it calls.
+fn bidiag_reduce_blocked_default(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+    bidiag_reduce_blocked(a, m, n, BIDIAG_PANEL_NB)
+}
+
 fn bidiag_reduce_blocked(a: &[f64], m: usize, n: usize, nb: usize) -> (Vec<f64>, Vec<f64>) {
     debug_assert!(m >= n);
     let mut work = a.to_vec();
@@ -23553,6 +23569,10 @@ except Exception as exc:
                 .map(|i| (((i * 37) % 101) as f64) / 7.0 - 6.5)
                 .collect();
             let (d, e) = super::bidiag_reduce_blocked(&a, m, n, nb);
+            // The default entry must satisfy the same invariant, not just the swept widths.
+            let (dd, ed) = super::bidiag_reduce_blocked_default(&a, m, n);
+            assert_eq!(dd.len(), d.len(), "default entry length m={m} n={n}");
+            assert_eq!(ed.len(), e.len(), "default entry length m={m} n={n}");
 
             let mut bmat = vec![0.0f64; n * n];
             for i in 0..n {
