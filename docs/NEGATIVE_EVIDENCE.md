@@ -55318,3 +55318,58 @@ RETRY PREDICATE: none - the negative answer is the useful one. If a per-class ra
 again, it needs >=3 INDEPENDENT LEVERS, not 3 cells of one lever, and the registered rule should be
 "predicted value inside the measured interval", not a percentage band around the prediction.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — THE REMAINING 220 BINDING SITES ARE NOT ON EITHER MEASURED HOT PATH, so the rest of this sweep cannot be justified by the cells already measured (deadlock-audit-c5ecm)
+
+**Result class:** a decision-relevant scoping result. Build-free, /data 47G, load ~6.
+
+The 220 unconverted binding-shape sites sit in **219 distinct functions** — essentially one site
+each, with no concentrated hot spot. The most-called holders reach only 16, 14 and 11 distinct
+callers (`f64_contiguous_cells`, `try_zerocopy_f16_unary_widen`, `try_zerocopy_f16_binary_widen`).
+
+### Two bounds, both weak, stated as bounds rather than resolved into a single number
+
+```
+  OBSERVED   holders appearing in the argsort + sort profiles          0 of 219
+  STATIC     holders reachable from argsort/sort by call-graph walk   16 of 219  (UPPER BOUND)
+```
+
+Neither figure is the answer, and I am not picking whichever is convenient:
+
+- **The profile's zero is not proof of non-execution.** That is the inference I retracted earlier
+  today, when symbols absent from a sampled profile turned out to be present in the ELF and merely
+  too cheap to sample.
+- **The static 16 is not proof of execution either.** My walk matches any `identifier(` in a body,
+  so it catches method calls, macros and locals. Three of the 16 (`ascontiguousarray`, `copy`,
+  `putmask`) are not mentioned anywhere in `argsort`'s own body — they enter only through deep
+  transitive branches, most of which are gated off for a 1-D contiguous int64 operand.
+
+The honest reading is the interval: **between 0 and 16 of the 220 remaining sites can execute on the
+two cells I have measured, and the observed count is 0.**
+
+### The decision this forces
+
+Both measured cells — argsort and sort — had their chains converted in full already. Whatever the
+remaining 220 sites are worth, **they are worth it on OTHER dispatchers, and those dispatchers are
+unmeasured.** So:
+
+1. The remaining sweep **cannot be justified by citing the -34,022 / -33,489 insns or the -2,584 /
+   -2,528 ns already banked.** Those cells are done; the remaining sites do not touch them.
+2. It also cannot be sized by the 13.2 insns/ns rate, which failed its cross-lever test earlier
+   today, nor by the 1,360.9/1,456.0 per-site figures, which are inline-shape numbers while the
+   remainder is the binding shape.
+3. So the remaining work needs **its own cell, its own arm, and its own counted A/B** before it is
+   worth 220 sites of churn on a shared tree — which is exactly the sequencing this bead has
+   required since it was filed, now with a concrete reason rather than a precaution.
+
+**RECOMMENDATION: deprioritise the remaining binding sweep** until someone picks a dispatcher that
+actually depends on those 219 functions, measures it, and finds the effect worth having. The high-
+value, well-measured part of this lever is DONE at 219 sites.
+
+COUNTED_MECHANISM: none - scoping analysis. 220 sites across 219 functions; 0 observed in two
+profiles; <=16 by an over-inclusive static walk.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: to revive the remaining sweep, name a dispatcher whose chain contains a material
+number of the 219 holders, add a counter arm for it, and measure. Do not restart on the strength of
+the argsort/sort numbers.
+AGENT_NAME=SlateFinch.
