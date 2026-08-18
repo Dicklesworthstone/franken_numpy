@@ -107055,6 +107055,9 @@ fn atleast_1d(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_atleast(py, args, kwargs, 1)? {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "atleast_1d", args, kwargs)
 }
 
@@ -107065,6 +107068,9 @@ fn atleast_2d(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_atleast(py, args, kwargs, 2)? {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "atleast_2d", args, kwargs)
 }
 
@@ -107075,6 +107081,9 @@ fn atleast_3d(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_atleast(py, args, kwargs, 3)? {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "atleast_3d", args, kwargs)
 }
 
@@ -110258,6 +110267,87 @@ fn binary_repr(
     core_numpy_passthrough(py, "binary_repr", args, kwargs)
 }
 
+/// An index tuple of `leading` new axes, `spans` full slices, and `trailing` new axes -
+/// i.e. `[newaxis, :]`, `[newaxis, :, newaxis]` or `[:, :, newaxis]`.
+///
+/// `newaxis` IS `None`; that is not a shorthand, it is what numpy's own `newaxis` binds to.
+/// The full slice is spelled `0..isize::MAX step 1`, which selects an entire axis of any
+/// length exactly as `:` does.
+fn newaxis_index_tuple(
+    py: Python<'_>,
+    leading: usize,
+    spans: usize,
+    trailing: usize,
+) -> PyResult<Bound<'_, PyTuple>> {
+    let mut parts: Vec<Bound<'_, PyAny>> = Vec::with_capacity(leading + spans + trailing);
+    for _ in 0..leading {
+        parts.push(py.None().into_bound(py));
+    }
+    for _ in 0..spans {
+        parts.push(PySlice::new(py, 0, isize::MAX, 1).into_any());
+    }
+    for _ in 0..trailing {
+        parts.push(py.None().into_bound(py));
+    }
+    PyTuple::new(py, parts)
+}
+
+/// `np.atleast_1d` / `_2d` / `_3d` for a single `ndarray` operand (`deadlock-audit-6y5wp`).
+///
+/// THE PROMOTION MUST BE AN INDEXING OPERATION, NOT A RESHAPE, and that is the whole trap
+/// here. Both give the right shape and both share memory, but they give DIFFERENT STRIDES:
+/// for a contiguous 1-d f64 array of length 6, `a[newaxis, :]` has strides `(0, 8)` while
+/// `a.reshape(1, 6)` has `(48, 8)`. NumPy's `atleast_2d` produces the former - the new axis
+/// carries stride 0 - so reshaping here would hand back an array that differs from the
+/// incumbent's in an observable attribute. Checked against the installed numpy on contiguous
+/// AND strided input before this was written; the strided case is what exposed it, and the
+/// contiguous case proved it was not merely a strided-input quirk.
+///
+/// The 0-d case IS a reshape, because that is what numpy does there (`result.reshape(1)`),
+/// and its strides confirm it.
+///
+/// AN ALREADY-BIG-ENOUGH ARRAY IS RETURNED AS THE SAME OBJECT, not a view of it:
+/// `np.atleast_1d(a) is a` holds for a 1-d `a`, because `asanyarray` is the identity on an
+/// ndarray. Returning a fresh view would break that identity.
+///
+/// Only an EXACT `ndarray` and exactly one operand qualify. `asanyarray` preserves
+/// subclasses, so a masked array or a matrix would need its own type back; a list or scalar
+/// needs converting; and several operands return a tuple. All of those are numpy's.
+fn native_atleast(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    rank: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if kwargs.is_some_and(|kw| !kw.is_empty()) || args.len() != 1 {
+        return Ok(None);
+    }
+    let Ok(ary) = args.get_item(0) else {
+        return Ok(None);
+    };
+    if !ary.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let ndim = ary.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+    if ndim >= rank {
+        return Ok(Some(ary.unbind()));
+    }
+    let promoted = if ndim == 0 {
+        // `reshape((1,) * rank)`, exactly as the incumbent does for a 0-d operand.
+        let ones = PyTuple::new(py, vec![1i64; rank])?;
+        ary.call_method1(intern!(py, "reshape"), (ones,))?
+    } else {
+        // (rank, ndim) is one of three shapes: 2-d from 1-d is `[newaxis, :]`; 3-d from 1-d
+        // is `[newaxis, :, newaxis]`; 3-d from 2-d is `[:, :, newaxis]`.
+        let (leading, trailing) = match rank {
+            2 => (1usize, 0usize),
+            _ => (usize::from(ndim < 2), 1usize),
+        };
+        ary.get_item(newaxis_index_tuple(py, leading, ndim, trailing)?)?
+    };
+    Ok(Some(promoted.unbind()))
+}
+
 /// A Python integer as `i64`, or `None` for anything this route will not take.
 ///
 /// `operator.index` is what the incumbent uses, so a `float` is a `TypeError` there and must
@@ -113121,16 +113211,16 @@ mod tests {
         interp, is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native,
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, native_base_repr, native_binary_repr, nextafter, numpy_dtype_is_f64,
-        offset_business_days, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
-        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate,
-        radians_native, ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted,
-        select, sign, signbit_native, sinc, solve_triangular, spacing, take, take_along_axis,
-        tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from,
-        triu_indices, triu_indices_from, trunc_native, try_native_lstsq_tsqr,
-        try_zerocopy_busday_count, try_zerocopy_busday_offset, try_zerocopy_f64_binary_into,
-        try_zerocopy_isnat, unravel_index, where_py, wide_int_table_bounds,
-        zerocopy_f64_binary_flat,
+        narrow_bitmap_setop, native_atleast, native_base_repr, native_binary_repr, nextafter,
+        numpy_dtype_is_f64, offset_business_days, place, put, put_along_axis, putmask,
+        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
+        required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
+        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
+        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
+        try_native_lstsq_tsqr, try_zerocopy_busday_count, try_zerocopy_busday_offset,
+        try_zerocopy_f64_binary_into, try_zerocopy_isnat, unravel_index, where_py,
+        wide_int_table_bounds, zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -125745,6 +125835,148 @@ mod tests {
                 )?
                 .is_none(),
                 "an empty weekmask must decline so numpy raises"
+            );
+            Ok(())
+        });
+    }
+
+    /// `np.atleast_1d` / `_2d` / `_3d` must match NumPy in SHAPE, STRIDES and OBJECT IDENTITY
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// STRIDES ARE THE POINT OF THIS TEST. Promoting by `reshape` gives the right shape and
+    /// shares the right memory, so a shape-and-values check passes it - but it is wrong. For
+    /// a contiguous 1-d f64 array of length 6, `a[newaxis, :]` has strides `(0, 8)` while
+    /// `a.reshape(1, 6)` has `(48, 8)`, and NumPy's `atleast_2d` produces the former. A test
+    /// that compared only shape and contents would certify the reshape.
+    ///
+    /// IDENTITY IS THE OTHER HALF: `np.atleast_1d(a) is a` holds for a 1-d `a`, because
+    /// `asanyarray` is the identity on an ndarray. Returning a fresh view of the same buffer
+    /// would satisfy every value, shape and stride check here and still be wrong, so identity
+    /// is asserted against numpy's own identity rather than assumed either way.
+    ///
+    /// ENGAGEMENT IS ASSERTED SEPARATELY, since a passthrough satisfies all of the above.
+    #[test]
+    fn atleast_family_matches_numpy_in_strides_and_identity() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_atleast")?;
+            fnp_python(&module)?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"z = np.array(5.0)\n\
+                  a1 = np.arange(6.0)\n\
+                  s1 = np.arange(12.0)[::2]\n\
+                  a2 = np.arange(6.0).reshape(2, 3)\n\
+                  f2 = np.asfortranarray(np.arange(6.0).reshape(2, 3))\n\
+                  s2 = np.arange(24.0).reshape(4, 6)[::2, ::3]\n\
+                  a3 = np.arange(24.0).reshape(2, 3, 4)\n\
+                  a4 = np.arange(24.0).reshape(2, 3, 4, 1)\n\
+                  e1 = np.array([], dtype=np.float64)\n\
+                  i1 = np.arange(4)\n\
+                  lst = [1, 2, 3]\n\
+                  masked = np.ma.array([1.0, 2.0])\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("atleast fixture missing")
+            };
+
+            let fixtures = ["z", "a1", "s1", "a2", "f2", "s2", "a3", "a4", "e1", "i1"];
+            for (rank, name) in [(1usize, "atleast_1d"), (2, "atleast_2d"), (3, "atleast_3d")] {
+                let ours = module.getattr(name)?;
+                let theirs = numpy.getattr(name)?;
+                for fixture in fixtures {
+                    let arg = g(fixture);
+                    let mine = ours.call1((&arg,))?;
+                    let theirs_out = theirs.call1((&arg,))?;
+                    assert_eq!(
+                        mine.getattr("shape")?.extract::<Vec<usize>>()?,
+                        theirs_out.getattr("shape")?.extract::<Vec<usize>>()?,
+                        "{name}({fixture}): shape diverged from numpy"
+                    );
+                    assert_eq!(
+                        mine.getattr("strides")?.extract::<Vec<isize>>()?,
+                        theirs_out.getattr("strides")?.extract::<Vec<isize>>()?,
+                        "{name}({fixture}): STRIDES diverged - promoting by reshape instead of \
+                         by newaxis indexing gives the right shape and the wrong strides"
+                    );
+                    assert_eq!(
+                        mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                        theirs_out
+                            .getattr("dtype")?
+                            .getattr("str")?
+                            .extract::<String>()?,
+                        "{name}({fixture}): dtype diverged from numpy"
+                    );
+                    assert!(
+                        numpy
+                            .call_method1("array_equal", (&mine, &theirs_out))?
+                            .extract::<bool>()?,
+                        "{name}({fixture}): contents diverged from numpy"
+                    );
+                    // Identity, against numpy's identity - not against a guess.
+                    assert_eq!(
+                        mine.is(&arg),
+                        theirs_out.is(&arg),
+                        "{name}({fixture}): numpy returns {} the input object; this route must \
+                         agree - `asanyarray` is the identity on an ndarray, so an \
+                         already-big-enough array comes back as ITSELF, not a fresh view",
+                        if theirs_out.is(&arg) { "" } else { "NOT" }
+                    );
+                    // ENGAGEMENT: a passthrough satisfies every assertion above.
+                    assert!(
+                        native_atleast(py, &PyTuple::new(py, [&arg])?, None, rank)?.is_some(),
+                        "the native {name} route declined {fixture}; parity alone proves nothing"
+                    );
+                }
+            }
+
+            // The declines, each because `asanyarray` would have to do real work that this
+            // route does not reproduce.
+            let ours1 = module.getattr("atleast_1d")?;
+            let theirs1 = numpy.getattr("atleast_1d")?;
+            for fixture in ["lst", "masked"] {
+                let arg = g(fixture);
+                assert!(
+                    native_atleast(py, &PyTuple::new(py, [&arg])?, None, 1)?.is_none(),
+                    "{fixture} must decline: asanyarray converts a list and PRESERVES a \
+                     subclass, and this route reproduces neither"
+                );
+                // ...and the passthrough must still give numpy's answer.
+                assert_eq!(
+                    ours1
+                        .call1((&arg,))?
+                        .get_type()
+                        .getattr("__name__")?
+                        .extract::<String>()?,
+                    theirs1
+                        .call1((&arg,))?
+                        .get_type()
+                        .getattr("__name__")?
+                        .extract::<String>()?,
+                    "{fixture}: the decline must still return numpy's own type"
+                );
+            }
+            // Several operands return a tuple; that is numpy's, and the passthrough must
+            // still produce it.
+            let pair = ours1.call1((g("a1"), g("z")))?;
+            assert!(
+                native_atleast(py, &PyTuple::new(py, [g("a1"), g("z")])?, None, 1)?.is_none(),
+                "more than one operand must decline - the result is a tuple, not an array"
+            );
+            assert_eq!(
+                pair.len()?,
+                2,
+                "atleast_1d of two operands must still return a 2-tuple via numpy"
             );
             Ok(())
         });
