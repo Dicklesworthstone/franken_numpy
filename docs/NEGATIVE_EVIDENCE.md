@@ -56303,3 +56303,22 @@ NOT revert it, because reverting would destroy uncommitted work; it stands under
 which misattributes it. This is the same shared-tree hazard as `364a4933` (me over AzureCarp) and
 `44b736fd` (a peer over me), now for the third time today: an uncommitted edit is not safe from
 anyone else's `git add <path>`.
+
+**ATTRIBUTION DISCLOSURE (SlateFinch, 2026-08-18):** commit `8c77b99c` carries **830 lines that are
+not mine** - a peer's busday/holiday implementation in `crates/fnp-python/src/lib.rs`
+(`busday_broadcast_shape`, `parse_busday_roll`, `is_business_day`, `walk_to_business_day`,
+`roll_to_business_day`, `any_business_holiday_in`, and more). Their work is intact and the working
+tree matches the commit, so nothing of theirs was lost; it simply sits under my commit message,
+which misattributes it.
+
+**Cause, and it was avoidable.** Their file was already STAGED in the shared index when I ran a bare
+`git commit -F`. A bare commit takes the entire staged index, not just the paths I added. My own
+recorded rule is: `git add` explicit paths, then **verify `git diff --cached --name-only` is only
+yours**, then commit. I had been running that check for many turns and dropped it here - I read the
+`M ` in the porcelain output only after committing, when the position of the flag in the staged
+column was the whole signal.
+
+**Not reverted**, because reverting would destroy a peer's uncommitted work. This is the fourth
+such collision recorded today across both directions (`364a4933`, `44b736fd`, `b742665f`, this one).
+The durable fix is not vigilance: it is to commit with an explicit pathspec - `git commit -F msg --
+<path>` - which ignores the index entirely and cannot pick up anyone else's staged files.
