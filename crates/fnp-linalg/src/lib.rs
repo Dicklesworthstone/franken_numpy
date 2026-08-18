@@ -895,6 +895,88 @@ fn lu_forward_back_multi(lu: &[f64], perm: &[usize], b: &[f64], n: usize, m: usi
     x
 }
 
+/// Column-panel width for `lu_forward_back_multi_panelled`.
+///
+/// The substitutions touch `n * panel` f64 at a time, so the width is chosen to keep that near
+/// 256 KiB - L2-resident on the hosts this campaign measures on - and then clamped so the inner
+/// `axpy` stays wide enough to vectorise and short enough to be worth panelling at all.
+const fn trsm_panel_width(n: usize) -> usize {
+    let by_n = if n == 0 { 64 } else { 32_768 / n };
+    if by_n < 8 {
+        8
+    } else if by_n > 64 {
+        64
+    } else {
+        by_n
+    }
+}
+
+/// `A^-1 B` from an LU factorisation, blocked over COLUMN PANELS of the right-hand side.
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
+/// `lu_forward_back_multi` is unchanged. Wiring is a one-line follow-up once built and A/B'd.
+///
+/// THE GAP THIS TARGETS, which is a real window and not a corner: `lu_forward_back_multi` routes
+/// to the blocked TRSM only when `n >= TRSM_BLOCK_MIN` (768) AND `m >= MATMUL_PARALLEL_MIN_DIM`
+/// (128). Everything below that falls to the fully unblocked body, whose working set is the whole
+/// `n * m` result. For `inv_nxn`, where `m == n`, that means every size from 49 up to 767 runs a
+/// level-2 solve over a working set of `n^2 * 8` bytes - 312 KiB at n=200, 2 MiB at n=512 - so
+/// each of the O(n^2) row-pair updates re-streams both rows from memory.
+///
+/// Panelling the columns holds the working set at `n * panel * 8` instead.
+///
+/// BIT-EXACT, for the same reason as `inv_from_lu_blocked`: the forward and backward
+/// substitutions are COLUMN-SEPARABLE. `x[i * m + col]` is only ever combined with
+/// `x[j * m + col]` at the SAME `col` - no operation in this routine crosses columns. Restricting
+/// the loops to a panel changes the order in which distinct elements are visited, but for any
+/// individual element the operand sequence is unchanged.
+/// `lu_forward_back_multi_panelled_is_bit_exact` pins it.
+///
+/// The row permutation stays a whole-matrix pass at the top, as in the unblocked routine: it
+/// gathers `b`'s rows and is not part of the substitution.
+fn lu_forward_back_multi_panelled(
+    lu: &[f64],
+    perm: &[usize],
+    b: &[f64],
+    n: usize,
+    m: usize,
+) -> Vec<f64> {
+    let mut x = vec![0.0; n * m];
+    for i in 0..n {
+        let p_i = perm[i];
+        for col in 0..m {
+            x[i * m + col] = b[p_i * m + col];
+        }
+    }
+    let panel = trsm_panel_width(n).max(1);
+    let mut c0 = 0;
+    while c0 < m {
+        let c1 = (c0 + panel).min(m);
+        for i in 1..n {
+            for j in 0..i {
+                let l_ij = lu[i * n + j];
+                for col in c0..c1 {
+                    x[i * m + col] -= l_ij * x[j * m + col];
+                }
+            }
+        }
+        for i in (0..n).rev() {
+            for j in (i + 1)..n {
+                let u_ij = lu[i * n + j];
+                for col in c0..c1 {
+                    x[i * m + col] -= u_ij * x[j * m + col];
+                }
+            }
+            let u_ii = lu[i * n + i];
+            for col in c0..c1 {
+                x[i * m + col] /= u_ii;
+            }
+        }
+        c0 = c1;
+    }
+    x
+}
+
 /// Solve Ax = b for an NxN system via LU decomposition with partial pivoting.
 /// `a` is n*n row-major, `b` has length n.
 pub fn solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
@@ -22009,6 +22091,70 @@ except Exception as exc:
                 "prepacked-B kernel diverged in BITS at m={m} k={k} n={n}"
             );
         }
+    }
+
+
+    /// The column-panelled multi-RHS solve must equal the unblocked one to the BIT.
+    ///
+    /// Every size here is deliberately BELOW the blocked-TRSM gate (`n >= 768 && m >= 128`), so
+    /// `lu_forward_back_multi` takes its unblocked body and the comparison is panelled-vs-
+    /// unblocked. Comparing against the blocked TRSM instead would be comparing two different
+    /// algorithms and would tell us nothing about the panelling.
+    ///
+    /// `n = 130` with a 64-wide panel gives two full panels and a ragged 2-column tail; the
+    /// smaller sizes take a single panel, which is the degenerate case that would pass even if
+    /// the panel loop were wrong, so they are included only as a floor.
+    #[test]
+    fn lu_forward_back_multi_panelled_is_bit_exact() {
+        for &n in &[5usize, 49, 64, 130] {
+            let mut a = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    a[i * n + j] = if i == j {
+                        (n as f64) + 6.0 + (i as f64) * 0.125
+                    } else {
+                        ((i * 5 + j * 11) % 13) as f64 * 0.0625 - 0.375
+                    };
+                }
+            }
+            let (lu, perm, _sign) = super::lu_decompose(&a, n).expect("well-conditioned LU");
+            let mut eye = vec![0.0f64; n * n];
+            for i in 0..n {
+                eye[i * n + i] = 1.0;
+            }
+            let want = super::lu_forward_back_multi(&lu, &perm, &eye, n, n);
+            let got = super::lu_forward_back_multi_panelled(&lu, &perm, &eye, n, n);
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                want_bits, got_bits,
+                "panelled multi-RHS solve diverged in BITS at n={n} (panel={})",
+                super::trsm_panel_width(n)
+            );
+        }
+    }
+
+    /// `trsm_panel_width` must stay positive and bounded, and must actually shrink as `n` grows.
+    ///
+    /// A zero width would spin the panel loop forever; a width that never shrinks would let the
+    /// working set grow with `n`, which is the whole thing the panelling exists to prevent.
+    #[test]
+    fn trsm_panel_width_bounds_the_working_set() {
+        for &n in &[1usize, 64, 128, 512, 1024, 4096, 16384] {
+            let w = super::trsm_panel_width(n);
+            assert!((8..=64).contains(&w), "panel width {w} out of bounds at n={n}");
+            // n * panel * 8 bytes must stay within a small multiple of the 256 KiB target; the
+            // floor of 8 means very large n cannot hold the target exactly.
+            let bytes = n * w * 8;
+            assert!(
+                bytes <= 8 * 256 * 1024 || w == 8,
+                "working set {bytes} B too large at n={n} with panel {w}"
+            );
+        }
+        assert!(
+            super::trsm_panel_width(4096) <= super::trsm_panel_width(128),
+            "panel width must not grow with n"
+        );
     }
 
 }
