@@ -100036,8 +100036,8 @@ fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
 /// estimates 3.4% apart, arm spreads under 0.05%). Entries are not free, so removing one and
 /// interning the rest is a real quantity rather than tidying.
 ///
-/// FETCHES `dtype` EXACTLY ONCE, WHICH IS THE POINT OF THIS SHAPE. The obvious way to write this
-/// - call the existing `dtype_char_of` helper first and fall through on `None` - re-reads `dtype`
+/// FETCHES `dtype` EXACTLY ONCE, WHICH IS THE POINT OF THIS SHAPE. The obvious way to write it
+/// (call the existing `dtype_char_of` helper first, falling through on `None`) re-reads `dtype`
 /// in the fallback, so an operand with NO `dtype` (a list, a Python scalar) raises and swallows
 /// TWO `AttributeError`s where the original raised one. `numpy_dtype_is_f64` can afford that
 /// because ITS fallback runs `asarray` and is expensive regardless; this fallback is three cheap
