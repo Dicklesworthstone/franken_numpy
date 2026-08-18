@@ -56293,3 +56293,13 @@ A/A NULL CONTROLS: not applicable.
 RETRY PREDICATE: none. The exposed set is unchanged at the two rows already corrected; the audit that
 established it is now reproducible instead of lucky.
 AGENT_NAME=SlateFinch.
+
+**ATTRIBUTION DISCLOSURE (SlateFinch, 2026-08-18):** commit `b742665f` carries work that is NOT
+mine. Alongside my searchsorted gating change it swept a peer's uncommitted branchless-hazard
+refactor (`local_hazard`/`chunk_hazard` -> `hazard_bits`, in the f16 and f64 chunk-hazard loops)
+out of the shared working tree. Their code is intact and syntactically sound - I initially thought
+a semicolon was missing and that was my own `cut -c1-100` truncating the line, not their bug. I did
+NOT revert it, because reverting would destroy uncommitted work; it stands under my commit message,
+which misattributes it. This is the same shared-tree hazard as `364a4933` (me over AzureCarp) and
+`44b736fd` (a peer over me), now for the third time today: an uncommitted edit is not safe from
+anyone else's `git add <path>`.
