@@ -8543,7 +8543,7 @@ fn pack_b_panel_block(b: &[f64], k: usize, n: usize, panel0: usize, panels: usiz
 /// tile with no cross-lane interaction, multiply and add kept SEPARATE so both roundings survive.
 /// No `mul_add`.
 fn packed_gemm_band_block<const MR: usize>(
-    a: &[f64],
+    ap: &[f64],
     bp: &[f64],
     m: usize,
     k: usize,
@@ -8559,7 +8559,7 @@ fn packed_gemm_band_block<const MR: usize>(
     if panels == 0 || m_full == 0 {
         return;
     }
-    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    debug_assert!(ap.len() >= (m_full / MR) * k * MR);
     for p in 0..panels {
         // `p` indexes within the packed block; `j0` is the absolute column in `out`.
         let j0 = (panel0 + p) * PACKED_NR;
@@ -8642,6 +8642,18 @@ fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Ve
         m.max(1)
     };
 
+    // A PACKED ONCE, above the block loop (`franken_numpy-ixs5y`). The band kernel used to pack
+    // its own rows, but the BLOCK loop is the outer one, so that re-packed A for every column
+    // block - the packing cost multiplied by the block count instead of being paid once. Bands are
+    // `mr`-aligned and `pack_a_rowblocks` lays blocks out in row order, so each band's packed rows
+    // are a CONTIGUOUS slice of this single buffer. Bit-exact: only the address changes.
+    let m_full_global = m - m % mr;
+    let ap_all = if narrow {
+        pack_a_rowblocks::<PACKED_MR_NARROW>(a, m_full_global, k)
+    } else {
+        pack_a_rowblocks::<PACKED_MR>(a, m_full_global, k)
+    };
+
     let block_panels = packed_block_panels(k);
     let mut p0 = 0;
     while p0 < total_panels {
@@ -8654,7 +8666,8 @@ fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Ve
                 .for_each(|(bi, c_band)| {
                     let row_start = bi * band_rows;
                     let rows = c_band.len() / n;
-                    let a_band = &a[row_start * k..row_start * k + rows * k];
+                    let blk = row_start / mr;
+                    let a_band = &ap_all[blk * k * mr..(blk + rows / mr) * k * mr];
                     if narrow {
                         packed_gemm_band_block::<PACKED_MR_NARROW>(
                             a_band, &bp, rows, k, n, p0, count, c_band,
@@ -8666,9 +8679,9 @@ fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Ve
                     }
                 });
         } else if narrow {
-            packed_gemm_band_block::<PACKED_MR_NARROW>(a, &bp, m, k, n, p0, count, &mut c);
+            packed_gemm_band_block::<PACKED_MR_NARROW>(&ap_all, &bp, m, k, n, p0, count, &mut c);
         } else {
-            packed_gemm_band_block::<PACKED_MR>(a, &bp, m, k, n, p0, count, &mut c);
+            packed_gemm_band_block::<PACKED_MR>(&ap_all, &bp, m, k, n, p0, count, &mut c);
         }
         p0 += count;
     }
@@ -9000,7 +9013,7 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
 /// the same direction (`target - acc`, matching `*slot -= v`). No `mul_add`, which would round once
 /// instead of twice and drift the golden digests this path is pinned by.
 fn packed_gemm_sub_assign_band_block<const MR: usize>(
-    a: &[f64],
+    ap: &[f64],
     bp: &[f64],
     m: usize,
     k: usize,
@@ -9018,7 +9031,7 @@ fn packed_gemm_sub_assign_band_block<const MR: usize>(
         return;
     }
     let _ = n;
-    let ap = pack_a_rowblocks::<MR>(a, m_full, k);
+    debug_assert!(ap.len() >= (m_full / MR) * k * MR);
     for p in 0..panels {
         // `p` indexes within the packed block; `j0` is the absolute column in `target`.
         let j0 = (panel0 + p) * PACKED_NR;
@@ -9097,6 +9110,18 @@ fn packed_gemm_sub_assign_blocked(
         m.max(1)
     };
 
+    // A PACKED ONCE, above the block loop (`franken_numpy-ixs5y`). The band kernel used to pack
+    // its own rows, but the BLOCK loop is the outer one, so that re-packed A for every column
+    // block - the packing cost multiplied by the block count instead of being paid once. Bands are
+    // `mr`-aligned and `pack_a_rowblocks` lays blocks out in row order, so each band's packed rows
+    // are a CONTIGUOUS slice of this single buffer. Bit-exact: only the address changes.
+    let m_full_global = m - m % mr;
+    let ap_all = if narrow {
+        pack_a_rowblocks::<PACKED_MR_NARROW>(a, m_full_global, k)
+    } else {
+        pack_a_rowblocks::<PACKED_MR>(a, m_full_global, k)
+    };
+
     let block_panels = packed_block_panels(k);
     let mut p0 = 0;
     while p0 < total_panels {
@@ -9110,7 +9135,8 @@ fn packed_gemm_sub_assign_blocked(
                 .for_each(|(bi, target_band)| {
                     let row_start = bi * band_rows;
                     let rows = target_band.len() / n;
-                    let a_band = &a[row_start * k..row_start * k + rows * k];
+                    let blk = row_start / mr;
+                    let a_band = &ap_all[blk * k * mr..(blk + rows / mr) * k * mr];
                     if narrow {
                         packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
                             a_band, &bp, rows, k, n, n, p0, count, target_band,
@@ -9123,11 +9149,11 @@ fn packed_gemm_sub_assign_blocked(
                 });
         } else if narrow {
             packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
-                a, &bp, m, k, n, n, p0, count, target,
+                &ap_all, &bp, m, k, n, n, p0, count, target,
             );
         } else {
             packed_gemm_sub_assign_band_block::<PACKED_MR>(
-                a, &bp, m, k, n, n, p0, count, target,
+                &ap_all, &bp, m, k, n, n, p0, count, target,
             );
         }
         p0 += count;
@@ -9194,6 +9220,18 @@ fn packed_gemm_sub_assign_strided_blocked(
         m.max(1)
     };
 
+    // A PACKED ONCE, above the block loop (`franken_numpy-ixs5y`). The band kernel used to pack
+    // its own rows, but the BLOCK loop is the outer one, so that re-packed A for every column
+    // block - the packing cost multiplied by the block count instead of being paid once. Bands are
+    // `mr`-aligned and `pack_a_rowblocks` lays blocks out in row order, so each band's packed rows
+    // are a CONTIGUOUS slice of this single buffer. Bit-exact: only the address changes.
+    let m_full_global = m - m % mr;
+    let ap_all = if narrow {
+        pack_a_rowblocks::<PACKED_MR_NARROW>(a, m_full_global, k)
+    } else {
+        pack_a_rowblocks::<PACKED_MR>(a, m_full_global, k)
+    };
+
     let block_panels = packed_block_panels(k);
     let mut p0 = 0;
     while p0 < total_panels {
@@ -9212,7 +9250,8 @@ fn packed_gemm_sub_assign_strided_blocked(
                     // Not `target_band.len() / row_stride`: the final chunk is short by the
                     // padding this view never owned, so the row count comes from `m`.
                     let rows = (m - row_start).min(band_rows);
-                    let a_band = &a[row_start * k..row_start * k + rows * k];
+                    let blk = row_start / mr;
+                    let a_band = &ap_all[blk * k * mr..(blk + rows / mr) * k * mr];
                     if narrow {
                         packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
                             a_band, &bp, rows, k, n, row_stride, p0, count, target_band,
@@ -9225,11 +9264,11 @@ fn packed_gemm_sub_assign_strided_blocked(
                 });
         } else if narrow {
             packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
-                a, &bp, m, k, n, row_stride, p0, count, target,
+                &ap_all, &bp, m, k, n, row_stride, p0, count, target,
             );
         } else {
             packed_gemm_sub_assign_band_block::<PACKED_MR>(
-                a, &bp, m, k, n, row_stride, p0, count, target,
+                &ap_all, &bp, m, k, n, row_stride, p0, count, target,
             );
         }
         p0 += count;
@@ -22762,7 +22801,8 @@ except Exception as exc:
                 while p0 < total_panels {
                     let count = block_panels.min(total_panels - p0);
                     let bp = super::pack_b_panel_block(&b, k, n, p0, count);
-                    super::packed_gemm_band_block::<MR>(&a, &bp, m, k, n, p0, count, &mut got);
+                    let ap = super::pack_a_rowblocks::<MR>(&a, m_full, k);
+                    super::packed_gemm_band_block::<MR>(&ap, &bp, m, k, n, p0, count, &mut got);
                     p0 += count;
                 }
                 // Tails ONCE, as the driver must do them - not once per block.
@@ -22882,9 +22922,10 @@ except Exception as exc:
                 while p0 < total_panels {
                     let count = block_panels.min(total_panels - p0);
                     let bp = super::pack_b_panel_block(&b, k, n, p0, count);
+                    let ap = super::pack_a_rowblocks::<MR>(&a, m_full, k);
                     // row_stride == n here: the non-strided variant.
                     super::packed_gemm_sub_assign_band_block::<MR>(
-                        &a, &bp, m, k, n, n, p0, count, &mut got,
+                        &ap, &bp, m, k, n, n, p0, count, &mut got,
                     );
                     p0 += count;
                 }
