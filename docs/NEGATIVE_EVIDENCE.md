@@ -55255,3 +55255,66 @@ A/A NULL CONTROLS: not applicable.
 RETRY PREDICATE: none. Re-run this classification after any further tranche; the check is one grep
 and costs nothing.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — THE 13.2 insns/ns CONVERSION RATE DOES NOT TRANSFER ACROSS LEVERS: the predicate lever converts at ~18 (95% [14.3, 25.0]), and the predicted 1,076 ns lies OUTSIDE the measured interval (deadlock-audit-c5ecm)
+
+**Result class:** a pre-registered cross-lever test of my own newest constant, which it FAILED — the
+outcome I said would be the more useful one. Artifact reuse, no build, /data 47G.
+
+Yesterday's 13.2 insns/ns rate came from argsort (13.17) and sort (13.24), 0.5% apart. Both measure
+the SAME lever (the ndarray type cache) on two dispatchers, so the rate was replicated across cells
+but never across LEVERS. This tests it on a different code change — the f32/f16/complex dtype
+predicate, which removes `kind`/`itemsize` reads and a heap `String` per probe rather than an
+`ndarray` fetch.
+
+```
+  15 paired reps, elf_before vs elf_after, argsort int64 arm, threading pinned
+  per-arm loadavg 4.38-6.03, idle 91%->92%, CPU 2285->2264 MHz
+
+  TIME SAVING   median 751.2 ns/call   stdev 360.9   stderr 93.2
+                95% interval [568.6, 933.8]      sign positive 14/15
+  NULL (numpy arm) +50.7 ns/call = 1.035%
+```
+
+### The test, and an honest split between two framings
+
+```
+  rate 13.2 predicts        1,076 ns
+  measured 95% interval     [568.6, 933.8]  -> 1,076 lies OUTSIDE it: rate EXCLUDED
+  my REGISTERED rule was looser: "measured within +-20% of 1,076", i.e. overlap with [861, 1,291].
+  The interval does overlap that band in the sliver [861, 933.8], so by MY OWN registered rule the
+  result is marginal rather than decisive.
+```
+
+I am reporting both. The sharper test — does the predicted value fall inside the measured interval —
+says no. My registered band was the weaker operationalisation and I should have registered the
+prediction-inside-interval form. Recording that rather than quietly adopting whichever rule gives
+the cleaner headline.
+
+```
+  IMPLIED RATE for this lever, both available numerators:
+    using the banked -14,201 insns    18.90   95% [15.21, 24.98] insns/ns
+    using this run's own -13,361.8    17.79   95% [14.31, 23.50] insns/ns
+  13.2 is excluded by both intervals.
+```
+
+### What this retires
+
+**The 13.2 figure may NOT be used to size the remaining 220 binding sites, or any change other than
+the ndarray type cache.** Conversion rate is a property of the specific instruction mix removed, not
+of "redundant CPython attribute work" as a class — which is what I had started to assume after two
+agreeing cells. Two cells of one lever is not a class.
+
+**DISCLOSED:** this cell is far noisier than the earlier two (stdev 48% of median, versus effects
+that were 3-4 orders above their spread), because the predicate lever's effect is ~3x smaller while
+the noise is similar in absolute terms. The 14/15 sign is solid; the magnitude is not sharp, and the
+implied-rate interval is correspondingly wide.
+
+COUNTED_MECHANISM: 15 paired reps, time saving median 751.2 ns (95% [568.6, 933.8]), sign 14/15,
+null 1.035%; implied rate 17.8-18.9 with 95% ranges excluding 13.2.
+A/A NULL CONTROLS: the numpy arm is the null; at 1.035% it is the weakest null in this series (16x
+separation vs 168x and 113x), which is itself a consequence of the smaller effect.
+RETRY PREDICATE: none - the negative answer is the useful one. If a per-class rate is ever wanted
+again, it needs >=3 INDEPENDENT LEVERS, not 3 cells of one lever, and the registered rule should be
+"predicted value inside the measured interval", not a percentage band around the prediction.
+AGENT_NAME=SlateFinch.
