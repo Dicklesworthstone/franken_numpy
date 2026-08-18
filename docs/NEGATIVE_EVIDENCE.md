@@ -54464,3 +54464,103 @@ RETRY PREDICATE: this lever is DONE and needs no retry. The open question it han
 REACHED probe count for a given cell, which must be counted directly (a counter on the predicate or
 a perf symbol count) before anyone sizes `c5ecm`.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — caching np.ndarray's TYPE OBJECT is worth 34,022 INSNS/CALL on argsort(int64) from just 31 of 488 sites — 1,097.5 insns per site, against a null 2,101x smaller (deadlock-audit-c5ecm)
+
+**Result class:** a pre-registered SIGN test that passed, with the magnitude deliberately left
+unregistered — and the largest single counted lever this campaign has measured on a dispatch path.
+
+**STILL BEHIND THE INCUMBENT. NOT QUOTABLE COMPETITIVELY.** `fnp.argsort(int64, n=256)` costs
+**2.663x** NumPy's retired instructions after this lever, improved from 3.531x. We remain 65,103
+insns/call over NumPy on this cell. Every figure here is self-speedup on a cell we lose.
+
+### The lever
+
+`cached_ndarray_type(py)` — a `PyOnceLock` holding `numpy.ndarray` — replaces
+`numpy.getattr("ndarray")` at **31 sites, scoped to argsort's probe chain only**. The other 457
+sites in the file are untouched, deliberately: the point was to PRICE the change on one dispatcher
+before sweeping a file a peer actively edits.
+
+Identity-preserving: `py.import("numpy")` returns the `sys.modules` singleton that `cached_numpy`
+reads, and `np.ndarray` is stable across re-imports (checked against the installed interpreter).
+
+### Result
+
+```
+                     median insns        per call     spread
+  before fnp        55,308,648,741       138,271.6     2.255%
+  after  fnp        41,699,671,626       104,249.2     1.136%
+  before numpy      15,664,860,348        39,162.2     0.229%
+  after  numpy      15,658,384,320        39,146.0     0.064%
+
+  NULL   (numpy arm, untouched)        -16.2 insns/call  = 0.041%
+  EFFECT (fnp arm)                 -34,022.4 insns/call
+  separation                           2,101x the null
+  PER SITE (31 converted)            1,097.5 insns
+```
+
+BEFORE elf `c61ad2363eb500aa`, AFTER elf `cc42f26ced133591`, distinct, marker `cached_ndarray_type`
+present 0 vs 20 — the provenance check that catches a build compiling source that is not yours.
+Same commit otherwise, `release-perf`, `RUSTFLAGS=-C target-feature=+avx2`, threading pinned
+(OPENBLAS/OMP/MKL=1), 3 reps x 4 arms interleaved, per-arm loadavg 9.00-10.21, idle 85%->87%, CPU
+2682->2136 MHz, /data 77G. Every arm `selected_groups=1`, probe printed, 0 panics, checked BEFORE
+reading counts. Checksum `0000000000007f80` identical on all 12 runs.
+
+**DISCLOSED WEAKNESS:** the before-fnp arm spread 2.255%, several times the other arms and the
+widest in any counted row I have banked. The effect is 3 orders of magnitude larger than that
+spread so it does not threaten the sign, but a magnitude quoted from this row should be read as
+"about 34,000", not 34,022.
+
+### On the magnitude I refused to predict
+
+I registered the SIGN and explicitly declined to register a band, because 31 sites x a per-getattr
+figure is a product of two banked numbers and that construct had been wrong three times today
+(157 -> 313 -> a measured 201.7; and a 24,000-31,000 band that measured 14,201).
+
+The measured per-site cost is **1,097.5 insns**, against the ~997 that product would have given —
+within 10%. **This does not retroactively justify the method.** The same construct missed by 1.7x
+one lever ago on the same dispatcher; that it lands close here is a fact about this site shape
+(a non-interned module attribute fetched unconditionally), not evidence that multiplying banked
+numbers predicts anything. The rule stands: measure it.
+
+### Cumulative, and what is left
+
+```
+  argsort(int64, n=256)      insns/call     vs numpy
+  original                    151,631.0       3.872x
+  + dtype predicate lever     138,271.6       3.531x
+  + ndarray type cache        104,249.2       2.663x
+  numpy                        39,162.2       1.000x
+```
+
+Two levers removed 47,382 insns/call, 31% of the original. **457 ndarray-getattr sites remain
+unconverted.** Do NOT size them by multiplying 457 x 1,097.5: that is the forbidden construct
+again, and the REACHED site count per cell is what matters and is still unmeasured for every cell
+except this one.
+
+COUNTED_MECHANISM: -34,022.4 insns/call on the fnp arm, medians of 3 reps, against a numpy-arm null
+of -16.2 (0.041%), 2,101x separation, checksums identical across all 12 runs, 1,097.5 insns per
+converted site.
+A/A NULL CONTROLS: the numpy arm IS the null - same operand, same harness, code untouched by the
+lever. Not a dual-null contract: this is a counted difference across two ELFs, not a wall-clock
+ratio.
+VALIDATION: 169 tests passed, 0 failed, across 9 conformance suites (sorting, sort_search,
+searching, searchsorted_containers, lexsort, arithmetic, complex, complex_ops,
+dtype_sniff_fallback), clean exit 696.6s, no RCH-E104.
+RETRY PREDICATE: to extend beyond these 31 sites, first COUNT the reached ndarray fetches for the
+target cell (a counter or a perf symbol count), then convert one dispatcher at a time and re-price.
+A file-wide sweep of 457 sites must not be justified by extrapolation from this row.
+AGENT_NAME=SlateFinch.
+
+**PROVENANCE NOTE on this row's source commit:** the `lib.rs` change measured above was landed by a
+PEER's commit `44b736fd` ("reuse the cached ndarray type in argsort probe guards"), not by me — it
+swept my uncommitted working-tree edit on the shared main tree while my test batch was running.
+Verified byte-identical to what I measured before banking this row: 57 insertions / 31 deletions,
+32 `cached_ndarray_type` additions, 31 `getattr("ndarray")` removals, and `git diff 44b736fd --
+crates/fnp-python/src/lib.rs` is empty. The measured ELF `cc42f26ced133591` therefore corresponds
+to committed source.
+
+This is the SAME shared-tree collision I inflicted on AzureCarp earlier today in the opposite
+direction (`364a4933`, disclosed in `744df646`). Recording it in both directions: on this tree, an
+uncommitted edit is not safe from a peer's commit, so the window between "edit" and "commit" is a
+hazard to BOTH agents. Commit source before starting a long measurement, not after.
