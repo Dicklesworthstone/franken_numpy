@@ -53989,3 +53989,79 @@ fresh ELF off `d29b508e` is being measured to confirm it. That comparison is CRO
 ~32 insns/call of build noise, so agreement should be judged against ~1442 +- 32 and NOT against the
 18.5 within-ELF floor - the conflation I made three times today and do not intend to make a fourth.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — SHIPPED-STATE CERTIFICATION: the route excess is 1478.0 insns/call, 352.5 removed (19.3%) — and my pre-registered band MISSED by 4 insns/call because I built it too tight (deadlock-audit-ei9jz)
+
+**Campaign result class:** shipped improvement certified at its WORST measured value + a registered
+band failed and is corrected
+
+Fresh ELF built from `dea8c832` (main, lever included), release-perf, threading pinned, 400,000
+calls/arm, 5 interleaved reps, `selected_groups=1` and parity asserted vs NumPy on every arm (0
+failures). Experiment switches verified ABSENT from the shipped binary (`strings | grep -c` = 0).
+PRE loadavg 8.14/11.21/11.56, CPU idle 91%, runnable 5/64, iowait 0, 1940 MHz, /data 103G.
+POST idle 89%.
+
+```
+  numpy_plain  median 3,174,185,511   spread 0.018%
+  fnp_plain    median 3,765,393,579   spread 0.104%
+  ---------------------------------------------------
+  SHIPPED ROUTE EXCESS      1478.0 insns/call
+  pre-lever                 1830.5
+  REMOVED                    352.5   = 19.3% of the route's excess over NumPy
+```
+
+**QUOTE 352.5, NOT 388.7.** The worktree measured 388.7; the shipped build shows 352.5. Standing
+orders say quote the worst cell, and here the shipped number IS the worst and also the one that
+matters, because it is what users get. The headline for this lever is **352.5 insns/call, 19.3%**.
+
+### The registered band FAILED, by 4 insns/call
+
+```
+  registered   ~1442 +- 32  =  [1410, 1474]
+  measured        1478.0                       -> OUTSIDE, by 4.0
+  saving 352.5 vs the worktree's 388.7, a 36.2 gap against a 32 threshold -> also outside
+```
+
+By the letter, both checks fail. Reporting that first because it is what I registered.
+
+**THE BAND WAS WRONG, AND WRONG BY CONSTRUCTION.** I derived +-32 from the 1.74% spread of the
+EXCESS across three ELFs. But the excess is a DIFFERENCE OF TWO ARMS THAT DRIFT INDEPENDENTLY, and
+the reference arm alone - NumPy's own code, which never changed - drifts this much between builds:
+
+```
+  numpy_plain, pre-lever ELF        3,193,533,335
+  numpy_plain, lever worktree ELF   3,175,895,588      -44.1 insns/call
+  numpy_plain, shipped ELF          3,174,185,511      -48.4 insns/call
+```
+
+A reference arm moving 44-48 insns/call cannot support a +-32 band on a quantity computed from it.
+The measured 36.2 gap sits inside that drift, so the shipped and worktree savings are consistent;
+my threshold was not.
+
+**This is the fourth spread-mismatch of the session** (within-run CI for a between-run question; a
+conversion rate borrowed from another host; a +-0.1% neutrality gate on a cross-ELF question; and
+now a band built from excess-spread when arm-drift dominates). The first three I caught before
+publishing. This one I did not - it was registered, it failed, and the correction is after the fact.
+**Standing rule going forward: when a quantity is a difference of two arms, its cross-build band
+must be built from the ARMS' drift, not from the spread of the difference.**
+
+### What is certified
+
+The lever removes **352.5 insns/call (19.3%)** from the delegating f64 multiply route at n=256, on
+shipped code, with parity asserted against NumPy on every arm and 668 tests green. That stands
+independent of the band arithmetic: both arms were measured on ONE ELF at 0.018% and 0.104% spread,
+and the pre-lever baseline is the campaign's most-replicated figure (1856.2 / 1824.3 / 1830.5 across
+three separate builds).
+
+COUNTED_MECHANISM: shipped excess 1478.0 vs pre-lever 1830.5 = 352.5 removed; reference-arm
+cross-build drift 44.1-48.4 insns/call measured across three ELF families; within-ELF spreads
+0.018%/0.104%.
+
+A/A NULL CONTROLS: not applicable - counted difference of two arms on one ELF, parity-gated. The
+control that matters here is the reference arm's own drift, now measured rather than assumed.
+
+RETRY PREDICATE: none for this lever - it is shipped and certified. For the NEXT cross-build
+comparison on this route, use a band of at least +-50 insns/call, or avoid cross-build comparison
+entirely by keeping both conditions in one ELF behind a runtime switch, which is what made the
+388.7 measurement clean in the first place.
+AGENT_NAME=SlateFinch.
