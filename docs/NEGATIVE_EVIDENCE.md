@@ -54620,3 +54620,50 @@ The controls that apply are the guard read (mechanism) and the profile (corrobor
 RETRY PREDICATE: none - this is a corrected denominator, not a lever. Anyone extending `c5ecm` must
 run the reached-count recipe above for THEIR cell first.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — I ADDED A SECOND CACHE FOR AN OBJECT THAT ALREADY HAD ONE; collapsed onto one static, and the 436-site sweep is analysed and DELIBERATELY NOT TAKEN (deadlock-audit-c5ecm)
+
+**Result class:** a self-inflicted duplication found and removed, plus a sweep I am recommending
+AGAINST on evidence rather than deferring by omission.
+
+`is_exact_numpy_ndarray` (111 call sites) already held `np.ndarray`'s type in a
+`PyOnceLock<Py<PyType>>`. I added `cached_ndarray_type` holding the same immutable object without
+grepping for an existing cache first — two statics for one type. Harmless in behaviour, but a
+second cache is a second thing to reason about when someone asks whether the handle can go stale,
+and the whole argument for caching a type here is the fail-closed staleness story. Both now read
+one `PyOnceLock`. Clippy back to the 328 baseline, delta 0; 139 tests pass across 6 suites.
+
+**I also introduced, and then removed, 5 clippy warnings of my own**: a doc line beginning `- `
+which rustdoc parses as a markdown list item, leaving the next five lines as unindented
+continuations. Caught only because I compared against a baseline instead of reading "0 errors" and
+moving on. A warning count is not a gate unless it is DIFFERENCED against a baseline taken on the
+same tree.
+
+### The remaining sweep: analysed, and recommended against as one commit
+
+```
+  total `numpy.getattr("ndarray")` occurrences   443   (12 of them in comments)
+  sites with `py` in scope                       436
+  sites WITHOUT `py` in scope                      3
+  receivers other than `numpy`                     0
+  shapes: 174 inline-reference, 237 `let` bindings, 32 bare (`if let Ok(..)`)
+```
+
+It is mechanically convertible — each shape has a type-preserving rewrite, and the `.clone()` the
+binding shape needs is a `Py_INCREF` against the 1,360.9 insns/reached-site the getattr costs. **I
+am still not doing it as one 436-site commit**, for three reasons recorded on the bead: this tree is
+shared and a peer's commit already swept one of my uncommitted edits today, so a 436-site diff
+maximises that collision surface; the prize is NOT 436 x 1,360.9 because the reached fraction
+(25/31 = 81%) is a property of one cell of one dispatcher; and **no single measurement would
+validate a 436-site sweep** — it would be a large change taken on trust across the whole crate.
+
+The registered shape instead is one dispatcher per commit, reached count measured first, each with
+its own counted A/B, in descending order of chained probes: argsort 32 (DONE), sort 8, cumsum 5,
+cumprod 5, nanmean 5, searchsorted 4, gradient 4, nansum 4, nanstd 4, nanvar 4, isin 4.
+
+COUNTED_MECHANISM: none claimed - this row is a duplication removal and a scoping decision.
+A/A NULL CONTROLS: not applicable - no ratio claimed.
+VALIDATION: 139 tests, 0 failures, 6 suites; clippy 328 = baseline, delta 0.
+RETRY PREDICATE: none. The sweep is not rejected, it is SEQUENCED - take the next dispatcher on the
+list above, run the build-free reached-count recipe for its cell, then convert and price it.
+AGENT_NAME=SlateFinch.
