@@ -1352,6 +1352,100 @@ fn inv_from_lu_unblocked(lu: &[f64], perm: &[usize], n: usize) -> Vec<f64> {
     x
 }
 
+/// Column-panel width for `inv_from_lu_blocked`.
+///
+/// The working set the substitutions touch is `n * panel` f64. 64 columns keeps that at 512 KiB
+/// for n = 1024, which is L2-resident on the hosts this campaign measures on, while staying wide
+/// enough that the inner `axpy` still vectorises. Mirrors `cholesky_panel_width`'s shape rather
+/// than inventing a second convention.
+const fn inv_panel_width(n: usize) -> usize {
+    if n >= 512 { 64 } else if n >= 128 { 32 } else { n }
+}
+
+/// `A^-1` from an LU factorisation, blocked over COLUMN PANELS of the right-hand side.
+///
+/// UNMEASURED - written under a disk freeze and committed unbuilt. Not wired into any live path:
+/// `inv_nxn` still calls `inv_from_lu_unblocked`. Wiring is a one-line follow-up once this is
+/// built, tested and A/B'd.
+///
+/// WHAT THIS FIXES: `inv_from_lu_unblocked` solves for the whole `n x n` identity at once, and
+/// every rank-1 row update `row_i[col] -= f * row_j[col]` sweeps all `n` columns. Its working set
+/// is therefore the entire `n^2` result, so for any `n` past L2 each of the O(n^2) row-pair
+/// updates re-streams both rows from memory. That is a level-2 access pattern with no reuse - the
+/// one factorisation path in this crate that never got blocked, while `lu_decompose_blocked` and
+/// `cholesky_blocked` both did.
+///
+/// WHY BLOCKING BY COLUMN IS SAFE HERE, and this is the whole reason this shape was chosen: the
+/// forward and backward substitutions treat each COLUMN of `X` independently. Column `c` is only
+/// ever combined with column `c` of another row - there is no cross-column arithmetic anywhere in
+/// the algorithm. So restricting every loop to a column range changes which elements are touched
+/// in what order across the matrix, but for any individual element the sequence of operations and
+/// operands is IDENTICAL. The result is bit-for-bit equal to the unblocked routine, not merely
+/// close, and `inv_blocked_is_bit_exact_vs_unblocked` pins that.
+///
+/// This is the difference between this change and a level-3 restructuring: LAPACK's `dgetri`
+/// reformulates the solve as GEMM, which regroups sums and changes rounding. That would be a
+/// larger win and is NOT what this does; `inv` is only held to `np.allclose` against NumPy, so a
+/// GEMM form is admissible, but it is a separate decision with a separate parity story and should
+/// not be smuggled in under a cache-blocking change.
+///
+/// The permutation pass stays whole-matrix and runs once at the end: it permutes within each row
+/// across all `n` columns, so it is the one step that is not column-separable.
+fn inv_from_lu_blocked(lu: &[f64], perm: &[usize], n: usize) -> Vec<f64> {
+    let mut x = vec![0.0; n * n];
+    for i in 0..n {
+        x[i * n + i] = 1.0;
+    }
+    let panel = inv_panel_width(n).max(1);
+    let mut c0 = 0;
+    while c0 < n {
+        let c1 = (c0 + panel).min(n);
+        // Forward substitution against unit-lower L, restricted to this column panel.
+        // The unblocked form runs `col in 0..=j`; intersected with the panel that is
+        // `c0..=min(j, c1 - 1)`, empty when the panel lies entirely right of `j`.
+        for i in 1..n {
+            for j in 0..i {
+                let hi = j.min(c1 - 1);
+                if hi < c0 {
+                    continue;
+                }
+                let l_ij = lu[i * n + j];
+                let (row_i, row_j) = two_rows_mut(&mut x, i, j, n);
+                for col in c0..=hi {
+                    row_i[col] -= l_ij * row_j[col];
+                }
+            }
+        }
+        // Backward substitution against U, then the diagonal scaling - both over the panel.
+        for i in (0..n).rev() {
+            for j in (i + 1)..n {
+                let u_ij = lu[i * n + j];
+                let (row_i, row_j) = two_rows_mut(&mut x, i, j, n);
+                for col in c0..c1 {
+                    row_i[col] -= u_ij * row_j[col];
+                }
+            }
+            let u_ii = lu[i * n + i];
+            let row_i = &mut x[i * n..i * n + n];
+            for col in c0..c1 {
+                row_i[col] /= u_ii;
+            }
+        }
+        c0 = c1;
+    }
+    // Column permutation, whole-matrix and once: this is the only step that is not
+    // column-separable, so it cannot be folded into the panel loop.
+    let mut tmp = vec![0.0; n];
+    for i in 0..n {
+        tmp.copy_from_slice(&x[i * n..i * n + n]);
+        let row_i = &mut x[i * n..i * n + n];
+        for k in 0..n {
+            row_i[perm[k]] = tmp[k];
+        }
+    }
+    x
+}
+
 #[inline]
 fn two_rows_mut(x: &mut [f64], a: usize, b: usize, n: usize) -> (&mut [f64], &[f64]) {
     debug_assert_ne!(a, b);
@@ -21660,6 +21754,60 @@ except Exception as exc:
                     }
                 }
             }
+        }
+    }
+
+
+    /// The column-panel blocked inverse must equal the unblocked one to the BIT.
+    ///
+    /// Blocking by column is only legitimate because the substitutions are column-separable:
+    /// column `c` of `X` is never combined with any other column, so restricting the loops to a
+    /// panel changes traversal order across the matrix but not the operation sequence for any
+    /// individual element. If that reasoning is wrong the results diverge in the low bits, which
+    /// an `allclose`-style check would happily hide - so this compares raw bits.
+    ///
+    /// The sizes are chosen to exercise the panelling, not just the happy path: `n = 130` with a
+    /// 32-wide panel gives four full panels plus a ragged 2-column tail, and `n = 128` gives four
+    /// exact panels. Sizes below 128 take `panel = n`, i.e. a single panel, which is the
+    /// degenerate case and would pass even if the panel loop were wrong.
+    #[test]
+    fn inv_blocked_is_bit_exact_vs_unblocked() {
+        for &n in &[1usize, 2, 5, 33, 128, 130] {
+            // Diagonally dominant, so the factorisation is well conditioned and the comparison
+            // is about the blocking rather than about pivot choices.
+            let mut a = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    a[i * n + j] = if i == j {
+                        (n as f64) + 4.0 + (i as f64) * 0.25
+                    } else {
+                        ((i * 7 + j * 13) % 11) as f64 * 0.125 - 0.5
+                    };
+                }
+            }
+            let (lu, perm, _sign) = super::lu_decompose(&a, n).expect("well-conditioned LU");
+            let want = super::inv_from_lu_unblocked(&lu, &perm, n);
+            let got = super::inv_from_lu_blocked(&lu, &perm, n);
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                want_bits, got_bits,
+                "blocked inverse diverged in BITS at n={n} (panel={})",
+                super::inv_panel_width(n)
+            );
+        }
+    }
+
+    /// `inv_panel_width` must never report a panel that would make the block loop misbehave.
+    ///
+    /// A zero width would spin forever and a width above `n` would make the first panel the whole
+    /// matrix, silently disabling the blocking this function exists to provide.
+    #[test]
+    fn inv_panel_width_is_sane() {
+        for &n in &[1usize, 2, 31, 32, 127, 128, 511, 512, 1024, 4096] {
+            let w = super::inv_panel_width(n);
+            assert!(w >= 1, "panel width {w} is not positive at n={n}");
+            assert!(w <= n.max(1), "panel width {w} exceeds n={n}");
         }
     }
 
