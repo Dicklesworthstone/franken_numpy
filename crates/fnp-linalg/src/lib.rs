@@ -8799,6 +8799,9 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
     n: usize,
     target: &mut [f64],
 ) {
+    use std::simd::Simd;
+    type Lane = Simd<f64, PACKED_NR>;
+
     let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     let nc = {
@@ -8827,22 +8830,24 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
                 // register tile applied to `target` once.
                 let block = i0 / MR;
                 let apanel = &ap[block * k * MR..(block + 1) * k * MR];
-                let mut acc = [[0.0f64; PACKED_NR]; MR];
+                // EXPLICIT SIMD register tile (`franken_numpy-ixs5y`). With `a` packed above
+                // and `b` packed per panel, this states the vector shape instead of leaving it
+                // to the autovectoriser. BIT-IDENTICAL: lane `jj` accumulates `kk` ascending
+                // with no cross-lane interaction, and the multiply and add stay SEPARATE so both
+                // roundings are preserved - no `mul_add`, which would round once and drift the
+                // golden digest this kernel is pinned by.
+                let mut acc = [Lane::splat(0.0); MR];
                 for kk in 0..k {
-                    let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                    let bvec = Lane::from_slice(&bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]);
                     let arow = &apanel[kk * MR..kk * MR + MR];
-                    for (ii, row) in acc.iter_mut().enumerate() {
-                        let av = arow[ii];
-                        for (slot, &bv) in row.iter_mut().zip(brow) {
-                            *slot += av * bv;
-                        }
+                    for (ii, slot) in acc.iter_mut().enumerate() {
+                        *slot += Lane::splat(arow[ii]) * bvec;
                     }
                 }
-                for (ii, row) in acc.iter().enumerate() {
+                for (ii, slot) in acc.iter().enumerate() {
                     let base = (i0 + ii) * n + j0;
-                    for (slot, &v) in target[base..base + PACKED_NR].iter_mut().zip(row) {
-                        *slot -= v;
-                    }
+                    let current = Lane::from_slice(&target[base..base + PACKED_NR]);
+                    (current - *slot).copy_to_slice(&mut target[base..base + PACKED_NR]);
                 }
                 i0 += MR;
             }
@@ -8908,6 +8913,9 @@ fn packed_gemm_sub_assign_strided_serial_tiled<const MR: usize>(
     row_stride: usize,
     target: &mut [f64],
 ) {
+    use std::simd::Simd;
+    type Lane = Simd<f64, PACKED_NR>;
+
     let m_full = m - m % MR;
     let n_full = n - n % PACKED_NR;
     let nc = {
@@ -8936,22 +8944,24 @@ fn packed_gemm_sub_assign_strided_serial_tiled<const MR: usize>(
                 // register tile applied to `target` once.
                 let block = i0 / MR;
                 let apanel = &ap[block * k * MR..(block + 1) * k * MR];
-                let mut acc = [[0.0f64; PACKED_NR]; MR];
+                // EXPLICIT SIMD register tile (`franken_numpy-ixs5y`). With `a` packed above
+                // and `b` packed per panel, this states the vector shape instead of leaving it
+                // to the autovectoriser. BIT-IDENTICAL: lane `jj` accumulates `kk` ascending
+                // with no cross-lane interaction, and the multiply and add stay SEPARATE so both
+                // roundings are preserved - no `mul_add`, which would round once and drift the
+                // golden digest this kernel is pinned by.
+                let mut acc = [Lane::splat(0.0); MR];
                 for kk in 0..k {
-                    let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                    let bvec = Lane::from_slice(&bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]);
                     let arow = &apanel[kk * MR..kk * MR + MR];
-                    for (ii, row) in acc.iter_mut().enumerate() {
-                        let av = arow[ii];
-                        for (slot, &bv) in row.iter_mut().zip(brow) {
-                            *slot += av * bv;
-                        }
+                    for (ii, slot) in acc.iter_mut().enumerate() {
+                        *slot += Lane::splat(arow[ii]) * bvec;
                     }
                 }
-                for (ii, row) in acc.iter().enumerate() {
+                for (ii, slot) in acc.iter().enumerate() {
                     let base = (i0 + ii) * row_stride + j0;
-                    for (slot, &v) in target[base..base + PACKED_NR].iter_mut().zip(row) {
-                        *slot -= v;
-                    }
+                    let current = Lane::from_slice(&target[base..base + PACKED_NR]);
+                    (current - *slot).copy_to_slice(&mut target[base..base + PACKED_NR]);
                 }
                 i0 += MR;
             }
