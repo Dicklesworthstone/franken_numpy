@@ -53920,3 +53920,72 @@ STILL OWED BEFORE MERGE: the repo's own test suite must pass with the lever (run
 worktree), and these 22 cases belong in a committed conformance test rather than a scratchpad
 script - a parity result that lives only in a ledger row is not a regression gate.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — SHIPPED: the dtype-identity sniff lands on main at d29b508e, 388.7 insns/call saved (21% of the route's excess over NumPy), with a regression gate that passes with AND without it (deadlock-audit-ei9jz)
+
+**Campaign result class:** CERTIFIED lever shipped — first production change of this session's
+`ei9jz` line
+
+```
+  sniff cost         593.5 -> 204.8 insns/call
+  saving             388.7              pre-registered band [250, 400] -> INSIDE
+  share of the route excess (1830.5)    21%
+```
+
+### The chain that got here, each step constraining the next
+
+```
+  1  whole-route excess over NumPy, counted            1830.5 insns/call
+  2  split, three single differences closing to 0.16%  probe 660.9 / wrapper 1249.6
+  3  neither probe BODY executes for f64               all three skip-deltas inside a 48.5 floor
+       -> so "probe chain" is really the DECISION SECTION, and the sniff is its only Python cost
+  4  sniff isolated by a switch holding control flow identical      593.5  (90% of the section)
+  5  lever: identity compares against interned dtypes               204.8  (388.7 saved)
+```
+
+No step reused a number from a different currency, a different host, or a different build without
+saying so. Step 3 is the one that mattered most: it re-labelled a quantity I had been calling "the
+probe chain" all session and redirected the lever from seven scattered probe entries to one sniff.
+
+### Verification, all of it
+
+```
+  612 lib tests                            passed, 0 failed
+   51 conformance_arithmetic               passed, 0 failed
+    5 conformance_dtype_sniff_fallback     passed, 0 failed
+  parity, 22 hand-built cases              22/22 BIT-IDENTICAL to NumPy
+  measurement control: probes-skipped baseline agrees across builds to 8.9 (noise floor 18.5)
+  fmt --check exit 0, captured unpiped
+```
+
+`conformance_dtype_sniff_fallback` (ed9cdc62) was committed FIRST and shown to pass on main WITHOUT
+the lever, then shown to pass WITH it. A test that only passes on the new code is a description of
+the new code; one that passes on both is a gate.
+
+### What was deliberately left out of the commit
+
+The three measurement switches (`FNP_DISABLE_NATIVE_ROUTES`, `FNP_SKIP_COMPLEX_PROBE`,
+`FNP_SKIP_F16_PROBE`, `FNP_SKIP_DTYPE_SNIFF`) stay in the worktree. Verified by grep before
+committing: zero occurrences in main. Measurement scaffolding that ships is scaffolding that
+eventually gets read as intent.
+
+### The cost, stated because it is real
+
+Unrecognised dtypes now pay up to FOUR failed pointer compares before falling back to the char path.
+f64 / complex128 / complex64 / f16 hit identity and win; datetime64-with-units, structured and
+string dtypes pay compares then fall back. Register compares against a `getattr` plus a unicode
+extract makes this the right trade at any plausible dtype mix, but it is a trade and it should be
+findable by whoever measures those dtypes later.
+
+COUNTED_MECHANISM: 593.5 -> 204.8 insns/call on the f64 multiply cell, 4 interleaved reps, spreads
+0.092%/0.197%, noise floor 18.5; baseline control 8.9; parity 22/22 byte-identical; 668 tests green.
+
+A/A NULL CONTROLS: not applicable to the counted delta. The controls that apply are the
+probes-skipped baseline (8.9 across builds), the stated noise floor, and a regression gate that
+passes on both sides of the change.
+
+RETRY PREDICATE: the shipped route excess should now read ~1442 insns/call (1830.5 - 388.7), and a
+fresh ELF off `d29b508e` is being measured to confirm it. That comparison is CROSS-ELF and inherits
+~32 insns/call of build noise, so agreement should be judged against ~1442 +- 32 and NOT against the
+18.5 within-ELF floor - the conflation I made three times today and do not intend to make a fourth.
+AGENT_NAME=SlateFinch.
