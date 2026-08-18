@@ -54387,3 +54387,80 @@ compiling, leaving too little to finish. The fix is two-step and worth reusing: 
 THE WORKER by PID, then re-invoke; rch prefers the now-warm worker, the compile is skipped, and the
 same nine suites run end to end in 726s. Cold vs warm is the whole difference between E104 and a
 clean exit.
+
+## 2026-08-18 — the f32/f16/complex fast path is WORTH 14,201 INSNS/CALL on argsort(int64), sign CONFIRMED against a 562x-separated null — and the registered magnitude BAND IS REFUTED at 0.59x its low end (deadlock-audit-v46rn)
+
+**Result class:** a pre-registered sign test that PASSED while its own magnitude band FAILED — the
+third time today a number built as a product of two banked figures came out wrong.
+
+**THIS IS SELF-SPEEDUP ON A ROUTE THAT IS BEHIND THE INCUMBENT. IT MAY NOT BE QUOTED
+COMPETITIVELY.** `fnp.argsort` on int64 n=256 spends **3.511x** the retired instructions NumPy
+spends, improved from 3.872x. We are still 98,291 insns/call over NumPy on this cell. Nothing here
+is a win against NumPy; it is a reduction in our own overhead on a cell we lose.
+
+### Setup
+
+Two ELFs differing in EXACTLY the three predicate bodies (67 diff lines = the 64 insertions and 3
+deletions of `986cbe15`), same commit `37752daa` otherwise, same profile `release-perf`, same
+`RUSTFLAGS=-C target-feature=+avx2`, BEFORE built in an isolated worktree.
+
+```
+  BEFORE elf sha e8be97a55b0df243      AFTER elf sha c61ad2363eb500aa      distinct: yes
+  both contain the bench_argsort_counter_fnp_i64 marker (unique to this change)
+  host thinkstation1, 3 reps x 4 arms interleaved, threading pinned
+  (OPENBLAS/OMP/MKL_NUM_THREADS=1), per-arm loadavg 11.40-12.06, idle 87%->83%,
+  CPU 2336->2501 MHz, /data 84G
+  every arm: selected_groups=1, probe line printed, 0 panics, checked BEFORE reading counts
+  checksum 0000000000007f80 IDENTICAL on all 12 runs - the arms compute the same answer
+```
+
+### Result
+
+```
+                     median insns        per call     spread
+  before fnp        60,652,384,031       151,631.0     0.501%
+  after  fnp        54,971,980,639       137,430.0     0.624%
+  before numpy      15,665,636,691        39,164.1     0.100%
+  after  numpy      15,655,523,493        39,138.8     0.090%
+
+  NULL   (numpy arm, untouched by the lever)   -25.3 insns/call   = 0.065%
+  EFFECT (fnp arm)                         -14,201.0 insns/call
+  separation                                     562x the null
+```
+
+The null is the load-bearing control: numpy's `argsort` cannot be affected by this change, so its
+count must be flat across the two ELFs. It moved 0.065%. The effect is 562x that.
+
+### The band was wrong, and it was wrong the same way as twice before
+
+REGISTERED BEFORE THE RUN: sign = decrease (**CONFIRMED**); magnitude 24,000-31,000 insns/call
+(**REFUTED** — measured 14,201, or 0.59x the low end).
+
+I registered that band as "the weaker claim ... a PRODUCT OF TWO BANKED NUMBERS ... if the
+measurement lands outside the band, the BAND is what is wrong, not the lever, and the band must be
+reported as refuted rather than quietly widened." Reporting it refuted, unwidened.
+
+WHY IT OVERSHOT, stated as hypotheses because I have not measured which: (a) not all 12
+f32/f16/complex probes are reached for this cell — the reached count is gated by `kind_spec` and
+axis form and I never measured it, which the `c5ecm` note already flags; (b) the ~795-insn
+non-interned `getattr` penalty was banked at a different call site and may not be additive here;
+(c) some probes still take the kind/itemsize fallback. The honest lesson is the same one for the
+third time: **a product of two banked numbers is a reason to measure, never a result.**
+
+### What this says about the next lever
+
+fnp's argsort dispatch costs 137,430 insns/call against numpy's 39,139 for the same answer. The
+predicate fast path removed 14,201 of a ~98,291 remaining excess — about 14%. The rest is still
+dispatch, and `deadlock-audit-c5ecm` (np.ndarray's type object re-fetched BY NAME, non-interned, at
+487 sites, up to 32 per argsort call) is the largest identified candidate. That bead's prize must
+still be MEASURED and not multiplied out; this row is the evidence for why.
+
+COUNTED_MECHANISM: -14,201.0 insns/call on the fnp arm, medians of 3 reps, arm spreads 0.50-0.62%,
+against a numpy-arm null of -25.3 (0.065%), 562x separation, checksums identical across all 12 runs.
+A/A NULL CONTROLS: the numpy arm IS the null (same operand, same harness, code untouched by the
+lever). Not a dual-null contract - this is a counted difference across two ELFs, not a wall-clock
+ratio, so the contract's balanced square does not apply.
+RETRY PREDICATE: this lever is DONE and needs no retry. The open question it hands on is the
+REACHED probe count for a given cell, which must be counted directly (a counter on the predicate or
+a perf symbol count) before anyone sizes `c5ecm`.
+AGENT_NAME=SlateFinch.
