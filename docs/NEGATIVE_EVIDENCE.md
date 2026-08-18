@@ -55937,3 +55937,74 @@ A/A NULL CONTROLS: not applicable - static analysis.
 RETRY PREDICATE: none. Reusable note: a call-graph walk over Rust source MUST strip comments and
 exclude `.method(` forms, or it will invent edges. Mine invented enough to turn a zero into a 16.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — SOURCE-READ DESIGN for `6y5wp`'s register-pressure lever: chunking is ALREADY REJECTED, and the untried candidate is INDEXED access replacing the zip-of-zip iterator (deadlock-audit-6y5wp)
+
+**Result class:** design prepared under build freeze so the next build is one shot, not exploration.
+No measurement, no build, no artifact writes. /data 34G, load 5.45.
+
+The disassembly census gave the defect: our Div loop is 22 instructions per 8 doubles against NumPy's
+10, the excess being 10 FE-hazard accumulate ops and **3 base-pointer reloads from the stack** that
+NumPy does not perform. The hypothesis was register pressure. Source now read.
+
+### The accumulate, exactly
+
+```rust
+  let mut evidence: u64 = 0;
+  for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+      let quotient = a_cell.get() / b_cell.get();
+      slot.set(quotient);
+      evidence |= f64_divide_quotient_non_normal_evidence(quotient.to_bits());
+  }
+
+  // f64_divide_quotient_non_normal_evidence:
+  let exponent = bits & EXPONENT_MASK;                                  // vandpd   <- const 1
+  exponent.wrapping_sub(1) | exponent.wrapping_add(EXPONENT_STEP)       // vpaddq x2 <- consts 2,3
+                                                                       // vpor  x2 (combine + accum)
+```
+
+Three live vector constants (`EXPONENT_MASK`, `-1`, `EXPONENT_STEP`) plus the accumulator, plus two
+data registers per unrolled lane — which is what leaves no register for the three base pointers.
+The disassembly matches this term for term (vandpd x2, vpaddq x4, vpor x4 across two lanes).
+
+### CHUNKING IS DEAD — already rejected, and it made codegen WORSE
+
+The bead lists "explicit chunking to encourage packed divides" as a candidate, and chunking is the
+textbook answer to register pressure. **It has already been tried and rejected**, with a recorded
+codegen census: `insns 1440 -> 2211, vector 187 -> 319, vdivpd 1 -> 0, vdivsd 1 -> 15`. The blocked
+form **devectorised the divide entirely** — 15 scalar divides where there had been a packed one.
+Anyone re-proposing it is re-treading a measured reject; read that row first.
+
+### The untried candidate, and why it targets the observed defect
+
+The loop iterates `output.iter().zip(a_in.iter()).zip(b_in.iter())` — a zip-of-zip over three `Cell`
+iterators, which gives LLVM three independent pointer inductions to keep live. **NumPy's loop uses
+ONE index into three base pointers** (`%rbx`, `%r10`, `%r11` with `%rax` as the index), which is
+exactly the shape that needs no spills.
+
+So the candidate is: **replace the zip-of-zip with indexed access over the three slices**, giving one
+induction variable and three invariant bases. That is not on the bead's candidate list, is not the
+rejected blocked form, and is the only change that addresses the three stack reloads directly.
+
+A secondary, weaker option if the reloads persist: the evidence test can be reformulated as a single
+unsigned range check, `(e - STEP) > (MASK - 2*STEP)`, using TWO live constants instead of three. That
+frees at most one ymm register and should be treated as marginal, not as the fix.
+
+**NEITHER IS MEASURED AND I AM NOT PREDICTING A MAGNITUDE.** The honest bound: eliminating all three
+reloads takes 22 instructions to 19, a 14% instruction reduction, which at the 0.70 time/instruction
+conversion measured on this route today is ~10% of a deficit that is itself 1.19x. Worth one build;
+not worth a campaign.
+
+**RISK TO CHECK IN THE SAME BUILD:** indexed slice access reintroduces bounds checks unless LLVM
+elides them. If the disassembly after the change shows `cmp`/`jae` pairs in the loop, the fix has
+traded three reloads for two bounds checks and is not a win — census the loop before believing any
+ns figure.
+
+COUNTED_MECHANISM: none - design reading. The instruction counts cited (22 vs 10, 3 reloads) are from
+today's banked disassembly census; the chunking reject figures are from the bead's own record.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: when the freeze lifts, ONE build: convert the serial Div arm to indexed access,
+disassemble the loop FIRST (expect 2 vdivpd retained, 0 stack reloads, no bounds-check pairs), and
+only then measure - >=5 runs, because this route's single-run CI understates its between-run spread
+by 3.4x. Do not touch the parallel arm; its ratio is unmeasured at n >= 2^21.
+AGENT_NAME=SlateFinch.
