@@ -56188,3 +56188,57 @@ mechanism. Convert that single site, measure it under the dual-null contract, an
 whether a sweep is justified. Do NOT open with a 3,448-site pass: the ndarray sweep taught that the
 reachable subset, not the site count, is the prize, and that lesson cost several rows to learn.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — PREMISE OF `s70kb` VERIFIED IN PyO3 SOURCE, not recalled: `call_method1(&str)` allocates a fresh `PyUnicode` every call, `intern!` is a process-lifetime static deref (deadlock-audit-s70kb)
+
+**Result class:** checking the premise of a bead I filed one turn earlier, before anyone spends a
+build on it. Source reading only, build freeze in force. /data 34G, load 5.88.
+
+I filed `s70kb` on the strength of a remembered fact — that PyO3 builds a fresh `PyString` for a
+`&str` method key on every call. That is the kind of claim that should not sit under a bead
+unverified, so it is now read out of `pyo3-0.28.3`:
+
+```rust
+  // types/any.rs — call_method1
+  fn call_method1<N, A>(&self, name: N, args: A) -> PyResult<...>
+  where N: IntoPyObject<'py, Target = PyString>, A: PyCallArgs<'py>
+  { let name = name.into_pyobject_or_pyerr(self.py())?; args.call_method_positional(..) }
+
+  // conversions/std/string.rs — the &str impl
+  impl<'py> IntoPyObject<'py> for &str {
+      type Target = PyString;
+      fn into_pyobject(self, py: Python<'py>) -> ... { Ok(PyString::new(py, self)) }
+  }
+```
+
+**`PyString::new` per call. No fast path, no cache, no short-string special case.** So every one of
+the 3,448 sites allocates a `PyUnicode`, copies the name's bytes, and drops it again, once per call.
+
+The interned form, for contrast:
+
+```rust
+  macro_rules! intern { ($py:expr, $text:expr) => {{
+      static INTERNED: Interned = Interned::new($text);   // Interned(&'static str, PyOnceLock<Py<PyString>>)
+      INTERNED.get($py)
+  }}}
+```
+
+A `PyOnceLock` in a static: the `PyString` is built once per process and every later call is a deref
+returning `&Bound<'py, PyString>`. Zero Python work on the hot path.
+
+### One mechanism worth naming, and NOT claimed as measured
+
+`PyString::intern` additionally calls `PyUnicode_InternInPlace`, which puts the string in CPython's
+intern table. Interned keys let CPython's dict lookup shortcut to POINTER equality instead of
+comparing characters, so interning may speed the attribute lookup itself and not only remove the
+allocation. **That is a reading of the mechanism, not a measurement** — the banked ~795 insns/call
+figure came from a hot `getattr` site and already includes whatever share of this applies there. I am
+recording it as a reason the benefit could exceed the allocation saving, not as an additional number.
+
+COUNTED_MECHANISM: none - source verification. Confirms the premise behind the 3,448-site census
+rather than adding a quantity.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: unchanged - convert ONE hot site (`asarray` on searchsorted's cold path) and price it
+under the dual-null contract before any sweep. The premise is now verified, so that measurement tests
+the SIZE of the effect and no longer has to establish that an effect exists at all.
+AGENT_NAME=SlateFinch.
