@@ -14,7 +14,7 @@ use fnp_python::fnp_python;
 use pyo3::Python;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule};
 use std::hint::black_box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn bench_parallel_binary_boundary(c: &mut Criterion) {
     // float_power / remainder / nextafter / power / fmod / heaviside / maximum / minimum /
@@ -1365,6 +1365,171 @@ td = rng.integers(-50000, 50000, (4096, 512, 8)).astype('timedelta64[D]')\n",
 
 // np.max/min(datetime64/timedelta64, axis): int64-backed; the int64-view routes to the native int
 // min/max (~5-8x, result viewed back as the SAME temporal dtype). NaT pre-scan + defer.
+/// `np.isnat`, `np.busday_count` and `np.busday_offset` against NumPy, under the dual-null
+/// median-CI contract (`deadlock-audit-6y5wp`).
+///
+/// All three were bare passthroughs until this bead, so a vs-numpy row for them BEFORE it
+/// would have timed NumPy against NumPy-plus-a-wrapper and read ~1.0 while proving nothing.
+/// That is why every row asserts `!ours.is(&theirs)` first: the ratio only means anything
+/// once the candidate arm is a different ROUTE, not a differently-spelled name.
+///
+/// Sizes are held so the RETURNED OUTPUT stays under 8 MiB. Above that the large-buffer
+/// mmap-churn regime dominates elementwise work and the number stops being about the
+/// kernel - and the A/A null is blind to it, so it has to be designed out rather than
+/// gated on.
+///
+/// A self-timing group: criterion is taken and never used, because the contract runs its
+/// own ABBAABBA schedule with both A/A nulls.
+fn bench_datetime_nat_busday_boundary(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        // Lambdas only, no indented blocks: the `\n\` continuations strip the leading
+        // whitespace of every following line, so a `def` body would arrive unindented.
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+rng = np.random.default_rng(20260818)\n\
+nat_mix = lambda n: np.where(rng.random(n) < 0.10, np.datetime64('NaT'), rng.integers(0, 1 << 40, n).astype('datetime64[ns]'))\n\
+days = lambda n: rng.integers(0, 20000, n).astype('datetime64[D]')\n\
+offs = lambda n: rng.integers(-40, 40, n).astype('int64')\n\
+nat_small = nat_mix(1 << 20)\n\
+nat_big = nat_mix(1 << 22)\n\
+bc_a_small = days(1 << 18)\n\
+bc_b_small = days(1 << 18)\n\
+bc_a_big = days(1 << 19)\n\
+bc_b_big = days(1 << 19)\n\
+bo_d_small = days(1 << 18)\n\
+bo_d_big = days(1 << 19)\n\
+bo_o_small = offs(1 << 18)\n\
+bo_o_big = offs(1 << 19)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("nat/busday setup");
+
+        let get = |k: &str| ns.get_item(k).expect("fixture present");
+
+        // Sampled-lane checksum, computed OUTSIDE the timed region (the contract captures
+        // `elapsed` before this runs). Sampling suffices HERE only because full parity is
+        // already pinned by the unit tests; its job in this loop is to catch an arm that
+        // silently stops doing the work, not to certify equality.
+        //
+        // Read through an int64 VIEW rather than extracting elements: the three routes
+        // return three different dtypes - bool, int64 and datetime64[D] - and a datetime64
+        // scalar will not extract as `i64` at all. A view is O(1); `astype` would copy the
+        // whole array on every observation.
+        //
+        // THE LANES ARE INDEXED OFF THE VIEW, NOT THE ELEMENT COUNT. A bool result views as
+        // int64 whenever its length is a multiple of 8 - EIGHT BOOLS PER LANE - so the view
+        // is an eighth as long as the array, and indexing it by the element count would run
+        // off the end on every isnat row.
+        let checksum = |result: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let ints = result
+                .call_method1("view", ("int64",))
+                .expect("result viewable as int64");
+            let len = ints.len().expect("viewed length");
+            assert!(len > 0, "checksum needs a non-empty result");
+            let lane = |index: usize| -> u64 {
+                ints.get_item(index)
+                    .expect("result index")
+                    .extract::<i64>()
+                    .expect("lane is an integer") as u64
+            };
+            lane(0)
+                ^ lane(len / 3).rotate_left(13)
+                ^ lane(len / 2).rotate_left(29)
+                ^ lane(len - 1).rotate_left(41)
+        };
+
+        let mut rows: Vec<(String, &str, pyo3::Bound<'_, pyo3::types::PyTuple>)> = Vec::new();
+        for (tag, key) in [
+            ("isnat_dt64ns_n2p20", "nat_small"),
+            ("isnat_dt64ns_n2p22", "nat_big"),
+        ] {
+            rows.push((
+                format!("{tag}_vs_numpy_route"),
+                "isnat",
+                pyo3::types::PyTuple::new(py, [get(key)]).expect("args"),
+            ));
+        }
+        for (tag, a, b) in [
+            ("busday_count_dt64D_n2p18", "bc_a_small", "bc_b_small"),
+            ("busday_count_dt64D_n2p19", "bc_a_big", "bc_b_big"),
+        ] {
+            rows.push((
+                format!("{tag}_vs_numpy_route"),
+                "busday_count",
+                pyo3::types::PyTuple::new(py, [get(a), get(b)]).expect("args"),
+            ));
+        }
+        for (tag, d, o) in [
+            ("busday_offset_dt64D_n2p18", "bo_d_small", "bo_o_small"),
+            ("busday_offset_dt64D_n2p19", "bo_d_big", "bo_o_big"),
+        ] {
+            let roll = pyo3::types::PyString::new(py, "forward").into_any();
+            rows.push((
+                format!("{tag}_vs_numpy_route"),
+                "busday_offset",
+                pyo3::types::PyTuple::new(py, [get(d), get(o), roll]).expect("args"),
+            ));
+        }
+
+        for (row, name, args) in &rows {
+            let ours = module.getattr(*name).expect("fnp fn");
+            let theirs = numpy.getattr(*name).expect("numpy fn");
+            assert!(
+                !ours.is(&theirs),
+                "fnp.{name} IS numpy's object - there is no candidate arm"
+            );
+            let ours_probe = ours.call1(args).expect("fnp probe");
+            let theirs_probe = theirs.call1(args).expect("numpy probe");
+            assert_eq!(
+                checksum(&ours_probe),
+                checksum(&theirs_probe),
+                "fnp.{name} and numpy.{name} disagree on these operands"
+            );
+
+            let incumbent = || {
+                let started = Instant::now();
+                let result = theirs.call1(args).expect("numpy call");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum(&result),
+                }
+            };
+            let candidate = || {
+                let started = Instant::now();
+                let result = ours.call1(args).expect("fnp call");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum(&result),
+                }
+            };
+            let (effect, _incumbent_null, _candidate_null) =
+                common::run_dual_null_median_ci_contract(row, incumbent, candidate);
+            println!(
+                "NAT_BUSDAY_ROW row={row} ratio_median={:.6} ci95=[{:.6},{:.6}] \
+                 numpy_ns={:.0} fnp_ns={:.0}",
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns
+            );
+        }
+    });
+}
+
 fn bench_datetime_minmax_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_datetime_minmax_boundary");
     group.sample_size(10);
@@ -1932,6 +2097,10 @@ fn main() {
             (
                 "bench_timedelta_cumsum_boundary",
                 bench_timedelta_cumsum_boundary,
+            ),
+            (
+                "bench_datetime_nat_busday_boundary",
+                bench_datetime_nat_busday_boundary,
             ),
             (
                 "bench_datetime_minmax_boundary",
