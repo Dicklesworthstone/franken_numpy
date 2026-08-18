@@ -54193,3 +54193,79 @@ this host - a probe that adds a single `getattr` to an otherwise identical arm -
 inferring a per-entry cost by division. That is a cheap experiment and it would settle whether 313
 is real or whether part of the 939.9 is something else.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — ONE CPython ATTRIBUTE ENTRY COSTS 201.7 INSNS, MEASURED: the linear model holds (two estimates 3.4% apart), and it accounts for only 64% of the diffuse remainder — so my inferred 313 was 1.6x too high and the entry-count account is PARTIAL (deadlock-audit-56vq8)
+
+**Campaign result class:** a quotient I published replaced by a measurement, which weakens the
+account it was defending
+
+Worktree ELF, release-perf, threading pinned, 400,000 iterations/arm, 3 reps x 3 arms. Every arm:
+`selected_groups=1`, probe line printed, 0 panics — checked BEFORE reading any count, for reasons
+below. PRE loadavg 17.74/13.52/11.41, CPU idle 87%, runnable 10/64, iowait 0, 2309 MHz, /data 98G.
+
+```
+  getattrs=0   median   863,752,136   spread 0.0167%
+  getattrs=1   median   945,826,381   spread 0.0500%
+  getattrs=2   median 1,025,118,306   spread 0.0391%
+
+  TWO INDEPENDENT ESTIMATES of one getattr("dtype"):
+    (1 - 0) = 205.2 insns
+    (2 - 1) = 198.2 insns
+    3.4% apart -> the linear model HOLDS, so a single per-entry figure is meaningful
+    MEASURED COST PER CPython ATTRIBUTE ENTRY = 201.7 insns
+```
+
+Taking both differences was the point of the three-arm design: had they disagreed, no single
+per-entry number would have been quotable at all.
+
+### What it does to my own account
+
+```
+  inferred, published last row   939.9 / 3 extra entries = 313 insns per entry
+  measured                                                 201.7
+  the inference was 1.6x too high
+
+  3 extra entries x 201.7 = 605.1 insns/call explained
+  diffuse remainder        939.9
+  -> entry cost accounts for 64% of it, leaving ~335 insns/call UNEXPLAINED
+```
+
+I closed `56vq8` saying the diffuse remainder was explained by entry count. **It is 64% explained.**
+The remaining ~335 insns/call is not accounted for by the three extra CPython entries at their
+measured price, and I do not currently know what it is. Candidates I have NOT tested: the tp_call
+bridge (measured ~100 insns/call separately, which would take this to ~75%), refcount traffic on
+the objects our path creates and drops, and error-path setup that never executes but is still coded.
+
+**This is the second time in two rows that the same quotient has moved.** 157, then 313, now a
+measured 201.7 that explains less than either claimed. The pattern is that I kept reaching for a
+per-entry figure to close a gap rather than measuring one, and each version was tuned to the gap it
+had to fill. The measurement was cheap - one bench probe and one build - and I should have run it
+before writing the convergence row, not after publishing two versions of a division.
+
+### The process failure that preceded this number, recorded because it nearly produced a fake one
+
+The first build of this probe FAILED (`cannot find macro intern in this scope` - the bench file does
+not import `pyo3::intern`, unlike `lib.rs`). **I measured anyway**, because I put the exit-code check
+in the same command as the measurement and could not act on it. All nine runs returned ~479.8M,
+identical across getattrs=0/1/2, from a STALE ELF. Taken at face value that reads "a getattr costs
+zero instructions" - clean, precise, entirely fabricated.
+
+Three tells were in the output: `sel=` empty, `panics=1`, and identical counts across arms. The
+harness now prints `sel=` and `probe_printed=` on every line so a stale or unselected run is visible
+without being looked for. **A check chained into the same command as the action it gates is
+decoration** - the identical lesson as chaining `git diff --cached` to a commit, repeated within one
+session.
+
+COUNTED_MECHANISM: 201.7 insns per `getattr("dtype")` from two independent differences 3.4% apart,
+arm spreads 0.017-0.050%; 3 x 201.7 = 605.1 against a 939.9 diffuse remainder.
+
+A/A NULL CONTROLS: not applicable - counter differences on one ELF. The controls that held:
+`selected_groups=1` and probe-line-printed per arm (added after a stale-ELF run), 0 panics, and the
+in-probe assertion that every getattr succeeded.
+
+RETRY PREDICATE: `56vq8` stays closed - its inventory of why each entry remains does not depend on
+this arithmetic - but the "entry count explains the residual" claim must now be quoted as **64%
+explained, ~335 insns/call unexplained**. The next probe on this line should price the tp_call
+bridge directly the same way (an arm that calls through tp_call vs one that does not), rather than
+carrying the ~100 figure over from a per-symbol profile.
+AGENT_NAME=SlateFinch.
