@@ -20260,28 +20260,44 @@ fn try_zerocopy_f16_diff_1d(
             .enumerate()
             .for_each(|(chunk_index, out)| {
                 let base = chunk_index * chunk;
-                let mut local_hazard = false;
+                // BRANCHLESS HAZARD ACCUMULATE, no early exit (`deadlock-audit-6y5wp`).
+                //
+                // Same defect and same fix as the f64 floor-divide arm one lane over: two
+                // `break`s and five short-circuiting `&&`/`||` per element, none of which
+                // fire on the data this route exists to serve. Replaced by `|` and `&` on
+                // `u16`-derived predicates and one accumulator, so the body has no control
+                // flow and a fixed trip count.
+                //
+                // THE DEFERRAL CONDITION IS UNCHANGED, element for element. Both original
+                // clauses are reproduced exactly:
+                //   1. either operand is NaN, or BOTH are infinities (inf - inf)
+                //   2. the difference overflowed to infinity from two finite operands
+                // Clause 2 still depends on the computed difference, so it is evaluated
+                // after the subtraction rather than before - which is why the subtraction
+                // now runs unconditionally.
+                //
+                // COST ON THE RARE PATH, accepted deliberately: with the breaks gone the
+                // subtraction runs for every element even when a hazard is present. Those
+                // values are discarded, because a hazard defers the whole call to NumPy.
+                let mut hazard_bits = 0u8;
                 for (offset, slot) in out.iter_mut().enumerate() {
                     let low_bits = input[base + offset];
                     let high_bits = input[base + offset + 1];
                     let low_exp = low_bits & 0x7c00;
                     let high_exp = high_bits & 0x7c00;
-                    let low_nan = low_exp == 0x7c00 && low_bits & 0x03ff != 0;
-                    let high_nan = high_exp == 0x7c00 && high_bits & 0x03ff != 0;
-                    if low_nan || high_nan || (low_exp == 0x7c00 && high_exp == 0x7c00) {
-                        local_hazard = true;
-                        break;
-                    }
+                    let low_nan = u8::from(low_exp == 0x7c00) & u8::from(low_bits & 0x03ff != 0);
+                    let high_nan = u8::from(high_exp == 0x7c00) & u8::from(high_bits & 0x03ff != 0);
+                    let both_inf = u8::from(low_exp == 0x7c00) & u8::from(high_exp == 0x7c00);
                     let difference = f16::from_f32(
                         f16::from_bits(high_bits).to_f32() - f16::from_bits(low_bits).to_f32(),
                     );
-                    if difference.is_infinite() && low_exp != 0x7c00 && high_exp != 0x7c00 {
-                        local_hazard = true;
-                        break;
-                    }
+                    let overflowed = u8::from(difference.is_infinite())
+                        & u8::from(low_exp != 0x7c00)
+                        & u8::from(high_exp != 0x7c00);
+                    hazard_bits |= low_nan | high_nan | both_inf | overflowed;
                     *slot = difference.to_bits();
                 }
-                if local_hazard {
+                if hazard_bits != 0 {
                     hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             });
@@ -34438,6 +34454,32 @@ fn searchsorted(
     // same outcome the `?` on the old form produced by propagating an error only when the
     // attribute was genuinely absent, and a safer one when it is merely odd.
     let a_kind = dtype_kind_of(&a_arr).unwrap_or('\0');
+    // EXACT FLOAT WIDTH, because `kind` cannot distinguish one (`deadlock-audit-v46rn`).
+    // UNMEASURED - landed unbuilt under a disk freeze.
+    //
+    // f16, f32 and f64 ALL report dtype kind `'f'`, so the five float probes below were each
+    // gated on `a_kind == 'f'` and every one of them ran for every float haystack, declining on
+    // WIDTH inside itself after doing its own dtype reads. An f64 array needle paid the f16
+    // probe; an f32 haystack paid the f16 probe AND both f64 probes before reaching its own.
+    //
+    // The typechar separates them exactly: 'e' f16, 'f' f32, 'd' f64.
+    //
+    // COMPUTED LAZILY, and that is the whole cost story. This adds ONE attribute read, and only
+    // for float haystacks - which is exactly the case where it removes at least one probe that
+    // would each have read `dtype` itself. Non-float haystacks (int, string, complex, temporal,
+    // struct) reach the `else` and pay nothing. The four probes it can skip do strictly more
+    // work than the one read it costs, so the trade should be positive, but it is NOT measured
+    // and no number is claimed.
+    //
+    // `a_kind` IS DELIBERATELY LEFT IN PLACE for the string/complex/struct/temporal/integer
+    // gates. Deriving those from the typechar too would need a complete char->kind map, and an
+    // incomplete map would silently misroute an exotic dtype - a correctness risk taken for no
+    // measured gain. One read, one purpose.
+    let a_float_char = if a_kind == 'f' {
+        dtype_char_of(&a_arr).unwrap_or('\0')
+    } else {
+        '\0'
+    };
     // Fixed-width unicode/bytes ('U' Latin-1 / 'S') sorted-haystack + same-width query array: parallel
     // memcmp binary search (numpy's per-record string binary search is ~2s @2M). C-contiguous N-D
     // queries use a zero-copy flat view, then recover numpy's query shape. Wide 'U' codepoints defer.
@@ -34522,7 +34564,7 @@ fn searchsorted(
         return Ok(out);
     }
     // float16 haystack + queries: widen exact to f32, route to the fast f32 searchsorted (numpy f16 ~332ms).
-    if a_kind == 'f'
+    if a_float_char == 'e'
         && sorter.is_none()
         && let Some(out) = try_native_f16_searchsorted(py, &numpy, &a_arr, v.bind(py), side)?
     {
@@ -34624,7 +34666,7 @@ fn searchsorted(
     // integer haystack (`deadlock-audit-v46rn`).
     if sorter.is_none()
         && !v_is_scalar
-        && a_kind == 'f'
+        && a_float_char == 'd'
         && let Some(out) = try_zerocopy_f64_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
@@ -34633,7 +34675,7 @@ fn searchsorted(
     // haystack, which dominates for a small query array (~13x slower at n_query=1000).
     if sorter.is_none()
         && !v_is_scalar
-        && a_kind == 'f'
+        && a_float_char == 'd'
         && let Some(out) = try_zerocopy_f64_searchsorted(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
@@ -34643,7 +34685,7 @@ fn searchsorted(
     // fall through to the parallel binary search below.
     if sorter.is_none()
         && !v_is_scalar
-        && a_kind == 'f'
+        && a_float_char == 'f'
         && let Some(out) = try_zerocopy_f32_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
@@ -34652,7 +34694,7 @@ fn searchsorted(
     // (~1.6s for 8M queries into a 1M sorted f32). The parallel per-query search wins; NaN defers.
     if sorter.is_none()
         && !v_is_scalar
-        && a_kind == 'f'
+        && a_float_char == 'f'
         && let Some(out) = try_zerocopy_f32_searchsorted(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
@@ -57975,15 +58017,37 @@ fn try_zerocopy_f64_floor_divide(
             .par_chunks_mut(chunk)
             .zip(a_raw.par_chunks(chunk).zip(b_raw.par_chunks(chunk)))
             .for_each(|(o, (ac, bc))| {
-                let mut chunk_hazard = false;
+                // BRANCHLESS HAZARD ACCUMULATE, no early exit (`deadlock-audit-6y5wp`).
+                //
+                // The old body tested three short-circuiting conditions per element and
+                // `break`-ed out on the first hit. On hazard-free data - the case this
+                // route exists to serve - the break never fires, so every one of those
+                // branches is pure per-element overhead, and the early exit additionally
+                // denies LLVM the fixed trip count it needs to unroll.
+                //
+                // `|` instead of `||`, and an accumulator instead of a break, evaluates the
+                // same three predicates with no control flow at all. The deferral condition
+                // is UNCHANGED, element for element - which matters because a wrong answer
+                // here is silent: we would return quotients where NumPy raises a warning.
+                //
+                // NOT CLAIMED: that this vectorises. It does not, and the reason is worth
+                // recording so nobody re-attempts it - `npy_floor_divide_f64` computes
+                // `a % b`, and LLVM lowers f64 `frem` to an `fmod` CALL, which no
+                // vectoriser can cross. The win here is branch and unroll shape only.
+                //
+                // COST ON THE RARE PATH, accepted deliberately: with the break gone we
+                // compute the quotient for every element even when a hazard is present.
+                // Those values are discarded - a hazard defers the whole call to NumPy - so
+                // this trades work we throw away in the rare case for branches we never
+                // execute in the common one.
+                let mut hazard_bits = 0u8;
                 for ((slot, &av), &bv) in o.iter_mut().zip(ac).zip(bc) {
-                    if !av.is_finite() || !bv.is_finite() || bv == 0.0 {
-                        chunk_hazard = true;
-                        break;
-                    }
+                    hazard_bits |= u8::from(!av.is_finite())
+                        | u8::from(!bv.is_finite())
+                        | u8::from(bv == 0.0);
                     *slot = npy_floor_divide_f64(av, bv);
                 }
-                if chunk_hazard {
+                if hazard_bits != 0 {
                     hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             });
