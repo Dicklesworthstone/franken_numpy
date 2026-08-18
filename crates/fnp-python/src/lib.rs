@@ -34383,7 +34383,7 @@ fn searchsorted(
     // searchsorted (numpy delegates datetime searchsorted, ~867ms @2M+2M; indices are dtype-agnostic). NaT defer.
     if (a_kind == 'M' || a_kind == 'm')
         && sorter.is_none()
-        && let Some(out) = try_native_datetime_searchsorted(py, &numpy, &a_arr, v.bind(py), side)?
+        && let Some(out) = try_native_datetime_searchsorted(py, &a_arr, v.bind(py), side)?
     {
         return Ok(out);
     }
@@ -36326,7 +36326,7 @@ fn try_zerocopy_f64_gradient_1d(
     if edge_order != 1 && edge_order != 2 {
         return Ok(None);
     }
-    if !f.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !f.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dtype = f.getattr("dtype")?;
@@ -36453,7 +36453,7 @@ fn try_zerocopy_f64_gradient_1d_coords(
     if edge_order != 1 {
         return Ok(None);
     }
-    let ndt = numpy.getattr("ndarray")?;
+    let ndt = cached_ndarray_type(py)?.clone();
     if !f.is_exact_instance(&ndt) || !x.is_exact_instance(&ndt) {
         return Ok(None);
     }
@@ -36541,7 +36541,7 @@ fn try_zerocopy_f64_gradient_2d_coords(
     if edge_order != 1 {
         return Ok(None);
     }
-    let ndt = numpy.getattr("ndarray")?;
+    let ndt = cached_ndarray_type(py)?.clone();
     for arr in [f, cy, cx] {
         if !arr.is_exact_instance(&ndt) {
             return Ok(None);
@@ -36691,7 +36691,7 @@ fn try_zerocopy_f64_gradient_axis_coords(
     if edge_order != 1 {
         return Ok(None);
     }
-    let ndt = numpy.getattr("ndarray")?;
+    let ndt = cached_ndarray_type(py)?.clone();
     if !f.is_exact_instance(&ndt) || !coord.is_exact_instance(&ndt) {
         return Ok(None);
     }
@@ -36834,7 +36834,7 @@ fn try_zerocopy_f32_gradient_1d(
     if edge_order != 1 {
         return Ok(None);
     }
-    if !f.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(f) {
+    if !f.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(f) {
         return Ok(None);
     }
     let Ok(buffer) = PyBuffer::<f32>::get(f) else {
@@ -36936,7 +36936,7 @@ fn try_zerocopy_f64_gradient_strided_axis(
     if edge_order != 1 && edge_order != 2 {
         return Ok(None);
     }
-    if !f.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !f.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dtype = f.getattr("dtype")?;
@@ -37070,7 +37070,7 @@ fn try_zerocopy_f32_gradient_strided_axis(
     if edge_order != 1 {
         return Ok(None);
     }
-    if !f.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(f) {
+    if !f.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(f) {
         return Ok(None);
     }
     let Ok(buffer) = PyBuffer::<f32>::get(f) else {
@@ -43048,7 +43048,7 @@ fn try_zerocopy_f16_nansum_flat(
     // parallel path (no NaN pre-scan needed) wins from ~130K up. Measured crossover ~1<<17.
     const F16_NANSUM_PARALLEL_MIN: usize = 1 << 17;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = numpy.getattr("ndarray")?;
+    let ndarray_type = cached_ndarray_type(py)?.clone();
     if !x.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
@@ -43104,7 +43104,7 @@ fn try_zerocopy_f16_nanmean_flat(
     // its fixed overhead is larger; measured crossover ~1<<19 (262K is 1.04x, 1M is 0.58x win).
     const F16_NANMEAN_PARALLEL_MIN: usize = 1 << 19;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = numpy.getattr("ndarray")?;
+    let ndarray_type = cached_ndarray_type(py)?.clone();
     if !x.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
@@ -45670,7 +45670,7 @@ fn try_zerocopy_f32_nansum_nanprod_nonlast_axis(
     is_prod: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = numpy.getattr("ndarray")?;
+    let ndarray_type = cached_ndarray_type(py)?.clone();
     if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
@@ -52043,7 +52043,7 @@ fn isin(
     }
     // datetime64/timedelta64 membership via the int64 view -> fast int isin (numpy delegates, ~341ms); NaT defer.
     if let Some(out) =
-        try_native_datetime_isin(py, &numpy, element.bind(py), test_elements.bind(py), invert)?
+        try_native_datetime_isin(py, element.bind(py), test_elements.bind(py), invert)?
     {
         return Ok(out);
     }
@@ -52134,7 +52134,7 @@ fn try_native_string_isin(
 ) -> PyResult<Option<Py<PyAny>>> {
     const ISIN_MIN: usize = 1 << 16;
     let numpy = py.import("numpy")?;
-    let nd = numpy.getattr("ndarray")?;
+    let nd = cached_ndarray_type(py)?.clone();
     if !element.is_exact_instance(&nd) || !test.is_exact_instance(&nd) {
         return Ok(None);
     }
@@ -52239,7 +52239,7 @@ fn try_native_struct_isin(
 ) -> PyResult<Option<Py<PyAny>>> {
     const ISIN_MIN: usize = 1 << 16;
     let numpy = py.import("numpy")?;
-    let nd = numpy.getattr("ndarray")?;
+    let nd = cached_ndarray_type(py)?.clone();
     if !element.is_exact_instance(&nd) || !test.is_exact_instance(&nd) {
         return Ok(None);
     }
@@ -53879,7 +53879,7 @@ fn try_zerocopy_int_isin(
     invert: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = numpy.getattr("ndarray")?;
+    let ndarray_type = cached_ndarray_type(py)?.clone();
     if !element.is_exact_instance(&ndarray_type) || !test.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
@@ -54030,7 +54030,7 @@ fn try_zerocopy_float_isin(
     invert: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = numpy.getattr("ndarray")?;
+    let ndarray_type = cached_ndarray_type(py)?.clone();
     if !element.is_exact_instance(&ndarray_type) || !test.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
@@ -66427,7 +66427,7 @@ fn try_zerocopy_c128_searchsorted(
     {
         return Ok(None);
     }
-    if !v.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !v.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let v_dt = v.getattr("dtype")?;
@@ -66536,7 +66536,7 @@ fn try_zerocopy_c128_isin(
 ) -> PyResult<Option<Py<PyAny>>> {
     const ISIN_MIN: usize = 1 << 16;
     let numpy = py.import("numpy")?;
-    let nd = numpy.getattr("ndarray")?;
+    let nd = cached_ndarray_type(py)?.clone();
     if !element.is_exact_instance(&nd) || !test.is_exact_instance(&nd) {
         return Ok(None);
     }
@@ -66657,7 +66657,7 @@ fn try_zerocopy_c64_searchsorted(
     {
         return Ok(None);
     }
-    if !v.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !v.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let v_dt = v.getattr("dtype")?;
@@ -66759,7 +66759,7 @@ fn try_zerocopy_c64_isin(
 ) -> PyResult<Option<Py<PyAny>>> {
     const ISIN_MIN: usize = 1 << 16;
     let numpy = py.import("numpy")?;
-    let nd = numpy.getattr("ndarray")?;
+    let nd = cached_ndarray_type(py)?.clone();
     if !element.is_exact_instance(&nd) || !test.is_exact_instance(&nd) {
         return Ok(None);
     }
@@ -69723,12 +69723,11 @@ fn datetime_has_nat(py: Python<'_>, arr: &Bound<'_, PyAny>) -> PyResult<bool> {
 // first). Same-dtype (same unit) array query only. BYTE-EXACT for finite (both sides verified vs numpy).
 fn try_native_datetime_searchsorted(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a_arr: &Bound<'_, PyAny>,
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !v.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !v.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let a_dt = a_arr.getattr("dtype")?;
@@ -69749,12 +69748,11 @@ fn try_native_datetime_searchsorted(
 // finite (verified vs numpy).
 fn try_native_datetime_isin(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     element: &Bound<'_, PyAny>,
     test: &Bound<'_, PyAny>,
     invert: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let nd = numpy.getattr("ndarray")?;
+    let nd = cached_ndarray_type(py)?.clone();
     if !element.is_exact_instance(&nd) || !test.is_exact_instance(&nd) {
         return Ok(None);
     }
@@ -69808,7 +69806,7 @@ fn try_native_f16_isin(
     test: &Bound<'_, PyAny>,
     invert: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let nd = numpy.getattr("ndarray")?;
+    let nd = cached_ndarray_type(py)?.clone();
     if !f16_dtype_ok(element, &nd)? || !f16_dtype_ok(test, &nd)? || element.len()? < (1 << 14) {
         return Ok(None);
     }
@@ -69902,7 +69900,7 @@ fn try_native_f16_searchsorted(
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let nd = numpy.getattr("ndarray")?;
+    let nd = cached_ndarray_type(py)?.clone();
     if !f16_dtype_ok(a_arr, &nd)? || !f16_dtype_ok(v, &nd)? || v.len()? < (1 << 14) {
         return Ok(None);
     }
@@ -70132,7 +70130,7 @@ fn try_native_searchsorted_struct(
     {
         return Ok(None);
     }
-    if !v.is_exact_instance(&numpy.getattr("ndarray")?) || !a_dtype.eq(&v.getattr("dtype")?)? {
+    if !v.is_exact_instance(cached_ndarray_type(py)?) || !a_dtype.eq(&v.getattr("dtype")?)? {
         return Ok(None);
     }
     if v.getattr("ndim")?.extract::<usize>()? != 1
@@ -70194,7 +70192,7 @@ fn try_native_searchsorted_struct_valuelex(
     if itemsize == 0 || itemsize > 256 {
         return Ok(None);
     }
-    if !v.is_exact_instance(&numpy.getattr("ndarray")?) || !dtype.eq(&v.getattr("dtype")?)? {
+    if !v.is_exact_instance(cached_ndarray_type(py)?) || !dtype.eq(&v.getattr("dtype")?)? {
         return Ok(None);
     }
     for arr in [a_arr, v] {
@@ -70564,7 +70562,7 @@ fn try_native_string_searchsorted(
         return Ok(None);
     }
     // Query array must be a same-kind ('U'/'S'), same-width, 1-D C-contiguous ndarray.
-    if !v.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !v.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let v_dtype = v.getattr("dtype")?;
@@ -84766,7 +84764,7 @@ fn try_zerocopy_complex_cumsum_lastaxis(
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_CUMSUM_PARALLEL_MIN: usize = 1 << 18; // complex elements
     let numpy = py.import("numpy")?;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -84913,7 +84911,7 @@ fn try_zerocopy_complex_cumprod_lastaxis(
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_CUMPROD_PARALLEL_MIN: usize = 1 << 18; // complex elements
     let numpy = py.import("numpy")?;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;
@@ -85991,7 +85989,7 @@ fn try_zerocopy_complex_cumulative_nonlast(
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_CUM_NONLAST_PARALLEL_MIN: usize = 1 << 18; // complex elements
     let numpy = py.import("numpy")?;
-    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dt = a.getattr("dtype")?;

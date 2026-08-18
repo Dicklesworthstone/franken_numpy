@@ -54839,3 +54839,57 @@ the null by construction.
 RETRY PREDICATE: none. Consequence for future rows: quote spread only from >=5 reps, or label it
 "incidental, 3 reps". Do not attach a mechanism to a 2-observation ordering.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — the nine-dispatcher tier converted (28 sites), clippy NET -2 BELOW baseline; 122 tests green with one suite truncated, and NOT MEASURED (deadlock-audit-c5ecm)
+
+**Result class:** sequenced source work, validated, with the counted row deliberately not taken.
+
+Third tranche of the ndarray-type conversion, covering `cumsum`, `cumprod`, `nanmean`, `nansum`,
+`nanstd`, `nanvar`, `gradient`, `isin`, `searchsorted` — 66 distinct probe helpers between them,
+28 unconverted sites.
+
+```
+  13 inline   `&numpy.getattr("ndarray")?`  ->  cached_ndarray_type(py)?
+  15 bindings `let X = numpy.getattr(..)?;` ->  let X = cached_ndarray_type(py)?.clone();
+  28 of 28 accounted for; 0 skipped
+```
+
+The binding shape needs `.clone()` so the local stays an OWNED `Bound` and every existing `&X` use
+still compiles; that clone is a `Py_INCREF`, single-digit instructions against ~1,400 for the
+getattr it replaces. The conversion script reports any shape it does not recognise rather than
+rewriting it, and asserts the recognised + skipped counts sum to the pre-counted 28.
+
+**CLIPPY WENT BELOW BASELINE: 326 vs 328, delta -2.** The conversion left `numpy` unused in
+`try_native_datetime_searchsorted` and `try_native_datetime_isin`; I removed the dead parameter from
+both (one caller each) rather than underscore-prefixing it, and dropping the two `&numpy` arguments
+also removed two "reference immediately dereferenced" warnings. Worth stating because the +2 was
+the FIRST signal — differencing against a baseline caught it, and reading "0 errors" would not have.
+
+```
+  VALIDATED   check          0 errors
+              clippy         326 = baseline 328 MINUS 2
+              test           122 passed, 0 failed, 10 suites completed
+                             (cumsum, cumsum_zerocopy, cumprod_zerocopy, cumulative, nan_funcs,
+                              nan_funcs_wide, gradient, diff_gradient, isin_fromiter, searching)
+  TRUNCATED   conformance_searchsorted_containers STARTED and was cut mid-run by RCH-E104 at the
+              1800s SSH ceiling. NOT a failure, and NOT a pass either - it is unresolved. That
+              suite passed on this same lever's earlier tranches (3 passed) but not on THIS source.
+  NOT DONE    any counted measurement
+```
+
+**NO NUMBER IS CLAIMED.** These nine dispatchers have no counter arm, so measuring them means new
+bench arms plus two ELFs, and the per-site figure is already replicated twice (1,360.9 argsort,
+1,456.0 sort). What a third measurement would add is confirmation that the constant holds for
+`let`-binding sites, which differ from the inline sites both prior rows measured — that is a real
+open question and it is registered below rather than assumed away.
+
+RUNNING TOTAL: argsort 32 (measured), sort 23 (measured), this tier 28 (unmeasured) = 83 sites
+converted; roughly 385 remain.
+
+COUNTED_MECHANISM: none claimed.
+A/A NULL CONTROLS: not applicable - no ratio claimed.
+RETRY PREDICATE: (1) re-run conformance_searchsorted_containers alone on a warm worker to resolve
+the truncation; (2) if a third measurement is wanted, add a cumsum counter arm and price the
+`let`-binding shape specifically, since both measured rows so far converted INLINE sites only and
+the `.clone()` makes the binding shape a genuinely different quantity.
+AGENT_NAME=SlateFinch.
