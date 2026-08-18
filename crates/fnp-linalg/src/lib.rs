@@ -9144,6 +9144,106 @@ fn packed_gemm_sub_assign_blocked(
     }
 }
 
+/// `target -= a * b` for a STRIDED target, blocked over column blocks of `b` with each block packed
+/// ONCE and shared by every row band.
+///
+/// UNMEASURED - not wired into any live path; `packed_gemm_sub_assign_strided` is unchanged.
+///
+/// THIS IS THE FORM THE FACTORISATIONS ACTUALLY USE, which the contiguous driver does not serve.
+/// Blocked LU's trailing update calls `packed_gemm_sub_assign_strided` against
+/// `&mut lu[target_start..]`, whose rows are `n` apart while the update is only `trail` wide; the
+/// contiguous `packed_gemm_sub_assign` is reached only from the multi-RHS solve. The redundancy is
+/// real on this path: `packed_gemm_sub_assign_strided` splits into row bands and hands each one
+/// `packed_gemm_sub_assign_strided_serial`, which packs `b` itself, so every thread rebuilds the
+/// identical panels.
+///
+/// Tile height comes from `packed_sub_assign_tile_rows(k)`, matching the kernel this would replace.
+/// Band heights are `mr`-aligned, so every band except the last has `rows % mr == 0` and the global
+/// remainder rows fall entirely in the last band - the same argument the contiguous driver rests on.
+///
+/// Tails run ONCE after the block loop, not once per block, and now go through the shared
+/// `packed_row_tail_sub_assign` with an explicit `row_stride`.
+fn packed_gemm_sub_assign_strided_blocked(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    row_stride: usize,
+    target: &mut [f64],
+) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    debug_assert!(row_stride >= n);
+    debug_assert!(target.len() >= (m - 1) * row_stride + n);
+
+    let n_full = n - n % PACKED_NR;
+    let total_panels = n_full / PACKED_NR;
+    let narrow = packed_sub_assign_tile_rows(k) == PACKED_MR_NARROW;
+    let mr = if narrow { PACKED_MR_NARROW } else { PACKED_MR };
+
+    let parallel = m >= MATMUL_PARALLEL_MIN_DIM
+        && k >= MATMUL_PARALLEL_MIN_DIM
+        && n >= MATMUL_PARALLEL_MIN_DIM
+        && rayon::current_num_threads() >= 2;
+    let band_rows = if parallel {
+        let threads = rayon::current_num_threads();
+        (m.div_ceil(threads * 4).div_ceil(mr).max(1)) * mr
+    } else {
+        m.max(1)
+    };
+
+    let block_panels = packed_block_panels(k);
+    let mut p0 = 0;
+    while p0 < total_panels {
+        let count = block_panels.min(total_panels - p0);
+        // Packed once here, OUTSIDE the band loop - the entire point of this ordering.
+        let bp = pack_b_panel_block(b, k, n, p0, count);
+        if parallel {
+            target
+                .par_chunks_mut(band_rows * row_stride)
+                .enumerate()
+                .for_each(|(bi, target_band)| {
+                    let row_start = bi * band_rows;
+                    if row_start >= m {
+                        return;
+                    }
+                    // Not `target_band.len() / row_stride`: the final chunk is short by the
+                    // padding this view never owned, so the row count comes from `m`.
+                    let rows = (m - row_start).min(band_rows);
+                    let a_band = &a[row_start * k..row_start * k + rows * k];
+                    if narrow {
+                        packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
+                            a_band, &bp, rows, k, n, row_stride, p0, count, target_band,
+                        );
+                    } else {
+                        packed_gemm_sub_assign_band_block::<PACKED_MR>(
+                            a_band, &bp, rows, k, n, row_stride, p0, count, target_band,
+                        );
+                    }
+                });
+        } else if narrow {
+            packed_gemm_sub_assign_band_block::<PACKED_MR_NARROW>(
+                a, &bp, m, k, n, row_stride, p0, count, target,
+            );
+        } else {
+            packed_gemm_sub_assign_band_block::<PACKED_MR>(
+                a, &bp, m, k, n, row_stride, p0, count, target,
+            );
+        }
+        p0 += count;
+    }
+
+    let m_full = m - m % mr;
+    for i in 0..m_full {
+        packed_row_tail_sub_assign(a, b, target, i, k, n, row_stride, n_full);
+    }
+    for i in m_full..m {
+        packed_row_tail_sub_assign(a, b, target, i, k, n, row_stride, 0);
+    }
+}
+
 /// One remainder row of `target -= a * b`, columns `j0..n`.
 ///
 /// `n` is B's ROW STRIDE; `row_stride` is the TARGET's row pitch. They were the same parameter
@@ -22840,6 +22940,48 @@ except Exception as exc:
             assert_eq!(
                 want_bits, got_bits,
                 "blocked sub_assign driver diverged in BITS at m={m} k={k} n={n}"
+            );
+        }
+    }
+
+    #[test]
+    fn strided_sub_assign_blocked_is_bit_exact_and_leaves_padding_alone() {
+        // The STRIDED form is the one blocked LU actually calls, against `&mut lu[start..]` whose
+        // rows are `n` apart while the update is only `trail` wide. Every shape here therefore has
+        // `row_stride > n`, which the contiguous test cannot reach.
+        for &(m, k, n, row_stride) in &[
+            (8usize, 5usize, 16usize, 20usize),
+            (12, 33, 24, 31),
+            // Both of these clear MATMUL_PARALLEL_MIN_DIM on every dimension, so they exercise the
+            // band-parallel path where the packed block is shared - the reason this driver exists.
+            (128, 128, 128, 160),
+            // Ragged in BOTH directions at once: 132 % 8 leaves remainder columns and 130 % 4
+            // leaves remainder rows, which is exactly what a per-block tail would corrupt.
+            (130, 129, 132, 150),
+        ] {
+            let a: Vec<f64> = (0..m * k).map(|i| ((i * 29 % 83) as f64) / 2.0 - 20.25).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| ((i * 47 % 71) as f64) / 8.0 - 4.375).collect();
+            // Non-zero seed: this path SUBTRACTS into live data, so a zero seed would hide a sign
+            // or accumulation error. The buffer spans the full pitch, so the columns in
+            // `n..row_stride` are padding the kernel must never write.
+            let seed: Vec<f64> =
+                (0..m * row_stride).map(|i| ((i * 17 % 61) as f64) - 30.5).collect();
+
+            let mut want = seed.clone();
+            super::packed_gemm_sub_assign_strided(&a, &b, m, k, n, row_stride, &mut want);
+            let mut got = seed;
+            super::packed_gemm_sub_assign_strided_blocked(
+                &a, &b, m, k, n, row_stride, &mut got,
+            );
+
+            // Compared over the WHOLE buffer, padding included. A strided kernel that ran off the
+            // end of a row would differ only in those columns, and a comparison restricted to the
+            // live n columns would report success.
+            let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+            let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(
+                want_bits, got_bits,
+                "strided blocked driver diverged in BITS at m={m} k={k} n={n} stride={row_stride}"
             );
         }
     }
