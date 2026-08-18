@@ -55504,3 +55504,70 @@ do and the ns gap narrows, the kernel and accumulate halves are ONE problem and 
 into a single bead. Both halves must be built in the SAME toolchain environment - this census is
 local codegen and the bead's local/remote warning stands.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — `v46rn`'s BLOCKING ceiling measurement finally RUN, build-free from a preserved ELF: the hoist ceiling is 681.0 ns of a 2,044 ns per-call floor, and the group's own scaling assertion PASSED at 5.864 (deadlock-audit-v46rn)
+
+**Result class:** a registered blocking measurement discharged by MEASUREMENT rather than by the
+argument I had substituted for it. No build; the group was already compiled into `elf_sort_after`.
+
+I had previously argued this measurement was unnecessary — the entry-cost probe showed a second
+`getattr` of the same attribute costs the same as the first, which answered the bead's blocking
+question (does CPython cache repeated dtype fetches?). That argument was sound but it was still an
+argument. The group was registered, compiled and sitting in a preserved ELF the whole time, so it
+cost nothing to just run it.
+
+```
+  DTYPE_PROBE_FANOUT_CEILING  n=256  numpy 2.4.3  worker=thinkstation1
+  harness=replica_min_of_2001  trials=2001  probe_fanout=6
+
+    repeated_1_ns    140.0
+    repeated_2_ns    280.0
+    repeated_n_ns    821.0        (n = 6)
+    hoisted_n_ns     140.0
+    per_fetch_pair   140.0
+    SAVED            681.0 ns     <- the ceiling on any threading
+    scaling_ratio    5.864        <- against an ideal 6.0
+
+  reference: route floor excess 2,044.0 ns at n=256; NumPy's WHOLE call 410.0 ns
+  ELF sha f73349a713eede08, selected_groups=1, exit 0
+  CPU_WITNESS: arm_a_cpu=20 arm_b_cpu=20 same_core=true, MHz 4290.6/4290.5 (incumbent null),
+  4288.8/4288.8 (candidate null), 4291.9/4291.8 (effect), arm_mhz_spread 1.0000
+  host load 5.13, idle 76%, governor=powersave, avx512f=false
+```
+
+### The group's built-in self-invalidation did NOT fire, which is the point
+
+The bead specified that this group must PANIC and declare itself void if `repeated(6)/repeated(1)`
+came in under 2.0, because a cached CPython lookup would produce a tiny saving that a naive reader
+would bank as a finding. **It measured 5.864 against an ideal 6.0** — the fetches scale essentially
+linearly and are not cached. That independently confirms the entry-cost probe's conclusion by a
+completely different method (ns, synthetic fanout, min-of-2001) than the one that produced it
+(retired instructions, 0/1/2 arms).
+
+### Against the bead's own registered decision rule
+
+The bead said: *"if per-fetch-pair is ~140 ns and 6 families fetch independently, the ceiling is
+~700-840 ns ... and worth taking. If the ceiling is under ~200 ns, the fetch is effectively cached
+and the whole shared-dtype line closes."*
+
+Measured per-fetch-pair is **exactly 140.0 ns**, and the ceiling is **681.0 ns** — 2.7% below the
+predicted band's low end, and more than three times the 200 ns threshold that would have closed the
+line. **So the line does not close: v46rn stays OPEN with a quantified ceiling of 681 ns, or 33.3%
+of the 2,044 ns per-call floor.**
+
+**WHAT IS NOT KNOWN, and it bounds the remaining prize:** the shipped sniff hoist (`d29b508e`) and
+the searchsorted probe gating already capture an unmeasured part of that 681 ns. So 681 is the
+ceiling for hoisting ALL six families from a cold start, not the residual prize today. The residual
+is **at most 681 ns and I have not measured how much is already taken** — that is the next question
+on this bead, and it should not be estimated by subtracting instruction-derived figures, since
+instructions do not convert to ns at a constant rate (established today across three cells).
+
+COUNTED_MECHANISM: repeated 140.0/280.0/821.0 ns at fanout 1/2/6 vs hoisted 140.0; saving 681.0 ns;
+scaling 5.864 against the group's own >=2.0 void threshold; min-of-2001 estimator, same-core arms at
+4290 MHz with spread 1.0000.
+A/A NULL CONTROLS: this group deliberately runs no dual-null contract - both arms are the same
+operation at different fanouts, so the SCALING assertion is the control, and it passed.
+RETRY PREDICATE: measure how much of the 681 ns the shipped hoist already captures, by running this
+same group against an ELF built before `d29b508e` — or accept the ceiling as an upper bound and
+measure the real route directly. Do NOT derive it from the 352.5 insns/call the sniff lever saved.
+AGENT_NAME=SlateFinch.
