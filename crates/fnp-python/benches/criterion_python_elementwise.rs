@@ -1362,6 +1362,14 @@ fn main() {
                 bench_binary_counter_divide_numpy,
             ),
             (
+                "bench_argsort_counter_fnp_i64",
+                bench_argsort_counter_fnp_i64,
+            ),
+            (
+                "bench_argsort_counter_numpy_i64",
+                bench_argsort_counter_numpy_i64,
+            ),
+            (
                 "bench_binary_counter_multiply_fnp_plain",
                 bench_binary_counter_multiply_fnp_plain,
             ),
@@ -7082,6 +7090,90 @@ fn binary_counter_probe_with_casting(op: &str, use_fnp: bool, casting: Option<&s
             casting.unwrap_or("default_same_kind"),
         );
     });
+}
+
+// PRICING THE DECLINING PROBE CHAIN, on the dispatcher that has the most of it
+// (`deadlock-audit-v46rn`).
+//
+// WHY `argsort` AND WHY AN int64 OPERAND: argsort calls 32 probe helpers, and on an operand that
+// is neither f32 nor f16 nor complex, the f32/f16/complex ones all run purely to DECLINE. That
+// makes this the densest reachable concentration of `numpy_dtype_is_*` calls in the crate, so a
+// change to those predicates shows up here or nowhere. int64 is chosen over f64 deliberately:
+// f64 would be answered by `numpy_dtype_is_f64`, which ALREADY has its fast path, and the arm
+// would measure a route that is not being changed.
+//
+// THE ARM IS ONE-SIDED ON PURPOSE. This is not an fnp-vs-numpy ratio and must never be quoted as
+// one - the comparison is the SAME arm across two ELFs (before and after the predicate change),
+// so the only thing that differs is the code under test. A numpy arm is included anyway, not to
+// form a ratio but as a NULL: numpy's argsort is untouched by this change, so its count must be
+// flat across the two ELFs. If it moves, the difference is the harness or the host and the fnp
+// delta is not attributable to the lever.
+//
+// CHECKSUMMED against numpy's own argsort so an arm that silently computes something else cannot
+// pass as a cheaper one.
+fn argsort_counter_probe(use_fnp: bool) {
+    const N: usize = 256;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        // int64, unsorted, no ties: exercises the decline chain without letting a tie
+        // pre-check or an already-sorted fast path change which route runs.
+        py.run(
+            std::ffi::CString::new("i = np.arange(n)\na = ((i * 1103515245 + 12345) % 65536).astype(np.int64)\n")
+                .unwrap()
+                .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operand");
+        let a = locals.get_item("a").expect("a operand");
+
+        // Both handles resolved in both arms so the getattr work matches.
+        let ours = module.getattr("argsort").expect("fnp argsort");
+        let theirs = numpy.getattr("argsort").expect("numpy argsort");
+        let target = if use_fnp { &ours } else { &theirs };
+
+        let checksum_of = |r: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            r.call_method0("sum")
+                .expect("result sums")
+                .extract::<i64>()
+                .expect("sum is an integer")
+                .cast_unsigned()
+        };
+        let oracle = checksum_of(&theirs.call1((&a,)).expect("oracle call"));
+
+        let mut last = None;
+        for _ in 0..ACCUMULATE_COUNTER_CALLS {
+            let r = target.call1((&a,)).expect("argsort call");
+            black_box(&r);
+            last = Some(r);
+        }
+        let last = checksum_of(&last.expect("the loop ran at least once"));
+        assert_eq!(
+            last, oracle,
+            "the argsort counter probe did not reproduce NumPy's answer, so its instruction \
+             count describes the wrong computation"
+        );
+        println!(
+            "ARGSORT_COUNTER_PROBE arm={} dtype=int64 n={N} calls={ACCUMULATE_COUNTER_CALLS} \
+             checksum={last:016x} run_this_under_perf_stat=true",
+            if use_fnp { "fnp" } else { "numpy" },
+        );
+    });
+}
+
+fn bench_argsort_counter_fnp_i64(_c: &mut Criterion) {
+    argsort_counter_probe(true);
+}
+
+fn bench_argsort_counter_numpy_i64(_c: &mut Criterion) {
+    argsort_counter_probe(false);
 }
 
 fn bench_binary_counter_add_fnp(_c: &mut Criterion) {
