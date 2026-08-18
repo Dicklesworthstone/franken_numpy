@@ -53186,3 +53186,97 @@ unreachable by a runtime switch). Do NOT re-land the extraction on main to do it
 the experiment on neutrality - gate only a merge on neutrality, and there is currently no reason to
 merge it at all.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — THE DIRECT A/B REFUTES ei9jz's SPLIT: the probe chain is 660.9 insns/call, not 1189.4, and the ordering REVERSES — the wrapper is the larger half after all (deadlock-audit-rz8g0)
+
+**Campaign result class:** a banked conclusion of mine refuted by a simpler instrument, exactly as pre-registered
+
+Run in an ISOLATED GIT WORKTREE at `235dadc9` so main never carried the change and no peer's rch
+build compiled it. ELF `criterion_python_elementwise-ea6828603f008c3e`, release-perf,
+`OPENBLAS/OMP/MKL_NUM_THREADS=1`, 400,000 calls/arm, 5 interleaved reps, `selected_groups=1` and
+0 panics on every arm. PRE loadavg 11.04/17.25/20.20, CPU idle 75%, runnable 17/64, iowait 0,
+2980 MHz, /data 132G. POST idle 74%.
+
+```
+  probes ON  (FNP_DISABLE_NATIVE_ROUTES=0)  median 3,959,729,290  spread 0.491%
+  probes OFF (FNP_DISABLE_NATIVE_ROUTES=1)  median 3,695,360,923  spread 0.556%
+  ------------------------------------------------------------------------------
+  PROBE CHAIN, measured directly            660.9 insns/call
+```
+
+The switch engaged beyond any doubt - 264 million instructions of separation - so this is not the
+inert-switch trap that a null result would have had to be screened for.
+
+### The pre-registered primary test FAILS, and I registered which way to jump
+
+```
+  ei9jz five-term identity   1189.4 insns/call
+  predicted band (+-15%)     [1011, 1368]
+  measured directly           660.9      -> OUTSIDE, -44.4%
+```
+
+I registered, before this ELF finished building: "outside -> ONE of the two is wrong and I do not
+get to pick which by preference. The A/B is the simpler instrument (one difference, no replicas, no
+correction terms), so it should be believed over the identity unless a specific defect in it is
+found." Applying that rule to my own banked conclusion.
+
+**REVISED SPLIT of the route's 1830.5 insns/call excess:**
+
+```
+                        ei9jz identity      direct A/B
+  probe chain            1189.4 (65%)        660.9 (36%)
+  wrapper residual        641.9 (35%)       1169.6 (64%)
+  ratio wrapper/probe        0.54               1.77      <- ORDERING REVERSES
+```
+
+**So "the probe chain is the larger half" - which I banked, put in ei9jz's closing summary, and used
+to argue that v46rn's dtype-sharing levers were aimed at the right component - is WRONG.** The
+wrapper residual is the larger half, 64% to 36%.
+
+### Where the identity went wrong, and my stated bound was backwards
+
+`probe_chain = pydict_replica + kb - 1217.9`. For the true 660.9, the bracket must be 1878.8; the
+replicas measured 1575.7 + 832.2 = **2407.9**, overstating by **529.1 insns/call (22%)**.
+
+I registered the replica as a **LOWER** bound on `our_kwargs_cost` - "being a replica it is a lower
+bound on the correction and therefore an UPPER bound on the wrapper residual". That direction was an
+assumption dressed as a derivation, and it is **backwards**: a standalone replica in a tight
+400,000-iteration loop OVERSTATES its in-situ cost, because the real path builds one dict amid other
+work with different allocator state and cache residency, while the replica hammers the same
+allocation path with everything hot and nothing else competing. Same family as the
+buffer-provenance tax already in this ledger, in the opposite direction from the one I assumed.
+
+### THE INSTRUMENT I DISMISSED WAS RIGHT ABOUT THE ORDERING
+
+Every nanosecond attempt at this split said wrapper > probe: ratios 1.57 and 4.68 under two
+aggregators, and the batched partition too. I retired them as UNDECIDABLE - correctly, since the
+aggregator alone swung the value 3x - and I wrote "it contradicts nothing". **The direct A/B now
+gives 1.77, inside that range.** Undecidable on magnitude did not mean uninformative on sign, and I
+discounted a consistent qualitative signal because its quantitative form was unusable. Worth
+remembering next time an instrument is noisy but persistent.
+
+### The secondary test PASSES
+
+```
+  wall clock difference   85.0 ns/call    band 60-250 ns -> INSIDE
+  implied rate            7.77 insns/ns   (route rate measured 6.99, kb path 9.63)
+```
+
+Consistent, and not used to overrule the counted result.
+
+COUNTED_MECHANISM: 660.9 insns/call probe chain from a single difference of two arms on one ELF,
+264M instructions of separation, spreads 0.491%/0.556%; identity bracket overstated by 529.1
+insns/call (22%).
+
+A/A NULL CONTROLS: not applicable - counter differences on one ELF, not a competitive ratio. The
+controls that do apply all held: selected_groups=1 per arm, 0 panics, switch engagement proven by
+the separation itself, threading pinned.
+
+RETRY PREDICATE: `deadlock-audit-ei9jz` is CLOSED and its closing summary now contains a refuted
+claim. Do not quote its 1189.4/641.9 split or its "probe chain is the larger half" conclusion. The
+wrapper residual at ~1169.6 insns/call is now the largest single component of the route, which
+points work at the wrapper - PyO3 entry, argument binding, the argument tuple - rather than at the
+probe chain, and REVERSES the recommendation I left on that bead. The replica-overstatement finding
+should also be checked against any other row in this ledger that derived a quantity by subtracting
+standalone replicas.
+AGENT_NAME=SlateFinch.
