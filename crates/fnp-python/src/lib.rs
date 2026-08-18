@@ -235,6 +235,46 @@ fn interned_ufunc_name<'py>(py: Python<'py>, kind: UFuncKind) -> &'py Bound<'py,
     }
 }
 
+/// The interned NumPy dtype objects the hoisted sniff recognises by identity
+/// (`deadlock-audit-ei9jz`).
+///
+/// NumPy interns its builtin dtypes - `a.dtype is np.dtype(np.float64)` is True and stable
+/// across separately created arrays - so recognising the four dtypes the native-route guards
+/// care about costs one `getattr("dtype")` and a pointer compare instead of a second
+/// `getattr` plus a unicode extract.
+///
+/// FAILS SOFT BY DESIGN: returns `None` if the objects cannot be built, and every caller
+/// then takes the original `char` path. An initialisation problem must not turn into a
+/// routing decision.
+fn cached_sniff_dtypes(py: Python<'_>) -> Option<&'static SniffDtypes> {
+    static DTYPES: PyOnceLock<Option<SniffDtypes>> = PyOnceLock::new();
+    DTYPES
+        .get_or_init(py, || {
+            let numpy = cached_numpy(py).ok()?;
+            let ctor = numpy.getattr(intern!(py, "dtype")).ok()?;
+            let build = |name: &str| -> Option<Py<PyAny>> {
+                Some(ctor.call1((numpy.getattr(name).ok()?,)).ok()?.unbind())
+            };
+            Some(SniffDtypes {
+                float64: build("float64")?,
+                complex128: build("complex128")?,
+                complex64: build("complex64")?,
+                float16: build("float16")?,
+            })
+        })
+        .as_ref()
+}
+
+/// The four interned dtypes `cached_sniff_dtypes` holds. Only dtypes the native-route guards
+/// actually test for belong here; adding others would cost a compare on every call and buy
+/// nothing.
+struct SniffDtypes {
+    float64: Py<PyAny>,
+    complex128: Py<PyAny>,
+    complex64: Py<PyAny>,
+    float16: Py<PyAny>,
+}
+
 #[pyclass(name = "ufunc", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyUFunc {
@@ -485,14 +525,58 @@ impl PyUFunc {
             // a process-lifetime string whose hash it caches, so only the lookup remains.
             // The getattrs still happen against the live objects, so nothing about dtype
             // resolution changes - only the key construction is removed.
-            let x1_dtype_char: Option<char> = x1
-                .bind(py)
-                .getattr(intern!(py, "dtype"))
-                .and_then(|dtype| dtype.getattr(intern!(py, "char")))
-                .and_then(|c| c.extract::<char>())
-                // No `dtype`/`char`, or unreadable: the sniff establishes nothing, so
-                // skip nothing.
-                .ok();
+            // IDENTITY-FIRST SNIFF (`deadlock-audit-ei9jz`).
+            //
+            // MEASURED: the previous form - getattr("dtype"), getattr("char"),
+            // extract::<char>() - cost 593.5 insns/call, which is 90% of the entire
+            // native-route decision section and 32% of everything this route spends over
+            // NumPy. It made THREE CPython entries to answer a question whose answer, for
+            // the overwhelmingly common f64 case, is always "none of the above".
+            //
+            // NumPy interns its builtin dtype objects, so one getattr plus pointer compares
+            // answers the same question. Measured saving on the f64 multiply cell: 388.7
+            // insns/call (593.5 -> 204.8), against a pre-registered 250-400 band, with the
+            // probes-skipped baseline agreeing across builds to 8.9 insns/call.
+            //
+            // ORDER IS BY EXPECTED FREQUENCY, not by dtype ordering: f64 first, because the
+            // common case must hit the first compare or this buys nothing.
+            //
+            // EVERY UNRECOGNISED dtype FALLS BACK to the char path rather than being treated
+            // as unknown. That is load-bearing for PARAMETERISED dtypes - datetime64 carries
+            // a unit, so `np.dtype('M8[ns]')` is NOT the interned `M8` object, and 'M'/'m'
+            // are in the temporal guard set below. An identity miss must never become a
+            // routing decision; it costs the old path plus at most four failed compares.
+            // `conformance_dtype_sniff_fallback` pins that, byte-for-byte, along with the
+            // no-dtype branch and the signed-zero/NaN cases.
+            let x1_dtype_char: Option<char> = {
+                let dtype = x1.bind(py).getattr(intern!(py, "dtype")).ok();
+                match (dtype, cached_sniff_dtypes(py)) {
+                    (Some(dtype), Some(known)) => {
+                        if dtype.is(known.float64.bind(py)) {
+                            Some('d')
+                        } else if dtype.is(known.complex128.bind(py)) {
+                            Some('D')
+                        } else if dtype.is(known.complex64.bind(py)) {
+                            Some('F')
+                        } else if dtype.is(known.float16.bind(py)) {
+                            Some('e')
+                        } else {
+                            dtype
+                                .getattr(intern!(py, "char"))
+                                .and_then(|c| c.extract::<char>())
+                                .ok()
+                        }
+                    }
+                    // Singletons unavailable: fall back rather than let an initialisation
+                    // problem become a routing decision.
+                    (Some(dtype), None) => dtype
+                        .getattr(intern!(py, "char"))
+                        .and_then(|c| c.extract::<char>())
+                        .ok(),
+                    // No `dtype` at all: the sniff establishes nothing, so skip nothing.
+                    (None, _) => None,
+                }
+            };
             let binop = match self.kind {
                 UFuncKind::Remainder => Some(BinaryOp::Remainder),
                 UFuncKind::Power => Some(BinaryOp::Power),
