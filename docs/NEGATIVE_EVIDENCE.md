@@ -53679,3 +53679,93 @@ decompose, which is the finding. To attack it, measure the SNIFF directly: an ar
 That is one more switch and one more build, and unlike this one it targets code that actually
 executes.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — THE DTYPE SNIFF IS 593.5 INSNS/CALL: 90% of the decision section and 32% of the whole route excess, corroborated by an independent symbol cluster to 12.8%. The lever now has a measured target (deadlock-audit-ei9jz)
+
+**Campaign result class:** a quantified, corroborated lever target
+
+Isolated worktree off `3e99bb51`, ELF `criterion_python_elementwise-ea6828603f008c3e`, release-perf,
+threading pinned, 400,000 calls/arm, 4 interleaved reps, parity asserted against NumPy's oracle on
+every arm (0 failures). PRE loadavg 7.28/8.37/9.17, CPU idle 91%, runnable 6/64, iowait 0, 2135 MHz,
+/data 125G. POST idle 91%. Switch string verified in the binary before measuring.
+
+```
+  sniff ON   median 3,922,394,624   spread 0.050%
+  sniff OFF  median 3,684,985,104   spread 0.224%
+  ---------------------------------------------------
+  DTYPE SNIFF COST = 593.5 insns/call
+```
+
+The switch substitutes `Some('\0')` for the sniffed typechar, NOT `None`. `None` would make every
+guard permissive (`None => true`) and let the probe bodies RUN, adding work and measuring the
+opposite quantity. `'\0'` matches none of `'e'`, `'F'/'D'/'G'`, `'M'/'m'`, `'d'`, so every downstream
+decision is exactly what float64 produces and only the two `getattr`s plus the `extract::<char>`
+disappear. Control flow held identical; the delta is the sniff alone.
+
+### Three instruments converge
+
+```
+  direct switch (this row)                                593.5 insns/call
+  symbol cluster from perf attribution                   ~526     (+12.8% apart)
+     PyObject_GetAttr 187.5, _PyType_LookupRef 125.2,
+     _PyObject_GenericGetAttrWithDict 114.8, _PyType_GetDict 47.9,
+     PyMember_GetOne 40.2, PyUnicode_AsUTF8AndSize 10.8
+  decision-section total (FNP_DISABLE_NATIVE_ROUTES A/B)  660.9
+     of which the sniff is                                    90%
+     leaving branch logic + binop match + out= predicate    67.4
+```
+
+The registered band was 300-660 with a center near 500 predicted from the symbol cluster. 593.5 is
+inside it and 12.8% from the center, and the two instruments share no machinery: one is a
+perf-sampled per-symbol attribution, the other a runtime switch on a single ELF.
+
+### What this makes of the route
+
+```
+  whole-route excess over NumPy      1830.5 insns/call   (100%)
+    dtype sniff                       593.5              ( 32%)   <- ONE lever, measured
+    branch logic / binop / out=        67.4              (  4%)
+    wrapper residual                 ~1169.6             ( 64%)
+```
+
+**The single largest identified lever on this route is one dtype sniff: 3 CPython entries, 593.5
+instructions, 32% of everything we spend over NumPy.** It exists to answer "is this operand complex,
+f16, or temporal", and for the overwhelmingly common f64 case the answer is always no.
+
+### The lever, with its measured ceiling and its two hazards
+
+NumPy's builtin dtype objects are SINGLETONS - verified: `a.dtype is np.dtype(np.float64)` and
+`c.dtype is np.dtype(np.complex128)` are both True, stable across separately created arrays. So the
+sniff's three entries (`getattr("dtype")`, `getattr("char")`, `extract::<char>`) can become ONE
+`getattr("dtype")` plus pointer comparisons against dtype objects cached at module init, the way
+`cached_numpy` already caches the module.
+
+CEILING: the sniff is 593.5 and one `getattr` must remain, so the realistic prize is the two
+removed entries - on the symbol split roughly `getattr("char")` plus the unicode extract, call it
+250-400 insns/call, or 14-22% of the route excess. NOT the full 593.5, and anyone quoting this lever
+should quote the ceiling, not the sniff total.
+
+HAZARD 1: the guards' `None => true` fallback exists for objects with no `dtype`. An identity check
+must keep unknown meaning "maybe", never "decline", or non-array operands silently take the wrong
+path.
+HAZARD 2: singleton identity holds for BUILTIN dtypes. Parameterised ones (datetime64 with units,
+structured) may not be interned, and `'M'`/`'m'` ARE in the guard set, so an identity miss must fall
+back to the char path rather than mis-route.
+
+COUNTED_MECHANISM: 593.5 insns/call from a single switch delta, 4 reps, spreads 0.050%/0.224%;
+corroborated within 12.8% by a per-symbol attribution sharing no machinery; 90% of an independently
+measured 660.9 section total.
+
+A/A NULL CONTROLS: not applicable - counter difference on one ELF. Controls that held: parity
+asserted vs NumPy on every arm, switch string verified in the ELF, control flow held identical by
+construction (`'\0'` reproduces float64's guard outcomes exactly).
+
+SCOPE WARNING: this switch also falsifies `x1_dtype_char == Some('d')`, which gates the f64 native
+block. For `multiply` that block is unreachable (`binop` is `None`) so the multiply arm is
+unaffected - but the switch would disable native routing for divide/remainder/power/max/min, and
+measuring those with it set compares different computations. Multiply arm only.
+
+RETRY PREDICATE: implement the dtype-identity check behind the two hazards above and measure the
+same cell; the change is worth taking only if it lands within the 250-400 insns/call ceiling, and it
+must be measured on the multiply arm where the sniff's cost is established rather than inferred.
+AGENT_NAME=SlateFinch.
