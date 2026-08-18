@@ -38650,8 +38650,13 @@ impl HistogramSample<'_> {
 // Zero-copy N-D histogram counting for an (N, D) f64 sample with precomputed edges
 // (`deadlock-audit-6y5wp`).
 //
-// The D-dimensional generalisation of `try_zerocopy_f64_histogram2d`, and it exists for
-// the same reason: `histogramdd_native` covers only auto-range, unweighted calls, so
+// The ONE counting kernel for the whole histogram family. `histogram2d` used to carry a
+// separate 2-D copy of this; it now routes here with `x` and `y` as its two columns, so
+// the binning rules, density order, weight handling and monotonic-edge check exist once
+// rather than in two copies kept in step by hand. NumPy is arranged the same way - its
+// `histogram2d` is `histogramdd([x, y], ...)`.
+//
+// It exists because `histogramdd_native` covers only auto-range, unweighted calls, so
 // `range=` and `weights=` - the two options anyone pinning a histogram across frames
 // reaches for - dropped the whole call to NumPy.
 //
@@ -38843,186 +38848,6 @@ fn try_zerocopy_f64_histogramdd(
     Ok(Some(out.unbind()))
 }
 
-// Zero-copy 2-D histogram counting for f64 samples with precomputed edges
-// (`deadlock-audit-6y5wp`).
-//
-// THE INCUMBENT'S ALGORITHM, read from `numpy.histogramdd`:
-//     Ncount[i] = np.searchsorted(edges[i], sample[:, i], side='right')
-//     on_edge   = (sample[:, i] == edges[i][-1]); Ncount[i][on_edge] -= 1
-//     xy        = np.ravel_multi_index(Ncount, nbin)
-//     hist      = np.bincount(xy, weights, minlength=nbin.prod()).reshape(nbin)
-// then the outlier row/column at each end is trimmed away.
-//
-// That is four passes over n and THREE n-sized temporaries - two index arrays and the
-// ravelled key - before a single counting pass. Every one of them exists only to hand
-// work to the next vectorised primitive. Fused into one pass there are no temporaries at
-// all: each sample computes its two bin indices and increments one counter.
-//
-// SEMANTICS ARE COPIED EXACTLY, not approximated. `side='right'` means "number of edges
-// <= v", so `k = partition_point(|e| e <= v)`; a sample sitting exactly on the last edge
-// gets `k -= 1`, which is what makes the final bin closed on both sides; and the real bin
-// is `k - 1`, valid only for `1 <= k <= nbins`. Samples outside the range land in the
-// outlier slots NumPy trims, so here they are simply not counted - the observable result
-// is identical.
-//
-// NaN IS HANDLED BY THE SAME RULE, not by a special case: `e <= NaN` is false for every
-// edge, so `partition_point` yields 0, which fails `k >= 1` and is dropped. That matches
-// NumPy, whose searchsorted places NaN past the end and whose outlier trim then discards
-// it.
-//
-// Declines to NumPy on anything it does not cover, including a bin grid large enough that
-// the counter array would dominate the sample pass.
-fn try_zerocopy_f64_histogram2d(
-    py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
-    x: &Bound<'_, PyAny>,
-    y: &Bound<'_, PyAny>,
-    xedges: &Bound<'_, PyAny>,
-    yedges: &Bound<'_, PyAny>,
-    weights: Option<&Bound<'_, PyAny>>,
-    density: bool,
-) -> PyResult<Option<Py<PyAny>>> {
-    // A grid this size makes the counter array itself the cost; NumPy's bincount is
-    // better shaped for it. Bounded so a pathological `bins=` cannot allocate wildly.
-    const MAX_BINS_TOTAL: usize = 1 << 16;
-    for operand in [x, y, xedges, yedges] {
-        if !operand.is_exact_instance(cached_ndarray_type(py)?)
-            || !numpy_dtype_is_f64(py, operand)
-            || operand.getattr("ndim")?.extract::<usize>()? != 1
-            || !operand
-                .getattr("flags")?
-                .getattr("c_contiguous")?
-                .extract::<bool>()?
-        {
-            return Ok(None);
-        }
-    }
-    let (Ok(xb), Ok(yb), Ok(xeb), Ok(yeb)) = (
-        PyBuffer::<f64>::get(x),
-        PyBuffer::<f64>::get(y),
-        PyBuffer::<f64>::get(xedges),
-        PyBuffer::<f64>::get(yedges),
-    ) else {
-        return Ok(None);
-    };
-    let (Some(xs), Some(ys), Some(xe), Some(ye)) = (
-        xb.as_slice(py),
-        yb.as_slice(py),
-        xeb.as_slice(py),
-        yeb.as_slice(py),
-    ) else {
-        return Ok(None);
-    };
-    if xs.len() != ys.len() || xe.len() < 2 || ye.len() < 2 {
-        return Ok(None);
-    }
-    // WEIGHTS (`deadlock-audit-6y5wp`). NumPy reaches them through the same
-    // `bincount(xy, weights)` that produces the unweighted counts - the bin selection is
-    // identical and only the increment changes - so they cost one extra buffer here and
-    // nothing in the loop's shape. Held in a local so the slice borrow outlives the use.
-    let weight_buffer = match weights {
-        None => None,
-        Some(w) => {
-            if !w.is_exact_instance(cached_ndarray_type(py)?)
-                || !numpy_dtype_is_f64(py, w)
-                || w.getattr("ndim")?.extract::<usize>()? != 1
-                || !w
-                    .getattr("flags")?
-                    .getattr("c_contiguous")?
-                    .extract::<bool>()?
-            {
-                return Ok(None);
-            }
-            let Ok(wb) = PyBuffer::<f64>::get(w) else {
-                return Ok(None);
-            };
-            Some(wb)
-        }
-    };
-    let weight_values: Option<&[f64]> = match weight_buffer.as_ref() {
-        None => None,
-        Some(wb) => {
-            let Some(ws) = wb.as_slice(py) else {
-                return Ok(None);
-            };
-            if ws.len() != xs.len() {
-                return Ok(None);
-            }
-            // SAFETY: as for the samples - ReadOnlyCell<f64> is repr(transparent) over f64
-            // and the array is a read-only C-contiguous f64 ndarray held under the GIL.
-            Some(unsafe { std::slice::from_raw_parts(ws.as_ptr().cast::<f64>(), ws.len()) })
-        }
-    };
-    let (nbx, nby) = (xe.len() - 1, ye.len() - 1);
-    if nbx.saturating_mul(nby) > MAX_BINS_TOTAL {
-        return Ok(None);
-    }
-
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and every operand is a
-    // read-only C-contiguous f64 ndarray held under the GIL.
-    let xv: &[f64] = unsafe { std::slice::from_raw_parts(xs.as_ptr().cast::<f64>(), xs.len()) };
-    let yv: &[f64] = unsafe { std::slice::from_raw_parts(ys.as_ptr().cast::<f64>(), ys.len()) };
-    let xed: &[f64] = unsafe { std::slice::from_raw_parts(xe.as_ptr().cast::<f64>(), xe.len()) };
-    let yed: &[f64] = unsafe { std::slice::from_raw_parts(ye.as_ptr().cast::<f64>(), ye.len()) };
-    // Strictly increasing, for the reason given in the N-D kernel: edges may be
-    // caller-supplied, and `partition_point` on unsorted edges bins silently wrong.
-    if xed.windows(2).any(|w| !(w[0] < w[1])) || yed.windows(2).any(|w| !(w[0] < w[1])) {
-        return Ok(None);
-    }
-
-    let bin_of = |edges: &[f64], v: f64, nbins: usize| -> Option<usize> {
-        let mut k = edges.partition_point(|&e| e <= v);
-        if v == edges[edges.len() - 1] {
-            k -= 1;
-        }
-        if k >= 1 && k <= nbins { Some(k - 1) } else { None }
-    };
-
-    let mut counts = vec![0.0_f64; nbx * nby];
-    for (index, (&xv_i, &yv_i)) in xv.iter().zip(yv.iter()).enumerate() {
-        if let Some(ix) = bin_of(xed, xv_i, nbx)
-            && let Some(iy) = bin_of(yed, yv_i, nby)
-        {
-            // Unweighted counting is the weight-1 case, so there is ONE loop rather than
-            // two. A NaN weight propagates into its bin exactly as NumPy's `bincount`
-            // lets it, and an out-of-range sample contributes nothing whether or not it
-            // carries a weight - both follow from doing the selection first.
-            counts[ix * nby + iy] += weight_values.map_or(1.0, |w| w[index]);
-        }
-    }
-
-    // NumPy returns H as float64 (verified against the installed 2.4.3), so the counter is
-    // accumulated in f64 directly rather than counted in u64 and converted.
-    // Density, same order as the N-D kernel and as NumPy: divide by the x width, then the
-    // y width, then by the total. Unweighted only, for the reason given there.
-    if density {
-        let total: f64 = counts.iter().sum();
-        for (flat, value) in counts.iter_mut().enumerate() {
-            let (ix, iy) = (flat / nby, flat % nby);
-            *value /= xed[ix + 1] - xed[ix];
-            *value /= yed[iy + 1] - yed[iy];
-            *value /= total;
-        }
-    }
-
-    let shape = PyTuple::new(py, [nbx, nby])?;
-    let out = numpy.call_method1("empty", (&shape, cached_float64_dtype(py)?))?;
-    {
-        let Ok(ob) = PyBuffer::<f64>::get(&out) else {
-            return Ok(None);
-        };
-        let Some(oc) = ob.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        if oc.len() != counts.len() {
-            return Ok(None);
-        }
-        for (slot, value) in oc.iter().zip(counts.iter()) {
-            slot.set(*value);
-        }
-    }
-    Ok(Some(out.unbind()))
-}
 
 // Zero-copy column_stack / dstack: both are a per-input reshape (adding a trailing or
 // leading singleton axis) followed by a concatenate, so once the inputs are reshaped
@@ -108468,22 +108293,60 @@ fn histogram2d(
                     .call_method("histogram_bin_edges", (sample,), Some(&ekw))?
                     .unbind())
             };
+            // ONE KERNEL, NOT TWO (`deadlock-audit-6y5wp`). `histogram2d` had its own
+            // 2-D counting kernel, which meant the binning rules, the density order, the
+            // weight handling and the monotonic-edge check all existed TWICE and had to
+            // be kept in step by hand - they were, three times running, which is exactly
+            // the kind of duplication that eventually is not. NumPy does not do this
+            // either: its `histogram2d` is `histogramdd([x, y], ...)` and nothing more.
+            //
+            // `x` and `y` ARE the two columns, so the sequence layout the N-D kernel
+            // already reads applies unchanged and nothing is copied. What stays here is
+            // only what is genuinely 2-D: NumPy's `len(bins)` disambiguation, which
+            // `histogramdd` does not share.
             if let (Ok(xe), Ok(ye)) = (
                 per_dim(0, specs[0].as_ref(), &x),
                 per_dim(1, specs[1].as_ref(), &y),
-            )
-                && let Some(hist) = try_zerocopy_f64_histogram2d(
-                    py,
-                    numpy,
-                    &x,
-                    &y,
-                    xe.bind(py),
-                    ye.bind(py),
-                    weights_arg.as_ref(),
-                    want_density,
-                )?
-            {
-                return Ok(PyTuple::new(py, [hist, xe, ye])?.unbind().into_any());
+            ) {
+                let usable = |column: &Bound<'_, PyAny>| -> bool {
+                    cached_ndarray_type(py).is_ok_and(|t| column.is_exact_instance(t))
+                        && numpy_dtype_is_f64(py, column)
+                        && column
+                            .getattr("ndim")
+                            .and_then(|n| n.extract::<usize>())
+                            .is_ok_and(|n| n == 1)
+                        && column
+                            .getattr("flags")
+                            .and_then(|f| f.getattr("c_contiguous"))
+                            .and_then(|c| c.extract::<bool>())
+                            .unwrap_or(false)
+                };
+                if usable(&x)
+                    && usable(&y)
+                    && let (Ok(xb), Ok(yb)) = (PyBuffer::<f64>::get(&x), PyBuffer::<f64>::get(&y))
+                    && let (Some(xc), Some(yc)) = (xb.as_slice(py), yb.as_slice(py))
+                    && xc.len() == yc.len()
+                {
+                    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; both are
+                    // read-only contiguous f64 ndarrays held under the GIL.
+                    let xs: &[f64] =
+                        unsafe { std::slice::from_raw_parts(xc.as_ptr().cast::<f64>(), xc.len()) };
+                    let ys: &[f64] =
+                        unsafe { std::slice::from_raw_parts(yc.as_ptr().cast::<f64>(), yc.len()) };
+                    let columns = [xs, ys];
+                    let layout = HistogramSample::Columns(&columns);
+                    let edges = [xe.clone_ref(py), ye.clone_ref(py)];
+                    if let Some(hist) = try_zerocopy_f64_histogramdd(
+                        py,
+                        numpy,
+                        &layout,
+                        &edges,
+                        weights_arg.as_ref(),
+                        want_density,
+                    )? {
+                        return Ok(PyTuple::new(py, [hist, xe, ye])?.unbind().into_any());
+                    }
+                }
             }
         }
     }
