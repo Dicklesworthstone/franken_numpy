@@ -3568,6 +3568,33 @@ fn svd_values_via_r(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgErr
     svd_bidiag_values(&r, n, n)
 }
 
+/// Whether the `R` route pays for EITHER orientation, comparing the long side against the short.
+fn svd_r_pays_either_orientation(m: usize, n: usize) -> bool {
+    svd_tall_qr_pays(m.max(n), m.min(n))
+}
+
+/// Singular values through the `R` factor, for a tall OR a wide matrix.
+///
+/// UNMEASURED and UNWIRED.
+///
+/// A wide matrix has exactly the same gap as a tall one: `sv(A) == sv(A^T)`, so a 100 x 100000
+/// input is the tall case of its own transpose, and the reduction cost is governed by
+/// `min(m, n)` either way. Without this, `svd_values_via_r` would decline every wide input and the
+/// larger half of the opportunity would be left on the table - the existing values path already
+/// transposes for `m < n`, so wide inputs are a route this crate takes routinely rather than an
+/// exotic shape.
+///
+/// The transpose is O(m n) against an O(m n^2) reduction, so it is not a meaningful share of the
+/// cost it removes.
+fn svd_values_via_r_any(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
+    if m >= n {
+        svd_values_via_r(a, m, n)
+    } else {
+        let at = transpose_mat(a, m, n);
+        svd_values_via_r(&at, n, m)
+    }
+}
+
 pub fn svd_mxn(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
     if Some(a.len()) != m.checked_mul(n) || m == 0 || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
@@ -4178,12 +4205,9 @@ fn svd_bidiag_values_with_max_iters(
     max_iter: usize,
 ) -> Result<Vec<f64>, LinAlgError> {
     if m < n {
-        let mut at = vec![0.0; n * m];
-        for i in 0..m {
-            for j in 0..n {
-                at[j * m + i] = a[i * n + j];
-            }
-        }
+        // Was an inline copy of `transpose_mat`. A transpose moves elements and performs no
+        // arithmetic, so this is bit-exact by construction, not merely bit-exact in practice.
+        let at = transpose_mat(a, m, n);
         return svd_bidiag_values_with_max_iters(&at, n, m, max_iter);
     }
 
@@ -23594,5 +23618,51 @@ except Exception as exc:
                 );
             }
         }
+    }
+
+    #[test]
+    fn svd_values_via_r_any_handles_wide_inputs() {
+        // sv(A) == sv(A^T), so a wide matrix is the tall case of its own transpose. Without this
+        // the R route would decline every wide input.
+        for &(m, n) in &[
+            (10usize, 200usize),
+            (97, 300),
+            (16, 128),
+            (33, 33),
+            (200, 10),
+        ] {
+            let a: Vec<f64> = (0..m * n)
+                .map(|i| (((i * 37) % 101) as f64) / 7.0 - 6.5)
+                .collect();
+            let want = super::svd_mxn(&a, m, n).expect("direct svd");
+            let got = super::svd_values_via_r_any(&a, m, n).expect("svd via R, either orientation");
+            assert_eq!(want.len(), got.len(), "count m={m} n={n}");
+            let scale = want.iter().cloned().fold(0.0f64, f64::max).max(1.0);
+            for (idx, (w, g)) in want.iter().zip(got.iter()).enumerate() {
+                assert!(
+                    (w - g).abs() <= 1e-9 * scale,
+                    "singular value {idx} drifted at m={m} n={n}: {w} vs {g}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn svd_r_pays_either_orientation_is_symmetric() {
+        for &(m, n) in &[
+            (100_000usize, 100usize),
+            (100, 100_000),
+            (11, 6),
+            (6, 11),
+            (10, 6),
+        ] {
+            assert_eq!(
+                super::svd_r_pays_either_orientation(m, n),
+                super::svd_r_pays_either_orientation(n, m),
+                "orientation changed the verdict at m={m} n={n}"
+            );
+        }
+        assert!(super::svd_r_pays_either_orientation(100, 100_000));
+        assert!(!super::svd_r_pays_either_orientation(100, 100));
     }
 }
