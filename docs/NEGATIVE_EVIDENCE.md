@@ -55759,3 +55759,68 @@ A/A NULL CONTROLS: carried from the source rows - numpy-arm nulls at 0.041%, 0.0
 RETRY PREDICATE: none. This table is the citable form; earlier rows keep their mechanism and
 narrative but their ratio columns are superseded here.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — THE MULTIPLY ROUTE FLOOR HAS COLLAPSED 15x SINCE `v46rn` WAS FILED: 2,044 ns -> 136 ns at n=256, and at n>=2^20 we are AT OR SLIGHTLY AHEAD OF PARITY. Also independently confirms the startup-floor correction to 1.4% (deadlock-audit-v46rn)
+
+**Result class:** a stale premise found by re-running a registered group that was already compiled
+into a preserved ELF. No build. /data 47G, load 5.0-5.7, idle 91%.
+
+I had said options were thin without a build. That was wrong: the preserved ELFs carry ~100
+registered groups, and `bench_route_floor_size_sweep_vs_numpy` is the very group that produced
+`v46rn`'s headline 2,044 ns floor. Re-running it on current source costs nothing.
+
+```
+  ROUTE_FLOOR_SWEEP op=multiply, harness=common::run_dual_null_median_ci_contract, numpy 2.4.3
+  CPU_WITNESS: same_core=true, arm MHz 4288.8-4291.5, arm_mhz_spread 1.0000, governor=powersave
+
+    n           numpy_ns      fnp_ns   excess_ns   ratio (ci95)              BANKED excess   change
+    256            425.0       561.0       136.0   0.757 [0.749,0.772]            2,044     15.0x lower
+    4,096        1,177.0     1,343.0       166.0   0.876 [0.873,0.881]            2,159     13.0x lower
+    65,536      14,918.0    15,183.0       265.0   0.983 [0.982,0.984]            2,991     11.3x lower
+    1,048,576  302,148.0   296,777.0    -5,371.0   1.0005 [0.992,1.009]           9,809     AT PARITY
+    16,777,216 18,869,963  18,858,047   -11,916.0  1.0021 [1.00018,1.00279]       5,425     SLIGHTLY AHEAD
+```
+
+At n=2^24 the ratio CI **excludes 1.0 from below** — fnp is measurably, if marginally, faster than
+NumPy on that cell. At n=2^20 it straddles parity.
+
+**I CANNOT ATTRIBUTE THIS TO MY OWN LEVERS AND AM NOT GOING TO.** This is a shared tree with several
+agents landing work daily; `v46rn`'s 2,044 ns was banked 2026-08-16 on elf `ef5467cb2a43c00b`, and
+everything since is a mixture. Establishing who moved it needs a bisect nobody has run. The citable
+fact is the CURRENT floor, not a credit assignment.
+
+### It independently confirms yesterday's startup-floor correction
+
+This harness is a dual-null median-CI contract measuring inside the process — structurally immune to
+the whole-process startup floor that contaminated my counter-probe ratios. It is therefore an
+independent check on the correction:
+
+```
+  my floor-CORRECTED multiply ratio     1.339x
+  this contract harness                 1.321x       ->  1.4% apart
+  my DILUTED (as first published)       1.093x       -> 17.2% off
+```
+
+The correction is right to within 1.4% of an independent harness; the uncorrected figure was 17%
+wrong. That is about as clean a confirmation as this campaign can produce, and it arrived from a
+direction I did not arrange.
+
+### What this does to `v46rn`
+
+The bead's entire framing is "a 2,044 ns per-call floor at n=256" with a hoist ceiling I measured
+yesterday at **681 ns**. **The floor is now 136 ns — the ceiling I measured exceeds the whole
+remaining excess by 5x.** Those cannot both describe today's route. The synthetic fanout probe
+measures repeated-vs-hoisted `getattr` in isolation; the route evidently no longer performs those
+redundant fetches, because the total excess left to remove is 136 ns.
+
+**So `v46rn`'s prize is bounded by 136 ns/call at n=256, not 681 ns, and is negative at n>=2^20.**
+The bead needs re-scoping or closing, not more levers.
+
+COUNTED_MECHANISM: dual-null contract, 5 sizes, ratio CIs as listed; same-core arms at ~4290 MHz
+with spread 1.0000; compared against the same group's banked output on elf ef5467cb2a43c00b.
+A/A NULL CONTROLS: the group's own incumbent_null and candidate_null phases ran on every size and
+the harness admitted all five cells.
+RETRY PREDICATE: none for the measurement. For the bead: re-scope `v46rn` against a 136 ns floor, or
+close it - and if anyone wants the credit assignment for the 15x, that is a bisect across
+2026-08-16..18, not an inference.
+AGENT_NAME=SlateFinch.
