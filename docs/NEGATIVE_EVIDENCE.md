@@ -55432,3 +55432,75 @@ RETRY PREDICATE: the surviving lever is WIDER UNROLL. Before building anything, 
 `DOUBLE_divide_X86_V3` for its unroll factor the same way; if NumPy is also 2x, the codegen gap is
 not unroll either and the whole 93,987 ns kernel half needs a different explanation.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — ALL THREE of `6y5wp`'s candidate levers are REFUTED by disassembly: NumPy's live divide loop is ALSO 2x-unrolled packed, and the real difference is 22 instructions/iteration against NumPy's 10 — 10 of them FE-hazard accumulate and 3 STACK RELOADS of base pointers (deadlock-audit-6y5wp)
+
+**Result class:** a registered candidate-lever list eliminated entirely, replaced by a specific
+mechanism. Build-free, artifact + installed-numpy reuse. /data 47G, load ~5, thinkstation1.
+
+NumPy's live loop identified soundly rather than assumed: `opt_func_info` is not available in this
+build, so the ISA decides it — thinkstation1 reports **avx512f=0** with avx2 on 64 cores, so
+`DOUBLE_divide_X86_V4` cannot run and `DOUBLE_divide_X86_V3` is live.
+
+### Both loops process 8 doubles per iteration. The bodies:
+
+```
+  NUMPY  DOUBLE_divide_X86_V3        10 insns      OURS  zerocopy_f64_binary_flat_with_out   22 insns
+    sub    $0x8,%rdx                               mov    0x20(%rsp),%rdi     <- STACK RELOAD
+    vmovupd 0x20(%rbx,%rax,1),%ymm0                vmovupd (%rdi,%rsi,8),%ymm5
+    vmovupd (%rbx,%rax,1),%ymm1                    vmovupd 0x20(%rdi,%rsi,8),%ymm6
+    vdivpd 0x20(%r10,%rax,1),%ymm0,%ymm0           mov    0x38(%rsp),%rdi     <- STACK RELOAD
+    vdivpd (%r10,%rax,1),%ymm1,%ymm1               vdivpd (%rdi,%rsi,8),%ymm5,%ymm5
+    vmovupd %ymm0,0x20(%r11,%rax,1)                vdivpd 0x20(%rdi,%rsi,8),%ymm6,%ymm6
+    vmovupd %ymm1,(%r11,%rax,1)                    mov    0x8(%rsp),%rdi      <- STACK RELOAD
+    add    $0x40,%rax                              vmovupd x2 (stores)
+    cmp    $0x7,%rdx                               vandpd x2 + vpaddq x4 + vpor x4  <- FE-HAZARD
+    jg                                             add / cmp / jne
+
+  opcode census per iteration      NUMPY      OURS
+    vdivpd (packed)                  2          2      <- IDENTICAL. "restore packing" DEAD.
+    vmovupd                          4          4      <- identical
+    FE-hazard accumulate ops         0         10
+    stack reloads from %rsp          0          3
+    loop arithmetic/branch           4          3
+    TOTAL                           10         22
+```
+
+### The three registered candidate levers, all eliminated
+
+1. **"Restore packing"** — DEAD. Ours is already `vdivpd` on ymm. (Independently confirms the 08-17
+   finding, from a different direction.)
+2. **"Split the accumulate out so it cannot inhibit vectorisation"** — DEAD AS STATED. The loop is
+   vectorised WITH the accumulate present; nothing is being inhibited.
+3. **"Wider unroll"** — DEAD. **NumPy is also 2x256-bit, 8 doubles per iteration.** Identical unroll.
+   This was the last one standing after the earlier census, and it falls here.
+
+### What replaces them
+
+The excess is **12 instructions per 8 elements**: ten are FE-hazard accumulate
+(`vandpd`/`vpaddq`/`vpor`), three are **base-pointer reloads from the stack** that NumPy does not
+perform — it keeps all three pointers (%rbx, %r10, %r11) live in registers across the loop.
+
+**These two are almost certainly the same problem.** The accumulate holds ymm0-ymm8 live, and that
+register pressure is what spills the base pointers. That gives a MECHANISM for the interaction the
+bead already warned about ("measure them together, not separately, or each will be credited with the
+other's win") — the accumulate is not merely adjacent to the kernel cost, it plausibly CAUSES the
+spills that constitute it.
+
+**INSTRUCTION COUNT IS NOT TIME — today's lesson applies to my own census.** 22 vs 10 instructions
+does NOT mean 2.2x time: two `vdivpd` per iteration dominate latency and much of the excess can hide
+under them. And indeed the banked wall-clock ratio for the fused shape is **1.5372x**, not 2.2x — a
+time/instruction ratio of ~0.70, squarely inside the 0.51-0.87 range measured across three other
+cells today. The census explains the shape of the gap; the ns figures remain the ones to quote.
+
+COUNTED_MECHANISM: per-iteration opcode census, both loops at 8 doubles/iteration: ours 22 insns
+(2 vdivpd, 4 vmovupd, 10 accumulate ops, 3 stack reloads, 3 loop ops) vs NumPy 10 (2 vdivpd,
+4 vmovupd, 4 loop ops, 0 reloads).
+A/A NULL CONTROLS: not applicable - static census.
+RETRY PREDICATE: the live question is now REGISTER PRESSURE, not packing/unroll. Test: build a
+variant that sinks the FE-hazard accumulate out of the inner loop (accumulate into a separate pass
+or a narrower live set) and check whether the three `mov ..(%rsp),%rdi` reloads disappear. If they
+do and the ns gap narrows, the kernel and accumulate halves are ONE problem and should be merged
+into a single bead. Both halves must be built in the SAME toolchain environment - this census is
+local codegen and the bead's local/remote warning stands.
+AGENT_NAME=SlateFinch.
