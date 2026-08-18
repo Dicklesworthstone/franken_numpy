@@ -54778,3 +54778,64 @@ A/A NULL CONTROLS: the numpy arm IS the null - same operand, same harness, untou
 RETRY PREDICATE: none for this lever. For the bead: the next dispatcher must have its reachable set
 derived from GUARDS, not from symbol presence.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — THE "BEFORE ARM HAS THE WIDER SPREAD" PATTERN I DISCLOSED TWICE IS REFUTED: at 5 reps the ordering REVERSES, so it was a 3-rep artifact — and the allocation hypothesis for the getattr cost is refuted too (minor faults flat to 0.13%) (deadlock-audit-c5ecm)
+
+**Result class:** a disclosed anomaly investigated and found NOT to exist, plus an independent
+replication of the effect it was attached to.
+
+I recorded, in two consecutive counted rows, that the before-fnp arm had the widest spread
+(2.255% on argsort, 2.228% on sort) and called it "a pattern I do not have an explanation for". I
+went looking for the mechanism. **There is no pattern.**
+
+```
+  5 reps, same two ELFs, same arm, threading pinned, per-arm loadavg 9.13-10.31, idle 87%->64%,
+  CPU 2615 MHz, /data 62G
+
+  INSTRUCTIONS   before  spread 1.185%   stdev/median 0.390%
+                 after   spread 2.069%   stdev/median 0.763%   <- AFTER is now WIDER
+```
+
+The ordering reversed. Two observations of "before wider" is what chance produces roughly half the
+time; I treated a coin landing heads twice as a phenomenon and published it as one. **A spread
+computed from 3 reps is not an estimate of spread**, and I have quoted 3-rep spreads in every
+counted row of this campaign. The effects there are 3-4 orders of magnitude larger than any of these
+figures, so no sign or magnitude is affected — but the SPREAD numbers in those rows should be read
+as incidental, not as characterisations of the noise.
+
+### The allocation hypothesis is also refuted
+
+My mechanism for the cost was that a non-interned `getattr` builds a fresh `PyString` per call, so
+the before arm should show allocation pressure. It does not:
+
+```
+  MINOR FAULTS     before 63,570   after 63,485   difference +85 = 0.13%
+  dTLB LOAD MISSES before 1,009,807 after 885,113  difference +14.1%
+                   (but dTLB's own spread is 7.6% / 19.7% - too noisy to lean on)
+```
+
+Minor faults are flat. The `PyString` churn is served from CPython's small-object allocator without
+touching new pages, so the ~1,400 insns/site is instruction cost — hashing, dict probing, refcount
+traffic — **not** page-allocation cost. That matters for anyone extrapolating: the saving will not
+show up as reduced memory pressure, only as fewer instructions.
+
+### Bonus: the effect REPLICATES across independent runs
+
+```
+  banked row (3 reps)   -33,489.0 insns/call
+  today       (5 reps)  -33,346.6 insns/call
+  0.43% apart
+```
+
+Two independent measurement sessions on the same ELF pair, hours apart, at different host loads.
+The sort lever's magnitude is real to well under 1%, which is a stronger statement than the original
+row could make.
+
+COUNTED_MECHANISM: instruction spread before 1.185% vs after 2.069% over 5 reps (ordering reversed
+vs the 3-rep rows); minor faults 63,570 vs 63,485 (0.13%); effect replicated at -33,346.6 vs
+-33,489.0 (0.43%).
+A/A NULL CONTROLS: not applicable - this row compares an arm against ITSELF across reps, which is
+the null by construction.
+RETRY PREDICATE: none. Consequence for future rows: quote spread only from >=5 reps, or label it
+"incidental, 3 reps". Do not attach a mechanism to a 2-observation ordering.
+AGENT_NAME=SlateFinch.
