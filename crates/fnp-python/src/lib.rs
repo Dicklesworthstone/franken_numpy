@@ -108567,6 +108567,39 @@ fn ediff1d(
         return Ok(out);
     }
 
+    // Zero-copy float16 consecutive differences (no to_begin/to_end)
+    // (`deadlock-audit-6y5wp`). NumPy defines `ediff1d` as the first difference of the
+    // RAVELLED input, so for a C-contiguous f16 array that is exactly
+    // `try_zerocopy_f16_diff_1d` applied to a flat view - the same widen->subtract->narrow
+    // the incumbent's binary16 loop performs, hence bit-identical.
+    //
+    // WHY THIS WAS MISSING. f64, f32 and int each got a bespoke `ediff1d` helper; f16
+    // never did, so every `np.ediff1d(float16_array)` delegated in full even though the
+    // first-difference kernel it needs already existed one dtype over. This wires the
+    // kernel that exists rather than writing a fourth one.
+    //
+    // CONTIGUITY IS CHECKED HERE, NOT LEFT TO THE KERNEL. `ravel()` is a view only for
+    // contiguous input; on a strided array it COPIES, and taking a hidden copy in order to
+    // reach a "zero-copy" path is how such a path stops being one. Strided input falls
+    // through to the general route, exactly as it did before this block existed.
+    //
+    // The kernel keeps its own gates - exact-ndarray, dtype, ndim, its 1<<20 parallel
+    // floor, and the inf/NaN deferral that preserves NumPy's float16 overflow/invalid
+    // warnings - so a small or warning-sensitive array declines here and lands on the same
+    // fallback it used before.
+    if to_begin.is_none()
+        && to_end.is_none()
+        && let Ok(flags) = ary.bind(py).getattr("flags")
+        && flags
+            .getattr("c_contiguous")
+            .and_then(|c| c.extract::<bool>())
+            .unwrap_or(false)
+        && let Ok(flat) = ary.bind(py).call_method0("ravel")
+        && let Some(out) = try_zerocopy_f16_diff_1d(py, numpy, &flat, 0)?
+    {
+        return Ok(out);
+    }
+
     let array = match extract_precise_numeric_array(py, ary.bind(py), "ediff1d(ary)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -123303,6 +123336,63 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// `np.ediff1d` on float16 must be byte-identical to NumPy, above and below the
+    /// kernel's parallel floor (`deadlock-audit-6y5wp`).
+    ///
+    /// f64, f32 and int each had a bespoke ediff1d helper and f16 had none, so float16
+    /// delegated in full. The new path reuses the f16 FIRST-DIFFERENCE kernel on a
+    /// ravelled view, which is legitimate only because NumPy defines ediff1d that way.
+    ///
+    /// Both sides of the kernel's `1 << 20` parallel floor are walked deliberately. Below
+    /// it the kernel declines and the general path answers; above it the new route runs.
+    /// A wiring that accidentally changed results would most likely change them on ONE
+    /// side of that floor only, which a single-size test would miss half the time.
+    ///
+    /// The 2-D case is here because `ediff1d` ravels: if the wiring ever forgot to ravel,
+    /// a 2-D input would either error or difference along the wrong axis, and a 1-D-only
+    /// test would never see it.
+    #[test]
+    fn f16_ediff1d_matches_numpy_byte_for_byte_across_the_parallel_floor() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_f16_ediff1d")?;
+            fnp_python(&module)?;
+            let ediff1d_fn = module.getattr("ediff1d")?;
+            let numpy = py.import("numpy")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            // Values stay small and exactly representable in binary16 so the comparison is
+            // about the wiring, not about rounding; no inf/NaN, which the kernel defers on.
+            py.run(
+                c"small = ((np.arange(1024) % 97) * 0.5).astype('float16')\n\
+                  big = ((np.arange((1 << 20) + 3) % 97) * 0.5).astype('float16')\n\
+                  two_d = ((np.arange(4096) % 97) * 0.5).astype('float16').reshape(64, 64)\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+
+            for name in ["small", "big", "two_d"] {
+                let x = locals.get_item(name).expect("f16 ediff1d fixture");
+                let ours = ediff1d_fn.call1((&x,))?;
+                let theirs = numpy.call_method1("ediff1d", (&x,))?;
+                assert_eq!(
+                    ours.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    theirs.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    "{name}: ediff1d dtype diverged from numpy on float16"
+                );
+                assert_eq!(
+                    ours.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{name}: float16 ediff1d is not byte-identical to numpy"
+                );
+            }
             Ok(())
         });
     }
