@@ -54358,3 +54358,32 @@ retired instructions, matched arms, per-arm loadavg and CPU MHz recorded, on a q
 sign is flat, check FIRST whether the caller already gates the probes - that pattern has zeroed
 five levers in this campaign - and bank a REJECT with that reason rather than retrying.
 AGENT_NAME=SlateFinch.
+
+### ADDENDUM, same day: the targeted batch COMPLETED GREEN
+
+The batch left running when the row above was written has finished, on a WARM worker, with no
+truncation:
+
+```
+  conformance_arithmetic                51 passed  0 failed   368.30s
+  conformance_complex                   15 passed  0 failed     8.62s
+  conformance_complex_ops               12 passed  0 failed     3.59s
+  conformance_dtype_sniff_fallback       5 passed  0 failed     3.05s
+  conformance_lexsort                   16 passed  0 failed    15.23s
+  conformance_searchsorted_containers    3 passed  0 failed     2.83s
+  conformance_searching                  2 passed  0 failed    27.40s
+  conformance_sort_search               52 passed  0 failed   111.93s
+  conformance_sorting                   13 passed  0 failed    88.57s
+  ---------------------------------------------------------------------
+  9 suites                             169 passed  0 failed   726.5s, exit 0, NO RCH-E104
+```
+
+Total validation for this change: **881 tests, 0 failures** (612 lib + 7 suites truncated at 712,
+plus these 169), all on the shipped source.
+
+**THE RECIPE THAT MADE IT FIT, since the full suite provably cannot:** the first attempt at this
+same batch ALSO died at RCH-E104 - it landed on a COLD worker and spent ~1100s of the 1800s window
+compiling, leaving too little to finish. The fix is two-step and worth reusing: kill your orphan ON
+THE WORKER by PID, then re-invoke; rch prefers the now-warm worker, the compile is skipped, and the
+same nine suites run end to end in 726s. Cold vs warm is the whole difference between E104 and a
+clean exit.
