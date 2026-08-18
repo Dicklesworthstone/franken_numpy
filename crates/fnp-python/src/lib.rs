@@ -9928,6 +9928,87 @@ fn try_zerocopy_f64_isclose(
 // `benches/criterion_python_elementwise.rs`, which the bench asserts before it
 // times anything. Change an arm of this predicate and both must move, or the
 // bench silently measures a branch we do not ship.
+/// glibc's floating-point exception flags - the mechanism NumPy uses to detect divide
+/// hazards WITHOUT touching the quotients (`deadlock-audit-6y5wp`).
+///
+/// READ OFF THE INCUMBENT, since no numpy source is vendored here.
+/// `_multiarray_umath.cpython-313-x86_64-linux-gnu.so` imports `feclearexcept` and
+/// `fetestexcept` from glibc and wraps them as `npy_clear_floatstatus_barrier` and
+/// `npy_get_floatstatus_barrier`. That is WHY its live loop `DOUBLE_divide_X86_V3`
+/// measures 10 instructions per 8 doubles: it performs NO per-element classification at
+/// all. It runs a bare divide loop and asks the hardware ONCE, afterwards, whether
+/// anything was raised.
+///
+/// Our loop classifies every quotient in software because safe Rust exposes no access to
+/// the FP environment, and that is precisely the gap this bead names: of our 35
+/// instructions per 16 doubles, roughly 20 exist only to recompute in software what MXCSR
+/// already recorded in hardware for free. The FE-hazard classifier was measured at 7.9%
+/// of this kernel - the price of parity, payable only because we could not read the flags.
+///
+/// Declared directly rather than by taking a `libc` dependency: these are two symbols from
+/// a library `std` already links, and the campaign's linkage ban is about BLAS/LAPACK/MKL,
+/// not the C runtime.
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" {
+    fn feclearexcept(excepts: core::ffi::c_int) -> core::ffi::c_int;
+    fn fetestexcept(excepts: core::ffi::c_int) -> core::ffi::c_int;
+}
+
+/// x86-64 glibc `bits/fenv.h` values.
+///
+/// `FE_INEXACT` (0x20) is DELIBERATELY EXCLUDED. Almost every division that is not exactly
+/// representable sets it, so including it would report a hazard on essentially every call
+/// and route the whole world down the slow exact-classification pass - a correctness-
+/// preserving change that would be catastrophically slower than the code it replaces, and
+/// it would look like it was working.
+#[cfg(target_arch = "x86_64")]
+const FE_DIVIDE_HAZARD_MASK: core::ffi::c_int = 0x01   // FE_INVALID   (0/0, inf/inf)
+    | 0x04                                             // FE_DIVBYZERO (x/0)
+    | 0x08                                             // FE_OVERFLOW  (quotient -> inf)
+    | 0x10; // FE_UNDERFLOW (quotient -> subnormal or 0)
+
+/// Divide `lhs / rhs` into `out` and report whether the hardware raised any flag that
+/// NumPy would turn into a warning.
+///
+/// THE POINT: the loop body is a bare divide, so it carries the same instruction density
+/// as the incumbent's. Nothing per-element is spent on classification.
+///
+/// PER-THREAD, WHICH IS WHY THIS TAKES A SLICE AND NOT THE WHOLE ARRAY. MXCSR is thread
+/// local, so flags raised on a rayon worker are invisible to the caller. Each worker must
+/// therefore clear and test around its OWN chunk, and the callers below reduce the results
+/// with OR. Calling this once around a `par_chunks` would silently read only the calling
+/// thread's flags and report "no hazard" for work done everywhere else.
+///
+/// THE BARRIER, mirroring the incumbent's own defence. LLVM does not model the FP
+/// environment, so in principle nothing stops it sinking the divide loop past the test.
+/// NumPy guards the same hazard by passing a pointer into `npy_get_floatstatus_barrier`;
+/// `black_box` on the output pointer is the same trick - it makes the loop's effect
+/// observably live across the call, so the loop cannot be moved over it.
+#[cfg(target_arch = "x86_64")]
+fn divide_slice_detecting_fe_hazards(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> bool {
+    // SAFETY: both are plain glibc calls on an integer mask, with no memory operands.
+    unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
+    for ((slot, &x), &y) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+        *slot = x / y;
+    }
+    std::hint::black_box(out.as_ptr());
+    // SAFETY: as above.
+    unsafe { fetestexcept(FE_DIVIDE_HAZARD_MASK) != 0 }
+}
+
+/// Fallback for targets where the flag values above are not the ABI: keep the shipped
+/// bitmask accumulator, which needs no FP-environment access.
+#[cfg(not(target_arch = "x86_64"))]
+fn divide_slice_detecting_fe_hazards(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> bool {
+    let mut evidence: u64 = 0;
+    for ((slot, &x), &y) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+        let quotient = x / y;
+        *slot = quotient;
+        evidence |= f64_divide_quotient_non_normal_evidence(quotient.to_bits());
+    }
+    f64_divide_evidence_saw_non_normal(evidence)
+}
+
 /// Non-normality evidence for ONE quotient, shaped so a whole run can be OR-ed
 /// together and tested once (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`).
 ///
@@ -10484,20 +10565,25 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 // of it (bead `deadlock-audit-vqxoa`). No quotient round-trips
                 // through a temporary — that is what broke vectorisation in the
                 // rejected blocked form (`deadlock-audit-ae85t`).
+                // HARDWARE FLAGS, NOT SOFTWARE CLASSIFICATION (`deadlock-audit-6y5wp`).
+                //
+                // Each worker clears the FP exception flags, runs a BARE divide over its
+                // chunk, and tests them once. MXCSR is thread local, so the clear and the
+                // test must both happen inside the closure; the `reduce` below ORs the
+                // per-worker answers. This is the incumbent's own algorithm - its live
+                // divide loop does no per-element classification because it asks the
+                // hardware afterwards - and it removes ~20 of our 35 instructions per 16
+                // doubles.
+                //
+                // The rare path is unchanged: a raised flag still triggers the exact
+                // value-based scan below, so warning parity with NumPy is decided by the
+                // same predicate as before. This only changes how the COMMON case, where
+                // nothing was raised, is detected.
                 let needs_precise_classification = out_data
                     .par_chunks_mut(chunk)
                     .zip(lhs.par_chunks(chunk))
                     .zip(rhs.par_chunks(chunk))
-                    .map(|((o, l), r)| {
-                        let mut saw_non_normal = false;
-                        for ((slot, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                            let quotient = x / y;
-                            *slot = quotient;
-                            saw_non_normal |=
-                                !f64_divide_quotient_bits_are_normal(quotient.to_bits());
-                        }
-                        saw_non_normal
-                    })
+                    .map(|((o, l), r)| divide_slice_detecting_fe_hazards(l, r, o))
                     .reduce(|| false, |left, right| left | right);
                 if needs_precise_classification
                     && lhs
@@ -110852,7 +110938,8 @@ mod tests {
         compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
         diagflat, diagonal, digitize, dtype_kind_of, extract, extract_numeric_array,
         extract_precise_numeric_array, f64_binary_route_is_worth_taking,
-        f64_divide_evidence_saw_non_normal, f64_divide_fast_accepts_without_fp_error,
+        divide_slice_detecting_fe_hazards, f64_divide_evidence_saw_non_normal,
+        f64_divide_fast_accepts_without_fp_error,
         f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
         f64_divide_quotient_non_normal_evidence, f64_divide_raises_fp_error,
         f64_out_route_is_worth_taking, fill_diagonal, flatnonzero, flip, fliplr, flipud,
@@ -163224,6 +163311,71 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                  exercises the allocating path could have caught it"
             );
         });
+    }
+
+    /// The hardware FE-flag detector must agree with the value classifier it replaces,
+    /// and must not cry wolf on ordinary arithmetic (`deadlock-audit-6y5wp`).
+    ///
+    /// THIS IS THE LOAD-BEARING TEST FOR THE FE-FLAG CHANGE. The detector reports "no
+    /// hazard" for the common case, and on that answer the route SKIPS the exact
+    /// value-based scan entirely. Two ways to be wrong, and they fail in opposite
+    /// directions:
+    ///
+    ///   - a FALSE NEGATIVE loses NumPy warning parity silently, on data that divides
+    ///     cleanly right up until it does not;
+    ///   - a FALSE POSITIVE is not a correctness bug but a performance catastrophe that
+    ///     LOOKS like it is working - every call would take the rare exact-scan path,
+    ///     which is slower than the software classifier this replaces. `FE_INEXACT` is
+    ///     excluded from the mask for exactly this reason, and 1.0/3.0 below is the case
+    ///     that would catch its accidental inclusion.
+    #[test]
+    fn fe_flag_detector_agrees_with_the_value_classifier() {
+        // Hazard-free: every quotient normal. 1.0/3.0 is inexact, so this also pins that
+        // FE_INEXACT is NOT in the mask.
+        let lhs = [6.0_f64, 1.0, 2.5, 1.0e10, -7.5];
+        let rhs = [3.0_f64, 3.0, 0.5, 4.0, 2.5];
+        let mut out = [0.0_f64; 5];
+        assert!(
+            !divide_slice_detecting_fe_hazards(&lhs, &rhs, &mut out),
+            "ordinary division reported a hazard - if FE_INEXACT crept into the mask every \
+             call would take the rare exact-scan path and the route would get SLOWER while \
+             every parity test still passed"
+        );
+        for ((got, &x), &y) in out.iter().zip(lhs.iter()).zip(rhs.iter()) {
+            assert_eq!(got.to_bits(), (x / y).to_bits(), "quotient is not a plain divide");
+        }
+
+        // Each hazard class, embedded in an otherwise clean run so the detector has to
+        // survive being asked after many ordinary divides - which is how the loop uses it.
+        let hazards: &[(f64, f64, &str)] = &[
+            (1.0, 0.0, "x/0 -> FE_DIVBYZERO"),
+            (0.0, 0.0, "0/0 -> FE_INVALID"),
+            (f64::INFINITY, f64::INFINITY, "inf/inf -> FE_INVALID"),
+            (f64::MAX, f64::MIN_POSITIVE, "overflow -> FE_OVERFLOW"),
+            (f64::MIN_POSITIVE, f64::MAX, "underflow -> FE_UNDERFLOW"),
+        ];
+        for (numerator, divisor, what) in hazards.iter().copied() {
+            let mut l = vec![6.0_f64; 33];
+            let mut r = vec![3.0_f64; 33];
+            l[17] = numerator;
+            r[17] = divisor;
+            let mut o = vec![0.0_f64; 33];
+            assert!(
+                divide_slice_detecting_fe_hazards(&l, &r, &mut o),
+                "{what}: the detector missed a hazard, which loses NumPy warning parity \
+                 silently because the exact scan is then skipped"
+            );
+            // The value classifier must agree that this run is not all-normal, so the
+            // rare path it gates reaches the same conclusion the detector did.
+            let mut evidence: u64 = 0;
+            for value in &o {
+                evidence |= f64_divide_quotient_non_normal_evidence(value.to_bits());
+            }
+            assert!(
+                f64_divide_evidence_saw_non_normal(evidence),
+                "{what}: the FE flags and the value classifier disagree about the same run"
+            );
+        }
     }
 
     /// The bitmask evidence accumulator must agree with the boolean predicate it
