@@ -8966,10 +8966,10 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
         jc += nc;
     }
     for i in 0..m_full {
-        packed_row_tail_sub_assign(a, b, target, i, k, n, n_full);
+        packed_row_tail_sub_assign(a, b, target, i, k, n, n, n_full);
     }
     for i in m_full..m {
-        packed_row_tail_sub_assign(a, b, target, i, k, n, 0);
+        packed_row_tail_sub_assign(a, b, target, i, k, n, n, 0);
     }
 }
 
@@ -9137,13 +9137,19 @@ fn packed_gemm_sub_assign_blocked(
     // last band and the global `m_full` boundary is the one each band would compute.
     let m_full = m - m % mr;
     for i in 0..m_full {
-        packed_row_tail_sub_assign(a, b, target, i, k, n, n_full);
+        packed_row_tail_sub_assign(a, b, target, i, k, n, n, n_full);
     }
     for i in m_full..m {
-        packed_row_tail_sub_assign(a, b, target, i, k, n, 0);
+        packed_row_tail_sub_assign(a, b, target, i, k, n, n, 0);
     }
 }
 
+/// One remainder row of `target -= a * b`, columns `j0..n`.
+///
+/// `n` is B's ROW STRIDE; `row_stride` is the TARGET's row pitch. They were the same parameter
+/// until `franken_numpy-ixs5y`, which is precisely what confined the blocked sub_assign driver to
+/// the non-strided case and forced the strided kernel to carry a duplicate inline tail. Contiguous
+/// callers pass `n` for both and are arithmetically unchanged.
 fn packed_row_tail_sub_assign(
     a: &[f64],
     b: &[f64],
@@ -9151,10 +9157,11 @@ fn packed_row_tail_sub_assign(
     i: usize,
     k: usize,
     n: usize,
+    row_stride: usize,
     j0: usize,
 ) {
     let a_base = i * k;
-    let o_base = i * n;
+    let o_base = i * row_stride;
     for j in j0..n {
         let mut s = 0.0f64;
         for kk in 0..k {
@@ -9256,27 +9263,14 @@ fn packed_gemm_sub_assign_strided_serial_tiled<const MR: usize>(
         }
         jc += nc;
     }
+    // Duplicated inline until `franken_numpy-ixs5y` gave the shared helper its own `row_stride`.
+    // Identical arithmetic, same order: full rows finish their remainder columns, then the
+    // remainder rows run every column.
     for i in 0..m_full {
-        let a_base = i * k;
-        let o_base = i * row_stride;
-        for j in n_full..n {
-            let mut s = 0.0f64;
-            for kk in 0..k {
-                s += a[a_base + kk] * b[kk * n + j];
-            }
-            target[o_base + j] -= s;
-        }
+        packed_row_tail_sub_assign(a, b, target, i, k, n, row_stride, n_full);
     }
     for i in m_full..m {
-        let a_base = i * k;
-        let o_base = i * row_stride;
-        for j in 0..n {
-            let mut s = 0.0f64;
-            for kk in 0..k {
-                s += a[a_base + kk] * b[kk * n + j];
-            }
-            target[o_base + j] -= s;
-        }
+        packed_row_tail_sub_assign(a, b, target, i, k, n, row_stride, 0);
     }
 }
 
@@ -22795,10 +22789,10 @@ except Exception as exc:
                     p0 += count;
                 }
                 for i in 0..m_full {
-                    super::packed_row_tail_sub_assign(&a, &b, &mut got, i, k, n, n_full);
+                    super::packed_row_tail_sub_assign(&a, &b, &mut got, i, k, n, n, n_full);
                 }
                 for i in m_full..m {
-                    super::packed_row_tail_sub_assign(&a, &b, &mut got, i, k, n, 0);
+                    super::packed_row_tail_sub_assign(&a, &b, &mut got, i, k, n, n, 0);
                 }
                 let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
                 assert_eq!(
