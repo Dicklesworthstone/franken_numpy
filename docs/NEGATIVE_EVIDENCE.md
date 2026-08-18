@@ -53438,3 +53438,87 @@ open question, and per the ei9jz symbol row it is NOT concentrated in any single
 ~60 insns/call noise floor, so it will not yield to a micro-lever. Anyone attacking it should target
 the CALL SHAPE (fewer CPython entries per call) rather than any one symbol.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — DISCHARGING ei9jz's UNEXECUTED METHOD STEP 2: counted by reading, our delegating multiply makes ~11 CPython entries per call where NumPy's own call makes 1. The floor is CALL COUNT, not any single stage (deadlock-audit-ei9jz, deadlock-audit-rz8g0)
+
+**Campaign result class:** source-derived attribution (no measurement, no build)
+
+`deadlock-audit-ei9jz` specified two methods. Step 1 (whole-call profiling) was executed and produced
+the symbol attribution. **Step 2 was never done:** "Count the CPython C-API entries our route makes
+per call versus NumPy's for the same op. If we make materially more, the floor is call-count, not
+any single stage - which is a different class of fix (batching/eliding entries) than shaving a
+stage." Doing it now, by reading, because the settled split makes it the right question: the wrapper
+is ~64% of the excess and its cost is diffuse across CPython machinery rather than concentrated in
+any symbol above the ~60 insns/call noise floor.
+
+Cell: `fnp.multiply(f64_ndarray, f64_ndarray)`, n=256, every keyword at its default - the exact cell
+all the counted rows measure. Read off `PyUFunc::__call__` (lib.rs 390-852) on current main.
+
+```
+  WHAT NUMPY DOES WHEN CALLED DIRECTLY
+    1  tp_call into numpy.multiply                                     = 1 CPython entry
+
+  WHAT OUR ROUTE DOES FOR THE SAME RESULT
+    1  tp_call into PyUFunc::__call__ (the user's call lands on us)
+    2  PyO3 argument extraction across a 9-parameter signature
+    3  x1 dtype sniff: getattr("dtype")
+    4  x1 dtype sniff: getattr("char") + extract::<char>()
+    5  complex probe: a.getattr("dtype")            } try_zerocopy_complex_binary,
+    6  complex probe: b.getattr("dtype")            } runs because Multiply is in its set,
+    7  complex probe: getattr("kind") + extract     } then DECLINES
+    8  f16 probe: numpy.getattr("ndarray")          } try_zerocopy_f16_binary_widen,
+    9  f16 probe: 2x is_exact_instance              } runs, then DECLINES
+   10  numpy.getattr(interned ufunc name)
+   11  PyTuple build + tp_call into numpy.multiply  = NumPy's original 1 entry, now nested
+```
+
+**~11 CPython entries where the incumbent makes 1**, and nine of them exist only to decide not to
+take a native route. Every one is a dict probe, a type check, or an allocation; none is expensive
+alone, which is exactly why the symbol attribution found nothing above its noise floor and why seven
+named stage-levers each moved nothing.
+
+### This is the mechanism behind three separate results, and it unifies them
+
+```
+  ei9jz symbol row     no shared symbol above ~60 insns/call; ~74% diffuse   <- because it is 9 small
+                                                                                entries, not 1 big one
+  rz8g0 split          wrapper ~1184 insns/call (64%), probe ~661 (36%)      <- entries 1-2,10-11 vs 3-9
+  sjpmo reject         native route ADDS ~10,300 insns/call at n=256         <- replacing entries with
+                                                                                MORE entries (buffer
+                                                                                acquisition, validation,
+                                                                                output construction)
+```
+
+The `sjpmo` result is the sharpest confirmation: the one change that removed the nested NumPy call
+made things 5.63x WORSE, because it substituted a larger set of entries for a smaller one. Entry
+count, not per-element work, governs this route at n=256.
+
+### What follows, and what does not
+
+FOLLOWS: the tractable levers are ones that REMOVE ENTRIES, not ones that make an entry cheaper.
+Entries 3-9 (the seven probe/sniff entries) are the removable class - they exist to decide, and the
+decision for a plain f64 multiply is always "decline". `deadlock-audit-v46rn` is already working this
+seam (sharing one dtype fetch across probes), and the counted split says it is worth at most the
+660.9 insns/call the whole probe chain costs.
+
+DOES NOT FOLLOW: that entries 1, 2, 10 and 11 are removable. Entry 1 is the price of being a Python
+callable at all. Entry 2 was measured at 0.0 ns for 3->9 parameters (`7ocfa`) so the SIGNATURE is not
+the cost, though the extraction itself is ~130 insns/call by symbol attribution. Entry 10 is already
+interned. Entry 11 is the delegation itself - removable only by not delegating, which `sjpmo` just
+measured as a 5.63x regression.
+
+**So the honest ceiling on this route, without a native kernel that beats NumPy's own, is roughly
+the 661 insns/call of probe chain - about 36% of the excess and ~14% of the whole call.** That is
+worth having, and it is a much smaller prize than "close the 1830 insns/call gap" implies.
+
+COUNTED_MECHANISM: ~11 CPython entries per call versus the incumbent's 1, enumerated from source;
+7 of the 11 exist solely to decline a native route; corroborated by three independent measured
+results.
+
+A/A NULL CONTROLS: not applicable - this row is derived from source and publishes no measurement.
+
+RETRY PREDICATE: the entry count above is READ, not measured. It can be checked directly with
+`ltrace`-style counting or by a CPython built with call counters, and anyone relying on the exact
+number 11 should do that first - the CLASS of the finding (many small entries, not one large stage)
+is what the three measured results support, and that is what should be quoted.
+AGENT_NAME=SlateFinch.
