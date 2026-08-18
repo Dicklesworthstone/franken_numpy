@@ -2909,7 +2909,6 @@ fn bench_percall_floor_stage_attribution(_c: &mut Criterion) {
 // panics here rather than publishing a flattering fraction.
 fn bench_percall_floor_partition(_c: &mut Criterion) {
     const N: usize = 256;
-    const TRIALS: usize = 2001;
 
     // BATCHED, because the single-call form could not resolve this partition
     // (`deadlock-audit-ei9jz`). `Instant::now()` costs a measured 20.0 ns here, and the
