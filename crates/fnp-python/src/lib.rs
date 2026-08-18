@@ -38637,6 +38637,7 @@ fn try_zerocopy_f64_histogramdd(
     sample: &Bound<'_, PyAny>,
     edges: &[Py<PyAny>],
     weights: Option<&Bound<'_, PyAny>>,
+    density: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MAX_BINS_TOTAL: usize = 1 << 16;
     const MAX_DIMS: usize = 8;
@@ -38772,6 +38773,31 @@ fn try_zerocopy_f64_histogramdd(
         }
     }
 
+    // DENSITY, replicating NumPy's operation ORDER exactly (`deadlock-audit-6y5wp`):
+    //     s = hist.sum()
+    //     for i in range(D): hist = hist / dedges[i].reshape(...)
+    //     hist /= s
+    // so each cell is ((count / d0) / d1) / ... / s, divisions in AXIS order and `s` last.
+    // Float division is deterministic, so doing the same divisions in the same order per
+    // cell is bit-identical rather than merely close.
+    //
+    // ONLY WHEN UNWEIGHTED, and that is a correctness boundary rather than caution. `s` is
+    // `hist.sum()`, which NumPy evaluates with a pairwise tree. Unweighted counts are
+    // integers, and integers below 2^53 sum exactly in ANY order, so the tree does not
+    // matter. Weighted counts are not, so `s` would depend on a summation order this loop
+    // does not reproduce - the caller declines that combination.
+    if density {
+        let total: f64 = counts.iter().sum();
+        for (flat, value) in counts.iter_mut().enumerate() {
+            for d in 0..ndim {
+                let index = (flat / strides[d]) % nbins[d];
+                let e = edge_slices[d];
+                *value /= e[index + 1] - e[index];
+            }
+            *value /= total;
+        }
+    }
+
     let out_shape = PyTuple::new(py, nbins.iter().copied())?;
     let out = numpy.call_method1("empty", (&out_shape, cached_float64_dtype(py)?))?;
     {
@@ -38828,6 +38854,7 @@ fn try_zerocopy_f64_histogram2d(
     xedges: &Bound<'_, PyAny>,
     yedges: &Bound<'_, PyAny>,
     weights: Option<&Bound<'_, PyAny>>,
+    density: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     // A grid this size makes the counter array itself the cost; NumPy's bincount is
     // better shaped for it. Bounded so a pathological `bins=` cannot allocate wildly.
@@ -38935,6 +38962,18 @@ fn try_zerocopy_f64_histogram2d(
 
     // NumPy returns H as float64 (verified against the installed 2.4.3), so the counter is
     // accumulated in f64 directly rather than counted in u64 and converted.
+    // Density, same order as the N-D kernel and as NumPy: divide by the x width, then the
+    // y width, then by the total. Unweighted only, for the reason given there.
+    if density {
+        let total: f64 = counts.iter().sum();
+        for (flat, value) in counts.iter_mut().enumerate() {
+            let (ix, iy) = (flat / nby, flat % nby);
+            *value /= xed[ix + 1] - xed[ix];
+            *value /= yed[iy + 1] - yed[iy];
+            *value /= total;
+        }
+    }
+
     let shape = PyTuple::new(py, [nbx, nby])?;
     let out = numpy.call_method1("empty", (&shape, cached_float64_dtype(py)?))?;
     {
@@ -108314,7 +108353,9 @@ fn histogram2d(
         && kwargs.is_none_or(|kw| {
             kw.keys().into_iter().all(|key| {
                 key.extract::<String>()
-                    .map(|k| k == "bins" || k == "range" || k == "weights")
+                    .map(|k| {
+                        k == "bins" || k == "range" || k == "weights" || k == "density"
+                    })
                     .unwrap_or(false)
             })
         })
@@ -108335,13 +108376,18 @@ fn histogram2d(
         let density = kwargs
             .and_then(|kw| kw.get_item("density").ok().flatten())
             .or_else(|| args.get_item(4).ok());
-        if density.is_some_and(|d| !d.is_none()) {
-            return core_numpy_passthrough(py, "histogram2d", args, kwargs);
-        }
         let weights_arg = kwargs
             .and_then(|kw| kw.get_item("weights").ok().flatten())
             .or_else(|| args.get_item(5).ok())
             .filter(|w| !w.is_none());
+        // Density is supported ONLY unweighted: see the kernel for why `s = hist.sum()`
+        // is order-independent for integer counts and not for weighted ones.
+        let want_density = density
+            .as_ref()
+            .is_some_and(|d| d.is_truthy().unwrap_or(false));
+        if want_density && weights_arg.is_some() {
+            return core_numpy_passthrough(py, "histogram2d", args, kwargs);
+        }
         let counts: Option<(usize, usize)> = match bins.as_ref() {
             None => Some((10, 10)),
             Some(b) => {
@@ -108375,6 +108421,7 @@ fn histogram2d(
                     xe.bind(py),
                     ye.bind(py),
                     weights_arg.as_ref(),
+                    want_density,
                 )?
             {
                 return Ok(PyTuple::new(py, [hist, xe, ye])?.unbind().into_any());
@@ -108498,7 +108545,9 @@ fn histogramdd(
         && kwargs.is_none_or(|kw| {
             kw.keys().into_iter().all(|key| {
                 key.extract::<String>()
-                    .map(|k| k == "bins" || k == "range" || k == "weights")
+                    .map(|k| {
+                        k == "bins" || k == "range" || k == "weights" || k == "density"
+                    })
                     .unwrap_or(false)
             })
         })
@@ -108518,7 +108567,11 @@ fn histogramdd(
         let weights_arg = kwargs
             .and_then(|kw| kw.get_item("weights").ok().flatten())
             .filter(|w| !w.is_none());
-        if density.is_some_and(|d| !d.is_none()) {
+        // Density unweighted only, as in `histogram2d`.
+        let want_density = density
+            .as_ref()
+            .is_some_and(|d| d.is_truthy().unwrap_or(false));
+        if want_density && weights_arg.is_some() {
             return core_numpy_passthrough(py, "histogramdd", args, kwargs);
         }
         // Only the `(N, D)` array form; a sequence of D arrays is NumPy's other accepted
@@ -108578,6 +108631,7 @@ fn histogramdd(
                         &sample,
                         &edges,
                         weights_arg.as_ref(),
+                        want_density,
                     )?
                 {
                     let edge_list = pyo3::types::PyList::new(py, edges.iter())?;
@@ -124020,7 +124074,10 @@ mod tests {
                 "3-D boundary and out-of-range rows with heavy weights",
             )?;
 
-            // density= must still reach numpy.
+            // Unweighted density, computed natively. At D = 3 this also pins that the
+            // per-axis widths are applied to the RIGHT axis: the bins are 2 x 3 x 4 with
+            // three different ranges, so every axis has a distinct width and swapping two
+            // of them changes the result.
             let dkw = PyDict::new(py);
             dkw.set_item("bins", g("bins3"))?;
             dkw.set_item("range", g("rng3"))?;
@@ -124028,7 +124085,19 @@ mod tests {
             compare(
                 &ours.call((g("s"),), Some(&dkw))?,
                 &theirs.call((g("s"),), Some(&dkw))?,
-                "density declines to numpy",
+                "unweighted density computed natively at D=3",
+            )?;
+
+            // Weighted density still declines, for the summation-order reason.
+            let dwkw = PyDict::new(py);
+            dwkw.set_item("bins", g("bins3"))?;
+            dwkw.set_item("range", g("rng3"))?;
+            dwkw.set_item("density", true)?;
+            dwkw.set_item("weights", g("w"))?;
+            compare(
+                &ours.call((g("s"),), Some(&dwkw))?,
+                &theirs.call((g("s"),), Some(&dwkw))?,
+                "weighted density declines to numpy",
             )?;
             Ok(())
         });
@@ -124111,7 +124180,10 @@ mod tests {
                 "positional weights with out-of-range samples",
             )?;
 
-            // density= must still reach numpy, and therefore still agree.
+            // density= is now computed natively when UNWEIGHTED. Byte-identity is the
+            // claim, not closeness: NumPy divides by each axis width in axis order and by
+            // the total last, and float division is deterministic, so the same order gives
+            // the same bits.
             let dkw = PyDict::new(py);
             dkw.set_item("bins", 4)?;
             dkw.set_item("range", g("rng3"))?;
@@ -124119,7 +124191,21 @@ mod tests {
             compare(
                 &ours.call((g("ox"), g("oy")), Some(&dkw))?,
                 &theirs.call((g("ox"), g("oy")), Some(&dkw))?,
-                "density declines to numpy",
+                "unweighted density computed natively",
+            )?;
+
+            // density WITH weights must still decline: `s = hist.sum()` is order-dependent
+            // once the counts are not integers, and this loop does not reproduce NumPy's
+            // pairwise tree. Declining keeps it byte-identical; computing it would not.
+            let dwkw = PyDict::new(py);
+            dwkw.set_item("bins", 4)?;
+            dwkw.set_item("range", g("rng3"))?;
+            dwkw.set_item("density", true)?;
+            dwkw.set_item("weights", g("ow"))?;
+            compare(
+                &ours.call((g("ox"), g("oy")), Some(&dwkw))?,
+                &theirs.call((g("ox"), g("oy")), Some(&dwkw))?,
+                "weighted density declines to numpy",
             )?;
             Ok(())
         });
