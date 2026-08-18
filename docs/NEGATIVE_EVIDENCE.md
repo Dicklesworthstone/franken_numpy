@@ -56059,3 +56059,74 @@ cell. Do not re-rank on a cross-harness comparison, however well the correction 
 this campaign has a standing rule that cross-entry comparisons are invalid, and harness differences
 are exactly that.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — SOURCE-READ DESIGN for the worst cell's last named candidate: all four float `searchsorted` probes are gated on `a_kind == 'f'`, which admits f16/f32/f64 alike — exact gating costs ZERO extra Python reads (deadlock-audit-v46rn)
+
+**Result class:** design prepared under build freeze against the one structural candidate RedLynx's
+retry predicate named. Source reading only. /data 34G, load 5.70.
+
+RedLynx's row records that the searchsorted family has gone 8.700x -> 3.172x across three levers and
+that **"the remaining 3.172x has no attributed mechanism and the four surviving declining probes are
+the only structural candidate left."** Those four are now identified.
+
+### The gate is one character too coarse
+
+The dispatcher computes `let a_kind = dtype_kind_of(&a_arr)` and gates the float family on it:
+
+```
+    if ... && a_kind == 'f' && try_native_f16_searchsorted(..)          <- f16 ONLY
+    if ... && a_kind == 'f' && try_zerocopy_f64_searchsorted_merge(..)
+    if ... && a_kind == 'f' && try_zerocopy_f64_searchsorted(..)        <- the f64 array path
+    if ... && a_kind == 'f' && try_zerocopy_f32_searchsorted_merge(..)
+    if ... && a_kind == 'f' && try_zerocopy_f32_searchsorted(..)
+```
+
+**f16, f32 and f64 all have dtype kind `'f'`.** So every one of these passes the gate for any float
+haystack and declines on WIDTH inside itself, each doing its own dtype reads to discover a fact the
+dispatcher could have known. For an f64 array needle the f16 probe runs and declines; for an f32
+haystack the f16 probe AND both f64 probes run and decline before the f32 path is reached.
+
+### The design, and why it is free
+
+Replace `dtype_kind_of` with **`dtype_char_of`** — a helper that already exists, already interned,
+and costs exactly the same one attribute read — then derive the kind locally where the other gates
+need it. char -> kind is a pure `match` with no Python call:
+
+```
+  'e','f','d','g' -> 'f'    'F','D','G' -> 'c'    '?' -> 'b'
+  'b','h','i','l','q' -> 'i'   'B','H','I','L','Q' -> 'u'
+  'M','m','U','S','V','O' -> themselves
+```
+
+Then gate exactly: f16 probe on `'e'`, f32 probes on `'f'`, f64 probes on `'d'`.
+
+**ZERO extra Python reads** — the same single dtype attribute fetch, more information extracted from
+it. The integer/string/complex/temporal gates keep working off the derived kind, so they need no
+rewrite and their many-chars-to-one-kind mapping stays in one place.
+
+### Honest sizing, and it is modest for the cell that matters
+
+```
+  f64 array needle (the 3.172x worst cell): skips ONE declining probe (f16)
+  f32 haystack:                             skips THREE (f16 + both f64)
+  f16 haystack:                             skips none it does not already skip
+```
+
+So the worst cell gains the least. **I am not predicting a magnitude** — the dispatcher-body lever
+that preceded this one moved the same cell +5.1%, and one probe skip is plausibly smaller than that.
+The f32 cells are where the structural win is, and they are not the cell under the standing order.
+
+**IT DOES PASS THE FILTER THAT MATTERS.** RedLynx's five-A/B lesson was: change only what runs
+UNCONDITIONALLY on the path that does the work. The f16 probe runs unconditionally for every float
+haystack, so this is not another of the four levers that measured zero because the caller already
+guarded the condition.
+
+COUNTED_MECHANISM: none - design reading. The probe inventory is from the dispatcher source; the
+3.172x and +5.1% figures are from RedLynx's banked rows.
+A/A NULL CONTROLS: not applicable.
+RETRY PREDICATE: when the freeze lifts, ONE build. Measure `ss_array_needle` AND at least one f32
+searchsorted cell in the same run - the f32 cells carry the larger structural win and omitting them
+would credit the lever at its worst cell only, which is the correct thing to QUOTE but the wrong
+thing to MEASURE. Use the dual-null contract that produced 3.172x, so the result is comparable to
+the banked figure rather than to a counter probe.
+AGENT_NAME=SlateFinch.
