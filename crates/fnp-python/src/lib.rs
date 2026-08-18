@@ -38644,6 +38644,7 @@ fn try_zerocopy_f64_histogram2d(
     y: &Bound<'_, PyAny>,
     xedges: &Bound<'_, PyAny>,
     yedges: &Bound<'_, PyAny>,
+    weights: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     // A grid this size makes the counter array itself the cost; NumPy's bincount is
     // better shaped for it. Bounded so a pathological `bins=` cannot allocate wildly.
@@ -38679,6 +38680,43 @@ fn try_zerocopy_f64_histogram2d(
     if xs.len() != ys.len() || xe.len() < 2 || ye.len() < 2 {
         return Ok(None);
     }
+    // WEIGHTS (`deadlock-audit-6y5wp`). NumPy reaches them through the same
+    // `bincount(xy, weights)` that produces the unweighted counts - the bin selection is
+    // identical and only the increment changes - so they cost one extra buffer here and
+    // nothing in the loop's shape. Held in a local so the slice borrow outlives the use.
+    let weight_buffer = match weights {
+        None => None,
+        Some(w) => {
+            if !w.is_exact_instance(cached_ndarray_type(py)?)
+                || !numpy_dtype_is_f64(py, w)
+                || w.getattr("ndim")?.extract::<usize>()? != 1
+                || !w
+                    .getattr("flags")?
+                    .getattr("c_contiguous")?
+                    .extract::<bool>()?
+            {
+                return Ok(None);
+            }
+            let Ok(wb) = PyBuffer::<f64>::get(w) else {
+                return Ok(None);
+            };
+            Some(wb)
+        }
+    };
+    let weight_values: Option<&[f64]> = match weight_buffer.as_ref() {
+        None => None,
+        Some(wb) => {
+            let Some(ws) = wb.as_slice(py) else {
+                return Ok(None);
+            };
+            if ws.len() != xs.len() {
+                return Ok(None);
+            }
+            // SAFETY: as for the samples - ReadOnlyCell<f64> is repr(transparent) over f64
+            // and the array is a read-only C-contiguous f64 ndarray held under the GIL.
+            Some(unsafe { std::slice::from_raw_parts(ws.as_ptr().cast::<f64>(), ws.len()) })
+        }
+    };
     let (nbx, nby) = (xe.len() - 1, ye.len() - 1);
     if nbx.saturating_mul(nby) > MAX_BINS_TOTAL {
         return Ok(None);
@@ -38700,11 +38738,15 @@ fn try_zerocopy_f64_histogram2d(
     };
 
     let mut counts = vec![0.0_f64; nbx * nby];
-    for (&xv_i, &yv_i) in xv.iter().zip(yv.iter()) {
+    for (index, (&xv_i, &yv_i)) in xv.iter().zip(yv.iter()).enumerate() {
         if let Some(ix) = bin_of(xed, xv_i, nbx)
             && let Some(iy) = bin_of(yed, yv_i, nby)
         {
-            counts[ix * nby + iy] += 1.0;
+            // Unweighted counting is the weight-1 case, so there is ONE loop rather than
+            // two. A NaN weight propagates into its bin exactly as NumPy's `bincount`
+            // lets it, and an out-of-range sample contributes nothing whether or not it
+            // carries a weight - both follow from doing the selection first.
+            counts[ix * nby + iy] += weight_values.map_or(1.0, |w| w[index]);
         }
     }
 
@@ -108085,11 +108127,11 @@ fn histogram2d(
     //
     // Anything beyond the first four positionals is `density`/`weights`, which change what
     // is accumulated rather than how fast, so those decline here as they do by keyword.
-    if (2..=4).contains(&args.len())
+    if (2..=6).contains(&args.len())
         && kwargs.is_none_or(|kw| {
             kw.keys().into_iter().all(|key| {
                 key.extract::<String>()
-                    .map(|k| k == "bins" || k == "range")
+                    .map(|k| k == "bins" || k == "range" || k == "weights")
                     .unwrap_or(false)
             })
         })
@@ -108105,6 +108147,18 @@ fn histogram2d(
         let range_arg = kwargs
             .and_then(|kw| kw.get_item("range").ok().flatten())
             .or_else(|| args.get_item(3).ok());
+        // `density` is positional slot 4 and rescales the result, so it is not just a
+        // faster path - decline it. `weights` is slot 5 and only changes the increment.
+        let density = kwargs
+            .and_then(|kw| kw.get_item("density").ok().flatten())
+            .or_else(|| args.get_item(4).ok());
+        if density.is_some_and(|d| !d.is_none()) {
+            return core_numpy_passthrough(py, "histogram2d", args, kwargs);
+        }
+        let weights_arg = kwargs
+            .and_then(|kw| kw.get_item("weights").ok().flatten())
+            .or_else(|| args.get_item(5).ok())
+            .filter(|w| !w.is_none());
         let counts: Option<(usize, usize)> = match bins.as_ref() {
             None => Some((10, 10)),
             Some(b) => {
@@ -108130,8 +108184,15 @@ fn histogram2d(
                         .unbind())
                 };
             if let (Ok(xe), Ok(ye)) = (per_dim(0, nx, &x), per_dim(1, ny, &y))
-                && let Some(hist) =
-                    try_zerocopy_f64_histogram2d(py, numpy, &x, &y, xe.bind(py), ye.bind(py))?
+                && let Some(hist) = try_zerocopy_f64_histogram2d(
+                    py,
+                    numpy,
+                    &x,
+                    &y,
+                    xe.bind(py),
+                    ye.bind(py),
+                    weights_arg.as_ref(),
+                )?
             {
                 return Ok(PyTuple::new(py, [hist, xe, ye])?.unbind().into_any());
             }
@@ -123569,6 +123630,97 @@ mod tests {
                 &numpy_gradient.call1((integers.clone(),))?,
             )?;
 
+            Ok(())
+        });
+    }
+
+    /// `histogram2d` with `weights=` must match NumPy, and `density=` must still decline
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// Weights reach the same bin selection and change only the increment, so the risk is
+    /// not the arithmetic - it is the two places where a weighted histogram can quietly
+    /// stop agreeing with NumPy:
+    ///
+    ///   1. AN OUT-OF-RANGE SAMPLE MUST CONTRIBUTE NOTHING, weight or no weight. Selecting
+    ///      the bin first and only then adding the weight is what guarantees that; adding
+    ///      first and clamping would bank the weight into an end bin.
+    ///   2. `density=` RESCALES the result rather than reweighting it, so it is not a
+    ///      faster path to the same answer and must reach NumPy. It is asserted here
+    ///      because a decline that silently stopped declining would look correct on the
+    ///      unweighted cases and be wrong only when someone asked for a density.
+    ///
+    /// Positional and keyword spellings are both exercised, since the two now travel
+    /// different lines of the argument plumbing.
+    #[test]
+    fn histogram2d_weights_match_numpy_and_density_declines() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_hist2d_w")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("histogram2d")?;
+            let theirs = numpy.getattr("histogram2d")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(11)\n\
+                  x = rng.standard_normal(5000)\n\
+                  y = rng.standard_normal(5000)\n\
+                  w = rng.standard_normal(5000)\n\
+                  ox = np.array([0.5, 1.5, -9.0, 9.0, 2.0])\n\
+                  oy = np.array([0.5, 1.5, 0.5, 0.5, 2.0])\n\
+                  ow = np.array([1.0, 2.0, 100.0, 100.0, 4.0])\n\
+                  rng2 = [[-2.0, 2.0], [-2.0, 2.0]]\n\
+                  rng3 = [[0.0, 2.0], [0.0, 2.0]]\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| locals.get_item(k).expect("hist2d weights fixture");
+
+            let compare = |mine: &Bound<'_, PyAny>, theirs_out: &Bound<'_, PyAny>, what: &str| -> PyResult<()> {
+                for (index, part) in [(0usize, "H"), (1, "xedges"), (2, "yedges")] {
+                    assert_eq!(
+                        mine.get_item(index)?.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        theirs_out.get_item(index)?.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "{what}: {part} diverged from numpy"
+                    );
+                }
+                Ok(())
+            };
+
+            // Keyword spelling, random weights.
+            let kw = PyDict::new(py);
+            kw.set_item("bins", 6)?;
+            kw.set_item("range", g("rng2"))?;
+            kw.set_item("weights", g("w"))?;
+            compare(
+                &ours.call((g("x"), g("y")), Some(&kw))?,
+                &theirs.call((g("x"), g("y")), Some(&kw))?,
+                "keyword weights",
+            )?;
+
+            // Positional spelling, and the out-of-range samples carry HEAVY weights so
+            // banking them into an end bin instead of dropping them cannot go unnoticed.
+            let pos = (g("ox"), g("oy"), 4, g("rng3"), py.None(), g("ow"));
+            compare(
+                &ours.call1(pos.clone())?,
+                &theirs.call1(pos)?,
+                "positional weights with out-of-range samples",
+            )?;
+
+            // density= must still reach numpy, and therefore still agree.
+            let dkw = PyDict::new(py);
+            dkw.set_item("bins", 4)?;
+            dkw.set_item("range", g("rng3"))?;
+            dkw.set_item("density", true)?;
+            compare(
+                &ours.call((g("ox"), g("oy")), Some(&dkw))?,
+                &theirs.call((g("ox"), g("oy")), Some(&dkw))?,
+                "density declines to numpy",
+            )?;
             Ok(())
         });
     }
