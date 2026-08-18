@@ -108970,7 +108970,209 @@ fn busday_count(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kw| {
+        kw.keys().into_iter().all(|key| {
+            key.extract::<String>()
+                .map(|k| k == "weekmask" || k == "holidays")
+                .unwrap_or(false)
+        })
+    }) && (2..=4).contains(&args.len())
+        && !busday_keyword_is_doubly_supplied(args, kwargs, "weekmask", 2)
+        && !busday_keyword_is_doubly_supplied(args, kwargs, "holidays", 3)
+        && let (Ok(begin), Ok(end)) = (args.get_item(0), args.get_item(1))
+        && let Some(result) = try_zerocopy_busday_count(
+            py,
+            &begin,
+            &end,
+            kwargs
+                .and_then(|kw| kw.get_item("weekmask").ok().flatten())
+                .or_else(|| args.get_item(2).ok())
+                .as_ref(),
+            kwargs
+                .and_then(|kw| kw.get_item("holidays").ok().flatten())
+                .or_else(|| args.get_item(3).ok())
+                .as_ref(),
+        )?
+    {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "busday_count", args, kwargs)
+}
+
+/// True when a business-day keyword ALSO arrives positionally, which the incumbent rejects
+/// with `TypeError: busday_count() got multiple values for argument 'weekmask'`.
+///
+/// Both `busday_count` and `is_busday` take `(*args, **kwargs)` here, so PyO3 raises
+/// nothing for the duplicate and the native route would happily prefer one of the two and
+/// return a number for a call NumPy refuses to accept. `position` is the index at which
+/// that keyword also appears in the positional signature.
+fn busday_keyword_is_doubly_supplied(
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    name: &str,
+    position: usize,
+) -> bool {
+    args.len() > position && kwargs.is_some_and(|kw| kw.contains(name).unwrap_or(false))
+}
+
+/// The Monday-first weekmask index for a `datetime64[D]` day number.
+///
+/// Day 0 (1970-01-01) was a Thursday, hence the `+ 3`. Reduced BEFORE the shift rather
+/// than after: `(day + 3).rem_euclid(7)` overflows for day numbers near `i64::MAX`, which
+/// `datetime64[D]` can hold and a holiday list can therefore contain. Reducing first is
+/// the same value for every `i64` - `(d + 3) mod 7 == ((d mod 7) + 3) mod 7` - and cannot
+/// overflow, since `rem_euclid` lands in `[0, 6]`.
+#[inline]
+fn busday_weekday_index(day: i64) -> usize {
+    ((day.rem_euclid(7) + 3) % 7) as usize
+}
+
+/// Widest day number the native business-day counter will touch (~3e9 years each side of
+/// 1970). Beyond it `end - begin` and `begin + 1` can overflow `i64`; see the range check.
+const BUSDAY_MAX_ABS_DAY: i64 = 1 << 40;
+
+/// Business days in the half-open span `[begin, end)`, assuming `begin <= end`.
+///
+/// Closed form rather than a walk: whole weeks contribute `popcount(weekmask)` each, so
+/// only the `n % 7` tail is inspected. A day-by-day loop would be O(span) and NumPy's is
+/// not; over a decade that is ~3650 iterations against 7.
+#[inline]
+fn busdays_in_span(begin: i64, end: i64, mask: &[bool; 7], per_week: i64, holidays: &[i64]) -> i64 {
+    if end <= begin {
+        return 0;
+    }
+    let span = end - begin;
+    let mut count = (span / 7) * per_week;
+    for offset in 0..(span % 7) {
+        if mask[busday_weekday_index(begin + offset)] {
+            count += 1;
+        }
+    }
+    // Holidays inside the span, but only those that WOULD have been business days - a
+    // holiday on a masked-off day was never counted and must not be subtracted twice.
+    let lo = holidays.partition_point(|&h| h < begin);
+    let hi = holidays.partition_point(|&h| h < end);
+    for &holiday in &holidays[lo..hi] {
+        if mask[busday_weekday_index(holiday)] {
+            count -= 1;
+        }
+    }
+    count
+}
+
+/// `np.busday_count` for contiguous `datetime64[D]` operands (`deadlock-audit-6y5wp`).
+///
+/// THE REVERSED SPAN IS NOT A NEGATED FORWARD SPAN, which is the trap here. Measured
+/// against the incumbent: `busday_count(Mon, Sat) = 5` but `busday_count(Sat, Mon) = -4`,
+/// not `-5`. Reversing flips WHICH end is open, so the reversed answer is
+/// `-count([end + 1, begin + 1))` - equivalently `-count((end, begin])`. Assuming symmetry
+/// would be off by one exactly when the far endpoint is itself a business day, which is
+/// most of the time.
+fn try_zerocopy_busday_count(
+    py: Python<'_>,
+    begin: &Bound<'_, PyAny>,
+    end: &Bound<'_, PyAny>,
+    weekmask: Option<&Bound<'_, PyAny>>,
+    holidays: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = cached_numpy(py)?;
+    let Some(mask) = parse_busday_weekmask(weekmask)? else {
+        return Ok(None);
+    };
+    let per_week = mask.iter().filter(|day| **day).count() as i64;
+    let Some(holiday_days) = collect_busday_holidays(py, holidays)? else {
+        return Ok(None);
+    };
+
+    // Both operands as day numbers. Either may be a single date broadcast over the other;
+    // anything more general than that (two different non-scalar shapes) declines.
+    let Some(begin_buffer) = datetime64_day_buffer(py, begin)? else {
+        return Ok(None);
+    };
+    let Some(end_buffer) = datetime64_day_buffer(py, end)? else {
+        return Ok(None);
+    };
+    let (Some(begin_cells), Some(end_cells)) = (begin_buffer.as_slice(py), end_buffer.as_slice(py))
+    else {
+        return Ok(None);
+    };
+    let (begin_len, end_len) = (begin_cells.len(), end_cells.len());
+    let begin_shape: Vec<usize> = begin.getattr("shape")?.extract()?;
+    let end_shape: Vec<usize> = end.getattr("shape")?.extract()?;
+    // Only the two broadcasts that need no shape arithmetic: identical shapes, or one
+    // side a single date spread over the other. A SINGLE ELEMENT IS NOT ENOUGH TO CLAIM
+    // THE OTHER SIDE'S SHAPE - it must also have no more axes, because broadcasting aligns
+    // from the right and *adds* the leftover leading axes. `(1, 1)` against `(3,)` is the
+    // case that bites: numpy returns `(1, 3)`, not `(3,)`, so taking the other operand's
+    // shape would hand back correct numbers wearing the wrong `.shape`. With `ndim <=`
+    // enforced the broadcast result IS the other operand's shape, every axis of a
+    // one-element array being 1. Checked against the incumbent over a grid of shape pairs.
+    // Anything else is NumPy's.
+    let shape = if begin_shape == end_shape {
+        begin_shape
+    } else if begin_len == 1 && begin_shape.len() <= end_shape.len() {
+        end_shape
+    } else if end_len == 1 && end_shape.len() <= begin_shape.len() {
+        begin_shape
+    } else {
+        return Ok(None);
+    };
+    // 0-d ON BOTH SIDES RETURNS A SCALAR, NOT A 0-d ARRAY. `np.busday_count` of two 0-d
+    // dates is `np.int64(5)`, whose type is `numpy.int64`, while `np.empty(())` is an
+    // `ndarray` - filling one here would return the right number in the wrong type. Every
+    // other combination, 0-d broadcast against a real array included, does return an
+    // array. Read off the incumbent rather than assumed.
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let count: usize = shape.iter().product();
+
+    // NaT is an ERROR here, not a value: the incumbent raises "Cannot compute a business
+    // day count with a NaT (not-a-time) date". Declining lets it raise, rather than
+    // inventing a number for it as `is_busday` legitimately does.
+    //
+    // The same test bounds the magnitude, because the reversed-span rule computes
+    // `begin + 1` and every span computes `end - begin`. `datetime64[D]` spans the whole
+    // of `i64`, so both can overflow on values no real calendar produces. The bound is
+    // ~3e9 years either side of 1970 - far outside anything a date means - and everything
+    // beyond it is NumPy's.
+    if !begin_cells
+        .iter()
+        .chain(end_cells.iter())
+        .all(|cell| (-BUSDAY_MAX_ABS_DAY..=BUSDAY_MAX_ABS_DAY).contains(&cell.get()))
+    {
+        return Ok(None);
+    }
+
+    let out = numpy.call_method1(
+        "empty",
+        (&PyTuple::new(py, shape.iter().copied())?, "int64"),
+    )?;
+    // Flatten before taking the buffer, as `is_busday` does: an N-d C-contiguous array is
+    // writable through a 1-d view, so the fill loop below indexes the flat operands
+    // directly and the output keeps the shape numpy would have given it.
+    let flat_out = out.call_method1("reshape", (-1i64,))?;
+    let Ok(out_buffer) = PyBuffer::<i64>::get(&flat_out) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != count {
+        return Ok(None);
+    }
+
+    for (index, slot) in out_cells.iter().enumerate() {
+        let b = begin_cells[if begin_len == 1 { 0 } else { index }].get();
+        let e = end_cells[if end_len == 1 { 0 } else { index }].get();
+        let value = if b <= e {
+            busdays_in_span(b, e, &mask, per_week, &holiday_days)
+        } else {
+            -busdays_in_span(e + 1, b + 1, &mask, per_week, &holiday_days)
+        };
+        slot.set(value);
+    }
+    Ok(Some(out.unbind()))
 }
 
 #[pyfunction]
@@ -109011,7 +109213,9 @@ fn is_busday(
                 .map(|k| k == "weekmask" || k == "holidays")
                 .unwrap_or(false)
         })
-    }) && args.len() >= 1
+    }) && (1..=3).contains(&args.len())
+        && !busday_keyword_is_doubly_supplied(args, kwargs, "weekmask", 1)
+        && !busday_keyword_is_doubly_supplied(args, kwargs, "holidays", 2)
         && let Ok(dates) = args.get_item(0)
         && let Some(result) = try_zerocopy_is_busday(
             py,
@@ -109023,7 +109227,6 @@ fn is_busday(
             kwargs
                 .and_then(|kw| kw.get_item("holidays").ok().flatten())
                 .or_else(|| args.get_item(2).ok())
-                .filter(|h| !h.is_none())
                 .as_ref(),
         )?
     {
@@ -109032,12 +109235,91 @@ fn is_busday(
     core_numpy_passthrough(py, "is_busday", args, kwargs)
 }
 
+/// The weekmask as seven Monday-first flags: the default, a 7-character '0'/'1' string, or
+/// a 7-element integer sequence. NumPy also accepts day-name spellings like "Mon Tue";
+/// those decline rather than being half-parsed.
+///
+/// AN ABSENT WEEKMASK AND AN EXPLICIT `None` ARE DIFFERENT ARGUMENTS. Omitting it gives
+/// the Mon-Fri default, but `weekmask=None` RAISES in the incumbent - "Couldn't convert
+/// object into a business day weekmask" - so `None` declines rather than quietly becoming
+/// the default. Confirmed against the installed numpy for both `busday_count` and
+/// `is_busday`; treating them alike would answer a call numpy refuses.
+fn parse_busday_weekmask(weekmask: Option<&Bound<'_, PyAny>>) -> PyResult<Option<[bool; 7]>> {
+    let mut mask = [true, true, true, true, true, false, false];
+    let Some(value) = weekmask else {
+        return Ok(Some(mask));
+    };
+    if value.is_none() {
+        return Ok(None);
+    }
+    if let Ok(text) = value.extract::<String>() {
+        let bytes = text.as_bytes();
+        if bytes.len() != 7 || bytes.iter().any(|b| !matches!(b, b'0' | b'1')) {
+            return Ok(None);
+        }
+        for (slot, byte) in mask.iter_mut().zip(bytes) {
+            *slot = *byte == b'1';
+        }
+        return Ok(busday_weekmask_if_usable(mask));
+    }
+    if let Ok(values) = value.extract::<Vec<i64>>() {
+        if values.len() != 7 {
+            return Ok(None);
+        }
+        for (slot, flag) in mask.iter_mut().zip(values) {
+            *slot = flag != 0;
+        }
+        return Ok(busday_weekmask_if_usable(mask));
+    }
+    Ok(None)
+}
+
+/// An all-zero weekmask is an ERROR in the incumbent, not an empty calendar: it raises
+/// "the business day weekmask must have at least one valid business day". Declining hands
+/// it back so NumPy raises, rather than us answering 0 for every span. Found by fuzzing -
+/// the all-zero mask was in the generator's list and NumPy refused it.
+#[inline]
+fn busday_weekmask_if_usable(mask: [bool; 7]) -> Option<[bool; 7]> {
+    mask.iter().any(|day| *day).then_some(mask)
+}
+
+/// Holiday dates as sorted, deduplicated day numbers, so membership is a binary search
+/// rather than a scan. NumPy sorts them internally for the same reason.
+fn collect_busday_holidays(
+    py: Python<'_>,
+    holidays: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Vec<i64>>> {
+    let Some(value) = holidays else {
+        return Ok(Some(Vec::new()));
+    };
+    let Some(buffer) = datetime64_day_buffer(py, value)? else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // NaT holidays are dropped, matching the incumbent, which ignores them. Kept, the
+    // sentinel `i64::MIN` would index the weekmask at whatever weekday it happens to
+    // reduce to and could subtract a business day that is not there.
+    let mut days: Vec<i64> = cells
+        .iter()
+        .map(|cell| cell.get())
+        .filter(|day| *day != i64::MIN)
+        .collect();
+    days.sort_unstable();
+    days.dedup();
+    Ok(Some(days))
+}
+
 /// A `datetime64[D]` array's day numbers, or `None` if it is not that exact dtype.
 ///
 /// Day resolution specifically: `datetime64[s]` and friends count seconds, so reading them
 /// as days would be wrong by a factor of 86400 rather than obviously broken. NumPy accepts
 /// coarser and finer units by converting; that conversion is left to NumPy.
-fn datetime64_day_buffer(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<PyBuffer<i64>>> {
+fn datetime64_day_buffer(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<PyBuffer<i64>>> {
     if !value.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -109067,47 +109349,12 @@ fn try_zerocopy_is_busday(
         return Ok(None);
     };
 
-    // Weekmask: the default, a 7-character '0'/'1' string, or a 7-element integer
-    // sequence. NumPy also accepts day-name spellings like "Mon Tue"; those decline.
-    let mut mask = [true, true, true, true, true, false, false];
-    if let Some(w) = weekmask {
-        if let Ok(text) = w.extract::<String>() {
-            let bytes = text.as_bytes();
-            if bytes.len() != 7 || bytes.iter().any(|b| !matches!(b, b'0' | b'1')) {
-                return Ok(None);
-            }
-            for (slot, byte) in mask.iter_mut().zip(bytes) {
-                *slot = *byte == b'1';
-            }
-        } else if let Ok(values) = w.extract::<Vec<i64>>() {
-            if values.len() != 7 {
-                return Ok(None);
-            }
-            for (slot, value) in mask.iter_mut().zip(values) {
-                *slot = value != 0;
-            }
-        } else {
-            return Ok(None);
-        }
-    }
-
-    // Holidays are compared as day numbers. Sorted once so the per-date test is a binary
-    // search rather than a scan; NumPy sorts them internally too.
-    let mut holiday_days: Vec<i64> = Vec::new();
-    if let Some(h) = holidays {
-        let Some(holiday_buffer) = datetime64_day_buffer(py, h)? else {
-            return Ok(None);
-        };
-        let Some(cells) = holiday_buffer.as_slice(py) else {
-            return Ok(None);
-        };
-        holiday_days.reserve(cells.len());
-        for cell in cells {
-            holiday_days.push(cell.get());
-        }
-        holiday_days.sort_unstable();
-        holiday_days.dedup();
-    }
+    let Some(mask) = parse_busday_weekmask(weekmask)? else {
+        return Ok(None);
+    };
+    let Some(holiday_days) = collect_busday_holidays(py, holidays)? else {
+        return Ok(None);
+    };
 
     let Some(date_cells) = date_buffer.as_slice(py) else {
         return Ok(None);
@@ -109130,7 +109377,7 @@ fn try_zerocopy_is_busday(
         let day = date.get();
         // NaT first: see the note at the call site.
         let valid = day != i64::MIN
-            && mask[(day + 3).rem_euclid(7) as usize]
+            && mask[busday_weekday_index(day)]
             && holiday_days.binary_search(&day).is_err();
         slot.set(u8::from(valid));
     }
@@ -112127,27 +112374,26 @@ mod tests {
         F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN, F64_DIV_OUT_DECLINE_MIN_LEN, MaskedStream,
         NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, UFuncKind,
         accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
-        build_numpy_array_from_ufunc, cached_float64_dtype, cached_numpy, ceil_native, choose,
-        compress, copysign, count_nonzero, degrees_native, diag, diag_indices, diag_indices_from,
-        diagflat, diagonal, digitize, dtype_kind_of, extract, extract_numeric_array,
-        extract_precise_numeric_array, f64_binary_route_is_worth_taking,
-        divide_slice_detecting_fe_hazards, f64_divide_evidence_saw_non_normal,
-        f64_divide_fast_accepts_without_fp_error,
-        f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
-        f64_divide_quotient_non_normal_evidence, f64_divide_raises_fp_error,
-        f64_out_route_is_worth_taking, fill_diagonal, flatnonzero, flip, fliplr, flipud,
-        floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name, interp,
-        is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native, isneginf_native,
-        isposinf_native, ix_, ldexp, logaddexp, logaddexp2, masked_pairwise_parallel,
-        masked_pairwise_streamed, meshgrid, modf, nan_to_num, narrow_bitmap_setop, nextafter,
-        numpy_dtype_is_f64, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
-        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate,
-        radians_native, ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted,
-        select, sign, signbit_native, sinc, solve_triangular, spacing, take, take_along_axis,
-        tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from,
-        triu_indices, triu_indices_from, trunc_native, try_native_lstsq_tsqr,
-        try_zerocopy_f64_binary_into, unravel_index, where_py, wide_int_table_bounds,
-        zerocopy_f64_binary_flat,
+        build_numpy_array_from_ufunc, busdays_in_span, cached_float64_dtype, cached_numpy,
+        ceil_native, choose, compress, copysign, count_nonzero, degrees_native, diag, diag_indices,
+        diag_indices_from, diagflat, diagonal, digitize, divide_slice_detecting_fe_hazards,
+        dtype_kind_of, extract, extract_numeric_array, extract_precise_numeric_array,
+        f64_binary_route_is_worth_taking, f64_divide_evidence_saw_non_normal,
+        f64_divide_fast_accepts_without_fp_error, f64_divide_non_fast_raises_fp_error,
+        f64_divide_quotient_bits_are_normal, f64_divide_quotient_non_normal_evidence,
+        f64_divide_raises_fp_error, f64_out_route_is_worth_taking, fill_diagonal, flatnonzero,
+        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name,
+        interp, is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native,
+        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
+        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
+        narrow_bitmap_setop, nextafter, numpy_dtype_is_f64, place, put, put_along_axis, putmask,
+        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
+        required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
+        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
+        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
+        try_native_lstsq_tsqr, try_zerocopy_busday_count, try_zerocopy_f64_binary_into,
+        unravel_index, where_py, wide_int_table_bounds, zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -124386,7 +124632,10 @@ mod tests {
             let same = |mine: &Bound<'_, PyAny>, theirs_out: &Bound<'_, PyAny>, what: &str| -> PyResult<()> {
                 assert_eq!(
                     mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
-                    theirs_out.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    theirs_out
+                        .getattr("dtype")?
+                        .getattr("str")?
+                        .extract::<String>()?,
                     "{what}: dtype diverged from numpy"
                 );
                 assert_eq!(
@@ -124433,8 +124682,368 @@ mod tests {
                 &theirs.call((g("fortnight"),), Some(&hkw))?,
                 "holidays",
             )?;
+
+            // AN ALL-ZERO WEEKMASK IS AN ERROR, NOT AN EMPTY CALENDAR. NumPy raises
+            // "the business day weekmask must have at least one valid business day"; the
+            // first cut of this route parsed it happily and returned all-False, which is a
+            // plausible answer to a question numpy refuses to answer. Caught by fuzzing
+            // `busday_count`, and it was this function's bug too.
+            let zkw = PyDict::new(py);
+            zkw.set_item("weekmask", "0000000")?;
+            assert!(
+                ours.call((g("fortnight"),), Some(&zkw)).is_err(),
+                "an all-zero weekmask must reach numpy and raise, not return all-False"
+            );
             Ok(())
         });
+    }
+
+    /// `np.busday_count` must match NumPy including the REVERSED-SPAN rule, which is the
+    /// one thing here that a reasonable implementation gets wrong (`deadlock-audit-6y5wp`).
+    ///
+    /// Measured against the incumbent before a line was written:
+    ///
+    ///   busday_count(Mon 2024-01-01, Sat 2024-01-06) ==  5   half-open [begin, end)
+    ///   busday_count(Sat 2024-01-06, Mon 2024-01-01) == -4   NOT -5
+    ///
+    /// Reversing the arguments flips WHICH endpoint is open, so the reversed answer is
+    /// `-count([end + 1, begin + 1))`. An implementation that negates the forward span is
+    /// off by one exactly when the far endpoint is itself a business day - most of the
+    /// time, and never on a weekend, so a fixture that reverses only across weekends would
+    /// pass a wrong implementation. The reversed cases below deliberately land on
+    /// weekdays.
+    ///
+    /// The other three traps, each with a case:
+    ///
+    ///   1. HOLIDAYS ARE SUBTRACTED ONLY WHEN THEY WOULD OTHERWISE HAVE COUNTED. A holiday
+    ///      on a Saturday was never in the total, and subtracting it anyway is a mistake
+    ///      that a weekday-holiday-only fixture cannot see. Both are here.
+    ///   2. PRE-EPOCH DATES ARE NEGATIVE, so the weekday index needs `rem_euclid`; `%`
+    ///      would index backwards off the mask.
+    ///   3. NaT is an ERROR, not a value - the incumbent raises `ValueError`. `is_busday`
+    ///      returns False for NaT, so copying its handling here would invent a number
+    ///      where NumPy refuses to produce one.
+    ///
+    /// ENGAGEMENT IS ASSERTED SEPARATELY from parity, because a passthrough would satisfy
+    /// every equality above. `try_zerocopy_busday_count` is called directly and must
+    /// return `Some` on the fixtures and `None` on each documented decline.
+    #[test]
+    fn busday_count_matches_numpy_including_reversed_spans_and_holidays() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_busday_count")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("busday_count")?;
+            let theirs = numpy.getattr("busday_count")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"d = lambda *s: np.array(list(s), dtype='datetime64[D]')\n\
+                  # Forward, reversed-across-weekdays, same-day, and a reversal whose far\n\
+                  # endpoint is a business day - the case a negated forward span fails.\n\
+                  begins = d('2024-01-01', '2024-01-06', '2024-01-03', '2024-01-31', '2024-02-05')\n\
+                  ends   = d('2024-01-06', '2024-01-01', '2024-01-03', '2024-01-02', '2024-01-08')\n\
+                  # Pre-epoch, both directions, spanning the epoch boundary.\n\
+                  pre_b  = d('1969-12-15', '1970-01-05', '1968-02-29', '1969-01-01')\n\
+                  pre_e  = d('1970-01-05', '1969-12-15', '1968-03-04', '1972-01-01')\n\
+                  # One holiday on a weekday (Wed 2024-01-03) and one on a weekend\n\
+                  # (Sat 2024-01-06). Only the first may change any count.\n\
+                  hols   = d('2024-01-03', '2024-01-06')\n\
+                  weekend_only = d('2024-01-06', '2024-01-07')\n\
+                  # Broadcast: one 0-d date against a real array, both ways round.\n\
+                  scalar_b = np.array('2024-01-01', dtype='datetime64[D]')\n\
+                  many_e = d('2024-01-06', '2024-01-08', '2023-12-25', '2024-03-01')\n\
+                  # Two dimensions, to pin the output shape rather than just its values.\n\
+                  grid_b = d('2024-01-01','2024-01-02','2024-01-03','2024-01-04').reshape(2, 2)\n\
+                  grid_e = d('2024-02-01','2024-02-02','2023-12-01','2024-01-04').reshape(2, 2)\n\
+                  nat_b  = d('2024-01-01', 'NaT')\n\
+                  nat_e  = d('2024-01-06', '2024-01-06')\n\
+                  strided = np.arange('2024-01-01', '2024-03-01', dtype='datetime64[D]')[::2]\n\
+                  strided_e = strided + 9\n\
+                  # A single element with MORE AXES than the other side. Broadcasting\n\
+                  # aligns from the right and keeps the extra leading axis, so numpy\n\
+                  # returns (1, 3) here - not (3,), which is what claiming the other\n\
+                  # operand's shape would give.\n\
+                  fat_b = d('2024-01-01').reshape(1, 1)\n\
+                  thin_e = d('2024-02-01', '2024-03-01', '2024-04-01')\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            // Unwrapped to a `Bound`, not left as the `Option` the other fixtures use:
+            // the engagement checks below pass these by reference into the native helper.
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("busday_count fixture missing")
+            };
+
+            let same = |mine: &Bound<'_, PyAny>,
+                        theirs_out: &Bound<'_, PyAny>,
+                        what: &str|
+             -> PyResult<()> {
+                assert_eq!(
+                    mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    theirs_out
+                        .getattr("dtype")?
+                        .getattr("str")?
+                        .extract::<String>()?,
+                    "{what}: dtype diverged from numpy"
+                );
+                assert_eq!(
+                    mine.getattr("shape")?.extract::<Vec<usize>>()?,
+                    theirs_out.getattr("shape")?.extract::<Vec<usize>>()?,
+                    "{what}: shape diverged from numpy"
+                );
+                assert_eq!(
+                    mine.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    theirs_out.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{what}: busday_count diverged from numpy"
+                );
+                Ok(())
+            };
+
+            // The documented reversal, spelled out as a literal so that a regression here
+            // reads as the rule it broke rather than as a byte mismatch.
+            let one_way = ours.call1((g("begins"), g("ends")))?;
+            assert_eq!(
+                one_way.call_method0("tolist")?.extract::<Vec<i64>>()?,
+                vec![5, -4, 0, -21, -20],
+                "the half-open/reversed-span rule is wrong; reversing flips WHICH endpoint \
+                 is open, so the reversed answer is -count([end + 1, begin + 1))"
+            );
+
+            for (b, e, what) in [
+                ("begins", "ends", "forward, reversed and same-day"),
+                ("pre_b", "pre_e", "pre-epoch, both directions"),
+                ("grid_b", "grid_e", "two dimensions"),
+                ("scalar_b", "many_e", "0-d begin broadcast over an array"),
+                ("many_e", "scalar_b", "array begin against a 0-d end"),
+                (
+                    "strided",
+                    "strided_e",
+                    "non-contiguous (must delegate, still correct)",
+                ),
+                (
+                    "fat_b",
+                    "thin_e",
+                    "one element, more axes than the other side",
+                ),
+                ("thin_e", "fat_b", "more axes on the end operand"),
+            ] {
+                same(
+                    &ours.call1((g(b), g(e)))?,
+                    &theirs.call1((g(b), g(e)))?,
+                    what,
+                )?;
+            }
+
+            // Holidays: on a weekday it must remove a day, on a weekend it must not.
+            for (holidays, what) in [
+                ("hols", "weekday + weekend holidays"),
+                ("weekend_only", "weekend-only holidays change nothing"),
+            ] {
+                let kw = PyDict::new(py);
+                kw.set_item("holidays", g(holidays))?;
+                same(
+                    &ours.call((g("begins"), g("ends")), Some(&kw))?,
+                    &theirs.call((g("begins"), g("ends")), Some(&kw))?,
+                    what,
+                )?;
+            }
+            // A weekend-only holiday list must leave the answer BIT-IDENTICAL to no
+            // holidays at all. Comparing against numpy alone would pass an implementation
+            // that subtracted weekend holidays on both sides.
+            let wkw = PyDict::new(py);
+            wkw.set_item("holidays", g("weekend_only"))?;
+            assert_eq!(
+                ours.call((g("begins"), g("ends")), Some(&wkw))?
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                one_way.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                "a holiday that falls on a non-business day must not be subtracted"
+            );
+
+            // Both weekmask spellings, including one that is every day - under which the
+            // whole-weeks shortcut and the tail loop must still agree.
+            for spelling in ["0111110", "1111111", "1000000"] {
+                let kw = PyDict::new(py);
+                kw.set_item("weekmask", spelling)?;
+                same(
+                    &ours.call((g("begins"), g("ends")), Some(&kw))?,
+                    &theirs.call((g("begins"), g("ends")), Some(&kw))?,
+                    spelling,
+                )?;
+            }
+            let lkw = PyDict::new(py);
+            lkw.set_item("weekmask", vec![1i64, 1, 1, 1, 1, 1, 0])?;
+            same(
+                &ours.call((g("begins"), g("ends")), Some(&lkw))?,
+                &theirs.call((g("begins"), g("ends")), Some(&lkw))?,
+                "list weekmask",
+            )?;
+
+            // NaT and an empty weekmask must RAISE, exactly as the incumbent does. Both
+            // reach NumPy by declining, so this is also a check that the decline path is
+            // a real passthrough and not a swallowed error.
+            assert!(
+                ours.call1((g("nat_b"), g("nat_e"))).is_err(),
+                "NaT must raise, as numpy does - `is_busday` returns False for NaT and \
+                 copying that here would invent a count numpy refuses to produce"
+            );
+            let zkw = PyDict::new(py);
+            zkw.set_item("weekmask", "0000000")?;
+            assert!(
+                ours.call((g("begins"), g("ends")), Some(&zkw)).is_err(),
+                "an all-zero weekmask must raise, as numpy does, not count zero everywhere"
+            );
+
+            // AN ABSENT ARGUMENT AND AN EXPLICIT `None` ARE DIFFERENT ARGUMENTS. Omitting
+            // `weekmask` gives Mon-Fri, but `weekmask=None` raises "Couldn't convert
+            // object into a business day weekmask"; omitting `holidays` means none, but
+            // `holidays=None` raises "holidays must be a provided as a one-dimensional
+            // array". Read off the incumbent - the obvious reading, that `None` means
+            // "use the default", answers two calls numpy refuses.
+            for key in ["weekmask", "holidays"] {
+                let nkw = PyDict::new(py);
+                nkw.set_item(key, py.None())?;
+                assert!(
+                    ours.call((g("begins"), g("ends")), Some(&nkw)).is_err(),
+                    "{key}=None must raise as numpy does, not fall back to the default"
+                );
+            }
+
+            // A KEYWORD SUPPLIED POSITIONALLY *AND* BY NAME IS A `TypeError`. This module
+            // takes `(*args, **kwargs)`, so PyO3 raises nothing for the duplicate and the
+            // native route would otherwise pick one and answer a call numpy rejects with
+            // "got multiple values for argument 'weekmask'".
+            let dupw = PyDict::new(py);
+            dupw.set_item("weekmask", "1111100")?;
+            assert!(
+                ours.call((g("begins"), g("ends"), "0111110"), Some(&dupw))
+                    .is_err(),
+                "weekmask given both positionally and by keyword must raise, as numpy does"
+            );
+            let duph = PyDict::new(py);
+            duph.set_item("holidays", g("hols"))?;
+            assert!(
+                ours.call((g("begins"), g("ends"), "1111100", g("hols")), Some(&duph))
+                    .is_err(),
+                "holidays given both positionally and by keyword must raise, as numpy does"
+            );
+
+            // ENGAGEMENT, and the declines. Parity above is satisfied by a passthrough.
+            let engaged = |b: &str, e: &str| -> PyResult<bool> {
+                Ok(try_zerocopy_busday_count(py, &g(b), &g(e), None, None)?.is_some())
+            };
+            for (b, e) in [
+                ("begins", "ends"),
+                ("pre_b", "pre_e"),
+                ("grid_b", "grid_e"),
+                ("scalar_b", "many_e"),
+                ("many_e", "scalar_b"),
+            ] {
+                assert!(
+                    engaged(b, e)?,
+                    "the native busday_count route declined {b}/{e}; every equality above \
+                     is satisfied by the passthrough, so parity alone proves nothing"
+                );
+            }
+            for (b, e, why) in [
+                ("nat_b", "nat_e", "NaT must reach numpy so numpy raises"),
+                (
+                    "scalar_b",
+                    "scalar_b",
+                    "0-d on both sides returns a numpy scalar, not a 0-d array",
+                ),
+                (
+                    "strided",
+                    "strided_e",
+                    "non-contiguous input has no zero-copy buffer",
+                ),
+                (
+                    "fat_b",
+                    "thin_e",
+                    "a (1, 1) operand broadcasts to (1, 3), not to the (3,) of the other \
+                     side - one element does not license claiming its shape",
+                ),
+                (
+                    "thin_e",
+                    "fat_b",
+                    "the same, with the extra axis on the end operand",
+                ),
+            ] {
+                assert!(
+                    !engaged(b, e)?,
+                    "the native route should have declined: {why}"
+                );
+            }
+            let zero_mask = "0000000".into_pyobject(py)?;
+            assert!(
+                try_zerocopy_busday_count(
+                    py,
+                    &g("begins"),
+                    &g("ends"),
+                    Some(zero_mask.as_any()),
+                    None
+                )?
+                .is_none(),
+                "an empty weekmask must decline so numpy raises"
+            );
+            Ok(())
+        });
+    }
+
+    /// The whole-weeks shortcut in `busdays_in_span` must equal a day-by-day walk
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// The shipped counter is closed-form - `(span / 7) * popcount(weekmask)` plus a tail
+    /// of at most six days - so its cost does not grow with the span. That is only worth
+    /// having if it is exactly the walk it replaces, and the two disagree in ways a
+    /// hand-picked fixture misses: the `span % 7` tail must start at `begin`, not at a
+    /// week boundary, and it must use `rem_euclid` for negative day numbers. This walks
+    /// every span from a pre-epoch start across several weekmasks and compares.
+    #[test]
+    fn busdays_in_span_closed_form_equals_a_day_by_day_walk() {
+        let masks: &[[bool; 7]] = &[
+            [true, true, true, true, true, false, false],
+            [true, true, true, true, true, true, true],
+            [true, false, false, false, false, false, false],
+            [false, false, false, false, false, true, true],
+            [true, false, true, false, true, false, true],
+        ];
+        // Straddles the epoch so the negative-index path is exercised, and the holidays
+        // include weekend days that must never be subtracted plus one outside the span.
+        let holidays: Vec<i64> = vec![-370, -3, 0, 1, 2, 5, 9, 400, 4000];
+        for mask in masks {
+            let per_week = mask.iter().filter(|day| **day).count() as i64;
+            for begin in [-400_i64, -7, -1, 0, 1, 13] {
+                for span in 0..80_i64 {
+                    let end = begin + span;
+                    let walked = (begin..end)
+                        .filter(|day| {
+                            mask[(day + 3).rem_euclid(7) as usize] && !holidays.contains(day)
+                        })
+                        .count() as i64;
+                    assert_eq!(
+                        busdays_in_span(begin, end, mask, per_week, &holidays),
+                        walked,
+                        "closed form disagrees with the walk at begin={begin} span={span}"
+                    );
+                }
+            }
+        }
+        // An empty or inverted span is zero, which is what the reversed-argument rule
+        // relies on when the two dates are equal.
+        for mask in masks {
+            let per_week = mask.iter().filter(|day| **day).count() as i64;
+            assert_eq!(busdays_in_span(10, 10, mask, per_week, &holidays), 0);
+            assert_eq!(busdays_in_span(10, 3, mask, per_week, &holidays), 0);
+        }
     }
 
     /// `np.where(cond, x, y)` must match NumPy for the array/array dtypes that had no
