@@ -72259,10 +72259,10 @@ fn try_zerocopy_f64_argsort_flat(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -72331,10 +72331,10 @@ fn try_zerocopy_f32_argsort_flat(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -72408,10 +72408,10 @@ fn try_zerocopy_c128_argsort_flat(
     {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -72509,10 +72509,10 @@ fn try_zerocopy_c64_argsort_flat(
     {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -72604,11 +72604,11 @@ fn try_zerocopy_c64_argsort_lastaxis(
     {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -72616,7 +72616,7 @@ fn try_zerocopy_c64_argsort_lastaxis(
     if !axis_spec_is_last(axis_spec, ndim) {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let cols = shape[ndim - 1];
     let rows: usize = shape[..ndim - 1].iter().product();
     const ARGSORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
@@ -72740,14 +72740,14 @@ fn try_zerocopy_c128_argsort_lastaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2 {
         return Ok(None);
     }
     if !axis_spec_is_last(axis_spec, ndim) {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let cols = shape[ndim - 1];
     let rows: usize = shape[..ndim - 1].iter().product();
     const ARGSORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
@@ -72840,11 +72840,11 @@ fn try_zerocopy_c128_argsort_axis0(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2 || !axis_spec_is_first(axis_spec, ndim) {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let rows = shape[0];
     let cols: usize = shape[1..].iter().product();
     const ARGSORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
@@ -72956,14 +72956,14 @@ fn try_zerocopy_c128_argsort_midaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 3 {
         return Ok(None);
     }
     let Some(ax) = axis_spec_middle(axis_spec, ndim) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let outer: usize = shape[..ax].iter().product();
     let alen = shape[ax];
     let inner: usize = shape[ax + 1..].iter().product();
@@ -73112,11 +73112,11 @@ fn try_zerocopy_c64_argsort_axis0(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2 || !axis_spec_is_first(axis_spec, ndim) {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let rows = shape[0];
     let cols: usize = shape[1..].iter().product();
     const ARGSORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
@@ -73225,14 +73225,14 @@ fn try_zerocopy_c64_argsort_midaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 3 {
         return Ok(None);
     }
     let Some(ax) = axis_spec_middle(axis_spec, ndim) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let outer: usize = shape[..ax].iter().product();
     let alen = shape[ax];
     let inner: usize = shape[ax + 1..].iter().product();
@@ -73862,23 +73862,23 @@ fn try_native_float_argsort_default_radix(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
-    let dt = a.getattr("dtype")?;
-    if dt.getattr("kind")?.extract::<String>()? != "f" {
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f" {
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
     let n = a.len()?;
     if n < MIN || rayon::current_num_threads() < 2 {
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
-    match dt.getattr("itemsize")?.extract::<usize>()? {
+    match dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
         4 => argsort_stable_radix_f32(py, numpy, a, n, true),
         8 => argsort_stable_radix_f64(py, numpy, a, n, true),
         _ => Ok(FloatArgsortRadixOutcome::NotApplicable),
@@ -73916,16 +73916,16 @@ fn try_native_int_argsort_default_radix(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
     }
-    let dt = a.getattr("dtype")?;
-    let kind = dt.getattr("kind")?.extract::<String>()?;
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if kind != "i" && kind != "u" {
         return Ok(None);
     }
@@ -73933,7 +73933,7 @@ fn try_native_int_argsort_default_radix(
     if n < MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    match (kind.as_str(), dt.getattr("itemsize")?.extract::<usize>()?) {
+    match (kind.as_str(), dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?) {
         ("i", 4) => argsort_stable_radix::<i32>(py, numpy, a, n, true),
         ("i", 8) => argsort_stable_radix::<i64>(py, numpy, a, n, true),
         ("u", 4) => argsort_stable_radix::<u32>(py, numpy, a, n, true),
@@ -74363,28 +74363,28 @@ fn try_native_int_argsort_flat(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
     }
-    let dt = a.getattr("dtype")?;
-    let kind = dt.getattr("kind")?.extract::<String>()?;
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if kind != "i" && kind != "u" {
         return Ok(None);
     }
     let n: usize = a
-        .getattr("shape")?
+        .getattr(intern!(py, "shape"))?
         .extract::<Vec<usize>>()?
         .iter()
         .product();
     if n < ARGSORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let itemsize = dt.getattr("itemsize")?.extract::<usize>()?;
+    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
         ("i", 4) => int_argsort_flat_typed::<i32>(py, numpy, a, n),
         ("i", 8) => int_argsort_flat_typed::<i64>(py, numpy, a, n),
@@ -74408,21 +74408,21 @@ fn try_native_datetime_argsort_flat(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
     }
-    let dt = a.getattr("dtype")?;
-    let kind = dt.getattr("kind")?.extract::<String>()?;
-    if (kind != "M" && kind != "m") || dt.getattr("itemsize")?.extract::<usize>()? != 8 {
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    if (kind != "M" && kind != "m") || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8 {
         return Ok(None);
     }
     let n: usize = a
-        .getattr("shape")?
+        .getattr(intern!(py, "shape"))?
         .extract::<Vec<usize>>()?
         .iter()
         .product();
@@ -74469,15 +74469,15 @@ fn try_native_datetime_argsort_axes(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let dt = a.getattr("dtype")?;
-    let kind = dt.getattr("kind")?.extract::<String>()?;
-    if (kind != "M" && kind != "m") || dt.getattr("itemsize")?.extract::<usize>()? != 8 {
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    if (kind != "M" && kind != "m") || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8 {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? < 2
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? < 2
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -74812,11 +74812,11 @@ fn try_native_int_argsort_lastaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -74824,12 +74824,12 @@ fn try_native_int_argsort_lastaxis(
     if !axis_spec_is_last(axis_spec, ndim) {
         return Ok(None);
     }
-    let dt = a.getattr("dtype")?;
-    let kind = dt.getattr("kind")?.extract::<String>()?;
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if kind != "i" && kind != "u" {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let cols = shape[ndim - 1];
     let rows: usize = shape[..ndim - 1].iter().product();
     if rows < 2
@@ -74840,7 +74840,7 @@ fn try_native_int_argsort_lastaxis(
         return Ok(None);
     }
     let n = rows * cols;
-    let itemsize = dt.getattr("itemsize")?.extract::<usize>()?;
+    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
         ("i", 4) => int_argsort_lastaxis_typed::<i32>(py, numpy, a, &shape, rows, cols, n),
         ("i", 8) => int_argsort_lastaxis_typed::<i64>(py, numpy, a, &shape, rows, cols, n),
@@ -74947,22 +74947,22 @@ fn try_native_int_argsort_axis0(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2
         || !axis_spec_is_first(axis_spec, ndim)
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
     }
-    let dt = a.getattr("dtype")?;
-    let kind = dt.getattr("kind")?.extract::<String>()?;
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if kind != "i" && kind != "u" {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let rows = shape[0];
     let cols: usize = shape[1..].iter().product();
     if rows < 2
@@ -74973,7 +74973,7 @@ fn try_native_int_argsort_axis0(
         return Ok(None);
     }
     let n = rows * cols;
-    let itemsize = dt.getattr("itemsize")?.extract::<usize>()?;
+    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
         ("i", 4) => int_argsort_axis0_typed::<i32>(py, numpy, a, &shape, rows, cols, n),
         ("i", 8) => int_argsort_axis0_typed::<i64>(py, numpy, a, &shape, rows, cols, n),
@@ -75089,11 +75089,11 @@ fn try_native_int_argsort_midaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 3
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -75101,12 +75101,12 @@ fn try_native_int_argsort_midaxis(
     let Some(ax) = axis_spec_middle(axis_spec, ndim) else {
         return Ok(None);
     };
-    let dt = a.getattr("dtype")?;
-    let kind = dt.getattr("kind")?.extract::<String>()?;
+    let dt = a.getattr(intern!(py, "dtype"))?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if kind != "i" && kind != "u" {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let outer: usize = shape[..ax].iter().product();
     let alen = shape[ax];
     let inner: usize = shape[ax + 1..].iter().product();
@@ -75119,7 +75119,7 @@ fn try_native_int_argsort_midaxis(
         return Ok(None);
     }
     let n = outer * alen * inner;
-    let itemsize = dt.getattr("itemsize")?.extract::<usize>()?;
+    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
         ("i", 4) => int_argsort_midaxis_typed::<i32>(py, numpy, a, &shape, outer, alen, inner, n),
         ("i", 8) => int_argsort_midaxis_typed::<i64>(py, numpy, a, &shape, outer, alen, inner, n),
@@ -75143,11 +75143,11 @@ fn try_zerocopy_f64_argsort_lastaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -75155,7 +75155,7 @@ fn try_zerocopy_f64_argsort_lastaxis(
     if !axis_spec_is_last(axis_spec, ndim) {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let cols = shape[ndim - 1];
     let rows: usize = shape[..ndim - 1].iter().product();
     const ARGSORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
@@ -75236,17 +75236,17 @@ fn try_zerocopy_f64_argsort_axis0(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2
         || !axis_spec_is_first(axis_spec, ndim)
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let rows = shape[0];
     let cols: usize = shape[1..].iter().product();
     const ARGSORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
@@ -75352,11 +75352,11 @@ fn try_zerocopy_f64_argsort_midaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 3
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -75364,7 +75364,7 @@ fn try_zerocopy_f64_argsort_midaxis(
     let Some(ax) = axis_spec_middle(axis_spec, ndim) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let outer: usize = shape[..ax].iter().product();
     let alen = shape[ax];
     let inner: usize = shape[ax + 1..].iter().product();
@@ -75478,11 +75478,11 @@ fn try_zerocopy_f32_argsort_lastaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -75490,7 +75490,7 @@ fn try_zerocopy_f32_argsort_lastaxis(
     if !axis_spec_is_last(axis_spec, ndim) {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let cols = shape[ndim - 1];
     let rows: usize = shape[..ndim - 1].iter().product();
     const ARGSORT_AXIS_PARALLEL_MIN: usize = 1 << 20;
@@ -75566,17 +75566,17 @@ fn try_zerocopy_f32_argsort_axis0(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2
         || !axis_spec_is_first(axis_spec, ndim)
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let rows = shape[0];
     let cols: usize = shape[1..].iter().product();
     const ARGSORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
@@ -75672,11 +75672,11 @@ fn try_zerocopy_f32_argsort_midaxis(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
-    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 3
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -75684,7 +75684,7 @@ fn try_zerocopy_f32_argsort_midaxis(
     let Some(ax) = axis_spec_middle(axis_spec, ndim) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let outer: usize = shape[..ax].iter().product();
     let alen = shape[ax];
     let inner: usize = shape[ax + 1..].iter().product();
@@ -96577,10 +96577,10 @@ fn try_native_struct_argsort_valuelex(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
         return Ok(None);
@@ -96591,7 +96591,7 @@ fn try_native_struct_argsort_valuelex(
     ) {
         return Ok(None);
     }
-    let dtype = a.getattr("dtype")?;
+    let dtype = a.getattr(intern!(py, "dtype"))?;
     let names_obj = dtype.getattr("names")?;
     if names_obj.is_none() {
         return Ok(None);
@@ -96600,7 +96600,7 @@ fn try_native_struct_argsort_valuelex(
     if names.is_empty() {
         return Ok(None);
     }
-    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize == 0 || itemsize > 256 {
         return Ok(None);
     }
@@ -96612,8 +96612,8 @@ fn try_native_struct_argsort_valuelex(
         let field = fields.get_item(name.as_str())?;
         let ftype = field.get_item(0)?;
         let offset: usize = field.get_item(1)?.extract()?;
-        let fw = ftype.getattr("itemsize")?.extract::<usize>()?;
-        let fk = ftype.getattr("kind")?.extract::<String>()?;
+        let fw = ftype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+        let fk = ftype.getattr(intern!(py, "kind"))?.extract::<String>()?;
         let kind_byte = match fk.as_str() {
             "i" => b'i',
             "u" => b'u',
