@@ -883,11 +883,25 @@ fn lu_forward_back_multi(lu: &[f64], perm: &[usize], b: &[f64], n: usize, m: usi
     }
 
     // Forward substitution (L has unit diagonal): Lx = Pb
+    // SPLIT BORROWS so both substitution axpys can vectorise (`franken_numpy-ixs5y`).
+    //
+    // Written as `x[i * m + col] -= l_ij * x[j * m + col]` the load and the store index the SAME
+    // `&mut [f64]`, so the compiler must assume they may alias, re-read the source element every
+    // iteration, and cannot autovectorise the `col` loop - which is the only loop here wide
+    // enough to vectorise, running over all `m` right-hand sides.
+    //
+    // The aliasing never occurs: `i != j` throughout both loops, and rows `i` and `j` of an
+    // `n x m` matrix are disjoint. `two_rows_mut` states that, taking the ROW STRIDE `m` (not
+    // `n`) because the right-hand side has `m` columns. Same remedy as the LU trailing update
+    // and `inv_from_lu_unblocked`.
+    //
+    // BIT-IDENTICAL: same operands, same order, same count; only the borrow structure changes.
     for i in 1..n {
         for j in 0..i {
             let l_ij = lu[i * n + j];
-            for col in 0..m {
-                x[i * m + col] -= l_ij * x[j * m + col];
+            let (row_i, row_j) = two_rows_mut(&mut x, i, j, m);
+            for (target, &src) in row_i.iter_mut().zip(row_j.iter()) {
+                *target -= l_ij * src;
             }
         }
     }
@@ -896,13 +910,16 @@ fn lu_forward_back_multi(lu: &[f64], perm: &[usize], b: &[f64], n: usize, m: usi
     for i in (0..n).rev() {
         for j in (i + 1)..n {
             let u_ij = lu[i * n + j];
-            for col in 0..m {
-                x[i * m + col] -= u_ij * x[j * m + col];
+            // Here `i < j`, which `two_rows_mut` handles by splitting the other way; it still
+            // returns row `i` mutably and row `j` immutably.
+            let (row_i, row_j) = two_rows_mut(&mut x, i, j, m);
+            for (target, &src) in row_i.iter_mut().zip(row_j.iter()) {
+                *target -= u_ij * src;
             }
         }
         let u_ii = lu[i * n + i];
-        for col in 0..m {
-            x[i * m + col] /= u_ii;
+        for value in &mut x[i * m..i * m + m] {
+            *value /= u_ii;
         }
     }
 
