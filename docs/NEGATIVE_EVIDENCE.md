@@ -55691,3 +55691,71 @@ A/A NULL CONTROLS: not applicable.
 RETRY PREDICATE: none. Standing rule unchanged: subtract the empty_loop arm before quoting any ratio
 from the counter-probe harness, or quote differences only. Criterion-timed rows are unaffected.
 AGENT_NAME=SlateFinch.
+
+## 2026-08-18 — CONSOLIDATED AND FINAL: the corrected state of every number on the ndarray/predicate levers, in one table, with a cross-run consistency check (deadlock-audit-c5ecm)
+
+**Result class:** a single authoritative restatement. Six correction rows now sit on top of the
+originals, and a reader reconstructing the current figures from that trail would get them wrong.
+This supersedes the ratio columns of every earlier row on these levers. Build-free.
+
+### Consistency check first — the chain is sound, only the arithmetic was wrong
+
+The post-predicate / pre-ndcache state of `argsort` was measured in TWO independent runs, hours
+apart, on different ELF pairs:
+
+```
+                       predicate row    ndcache row     apart
+  fnp arm insns/call      137,430.0       138,271.6     0.61%
+  numpy arm insns/call     39,138.8        39,162.2     0.060%
+  corrected ratio            3.727x          3.748x     0.56%
+```
+
+Independent replication of the same state to under 1%. **The measurements were always fine; what
+was wrong was dividing two whole-process totals to get a ratio.**
+
+### The table (all ratios floor-corrected; the empty_loop floor is 1,281.1 ns / 3,098.4 insns per call)
+
+```
+  argsort  int64 n=256          insns/call   ratio      ns/call    ratio
+    original (pre both levers)   151,631.0   4.118x         --        --
+    + predicate lever            137,430.0   3.727x     13,384.0   3.305x
+    + ndarray cache              104,249.2   2.806x     10,800.0   2.610x
+    NumPy                         ~39,150    1.000x      ~4,936    1.000x
+
+  sort  int64 n=256             insns/call   ratio      ns/call    ratio
+    pre ndarray cache            140,302.3   7.672x     12,495.8   6.842x
+    + ndarray cache              106,813.3   5.800x      9,967.3   5.228x
+    NumPy                         ~20,982    1.000x      ~2,931    1.000x
+
+  multiply  f64 n=256 (delegating)          insns/call   ratio      ns/call    ratio
+    fnp                                       9,441.7   1.299x      1,930.3   1.339x
+    NumPy                                     7,981.7   1.000x      1,765.9   1.000x
+```
+
+### Lever effects — UNCHANGED throughout, because the floor cancels in a difference
+
+```
+  f32/f16/complex predicate      -14,201.0 insns/call    -751.2 ns/call (15 reps, 95% [568.6, 933.8])
+  ndarray cache, argsort         -34,022.4 insns/call  -2,584.0 ns/call
+  ndarray cache, sort            -33,489.0 insns/call  -2,528.5 ns/call
+```
+
+Not one lever effect moved across six corrections. Every correction hit a RATIO; none touched a
+difference. That is the durable lesson from this whole sequence and it is worth more than any of the
+individual numbers: **on this harness, differences are trustworthy and ratios required a control I
+did not run until the sixth turn of looking at them.**
+
+### What is true competitively
+
+We remain behind NumPy on all three cells, by more than I claimed at any earlier point:
+**argsort 2.610x, sort 5.228x, multiply 1.339x, all in wall clock, all after every lever shipped.**
+No figure on these levers is a win against the incumbent, and the two levers together removed 31% of
+argsort's instruction overhead without changing that.
+
+COUNTED_MECHANISM: consolidation of banked medians; cross-run agreement 0.61% (fnp) and 0.060%
+(numpy) on an independently re-measured state.
+A/A NULL CONTROLS: carried from the source rows - numpy-arm nulls at 0.041%, 0.0112%, 0.312%,
+0.766% and 1.035% across the five measured comparisons.
+RETRY PREDICATE: none. This table is the citable form; earlier rows keep their mechanism and
+narrative but their ratio columns are superseded here.
+AGENT_NAME=SlateFinch.
