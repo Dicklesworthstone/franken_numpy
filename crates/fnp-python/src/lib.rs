@@ -127048,6 +127048,158 @@ mod tests {
         });
     }
 
+    /// LIVE vs-INCUMBENT MEASUREMENT of the `numpy.emath` fix route. `#[ignore]`d: it is a
+    /// measurement, not a correctness gate, and it must never decide a CI pass.
+    ///
+    ///   cargo test -p fnp-python --lib --profile bench-fast -- --ignored --nocapture emath_ratio
+    ///
+    /// WHY IT LIVES IN THE TEST BINARY AND NOT IN A PYTHON SCRIPT: the importable extension
+    /// cannot be built on this box right now (the build-offload hook refuses a local fallback,
+    /// and a remote cdylib links a newer glibc and is excluded from artifact retrieval anyway).
+    /// The test binary already builds the module IN PROCESS, so both arms are reachable in ONE
+    /// invocation - which is also what makes the comparison honest: same interpreter, same
+    /// arrays, same GIL, interleaved.
+    ///
+    /// THE METHOD, and every part of it is load-bearing:
+    ///   - ARMS INTERLEAVED AB/BA per round. Sequential blocks do not cancel machine drift.
+    ///   - AN A/A NULL ARM, the incumbent timed against ITSELF through the same harness. A
+    ///     ratio inside twice the null spread is printed UNDECIDABLE and must NOT be banked.
+    ///   - PARITY ASSERTED BEFORE TIMING, on bytes and dtype, so a "win" cannot come from
+    ///     computing something cheaper than the incumbent computed.
+    ///   - PER-ARM LOADAVG AND CPU MHz ON EVERY ROW. A row without them is not a row.
+    ///   - The operand is ALL-NONNEGATIVE, i.e. the fix does NOT fire. That is the case this
+    ///     route optimises: numpy still pays `isreal(x) & (x < 0)` - four full-array
+    ///     temporaries and a scan - to discover it had nothing to do.
+    ///
+    /// PROFILE IS PART OF THE ROW. Under the default dev profile the scan is UNOPTIMISED and
+    /// the large-n rows are a floor, not a result; `--profile bench-fast` is opt-level 3
+    /// without LTO. Whatever profile is used, it is printed with the row.
+    #[test]
+    #[ignore = "measurement, not a correctness gate"]
+    fn emath_ratio_vs_numpy_live() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let emath = numpy.getattr("emath")?;
+            let module = PyModule::new(py, "fnp_python_measure_emath")?;
+            fnp_python(&module)?;
+
+            let loadavg = || -> String {
+                std::fs::read_to_string("/proc/loadavg")
+                    .map(|s| s.split_whitespace().take(1).collect::<String>())
+                    .unwrap_or_else(|_| "?".to_string())
+            };
+            let mhz = || -> String {
+                std::fs::read_to_string("/proc/cpuinfo")
+                    .ok()
+                    .and_then(|s| {
+                        s.lines()
+                            .find(|l| l.starts_with("cpu MHz"))
+                            .and_then(|l| l.split(':').nth(1))
+                            .map(|v| v.trim().to_string())
+                    })
+                    .unwrap_or_else(|| "?".to_string())
+            };
+            let profile = if cfg!(debug_assertions) {
+                "dev (UNOPTIMISED - large-n rows are a floor, not a result)"
+            } else {
+                "optimised"
+            };
+
+            println!("\nemath fix route vs numpy.emath - profile: {profile}");
+            println!(
+                "{:8} {:>7} {:>11} {:>11} {:>8} {:>8} {:>12}  {:>11}  {}",
+                "fn", "n", "numpy ns", "ours ns", "ratio", "null", "verdict", "load a/b", "MHz"
+            );
+
+            const REPS: usize = 11;
+            const ROUNDS: usize = 5;
+            for (name, flat) in [
+                ("sqrt", "scimath_sqrt"),
+                ("log", "scimath_log"),
+                ("arctanh", "scimath_arctanh"),
+            ] {
+                let theirs = emath.getattr(name)?;
+                let ours = module.getattr(flat)?;
+                for lg in [8_u32, 12, 16, 20] {
+                    let n = 1_usize << lg;
+                    // All-nonnegative, and <1 for arctanh, so neither fix fires and both arms
+                    // return a REAL array - the case the route exists for.
+                    let x = numpy.call_method1("arange", (n,))?;
+                    let x = x.call_method1("astype", ("float64",))?;
+                    let x = x.call_method1("__truediv__", (n as f64 * 1.01,))?;
+                    let x = x.call_method1("__add__", (1.0e-3_f64,))?;
+
+                    let a_ref = theirs.call1((&x,))?;
+                    let b_ref = ours.call1((&x,))?;
+                    assert_eq!(
+                        a_ref.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                        b_ref.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                        "{name}: dtype diverged - refusing to time two different computations"
+                    );
+                    assert_eq!(
+                        a_ref.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        b_ref.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "{name}: bytes diverged - refusing to time two different computations"
+                    );
+
+                    let time_it = |f: &Bound<'_, PyAny>| -> PyResult<Vec<u128>> {
+                        let mut out = Vec::with_capacity(REPS);
+                        for _ in 0..REPS {
+                            let t0 = Instant::now();
+                            let _ = f.call1((&x,))?;
+                            out.push(t0.elapsed().as_nanos());
+                        }
+                        Ok(out)
+                    };
+                    let (mut a, mut b, mut null) = (Vec::new(), Vec::new(), Vec::new());
+                    let (mut load_a, mut load_b) = (String::new(), String::new());
+                    for round in 0..ROUNDS {
+                        if round % 2 == 0 {
+                            load_a = loadavg();
+                            a.extend(time_it(&theirs)?);
+                            load_b = loadavg();
+                            b.extend(time_it(&ours)?);
+                        } else {
+                            load_b = loadavg();
+                            b.extend(time_it(&ours)?);
+                            load_a = loadavg();
+                            a.extend(time_it(&theirs)?);
+                        }
+                        null.extend(time_it(&theirs)?);
+                    }
+                    let median = |v: &mut Vec<u128>| -> f64 {
+                        v.sort_unstable();
+                        v[v.len() / 2] as f64
+                    };
+                    let (ma, mb, mn) = (median(&mut a), median(&mut b), median(&mut null));
+                    let ratio = ma / mb;
+                    let null_spread = ma.max(mn) / ma.min(mn);
+                    // Twice the null spread, because the null is one arm's own noise and the
+                    // ratio carries two arms' worth.
+                    let verdict = if (ratio - 1.0).abs() > 2.0 * (null_spread - 1.0) {
+                        "DECIDABLE"
+                    } else {
+                        "UNDECIDABLE"
+                    };
+                    println!(
+                        "{name:8} {:>7} {ma:>11.0} {mb:>11.0} {ratio:>7.3}x {null_spread:>7.3}x \
+                         {verdict:>12}  {load_a:>5}/{load_b:<5}  {}",
+                        format!("2^{lg}"),
+                        mhz()
+                    );
+                }
+            }
+            println!(
+                "ratio > 1 = OURS FASTER. null = incumbent-vs-itself through the same harness; \
+                 a ratio inside 2x the null spread is UNDECIDABLE and must not be banked.\n"
+            );
+            Ok(())
+        });
+    }
+
     /// `np.binary_repr` and `np.base_repr` must match NumPy, including the four edge cases
     /// where the obvious implementation is wrong (`deadlock-audit-6y5wp`).
     ///
