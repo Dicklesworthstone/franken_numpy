@@ -340,7 +340,7 @@ If you need `fnp-runtime`'s optional `asupersync` async integration or `frankent
 | **Scimath** | `scimath_sqrt`, `scimath_log`, `scimath_log2`, `scimath_log10`, `scimath_logn`, `scimath_power`, `scimath_arccos`, `scimath_arcsin`, `scimath_arctanh` (complex-aware extensions of real-domain math) |
 | **NumPy 2.0+ API** | `unique_all`, `unique_counts`, `unique_inverse`, `unique_values`, `permuted`, `matrix_transpose`, `cumulative_sum`, `cumulative_prod`, `trapezoid`, `unstack`, `vecdot` |
 
-See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the complete live parity matrix and per-crate test counts.
+See [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the complete live parity matrix and per-crate test counts.
 
 ---
 
@@ -1613,7 +1613,7 @@ FrankenNumPy's security posture covers more than memory safety.
 - **Bounded resource consumption.** NPY header caps at 64 KB. NPZ archives cap at 4,096 members and 2 GiB uncompressed. Text I/O caps at 16,777,216 elements. Memmap validation retries cap at 64. These prevent denial of service via crafted inputs.
 - **Pickle rejection.** Object dtype arrays that could execute arbitrary code during deserialization require explicit `allow_pickle=true`, matching NumPy's security gate.
 - **Adversarial conformance.** The security gate (`run_security_gate`) tests exploit scenarios from a versioned threat matrix mapped to specific parser / IO / shape-validation boundaries.
-- **No production code mocks or stubs.** Structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` — 8 `#[test]` functions that fail CI if `unimplemented!`, `todo!`, `FIXME`, `HACK`, `XXX`, stub comments, `panic!("not implemented")`, `dbg!()` in library code, or `#[allow(unused_*)]` in library code appear in `crates/*/src/` (the eighth test, `test_count_sanity_check`, asserts the workspace stays above 6,000 `#[test]` functions). The `no_allow_unused_in_library_code` test is the subtle one: the `unused_*` warning family is what catches stale code paths that would otherwise rot silently, so suppressing it via `#[allow(unused_*)]` is treated as a stub marker. The human-readable audit at [`audit_numpy_mocks.md`](audit_numpy_mocks.md) is the companion document with per-site analysis: zero production `.unwrap()` outside `fnp-conformance` fixture-harness code.
+- **No production code mocks or stubs.** Structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` — 8 `#[test]` functions that fail CI if `unimplemented!`, `todo!`, `FIXME`, `HACK`, `XXX`, stub comments, `panic!("not implemented")`, `dbg!()` in library code, or `#[allow(unused_*)]` in library code appear in `crates/*/src/` (the eighth test, `test_count_sanity_check`, asserts the workspace stays above 6,000 `#[test]` functions). The `no_allow_unused_in_library_code` test is the subtle one: the `unused_*` warning family is what catches stale code paths that would otherwise rot silently, so suppressing it via `#[allow(unused_*)]` is treated as a stub marker. The human-readable audit at [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md) is the companion document with per-site analysis: zero production `.unwrap()` outside `fnp-conformance` fixture-harness code.
 
 ---
 
@@ -1662,7 +1662,7 @@ Each packet produces 8 artifact files: `legacy_anchor_map.md`, `contract_table.m
 
 ## Test Coverage
 
-Live counts as of 2026-05-16 (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the authoritative live inventory). The 6,392 test count below is split across **175 integration test files** (verified 2026-05-18 — unchanged from 2026-05-17 — via `find crates -path '*/tests/*.rs'`): `fnp-python` 137 (133 conformance shards + `metamorphic_array_ops` + `e2e_workflow` + `golden_native_functions` + 1 helper), `fnp-ufunc` 9 (concurrency_safety, fuzz_regression, golden_histogram, isclose_bugs, metamorphic_math, public_api_golden, test_nansum_empty, test_nat, test_strided), `fnp-conformance` 5 (codebase_hygiene, concurrency_safety, numpy_reference_ops, profiling_baseline, smoke), `fnp-io` 5 (fuzz_regression_header, golden_text_io, metamorphic_io, npy_npz_diagnostic, npy_numpy_conformance), `fnp-dtype` 4, `fnp-ndarray` 4, `fnp-linalg` 4, `fnp-iter` 3, `fnp-random` 2, `fnp-runtime` 2 (golden_runtime, runtime_comprehensive); plus inline `#[cfg(test)]` blocks in each crate's `src/lib.rs`:
+Live counts as of 2026-05-16 (see [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the authoritative live inventory). The 6,392 test count below is split across **175 integration test files** (verified 2026-05-18 — unchanged from 2026-05-17 — via `find crates -path '*/tests/*.rs'`): `fnp-python` 137 (133 conformance shards + `metamorphic_array_ops` + `e2e_workflow` + `golden_native_functions` + 1 helper), `fnp-ufunc` 9 (concurrency_safety, fuzz_regression, golden_histogram, isclose_bugs, metamorphic_math, public_api_golden, test_nansum_empty, test_nat, test_strided), `fnp-conformance` 5 (codebase_hygiene, concurrency_safety, numpy_reference_ops, profiling_baseline, smoke), `fnp-io` 5 (fuzz_regression_header, golden_text_io, metamorphic_io, npy_npz_diagnostic, npy_numpy_conformance), `fnp-dtype` 4, `fnp-ndarray` 4, `fnp-linalg` 4, `fnp-iter` 3, `fnp-random` 2, `fnp-runtime` 2 (golden_runtime, runtime_comprehensive); plus inline `#[cfg(test)]` blocks in each crate's `src/lib.rs`:
 
 | Crate | Tests | Focus |
 |---|---:|---|
@@ -2056,7 +2056,7 @@ Every feature family is `parity_green`:
 | Financial | parity_green |
 | Scimath | parity_green |
 
-See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the live matrix with evidence links.
+See [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the live matrix with evidence links.
 
 ---
 
@@ -2082,12 +2082,12 @@ The three libraries above are excellent in their target domains; FrankenNumPy is
 franken_numpy/
 ├── Cargo.toml                         # Workspace root (10 crates)
 ├── rust-toolchain.toml                # nightly-2026-07-05 (single source of truth)
-├── FEATURE_PARITY.md                  # Live parity matrix + evidence links
 ├── CHANGELOG.md                       # Capability-area changelog
-├── audit_numpy_reality.md             # `numpy.__all__` coverage architecture + lock-in
-├── audit_numpy_mocks.md               # Mock/stub/unwrap audit (zero production mocks)
 ├── docs/
-│   ├── planning/                      # Design spec, porting plan, architecture notes
+│   ├── planning/                      # Design spec, porting plan, parity matrix, audits
+│   │   ├── FEATURE_PARITY.md          # Live parity matrix + evidence links
+│   │   ├── audit_numpy_reality.md     # `numpy.__all__` coverage architecture + lock-in
+│   │   └── audit_numpy_mocks.md       # Mock/stub/unwrap audit (zero production mocks)
 │   ├── DIVERGENCES.md                 # Machine-readable divergence ledger
 │   ├── FUZZING.md                     # Fuzz crate / target / seed inventory
 │   └── adr/
@@ -2415,10 +2415,10 @@ Yes. `fnp-random` keeps dependencies minimal (`fnp-ndarray` plus `getrandom` for
 [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) is the machine-readable ledger. As of 2026-05-22 there are zero active rows. No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy. The ledger gate is enforced in CI.
 
 **Are there any stubs, TODOs, or mock code in production?**
-No. The [`audit_numpy_mocks.md`](audit_numpy_mocks.md) automated audit shows zero `TODO` / `FIXME` / `HACK` / `STUB` / `unimplemented!()` / `todo!()` across the 10 production crates, and zero production `.unwrap()` outside `fnp-conformance` fixture-harness code.
+No. The [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md) automated audit shows zero `TODO` / `FIXME` / `HACK` / `STUB` / `unimplemented!()` / `todo!()` across the 10 production crates, and zero production `.unwrap()` outside `fnp-conformance` fixture-harness code.
 
 **How do I find what changed recently?**
-[`CHANGELOG.md`](CHANGELOG.md) is organized by capability area, with representative commit links and bead IDs. [`FEATURE_PARITY.md`](FEATURE_PARITY.md) is the live parity matrix. [`audit_numpy_reality.md`](audit_numpy_reality.md) documents how the 100% surface coverage is maintained.
+[`CHANGELOG.md`](CHANGELOG.md) is organized by capability area, with representative commit links and bead IDs. [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) is the live parity matrix. [`docs/planning/audit_numpy_reality.md`](docs/planning/audit_numpy_reality.md) documents how the 100% surface coverage is maintained.
 
 ---
 

@@ -339,7 +339,7 @@ The 100% baseline is structurally enforced by the conformance test
 `fnp_python_covers_full_numpy_all` (in
 `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`),
 which iterates `numpy.__all__` at run time and fails CI if any name
-regresses. See [`audit_numpy_reality.md`](audit_numpy_reality.md) for
+regresses. See [`docs/planning/audit_numpy_reality.md`](docs/planning/audit_numpy_reality.md) for
 the architectural choices that drove the close-out.
 
 Representative parity-wave bead IDs (each shipped its own focused

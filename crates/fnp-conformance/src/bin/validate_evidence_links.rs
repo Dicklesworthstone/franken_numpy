@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 const SCHEMA_VERSION: &str = "evidence-link-report-v1";
 const DEFAULT_REPORT_PATH: &str = "target/evidence_link_report.json";
 const EXCEPTION_MARKER: &str = "evidence-validator-ignore";
-const SOURCE_DOCUMENTS: &[&str] = &["README.md", "FEATURE_PARITY.md"];
+const SOURCE_DOCUMENTS: &[&str] = &["README.md", "docs/planning/FEATURE_PARITY.md"];
 const CONTRACTS_DIR: &str = "artifacts/contracts";
 const CONTRACT_EXTENSIONS: &[&str] = &["json", "md", "yaml", "yml"];
 const PATH_PREFIXES: &[&str] = &[
@@ -22,7 +22,6 @@ const PATH_PREFIXES: &[&str] = &[
 const ROOT_FILES: &[&str] = &[
     "AGENTS.md",
     "Cargo.toml",
-    "FEATURE_PARITY.md",
     "LICENSE",
     "PROPOSED_ARCHITECTURE.md",
     "README.md",
@@ -872,7 +871,7 @@ mod tests {
         write_file(&repo, "README.md", "`artifacts/proofs/live.json`\n");
         write_file(
             &repo,
-            "FEATURE_PARITY.md",
+            "docs/planning/FEATURE_PARITY.md",
             "Run `cargo run -p fnp-conformance --bin live_gate`.\n",
         );
         write_file(&repo, "artifacts/proofs/live.json", "{}\n");
@@ -898,7 +897,7 @@ mod tests {
     fn validate_evidence_links_reports_missing_files() {
         let repo = fixture_repo("missing-file");
         write_file(&repo, "README.md", "`artifacts/proofs/missing.json`\n");
-        write_file(&repo, "FEATURE_PARITY.md", "No refs.\n");
+        write_file(&repo, "docs/planning/FEATURE_PARITY.md", "No refs.\n");
         write_file(&repo, "artifacts/contracts/contract.md", "No refs.\n");
 
         let report = build_report(&repo);
@@ -915,7 +914,7 @@ mod tests {
             "README.md",
             "`cargo test -p fnp-conformance absent_filter`\n",
         );
-        write_file(&repo, "FEATURE_PARITY.md", "No refs.\n");
+        write_file(&repo, "docs/planning/FEATURE_PARITY.md", "No refs.\n");
         write_file(&repo, "artifacts/contracts/contract.md", "No refs.\n");
         write_file(
             &repo,
@@ -937,7 +936,7 @@ mod tests {
             "README.md",
             "`artifacts/proofs/external.json` <!-- evidence-validator-ignore(owner=docs, reason=external-ledger) -->\n",
         );
-        write_file(&repo, "FEATURE_PARITY.md", "No refs.\n");
+        write_file(&repo, "docs/planning/FEATURE_PARITY.md", "No refs.\n");
         write_file(&repo, "artifacts/contracts/contract.md", "No refs.\n");
 
         let report = build_report(&repo);

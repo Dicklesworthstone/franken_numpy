@@ -179,4 +179,4 @@ When documenting a new divergence:
 ## References
 
 - [COVERAGE.md](COVERAGE.md) - Coverage matrix and gaps
-- [FEATURE_PARITY.md](../../FEATURE_PARITY.md) - Intentional design decisions section
+- [FEATURE_PARITY.md](../../docs/planning/FEATURE_PARITY.md) - Intentional design decisions section

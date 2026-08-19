@@ -92,6 +92,6 @@ Per the testing-conformance-harnesses skill:
 
 ## References
 
-- [FEATURE_PARITY.md](../../FEATURE_PARITY.md) - Overall parity status
+- [FEATURE_PARITY.md](../../docs/planning/FEATURE_PARITY.md) - Overall parity status
 - [fixtures/README.md](fixtures/README.md) - Fixture file descriptions
 - [DISCREPANCIES.md](DISCREPANCIES.md) - Intentional divergences from NumPy

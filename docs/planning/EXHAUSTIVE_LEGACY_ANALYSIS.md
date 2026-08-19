@@ -20,10 +20,10 @@ Legacy corpus:
 
 Project contracts:
 - `/data/projects/franken_numpy/docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md` (sections 14-21)
-- `/data/projects/franken_numpy/EXISTING_NUMPY_STRUCTURE.md`
+- `/data/projects/franken_numpy/docs/planning/EXISTING_NUMPY_STRUCTURE.md`
 - `/data/projects/franken_numpy/docs/planning/PLAN_TO_PORT_NUMPY_TO_RUST.md`
 - `/data/projects/franken_numpy/docs/planning/PROPOSED_ARCHITECTURE.md`
-- `/data/projects/franken_numpy/FEATURE_PARITY.md`
+- `/data/projects/franken_numpy/docs/planning/FEATURE_PARITY.md`
 
 ## DOC-PASS-13 Integration Snapshot (2026-02-18)
 

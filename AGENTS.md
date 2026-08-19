@@ -69,11 +69,11 @@ success** — one line, revert, next lever, no retraction narrative.
 
 ## Current state (2026-05-16)
 
-- `fnp_python` covers **100% of `numpy.__all__`** (499/499 names) — see [`audit_numpy_reality.md`](audit_numpy_reality.md) for architecture + coverage progression.
+- `fnp_python` covers **100% of `numpy.__all__`** (499/499 names) — see [`docs/planning/audit_numpy_reality.md`](docs/planning/audit_numpy_reality.md) for architecture + coverage progression.
 - Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
-- Workspace runs 6,392 tests across 10 crates (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,575 `pub fn` declarations across `crates/*/src/**/*.rs`.
+- Workspace runs 6,392 tests across 10 crates (see [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,575 `pub fn` declarations across `crates/*/src/**/*.rs`.
 - Bead tracker stands at ~1,417 closed beads as of 2026-05-19; live count via `br list --status=closed --limit 10000 --json | jq length`.
-- No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (8 #[test] functions fail CI on stub markers); per-site analysis in [`audit_numpy_mocks.md`](audit_numpy_mocks.md).
+- No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (8 #[test] functions fail CI on stub markers); per-site analysis in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
 - Active tracked divergences: 0 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
 
 ## Toolchain: Rust & Cargo
@@ -215,7 +215,7 @@ cargo test -p fnp-runtime
 cargo test --workspace --all-features
 ```
 
-Cost note: `fnp-ufunc` (2,191 tests, ~60k LOC) and `fnp-python` (2,127 tests) dominate workspace test time. When iterating on a focused change in another crate, prefer the targeted `-p` invocation. See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the live per-crate test counts.
+Cost note: `fnp-ufunc` (2,191 tests, ~60k LOC) and `fnp-python` (2,127 tests) dominate workspace test time. When iterating on a focused change in another crate, prefer the targeted `-p` invocation. See [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the live per-crate test counts.
 
 ### Test Categories
 
