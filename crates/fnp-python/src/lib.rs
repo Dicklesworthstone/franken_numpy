@@ -109845,6 +109845,16 @@ fn histogramdd_native(
 ///   busday_count  n=2^19  0.908287x  [0.908117, 0.908608]  DECIDABLE_REGRESSION
 ///   busday_offset n=2^18  0.599316x  [0.598970, 0.599516]  DECIDABLE_REGRESSION
 ///   busday_offset n=2^19  0.597806x  [0.597669, 0.598020]  DECIDABLE_REGRESSION
+///   is_busday     n=2^18  0.846471x  [0.846114, 0.847163]  DECIDABLE_REGRESSION
+///   is_busday     n=2^19  0.848883x  [0.848188, 0.849431]  DECIDABLE_REGRESSION
+///
+/// `is_busday` was measured a run later, on the same group and worker, precisely BECAUSE its
+/// two siblings lost - it shares their kernel style, so there was a specific reason to expect
+/// it lost too rather than a reason to assume it did not. It does, by 1.18x.
+///
+/// THE SAME RUN CONFIRMS THE DISENGAGEMENT WORKS: with the two siblings already gated off,
+/// their rows moved from 0.9083x and 0.5978x to 0.999826x and 0.999763x - unity, both arms
+/// now being NumPy, both verdicts UNDECIDED. Visible in the ledger, not merely asserted.
 ///
 /// NumPy's C business-day loops beat the native closed form. THE LOSS IS PER-ELEMENT, NOT A
 /// FIXED FLOOR: `busday_count` gives up a flat 1.36 ns/element at BOTH sizes, and the ratio
@@ -110133,7 +110143,8 @@ fn is_busday(
                 .map(|k| k == "weekmask" || k == "holidays")
                 .unwrap_or(false)
         })
-    }) && (1..=3).contains(&args.len())
+    }) && BUSDAY_NATIVE_ROUTE_BEATS_NUMPY
+        && (1..=3).contains(&args.len())
         && !keyword_is_doubly_supplied(args, kwargs, "weekmask", 1)
         && !keyword_is_doubly_supplied(args, kwargs, "holidays", 2)
         && let Ok(dates) = args.get_item(0)
@@ -114232,7 +114243,7 @@ mod tests {
         sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
         trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
         try_native_lstsq_tsqr, try_zerocopy_busday_count, try_zerocopy_busday_offset,
-        try_zerocopy_f64_binary_into, try_zerocopy_isnat, unravel_index, where_py,
+        try_zerocopy_f64_binary_into, try_zerocopy_is_busday, try_zerocopy_isnat, unravel_index, where_py,
         wide_int_table_bounds, zerocopy_f64_binary_flat,
     };
     use fnp_dtype::{ArrayStorage, DType};
@@ -126533,6 +126544,31 @@ mod tests {
                 ours.call((g("fortnight"),), Some(&zkw)).is_err(),
                 "an all-zero weekmask must reach numpy and raise, not return all-False"
             );
+
+            // THE KERNEL IS CHECKED DIRECTLY, for the same reason as its two siblings: this
+            // route is disengaged on measured rows (0.846x / 0.849x), so `ours.call1(..)`
+            // above now DELEGATES and every equality up to here compares numpy with numpy.
+            //
+            // `g` in THIS test yields an `Option<Bound>` (a single `expect`), unlike the
+            // sibling tests - and passing that `Option` straight into a python call still
+            // compiles, because pyo3 maps `None` to Python's None. It has to be unwrapped
+            // before it can be passed by reference to the kernel.
+            for name in ["fortnight", "pre_epoch", "with_nat", "epoch_edge"] {
+                let fixture = g(name).expect("is_busday fixture present");
+                let native = try_zerocopy_is_busday(py, &fixture, None, None)?
+                    .expect("the native is_busday kernel must still engage when called directly");
+                assert_eq!(
+                    native
+                        .bind(py)
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    theirs
+                        .call1((g(name),))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    "the native is_busday kernel disagrees with numpy on {name}"
+                );
+            }
 
             // A 0-d DATE RETURNS A `numpy.bool_` SCALAR, NOT A 0-d ARRAY. This route used to
             // get that right only by accident - a 0-d buffer yielded no slice, so it
