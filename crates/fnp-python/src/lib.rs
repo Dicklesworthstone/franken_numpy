@@ -129266,8 +129266,8 @@ mod tests {
                   c128a = c64a.astype('complex128'); c128b = c64b.astype('complex128')\n\
                   i16a = (rng.integers(-30000, 30000, n)).astype('int16')\n\
                   i16b = (rng.integers(-30000, 30000, n)).astype('int16')\n\
-                  dta = np.arange(n, dtype='datetime64[s]')\n\
-                  dtb = (np.arange(n, dtype='datetime64[s]') + np.timedelta64(5, 's'))\n\
+                  dta = np.arange(0, n, dtype='datetime64[s]')\n\
+                  dtb = (np.arange(0, n, dtype='datetime64[s]') + np.timedelta64(5, 's'))\n\
                   f64a = f32a.astype('float64')\n",
                 Some(&locals),
                 Some(&locals),
@@ -129483,16 +129483,40 @@ mod tests {
                 "edges on one axis, count on the other",
             )?;
 
-            // Non-monotonic and zero-width edges must raise, exactly as numpy does.
-            for (name, why) in [("bad", "non-monotonic"), ("flat", "zero-width bin")] {
-                let bkw = PyDict::new(py);
-                bkw.set_item("bins", (g(name), g("ye")))?;
-                assert!(
-                    ours.call((g("x"), g("y")), Some(&bkw)).is_err(),
-                    "{why} edges must raise rather than bin - partition_point on unsorted \
-                     edges returns a meaningless index"
-                );
-            }
+            // NON-MONOTONIC edges must raise; ZERO-WIDTH ones MUST NOT. That split is
+            // numpy's and not a preference: `histogramdd` rejects an edge array with
+            // `np.any(edges[:-1] > edges[1:])`, which is STRICTLY decreasing, so a REPEATED
+            // edge passes the check and gets binned. Verified against the installed numpy
+            // 2.4.3 - `histogram2d(x, y, bins=([0, 1, 1, 2], ye))` returns a histogram, and
+            // only `[0, 2, 1, 3]` raises "`bins[0]` must be monotonically increasing, when an
+            // array".
+            //
+            // THIS TEST USED TO ASSERT BOTH MUST RAISE and was RED at HEAD for it. The
+            // rationale it carried - "partition_point on unsorted edges returns a meaningless
+            // index" - is true of non-monotonic edges and FALSE of repeated ones, which are
+            // still sorted: `partition_point` is perfectly well defined on them, it just
+            // never returns the zero-width bin. Matching numpy is the requirement, so the
+            // zero-width case is now compared rather than rejected.
+            let bad_kw = PyDict::new(py);
+            bad_kw.set_item("bins", (g("bad"), g("ye")))?;
+            assert!(
+                theirs.call((g("x"), g("y")), Some(&bad_kw)).is_err(),
+                "fixture check: numpy is supposed to reject non-monotonic edges"
+            );
+            assert!(
+                ours.call((g("x"), g("y")), Some(&bad_kw)).is_err(),
+                "non-monotonic edges must raise - partition_point on unsorted edges returns a \
+                 meaningless index"
+            );
+
+            let flat_kw = PyDict::new(py);
+            flat_kw.set_item("bins", (g("flat"), g("ye")))?;
+            compare(
+                &ours.call((g("x"), g("y")), Some(&flat_kw))?,
+                &theirs.call((g("x"), g("y")), Some(&flat_kw))?,
+                "zero-width bin: numpy accepts a repeated edge and bins it, so this route must \
+                 produce the same histogram rather than raise",
+            )?;
             Ok(())
         });
     }
