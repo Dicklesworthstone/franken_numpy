@@ -109692,12 +109692,38 @@ fn histogramdd_native(
 // Busday calendar functions (3).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
+/// Is the native business-day kernel worth engaging? MEASURED FALSE.
+///
+/// `bench_datetime_nat_busday_boundary`, worker `fixmydocuments` (Ryzen 7 5800X, 8 physical
+/// cores, powersave, avx512f=false), ELF `1618703d16fa262b`, `release-perf`, dual-null
+/// contract, every arm `same_core=true`, nulls 0.0002-0.001 against a 0.01 required delta:
+///
+///   busday_count  n=2^18  0.908260x  [0.907904, 0.908651]  DECIDABLE_REGRESSION
+///   busday_count  n=2^19  0.908287x  [0.908117, 0.908608]  DECIDABLE_REGRESSION
+///   busday_offset n=2^18  0.599316x  [0.598970, 0.599516]  DECIDABLE_REGRESSION
+///   busday_offset n=2^19  0.597806x  [0.597669, 0.598020]  DECIDABLE_REGRESSION
+///
+/// NumPy's C business-day loops beat the native closed form. THE LOSS IS PER-ELEMENT, NOT A
+/// FIXED FLOOR: `busday_count` gives up a flat 1.36 ns/element at BOTH sizes, and the ratio
+/// is identical to four decimal places across a 2x change in n. That rules out a large-n
+/// gate - there is no size in the measured range where this wins, and the only regime that
+/// could is n below roughly a thousand, where the per-call saving might still cover it.
+/// That regime is UNMEASURED, so it gets no speculative threshold here.
+///
+/// The kernels and their tests stay: `busdays_in_span` and `offset_business_days` are still
+/// checked against a day-by-day walk, and the zero-copy routes are still checked against
+/// NumPy directly, so re-engaging is this one constant when the kernel is fast enough.
+/// Parity was never the problem - all eleven tests pass - the arithmetic is simply slower
+/// than NumPy's C.
+const BUSDAY_NATIVE_ROUTE_BEATS_NUMPY: bool = false;
+
 fn busday_count(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kw| {
+    if BUSDAY_NATIVE_ROUTE_BEATS_NUMPY
+        && kwargs.is_none_or(|kw| {
         kw.keys().into_iter().all(|key| {
             key.extract::<String>()
                 .map(|k| k == "weekmask" || k == "holidays")
@@ -109894,13 +109920,18 @@ fn busday_offset(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kw| {
-        kw.keys().into_iter().all(|key| {
-            key.extract::<String>()
-                .map(|k| k == "roll" || k == "weekmask" || k == "holidays")
-                .unwrap_or(false)
+    // Disengaged on the same measured rows as `busday_count`; see
+    // `BUSDAY_NATIVE_ROUTE_BEATS_NUMPY`. This one is the worse of the two at 0.598x - NumPy
+    // is 1.67x faster - and the ratio is likewise flat across 2^18 and 2^19.
+    if BUSDAY_NATIVE_ROUTE_BEATS_NUMPY
+        && kwargs.is_none_or(|kw| {
+            kw.keys().into_iter().all(|key| {
+                key.extract::<String>()
+                    .map(|k| k == "roll" || k == "weekmask" || k == "holidays")
+                    .unwrap_or(false)
+            })
         })
-    }) && (2..=5).contains(&args.len())
+        && (2..=5).contains(&args.len())
         && !keyword_is_doubly_supplied(args, kwargs, "roll", 2)
         && !keyword_is_doubly_supplied(args, kwargs, "weekmask", 3)
         && !keyword_is_doubly_supplied(args, kwargs, "holidays", 4)
@@ -126405,7 +126436,12 @@ mod tests {
                 "holidays given both positionally and by keyword must raise, as numpy does"
             );
 
-            // ENGAGEMENT, and the declines. Parity above is satisfied by a passthrough.
+            // THE KERNEL IS CHECKED DIRECTLY, NOT THROUGH THE MODULE FUNCTION. Since the
+            // measured regression disengaged this route (`BUSDAY_NATIVE_ROUTE_BEATS_NUMPY`),
+            // `ours.call1(..)` above now DELEGATES - so every equality up to here compares
+            // numpy against numpy and proves nothing about the kernel. Calling
+            // `try_zerocopy_busday_count` directly keeps the arithmetic under test and ready
+            // to re-engage, and is the only thing here that can fail for a real reason.
             let engaged = |b: &str, e: &str| -> PyResult<bool> {
                 Ok(try_zerocopy_busday_count(py, &g(b), &g(e), None, None)?.is_some())
             };
@@ -126418,8 +126454,22 @@ mod tests {
             ] {
                 assert!(
                     engaged(b, e)?,
-                    "the native busday_count route declined {b}/{e}; every equality above \
-                     is satisfied by the passthrough, so parity alone proves nothing"
+                    "the native busday_count kernel declined {b}/{e}"
+                );
+                // ...and its VALUE must equal numpy's. `is_some()` alone would pass a kernel
+                // that engaged and computed nonsense.
+                let native = try_zerocopy_busday_count(py, &g(b), &g(e), None, None)?
+                    .expect("kernel engaged just above");
+                assert_eq!(
+                    native
+                        .bind(py)
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    theirs
+                        .call1((g(b), g(e)))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    "the native busday_count kernel disagrees with numpy on {b}/{e}"
                 );
             }
             for (b, e, why) in [
@@ -127865,6 +127915,11 @@ mod tests {
                 )?
                 .is_some())
             };
+            // As in the busday_count test: this route is disengaged on measured rows, so the
+            // module-level equalities above now compare numpy with numpy. The kernel is
+            // exercised and value-checked HERE, which is the part that can still fail.
+            let fkw = PyDict::new(py);
+            fkw.set_item("roll", "forward")?;
             for dates in ["dates", "grid", "nat_d"] {
                 let offs = if dates == "grid" {
                     g("goffs")
@@ -127873,8 +127928,27 @@ mod tests {
                 };
                 assert!(
                     engaged(dates, &offs)?,
-                    "the native busday_offset route declined {dates}; every equality above \
-                     is satisfied by the passthrough, so parity alone proves nothing"
+                    "the native busday_offset kernel declined {dates}"
+                );
+                let native = try_zerocopy_busday_offset(
+                    py,
+                    &g(dates),
+                    &offs,
+                    Some(forward.as_any()),
+                    None,
+                    None,
+                )?
+                .expect("kernel engaged just above");
+                assert_eq!(
+                    native
+                        .bind(py)
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    theirs
+                        .call((g(dates), &offs), Some(&fkw))?
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
+                    "the native busday_offset kernel disagrees with numpy on {dates}"
                 );
             }
             for (dates, offs, why) in [
