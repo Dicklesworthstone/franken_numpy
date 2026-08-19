@@ -82523,6 +82523,39 @@ fn core_numpy_passthrough(
     Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
 }
 
+/// Generates a cached accessor for one `numpy` attribute.
+///
+/// WHY A MACRO AND NOT A PARAMETER: each expansion owns its OWN `PyOnceLock`, so the
+/// attribute name is a LITERAL and can go through `intern!`. `core_numpy_passthrough` takes
+/// its name as a runtime `&str`, and PyO3 must therefore build a fresh `PyString` for the
+/// attribute lookup on EVERY call - the pattern this campaign has measured at ~795
+/// insns/call. A literal lets the key be resolved once for the process instead.
+///
+/// This is the same shape as `cached_ndarray_type`, one attribute per expansion.
+macro_rules! cached_numpy_attr {
+    ($fn_name:ident, $attr:literal) => {
+        fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+            static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+            Ok(CACHE
+                .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+                    Ok(cached_numpy(py)?.getattr(intern!(py, $attr))?.unbind())
+                })?
+                .bind(py))
+        }
+    };
+}
+
+// The six passthroughs NumPy implements in C. Delegation is permanent for these - no native
+// route will ever beat numpy's own C - so the wrapper's entire cost IS the attribute lookup,
+// which makes them the bounded, defensible slice of the passthrough-interning lever.
+// Everything else keeps `core_numpy_passthrough` until that lever is priced.
+cached_numpy_attr!(cached_numpy_array, "array");
+cached_numpy_attr!(cached_numpy_empty, "empty");
+cached_numpy_attr!(cached_numpy_can_cast, "can_cast");
+cached_numpy_attr!(cached_numpy_datetime_data, "datetime_data");
+cached_numpy_attr!(cached_numpy_promote_types, "promote_types");
+cached_numpy_attr!(cached_numpy_result_type, "result_type");
+
 fn clone_py_kwargs<'py>(
     py: Python<'py>,
     kwargs: Option<&Bound<'py, PyDict>>,
@@ -82631,7 +82664,9 @@ fn empty(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "empty", args, kwargs)
+    // numpy implements this in C; delegation is permanent, so the cached attribute is all
+    // this wrapper can save.
+    Ok(cached_numpy_empty(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -82641,7 +82676,9 @@ fn array(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "array", args, kwargs)
+    // numpy implements this in C; delegation is permanent, so the cached attribute is all
+    // this wrapper can save.
+    Ok(cached_numpy_array(py)?.call(args, kwargs)?.unbind())
 }
 
 // np.sum over the contiguous LAST axis of a C-contiguous f64 array: each lane is an
@@ -106647,7 +106684,9 @@ fn can_cast(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "can_cast", args, kwargs)
+    // numpy implements this in C; delegation is permanent, so the cached attribute is all
+    // this wrapper can save.
+    Ok(cached_numpy_can_cast(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -106657,7 +106696,9 @@ fn promote_types(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "promote_types", args, kwargs)
+    // numpy implements this in C; delegation is permanent, so the cached attribute is all
+    // this wrapper can save.
+    Ok(cached_numpy_promote_types(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -106667,7 +106708,9 @@ fn result_type(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "result_type", args, kwargs)
+    // numpy implements this in C; delegation is permanent, so the cached attribute is all
+    // this wrapper can save.
+    Ok(cached_numpy_result_type(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -110582,7 +110625,9 @@ fn datetime_data(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "datetime_data", args, kwargs)
+    // numpy implements this in C; delegation is permanent, so the cached attribute is all
+    // this wrapper can save.
+    Ok(cached_numpy_datetime_data(py)?.call(args, kwargs)?.unbind())
 }
 
 // String-format helpers (4).
