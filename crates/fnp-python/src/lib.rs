@@ -32200,6 +32200,35 @@ fn masked_sum(py: Python<'_>, a: Py<PyAny>, mask: Py<PyAny>) -> PyResult<Py<PyAn
     Ok(array.get_item(selector)?.call_method0(intern!(py, "sum"))?.unbind())
 }
 
+/// Mean of the elements of `a` selected by boolean `mask`, in one fused pass.
+///
+/// Equivalent to `a[mask].mean()`, which numpy cannot fuse for the same reason
+/// `masked_sum` names: the compacted array must be materialised before it can be
+/// reduced, and that gather is single-threaded. This shares `masked_sum`'s exact
+/// pairwise tree and divides by the selected count, which is byte-identical
+/// because numpy's `mean` IS `sum / count` bit-for-bit - verified over twelve
+/// size/density cells before this was written, not assumed.
+///
+/// AN EMPTY SELECTION DEFERS. `a[mask].mean()` on an all-False mask returns NaN
+/// *and emits two RuntimeWarnings*, where `a[mask].sum()` quietly returns 0.0.
+/// Producing the NaN here would be the right value with the wrong observable
+/// behaviour, so the zero-count case goes to numpy's own two-call form and lets
+/// it warn.
+#[pyfunction]
+#[pyo3(signature = (a, mask))]
+fn masked_mean(py: Python<'_>, a: Py<PyAny>, mask: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(value) = try_zerocopy_f64_masked_mean(py, a.bind(py), mask.bind(py))? {
+        return Ok(value);
+    }
+    let numpy = cached_numpy(py)?;
+    let array = numpy.getattr(intern!(py, "asarray"))?.call1((a.bind(py),))?;
+    let selector = numpy.getattr(intern!(py, "asarray"))?.call1((mask.bind(py),))?;
+    Ok(array
+        .get_item(selector)?
+        .call_method0(intern!(py, "mean"))?
+        .unbind())
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, c, *, out=None))]
 fn multiply_add(
@@ -43154,11 +43183,19 @@ fn masked_pairwise_parallel(
 // the compacted pairwise tree is reproduced exactly (see masked_pairwise_*).
 // Returns None — caller defers to numpy — for any non-f64 / non-bool /
 // shape-mismatched / non-contiguous / non-ndarray input.
-fn try_zerocopy_f64_masked_sum(
+/// The fused masked pass shared by `masked_sum` and `masked_mean`: returns the compacted
+/// pairwise total AND the number of selected elements, or `None` for any input the fused
+/// route does not serve.
+///
+/// Split out so `masked_mean` reuses this exact accumulation rather than a second one -
+/// numpy's `mean` IS `sum / count` bit-for-bit (verified over 12 size/density cells), so
+/// sharing the tree is what makes the mean byte-identical too. A second implementation would
+/// have to re-derive that, and could drift from it.
+fn masked_total_and_count(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     mask: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
+) -> PyResult<Option<(f64, usize)>> {
     let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     if !a.is_exact_instance(&ndarray_type) || !mask.is_exact_instance(&ndarray_type) {
@@ -43205,6 +43242,7 @@ fn try_zerocopy_f64_masked_sum(
     let mask_raw: &[u8] =
         unsafe { std::slice::from_raw_parts(mask_cells.as_ptr().cast::<u8>(), n) };
 
+    let mut selected_count = 0usize;
     let total = if n >= MASKED_SUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
         let counts: Vec<usize> = mask_raw
@@ -43219,11 +43257,13 @@ fn try_zerocopy_f64_masked_sum(
         }
         prefix.push(acc);
         let selected = acc;
+        selected_count = selected;
         // ~4 subtrees per worker so a skewed mask still balances.
         let cut = (selected / (rayon::current_num_threads() * 4)).max(1 << 12);
         masked_pairwise_parallel(mask_raw, data, &prefix, 0, 0, selected, cut)
     } else {
         let selected = mask_raw.iter().filter(|&&m| m != 0).count();
+        selected_count = selected;
         let mut buf = [0.0f64; 128];
         let mut stream = MaskedStream {
             mask: mask_raw,
@@ -43232,7 +43272,50 @@ fn try_zerocopy_f64_masked_sum(
         };
         masked_pairwise_streamed(&mut stream, selected, &mut buf)
     };
-    Ok(Some(numpy.getattr(intern!(py, "float64"))?.call1((total,))?.unbind()))
+    Ok(Some((total, selected_count)))
+}
+
+/// `a[mask].sum()` fused; see `masked_total_and_count`.
+fn try_zerocopy_f64_masked_sum(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    mask: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((total, _count)) = masked_total_and_count(py, a, mask)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        cached_numpy(py)?
+            .getattr(intern!(py, "float64"))?
+            .call1((total,))?
+            .unbind(),
+    ))
+}
+
+/// `a[mask].mean()` fused, over the SAME pairwise tree the sum uses.
+///
+/// AN EMPTY SELECTION MUST DECLINE, and this is the whole edge case. `a[mask].mean()` on an
+/// all-False mask returns NaN *and emits two RuntimeWarnings*, where `a[mask].sum()` quietly
+/// returns 0.0. Dividing 0.0 by 0 here would produce the NaN and swallow both warnings -
+/// the right value with the wrong observable behaviour - so a zero count defers to numpy's
+/// own two-call form and lets it warn. Read off the incumbent, not inferred.
+fn try_zerocopy_f64_masked_mean(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    mask: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((total, count)) = masked_total_and_count(py, a, mask)? else {
+        return Ok(None);
+    };
+    if count == 0 {
+        return Ok(None);
+    }
+    Ok(Some(
+        cached_numpy(py)?
+            .getattr(intern!(py, "float64"))?
+            .call1((total / count as f64,))?
+            .unbind(),
+    ))
 }
 
 // Zero-copy bit-exact nansum for the f64 full reduction (axis=None): numpy's
@@ -112422,6 +112505,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(radians, m)?)?;
     m.add_function(wrap_pyfunction!(sinc, m)?)?;
     m.add_function(wrap_pyfunction!(masked_sum, m)?)?;
+    m.add_function(wrap_pyfunction!(masked_mean, m)?)?;
     m.add_function(wrap_pyfunction!(multiply_add, m)?)?;
     m.add_function(wrap_pyfunction!(subtract_multiply_add, m)?)?;
     m.add_function(wrap_pyfunction!(pairwise_multiply_add, m)?)?;
@@ -127519,6 +127603,107 @@ mod tests {
         });
     }
 
+    /// `fnp.masked_mean(a, mask)` must be BYTE-identical to `a[mask].mean()`, and must defer
+    /// an empty selection (`deadlock-audit-6y5wp`).
+    ///
+    /// This is `masked_sum`'s vein: numpy's API forces `a[mask]` to be materialised before it
+    /// can be reduced, and that gather is single-threaded. The mean shares the sum's exact
+    /// compacted pairwise tree and divides by the count, which is byte-identical because
+    /// numpy's `mean` IS `sum / count` bit-for-bit - checked over twelve size/density cells
+    /// against the installed numpy before the Rust was written, rather than assumed from the
+    /// documentation.
+    ///
+    /// THE EMPTY SELECTION IS THE EDGE CASE. `a[mask].mean()` on an all-False mask returns
+    /// NaN *and emits two RuntimeWarnings*, while `a[mask].sum()` quietly returns 0.0.
+    /// Dividing 0.0 by 0 in the kernel would give the right value with the wrong observable
+    /// behaviour - NaN, no warnings - so the zero-count case must defer. Asserted here on the
+    /// WARNINGS, not just the value, because the value alone cannot tell the two apart.
+    #[test]
+    fn masked_mean_is_byte_identical_and_defers_the_empty_selection() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_masked_mean")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("masked_mean")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            locals.set_item("fnp_masked_mean", &ours)?;
+            py.run(
+                c"import warnings\n\
+                  rng = np.random.default_rng(7)\n\
+                  # COMPREHENSIONS ONLY: the `\\n\\` continuations strip the leading\n\
+                  # whitespace of every following line, so an indented `for` body arrives\n\
+                  # unindented and raises IndentationError.\n\
+                  cells = [(n, f) for n in (10, 1000, 100000, 1000001) for f in (0.05, 0.5, 0.95)]\n\
+                  mk = lambda n: rng.standard_normal(n) * rng.integers(1, 1000, n)\n\
+                  data = [(n, f, mk(n), rng.random(n) < f) for n, f in cells]\n\
+                  data = [(n, f, a, m) for n, f, a, m in data if m.any()]\n\
+                  bits = lambda v: np.float64(v).view('int64')\n\
+                  mismatches = [(n, f, float(a[m].mean()), float(fnp_masked_mean(a, m))) for n, f, a, m in data if bits(a[m].mean()) != bits(fnp_masked_mean(a, m))]\n\
+                  # The all-False mask: numpy returns NaN and WARNS twice.\n\
+                  e = np.array([1.0, 2.0]); em = np.array([False, False])\n\
+                  # No `with` block either, for the same continuation reason - the warning\n\
+                  # hook is swapped by hand instead of using catch_warnings.\n\
+                  seen = []\n\
+                  old_hook = warnings.showwarning\n\
+                  warnings.showwarning = lambda *a, **k: seen.append(1)\n\
+                  warnings.simplefilter('always')\n\
+                  empty_val = fnp_masked_mean(e, em)\n\
+                  warnings.showwarning = old_hook\n\
+                  empty_is_nan = bool(np.isnan(empty_val))\n\
+                  empty_warnings = len(seen)\n\
+                  # A non-f64 array and a non-bool mask must still answer correctly via the\n\
+                  # deferral, so the fused route's declines are exercised too.\n\
+                  f32a = np.arange(8, dtype=np.float32); f32m = np.arange(8) % 2 == 0\n\
+                  f32_ok = float(fnp_masked_mean(f32a, f32m)) == float(f32a[f32m].mean())\n\
+                  inta = np.arange(8); int_ok = float(fnp_masked_mean(inta, f32m)) == float(inta[f32m].mean())\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("masked_mean fixture missing")
+            };
+            let mismatches = g("mismatches");
+            assert_eq!(
+                mismatches.len()?,
+                0,
+                "masked_mean diverged from a[mask].mean() on {} cell(s): {}",
+                mismatches.len()?,
+                mismatches.str()?
+            );
+
+            // The empty selection must come back through numpy: NaN *with* its warnings.
+            assert!(
+                g("empty_is_nan").extract::<bool>()?,
+                "an empty selection must still produce NaN"
+            );
+            assert!(
+                g("empty_warnings").extract::<usize>()? >= 1,
+                "an empty selection must DEFER to numpy so its RuntimeWarnings are raised - \
+                 dividing 0.0 by 0 in the kernel gives the right NaN and swallows them, which \
+                 the value alone cannot distinguish"
+            );
+
+            // Declines that must still answer correctly through the two-call form.
+            assert!(
+                g("f32_ok").extract::<bool>()?,
+                "a float32 array must defer and still match a[mask].mean()"
+            );
+            assert!(
+                g("int_ok").extract::<bool>()?,
+                "an integer array must defer and still match a[mask].mean()"
+            );
+            Ok(())
+        });
+    }
+
     /// `np.array_str` must match NumPy byte-for-byte, and MUST decline 0-d
     /// (`deadlock-audit-6y5wp`).
     ///
@@ -128447,6 +128632,140 @@ mod tests {
                     base.call_method0("tobytes")?.extract::<Vec<u8>>()?,
                     "logn(3.0, bad_arrays[{index}]) must still match numpy through the \
                      passthrough"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    /// LIVE vs-INCUMBENT MEASUREMENT of the native `apply_along_axis` (`8608ab81`), which
+    /// shipped with no number. `format_float` shipped the same way and turned out to be
+    /// 0.663-0.836x - a regression that ran for several commits before anyone timed it - so
+    /// this route gets its row before it earns any claim.
+    ///
+    ///   cargo test -p fnp-python --lib -- --ignored --nocapture apply_along_axis_ratio
+    ///
+    /// WHAT THE SHAPES ARE FOR: the lever is per-ITERATION Python overhead (an `ndindex`
+    /// generator, a tuple concat for the trailing `Ellipsis`, a `__getitem__`, an `asanyarray`
+    /// and a `__setitem__`), so the win must GROW with the number of iterations and SHRINK as
+    /// the callback gets expensive. `many_short` (2000 rows of 8) is the friendly end,
+    /// `few_long` (8 rows of 2000) the hostile one, and `np.sort` is a callback heavy enough to
+    /// bury the loop. A route that only wins on `many_short` with `np.sum` is a route that wins
+    /// nowhere real.
+    #[test]
+    #[ignore = "measurement, not a correctness gate"]
+    fn apply_along_axis_ratio_vs_numpy_live() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_measure_aaa")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("apply_along_axis")?;
+            let theirs = numpy.getattr("apply_along_axis")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(11)\n\
+                  many_short = rng.standard_normal((2000, 8))\n\
+                  few_long = rng.standard_normal((8, 2000))\n\
+                  square = rng.standard_normal((128, 128))\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("aaa fixture missing")
+            };
+            let loadavg = || -> String {
+                std::fs::read_to_string("/proc/loadavg")
+                    .map(|s| s.split_whitespace().take(1).collect::<String>())
+                    .unwrap_or_else(|_| "?".to_string())
+            };
+            let mhz = || -> String {
+                std::fs::read_to_string("/proc/cpuinfo")
+                    .ok()
+                    .and_then(|s| {
+                        s.lines()
+                            .find(|l| l.starts_with("cpu MHz"))
+                            .and_then(|l| l.split(':').nth(1))
+                            .map(|v| v.trim().to_string())
+                    })
+                    .unwrap_or_else(|| "?".to_string())
+            };
+            println!(
+                "\napply_along_axis vs numpy - profile: {}",
+                if cfg!(debug_assertions) { "dev (UNOPTIMISED)" } else { "optimised" }
+            );
+            println!(
+                "{:22} {:>12} {:>12} {:>8} {:>8} {:>12}  {:>11}  {}",
+                "case", "numpy ns", "ours ns", "ratio", "null", "verdict", "load a/b", "MHz"
+            );
+
+            const REPS: usize = 7;
+            const ROUNDS: usize = 5;
+            for (array_name, func_name, axis) in [
+                ("many_short", "sum", 1_i64),
+                ("many_short", "sort", 1),
+                ("few_long", "sum", 1),
+                ("square", "sum", 0),
+                ("square", "sum", 1),
+            ] {
+                let arr = g(array_name);
+                let func = numpy.getattr(func_name)?;
+                let label = format!("{array_name}/{func_name}/axis={axis}");
+                let a_ref = theirs.call1((&func, axis, &arr))?;
+                let b_ref = ours.call1((&func, axis, &arr))?;
+                assert_eq!(
+                    a_ref.call_method0(pyo3::intern!(py, "tobytes"))?.extract::<Vec<u8>>()?,
+                    b_ref.call_method0(pyo3::intern!(py, "tobytes"))?.extract::<Vec<u8>>()?,
+                    "{label}: bytes diverged - refusing to time two different computations"
+                );
+                let time_it = |f: &Bound<'_, PyAny>| -> PyResult<Vec<u128>> {
+                    let mut out = Vec::with_capacity(REPS);
+                    for _ in 0..REPS {
+                        let t0 = Instant::now();
+                        let _ = f.call1((&func, axis, &arr))?;
+                        out.push(t0.elapsed().as_nanos());
+                    }
+                    Ok(out)
+                };
+                let (mut a, mut b, mut null) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut load_a, mut load_b) = (String::new(), String::new());
+                for round in 0..ROUNDS {
+                    if round % 2 == 0 {
+                        load_a = loadavg();
+                        a.extend(time_it(&theirs)?);
+                        load_b = loadavg();
+                        b.extend(time_it(&ours)?);
+                    } else {
+                        load_b = loadavg();
+                        b.extend(time_it(&ours)?);
+                        load_a = loadavg();
+                        a.extend(time_it(&theirs)?);
+                    }
+                    null.extend(time_it(&theirs)?);
+                }
+                let median = |v: &mut Vec<u128>| -> f64 {
+                    v.sort_unstable();
+                    v[v.len() / 2] as f64
+                };
+                let (ma, mb, mn) = (median(&mut a), median(&mut b), median(&mut null));
+                let ratio = ma / mb;
+                let null_spread = ma.max(mn) / ma.min(mn);
+                let verdict = if (ratio - 1.0).abs() > 2.0 * (null_spread - 1.0) {
+                    "DECIDABLE"
+                } else {
+                    "UNDECIDABLE"
+                };
+                println!(
+                    "{label:22} {ma:>12.0} {mb:>12.0} {ratio:>7.3}x {null_spread:>7.3}x \
+                     {verdict:>12}  {load_a:>5}/{load_b:<5}  {}",
+                    mhz()
                 );
             }
             Ok(())
