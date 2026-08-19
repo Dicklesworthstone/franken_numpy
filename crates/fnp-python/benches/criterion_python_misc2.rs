@@ -1460,6 +1460,23 @@ bo_o_big = offs(1 << 19)\n",
                 pyo3::types::PyTuple::new(py, [get(key)]).expect("args"),
             ));
         }
+        // `is_busday` is the ONE MEMBER OF THIS FAMILY STILL UNMEASURED, and it is measured
+        // here because its two siblings turned out to be regressions: busday_count came in at
+        // 0.908x and busday_offset at 0.598x on this same group, and both are now disengaged.
+        // It shares their kernel style - a weekmask index plus a holiday binary search per
+        // element - so there is a specific reason to expect it loses too, and no reason to
+        // assume it does not. Same operand sizes as the busday_count rows so the three are
+        // comparable WITHIN this invocation.
+        for (tag, key) in [
+            ("is_busday_dt64D_n2p18", "bc_a_small"),
+            ("is_busday_dt64D_n2p19", "bc_a_big"),
+        ] {
+            rows.push((
+                format!("{tag}_vs_numpy_route"),
+                "is_busday",
+                pyo3::types::PyTuple::new(py, [get(key)]).expect("args"),
+            ));
+        }
         for (tag, a, b) in [
             ("busday_count_dt64D_n2p18", "bc_a_small", "bc_b_small"),
             ("busday_count_dt64D_n2p19", "bc_a_big", "bc_b_big"),
