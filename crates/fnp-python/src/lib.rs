@@ -106945,16 +106945,21 @@ fn cached_issubclass(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 /// A bad dtype spelling raises here exactly as it does there, because it is the SAME
 /// `np.dtype()` call that raises - `issubdtype('bad_name', np.floating)` is a `TypeError`
 /// either way, with numpy's own message.
-fn native_issubdtype(
-    py: Python<'_>,
-    arg1: &Bound<'_, PyAny>,
-    arg2: &Bound<'_, PyAny>,
+/// The `'py` here is not decoration: the normalisation closure returns a value borrowed from
+/// `arg` on one branch and from the cached `numpy` module on the other, and with two elided
+/// `'_` lifetimes those are independent, so the borrow checker cannot prove the result
+/// outlives the call. Naming one lifetime for the token, both operands and the closure ties
+/// all three together.
+fn native_issubdtype<'py>(
+    py: Python<'py>,
+    arg1: &Bound<'py, PyAny>,
+    arg2: &Bound<'py, PyAny>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let generic = cached_numpy_generic(py)?;
     let issubclass = cached_issubclass(py)?;
 
-    let as_scalar_type = |arg: &Bound<'_, PyAny>| -> PyResult<Bound<'_, PyAny>> {
+    let as_scalar_type = |arg: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
         // `cast_into` succeeding IS the "is it a class" test that `issubclass_` performs by
         // catching TypeError.
         if arg.clone().cast_into::<PyType>().is_ok()
@@ -113783,7 +113788,7 @@ mod tests {
     use super::{
         BinaryOp, F64_ACCUMULATE_NATIVE_MIN_LEN, F64_DIV_NATIVE_MIN_LEN,
         F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN, F64_DIV_OUT_DECLINE_MIN_LEN, MaskedStream,
-        NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, UFuncKind,
+        NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, ScimathFix, UFuncKind,
         accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, busdays_in_span, cached_float64_dtype, cached_numpy,
         ceil_native, choose, compress, copysign, count_nonzero, degrees_native, diag, diag_indices,
@@ -113798,7 +113803,8 @@ mod tests {
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
         narrow_bitmap_setop, native_apply_over_axes, native_atleast, native_base_repr,
-        native_binary_repr, nextafter,
+        native_isdtype,
+        native_binary_repr, native_scimath_fix_unary, nextafter,
         numpy_dtype_is_f64, offset_business_days, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
@@ -164626,6 +164632,202 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 }
             }
 
+            Ok(())
+        });
+    }
+
+    /// The `numpy.emath` fix family must match NumPy exactly - VALUES, DTYPE and WARNINGS -
+    /// and must DECLINE everything it does not answer (`deadlock-audit-6y5wp`).
+    ///
+    /// Every function in `numpy.lib._scimath_impl` is two lines: one `_fix_*` over the operand,
+    /// then the ordinary ufunc. The fix is `any(isreal(x) & (x < 0))`, and every piece of that
+    /// expression allocates a full array - `.imag` zeros, a bool for `== 0`, a bool for the
+    /// comparison, a bool for the `&` - before it scans. For a REAL dtype `isreal` is all-true
+    /// by construction, so the native route is ONE scan and no temporary. Measured on the
+    /// INCUMBENT (numpy 2.4.3, this host, loadavg 7.3): `np.emath.sqrt` is 9.18x `np.sqrt` at
+    /// n=2^8 and 1.44x at n=2^20, and the smallest gap over the sweep - the honest worst cell -
+    /// is `np.emath.log` at 1.14x, n=2^16.
+    ///
+    /// THE CELLS A PLAUSIBLE IMPLEMENTATION GETS WRONG, all asserted:
+    ///   - An all-nonnegative operand must come back REAL. Converting unconditionally gives
+    ///     the right values with the wrong dtype (complex128 where numpy says float64), and
+    ///     `array_equal` would not notice.
+    ///   - `_tocomplex` sends SINGLE precision to complex64, not complex128, so a float32
+    ///     operand with a negative must come back complex64.
+    ///   - NaN never triggers either fix: `nan < 0` and `abs(nan) > 1` are both False.
+    ///   - `-0.0 < 0` is False, so an operand of `[-0.0, 0.0]` stays real.
+    ///   - `abs(x) > 1` is STRICT, so exactly +/-1 stays real - and real `arctanh(1)` is `inf`
+    ///     with a divide-by-zero RuntimeWarning, which the route must still emit.
+    ///
+    /// WARNING PARITY IS ASSERTED, not assumed: `log(0)` and `arctanh(1)` are compared under
+    /// `warnings.catch_warnings(record=True)` against the incumbent. This is the assertion that
+    /// would fail if the compute were ever moved off numpy's ufunc onto a kernel with a
+    /// different FE-hazard policy.
+    #[test]
+    fn scimath_fix_family_matches_numpy_including_dtype_and_warnings() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let numpy_scimath = py.import("numpy.lib.scimath")?;
+            let module = PyModule::new(py, "fnp_python_test_scimath_fix")?;
+            fnp_python(&module)?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"pos = np.array([0.25, 1.0, 4.0, 9.0])\n\
+                  mixed = np.array([-4.0, -0.5, 0.5, 9.0])\n\
+                  unit = np.array([-1.0, -0.5, 0.5, 1.0])\n\
+                  zeros = np.zeros(5)\n\
+                  negzero = np.array([-0.0, 0.0, 1.0])\n\
+                  withnan = np.array([np.nan, 0.5, 2.0])\n\
+                  nanneg = np.array([np.nan, -0.5, 2.0])\n\
+                  infs = np.array([np.inf, -np.inf, 1.0])\n\
+                  empty = np.array([], dtype=np.float64)\n\
+                  two_d = np.arange(-6.0, 6.0).reshape(3, 4)\n\
+                  pos32 = np.array([0.25, 1.0, 4.0], dtype=np.float32)\n\
+                  mixed32 = np.array([-4.0, 0.5, 9.0], dtype=np.float32)\n\
+                  zerod = np.array(4.0)\n\
+                  strided = np.arange(12.0)[::2]\n\
+                  ints = np.array([-1, 4], dtype=np.int64)\n\
+                  cplx = np.array([1.0 + 2.0j, -3.0 + 0.0j])\n\
+                  lst = [-4.0, 9.0]\n\
+                  mat = np.ma.array([1.0, 4.0])\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            // One line, because a `\n\` continuation strips the next line's indentation and a
+            // Python function body needs it.
+            py.run(
+                c"import warnings\ndef capture(f, x):\n    with warnings.catch_warnings(record=True) as w:\n        warnings.simplefilter('always')\n        r = f(x)\n    return (r.tobytes(), r.dtype.str, sorted(m.category.__name__ for m in w))\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("scimath fixture missing")
+            };
+            let capture = g("capture");
+
+            let fixtures = [
+                "pos", "mixed", "unit", "zeros", "negzero", "withnan", "nanneg", "infs", "empty",
+                "two_d", "pos32", "mixed32",
+            ];
+            for (flat_name, numpy_name, fix) in [
+                ("scimath_sqrt", "sqrt", ScimathFix::RealLtZero),
+                ("scimath_log", "log", ScimathFix::RealLtZero),
+                ("scimath_log2", "log2", ScimathFix::RealLtZero),
+                ("scimath_log10", "log10", ScimathFix::RealLtZero),
+                ("scimath_arccos", "arccos", ScimathFix::RealAbsGt1),
+                ("scimath_arcsin", "arcsin", ScimathFix::RealAbsGt1),
+                ("scimath_arctanh", "arctanh", ScimathFix::RealAbsGt1),
+            ] {
+                let ours = module.getattr(flat_name)?;
+                let theirs = numpy_scimath.getattr(numpy_name)?;
+                for fixture in fixtures {
+                    let x = g(fixture);
+                    // BYTES, not `array_equal`: this has to catch a NaN payload, a signed
+                    // zero and a wrong dtype, and `array_equal` reports none of the three.
+                    let mine = capture.call1((&ours, &x))?;
+                    let base = capture.call1((&theirs, &x))?;
+                    assert_eq!(
+                        mine.get_item(1)?.extract::<String>()?,
+                        base.get_item(1)?.extract::<String>()?,
+                        "{numpy_name}({fixture}): DTYPE diverged - an unconditional \
+                         `_tocomplex` gives the right values and the wrong dtype"
+                    );
+                    assert_eq!(
+                        mine.get_item(0)?.extract::<Vec<u8>>()?,
+                        base.get_item(0)?.extract::<Vec<u8>>()?,
+                        "{numpy_name}({fixture}): bytes diverged from numpy"
+                    );
+                    assert_eq!(
+                        mine.get_item(2)?.extract::<Vec<String>>()?,
+                        base.get_item(2)?.extract::<Vec<String>>()?,
+                        "{numpy_name}({fixture}): WARNINGS diverged - the compute must stay on \
+                         numpy's ufunc, whose FE-hazard surface this route does not reproduce"
+                    );
+                    // ENGAGEMENT: every assertion above is satisfied by a passthrough.
+                    assert!(
+                        native_scimath_fix_unary(
+                            py,
+                            &PyTuple::new(py, [&x])?,
+                            None,
+                            fix,
+                            numpy_name
+                        )?
+                        .is_some(),
+                        "the native route declined {numpy_name}({fixture}); parity alone \
+                         proves nothing"
+                    );
+                }
+            }
+
+            // The dtype rules, spelled out on the two cells that pin them.
+            let sqrt = module.getattr("scimath_sqrt")?;
+            assert_eq!(
+                sqrt.call1((g("pos"),))?
+                    .getattr("dtype")?
+                    .getattr("str")?
+                    .extract::<String>()?,
+                "<f8",
+                "an all-nonnegative operand must stay REAL - the fix did not fire"
+            );
+            assert_eq!(
+                sqrt.call1((g("mixed32"),))?
+                    .getattr("dtype")?
+                    .getattr("str")?
+                    .extract::<String>()?,
+                "<c8",
+                "`_tocomplex` sends SINGLE precision to complex64, not complex128"
+            );
+            assert_eq!(
+                sqrt.call1((g("negzero"),))?
+                    .getattr("dtype")?
+                    .getattr("str")?
+                    .extract::<String>()?,
+                "<f8",
+                "`-0.0 < 0` is False, so a signed zero must NOT trigger the fix"
+            );
+            assert_eq!(
+                module
+                    .getattr("scimath_arctanh")?
+                    .call1((g("unit"),))?
+                    .getattr("dtype")?
+                    .getattr("str")?
+                    .extract::<String>()?,
+                "<f8",
+                "`abs(x) > 1` is STRICT, so exactly +/-1 must stay real"
+            );
+
+            // The declines. Each must reach numpy, and numpy's answer must still come back.
+            for fixture in ["zerod", "strided", "ints", "cplx", "lst", "mat"] {
+                let x = g(fixture);
+                assert!(
+                    native_scimath_fix_unary(
+                        py,
+                        &PyTuple::new(py, [&x])?,
+                        None,
+                        ScimathFix::RealLtZero,
+                        "sqrt"
+                    )?
+                    .is_none(),
+                    "{fixture} must decline: a 0-d array yields no buffer slice, a strided one \
+                     no contiguous slice, and every other dtype or subclass needs numpy's own \
+                     `isreal`/`_fix_int_lt_zero`/dispatch handling"
+                );
+                let mine = sqrt.call1((&x,))?;
+                let base = numpy_scimath.getattr("sqrt")?.call1((&x,))?;
+                assert_eq!(
+                    mine.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    base.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "sqrt({fixture}) must still match numpy through the passthrough"
+                );
+            }
             Ok(())
         });
     }
