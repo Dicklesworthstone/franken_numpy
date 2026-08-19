@@ -127586,6 +127586,95 @@ mod tests {
                     );
                 }
             }
+            // The TWO-OPERAND entries. Same method, and the scalar operand is passed the way
+            // each incumbent takes it: `logn(base, x)` puts the BASE FIRST, `power(x, p)` puts
+            // the exponent SECOND. Getting that backwards would time a different function.
+            for (name, flat, scalar, scalar_first) in [
+                ("logn", "scimath_logn", 3.0_f64, true),
+                ("power", "scimath_power", 0.5_f64, false),
+            ] {
+                let theirs = emath.getattr(name)?;
+                let ours = module.getattr(flat)?;
+                for lg in [8_u32, 12, 16, 20] {
+                    let n = 1_usize << lg;
+                    let x = numpy.call_method1("arange", (n,))?;
+                    let x = x.call_method1("astype", ("float64",))?;
+                    let x = x.call_method1("__truediv__", (n as f64 * 1.01,))?;
+                    let x = x.call_method1("__add__", (1.0e-3_f64,))?;
+
+                    let call = |f: &Bound<'_, PyAny>| -> PyResult<Py<PyAny>> {
+                        if scalar_first {
+                            Ok(f.call1((scalar, &x))?.unbind())
+                        } else {
+                            Ok(f.call1((&x, scalar))?.unbind())
+                        }
+                    };
+                    let a_ref = call(&theirs)?;
+                    let b_ref = call(&ours)?;
+                    assert_eq!(
+                        a_ref
+                            .bind(py)
+                            .getattr("dtype")?
+                            .getattr("str")?
+                            .extract::<String>()?,
+                        b_ref
+                            .bind(py)
+                            .getattr("dtype")?
+                            .getattr("str")?
+                            .extract::<String>()?,
+                        "{name}: dtype diverged - refusing to time two different computations"
+                    );
+                    assert_eq!(
+                        a_ref.bind(py).call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        b_ref.bind(py).call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "{name}: bytes diverged - refusing to time two different computations"
+                    );
+
+                    let time_it = |f: &Bound<'_, PyAny>| -> PyResult<Vec<u128>> {
+                        let mut out = Vec::with_capacity(REPS);
+                        for _ in 0..REPS {
+                            let t0 = Instant::now();
+                            let _ = call(f)?;
+                            out.push(t0.elapsed().as_nanos());
+                        }
+                        Ok(out)
+                    };
+                    let (mut a, mut b, mut null) = (Vec::new(), Vec::new(), Vec::new());
+                    let (mut load_a, mut load_b) = (String::new(), String::new());
+                    for round in 0..ROUNDS {
+                        if round % 2 == 0 {
+                            load_a = loadavg();
+                            a.extend(time_it(&theirs)?);
+                            load_b = loadavg();
+                            b.extend(time_it(&ours)?);
+                        } else {
+                            load_b = loadavg();
+                            b.extend(time_it(&ours)?);
+                            load_a = loadavg();
+                            a.extend(time_it(&theirs)?);
+                        }
+                        null.extend(time_it(&theirs)?);
+                    }
+                    let median = |v: &mut Vec<u128>| -> f64 {
+                        v.sort_unstable();
+                        v[v.len() / 2] as f64
+                    };
+                    let (ma, mb, mn) = (median(&mut a), median(&mut b), median(&mut null));
+                    let ratio = ma / mb;
+                    let null_spread = ma.max(mn) / ma.min(mn);
+                    let verdict = if (ratio - 1.0).abs() > 2.0 * (null_spread - 1.0) {
+                        "DECIDABLE"
+                    } else {
+                        "UNDECIDABLE"
+                    };
+                    println!(
+                        "{name:8} {:>7} {ma:>11.0} {mb:>11.0} {ratio:>7.3}x {null_spread:>7.3}x \
+                         {verdict:>12}  {load_a:>5}/{load_b:<5}  {}",
+                        format!("2^{lg}"),
+                        mhz()
+                    );
+                }
+            }
             println!(
                 "ratio > 1 = OURS FASTER. null = incumbent-vs-itself through the same harness; \
                  a ratio inside 2x the null spread is UNDECIDABLE and must not be banked.\n"
