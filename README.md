@@ -2084,10 +2084,10 @@ franken_numpy/
 ├── rust-toolchain.toml                # nightly-2026-07-05 (single source of truth)
 ├── FEATURE_PARITY.md                  # Live parity matrix + evidence links
 ├── CHANGELOG.md                       # Capability-area changelog
-├── PROPOSED_ARCHITECTURE.md           # Architecture notes
 ├── audit_numpy_reality.md             # `numpy.__all__` coverage architecture + lock-in
 ├── audit_numpy_mocks.md               # Mock/stub/unwrap audit (zero production mocks)
 ├── docs/
+│   ├── planning/                      # Design spec, porting plan, architecture notes
 │   ├── DIVERGENCES.md                 # Machine-readable divergence ledger
 │   ├── FUZZING.md                     # Fuzz crate / target / seed inventory
 │   └── adr/
@@ -2162,7 +2162,7 @@ Saying these things explicitly saves everyone time. If your use case sits on the
 
 ## Performance Levers Applied So Far
 
-Concrete optimization passes that have landed, paired with what they bought. Each lever follows the optimization-governance pattern in [`PROPOSED_ARCHITECTURE.md`](PROPOSED_ARCHITECTURE.md): baseline → profile → single lever → conformance check → re-baseline → proof artifact.
+Concrete optimization passes that have landed, paired with what they bought. Each lever follows the optimization-governance pattern in [`docs/planning/PROPOSED_ARCHITECTURE.md`](docs/planning/PROPOSED_ARCHITECTURE.md): baseline → profile → single lever → conformance check → re-baseline → proof artifact.
 
 | Lever | What it does | Where | Effect |
 |---|---|---|---|

@@ -133,7 +133,7 @@ Status key:
 ## 5. Documentation and Tracking Updates
 
 - [x] Update `FEATURE_PARITY.md` statuses for new suites/artifacts
-- [x] Update `PROPOSED_ARCHITECTURE.md` with implemented pipeline details
+- [x] Update `docs/planning/PROPOSED_ARCHITECTURE.md` with implemented pipeline details
 - [x] Update `README.md` commands for capture/diff/sidecar/scrub
 - [x] Add/refresh optimization matrix and isomorphism proof docs if behavior changes
 
@@ -207,7 +207,7 @@ Status key:
 
 ### 9.3 Documentation and tracking
 - [x] Update `README.md` with packet-validator command
-- [x] Update `PROPOSED_ARCHITECTURE.md` with readiness-validator details
+- [x] Update `docs/planning/PROPOSED_ARCHITECTURE.md` with readiness-validator details
 - [x] Update `FEATURE_PARITY.md` foundation status for contract-schema lock
 - [x] Run formatter/check/tests for this bead and record outcomes
 - [x] Post completion update in Agent Mail thread `bd-23m.3`
@@ -333,7 +333,7 @@ Status key:
 ### 12.6 Documentation updates
 - [x] Update `artifacts/contracts/README.md` with test/logging contract artifacts
 - [x] Update `README.md` conformance command list with test-contract gate commands
-- [x] Update broader spec docs (`COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md`, `PLAN_TO_PORT_NUMPY_TO_RUST.md`) with finalized test-contract references
+- [x] Update broader spec docs (`docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md`, `docs/planning/PLAN_TO_PORT_NUMPY_TO_RUST.md`) with finalized test-contract references
 
 ### 12.7 Validation and closure
 - [x] `cargo fmt --check`

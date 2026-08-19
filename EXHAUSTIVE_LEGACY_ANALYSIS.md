@@ -19,10 +19,10 @@ Legacy corpus:
 - Upstream oracle: `numpy/numpy`
 
 Project contracts:
-- `/data/projects/franken_numpy/COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md` (sections 14-21)
+- `/data/projects/franken_numpy/docs/planning/COMPREHENSIVE_SPEC_FOR_FRANKENNUMPY_V1.md` (sections 14-21)
 - `/data/projects/franken_numpy/EXISTING_NUMPY_STRUCTURE.md`
-- `/data/projects/franken_numpy/PLAN_TO_PORT_NUMPY_TO_RUST.md`
-- `/data/projects/franken_numpy/PROPOSED_ARCHITECTURE.md`
+- `/data/projects/franken_numpy/docs/planning/PLAN_TO_PORT_NUMPY_TO_RUST.md`
+- `/data/projects/franken_numpy/docs/planning/PROPOSED_ARCHITECTURE.md`
 - `/data/projects/franken_numpy/FEATURE_PARITY.md`
 
 ## DOC-PASS-13 Integration Snapshot (2026-02-18)
@@ -1052,7 +1052,7 @@ Definition of done for Phase-2:
 
 ## 11. Residual Gaps and Risks
 
-- `PROPOSED_ARCHITECTURE.md` crate list contains literal `\n` separators; normalize before automation.
+- `docs/planning/PROPOSED_ARCHITECTURE.md` crate list contains literal `\n` separators; normalize before automation.
 - high-risk native boundaries (multiarray/umath/lapack-lite) require wider differential corpus before aggressive optimization.
 - RNG and cast semantics are common silent-regression vectors and require explicit release blockers.
 
