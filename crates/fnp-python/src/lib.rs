@@ -9941,26 +9941,26 @@ fn try_zerocopy_f64_isclose(
 // `benches/criterion_python_elementwise.rs`, which the bench asserts before it
 // times anything. Change an arm of this predicate and both must move, or the
 // bench silently measures a branch we do not ship.
-/// glibc's floating-point exception flags - the mechanism NumPy uses to detect divide
-/// hazards WITHOUT touching the quotients (`deadlock-audit-6y5wp`).
-///
-/// READ OFF THE INCUMBENT, since no numpy source is vendored here.
-/// `_multiarray_umath.cpython-313-x86_64-linux-gnu.so` imports `feclearexcept` and
-/// `fetestexcept` from glibc and wraps them as `npy_clear_floatstatus_barrier` and
-/// `npy_get_floatstatus_barrier`. That is WHY its live loop `DOUBLE_divide_X86_V3`
-/// measures 10 instructions per 8 doubles: it performs NO per-element classification at
-/// all. It runs a bare divide loop and asks the hardware ONCE, afterwards, whether
-/// anything was raised.
-///
-/// Our loop classifies every quotient in software because safe Rust exposes no access to
-/// the FP environment, and that is precisely the gap this bead names: of our 35
-/// instructions per 16 doubles, roughly 20 exist only to recompute in software what MXCSR
-/// already recorded in hardware for free. The FE-hazard classifier was measured at 7.9%
-/// of this kernel - the price of parity, payable only because we could not read the flags.
-///
-/// Declared directly rather than by taking a `libc` dependency: these are two symbols from
-/// a library `std` already links, and the campaign's linkage ban is about BLAS/LAPACK/MKL,
-/// not the C runtime.
+// glibc's floating-point exception flags - the mechanism NumPy uses to detect divide
+// hazards WITHOUT touching the quotients (`deadlock-audit-6y5wp`).
+//
+// READ OFF THE INCUMBENT, since no numpy source is vendored here.
+// `_multiarray_umath.cpython-313-x86_64-linux-gnu.so` imports `feclearexcept` and
+// `fetestexcept` from glibc and wraps them as `npy_clear_floatstatus_barrier` and
+// `npy_get_floatstatus_barrier`. That is WHY its live loop `DOUBLE_divide_X86_V3`
+// measures 10 instructions per 8 doubles: it performs NO per-element classification at
+// all. It runs a bare divide loop and asks the hardware ONCE, afterwards, whether
+// anything was raised.
+//
+// Our loop classifies every quotient in software because safe Rust exposes no access to
+// the FP environment, and that is precisely the gap this bead names: of our 35
+// instructions per 16 doubles, roughly 20 exist only to recompute in software what MXCSR
+// already recorded in hardware for free. The FE-hazard classifier was measured at 7.9%
+// of this kernel - the price of parity, payable only because we could not read the flags.
+//
+// Declared directly rather than by taking a `libc` dependency: these are two symbols from
+// a library `std` already links, and the campaign's linkage ban is about BLAS/LAPACK/MKL,
+// not the C runtime.
 #[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
     fn feclearexcept(excepts: core::ffi::c_int) -> core::ffi::c_int;
