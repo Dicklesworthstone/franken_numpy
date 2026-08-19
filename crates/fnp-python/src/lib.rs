@@ -349,10 +349,10 @@ impl PyUFunc {
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
         let kwargs = PyDict::new(py);
         if let Some(sig) = signature.as_ref() {
-            kwargs.set_item("signature", sig.bind(py))?;
+            kwargs.set_item(intern!(py, "signature"), sig.bind(py))?;
         }
         if let Some(c) = casting {
-            kwargs.set_item("casting", c)?;
+            kwargs.set_item(intern!(py, "casting"), c)?;
         }
         Ok(np_ufunc
             .getattr(intern!(py, "resolve_dtypes"))?
@@ -378,31 +378,31 @@ impl PyUFunc {
         params.append(param_cls.call1(("x2", &pos_only))?)?;
 
         let kwargs = PyDict::new(py);
-        kwargs.set_item("default", py.None())?;
+        kwargs.set_item(intern!(py, "default"), py.None())?;
         params.append(param_cls.call(("out", &pos_or_kw), Some(&kwargs))?)?;
 
         let kwargs = PyDict::new(py);
-        kwargs.set_item("default", true)?;
+        kwargs.set_item(intern!(py, "default"), true)?;
         params.append(param_cls.call(("where", &kw_only), Some(&kwargs))?)?;
 
         let kwargs = PyDict::new(py);
-        kwargs.set_item("default", "same_kind")?;
+        kwargs.set_item(intern!(py, "default"), "same_kind")?;
         params.append(param_cls.call(("casting", &kw_only), Some(&kwargs))?)?;
 
         let kwargs = PyDict::new(py);
-        kwargs.set_item("default", "K")?;
+        kwargs.set_item(intern!(py, "default"), "K")?;
         params.append(param_cls.call(("order", &kw_only), Some(&kwargs))?)?;
 
         let kwargs = PyDict::new(py);
-        kwargs.set_item("default", py.None())?;
+        kwargs.set_item(intern!(py, "default"), py.None())?;
         params.append(param_cls.call(("dtype", &kw_only), Some(&kwargs))?)?;
 
         let kwargs = PyDict::new(py);
-        kwargs.set_item("default", true)?;
+        kwargs.set_item(intern!(py, "default"), true)?;
         params.append(param_cls.call(("subok", &kw_only), Some(&kwargs))?)?;
 
         let kwargs = PyDict::new(py);
-        kwargs.set_item("default", py.None())?;
+        kwargs.set_item(intern!(py, "default"), py.None())?;
         params.append(param_cls.call(("signature", &kw_only), Some(&kwargs))?)?;
 
         Ok(sig_cls.call1((params,))?.unbind())
@@ -910,25 +910,25 @@ impl PyUFunc {
         // `delegated_kwargs_omit_defaults_and_forward_non_defaults` pins all three.
         let kwargs = PyDict::new(py);
         if let Some(o) = out.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         if let Some(w) = r#where {
-            kwargs.set_item("where", w.bind(py))?;
+            kwargs.set_item(intern!(py, "where"), w.bind(py))?;
         }
         if casting != "same_kind" {
-            kwargs.set_item("casting", casting)?;
+            kwargs.set_item(intern!(py, "casting"), casting)?;
         }
         if order != "K" {
-            kwargs.set_item("order", order)?;
+            kwargs.set_item(intern!(py, "order"), order)?;
         }
         if let Some(d) = dtype.as_ref() {
-            kwargs.set_item("dtype", d.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), d.bind(py))?;
         }
         if !subok {
-            kwargs.set_item("subok", subok)?;
+            kwargs.set_item(intern!(py, "subok"), subok)?;
         }
         if let Some(s) = signature.as_ref() {
-            kwargs.set_item("signature", s.bind(py))?;
+            kwargs.set_item(intern!(py, "signature"), s.bind(py))?;
         }
         Ok(np_ufunc
             .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
@@ -1710,10 +1710,10 @@ impl PySeedSequence {
     #[getter]
     fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
-        dict.set_item("entropy", self.entropy(py)?)?;
-        dict.set_item("spawn_key", self.spawn_key(py)?)?;
-        dict.set_item("pool_size", self.inner.pool_size())?;
-        dict.set_item("n_children_spawned", self.inner.spawn_counter())?;
+        dict.set_item(intern!(py, "entropy"), self.entropy(py)?)?;
+        dict.set_item(intern!(py, "spawn_key"), self.spawn_key(py)?)?;
+        dict.set_item(intern!(py, "pool_size"), self.inner.pool_size())?;
+        dict.set_item(intern!(py, "n_children_spawned"), self.inner.spawn_counter())?;
         Ok(dict.into_any().unbind())
     }
 
@@ -2719,7 +2719,7 @@ impl PyRandomGenerator {
         let index_array =
             build_numpy_array_from_storage(py, &sample_shape, ArrayStorage::I64(index_i64))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", axis as isize)?;
+        kwargs.set_item(intern!(py, "axis"), axis as isize)?;
         let result = arr.call_method(intern!(py, "take"), (index_array.bind(py),), Some(&kwargs))?;
         if result.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0 {
             return Ok(result.get_item(())?.unbind());
@@ -2773,7 +2773,7 @@ impl PyRandomGenerator {
         let index_array =
             build_numpy_array_from_storage(py, &[shape[axis]], ArrayStorage::I64(order_i64))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", axis as isize)?;
+        kwargs.set_item(intern!(py, "axis"), axis as isize)?;
         Ok(arr
             .call_method(intern!(py, "take"), (index_array.bind(py),), Some(&kwargs))?
             .unbind())
@@ -2853,7 +2853,7 @@ impl PyRandomGenerator {
         let index_array =
             build_numpy_array_from_storage(py, &[shape[axis]], ArrayStorage::I64(order_i64))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", axis as isize)?;
+        kwargs.set_item(intern!(py, "axis"), axis as isize)?;
         let shuffled = bound.call_method(intern!(py, "take"), (index_array.bind(py),), Some(&kwargs))?;
         numpy.call_method1(intern!(py, "copyto"), (bound, &shuffled))?;
         Ok(py.None())
@@ -2931,7 +2931,7 @@ impl PyRandomGenerator {
             return Err(PyValueError::new_err("out must have the same shape as x"));
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("casting", "safe")?;
+        kwargs.set_item(intern!(py, "casting"), "safe")?;
         numpy.call_method(intern!(py, "copyto"), (out_bound, &generated), Some(&kwargs))?;
         Ok(out)
     }
@@ -3890,8 +3890,8 @@ fn build_bit_generator_state_dict(
 ) -> PyResult<Py<PyAny>> {
     let state = bit_generator.state();
     let state_dict = PyDict::new(py);
-    state_dict.set_item("state", py_int_from_u128(py, state.seed)?)?;
-    state_dict.set_item("inc", py_int_from_u128(py, state.counter)?)?;
+    state_dict.set_item(intern!(py, "state"), py_int_from_u128(py, state.seed)?)?;
+    state_dict.set_item(intern!(py, "inc"), py_int_from_u128(py, state.counter)?)?;
 
     let schema_entries = PyList::empty(py);
     for (key, value) in &state.schema_entries {
@@ -3899,12 +3899,12 @@ fn build_bit_generator_state_dict(
     }
 
     let dict = PyDict::new(py);
-    dict.set_item("bit_generator", bit_generator_numpy_name(state.kind))?;
-    dict.set_item("state", state_dict)?;
-    dict.set_item("schema_version", state.schema_version)?;
-    dict.set_item("schema_entries", schema_entries)?;
-    dict.set_item("has_uint32", 0)?;
-    dict.set_item("uinteger", 0)?;
+    dict.set_item(intern!(py, "bit_generator"), bit_generator_numpy_name(state.kind))?;
+    dict.set_item(intern!(py, "state"), state_dict)?;
+    dict.set_item(intern!(py, "schema_version"), state.schema_version)?;
+    dict.set_item(intern!(py, "schema_entries"), schema_entries)?;
+    dict.set_item(intern!(py, "has_uint32"), 0)?;
+    dict.set_item(intern!(py, "uinteger"), 0)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -3930,7 +3930,7 @@ fn numpy_array_from_u64_list<'py>(
     values: &[u64],
 ) -> PyResult<Bound<'py, PyAny>> {
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint64")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint64")?;
     numpy
         .getattr(intern!(py, "array"))?
         .call((PyList::new(py, values)?,), Some(&kwargs))
@@ -3942,7 +3942,7 @@ fn numpy_array_from_u32_list<'py>(
     values: &[u32],
 ) -> PyResult<Bound<'py, PyAny>> {
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint32")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint32")?;
     numpy
         .getattr(intern!(py, "array"))?
         .call((PyList::new(py, values)?,), Some(&kwargs))
@@ -3999,14 +3999,14 @@ fn build_numpy_compatible_bit_generator_state_dict(
 ) -> PyResult<Py<PyAny>> {
     let state = bit_generator.state();
     let dict = PyDict::new(py);
-    dict.set_item("bit_generator", bit_generator_numpy_name(state.kind))?;
+    dict.set_item(intern!(py, "bit_generator"), bit_generator_numpy_name(state.kind))?;
 
     let state_dict = PyDict::new(py);
     match state.kind {
         BitGeneratorKind::Pcg64 | BitGeneratorKind::Pcg64Dxsm => {
-            state_dict.set_item("state", py_int_from_u128(py, state.seed)?)?;
-            state_dict.set_item("inc", py_int_from_u128(py, state.counter)?)?;
-            dict.set_item("state", state_dict)?;
+            state_dict.set_item(intern!(py, "state"), py_int_from_u128(py, state.seed)?)?;
+            state_dict.set_item(intern!(py, "inc"), py_int_from_u128(py, state.counter)?)?;
+            dict.set_item(intern!(py, "state"), state_dict)?;
         }
         BitGeneratorKind::Mt19937 => {
             let numpy = py.import("numpy")?;
@@ -4017,12 +4017,12 @@ fn build_numpy_compatible_bit_generator_state_dict(
                     &format!("mt19937_s{index}"),
                 )?);
             }
-            state_dict.set_item("key", numpy_array_from_u32_list(py, &numpy, &key)?)?;
+            state_dict.set_item(intern!(py, "key"), numpy_array_from_u32_list(py, &numpy, &key)?)?;
             state_dict.set_item(
                 "pos",
                 bit_generator_schema_entry_u64(&state.schema_entries, "mt19937_pos")?,
             )?;
-            dict.set_item("state", state_dict)?;
+            dict.set_item(intern!(py, "state"), state_dict)?;
         }
         BitGeneratorKind::Philox => {
             let numpy = py.import("numpy")?;
@@ -4042,10 +4042,10 @@ fn build_numpy_compatible_bit_generator_state_dict(
                 bit_generator_schema_entry_u64(&state.schema_entries, "philox_buf2")?,
                 bit_generator_schema_entry_u64(&state.schema_entries, "philox_buf3")?,
             ];
-            state_dict.set_item("counter", numpy_array_from_u64_list(py, &numpy, &counter)?)?;
-            state_dict.set_item("key", numpy_array_from_u64_list(py, &numpy, &key)?)?;
-            dict.set_item("state", state_dict)?;
-            dict.set_item("buffer", numpy_array_from_u64_list(py, &numpy, &buffer)?)?;
+            state_dict.set_item(intern!(py, "counter"), numpy_array_from_u64_list(py, &numpy, &counter)?)?;
+            state_dict.set_item(intern!(py, "key"), numpy_array_from_u64_list(py, &numpy, &key)?)?;
+            dict.set_item(intern!(py, "state"), state_dict)?;
+            dict.set_item(intern!(py, "buffer"), numpy_array_from_u64_list(py, &numpy, &buffer)?)?;
             dict.set_item(
                 "buffer_pos",
                 bit_generator_schema_entry_u64(&state.schema_entries, "philox_pos")?,
@@ -4063,12 +4063,12 @@ fn build_numpy_compatible_bit_generator_state_dict(
                 "state",
                 numpy_array_from_u64_list(py, &numpy, &state_values)?,
             )?;
-            dict.set_item("state", state_dict)?;
+            dict.set_item(intern!(py, "state"), state_dict)?;
         }
     }
 
-    dict.set_item("has_uint32", 0)?;
-    dict.set_item("uinteger", 0)?;
+    dict.set_item(intern!(py, "has_uint32"), 0)?;
+    dict.set_item(intern!(py, "uinteger"), 0)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -4498,14 +4498,14 @@ fn build_random_state_state(
     }
 
     let state_dict = PyDict::new(py);
-    state_dict.set_item("key", key_array)?;
-    state_dict.set_item("pos", pos)?;
+    state_dict.set_item(intern!(py, "key"), key_array)?;
+    state_dict.set_item(intern!(py, "pos"), pos)?;
 
     let dict = PyDict::new(py);
-    dict.set_item("bit_generator", "MT19937")?;
-    dict.set_item("state", state_dict)?;
-    dict.set_item("has_gauss", has_gaussian_value)?;
-    dict.set_item("gauss", gaussian)?;
+    dict.set_item(intern!(py, "bit_generator"), "MT19937")?;
+    dict.set_item(intern!(py, "state"), state_dict)?;
+    dict.set_item(intern!(py, "has_gauss"), has_gaussian_value)?;
+    dict.set_item(intern!(py, "gauss"), gaussian)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -5319,7 +5319,7 @@ where
     T: pyo3::buffer::Element + Copy + for<'a, 'b> FromPyObject<'a, 'b>,
 {
     let kwargs = PyDict::new(py);
-    kwargs.set_item("copy", false)?;
+    kwargs.set_item(intern!(py, "copy"), false)?;
     let cast = flat.call_method(intern!(py, "astype"), (dtype_name,), Some(&kwargs))?;
     numpy_contiguous_to_vec::<T>(py, &cast)
 }
@@ -5802,11 +5802,11 @@ fn stack_helper_numpy_fallback(
     if let Some(dtype) = dtype
         && !dtype.bind(py).is_none()
     {
-        kwargs.set_item("dtype", dtype.bind(py))?;
+        kwargs.set_item(intern!(py, "dtype"), dtype.bind(py))?;
         has_kwargs = true;
     }
     if let Some(casting) = casting {
-        kwargs.set_item("casting", casting)?;
+        kwargs.set_item(intern!(py, "casting"), casting)?;
         has_kwargs = true;
     }
 
@@ -5889,7 +5889,7 @@ fn split_helper_numpy_fallback(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     let has_kwargs = if let Some(axis) = axis {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
         true
     } else {
         false
@@ -6310,7 +6310,7 @@ fn masked_scalar_compare(
         // this used to import numpy and read `.ma` off it on every fallback call.
         let masked_fn = cached_numpy_ma(py)?.getattr(numpy_name)?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("copy", copy)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
         Ok(masked_fn
             .call(
                 (x_for_fallback.bind(py), value_for_fallback.bind(py)),
@@ -6348,7 +6348,7 @@ fn masked_scalar_compare(
                 // masked_where (numpy's own internal path for these wrappers) shrinks an
                 // all-False mask to nomask, matching numpy exactly.
                 let kwargs = PyDict::new(py);
-                kwargs.set_item("copy", copy)?;
+                kwargs.set_item(intern!(py, "copy"), copy)?;
                 let result = numpy
                     .getattr(intern!(py, "ma"))?
                     .getattr(intern!(py, "masked_where"))?
@@ -6503,7 +6503,7 @@ fn masked_interval_compare(
         // this used to import numpy and read `.ma` off it on every fallback call.
         let masked_fn = cached_numpy_ma(py)?.getattr(numpy_name)?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("copy", copy)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
         Ok(masked_fn
             .call(
                 (
@@ -6538,7 +6538,7 @@ fn masked_interval_compare(
             };
             if let Some(mask) = try_zerocopy_f64_predicate(py, x.bind(py), pred)? {
                 let kwargs = PyDict::new(py);
-                kwargs.set_item("copy", copy)?;
+                kwargs.set_item(intern!(py, "copy"), copy)?;
                 return Ok(numpy
                     .getattr(intern!(py, "ma"))?
                     .getattr(intern!(py, "masked_where"))?
@@ -6783,7 +6783,7 @@ fn numpy_savez_call(
             call_kwargs.set_item(key, value)?;
         }
     }
-    call_kwargs.set_item("allow_pickle", allow_pickle)?;
+    call_kwargs.set_item(intern!(py, "allow_pickle"), allow_pickle)?;
     Ok(numpy
         .getattr(function_name)?
         .call(&positional, Some(&call_kwargs))?
@@ -7335,7 +7335,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "bool_")?;
+            kwargs.set_item(intern!(py, "dtype"), "bool_")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7355,7 +7355,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "int8")?;
+            kwargs.set_item(intern!(py, "dtype"), "int8")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7375,7 +7375,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "int16")?;
+            kwargs.set_item(intern!(py, "dtype"), "int16")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7395,7 +7395,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "int32")?;
+            kwargs.set_item(intern!(py, "dtype"), "int32")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7415,7 +7415,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "int64")?;
+            kwargs.set_item(intern!(py, "dtype"), "int64")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7435,7 +7435,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "uint8")?;
+            kwargs.set_item(intern!(py, "dtype"), "uint8")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7455,7 +7455,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "uint16")?;
+            kwargs.set_item(intern!(py, "dtype"), "uint16")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7475,7 +7475,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "uint32")?;
+            kwargs.set_item(intern!(py, "dtype"), "uint32")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7495,7 +7495,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "uint64")?;
+            kwargs.set_item(intern!(py, "dtype"), "uint64")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7515,7 +7515,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "float16")?;
+            kwargs.set_item(intern!(py, "dtype"), "float16")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7535,7 +7535,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "float32")?;
+            kwargs.set_item(intern!(py, "dtype"), "float32")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7555,7 +7555,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "float64")?;
+            kwargs.set_item(intern!(py, "dtype"), "float64")?;
             numpy.call_method(
                 "array",
                 (PyList::new(py, values.iter().copied())?,),
@@ -7577,7 +7577,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "complex64")?;
+            kwargs.set_item(intern!(py, "dtype"), "complex64")?;
             numpy.call_method(intern!(py, "array"), (PyList::new(py, values.iter())?,), Some(&kwargs))?
         }
         DType::Complex128 => {
@@ -7595,7 +7595,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "complex128")?;
+            kwargs.set_item(intern!(py, "dtype"), "complex128")?;
             numpy.call_method(intern!(py, "array"), (PyList::new(py, values.iter())?,), Some(&kwargs))?
         }
         DType::Str => {
@@ -7611,7 +7611,7 @@ fn build_numpy_array_from_interleaved_storage(
                     }
                 }
             }
-            kwargs.set_item("dtype", "str")?;
+            kwargs.set_item(intern!(py, "dtype"), "str")?;
             numpy.call_method(intern!(py, "array"), (PyList::new(py, values.iter())?,), Some(&kwargs))?
         }
         unsupported => {
@@ -7662,10 +7662,10 @@ fn structured_to_unstructured(
     let recfunctions = py.import("numpy.lib.recfunctions")?;
     let kwargs = PyDict::new(py);
     if let Some(dtype) = dtype {
-        kwargs.set_item("dtype", dtype.bind(py))?;
+        kwargs.set_item(intern!(py, "dtype"), dtype.bind(py))?;
     }
-    kwargs.set_item("copy", copy)?;
-    kwargs.set_item("casting", casting)?;
+    kwargs.set_item(intern!(py, "copy"), copy)?;
+    kwargs.set_item(intern!(py, "casting"), casting)?;
     Ok(recfunctions
         .getattr(intern!(py, "structured_to_unstructured"))?
         .call((arr.bind(py),), Some(&kwargs))?
@@ -7862,7 +7862,7 @@ fn cast_numpy_array_dtype(
             (dtype,),
             Some(&{
                 let kwargs = PyDict::new(py);
-                kwargs.set_item("copy", false)?;
+                kwargs.set_item(intern!(py, "copy"), false)?;
                 kwargs
             }),
         )?
@@ -7995,7 +7995,7 @@ fn numpy_array_from_slice<'py, T: pyo3::buffer::Element + Copy>(
     dtype_name: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let array = numpy.call_method(intern!(py, "empty"), (values.len(),), Some(&kwargs))?;
     if !values.is_empty() {
         let buffer = PyBuffer::<T>::get(&array)?;
@@ -8010,7 +8010,7 @@ fn numpy_complex128_array_from_interleaved_f64<'py>(
     values: &[f64],
 ) -> PyResult<Bound<'py, PyAny>> {
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let array = numpy.call_method(intern!(py, "empty"), (values.len() / 2,), Some(&kwargs))?;
     if !values.is_empty() {
         let view = array.call_method1(intern!(py, "view"), ("float64",))?;
@@ -8051,7 +8051,7 @@ fn numpy_array_from_direct_f64_unary<'py>(
     }
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let output = numpy.call_method(intern!(py, "empty"), (array.values().len(),), Some(&kwargs))?;
     if array.values().is_empty() {
         return Ok(Some(output));
@@ -8258,7 +8258,7 @@ fn numpy_f64_unary_matches_libm(
 
     let probe = || -> PyResult<bool> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "float64")?;
+        kwargs.set_item(intern!(py, "dtype"), "float64")?;
         let arr = numpy.call_method(intern!(py, "asarray"), (samples.clone(),), Some(&kwargs))?;
         let theirs: Vec<f64> = numpy
             .getattr(numpy_name)?
@@ -9001,7 +9001,7 @@ fn zerocopy_i64_unary_flat<'py>(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
@@ -9092,7 +9092,7 @@ fn zerocopy_i32_unary_flat<'py>(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int32")?;
+    kwargs.set_item(intern!(py, "dtype"), "int32")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<i32>::get(&flat) else {
@@ -9189,7 +9189,7 @@ where
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -9374,7 +9374,7 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -9415,7 +9415,7 @@ fn zerocopy_f64_unary_flat_with<'py, F: Fn(f64) -> f64>(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -9473,7 +9473,7 @@ fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -9558,7 +9558,7 @@ fn zerocopy_f64_isclose_flat<'py>(
     let shape: Vec<usize> = a_buffer.shape().to_vec();
     let n = a_in.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -9657,7 +9657,7 @@ fn zerocopy_f32_isclose_flat<'py>(
     let shape: Vec<usize> = a_buffer.shape().to_vec();
     let n = a_in.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -9775,7 +9775,7 @@ fn try_zerocopy_f64_isclose_array_scalar(
     let shape: Vec<usize> = buf.shape().to_vec();
     let thresh = atol + rtol * bv.abs();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
@@ -9855,7 +9855,7 @@ fn try_zerocopy_f32_isclose_array_scalar(
     let shape: Vec<usize> = buf.shape().to_vec();
     let thresh = atol + rtol * bv.abs();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
@@ -10461,7 +10461,7 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
     //
     // The previous form built a `PyDict` and set `dtype` into it on EVERY call, then
     // built a shape tuple even when the shape has one element:
-    //     let kwargs = PyDict::new(py); kwargs.set_item("dtype", "float64")?;
+    //     let kwargs = PyDict::new(py); kwargs.set_item(intern!(py, "dtype"), "float64")?;
     //     numpy.call_method(intern!(py, "empty"), (&PyTuple::new(py, shape)?,), Some(&kwargs))
     // `numpy.empty` takes dtype as its SECOND POSITIONAL parameter, so the dict is pure
     // overhead — and this ledger priced a 3-key kwargs dict at 230 ns in the partition
@@ -10838,7 +10838,7 @@ fn try_zerocopy_f16_binary_widen(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let out_u16 = numpy.call_method(intern!(py, "empty"), (a_shape.clone(),), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
@@ -11218,7 +11218,7 @@ fn try_zerocopy_f16_nan_to_num(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let out_u16 = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
@@ -11305,7 +11305,7 @@ fn try_zerocopy_f16_clip(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let out_u16 = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
@@ -11531,7 +11531,7 @@ fn try_zerocopy_f16_minmax_flat(
     let bits = f16::from_f32(ext).to_bits();
     // Build a numpy float16 scalar from the exact f16 bits (uint16 0-d -> view float16 -> scalar).
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
     let scalar = scalar_u16.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "float16"))?,))?;
     Ok(Some(scalar.unbind()))
@@ -11724,7 +11724,7 @@ fn try_zerocopy_f16_ptp_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     }
     let bits = f16::from_f32(mx - mn).to_bits();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
     let scalar = scalar_u16.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "float16"))?,))?;
     Ok(Some(scalar.unbind()))
@@ -11921,7 +11921,7 @@ fn try_zerocopy_f16_nanextreme_flat(
     }
     let bits = f16::from_f32(ext).to_bits();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
     let scalar = scalar_u16.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "float16"))?,))?;
     Ok(Some(scalar.unbind()))
@@ -12102,7 +12102,7 @@ fn try_zerocopy_f16_compare(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let out_u8 = numpy.call_method(intern!(py, "empty"), (a_shape.clone(),), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
@@ -12190,7 +12190,7 @@ where
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let out_u8 = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
@@ -12445,7 +12445,7 @@ where
     let shape: Vec<usize> = a_buf.shape().to_vec();
     let n = a_in.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", name)?;
+    kwargs.set_item(intern!(py, "dtype"), name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -12569,7 +12569,7 @@ where
     let shape: Vec<usize> = a_buf.shape().to_vec();
     let n = a_in.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", name)?;
+    kwargs.set_item(intern!(py, "dtype"), name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -12699,7 +12699,7 @@ where
     let shape: Vec<usize> = a_buf.shape().to_vec();
     let n = a_in.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", name)?;
+    kwargs.set_item(intern!(py, "dtype"), name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -12872,7 +12872,7 @@ where
     let shape: Vec<usize> = a_buf.shape().to_vec();
     let n = a_in.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", name)?;
+    kwargs.set_item(intern!(py, "dtype"), name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -13391,7 +13391,7 @@ where
     let n = a_in.len();
     let mk = |nm: &str| -> PyResult<Bound<'_, PyAny>> {
         let kw = PyDict::new(py);
-        kw.set_item("dtype", nm)?;
+        kw.set_item(intern!(py, "dtype"), nm)?;
         numpy.call_method(intern!(py, "empty"), (n,), Some(&kw))
     };
     let quotient = mk(name)?;
@@ -13785,7 +13785,7 @@ fn try_zerocopy_f16_unary_widen(
         _ => {}
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let out_u16 = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
@@ -14009,7 +14009,7 @@ fn try_zerocopy_f64_i32_ldexp(
     let shape = x1_buffer.shape().to_vec();
     let n = mantissas.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -14084,7 +14084,7 @@ fn try_zerocopy_f32_i32_ldexp(
     let shape = x1_buffer.shape().to_vec();
     let n = m_s.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -14183,7 +14183,7 @@ fn try_zerocopy_f16_i32_ldexp(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float16")?;
+    kwargs.set_item(intern!(py, "dtype"), "float16")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let out16 = flat.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -14256,7 +14256,7 @@ fn try_zerocopy_f64_clip(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -14349,7 +14349,7 @@ fn try_zerocopy_f32_clip(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -14421,7 +14421,7 @@ where
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -14587,7 +14587,7 @@ fn try_zerocopy_int_nan_to_num(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("order", "K")?;
+    kwargs.set_item(intern!(py, "order"), "K")?;
     Ok(Some(x.call_method(intern!(py, "copy"), (), Some(&kwargs))?.unbind()))
 }
 
@@ -14612,7 +14612,7 @@ fn try_zerocopy_f64_nan_to_num(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -14711,7 +14711,7 @@ fn try_zerocopy_f32_nan_to_num(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -14984,7 +14984,7 @@ fn try_zerocopy_f64_where(
     let xs = x_scalar.unwrap_or(0.0);
     let ys = y_scalar.unwrap_or(0.0);
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -15091,7 +15091,7 @@ fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     let shape: Vec<usize> = x_buffer.shape().to_vec();
     let n = x_in.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -15354,7 +15354,7 @@ fn try_zerocopy_where_array_scalar(
                 return Ok(None);
             }
             let sc_kwargs = PyDict::new(py);
-            sc_kwargs.set_item("dtype", &dtype)?;
+            sc_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
             // 1-element array (not 0-d, which can't change itemsize on view) cast to dtype.
             let sc_arr = numpy.call_method(intern!(py, "full"), ((1usize,), scalar_obj), Some(&sc_kwargs))?;
             let sc_u = sc_arr.call_method1(intern!(py, "view"), (&un,))?;
@@ -15369,7 +15369,7 @@ fn try_zerocopy_where_array_scalar(
             }
             let scalar_u = sc_in[0].get();
             let out_kwargs = PyDict::new(py);
-            out_kwargs.set_item("dtype", &dtype)?;
+            out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
             let shape_tuple = PyTuple::new(py, arr_shape.iter().copied())?;
             let out = numpy.call_method(intern!(py, "empty"), (&shape_tuple,), Some(&out_kwargs))?;
             if n > 0 {
@@ -15531,7 +15531,7 @@ fn try_zerocopy_f64_select(
 
     let n = choice_slices[0].len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -15791,7 +15791,7 @@ fn try_zerocopy_int_select(
                 return Ok(None);
             }
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", uname)?;
+            kwargs.set_item(intern!(py, "dtype"), uname)?;
             let flat = numpy.call_method(intern!(py, "empty"), (units,), Some(&kwargs))?;
             if n > 0 {
                 let Ok(out_buffer) = PyBuffer::<$t>::get(&flat) else {
@@ -16043,7 +16043,7 @@ fn try_zerocopy_any_roll(
     };
     let total_bytes = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let out_u8 = numpy.call_method(intern!(py, "empty"), (total_bytes,), Some(&kwargs))?;
     if n > 0 {
         let s = (((shift_scalar % n as i64) + n as i64) % n as i64) as usize;
@@ -16116,7 +16116,7 @@ fn try_zerocopy_f64_roll_axis(
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 && axis_len > 0 {
         let s = (((shift_scalar % axis_len as i64) + axis_len as i64) % axis_len as i64) as usize;
@@ -16218,7 +16218,7 @@ fn try_zerocopy_any_roll_axis(
     };
     let total_bytes = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let out_u8 = numpy.call_method(intern!(py, "empty"), (total_bytes,), Some(&kwargs))?;
     if total_bytes > 0 && axis_len > 0 {
         let s = (((shift_scalar % axis_len as i64) + axis_len as i64) % axis_len as i64) as usize;
@@ -16315,7 +16315,7 @@ fn try_zerocopy_f64_roll_2d_multi(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), ((rows, cols),), Some(&kwargs))?;
     if rows > 0 && cols > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -16513,7 +16513,7 @@ fn try_zerocopy_f64_compress(
     }
     let count = count_true_u8_prefix(cond_in, m);
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -16608,7 +16608,7 @@ fn try_zerocopy_f64_compress_axis(
     out_shape[ax] = count;
     let out_elems = outer * count * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -16696,7 +16696,7 @@ fn compact_typed<
             .collect();
         let total: usize = counts.iter().sum();
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", dtype_name)?;
+        kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
         let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
         if total > 0 {
             let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -16733,7 +16733,7 @@ fn compact_typed<
     }
     let count = cond_in.iter().filter(|cell| pred(cell.get())).count();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -16954,7 +16954,7 @@ fn try_zerocopy_f64_take(
     let out_shape: Vec<usize> = idx_buffer.shape().to_vec();
     let count = idx_in.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -17049,7 +17049,7 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     let out_shape: Vec<usize> = idx_buffer.shape().to_vec();
     let count = idx_in.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -17150,7 +17150,7 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         resolved.push(k as usize);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", out_dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), out_dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (total_out,), Some(&kwargs))?;
     if total_out > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -17889,7 +17889,7 @@ fn accumulate_extremum_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
         return Ok(None);
@@ -18103,7 +18103,7 @@ fn try_zerocopy_f64_cumsum(
     };
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -18153,7 +18153,7 @@ where
     };
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", out_dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), out_dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
@@ -18415,7 +18415,7 @@ fn try_zerocopy_f64_cumprod(
     };
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -18466,7 +18466,7 @@ fn try_zerocopy_f64_nancumsum(
     };
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -18516,7 +18516,7 @@ fn try_zerocopy_f64_nancumprod(
     };
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -18589,7 +18589,7 @@ fn try_zerocopy_f64_cumulative_axis(
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -18790,7 +18790,7 @@ where
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
@@ -19130,7 +19130,7 @@ fn try_zerocopy_f16_cumulative_axis(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -19609,7 +19609,7 @@ fn try_zerocopy_f64_tile(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -19702,7 +19702,7 @@ fn try_zerocopy_any_tile(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let out_u8 = numpy.call_method(intern!(py, "empty"), (total_bytes,), Some(&kwargs))?;
     if total_bytes > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
@@ -19824,7 +19824,7 @@ fn try_zerocopy_any_tile_multidim(
     let row_bytes = a_last * itemsize;
     let total_bytes: usize = out_shape.iter().product::<usize>() * itemsize;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let out_u8 = numpy.call_method(intern!(py, "empty"), (total_bytes,), Some(&kwargs))?;
     if total_bytes > 0 && row_bytes > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
@@ -19944,7 +19944,7 @@ fn try_zerocopy_f64_diff1d(
     };
     let n_out = input.len().saturating_sub(1);
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n_out,), Some(&kwargs))?;
     if n_out > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -20036,7 +20036,7 @@ fn try_zerocopy_f64_diff_axis(
     out_shape[ax] = out_axis_len;
     let total_out = outer * out_axis_len * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (total_out,), Some(&kwargs))?;
     if total_out > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -20165,7 +20165,7 @@ where
     out_shape[ax] = out_axis_len;
     let total_out = outer * out_axis_len * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (total_out,), Some(&kwargs))?;
     if total_out > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -20378,7 +20378,7 @@ fn try_zerocopy_f16_diff_1d(
     };
     let output_len = input_len - 1;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let output_u16 = numpy.call_method(intern!(py, "empty"), (output_len,), Some(&kwargs))?;
     let hazard = std::sync::atomic::AtomicBool::new(false);
     {
@@ -20446,7 +20446,7 @@ fn try_zerocopy_f16_diff_1d(
     }
     if hazard.load(std::sync::atomic::Ordering::Relaxed) {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
         return Ok(Some(
             numpy.getattr(intern!(py, "diff"))?.call((a,), Some(&kwargs))?.unbind(),
         ));
@@ -20521,7 +20521,7 @@ fn try_zerocopy_f64_ediff1d(
 
     let total = begin.len() + n_diff + end.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -20582,7 +20582,7 @@ fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T)
     };
     let n_out = input.len().saturating_sub(1);
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n_out,), Some(&kwargs))?;
     if n_out > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -20795,7 +20795,7 @@ fn build_numpy_array_from_ufunc_fortran(py: Python<'_>, array: &UFuncArray) -> P
     }
     let py_arr = c_contig.bind(py);
     let kwargs = PyDict::new(py);
-    kwargs.set_item("order", "F")?;
+    kwargs.set_item(intern!(py, "order"), "F")?;
     Ok(py_arr.call_method(intern!(py, "copy"), (), Some(&kwargs))?.unbind())
 }
 
@@ -20814,9 +20814,9 @@ fn build_numpy_masked_array(py: Python<'_>, array: &MaskedArray) -> PyResult<Py<
     let kwargs = PyDict::new(py);
     if let Some(mask) = array.mask() {
         let mask = build_numpy_array_from_ufunc(py, mask)?;
-        kwargs.set_item("mask", mask.bind(py))?;
+        kwargs.set_item(intern!(py, "mask"), mask.bind(py))?;
     } else {
-        kwargs.set_item("mask", ma.getattr(intern!(py, "nomask"))?)?;
+        kwargs.set_item(intern!(py, "mask"), ma.getattr(intern!(py, "nomask"))?)?;
     }
     Ok(ma
         .getattr(intern!(py, "array"))?
@@ -20849,7 +20849,7 @@ fn build_numpy_eigvals_vector_from_flat_interleaved(
                     .iter()
                     .map(|chunk| chunk[0] as f32)
                     .collect::<Vec<_>>();
-                kwargs.set_item("dtype", numpy.getattr(intern!(py, "float32"))?)?;
+                kwargs.set_item(intern!(py, "dtype"), numpy.getattr(intern!(py, "float32"))?)?;
                 return Ok(numpy
                     .getattr(intern!(py, "array"))?
                     .call(
@@ -20863,7 +20863,7 @@ fn build_numpy_eigvals_vector_from_flat_interleaved(
                     .iter()
                     .map(|chunk| chunk[0])
                     .collect::<Vec<_>>();
-                kwargs.set_item("dtype", numpy.getattr(intern!(py, "float64"))?)?;
+                kwargs.set_item(intern!(py, "dtype"), numpy.getattr(intern!(py, "float64"))?)?;
                 return Ok(numpy
                     .getattr(intern!(py, "array"))?
                     .call(
@@ -20885,7 +20885,7 @@ fn build_numpy_eigvals_vector_from_flat_interleaved(
         DType::F32 => numpy.getattr(intern!(py, "complex64"))?,
         _ => numpy.getattr(intern!(py, "complex128"))?,
     };
-    kwargs.set_item("dtype", complex_dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_dtype)?;
     Ok(numpy
         .getattr(intern!(py, "array"))?
         .call((PyList::new(py, complex_values.iter())?,), Some(&kwargs))?
@@ -20900,7 +20900,7 @@ fn extract_complex_interleaved_array(
 ) -> PyResult<UFuncArray> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", numpy.getattr(intern!(py, "complex128"))?)?;
+    kwargs.set_item(intern!(py, "dtype"), numpy.getattr(intern!(py, "complex128"))?)?;
     let array = numpy.call_method(intern!(py, "asarray"), (value,), Some(&kwargs))?;
     let shape = array.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?;
     if shape.len() != 1 {
@@ -21092,7 +21092,7 @@ fn extract_object_array_input(
     let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", builtins.getattr(intern!(py, "object"))?)?;
+    kwargs.set_item(intern!(py, "dtype"), builtins.getattr(intern!(py, "object"))?)?;
     let array = numpy.call_method(intern!(py, "asarray"), (value,), Some(&kwargs))?;
     let shape = array.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?;
     let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
@@ -21113,7 +21113,7 @@ fn build_numpy_object_array_from_flat_values(
     let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", builtins.getattr(intern!(py, "object"))?)?;
+    kwargs.set_item(intern!(py, "dtype"), builtins.getattr(intern!(py, "object"))?)?;
     let list = PyList::new(py, values.iter().map(|value| value.bind(py)))?;
     let array = numpy.call_method(intern!(py, "array"), (list,), Some(&kwargs))?;
     let shape = PyTuple::new(py, shape.iter().copied())?;
@@ -21206,7 +21206,7 @@ fn extract_frompyfunc_where_mask(
     let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", builtins.getattr(intern!(py, "bool"))?)?;
+    kwargs.set_item(intern!(py, "dtype"), builtins.getattr(intern!(py, "bool"))?)?;
     let mask = numpy.call_method(intern!(py, "asarray"), (where_value,), Some(&kwargs))?;
     let shape = PyTuple::new(py, shape.iter().copied())?;
     let broadcast = numpy.call_method1(intern!(py, "broadcast_to"), (mask, shape))?;
@@ -21360,7 +21360,7 @@ impl PyFromPyFunc {
 
         for arg in args.iter() {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", &object_dtype)?;
+            kwargs.set_item(intern!(py, "dtype"), &object_dtype)?;
 
             let array = numpy.call_method(intern!(py, "asarray"), (arg,), Some(&kwargs))?;
             let shape = array.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?;
@@ -21447,7 +21447,7 @@ impl PyFromPyFunc {
         for values in outputs {
             let list = PyList::new(py, values.iter().map(|value| value.bind(py)))?;
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", &object_dtype)?;
+            kwargs.set_item(intern!(py, "dtype"), &object_dtype)?;
             let array = numpy.call_method(intern!(py, "array"), (list,), Some(&kwargs))?;
             let reshaped = array.call_method1(intern!(py, "reshape"), (&output_shape,))?;
             arrays.push(reshaped.unbind());
@@ -21512,12 +21512,12 @@ impl PyVectorize {
         // numpy.vectorize (carrying otypes/excluded for parity).
         if let Some(sig) = self.signature.as_ref() {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("signature", sig.bind(py))?;
+            kwargs.set_item(intern!(py, "signature"), sig.bind(py))?;
             if let Some(ot) = self.otypes.as_ref() {
-                kwargs.set_item("otypes", ot.bind(py))?;
+                kwargs.set_item(intern!(py, "otypes"), ot.bind(py))?;
             }
             if !self.excluded.is_empty() {
-                kwargs.set_item("excluded", PyList::new(py, self.excluded.iter().copied())?)?;
+                kwargs.set_item(intern!(py, "excluded"), PyList::new(py, self.excluded.iter().copied())?)?;
             }
             let np_vec = numpy
                 .getattr(intern!(py, "vectorize"))?
@@ -21665,7 +21665,7 @@ impl PyVectorize {
         for (values, dtype) in outputs.into_iter().zip(output_dtypes) {
             let list = PyList::new(py, values.iter().map(|value| value.bind(py)))?;
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", dtype.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype.bind(py))?;
             let array = numpy.call_method(intern!(py, "array"), (list,), Some(&kwargs))?;
             let reshaped = array.call_method1(intern!(py, "reshape"), (&output_shape,))?;
             arrays.push(reshaped.unbind());
@@ -22049,7 +22049,7 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Syn
     let decreasing = dirn == -1;
     let m = xs.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let out = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
     if m > 0 {
         let Ok(ob) = PyBuffer::<i64>::get(&out) else {
@@ -22216,7 +22216,7 @@ where
     }
     let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let out = numpy.call_method(intern!(py, "zeros"), (length,), Some(&kwargs))?;
     if length > 0 && n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
@@ -22332,7 +22332,7 @@ fn try_zerocopy_bincount(
     }
     let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let out = numpy.call_method(intern!(py, "zeros"), (length,), Some(&kwargs))?;
     if length > 0 && n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
@@ -22428,15 +22428,15 @@ fn try_zerocopy_bincount_weighted(
     // general fallback path would otherwise produce a float64 result here).
     if x_in.is_empty() {
         let kwb = PyDict::new(py);
-        kwb.set_item("weights", weights)?;
-        kwb.set_item("minlength", minlength)?;
+        kwb.set_item(intern!(py, "weights"), weights)?;
+        kwb.set_item(intern!(py, "minlength"), minlength)?;
         let out = numpy.getattr(intern!(py, "bincount"))?.call((x,), Some(&kwb))?;
         return Ok(Some(out.unbind()));
     }
     // numpy accumulates weighted bincount in float64; cast weights to a contiguous
     // float64 array (a no-op view when already f64). Defer on any cast failure.
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "float64")?;
+    kw.set_item(intern!(py, "dtype"), "float64")?;
     let Ok(w_arr) = numpy
         .getattr(intern!(py, "ascontiguousarray"))?
         .call((weights,), Some(&kw))
@@ -22469,7 +22469,7 @@ fn try_zerocopy_bincount_weighted(
     }
     let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
     let kwz = PyDict::new(py);
-    kwz.set_item("dtype", "float64")?;
+    kwz.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "zeros"), (length,), Some(&kwz))?;
     if length > 0 && !x_in.is_empty() {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -22613,13 +22613,13 @@ fn interp(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(l) = left.as_ref() {
-            kwargs.set_item("left", l.bind(py))?;
+            kwargs.set_item(intern!(py, "left"), l.bind(py))?;
         }
         if let Some(r) = right.as_ref() {
-            kwargs.set_item("right", r.bind(py))?;
+            kwargs.set_item(intern!(py, "right"), r.bind(py))?;
         }
         if let Some(p) = period.as_ref() {
-            kwargs.set_item("period", p.bind(py))?;
+            kwargs.set_item(intern!(py, "period"), p.bind(py))?;
         }
         Ok(numpy
             .getattr(intern!(py, "interp"))?
@@ -22638,7 +22638,7 @@ fn interp(
         };
         let f64_dt = numpy.getattr(intern!(py, "float64"))?;
         let as_f64_kw = PyDict::new(py);
-        as_f64_kw.set_item("dtype", &f64_dt)?;
+        as_f64_kw.set_item(intern!(py, "dtype"), &f64_dt)?;
         let fp_probe = numpy.call_method1(intern!(py, "asarray"), (fp.bind(py),))?;
         if fp_probe
             .getattr(intern!(py, "dtype"))?
@@ -22754,7 +22754,7 @@ fn try_zerocopy_f64_interp(
     let fp_in: &[f64] =
         unsafe { std::slice::from_raw_parts(fp_cells.as_ptr().cast::<f64>(), fp_cells.len()) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (nx,), Some(&kwargs))?;
     if nx > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -22892,7 +22892,7 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (outer,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -23003,7 +23003,7 @@ fn try_zerocopy_f32_trapezoid(
     }
     let outer = total / l;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let flat = numpy.call_method(intern!(py, "empty"), (outer,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -23098,10 +23098,10 @@ fn trapezoid_impl(
     if int_kind(y.bind(py)) || x.as_ref().is_some_and(|xv| int_kind(xv.bind(py))) {
         let kwargs = PyDict::new(py);
         if let Some(xv) = x.as_ref() {
-            kwargs.set_item("x", xv.bind(py))?;
+            kwargs.set_item(intern!(py, "x"), xv.bind(py))?;
         }
-        kwargs.set_item("dx", dx)?;
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "dx"), dx)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
         return Ok(numpy_trapezoid_delegate(numpy, name)?
             .call((y.bind(py),), Some(&kwargs))?
             .unbind());
@@ -23114,10 +23114,10 @@ fn trapezoid_impl(
     {
         let kwargs = PyDict::new(py);
         if let Some(xv) = x.as_ref() {
-            kwargs.set_item("x", xv.bind(py))?;
+            kwargs.set_item(intern!(py, "x"), xv.bind(py))?;
         }
-        kwargs.set_item("dx", dx)?;
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "dx"), dx)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
         return Ok(numpy_trapezoid_delegate(numpy, name)?
             .call((y.bind(py),), Some(&kwargs))?
             .unbind());
@@ -23414,7 +23414,7 @@ fn flatnonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
 ) -> PyResult<Option<Py<PyAny>>> {
     let count = input.iter().filter(|cell| pred(cell.get())).count();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let out = numpy
         .call_method(intern!(py, "empty"), (count,), Some(&kwargs))?
         .unbind();
@@ -23461,7 +23461,7 @@ fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
         .collect();
     let total: usize = counts.iter().sum();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let out = numpy
         .call_method(intern!(py, "empty"), (total,), Some(&kwargs))?
         .unbind();
@@ -23581,7 +23581,7 @@ fn nonzero_2d_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
         .collect();
     let total: usize = counts.iter().sum();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let rows = numpy
         .call_method(intern!(py, "empty"), (total,), Some(&kwargs))?
         .unbind();
@@ -23667,7 +23667,7 @@ fn nonzero_nd_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
         .collect();
     let total: usize = counts.iter().sum();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let flats: Vec<Bound<'_, PyAny>> = {
         let mut v = Vec::with_capacity(ndim);
         for _ in 0..ndim {
@@ -23969,7 +23969,7 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
             .collect();
         let total: usize = counts.iter().sum();
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "int64")?;
+        kwargs.set_item(intern!(py, "dtype"), "int64")?;
         let out = numpy
             .call_method(intern!(py, "empty"), ((total, ndim),), Some(&kwargs))?
             .unbind();
@@ -24024,7 +24024,7 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
     }
     let count = input.iter().filter(|cell| pred(cell.get())).count();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let out = numpy
         .call_method(intern!(py, "empty"), ((count, ndim),), Some(&kwargs))?
         .unbind();
@@ -24195,12 +24195,12 @@ fn take(
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
         if let Some(axis) = axis {
-            kwargs.set_item("axis", axis)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         if let Some(out_val) = out_for_fallback.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("mode", mode)?;
+        kwargs.set_item(intern!(py, "mode"), mode)?;
         Ok(numpy
             .getattr(intern!(py, "take"))?
             .call(
@@ -24557,7 +24557,7 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
             out_shape.remove(axu);
             let out_elems = outer * inner;
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", "int64")?;
+            kwargs.set_item(intern!(py, "dtype"), "int64")?;
             let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
             if out_elems > 0 {
                 let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
@@ -24796,7 +24796,7 @@ fn axis_any_all_fold<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
     let mut out_shape = shape.to_vec();
     out_shape.remove(axu);
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let flat_u8 = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&flat_u8) else {
@@ -25137,10 +25137,10 @@ fn count_nonzero(
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
         if let Some(ax) = &axis_for_fallback {
-            kwargs.set_item("axis", ax.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if keepdims {
-            kwargs.set_item("keepdims", true)?;
+            kwargs.set_item(intern!(py, "keepdims"), true)?;
         }
         Ok(numpy
             .getattr(intern!(py, "count_nonzero"))?
@@ -25327,7 +25327,7 @@ fn broadcast_to(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if subok {
-        kwargs.set_item("subok", true)?;
+        kwargs.set_item(intern!(py, "subok"), true)?;
     }
     Ok(numpy
         .getattr(intern!(py, "broadcast_to"))?
@@ -25344,7 +25344,7 @@ fn broadcast_arrays(py: Python<'_>, args: &Bound<'_, PyTuple>, subok: bool) -> P
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if subok {
-        kwargs.set_item("subok", true)?;
+        kwargs.set_item(intern!(py, "subok"), true)?;
     }
     Ok(numpy
         .getattr(intern!(py, "broadcast_arrays"))?
@@ -25375,7 +25375,7 @@ fn may_share_memory(
     // arrays, and max_work kwarg surface all match numpy exactly.
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("max_work", max_work)?;
+    kwargs.set_item(intern!(py, "max_work"), max_work)?;
     Ok(numpy
         .getattr(intern!(py, "may_share_memory"))?
         .call((a.bind(py), b.bind(py)), Some(&kwargs))?
@@ -25396,8 +25396,8 @@ fn fromiter(
         && !like_val.bind(py).is_none()
     {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("count", count)?;
-        kwargs.set_item("like", like_val.bind(py))?;
+        kwargs.set_item(intern!(py, "count"), count)?;
+        kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         return Ok(numpy
             .getattr(intern!(py, "fromiter"))?
             .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
@@ -25409,7 +25409,7 @@ fn fromiter(
     // (each element is a Python round-trip either way), so delegate. numpy owns the
     // exact dtype-coercion, count, and short-iterator (ValueError) surface.
     let kwargs = PyDict::new(py);
-    kwargs.set_item("count", count)?;
+    kwargs.set_item(intern!(py, "count"), count)?;
     Ok(numpy
         .getattr(intern!(py, "fromiter"))?
         .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
@@ -25430,12 +25430,12 @@ fn fromstring(
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item("count", count)?;
-        kwargs.set_item("sep", sep)?;
+        kwargs.set_item(intern!(py, "count"), count)?;
+        kwargs.set_item(intern!(py, "sep"), sep)?;
         if let Some(like_val) = like.as_ref() {
-            kwargs.set_item("like", like_val.bind(py))?;
+            kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         }
         Ok(numpy
             .getattr(intern!(py, "fromstring"))?
@@ -25584,11 +25584,11 @@ fn frombuffer(
     {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item("count", count)?;
-        kwargs.set_item("offset", offset)?;
-        kwargs.set_item("like", like_val.bind(py))?;
+        kwargs.set_item(intern!(py, "count"), count)?;
+        kwargs.set_item(intern!(py, "offset"), offset)?;
+        kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         return Ok(numpy
             .getattr(intern!(py, "frombuffer"))?
             .call((buffer.bind(py),), Some(&kwargs))?
@@ -25598,10 +25598,10 @@ fn frombuffer(
     let numpy_frombuffer = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item("count", count)?;
-        kwargs.set_item("offset", offset)?;
+        kwargs.set_item(intern!(py, "count"), count)?;
+        kwargs.set_item(intern!(py, "offset"), offset)?;
         Ok(numpy
             .getattr(intern!(py, "frombuffer"))?
             .call((buffer.bind(py),), Some(&kwargs))?
@@ -25624,7 +25624,7 @@ fn shares_memory(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, max_work: i64) -> P
     // may_share_memory, shares_memory defaults to max_work=-1 (solve).
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("max_work", max_work)?;
+    kwargs.set_item(intern!(py, "max_work"), max_work)?;
     Ok(numpy
         .getattr(intern!(py, "shares_memory"))?
         .call((a.bind(py), b.bind(py)), Some(&kwargs))?
@@ -25679,7 +25679,7 @@ fn int_clip_arrays_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send + S
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (shape.to_vec(),), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
@@ -25854,7 +25854,7 @@ fn float_clip_arrays_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (shape.to_vec(),), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
@@ -26036,19 +26036,19 @@ fn clip(
     if legacy_used && new_used {
         let ckw = PyDict::new(py);
         if let Some(v) = a_min.as_ref() {
-            ckw.set_item("a_min", v.bind(py))?;
+            ckw.set_item(intern!(py, "a_min"), v.bind(py))?;
         }
         if let Some(v) = a_max.as_ref() {
-            ckw.set_item("a_max", v.bind(py))?;
+            ckw.set_item(intern!(py, "a_max"), v.bind(py))?;
         }
         if let Some(v) = min.as_ref() {
-            ckw.set_item("min", v.bind(py))?;
+            ckw.set_item(intern!(py, "min"), v.bind(py))?;
         }
         if let Some(v) = max.as_ref() {
-            ckw.set_item("max", v.bind(py))?;
+            ckw.set_item(intern!(py, "max"), v.bind(py))?;
         }
         if let Some(v) = out.as_ref() {
-            ckw.set_item("out", v.bind(py))?;
+            ckw.set_item(intern!(py, "out"), v.bind(py))?;
         }
         if let Some(k) = kwargs {
             for (key, value) in k.iter() {
@@ -26071,7 +26071,7 @@ fn clip(
     let fallback = || -> PyResult<Py<PyAny>> {
         let call_kwargs = PyDict::new(py);
         if let Some(out) = out_for_fallback.as_ref() {
-            call_kwargs.set_item("out", out.bind(py))?;
+            call_kwargs.set_item(intern!(py, "out"), out.bind(py))?;
         }
         if let Some(k) = kwargs_snapshot.as_ref() {
             for (key, value) in k.bind(py).iter() {
@@ -26376,7 +26376,7 @@ fn try_native_repeat_array(
         vec![total_units]
     };
     let kw = PyDict::new(py);
-    kw.set_item("dtype", &dtype)?;
+    kw.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(
         "empty",
         (PyTuple::new(py, out_shape.iter().copied())?,),
@@ -26509,7 +26509,7 @@ fn try_native_repeat_scalar(
         return Ok(None);
     }
     let kw = PyDict::new(py);
-    kw.set_item("dtype", &dtype)?;
+    kw.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(
         "empty",
         (PyTuple::new(py, out_shape.iter().copied())?,),
@@ -26578,7 +26578,7 @@ fn repeat(
     let repeat_fn = numpy.getattr(intern!(py, "repeat"))?;
     let kwargs = PyDict::new(py);
     if let Some(axis) = axis {
-        kwargs.set_item("axis", axis.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
     }
     Ok(repeat_fn
         .call((a.bind(py), repeats.bind(py)), Some(&kwargs))?
@@ -26626,7 +26626,7 @@ fn try_zerocopy_append_flat(
     // ravel both (C-order) and cast values to arr's dtype, then view the raw bytes.
     let a_flat = arr.call_method0(intern!(py, "ravel"))?;
     let kw = PyDict::new(py);
-    kw.set_item("dtype", &arr_dtype)?;
+    kw.set_item(intern!(py, "dtype"), &arr_dtype)?;
     let v_flat = numpy
         .getattr(intern!(py, "asarray"))?
         .call((&v_arr,), Some(&kw))?
@@ -26643,7 +26643,7 @@ fn try_zerocopy_append_flat(
     let na = a_in.len();
     let nv = v_in.len();
     let kw2 = PyDict::new(py);
-    kw2.set_item("dtype", &uint8)?;
+    kw2.set_item(intern!(py, "dtype"), &uint8)?;
     let out_bytes = numpy.call_method(intern!(py, "empty"), (na + nv,), Some(&kw2))?;
     if na + nv > 0 {
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_bytes) else {
@@ -26694,7 +26694,7 @@ fn append(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(ref a) = axis {
-            kwargs.set_item("axis", a.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), a.bind(py))?;
         }
         Ok(append_fn
             .call((arr.bind(py), values.bind(py)), Some(&kwargs))?
@@ -26842,7 +26842,7 @@ fn try_zerocopy_resize(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dt)?;
+    kwargs.set_item(intern!(py, "dtype"), &dt)?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (&u8dt,))?;
@@ -26942,7 +26942,7 @@ fn try_zerocopy_f64_insert_scalar(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", "float64")?;
+    out_kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (n + 1,), Some(&out_kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -27056,7 +27056,7 @@ fn try_native_insert_block(
         return Ok(None);
     }
     let kw = PyDict::new(py);
-    kw.set_item("dtype", &dtype)?;
+    kw.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (n + m,), Some(&kw))?;
     let out_bytes = out.call_method1(intern!(py, "view"), (&uint8,))?;
     let Ok(o_buf) = PyBuffer::<u8>::get(&out_bytes) else {
@@ -27135,7 +27135,7 @@ fn insert(
     let insert_fn = numpy.getattr(intern!(py, "insert"))?;
     let kwargs = PyDict::new(py);
     if let Some(axis) = axis {
-        kwargs.set_item("axis", axis.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
     }
     Ok(insert_fn
         .call((arr.bind(py), obj.bind(py), values.bind(py)), Some(&kwargs))?
@@ -27199,7 +27199,7 @@ fn try_zerocopy_f64_delete_scalar(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", "float64")?;
+    out_kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (n - 1,), Some(&out_kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -27407,7 +27407,7 @@ fn delete(
     let delete_fn = numpy.getattr(intern!(py, "delete"))?;
     let kwargs = PyDict::new(py);
     if let Some(axis) = axis {
-        kwargs.set_item("axis", axis.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
     }
     Ok(delete_fn
         .call((arr.bind(py), obj.bind(py)), Some(&kwargs))?
@@ -27537,7 +27537,7 @@ fn try_zerocopy_f64_concatenate(
     out_shape[ax] = out_axis;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     // Allocate at the FINAL shape, not flat-then-reshape: the trailing reshape
     // set `.base` to the flat temporary, where numpy's concatenate returns an
     // array owning its data (deadlock-audit-concatenate-base-attribute-st00f).
@@ -27619,7 +27619,7 @@ fn concatenate_mover<'py, T: pyo3::buffer::Element + Copy>(
     // in the copy loop below changes; this is two fewer method calls per call,
     // and the buffer written is the same one either way.
     let kw = PyDict::new(py);
-    kw.set_item("dtype", out_dtype)?;
+    kw.set_item(intern!(py, "dtype"), out_dtype)?;
     let result = numpy.call_method(intern!(py, "empty"), (&output_shape,), Some(&kw))?;
     // Same-itemsize view of a freshly allocated C-contiguous array, so the
     // reshape is a view and the dtype view is always legal.
@@ -27791,7 +27791,7 @@ fn concatenate(
             }
         }
         if !call_kwargs.contains("axis")? && args.len() == 1 {
-            call_kwargs.set_item("axis", 0_i64)?;
+            call_kwargs.set_item(intern!(py, "axis"), 0_i64)?;
         }
         Ok(concatenate_fn.call(args, Some(&call_kwargs))?.unbind())
     };
@@ -27967,7 +27967,7 @@ fn stack(
     }
 
     if !call_kwargs.contains("axis")? && args.len() == 1 {
-        call_kwargs.set_item("axis", 0_i64)?;
+        call_kwargs.set_item(intern!(py, "axis"), 0_i64)?;
     }
 
     Ok(stack_fn.call(args, Some(&call_kwargs))?.unbind())
@@ -28087,7 +28087,7 @@ fn trim_zeros(
         let trim_zeros_fn = numpy.getattr(intern!(py, "trim_zeros"))?;
         if let Some(axis_val) = axis_for_fallback.as_ref() {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
             return Ok(trim_zeros_fn
                 .call(
                     (filt_for_fallback.bind(py), trim_owned.as_str()),
@@ -28152,7 +28152,7 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
         let numpy = py.import("numpy")?;
         let masked_invalid_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "masked_invalid"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("copy", copy)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
         Ok(masked_invalid_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
@@ -28175,7 +28175,7 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
             && let Some(mask) = try_zerocopy_f64_predicate(py, a.bind(py), |v| !v.is_finite())?
         {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("copy", copy)?;
+            kwargs.set_item(intern!(py, "copy"), copy)?;
             return Ok(numpy
                 .getattr(intern!(py, "ma"))?
                 .getattr(intern!(py, "masked_where"))?
@@ -28243,11 +28243,11 @@ fn fix_invalid(
         let fix_invalid_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "fix_invalid"))?;
         let kwargs = PyDict::new(py);
         if let Some(mask_val) = &mask_for_fallback {
-            kwargs.set_item("mask", mask_val.bind(py))?;
+            kwargs.set_item(intern!(py, "mask"), mask_val.bind(py))?;
         }
-        kwargs.set_item("copy", copy)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
         if let Some(fill_value_val) = &fill_value_for_fallback {
-            kwargs.set_item("fill_value", fill_value_val.bind(py))?;
+            kwargs.set_item(intern!(py, "fill_value"), fill_value_val.bind(py))?;
         }
         Ok(fix_invalid_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
@@ -28428,7 +28428,7 @@ fn pinv(
         let rtol = parse_pinv_rtol_kwarg(py, kwargs)?;
         let kw = PyDict::new(py);
         rcond_parsed.set_on_kwargs(&kw, "rcond")?;
-        kw.set_item("hermitian", hermitian)?;
+        kw.set_item(intern!(py, "hermitian"), hermitian)?;
         rtol.set_on_kwargs(&kw, "rtol")?;
         return Ok(pinv_fn.call((a.bind(py),), Some(&kw))?.unbind());
     }
@@ -28505,7 +28505,7 @@ fn pinv(
     let pinv_fn = numpy.getattr(intern!(py, "linalg"))?.getattr(intern!(py, "pinv"))?;
     let kw = PyDict::new(py);
     rcond.set_on_kwargs(&kw, "rcond")?;
-    kw.set_item("hermitian", hermitian)?;
+    kw.set_item(intern!(py, "hermitian"), hermitian)?;
     rtol.set_on_kwargs(&kw, "rtol")?;
     Ok(pinv_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
@@ -28552,11 +28552,11 @@ fn matrix_rank(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(value) = &tol_for_fallback {
-            kwargs.set_item("tol", value.bind(py))?;
+            kwargs.set_item(intern!(py, "tol"), value.bind(py))?;
         }
-        kwargs.set_item("hermitian", hermitian)?;
+        kwargs.set_item(intern!(py, "hermitian"), hermitian)?;
         if let Some(value) = &rtol_for_fallback {
-            kwargs.set_item("rtol", value.bind(py))?;
+            kwargs.set_item(intern!(py, "rtol"), value.bind(py))?;
         }
         Ok(matrix_rank_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
@@ -28752,7 +28752,7 @@ fn int_matrix_power_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     }
     let result = result.expect("power >= 1");
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), ((dim, dim),), Some(&kwargs))?;
     let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
         return Ok(None);
@@ -29090,9 +29090,9 @@ fn svd(
     let numpy = cached_numpy(py)?;
     let svd_fn = numpy.getattr(intern!(py, "linalg"))?.getattr(intern!(py, "svd"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("full_matrices", full_matrices)?;
-    kwargs.set_item("compute_uv", compute_uv)?;
-    kwargs.set_item("hermitian", hermitian)?;
+    kwargs.set_item(intern!(py, "full_matrices"), full_matrices)?;
+    kwargs.set_item(intern!(py, "compute_uv"), compute_uv)?;
+    kwargs.set_item(intern!(py, "hermitian"), hermitian)?;
     Ok(svd_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
@@ -29105,7 +29105,7 @@ fn qr(py: Python<'_>, a: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let qr_fn = numpy.getattr(intern!(py, "linalg"))?.getattr(intern!(py, "qr"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("mode", mode)?;
+    kwargs.set_item(intern!(py, "mode"), mode)?;
     Ok(qr_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
@@ -29165,7 +29165,7 @@ fn cholesky(
                 "upper" => {
                     call_kwargs
                         .get_or_insert_with(|| PyDict::new(py))
-                        .set_item("upper", &value)?;
+                        .set_item(intern!(py, "upper"), &value)?;
                     saw_upper = true;
                 }
                 _ => {
@@ -29943,7 +29943,7 @@ fn try_native_lstsq_tsqr(
     let float64 = numpy.getattr(intern!(py, "float64"))?;
     let as_f64_array = |values: Vec<f64>| -> PyResult<Bound<'_, PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", &float64)?;
+        kwargs.set_item(intern!(py, "dtype"), &float64)?;
         numpy.call_method(intern!(py, "array"), (values,), Some(&kwargs))
     };
     // rank is a numpy.int32 scalar in numpy's own return, not a Python int.
@@ -29997,7 +29997,7 @@ fn lstsq(
     let lstsq_fn = numpy.getattr(intern!(py, "linalg"))?.getattr(intern!(py, "lstsq"))?;
     let kwargs = PyDict::new(py);
     if let Some(value) = bound_rcond {
-        kwargs.set_item("rcond", value)?;
+        kwargs.set_item(intern!(py, "rcond"), value)?;
     }
     Ok(lstsq_fn.call((bound_a, bound_b), Some(&kwargs))?.unbind())
 }
@@ -30015,7 +30015,7 @@ fn tensorsolve(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axes) = axes {
-        kwargs.set_item("axes", axes.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "linalg"))?
@@ -30034,7 +30034,7 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
     // Complex arrays must fall back to numpy
     if dtype_kind == "c" {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("ind", ind)?;
+        kwargs.set_item(intern!(py, "ind"), ind)?;
         return Ok(numpy
             .getattr(intern!(py, "linalg"))?
             .getattr(intern!(py, "tensorinv"))?
@@ -30052,7 +30052,7 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
         // success path stays native.
         Err(_) => {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("ind", ind)?;
+            kwargs.set_item(intern!(py, "ind"), ind)?;
             return Ok(numpy
                 .getattr(intern!(py, "linalg"))?
                 .getattr(intern!(py, "tensorinv"))?
@@ -30104,7 +30104,7 @@ fn native_complex_solve_triangular(
     let rhs = if shape_b.len() == 1 { 1 } else { shape_b[1] };
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &c128)?;
+    kwargs.set_item(intern!(py, "dtype"), &c128)?;
     let a_c = numpy.call_method(intern!(py, "ascontiguousarray"), (arr_a,), Some(&kwargs))?;
     let b_c = numpy.call_method(intern!(py, "ascontiguousarray"), (arr_b,), Some(&kwargs))?;
 
@@ -30177,7 +30177,7 @@ fn native_complex_solve_triangular(
     }
 
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &f64_dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &f64_dtype)?;
     let flat = numpy.call_method(intern!(py, "empty"), (2 * n * rhs,), Some(&out_kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<f64>::get(&flat) else {
@@ -30272,7 +30272,7 @@ fn try_const_bool_integral(
     }
     let shape = x.getattr(intern!(py, "shape"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "bool")?;
+    kwargs.set_item(intern!(py, "dtype"), "bool")?;
     // np.zeros (calloc) / np.ones beat np.full(value) for the constant bool fill.
     let ctor = if value { "ones" } else { "zeros" };
     Ok(Some(
@@ -30314,7 +30314,7 @@ fn try_zerocopy_isinf_signed(
     }
     let shape = x.getattr(intern!(py, "shape"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "bool")?;
+    kwargs.set_item(intern!(py, "dtype"), "bool")?;
     let out_arr = numpy.call_method(intern!(py, "empty"), (shape,), Some(&kwargs))?;
     let out_u8 = out_arr.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
     let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
@@ -30697,7 +30697,7 @@ fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Op
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buf) = PyBuffer::<f32>::get(&flat) else {
@@ -31107,7 +31107,7 @@ fn try_zerocopy_f64_sinc(
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     let shape: Vec<usize> = buffer.shape().to_vec();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -31184,7 +31184,7 @@ fn try_zerocopy_f64_heaviside_scalar(
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     let shape: Vec<usize> = buffer.shape().to_vec();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -31519,7 +31519,7 @@ fn zerocopy_multiply_add_f16(
     let vc: &[u16] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<u16>(), n) };
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float16")?;
+    kwargs.set_item(intern!(py, "dtype"), "float16")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let raw_out = flat.call_method1(intern!(py, "view"), (&u16_dtype,))?;
@@ -31744,7 +31744,7 @@ fn zerocopy_multiply_add_complex(
                 };
 
                 let kwargs = PyDict::new(py);
-                kwargs.set_item("dtype", complex_name)?;
+                kwargs.set_item(intern!(py, "dtype"), complex_name)?;
                 let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
                 {
                     let view_out = flat.call_method1(intern!(py, "view"), (&component_dtype,))?;
@@ -31846,7 +31846,7 @@ where
     let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -32499,7 +32499,7 @@ where
     let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -32586,7 +32586,7 @@ where
     let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -32753,7 +32753,7 @@ fn subtract_multiply_add(
 
     if let Some(output) = out.as_ref() {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("out", output.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), output.bind(py))?;
         let difference = numpy
             .getattr(intern!(py, "subtract"))?
             .call((a.bind(py), b.bind(py)), Some(&kwargs))?;
@@ -33108,7 +33108,7 @@ fn logaddexp2(
                     .unwrap_or(false)
         };
         let kw = PyDict::new(py);
-        kw.set_item("dtype", "float64")?;
+        kw.set_item(intern!(py, "dtype"), "float64")?;
         if is_arr(x1b)
             && !is_arr(x2b)
             && let Ok(h) = x2b.extract::<f64>()
@@ -33203,10 +33203,10 @@ fn try_zerocopy_f64_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
     }
     let n = input.len();
     let mkw = PyDict::new(py);
-    mkw.set_item("dtype", "float64")?;
+    mkw.set_item(intern!(py, "dtype"), "float64")?;
     let mantissa = numpy.call_method(intern!(py, "empty"), (n,), Some(&mkw))?;
     let ekw = PyDict::new(py);
-    ekw.set_item("dtype", "int32")?;
+    ekw.set_item(intern!(py, "dtype"), "int32")?;
     let exponent = numpy.call_method(intern!(py, "empty"), (n,), Some(&ekw))?;
     if n > 0 {
         let (Ok(m_buf), Ok(e_buf)) = (
@@ -33278,10 +33278,10 @@ fn try_zerocopy_f32_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
     }
     let n = input.len();
     let mkw = PyDict::new(py);
-    mkw.set_item("dtype", "float32")?;
+    mkw.set_item(intern!(py, "dtype"), "float32")?;
     let mantissa = numpy.call_method(intern!(py, "empty"), (n,), Some(&mkw))?;
     let ekw = PyDict::new(py);
-    ekw.set_item("dtype", "int32")?;
+    ekw.set_item(intern!(py, "dtype"), "int32")?;
     let exponent = numpy.call_method(intern!(py, "empty"), (n,), Some(&ekw))?;
     if n > 0 {
         let (Ok(m_buf), Ok(e_buf)) = (
@@ -33374,10 +33374,10 @@ fn try_zerocopy_f16_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
         return Ok(None);
     }
     let mkw = PyDict::new(py);
-    mkw.set_item("dtype", "float16")?;
+    mkw.set_item(intern!(py, "dtype"), "float16")?;
     let mantissa = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&mkw))?;
     let ekw = PyDict::new(py);
-    ekw.set_item("dtype", "int32")?;
+    ekw.set_item(intern!(py, "dtype"), "int32")?;
     let exponent = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&ekw))?;
     if n > 0 {
         let m16 = mantissa.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -33509,7 +33509,7 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     };
     let shape = x.getattr(intern!(py, "shape"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let frac_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
     let int_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
     if !cells.is_empty() {
@@ -33587,7 +33587,7 @@ fn try_zerocopy_f32_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     };
     let shape = x.getattr(intern!(py, "shape"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let frac_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
     let int_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
     if !cells.is_empty() {
@@ -33665,7 +33665,7 @@ fn try_zerocopy_f16_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float16")?;
+    kwargs.set_item(intern!(py, "dtype"), "float16")?;
     let frac_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
     let int_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
     {
@@ -33750,13 +33750,13 @@ fn nan_to_num(
     if !copy {
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("copy", false)?;
-        kwargs.set_item("nan", nan)?;
+        kwargs.set_item(intern!(py, "copy"), false)?;
+        kwargs.set_item(intern!(py, "nan"), nan)?;
         if let Some(p) = posinf {
-            kwargs.set_item("posinf", p)?;
+            kwargs.set_item(intern!(py, "posinf"), p)?;
         }
         if let Some(n) = neginf {
-            kwargs.set_item("neginf", n)?;
+            kwargs.set_item(intern!(py, "neginf"), n)?;
         }
         return Ok(numpy
             .getattr(intern!(py, "nan_to_num"))?
@@ -33853,12 +33853,12 @@ fn nan_to_num(
                 == "b"
         {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("nan", nan)?;
+            kwargs.set_item(intern!(py, "nan"), nan)?;
             if let Some(p) = posinf {
-                kwargs.set_item("posinf", p)?;
+                kwargs.set_item(intern!(py, "posinf"), p)?;
             }
             if let Some(n) = neginf {
-                kwargs.set_item("neginf", n)?;
+                kwargs.set_item(intern!(py, "neginf"), n)?;
             }
             return Ok(numpy
                 .getattr(intern!(py, "nan_to_num"))?
@@ -33872,13 +33872,13 @@ fn nan_to_num(
         let numpy = py.import("numpy")?;
         if noncontiguous_ndarray(&numpy, x.bind(py))? {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("copy", true)?;
-            kwargs.set_item("nan", nan)?;
+            kwargs.set_item(intern!(py, "copy"), true)?;
+            kwargs.set_item(intern!(py, "nan"), nan)?;
             if let Some(p) = posinf {
-                kwargs.set_item("posinf", p)?;
+                kwargs.set_item(intern!(py, "posinf"), p)?;
             }
             if let Some(n) = neginf {
-                kwargs.set_item("neginf", n)?;
+                kwargs.set_item(intern!(py, "neginf"), n)?;
             }
             return Ok(numpy
                 .getattr(intern!(py, "nan_to_num"))?
@@ -33896,12 +33896,12 @@ fn nan_to_num(
             // string array) reproduces numpy's own error.
             let numpy = py.import("numpy")?;
             let kwargs = PyDict::new(py);
-            kwargs.set_item("nan", nan)?;
+            kwargs.set_item(intern!(py, "nan"), nan)?;
             if let Some(p) = posinf {
-                kwargs.set_item("posinf", p)?;
+                kwargs.set_item(intern!(py, "posinf"), p)?;
             }
             if let Some(n) = neginf {
-                kwargs.set_item("neginf", n)?;
+                kwargs.set_item(intern!(py, "neginf"), n)?;
             }
             return Ok(numpy
                 .getattr(intern!(py, "nan_to_num"))?
@@ -33934,10 +33934,10 @@ fn compress(
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
         if let Some(axis) = axis {
-            kwargs.set_item("axis", axis)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         if let Some(out_val) = out_for_fallback.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         Ok(numpy
             .getattr(intern!(py, "compress"))?
@@ -34044,7 +34044,7 @@ fn select(
         let select_fn = numpy.getattr(intern!(py, "select"))?;
         if let Some(default) = default_for_fallback.as_ref() {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("default", default.bind(py))?;
+            kwargs.set_item(intern!(py, "default"), default.bind(py))?;
             Ok(select_fn
                 .call(
                     (
@@ -34204,7 +34204,7 @@ fn choose_typed<'py, T: pyo3::buffer::Element + Copy>(
         }
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -34287,7 +34287,7 @@ fn try_zerocopy_int_choose(
     }
     // Normalize the index array to contiguous int64.
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "int64")?;
+    kw.set_item(intern!(py, "dtype"), "int64")?;
     let a64 = numpy.getattr(intern!(py, "ascontiguousarray"))?.call((a,), Some(&kw))?;
     match (kind.as_str(), itemsize) {
         ("i", 8) => choose_typed::<i64>(py, numpy, &a64, &items, "int64", &a_shape),
@@ -34410,9 +34410,9 @@ fn choose(
     if defer_to_numpy {
         let kwargs = PyDict::new(py);
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("mode", mode)?;
+        kwargs.set_item(intern!(py, "mode"), mode)?;
         return Ok(numpy
             .getattr(intern!(py, "choose"))?
             .call((a.bind(py), choices_bound), Some(&kwargs))?
@@ -34445,7 +34445,7 @@ fn choose(
         Ok(result) => build_numpy_array_from_ufunc(py, &result),
         Err(_) => {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("mode", mode)?;
+            kwargs.set_item(intern!(py, "mode"), mode)?;
             Ok(numpy
                 .getattr(intern!(py, "choose"))?
                 .call((a.bind(py), choices_bound), Some(&kwargs))?
@@ -34472,9 +34472,9 @@ fn searchsorted(
     // numpy's literal in Rust would silently re-break on every numpy rewording.
     if side != "left" && side != "right" {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("side", side)?;
+        kwargs.set_item(intern!(py, "side"), side)?;
         if let Some(sorter) = sorter.as_ref() {
-            kwargs.set_item("sorter", sorter.bind(py))?;
+            kwargs.set_item(intern!(py, "sorter"), sorter.bind(py))?;
         }
         return Ok(numpy
             .getattr(intern!(py, "searchsorted"))?
@@ -34533,9 +34533,9 @@ fn searchsorted(
     // its literal here, where every numpy rewording would silently re-break it.
     if a_arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("side", side)?;
+        kwargs.set_item(intern!(py, "side"), side)?;
         if let Some(sorter) = sorter.as_ref() {
-            kwargs.set_item("sorter", sorter.bind(py))?;
+            kwargs.set_item(intern!(py, "sorter"), sorter.bind(py))?;
         }
         return Ok(numpy
             .getattr(intern!(py, "searchsorted"))?
@@ -34583,8 +34583,8 @@ fn searchsorted(
         }
         if !gathered {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("side", side)?;
-            kwargs.set_item("sorter", sb)?;
+            kwargs.set_item(intern!(py, "side"), side)?;
+            kwargs.set_item(intern!(py, "sorter"), sb)?;
             return Ok(numpy
                 .getattr(intern!(py, "searchsorted"))?
                 .call((&a_arr, v.bind(py)), Some(&kwargs))?
@@ -34718,9 +34718,9 @@ fn searchsorted(
     }
     if !matches!(a_kind, 'b' | 'i' | 'u' | 'f') {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("side", side)?;
+        kwargs.set_item(intern!(py, "side"), side)?;
         if let Some(sorter) = sorter.as_ref() {
-            kwargs.set_item("sorter", sorter.bind(py))?;
+            kwargs.set_item(intern!(py, "sorter"), sorter.bind(py))?;
         }
         return Ok(numpy
             .getattr(intern!(py, "searchsorted"))?
@@ -35161,7 +35161,7 @@ fn try_zerocopy_f64_searchsorted_merge(
     let mut pairs: Vec<(f64, u32)> = (0..m).map(|i| (v_raw[i], i as u32)).collect();
     pairs.par_sort_unstable_by(|x, y| x.0.total_cmp(&y.0));
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let flat = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
@@ -35314,7 +35314,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     };
     let m = v_s.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let flat = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
     if m > 0 {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
@@ -35417,7 +35417,7 @@ fn searchsorted_int_merge_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Sen
     pairs.par_sort_unstable_by(|x, y| x.0.cmp(&y.0));
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let flat = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
@@ -35635,7 +35635,7 @@ fn try_zerocopy_f32_searchsorted_merge(
     let mut pairs: Vec<(f32, u32)> = (0..m).map(|i| (v_raw[i], i as u32)).collect();
     pairs.par_sort_unstable_by(|x, y| x.0.total_cmp(&y.0));
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let flat = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
@@ -35740,16 +35740,16 @@ fn histogram(
         let histogram_fn = numpy.getattr(intern!(py, "histogram"))?;
         let kwargs = PyDict::new(py);
         if let Some(bins_val) = bins.as_ref() {
-            kwargs.set_item("bins", bins_val.bind(py))?;
+            kwargs.set_item(intern!(py, "bins"), bins_val.bind(py))?;
         }
         if let Some(range_val) = range.as_ref() {
-            kwargs.set_item("range", range_val.bind(py))?;
+            kwargs.set_item(intern!(py, "range"), range_val.bind(py))?;
         }
         if let Some(density_val) = density.as_ref() {
-            kwargs.set_item("density", density_val.bind(py))?;
+            kwargs.set_item(intern!(py, "density"), density_val.bind(py))?;
         }
         if let Some(weights_val) = weights.as_ref() {
-            kwargs.set_item("weights", weights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
         Ok(histogram_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -35867,14 +35867,14 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
     if n == 0 {
         let edges = numpy.call_method1(intern!(py, "linspace"), (0.0f64, 1.0f64, nbins + 1))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "int64")?;
+        kwargs.set_item(intern!(py, "dtype"), "int64")?;
         let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
         return Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()));
     }
     let Some(s) = buf.as_slice(py) else {
         let histogram_fn = numpy.getattr(intern!(py, "histogram"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("bins", nbins)?;
+        kwargs.set_item(intern!(py, "bins"), nbins)?;
         return Ok(Some(histogram_fn.call((a,), Some(&kwargs))?.unbind()));
     };
     // Large 1-D arrays: numpy runs histogram single-threaded, so a privatized
@@ -35929,7 +35929,7 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
         }
         let edges = numpy.call_method1(intern!(py, "linspace"), (first, last, nbins + 1))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "int64")?;
+        kwargs.set_item(intern!(py, "dtype"), "int64")?;
         let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
 
         let Ok(ebuf) = PyBuffer::<f64>::get(&edges) else {
@@ -36040,7 +36040,7 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
     // Delegate the (nbins+1) edge floats to numpy.linspace for bit-identical edges.
     let edges = numpy.call_method1(intern!(py, "linspace"), (first, last, nbins + 1))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
     if n > 0 {
         let Ok(ebuf) = PyBuffer::<f64>::get(&edges) else {
@@ -36105,7 +36105,7 @@ fn histogram_f32(
     let n = buf.item_count();
     if n == 0 {
         let edge_kwargs = PyDict::new(py);
-        edge_kwargs.set_item("dtype", "float32")?;
+        edge_kwargs.set_item(intern!(py, "dtype"), "float32")?;
         let np_float32 = numpy.getattr(intern!(py, "float32"))?;
         let first_py = np_float32.call1((0.0f32,))?;
         let last_py = np_float32.call1((1.0f32,))?;
@@ -36115,14 +36115,14 @@ fn histogram_f32(
             Some(&edge_kwargs),
         )?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "int64")?;
+        kwargs.set_item(intern!(py, "dtype"), "int64")?;
         let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
         return Ok(Some(PyTuple::new(py, [counts, edges])?.into_any().unbind()));
     }
     let Some(s) = buf.as_slice(py) else {
         let histogram_fn = numpy.getattr(intern!(py, "histogram"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("bins", nbins)?;
+        kwargs.set_item(intern!(py, "bins"), nbins)?;
         return Ok(Some(histogram_fn.call((a,), Some(&kwargs))?.unbind()));
     };
     let mut mn = s[0].get();
@@ -36154,7 +36154,7 @@ fn histogram_f32(
         last32 += 0.5;
     }
     let edge_kwargs = PyDict::new(py);
-    edge_kwargs.set_item("dtype", "float32")?;
+    edge_kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let np_float32 = numpy.getattr(intern!(py, "float32"))?;
     let first_py = np_float32.call1((first32,))?;
     let last_py = np_float32.call1((last32,))?;
@@ -36169,7 +36169,7 @@ fn histogram_f32(
     // use the same O(1) affine index + edge corrections as the f64/integer path.
     // first32/last32 are the float32 edge endpoints used for the linspace.
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
     {
         let Ok(ebuf) = PyBuffer::<f32>::get(&edges) else {
@@ -36568,7 +36568,7 @@ fn try_zerocopy_histogram_edges(
             },
         );
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let hist = numpy.call_method(intern!(py, "empty"), (nb,), Some(&kwargs))?;
     {
         let Ok(hb) = PyBuffer::<i64>::get(&hist) else {
@@ -36682,7 +36682,7 @@ fn try_zerocopy_f64_gradient_1d(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -36808,7 +36808,7 @@ fn try_zerocopy_f64_gradient_1d_coords(
     let fd: &[f64] = unsafe { std::slice::from_raw_parts(fc.as_ptr().cast::<f64>(), n) };
     let xd: &[f64] = unsafe { std::slice::from_raw_parts(xc.as_ptr().cast::<f64>(), n) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(obuf) = PyBuffer::<f64>::get(&out) else {
@@ -36904,7 +36904,7 @@ fn try_zerocopy_f64_gradient_2d_coords(
     let yd: &[f64] = unsafe { std::slice::from_raw_parts(yc.as_ptr().cast::<f64>(), r) };
     let xd: &[f64] = unsafe { std::slice::from_raw_parts(xc.as_ptr().cast::<f64>(), c) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let g0 = numpy.call_method(intern!(py, "empty"), ((r, c),), Some(&kwargs))?;
     let g1 = numpy.call_method(intern!(py, "empty"), ((r, c),), Some(&kwargs))?;
     {
@@ -37055,7 +37055,7 @@ fn try_zerocopy_f64_gradient_axis_coords(
     let fd: &[f64] = unsafe { std::slice::from_raw_parts(fc.as_ptr().cast::<f64>(), total) };
     let cd: &[f64] = unsafe { std::slice::from_raw_parts(cc0.as_ptr().cast::<f64>(), la) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     {
         let Ok(obuf) = PyBuffer::<f64>::get(&out) else {
@@ -37181,7 +37181,7 @@ fn try_zerocopy_f32_gradient_1d(
     // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
     let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
@@ -37299,7 +37299,7 @@ fn try_zerocopy_f64_gradient_strided_axis(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -37427,7 +37427,7 @@ fn try_zerocopy_f32_gradient_strided_axis(
     // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
     let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
@@ -37813,10 +37813,10 @@ fn gradient(
     let args = PyTuple::new(py, positional.iter().map(|item| item.bind(py)))?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
     }
     if edge_order != 1 {
-        kwargs.set_item("edge_order", edge_order)?;
+        kwargs.set_item(intern!(py, "edge_order"), edge_order)?;
     }
     Ok(gradient_fn.call(args, Some(&kwargs))?.unbind())
 }
@@ -37884,7 +37884,7 @@ macro_rules! diff1_pend_arm {
             let na = if ap.is_some() { 1usize } else { 0 };
             let m = n - 1 + np_ + na;
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", $name)?;
+            kwargs.set_item(intern!(py, "dtype"), $name)?;
             let out = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
             {
                 let Ok(ob) = PyBuffer::<$t>::get(&out) else {
@@ -38203,7 +38203,7 @@ fn roll(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis_for_fallback.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         Ok(roll_fn
             .call(
@@ -38297,13 +38297,13 @@ fn histogram_bin_edges(
         let histogram_bin_edges_fn = numpy.getattr(intern!(py, "histogram_bin_edges"))?;
         let kwargs = PyDict::new(py);
         if let Some(bins_val) = bins.as_ref() {
-            kwargs.set_item("bins", bins_val.bind(py))?;
+            kwargs.set_item(intern!(py, "bins"), bins_val.bind(py))?;
         }
         if let Some(range_val) = range.as_ref() {
-            kwargs.set_item("range", range_val.bind(py))?;
+            kwargs.set_item(intern!(py, "range"), range_val.bind(py))?;
         }
         if let Some(weights_val) = weights.as_ref() {
-            kwargs.set_item("weights", weights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
         Ok(histogram_bin_edges_fn
             .call((a.bind(py),), Some(&kwargs))?
@@ -38475,12 +38475,12 @@ fn reshape(
     // (copy=None) is preserved on numpy builds predating the copy argument.
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("order", order)?;
+    kwargs.set_item(intern!(py, "order"), order)?;
     if let Some(copy) = copy {
-        kwargs.set_item("copy", copy)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
     }
     if let Some(newshape) = newshape.as_ref() {
-        kwargs.set_item("newshape", newshape.bind(py))?;
+        kwargs.set_item(intern!(py, "newshape"), newshape.bind(py))?;
     }
     // `shape` is passed POSITIONALLY (the 2nd positional arg on every numpy — named
     // `newshape` pre-2.1, `shape` after — so a positional bind is version-robust,
@@ -38508,7 +38508,7 @@ fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axes_val) = axes.as_ref() {
-        kwargs.set_item("axes", axes_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "transpose"))?
@@ -38572,7 +38572,7 @@ fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = axis.as_ref() {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "squeeze"))?
@@ -39157,7 +39157,7 @@ fn try_native_column_interleave(
         byte_views.push(bv);
     }
     let kw = PyDict::new(py);
-    kw.set_item("dtype", &dtype)?;
+    kw.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), ((n, k),), Some(&kw))?;
     let out_bytes_view = out.call_method1(intern!(py, "view"), (&uint8,))?;
     let Ok(o_buf) = PyBuffer::<u8>::get(&out_bytes_view) else {
@@ -39366,7 +39366,7 @@ fn try_zerocopy_any_put(
         return Ok(None);
     }
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "int64")?;
+    kw.set_item(intern!(py, "dtype"), "int64")?;
     let ind64 = numpy
         .getattr(intern!(py, "ascontiguousarray"))?
         .call((ind_arr,), Some(&kw))?;
@@ -39376,12 +39376,12 @@ fn try_zerocopy_any_put(
     // numpy.put so it raises the canonical error (the native fallback path would
     // raise a different exception type) — numpy raises before any in-place write.
     let kw_v = PyDict::new(py);
-    kw_v.set_item("dtype", &a_dtype)?;
+    kw_v.set_item(intern!(py, "dtype"), &a_dtype)?;
     let v_cast = match numpy.getattr(intern!(py, "asarray"))?.call((v,), Some(&kw_v)) {
         Ok(arr) => arr.call_method1(intern!(py, "reshape"), ((-1isize,),))?,
         Err(_) => {
             let kwp = PyDict::new(py);
-            kwp.set_item("mode", "raise")?;
+            kwp.set_item(intern!(py, "mode"), "raise")?;
             numpy.getattr(intern!(py, "put"))?.call((a, ind, v), Some(&kwp))?;
             return Ok(Some(()));
         }
@@ -39450,7 +39450,7 @@ fn put(
     let fallback = || -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("mode", &mode_owned)?;
+        kwargs.set_item(intern!(py, "mode"), &mode_owned)?;
         Ok(numpy
             .getattr(intern!(py, "put"))?
             .call(
@@ -39666,8 +39666,8 @@ impl WhereArg {
     fn apply(&self, py: Python<'_>, kwargs: &Bound<'_, PyDict>) -> PyResult<()> {
         match self {
             WhereArg::Absent => Ok(()),
-            WhereArg::ExplicitNone => kwargs.set_item("where", py.None()),
-            WhereArg::Value(value) => kwargs.set_item("where", value.bind(py)),
+            WhereArg::ExplicitNone => kwargs.set_item(intern!(py, "where"), py.None()),
+            WhereArg::Value(value) => kwargs.set_item(intern!(py, "where"), value.bind(py)),
         }
     }
 
@@ -39710,7 +39710,7 @@ fn copyto(
     let numpy = cached_numpy(py)?;
     let copyto_fn = numpy.getattr(intern!(py, "copyto"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("casting", casting)?;
+    kwargs.set_item(intern!(py, "casting"), casting)?;
     r#where.apply(py, &kwargs)?;
     Ok(copyto_fn
         .call((dst.bind(py), src.bind(py)), Some(&kwargs))?
@@ -39757,7 +39757,7 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
         if !vals.bind(py).is_exact_instance(&ndarray_type) {
             let arr_dtype = arr.getattr(intern!(py, "dtype"))?;
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", arr_dtype)?;
+            kwargs.set_item(intern!(py, "dtype"), arr_dtype)?;
             let vals_arr = numpy
                 .call_method(intern!(py, "array"), (vals.bind(py),), Some(&kwargs))?
                 .call_method1(intern!(py, "ravel"), ())?;
@@ -39832,7 +39832,7 @@ fn putmask(
             // for a narrow dtype (numpy 2.x) — astype() would silently wrap instead.
             let a_dtype = a.getattr(intern!(py, "dtype"))?;
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", a_dtype)?;
+            kwargs.set_item(intern!(py, "dtype"), a_dtype)?;
             let vals_arr = numpy
                 .call_method(intern!(py, "array"), (values.bind(py),), Some(&kwargs))?
                 .call_method1(intern!(py, "ravel"), ())?;
@@ -39988,7 +39988,7 @@ fn try_zerocopy_indices(
     out_shape.push(d);
     out_shape.extend_from_slice(dims);
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dt_obj)?;
+    kwargs.set_item(intern!(py, "dtype"), &dt_obj)?;
     let out = numpy.call_method(intern!(py, "empty"), (PyTuple::new(py, out_shape)?,), Some(&kwargs))?;
     let ok = match (kind.as_str(), itemsize) {
         ("i", 8) => fill_indices_typed::<i64, _>(py, &out, dims, total, |v| v as i64)?,
@@ -40022,9 +40022,9 @@ fn indices(
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item("sparse", true)?;
+        kwargs.set_item(intern!(py, "sparse"), true)?;
         return Ok(numpy
             .getattr(intern!(py, "indices"))?
             .call((dimensions,), Some(&kwargs))?
@@ -40110,11 +40110,11 @@ fn try_zerocopy_tri(
     let mover = numpy.getattr(mover_name)?;
     // The dtype's "1" bit pattern (float 1.0 / int 1 / True), read via the mover view.
     let one_kw = PyDict::new(py);
-    one_kw.set_item("dtype", dt_obj)?;
+    one_kw.set_item(intern!(py, "dtype"), dt_obj)?;
     let one_arr = numpy.call_method(intern!(py, "ones"), ((1usize,),), Some(&one_kw))?;
     let one_mover = one_arr.call_method1(intern!(py, "view"), (&mover,))?;
     let out_kw = PyDict::new(py);
-    out_kw.set_item("dtype", dt_obj)?;
+    out_kw.set_item(intern!(py, "dtype"), dt_obj)?;
     let out = numpy.call_method(intern!(py, "empty"), ((n, m),), Some(&out_kw))?;
     let out_mover = out.call_method1(intern!(py, "view"), (&mover,))?;
     let filled = match itemsize {
@@ -40176,11 +40176,11 @@ fn tri(
         if let Some(columns) = M {
             kwargs.set_item("M", columns)?;
         }
-        kwargs.set_item("k", k)?;
+        kwargs.set_item(intern!(py, "k"), k)?;
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item("like", like.as_ref().map(|v| v.bind(py)))?;
+        kwargs.set_item(intern!(py, "like"), like.as_ref().map(|v| v.bind(py)))?;
         return Ok(numpy.getattr(intern!(py, "tri"))?.call((N,), Some(&kwargs))?.unbind());
     }
     // `N` / `M` carry numpy's capital spelling: np.tri(N=3, M=2) is the documented
@@ -40199,12 +40199,12 @@ fn tri(
     // numpy.tri creates the boolean/typed lower-triangle directly; the native
     // UFuncArray build-then-convert path was 18-178x slower (int8 178x). Delegate.
     let kwargs = PyDict::new(py);
-    kwargs.set_item("k", k)?;
+    kwargs.set_item(intern!(py, "k"), k)?;
     if let Some(columns) = M {
         kwargs.set_item("M", columns)?;
     }
     if let Some(dtype_val) = dtype.as_ref() {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+        kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
     }
     Ok(numpy.getattr(intern!(py, "tri"))?.call((N,), Some(&kwargs))?.unbind())
 }
@@ -40223,7 +40223,7 @@ fn masked_where(
         let numpy = py.import("numpy")?;
         let masked_where_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "masked_where"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("copy", copy)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
         Ok(masked_where_fn
             .call(
                 (condition_for_fallback.bind(py), a_for_fallback.bind(py)),
@@ -40290,7 +40290,7 @@ fn mask_rowcols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResu
     match axis {
         Some(axis) => {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("axis", axis.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
             Ok(mask_rowcols_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
         }
         None => Ok(mask_rowcols_fn.call1((a.bind(py),))?.unbind()),
@@ -40305,7 +40305,7 @@ fn mask_rows(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<
     match axis {
         Some(axis) => {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("axis", axis.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
             Ok(mask_rows_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
         }
         None => Ok(mask_rows_fn.call1((a.bind(py),))?.unbind()),
@@ -40320,7 +40320,7 @@ fn mask_cols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<
     match axis {
         Some(axis) => {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("axis", axis.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
             Ok(mask_cols_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
         }
         None => Ok(mask_cols_fn.call1((a.bind(py),))?.unbind()),
@@ -40344,7 +40344,7 @@ fn numpy_ma_axis(
     match axis {
         Some(axis) => {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("axis", axis.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
             Ok(func.call((a.bind(py),), Some(&kwargs))?.unbind())
         }
         None => Ok(func.call1((a.bind(py),))?.unbind()),
@@ -40468,7 +40468,7 @@ fn make_mask_none(
     let func = numpy.getattr(intern!(py, "make_mask_none"))?;
     if let Some(dtype) = dtype {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", dtype)?;
+        kwargs.set_item(intern!(py, "dtype"), dtype)?;
         return Ok(func.call((newshape,), Some(&kwargs))?.unbind());
     }
     Ok(func.call1((newshape,))?.unbind())
@@ -40643,19 +40643,19 @@ fn fft(
         .getattr(intern!(py, "fft"))?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
-        kwargs.set_item("n", n_val)?;
+        kwargs.set_item(intern!(py, "n"), n_val)?;
     }
     // numpy's own default for `fft` is axis=-1, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != -1 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(fft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -40723,7 +40723,7 @@ fn try_zerocopy_ma_filled_f64(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buf) = PyBuffer::<f64>::get(&flat) else {
@@ -40808,7 +40808,7 @@ where
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_str)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_str)?;
     let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -40836,7 +40836,7 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
         let filled_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "filled"))?;
         let kwargs = PyDict::new(py);
         if let Some(value) = &fill_value_for_fallback {
-            kwargs.set_item("fill_value", value.bind(py))?;
+            kwargs.set_item(intern!(py, "fill_value"), value.bind(py))?;
         }
         Ok(filled_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -40972,8 +40972,8 @@ fn mask_or(
         let numpy = cached_numpy(py)?;
         let mask_or_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "mask_or"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("copy", copy)?;
-        kwargs.set_item("shrink", shrink)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
+        kwargs.set_item(intern!(py, "shrink"), shrink)?;
         Ok(mask_or_fn
             .call(
                 (m1_for_fallback.bind(py), m2_for_fallback.bind(py)),
@@ -41003,10 +41003,10 @@ fn ma_count(
         let count_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "count"))?;
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(keepdims_val) = keepdims {
-            kwargs.set_item("keepdims", keepdims_val)?;
+            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
         }
         Ok(count_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -41275,13 +41275,13 @@ fn median(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("overwrite_input", overwrite_input)?;
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         Ok(median_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
@@ -41695,7 +41695,7 @@ fn build_square_f64_matrix(
     n_vars: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n_vars * n_vars,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -42044,21 +42044,21 @@ fn cov(
         let cov_fn = numpy.getattr(intern!(py, "cov"))?;
         let kwargs = PyDict::new(py);
         if let Some(y_val) = y.as_ref() {
-            kwargs.set_item("y", y_val.bind(py))?;
+            kwargs.set_item(intern!(py, "y"), y_val.bind(py))?;
         }
-        kwargs.set_item("rowvar", rowvar)?;
-        kwargs.set_item("bias", bias)?;
+        kwargs.set_item(intern!(py, "rowvar"), rowvar)?;
+        kwargs.set_item(intern!(py, "bias"), bias)?;
         if let Some(ddof_val) = ddof.as_ref() {
-            kwargs.set_item("ddof", ddof_val.bind(py))?;
+            kwargs.set_item(intern!(py, "ddof"), ddof_val.bind(py))?;
         }
         if let Some(fweights_val) = fweights.as_ref() {
-            kwargs.set_item("fweights", fweights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "fweights"), fweights_val.bind(py))?;
         }
         if let Some(aweights_val) = aweights.as_ref() {
-            kwargs.set_item("aweights", aweights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "aweights"), aweights_val.bind(py))?;
         }
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         Ok(cov_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -42234,17 +42234,17 @@ fn corrcoef(
     if bias.is_some() || ddof.is_some() {
         let kwargs = PyDict::new(py);
         if let Some(y_val) = y.as_ref() {
-            kwargs.set_item("y", y_val.bind(py))?;
+            kwargs.set_item(intern!(py, "y"), y_val.bind(py))?;
         }
-        kwargs.set_item("rowvar", rowvar)?;
+        kwargs.set_item(intern!(py, "rowvar"), rowvar)?;
         if let Some(bias_val) = bias.as_ref() {
-            kwargs.set_item("bias", bias_val.bind(py))?;
+            kwargs.set_item(intern!(py, "bias"), bias_val.bind(py))?;
         }
         if let Some(ddof_val) = ddof.as_ref() {
-            kwargs.set_item("ddof", ddof_val.bind(py))?;
+            kwargs.set_item(intern!(py, "ddof"), ddof_val.bind(py))?;
         }
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         return Ok(numpy
             .getattr(intern!(py, "corrcoef"))?
@@ -42267,13 +42267,13 @@ fn corrcoef(
         let corrcoef_fn = numpy.getattr(intern!(py, "corrcoef"))?;
         let kwargs = PyDict::new(py);
         if let Some(y_val) = y.as_ref() {
-            kwargs.set_item("y", y_val.bind(py))?;
+            kwargs.set_item(intern!(py, "y"), y_val.bind(py))?;
         }
-        kwargs.set_item("rowvar", rowvar)?;
+        kwargs.set_item(intern!(py, "rowvar"), rowvar)?;
         // bias/ddof are not forwarded here because they cannot reach this point:
         // supplying either returns above, straight to numpy.
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         Ok(corrcoef_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -42424,7 +42424,7 @@ fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyR
         let numpy = py.import("numpy")?;
         let allequal_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "allequal"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("fill_value", fill_value)?;
+        kwargs.set_item(intern!(py, "fill_value"), fill_value)?;
         Ok(allequal_fn
             .call(
                 (a_for_fallback.bind(py), b_for_fallback.bind(py)),
@@ -42645,7 +42645,7 @@ fn try_zerocopy_f64_nansum_axis(
     let inner: usize = shape[ax + 1..].iter().product();
     let total_out = outer * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (total_out,), Some(&kwargs))?;
     if total_out > 0 {
         let Ok(ob) = PyBuffer::<f64>::get(&flat) else {
@@ -42763,15 +42763,15 @@ fn nanmean(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         r#where.apply(py, &kwargs)?;
         Ok(nanmean_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -43679,7 +43679,7 @@ fn try_zerocopy_f16_nansum_flat(
     let total = par_pairwise_nansum_f16(data, 0, n);
     let bits = f16::from_f32(total).to_bits();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
     let scalar = scalar_u16.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "float16"))?,))?;
     Ok(Some(scalar.unbind()))
@@ -43747,7 +43747,7 @@ fn try_zerocopy_f16_nanmean_flat(
     let mean_f32 = nansum_f16.to_f32() / (count as f32);
     let bits = f16::from_f32(mean_f32).to_bits();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
     let scalar = scalar_u16.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "float16"))?,))?;
     Ok(Some(scalar.unbind()))
@@ -44576,7 +44576,7 @@ fn try_zerocopy_f16_sum_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     let bits = f16::from_f32(total).to_bits();
     // Build a numpy float16 scalar from exact bits (uint16 0-d -> view float16), matching np.sum's dtype.
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
     let scalar = scalar_u16.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "float16"))?,))?;
     Ok(Some(scalar.unbind()))
@@ -44634,7 +44634,7 @@ fn try_zerocopy_f16_mean_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<
     let mean_f32 = total / (n as f32); // numpy: f32_sum / float32(n), then narrow
     let bits = f16::from_f32(mean_f32).to_bits();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
     let scalar = scalar_u16.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "float16"))?,))?;
     Ok(Some(scalar.unbind()))
@@ -44826,17 +44826,17 @@ fn nansum(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(initial_val) = initial.as_ref() {
-            kwargs.set_item("initial", initial_val.bind(py))?;
+            kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
         }
         r#where.apply(py, &kwargs)?;
         Ok(nansum_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
@@ -44990,19 +44990,19 @@ fn nanprod(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         if let Some(keepdims_val) = keepdims {
-            kwargs.set_item("keepdims", keepdims_val)?;
+            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
         }
         if let Some(initial_val) = initial.as_ref() {
-            kwargs.set_item("initial", initial_val.bind(py))?;
+            kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
         }
         r#where.apply(py, &kwargs)?;
         Ok(nanprod_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
@@ -48232,16 +48232,16 @@ fn nanmax(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         if let Some(keepdims_val) = keepdims {
-            kwargs.set_item("keepdims", keepdims_val)?;
+            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
         }
         if let Some(initial_val) = initial.as_ref() {
-            kwargs.set_item("initial", initial_val.bind(py))?;
+            kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
         }
         r#where.apply(py, &kwargs)?;
         Ok(nanmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
@@ -48396,16 +48396,16 @@ fn nanmin(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         if let Some(keepdims_val) = keepdims {
-            kwargs.set_item("keepdims", keepdims_val)?;
+            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
         }
         if let Some(initial_val) = initial.as_ref() {
-            kwargs.set_item("initial", initial_val.bind(py))?;
+            kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
         }
         r#where.apply(py, &kwargs)?;
         Ok(nanmin_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
@@ -48563,26 +48563,26 @@ fn nanstd(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         if let Some(ddof_val) = ddof.as_ref() {
-            kwargs.set_item("ddof", ddof_val.bind(py))?;
+            kwargs.set_item(intern!(py, "ddof"), ddof_val.bind(py))?;
         }
         if let Some(keepdims_val) = keepdims {
-            kwargs.set_item("keepdims", keepdims_val)?;
+            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
         }
         r#where.apply(py, &kwargs)?;
         if let Some(mean_val) = mean.as_ref() {
-            kwargs.set_item("mean", mean_val.bind(py))?;
+            kwargs.set_item(intern!(py, "mean"), mean_val.bind(py))?;
         }
         if let Some(correction_val) = correction.as_ref() {
-            kwargs.set_item("correction", correction_val.bind(py))?;
+            kwargs.set_item(intern!(py, "correction"), correction_val.bind(py))?;
         }
         Ok(nanstd_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -48851,26 +48851,26 @@ fn nanvar(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         if let Some(ddof_val) = ddof.as_ref() {
-            kwargs.set_item("ddof", ddof_val.bind(py))?;
+            kwargs.set_item(intern!(py, "ddof"), ddof_val.bind(py))?;
         }
         if let Some(keepdims_val) = keepdims {
-            kwargs.set_item("keepdims", keepdims_val)?;
+            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
         }
         r#where.apply(py, &kwargs)?;
         if let Some(mean_val) = mean.as_ref() {
-            kwargs.set_item("mean", mean_val.bind(py))?;
+            kwargs.set_item(intern!(py, "mean"), mean_val.bind(py))?;
         }
         if let Some(correction_val) = correction.as_ref() {
-            kwargs.set_item("correction", correction_val.bind(py))?;
+            kwargs.set_item(intern!(py, "correction"), correction_val.bind(py))?;
         }
         Ok(nanvar_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -49598,13 +49598,13 @@ fn nanargmax(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         if let Some(keepdims_val) = keepdims {
-            kwargs.set_item("keepdims", keepdims_val)?;
+            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
         }
         Ok(nanargmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -49633,7 +49633,7 @@ fn nanargmax(
     {
         let kw = PyDict::new(py);
         if let Some(k) = keepdims {
-            kw.set_item("keepdims", k)?;
+            kw.set_item(intern!(py, "keepdims"), k)?;
         }
         return argmax(py, a, axis, out, Some(&kw));
     }
@@ -49734,13 +49734,13 @@ fn nanargmin(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         if let Some(keepdims_val) = keepdims {
-            kwargs.set_item("keepdims", keepdims_val)?;
+            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
         }
         Ok(nanargmin_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -49765,7 +49765,7 @@ fn nanargmin(
     {
         let kw = PyDict::new(py);
         if let Some(k) = keepdims {
-            kw.set_item("keepdims", k)?;
+            kw.set_item(intern!(py, "keepdims"), k)?;
         }
         return argmin(py, a, axis, out, Some(&kw));
     }
@@ -49870,18 +49870,18 @@ fn percentile(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("overwrite_input", overwrite_input)?;
+        kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
         if let Some(method_val) = method.as_ref() {
-            kwargs.set_item("method", method_val)?;
+            kwargs.set_item(intern!(py, "method"), method_val)?;
         }
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(weights_val) = weights.as_ref() {
-            kwargs.set_item("weights", weights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
         Ok(percentile_fn
             .call((a.bind(py), q.bind(py)), Some(&kwargs))?
@@ -50177,21 +50177,21 @@ fn nanpercentile(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("overwrite_input", overwrite_input)?;
+        kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
         if let Some(method_val) = method.as_ref() {
-            kwargs.set_item("method", method_val)?;
+            kwargs.set_item(intern!(py, "method"), method_val)?;
         }
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(weights_val) = weights.as_ref() {
-            kwargs.set_item("weights", weights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
         if let Some(interpolation_val) = interpolation.as_ref() {
-            kwargs.set_item("interpolation", interpolation_val)?;
+            kwargs.set_item(intern!(py, "interpolation"), interpolation_val)?;
         }
         Ok(nanpercentile_fn
             .call((a.bind(py), q.bind(py)), Some(&kwargs))?
@@ -50340,21 +50340,21 @@ fn nanquantile(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("overwrite_input", overwrite_input)?;
+        kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
         if let Some(method_val) = method.as_ref() {
-            kwargs.set_item("method", method_val)?;
+            kwargs.set_item(intern!(py, "method"), method_val)?;
         }
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(weights_val) = weights.as_ref() {
-            kwargs.set_item("weights", weights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
         if let Some(interpolation_val) = interpolation.as_ref() {
-            kwargs.set_item("interpolation", interpolation_val)?;
+            kwargs.set_item(intern!(py, "interpolation"), interpolation_val)?;
         }
         Ok(nanquantile_fn
             .call((a.bind(py), q.bind(py)), Some(&kwargs))?
@@ -50540,7 +50540,7 @@ fn try_native_lexsort_composite(
             return Ok(None);
         }
         let kw = PyDict::new(py);
-        kw.set_item("dtype", "int64")?;
+        kw.set_item(intern!(py, "dtype"), "int64")?;
         if kind == "f" {
             let contig = numpy.call_method1(intern!(py, "ascontiguousarray"), (&arr,))?;
             if itemsize == 8 {
@@ -50652,7 +50652,7 @@ fn try_native_lexsort_composite(
             acc += cnt;
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "intp")?;
+        kwargs.set_item(intern!(py, "dtype"), "intp")?;
         let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
         {
             let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
@@ -50678,7 +50678,7 @@ fn try_native_lexsort_composite(
     let mut pairs: Vec<(u64, u32)> = (0..n).map(|i| (comp[i], i as u32)).collect();
     pairs.par_sort_unstable();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
@@ -50977,7 +50977,7 @@ fn lexsort_perm_from_wide_cols<const K: usize>(
         .collect();
     tuples.par_sort_unstable();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let arr = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(ob) = PyBuffer::<i64>::get(&arr) else {
@@ -51084,7 +51084,7 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
         // installed interpreter - sending it costs a dict entry and a keyword parse
         // to communicate the default (`deadlock-audit-v46rn`).
         if axis != -1 {
-            kwargs.set_item("axis", axis)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         Ok(lexsort_fn.call((keys_bound,), Some(&kwargs))?.unbind())
     };
@@ -51255,16 +51255,16 @@ fn rfftn(
     let rfftn_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "rfftn"))?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
-        kwargs.set_item("s", s_val.bind(py))?;
+        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
     }
     if let Some(axes_val) = axes {
-        kwargs.set_item("axes", axes_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(rfftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -51283,16 +51283,16 @@ fn irfftn(
     let irfftn_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "irfftn"))?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
-        kwargs.set_item("s", s_val.bind(py))?;
+        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
     }
     if let Some(axes_val) = axes {
-        kwargs.set_item("axes", axes_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(irfftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -51328,7 +51328,7 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
         if let Some(ax) = &axis_for_fallback {
-            kwargs.set_item("axis", ax.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         Ok(numpy
             .getattr(intern!(py, "flip"))?
@@ -52041,7 +52041,7 @@ fn wide_int_setop_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
         out.extend_from_slice(&b[j..]);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let arr = numpy.call_method(intern!(py, "empty"), (out.len(),), Some(&kwargs))?;
     if !out.is_empty() {
         let Ok(ob) = PyBuffer::<T>::get(&arr) else {
@@ -52204,8 +52204,8 @@ fn intersect1d(
     let ar2_for_fallback = ar2.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("assume_unique", assume_unique)?;
-        kwargs.set_item("return_indices", return_indices)?;
+        kwargs.set_item(intern!(py, "assume_unique"), assume_unique)?;
+        kwargs.set_item(intern!(py, "return_indices"), return_indices)?;
         Ok(intersect1d_fn
             .call(
                 (ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)),
@@ -52384,7 +52384,7 @@ fn setdiff1d(
     let ar2_for_fallback = ar2.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("assume_unique", assume_unique)?;
+        kwargs.set_item(intern!(py, "assume_unique"), assume_unique)?;
         Ok(setdiff1d_fn
             .call(
                 (ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)),
@@ -52482,7 +52482,7 @@ fn setxor1d(
     let ar2_for_fallback = ar2.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("assume_unique", assume_unique)?;
+        kwargs.set_item(intern!(py, "assume_unique"), assume_unique)?;
         Ok(setxor1d_fn
             .call(
                 (ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)),
@@ -52583,10 +52583,10 @@ fn isin(
     let kind_for_fallback = kind.as_ref().map(|v| v.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("assume_unique", assume_unique)?;
-        kwargs.set_item("invert", invert)?;
+        kwargs.set_item(intern!(py, "assume_unique"), assume_unique)?;
+        kwargs.set_item(intern!(py, "invert"), invert)?;
         if let Some(kind_val) = kind_for_fallback.as_ref() {
-            kwargs.set_item("kind", kind_val.bind(py))?;
+            kwargs.set_item(intern!(py, "kind"), kind_val.bind(py))?;
         }
         Ok(isin_fn
             .call(
@@ -53294,8 +53294,8 @@ fn numpy_array_from_record_bytes(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype)?;
-    kwargs.set_item("count", records)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype)?;
+    kwargs.set_item(intern!(py, "count"), records)?;
     let view = numpy.call_method(intern!(py, "frombuffer"), (PyBytes::new(py, bytes),), Some(&kwargs))?;
     Ok(Some(view.call_method0(intern!(py, "copy"))?.unbind()))
 }
@@ -53771,7 +53771,7 @@ fn try_native_c128_union1d_dense_integral(
     }
     let nu = present.iter().filter(|&&seen| seen != 0).count();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
     let out_buffer = PyBuffer::<f64>::get(&outview)?;
@@ -53909,7 +53909,7 @@ fn try_native_c128_setxor_dense_integral(
     // Symmetric difference: keep cells present in exactly one side (0b01 or 0b10).
     let nu = state.iter().filter(|&&s| s == 1 || s == 2).count();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
     let out_buffer = PyBuffer::<f64>::get(&outview)?;
@@ -54034,7 +54034,7 @@ fn c128_sorted_unique_intersect_setdiff_merge(
     }
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (out_pairs.len(),), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
     let out_buffer = PyBuffer::<f64>::get(&outview)?;
@@ -54171,7 +54171,7 @@ fn try_native_c128_intersect_setdiff_dense_integral(
     let want: u8 = if is_diff { 1 } else { 3 };
     let nu = state.iter().filter(|&&s| s == want).count();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
     let out_buffer = PyBuffer::<f64>::get(&outview)?;
@@ -54362,7 +54362,7 @@ fn isin_typed<
     };
     let n = e_s.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n == 0 {
         return Ok(Some(flat.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?));
@@ -54564,7 +54564,7 @@ fn isin_float_typed<'py, T: FloatKey>(
     };
     let n = e_s.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n == 0 {
         return Ok(Some(flat.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?));
@@ -54699,7 +54699,7 @@ fn try_zerocopy_f64_vander(
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), rows) };
     let total = rows * cols;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -54762,7 +54762,7 @@ fn vander(py: Python<'_>, x: Py<PyAny>, N: Option<usize>, increasing: bool) -> P
     if let Some(width) = N {
         kwargs.set_item("N", width)?;
     }
-    kwargs.set_item("increasing", increasing)?;
+    kwargs.set_item(intern!(py, "increasing"), increasing)?;
     Ok(vander_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
 }
 
@@ -54781,13 +54781,13 @@ fn arange(
     let arange_fn = numpy.getattr(intern!(py, "arange"))?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype.as_ref() {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+        kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
     }
     if let Some(device_val) = device.as_ref() {
-        kwargs.set_item("device", device_val.bind(py))?;
+        kwargs.set_item(intern!(py, "device"), device_val.bind(py))?;
     }
     if let Some(like_val) = like.as_ref() {
-        kwargs.set_item("like", like_val.bind(py))?;
+        kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
     }
     Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
 }
@@ -54882,25 +54882,25 @@ fn linspace(
         let linspace_fn = numpy.getattr(intern!(py, "linspace"))?;
         let kwargs = PyDict::new(py);
         if num != 50 {
-            kwargs.set_item("num", num)?;
+            kwargs.set_item(intern!(py, "num"), num)?;
         }
         if !endpoint {
-            kwargs.set_item("endpoint", endpoint)?;
+            kwargs.set_item(intern!(py, "endpoint"), endpoint)?;
         }
         if retstep {
-            kwargs.set_item("retstep", retstep)?;
+            kwargs.set_item(intern!(py, "retstep"), retstep)?;
         }
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         // numpy's own default for `linspace` is axis=0, verified against the
         // installed interpreter - sending it costs a dict entry and a keyword parse
         // to communicate the default (`deadlock-audit-v46rn`).
         if axis != 0 {
-            kwargs.set_item("axis", axis)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         if let Some(device_val) = device.as_ref() {
-            kwargs.set_item("device", device_val.bind(py))?;
+            kwargs.set_item(intern!(py, "device"), device_val.bind(py))?;
         }
         let args = (start.bind(py), stop.bind(py));
         if kwargs.is_empty() {
@@ -55006,16 +55006,16 @@ fn geomspace(
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let geomspace_fn = numpy.getattr(intern!(py, "geomspace"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("num", num)?;
-        kwargs.set_item("endpoint", endpoint)?;
+        kwargs.set_item(intern!(py, "num"), num)?;
+        kwargs.set_item(intern!(py, "endpoint"), endpoint)?;
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         // numpy's own default for `geomspace` is axis=0, verified against the
         // installed interpreter - sending it costs a dict entry and a keyword parse
         // to communicate the default (`deadlock-audit-v46rn`).
         if axis != 0 {
-            kwargs.set_item("axis", axis)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         Ok(geomspace_fn
             .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
@@ -55134,7 +55134,7 @@ fn try_native_full_parallel(
     if let Some(dt) = dtype
         && !dt.is_none()
     {
-        kw.set_item("dtype", dt)?;
+        kw.set_item(intern!(py, "dtype"), dt)?;
     }
     let one = PyTuple::new(py, [1usize])?;
     let Ok(fill1) = numpy.getattr(intern!(py, "full"))?.call((one, fill_value), Some(&kw)) else {
@@ -55158,7 +55158,7 @@ fn try_native_full_parallel(
     let mover = numpy.getattr(mover_name)?;
     let fill1_mover = fill1.call_method1(intern!(py, "view"), (&mover,))?;
     let kw2 = PyDict::new(py);
-    kw2.set_item("dtype", &out_dtype)?;
+    kw2.set_item(intern!(py, "dtype"), &out_dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (shape,), Some(&kw2))?;
     let out_mover = out.call_method1(intern!(py, "view"), (&mover,))?;
     let filled = match itemsize {
@@ -55228,14 +55228,14 @@ fn full(
         let full_fn = numpy.getattr(intern!(py, "full"))?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item("order", order)?;
+        kwargs.set_item(intern!(py, "order"), order)?;
         if let Some(device_val) = device.as_ref() {
-            kwargs.set_item("device", device_val.bind(py))?;
+            kwargs.set_item(intern!(py, "device"), device_val.bind(py))?;
         }
         if let Some(like_val) = like.as_ref() {
-            kwargs.set_item("like", like_val.bind(py))?;
+            kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         }
         Ok(full_fn
             .call((shape.bind(py), fill_value.bind(py)), Some(&kwargs))?
@@ -55454,15 +55454,15 @@ fn full_like(
     let full_like_fn = numpy.getattr(intern!(py, "full_like"))?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
-        kwargs.set_item("dtype", dtype_val)?;
+        kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
     }
-    kwargs.set_item("order", order)?;
-    kwargs.set_item("subok", subok)?;
+    kwargs.set_item(intern!(py, "order"), order)?;
+    kwargs.set_item(intern!(py, "subok"), subok)?;
     if let Some(shape_val) = shape_bound {
-        kwargs.set_item("shape", shape_val)?;
+        kwargs.set_item(intern!(py, "shape"), shape_val)?;
     }
     if let Some(device_val) = device_bound {
-        kwargs.set_item("device", device_val)?;
+        kwargs.set_item(intern!(py, "device"), device_val)?;
     }
     Ok(full_like_fn
         .call((a_bound, fill_bound), Some(&kwargs))?
@@ -55503,15 +55503,15 @@ fn zeros_like(
     let zeros_like_fn = numpy.getattr(intern!(py, "zeros_like"))?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
-        kwargs.set_item("dtype", dtype_val)?;
+        kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
     }
-    kwargs.set_item("order", order)?;
-    kwargs.set_item("subok", subok)?;
+    kwargs.set_item(intern!(py, "order"), order)?;
+    kwargs.set_item(intern!(py, "subok"), subok)?;
     if let Some(shape_val) = shape_bound {
-        kwargs.set_item("shape", shape_val)?;
+        kwargs.set_item(intern!(py, "shape"), shape_val)?;
     }
     if let Some(device_val) = device_bound {
-        kwargs.set_item("device", device_val)?;
+        kwargs.set_item(intern!(py, "device"), device_val)?;
     }
     Ok(zeros_like_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
@@ -55550,15 +55550,15 @@ fn ones_like(
     let ones_like_fn = numpy.getattr(intern!(py, "ones_like"))?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
-        kwargs.set_item("dtype", dtype_val)?;
+        kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
     }
-    kwargs.set_item("order", order)?;
-    kwargs.set_item("subok", subok)?;
+    kwargs.set_item(intern!(py, "order"), order)?;
+    kwargs.set_item(intern!(py, "subok"), subok)?;
     if let Some(shape_val) = shape_bound {
-        kwargs.set_item("shape", shape_val)?;
+        kwargs.set_item(intern!(py, "shape"), shape_val)?;
     }
     if let Some(device_val) = device_bound {
-        kwargs.set_item("device", device_val)?;
+        kwargs.set_item(intern!(py, "device"), device_val)?;
     }
     Ok(ones_like_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
@@ -55585,15 +55585,15 @@ fn empty_like(
     let empty_like_fn = numpy.getattr(intern!(py, "empty_like"))?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
-        kwargs.set_item("dtype", dtype_val)?;
+        kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
     }
-    kwargs.set_item("order", order)?;
-    kwargs.set_item("subok", subok)?;
+    kwargs.set_item(intern!(py, "order"), order)?;
+    kwargs.set_item(intern!(py, "subok"), subok)?;
     if let Some(shape_val) = shape_bound {
-        kwargs.set_item("shape", shape_val)?;
+        kwargs.set_item(intern!(py, "shape"), shape_val)?;
     }
     if let Some(device_val) = device_bound {
-        kwargs.set_item("device", device_val)?;
+        kwargs.set_item(intern!(py, "device"), device_val)?;
     }
     Ok(empty_like_fn
         .call((prototype_bound,), Some(&kwargs))?
@@ -55810,19 +55810,19 @@ fn asarray(
     let asarray_fn = numpy.getattr(intern!(py, "asarray"))?;
     let kwargs = PyDict::new(py);
     if let Some(v) = dtype_bound {
-        kwargs.set_item("dtype", v)?;
+        kwargs.set_item(intern!(py, "dtype"), v)?;
     }
     if let Some(v) = order_bound {
-        kwargs.set_item("order", v)?;
+        kwargs.set_item(intern!(py, "order"), v)?;
     }
     if let Some(v) = copy_bound {
-        kwargs.set_item("copy", v)?;
+        kwargs.set_item(intern!(py, "copy"), v)?;
     }
     if let Some(v) = device_bound {
-        kwargs.set_item("device", v)?;
+        kwargs.set_item(intern!(py, "device"), v)?;
     }
     if let Some(v) = like_bound {
-        kwargs.set_item("like", v)?;
+        kwargs.set_item(intern!(py, "like"), v)?;
     }
     Ok(asarray_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
@@ -55860,19 +55860,19 @@ fn asanyarray(
     let asanyarray_fn = numpy.getattr(intern!(py, "asanyarray"))?;
     let kwargs = PyDict::new(py);
     if let Some(v) = dtype_bound {
-        kwargs.set_item("dtype", v)?;
+        kwargs.set_item(intern!(py, "dtype"), v)?;
     }
     if let Some(v) = order_bound {
-        kwargs.set_item("order", v)?;
+        kwargs.set_item(intern!(py, "order"), v)?;
     }
     if let Some(v) = copy_bound {
-        kwargs.set_item("copy", v)?;
+        kwargs.set_item(intern!(py, "copy"), v)?;
     }
     if let Some(v) = device_bound {
-        kwargs.set_item("device", v)?;
+        kwargs.set_item(intern!(py, "device"), v)?;
     }
     if let Some(v) = like_bound {
-        kwargs.set_item("like", v)?;
+        kwargs.set_item(intern!(py, "like"), v)?;
     }
     Ok(asanyarray_fn.call((a_bound,), Some(&kwargs))?.unbind())
 }
@@ -55890,10 +55890,10 @@ fn ascontiguousarray(
         let asc_fn = numpy.getattr(intern!(py, "ascontiguousarray"))?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         if let Some(like_val) = like.as_ref() {
-            kwargs.set_item("like", like_val.bind(py))?;
+            kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         }
         Ok(asc_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -55956,7 +55956,7 @@ fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> 
     // Delegate to NumPy to preserve scalar return type for scalar inputs.
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tol", tol)?;
+    kwargs.set_item(intern!(py, "tol"), tol)?;
     Ok(numpy
         .getattr(intern!(py, "real_if_close"))?
         .call((a.bind(py),), Some(&kwargs))?
@@ -56075,7 +56075,7 @@ fn try_zerocopy_complex_unary(
                 return Ok(None);
             }
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", $cplx)?;
+            kwargs.set_item(intern!(py, "dtype"), $cplx)?;
             let out = numpy.call_method(intern!(py, "empty"), (shape.clone(),), Some(&kwargs))?;
             {
                 let out_view = out.call_method1(intern!(py, "view"), (&real_dtype,))?;
@@ -56366,7 +56366,7 @@ fn try_zerocopy_complex_angle(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -56423,7 +56423,7 @@ fn angle(py: Python<'_>, z: Py<PyAny>, deg: bool) -> PyResult<Py<PyAny>> {
     // Pass original value to NumPy to preserve scalar return type.
     let angle_fn = numpy.getattr(intern!(py, "angle"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("deg", deg)?;
+    kwargs.set_item(intern!(py, "deg"), deg)?;
     Ok(angle_fn.call((z.bind(py),), Some(&kwargs))?.unbind())
 }
 
@@ -56608,7 +56608,7 @@ fn conjugate(
     let numpy = cached_numpy(py)?;
     let call_kwargs = PyDict::new(py);
     if let Some(out_val) = out {
-        call_kwargs.set_item("out", out_val.bind(py))?;
+        call_kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     if let Some(kw) = kwargs {
         for (key, value) in kw.iter() {
@@ -57551,7 +57551,7 @@ fn try_zerocopy_bool_logical_not(
     };
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -57723,7 +57723,7 @@ fn try_zerocopy_i64_shift(
         is_exact_int64_ndarray(py, b)? && b.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()? == shape;
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
@@ -57820,7 +57820,7 @@ where
             return Ok(None);
         }
         let kw = PyDict::new(py);
-        kw.set_item("dtype", dtype_name)?;
+        kw.set_item(intern!(py, "dtype"), dtype_name)?;
         let b_arr0 = numpy.getattr(intern!(py, "asarray"))?.call((b,), Some(&kw))?;
         // Only a true scalar (1 element) broadcasts here; a different-shape array is a
         // real broadcast that must defer to numpy.
@@ -57841,7 +57841,7 @@ where
         Some(b_one[0].get())
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -58039,7 +58039,7 @@ where
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -58414,7 +58414,7 @@ fn try_zerocopy_f64_floor_divide(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (shape,), Some(&kwargs))?;
     let hazard = std::sync::atomic::AtomicBool::new(false);
     {
@@ -58741,16 +58741,16 @@ fn unwrap(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(discont_val) = discont {
-        kwargs.set_item("discont", discont_val.bind(py))?;
+        kwargs.set_item(intern!(py, "discont"), discont_val.bind(py))?;
     }
     // numpy's own default for `unwrap` is axis=-1, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != -1 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     if let Some(period_val) = period {
-        kwargs.set_item("period", period_val.bind(py))?;
+        kwargs.set_item(intern!(py, "period"), period_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "unwrap"))?
@@ -58778,7 +58778,7 @@ fn polyint(py: Python<'_>, p: Py<PyAny>, m: i64, k: Option<Py<PyAny>>) -> PyResu
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k) = k {
-        kwargs.set_item("k", k.bind(py))?;
+        kwargs.set_item(intern!(py, "k"), k.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "polyint"))?
@@ -58879,7 +58879,7 @@ fn array_equal(
     let a2_for_fallback = a2.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("equal_nan", equal_nan)?;
+        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
         Ok(array_equal_fn
             .call(
                 (a1_for_fallback.bind(py), a2_for_fallback.bind(py)),
@@ -59263,7 +59263,7 @@ fn polyline(py: Python<'_>, off: Py<PyAny>, scl: Py<PyAny>) -> PyResult<Py<PyAny
 fn polytrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tol", tol)?;
+    kwargs.set_item(intern!(py, "tol"), tol)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "polynomial"))?
@@ -59282,7 +59282,7 @@ fn polyvalfromroots(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tensor", tensor)?;
+    kwargs.set_item(intern!(py, "tensor"), tensor)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "polynomial"))?
@@ -59311,7 +59311,7 @@ fn polypow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyRes
     // maxpower to match NumPy's allocation guard.
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("maxpower", maxpower)?;
+    kwargs.set_item(intern!(py, "maxpower"), maxpower)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "polynomial"))?
@@ -59404,7 +59404,7 @@ fn chebval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult
     // corresponding coefficient row instead.
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tensor", tensor)?;
+    kwargs.set_item(intern!(py, "tensor"), tensor)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "chebyshev"))?
@@ -59437,12 +59437,12 @@ fn chebder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResul
     // `scl` at each iteration (use for a linear change-of-variable).
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `chebder` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -59472,15 +59472,15 @@ fn chebint(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
-        kwargs.set_item("k", k_val.bind(py))?;
+        kwargs.set_item(intern!(py, "k"), k_val.bind(py))?;
     }
-    kwargs.set_item("lbnd", lbnd)?;
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "lbnd"), lbnd)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `chebint` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -59515,7 +59515,7 @@ fn chebpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyRes
     // ValueError if pow > maxpower).
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("maxpower", maxpower)?;
+    kwargs.set_item(intern!(py, "maxpower"), maxpower)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "chebyshev"))?
@@ -59576,7 +59576,7 @@ fn chebtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
     // from polytrim's semantics; tol must be non-negative.
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tol", tol)?;
+    kwargs.set_item(intern!(py, "tol"), tol)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "chebyshev"))?
@@ -59666,7 +59666,7 @@ fn hermmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> 
 fn hermval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tensor", tensor)?;
+    kwargs.set_item(intern!(py, "tensor"), tensor)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "hermite"))?
@@ -59704,7 +59704,7 @@ fn hermfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn hermpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("maxpower", maxpower)?;
+    kwargs.set_item(intern!(py, "maxpower"), maxpower)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "hermite"))?
@@ -59754,7 +59754,7 @@ fn hermmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn hermtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tol", tol)?;
+    kwargs.set_item(intern!(py, "tol"), tol)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "hermite"))?
@@ -59768,12 +59768,12 @@ fn hermtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 fn hermder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `hermder` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -59797,15 +59797,15 @@ fn hermint(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
-        kwargs.set_item("k", k_val.bind(py))?;
+        kwargs.set_item(intern!(py, "k"), k_val.bind(py))?;
     }
-    kwargs.set_item("lbnd", lbnd)?;
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "lbnd"), lbnd)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `hermint` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -59897,7 +59897,7 @@ fn hermemul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>>
 fn hermeval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tensor", tensor)?;
+    kwargs.set_item(intern!(py, "tensor"), tensor)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "hermite_e"))?
@@ -59935,7 +59935,7 @@ fn hermefromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn hermepow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("maxpower", maxpower)?;
+    kwargs.set_item(intern!(py, "maxpower"), maxpower)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "hermite_e"))?
@@ -60040,7 +60040,7 @@ fn herme_native_result(
     values: Vec<f64>,
 ) -> PyResult<Py<PyAny>> {
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     Ok(numpy
         .call_method(intern!(py, "array"), (values,), Some(&kwargs))?
         .unbind())
@@ -60056,12 +60056,12 @@ fn hermeder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResu
         return herme_native_result(py, &numpy, der);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `hermeder` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -60106,15 +60106,15 @@ fn hermeint(
     }
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
-        kwargs.set_item("k", k_val.bind(py))?;
+        kwargs.set_item(intern!(py, "k"), k_val.bind(py))?;
     }
-    kwargs.set_item("lbnd", lbnd)?;
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "lbnd"), lbnd)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `hermeint` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -60204,7 +60204,7 @@ fn lagmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn lagval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tensor", tensor)?;
+    kwargs.set_item(intern!(py, "tensor"), tensor)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "laguerre"))?
@@ -60242,7 +60242,7 @@ fn lagfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn lagpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("maxpower", maxpower)?;
+    kwargs.set_item(intern!(py, "maxpower"), maxpower)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "laguerre"))?
@@ -60292,7 +60292,7 @@ fn lagmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn lagtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tol", tol)?;
+    kwargs.set_item(intern!(py, "tol"), tol)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "laguerre"))?
@@ -60306,12 +60306,12 @@ fn lagtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 fn lagder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `lagder` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -60335,15 +60335,15 @@ fn lagint(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
-        kwargs.set_item("k", k_val.bind(py))?;
+        kwargs.set_item(intern!(py, "k"), k_val.bind(py))?;
     }
-    kwargs.set_item("lbnd", lbnd)?;
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "lbnd"), lbnd)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `lagint` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -60434,7 +60434,7 @@ fn legmul(py: Python<'_>, c1: Py<PyAny>, c2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn legval(py: Python<'_>, x: Py<PyAny>, c: Py<PyAny>, tensor: bool) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tensor", tensor)?;
+    kwargs.set_item(intern!(py, "tensor"), tensor)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "legendre"))?
@@ -60472,7 +60472,7 @@ fn legfromroots(py: Python<'_>, roots: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn legpow(py: Python<'_>, c: Py<PyAny>, pow: Py<PyAny>, maxpower: i64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("maxpower", maxpower)?;
+    kwargs.set_item(intern!(py, "maxpower"), maxpower)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "legendre"))?
@@ -60522,7 +60522,7 @@ fn legmulx(py: Python<'_>, c: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn legtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("tol", tol)?;
+    kwargs.set_item(intern!(py, "tol"), tol)?;
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
         .getattr(intern!(py, "legendre"))?
@@ -60536,12 +60536,12 @@ fn legtrim(py: Python<'_>, c: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
 fn legder(py: Python<'_>, c: Py<PyAny>, m: i64, scl: f64, axis: i64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `legder` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -60565,15 +60565,15 @@ fn legint(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(k_val) = k {
-        kwargs.set_item("k", k_val.bind(py))?;
+        kwargs.set_item(intern!(py, "k"), k_val.bind(py))?;
     }
-    kwargs.set_item("lbnd", lbnd)?;
-    kwargs.set_item("scl", scl)?;
+    kwargs.set_item(intern!(py, "lbnd"), lbnd)?;
+    kwargs.set_item(intern!(py, "scl"), scl)?;
     // numpy's own default for `legint` is axis=0, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "polynomial"))?
@@ -60638,10 +60638,10 @@ fn sliding_window_view(
     let stride_tricks = numpy.getattr(intern!(py, "lib"))?.getattr(intern!(py, "stride_tricks"))?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
     }
-    kwargs.set_item("subok", subok)?;
-    kwargs.set_item("writeable", writeable)?;
+    kwargs.set_item(intern!(py, "subok"), subok)?;
+    kwargs.set_item(intern!(py, "writeable"), writeable)?;
     Ok(stride_tricks
         .getattr(intern!(py, "sliding_window_view"))?
         .call((x.bind(py), window_shape.bind(py)), Some(&kwargs))?
@@ -60668,13 +60668,13 @@ fn as_strided(
     let stride_tricks = numpy.getattr(intern!(py, "lib"))?.getattr(intern!(py, "stride_tricks"))?;
     let kwargs = PyDict::new(py);
     if let Some(shape_val) = shape {
-        kwargs.set_item("shape", shape_val.bind(py))?;
+        kwargs.set_item(intern!(py, "shape"), shape_val.bind(py))?;
     }
     if let Some(strides_val) = strides {
-        kwargs.set_item("strides", strides_val.bind(py))?;
+        kwargs.set_item(intern!(py, "strides"), strides_val.bind(py))?;
     }
-    kwargs.set_item("subok", subok)?;
-    kwargs.set_item("writeable", writeable)?;
+    kwargs.set_item(intern!(py, "subok"), subok)?;
+    kwargs.set_item(intern!(py, "writeable"), writeable)?;
     Ok(stride_tricks
         .getattr(intern!(py, "as_strided"))?
         .call((x.bind(py),), Some(&kwargs))?
@@ -60882,9 +60882,9 @@ fn allclose(
     let b_for_fallback = b.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("rtol", rtol)?;
-        kwargs.set_item("atol", atol)?;
-        kwargs.set_item("equal_nan", equal_nan)?;
+        kwargs.set_item(intern!(py, "rtol"), rtol)?;
+        kwargs.set_item(intern!(py, "atol"), atol)?;
+        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
         Ok(allclose_fn
             .call(
                 (a_for_fallback.bind(py), b_for_fallback.bind(py)),
@@ -61030,7 +61030,7 @@ fn try_zerocopy_f64_triangular(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "zeros"), ((rows, cols),), Some(&kwargs))?;
     if rows > 0 && cols > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -61135,7 +61135,7 @@ fn try_zerocopy_any_triangular(
         _ => return Ok(None),
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "zeros"), ((rows, cols),), Some(&kwargs))?;
     if rows > 0 && cols > 0 {
         let uview = numpy.getattr(uname)?;
@@ -61223,13 +61223,13 @@ fn asarray_chkfinite(
     let asarray_fn = numpy.getattr(intern!(py, "asarray"))?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype.as_ref() {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+        kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
     }
     // numpy.asarray_chkfinite forwards `order` straight to asarray, so
     // order="F" really does produce an F-contiguous result; forward it the same
     // way rather than dropping it (the finiteness sweep below is unaffected).
     if let Some(order_val) = order.as_ref() {
-        kwargs.set_item("order", order_val.bind(py))?;
+        kwargs.set_item(intern!(py, "order"), order_val.bind(py))?;
     }
     // Perform the coercion first (this may raise TypeError if dtype is
     // invalid), then use Rust to sweep the values for NaN/Inf. numpy's
@@ -61316,13 +61316,13 @@ fn require(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype {
-        kwargs.set_item("dtype", dtype_val.bind(py))?;
+        kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
     }
     if let Some(req_val) = requirements {
-        kwargs.set_item("requirements", req_val.bind(py))?;
+        kwargs.set_item(intern!(py, "requirements"), req_val.bind(py))?;
     }
     if let Some(like_val) = like {
-        kwargs.set_item("like", like_val.bind(py))?;
+        kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "require"))?
@@ -61362,7 +61362,7 @@ fn linalg_vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyR
         // equals axis=-1 and differs from axis=0, on both np.vecdot and
         // np.linalg.vecdot (`deadlock-audit-v46rn`).
         if axis != -1 {
-            kwargs.set_item("axis", axis)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         Ok(vecdot_fn
             .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
@@ -61816,9 +61816,9 @@ fn save(
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("allow_pickle", allow_pickle)?;
+        kwargs.set_item(intern!(py, "allow_pickle"), allow_pickle)?;
         if let Some(fix_imports_val) = fix_imports {
-            kwargs.set_item("fix_imports", fix_imports_val)?;
+            kwargs.set_item(intern!(py, "fix_imports"), fix_imports_val)?;
         }
         Ok(numpy
             .getattr(intern!(py, "save"))?
@@ -61893,12 +61893,12 @@ fn load(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(mode) = mmap_mode.as_ref() {
-            kwargs.set_item("mmap_mode", mode.bind(py))?;
+            kwargs.set_item(intern!(py, "mmap_mode"), mode.bind(py))?;
         }
-        kwargs.set_item("allow_pickle", allow_pickle)?;
-        kwargs.set_item("fix_imports", fix_imports)?;
-        kwargs.set_item("encoding", encoding)?;
-        kwargs.set_item("max_header_size", max_header_size)?;
+        kwargs.set_item(intern!(py, "allow_pickle"), allow_pickle)?;
+        kwargs.set_item(intern!(py, "fix_imports"), fix_imports)?;
+        kwargs.set_item(intern!(py, "encoding"), encoding)?;
+        kwargs.set_item(intern!(py, "max_header_size"), max_header_size)?;
         Ok(numpy
             .getattr(intern!(py, "load"))?
             .call((file.bind(py),), Some(&kwargs))?
@@ -61966,10 +61966,10 @@ fn load_via_numpy_bytes(
     let io = py.import("io")?;
     let buffer = io.getattr("BytesIO")?.call1((PyBytes::new(py, bytes),))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("allow_pickle", allow_pickle)?;
-    kwargs.set_item("fix_imports", fix_imports)?;
-    kwargs.set_item("encoding", encoding)?;
-    kwargs.set_item("max_header_size", max_header_size)?;
+    kwargs.set_item(intern!(py, "allow_pickle"), allow_pickle)?;
+    kwargs.set_item(intern!(py, "fix_imports"), fix_imports)?;
+    kwargs.set_item(intern!(py, "encoding"), encoding)?;
+    kwargs.set_item(intern!(py, "max_header_size"), max_header_size)?;
     Ok(py
         .import("numpy")?
         .getattr(intern!(py, "load"))?
@@ -62008,15 +62008,15 @@ fn savetxt(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(fmt_val) = fmt.as_ref() {
-        kwargs.set_item("fmt", fmt_val.bind(py))?;
+        kwargs.set_item(intern!(py, "fmt"), fmt_val.bind(py))?;
     }
-    kwargs.set_item("delimiter", delimiter)?;
-    kwargs.set_item("newline", newline)?;
-    kwargs.set_item("header", header)?;
-    kwargs.set_item("footer", footer)?;
-    kwargs.set_item("comments", comments)?;
+    kwargs.set_item(intern!(py, "delimiter"), delimiter)?;
+    kwargs.set_item(intern!(py, "newline"), newline)?;
+    kwargs.set_item(intern!(py, "header"), header)?;
+    kwargs.set_item(intern!(py, "footer"), footer)?;
+    kwargs.set_item(intern!(py, "comments"), comments)?;
     if let Some(enc) = encoding {
-        kwargs.set_item("encoding", enc)?;
+        kwargs.set_item(intern!(py, "encoding"), enc)?;
     }
     numpy
         .getattr(intern!(py, "savetxt"))?
@@ -62037,8 +62037,8 @@ fn tofile(
     let array = numpy.getattr(intern!(py, "asarray"))?.call1((a.bind(py),))?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("sep", sep)?;
-        kwargs.set_item("format", format)?;
+        kwargs.set_item(intern!(py, "sep"), sep)?;
+        kwargs.set_item(intern!(py, "format"), format)?;
         array.call_method(intern!(py, "tofile"), (fid.bind(py),), Some(&kwargs))?;
         Ok(py.None())
     };
@@ -62108,13 +62108,13 @@ fn fromfile(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item("count", count)?;
-        kwargs.set_item("sep", sep)?;
-        kwargs.set_item("offset", offset)?;
+        kwargs.set_item(intern!(py, "count"), count)?;
+        kwargs.set_item(intern!(py, "sep"), sep)?;
+        kwargs.set_item(intern!(py, "offset"), offset)?;
         if let Some(like_val) = like.as_ref() {
-            kwargs.set_item("like", like_val.bind(py))?;
+            kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         }
         Ok(numpy
             .getattr(intern!(py, "fromfile"))?
@@ -62226,32 +62226,32 @@ fn loadtxt(
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item("comments", comments)?;
+        kwargs.set_item(intern!(py, "comments"), comments)?;
         if let Some(delim) = delimiter {
-            kwargs.set_item("delimiter", delim)?;
+            kwargs.set_item(intern!(py, "delimiter"), delim)?;
         }
         if let Some(cv) = converters.as_ref() {
-            kwargs.set_item("converters", cv.bind(py))?;
+            kwargs.set_item(intern!(py, "converters"), cv.bind(py))?;
         }
-        kwargs.set_item("skiprows", skiprows)?;
+        kwargs.set_item(intern!(py, "skiprows"), skiprows)?;
         if let Some(uc) = usecols.as_ref() {
-            kwargs.set_item("usecols", uc.bind(py))?;
+            kwargs.set_item(intern!(py, "usecols"), uc.bind(py))?;
         }
-        kwargs.set_item("unpack", unpack)?;
-        kwargs.set_item("ndmin", ndmin)?;
+        kwargs.set_item(intern!(py, "unpack"), unpack)?;
+        kwargs.set_item(intern!(py, "ndmin"), ndmin)?;
         if let Some(enc) = encoding {
-            kwargs.set_item("encoding", enc)?;
+            kwargs.set_item(intern!(py, "encoding"), enc)?;
         }
         if let Some(mr) = max_rows {
-            kwargs.set_item("max_rows", mr)?;
+            kwargs.set_item(intern!(py, "max_rows"), mr)?;
         }
         if let Some(quotechar_val) = quotechar.as_ref() {
-            kwargs.set_item("quotechar", quotechar_val.bind(py))?;
+            kwargs.set_item(intern!(py, "quotechar"), quotechar_val.bind(py))?;
         }
         if let Some(like_val) = like.as_ref() {
-            kwargs.set_item("like", like_val.bind(py))?;
+            kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         }
         Ok(numpy
             .getattr(intern!(py, "loadtxt"))?
@@ -62887,56 +62887,56 @@ fn genfromtxt(
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item("comments", comments)?;
+        kwargs.set_item(intern!(py, "comments"), comments)?;
         if let Some(d) = delimiter {
-            kwargs.set_item("delimiter", d)?;
+            kwargs.set_item(intern!(py, "delimiter"), d)?;
         }
-        kwargs.set_item("skip_header", skip_header)?;
-        kwargs.set_item("skip_footer", skip_footer)?;
+        kwargs.set_item(intern!(py, "skip_header"), skip_header)?;
+        kwargs.set_item(intern!(py, "skip_footer"), skip_footer)?;
         if let Some(cv) = converters.as_ref() {
-            kwargs.set_item("converters", cv.bind(py))?;
+            kwargs.set_item(intern!(py, "converters"), cv.bind(py))?;
         }
         if let Some(mv) = missing_values.as_ref() {
-            kwargs.set_item("missing_values", mv.bind(py))?;
+            kwargs.set_item(intern!(py, "missing_values"), mv.bind(py))?;
         }
         if let Some(fv) = filling_values.as_ref() {
-            kwargs.set_item("filling_values", fv.bind(py))?;
+            kwargs.set_item(intern!(py, "filling_values"), fv.bind(py))?;
         }
         if let Some(uc) = usecols.as_ref() {
-            kwargs.set_item("usecols", uc.bind(py))?;
+            kwargs.set_item(intern!(py, "usecols"), uc.bind(py))?;
         }
         if let Some(n) = names.as_ref() {
-            kwargs.set_item("names", n.bind(py))?;
+            kwargs.set_item(intern!(py, "names"), n.bind(py))?;
         }
         if let Some(el) = excludelist.as_ref() {
-            kwargs.set_item("excludelist", el.bind(py))?;
+            kwargs.set_item(intern!(py, "excludelist"), el.bind(py))?;
         }
         if let Some(dc) = deletechars {
-            kwargs.set_item("deletechars", dc)?;
+            kwargs.set_item(intern!(py, "deletechars"), dc)?;
         }
-        kwargs.set_item("replace_space", replace_space)?;
-        kwargs.set_item("autostrip", autostrip)?;
+        kwargs.set_item(intern!(py, "replace_space"), replace_space)?;
+        kwargs.set_item(intern!(py, "autostrip"), autostrip)?;
         if let Some(cs) = case_sensitive.as_ref() {
-            kwargs.set_item("case_sensitive", cs.bind(py))?;
+            kwargs.set_item(intern!(py, "case_sensitive"), cs.bind(py))?;
         }
-        kwargs.set_item("defaultfmt", defaultfmt)?;
+        kwargs.set_item(intern!(py, "defaultfmt"), defaultfmt)?;
         if let Some(up) = unpack {
-            kwargs.set_item("unpack", up)?;
+            kwargs.set_item(intern!(py, "unpack"), up)?;
         }
-        kwargs.set_item("usemask", usemask)?;
-        kwargs.set_item("loose", loose)?;
-        kwargs.set_item("invalid_raise", invalid_raise)?;
+        kwargs.set_item(intern!(py, "usemask"), usemask)?;
+        kwargs.set_item(intern!(py, "loose"), loose)?;
+        kwargs.set_item(intern!(py, "invalid_raise"), invalid_raise)?;
         if let Some(mr) = max_rows {
-            kwargs.set_item("max_rows", mr)?;
+            kwargs.set_item(intern!(py, "max_rows"), mr)?;
         }
         if let Some(enc) = encoding {
-            kwargs.set_item("encoding", enc)?;
+            kwargs.set_item(intern!(py, "encoding"), enc)?;
         }
-        kwargs.set_item("ndmin", ndmin)?;
+        kwargs.set_item(intern!(py, "ndmin"), ndmin)?;
         if let Some(like_val) = like.as_ref() {
-            kwargs.set_item("like", like_val.bind(py))?;
+            kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         }
         Ok(numpy
             .getattr(intern!(py, "genfromtxt"))?
@@ -63273,8 +63273,8 @@ fn recfunctions_drop_fields(
     let drop_names_bound = drop_names.bind(py);
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("usemask", usemask)?;
-        kwargs.set_item("asrecarray", asrecarray)?;
+        kwargs.set_item(intern!(py, "usemask"), usemask)?;
+        kwargs.set_item(intern!(py, "asrecarray"), asrecarray)?;
         Ok(py
             .import("numpy.lib.recfunctions")?
             .getattr(intern!(py, "drop_fields"))?
@@ -63337,7 +63337,7 @@ fn recfunctions_drop_fields(
     let zeros_fn = numpy.getattr(intern!(py, "zeros"))?;
     let shape_obj = base_bound.getattr(intern!(py, "shape"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", new_dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), new_dtype)?;
     let out = zeros_fn.call((shape_obj,), Some(&kwargs))?;
     for name in &keep_names {
         let value = base_bound.get_item(name.as_str())?;
@@ -63428,11 +63428,11 @@ fn recfunctions_append_fields(
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtypes_val) = dtypes.as_ref() {
-            kwargs.set_item("dtypes", dtypes_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtypes"), dtypes_val.bind(py))?;
         }
-        kwargs.set_item("fill_value", fill_value)?;
-        kwargs.set_item("usemask", usemask)?;
-        kwargs.set_item("asrecarray", asrecarray)?;
+        kwargs.set_item(intern!(py, "fill_value"), fill_value)?;
+        kwargs.set_item(intern!(py, "usemask"), usemask)?;
+        kwargs.set_item(intern!(py, "asrecarray"), asrecarray)?;
         Ok(py
             .import("numpy.lib.recfunctions")?
             .getattr(intern!(py, "append_fields"))?
@@ -63499,7 +63499,7 @@ fn recfunctions_append_fields(
 
     let zeros_fn = numpy.getattr(intern!(py, "zeros"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", new_dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), new_dtype)?;
     let out = zeros_fn.call((base_bound.getattr(intern!(py, "shape"))?,), Some(&kwargs))?;
     for name in &old_names {
         out.set_item(name.as_str(), base_bound.get_item(name.as_str())?)?;
@@ -63525,10 +63525,10 @@ fn recfunctions_merge_arrays(
     let seqarrays_bound = seqarrays.bind(py);
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("fill_value", fill_value)?;
-        kwargs.set_item("flatten", flatten)?;
-        kwargs.set_item("usemask", usemask)?;
-        kwargs.set_item("asrecarray", asrecarray)?;
+        kwargs.set_item(intern!(py, "fill_value"), fill_value)?;
+        kwargs.set_item(intern!(py, "flatten"), flatten)?;
+        kwargs.set_item(intern!(py, "usemask"), usemask)?;
+        kwargs.set_item(intern!(py, "asrecarray"), asrecarray)?;
         Ok(py
             .import("numpy.lib.recfunctions")?
             .getattr(intern!(py, "merge_arrays"))?
@@ -63621,7 +63621,7 @@ fn recfunctions_merge_arrays(
 
     let zeros_fn = numpy.getattr(intern!(py, "zeros"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", new_dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), new_dtype)?;
     let out = zeros_fn.call((arrays[0].getattr(intern!(py, "shape"))?,), Some(&kwargs))?;
     for (i, arr) in arrays.iter().enumerate() {
         if input_field_names[i].len() == 1 {
@@ -63654,14 +63654,14 @@ fn recfunctions_unstructured_to_structured(
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype_bound {
-            kwargs.set_item("dtype", dtype_val)?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
         }
         if let Some(names_val) = names_bound {
-            kwargs.set_item("names", names_val)?;
+            kwargs.set_item(intern!(py, "names"), names_val)?;
         }
-        kwargs.set_item("align", align)?;
-        kwargs.set_item("copy", copy)?;
-        kwargs.set_item("casting", casting)?;
+        kwargs.set_item(intern!(py, "align"), align)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
+        kwargs.set_item(intern!(py, "casting"), casting)?;
         Ok(py
             .import("numpy.lib.recfunctions")?
             .getattr(intern!(py, "unstructured_to_structured"))?
@@ -63706,7 +63706,7 @@ fn recfunctions_unstructured_to_structured(
     let out_shape: Vec<usize> = source_shape[..source_shape.len() - 1].to_vec();
     let zeros_fn = numpy.getattr(intern!(py, "zeros"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_val)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
     let out = zeros_fn.call(
         (PyTuple::new(py, out_shape.iter().copied())?,),
         Some(&kwargs),
@@ -64368,15 +64368,15 @@ fn ma_argmax(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = &axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
     }
     if let Some(fv) = &fill_value {
-        kwargs.set_item("fill_value", fv.bind(py))?;
+        kwargs.set_item(intern!(py, "fill_value"), fv.bind(py))?;
     }
     if let Some(out_val) = &out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
-    kwargs.set_item("keepdims", keepdims)?;
+    kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
     Ok(numpy
         .getattr(intern!(py, "ma"))?
         .getattr(intern!(py, "argmax"))?
@@ -64399,15 +64399,15 @@ fn ma_argmin(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = &axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
     }
     if let Some(fv) = &fill_value {
-        kwargs.set_item("fill_value", fv.bind(py))?;
+        kwargs.set_item(intern!(py, "fill_value"), fv.bind(py))?;
     }
     if let Some(out_val) = &out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
-    kwargs.set_item("keepdims", keepdims)?;
+    kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
     Ok(numpy
         .getattr(intern!(py, "ma"))?
         .getattr(intern!(py, "argmin"))?
@@ -64472,7 +64472,7 @@ fn try_zerocopy_f64_pad_1d_constant(
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     let total = before + n + after;
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", "float64")?;
+    out_kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&out_kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -64566,7 +64566,7 @@ fn try_zerocopy_pad_bytes_1d_constant(
         unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
     let total = before + n + after;
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&out_kwargs))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
@@ -64668,7 +64668,7 @@ fn try_zerocopy_pad_bytes_1d_edge(
         unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
     let total = before + n + after;
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&out_kwargs))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
@@ -64804,7 +64804,7 @@ fn try_zerocopy_pad_bytes_1d_wrap(
         unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
     let total = before + n + after;
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&out_kwargs))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
@@ -64921,7 +64921,7 @@ fn try_zerocopy_pad_bytes_1d_reflect(
         unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
     let total = before + n + after;
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&out_kwargs))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
@@ -65033,7 +65033,7 @@ fn pad(
         return Ok(out);
     }
     let call_kwargs = PyDict::new(py);
-    call_kwargs.set_item("mode", mode)?;
+    call_kwargs.set_item(intern!(py, "mode"), mode)?;
     if let Some(extras) = kwargs {
         for (k, v) in extras.iter() {
             call_kwargs.set_item(k, v)?;
@@ -65079,14 +65079,14 @@ fn polyfit(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(rcond_val) = rcond {
-        kwargs.set_item("rcond", rcond_val.bind(py))?;
+        kwargs.set_item(intern!(py, "rcond"), rcond_val.bind(py))?;
     }
-    kwargs.set_item("full", full)?;
+    kwargs.set_item(intern!(py, "full"), full)?;
     if let Some(w_val) = w {
-        kwargs.set_item("w", w_val.bind(py))?;
+        kwargs.set_item(intern!(py, "w"), w_val.bind(py))?;
     }
     if let Some(cov_val) = cov {
-        kwargs.set_item("cov", cov_val.bind(py))?;
+        kwargs.set_item(intern!(py, "cov"), cov_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "polyfit"))?
@@ -65167,9 +65167,9 @@ fn linalg_matrix_norm(
         }
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("keepdims", keepdims)?;
+    kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
     if let Some(ord_val) = ord {
-        kwargs.set_item("ord", ord_val.bind(py))?;
+        kwargs.set_item(intern!(py, "ord"), ord_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "linalg"))?
@@ -65200,7 +65200,7 @@ fn einsum_path(
     let call_args = PyTuple::new(py, call_items)?;
     let kwargs = PyDict::new(py);
     if let Some(opt_val) = optimize {
-        kwargs.set_item("optimize", opt_val.bind(py))?;
+        kwargs.set_item(intern!(py, "optimize"), opt_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "einsum_path"))?
@@ -65229,10 +65229,10 @@ fn asfortranarray(
         let asf_fn = numpy.getattr(intern!(py, "asfortranarray"))?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         if let Some(like_val) = like.as_ref() {
-            kwargs.set_item("like", like_val.bind(py))?;
+            kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         }
         Ok(asf_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -65377,13 +65377,13 @@ fn average(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(weights_val) = weights_for_fallback.as_ref() {
-            kwargs.set_item("weights", weights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
-        kwargs.set_item("returned", returned)?;
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "returned"), returned)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         Ok(avg_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
@@ -65893,7 +65893,7 @@ fn try_zerocopy_f64_average_axis(
     };
     let total_out = outer * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (total_out,), Some(&kwargs))?;
     if total_out > 0 {
         let Ok(ob) = PyBuffer::<f64>::get(&flat) else {
@@ -65999,7 +65999,7 @@ fn try_zerocopy_f64_average_axis(
             numpy.getattr(intern!(py, "float64"))?.call1((denominator,))?
         } else {
             let sum_kwargs = PyDict::new(py);
-            sum_kwargs.set_item("dtype", "float64")?;
+            sum_kwargs.set_item(intern!(py, "dtype"), "float64")?;
             numpy.call_method(intern!(py, "full"), (&shape_tuple, denominator), Some(&sum_kwargs))?
         };
         return Ok(Some(
@@ -66027,11 +66027,11 @@ fn testing_assert_equal(
     let assert_fn = numpy.getattr(intern!(py, "testing"))?.getattr(intern!(py, "assert_equal"))?;
     let kwargs = PyDict::new(py);
     if let Some(msg) = err_msg {
-        kwargs.set_item("err_msg", msg)?;
+        kwargs.set_item(intern!(py, "err_msg"), msg)?;
     }
-    kwargs.set_item("verbose", verbose)?;
+    kwargs.set_item(intern!(py, "verbose"), verbose)?;
     if strict {
-        kwargs.set_item("strict", true)?;
+        kwargs.set_item(intern!(py, "strict"), true)?;
     }
     assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
     Ok(())
@@ -66053,11 +66053,11 @@ fn testing_assert_almost_equal(
     let numpy = cached_numpy(py)?;
     let assert_fn = numpy.getattr(intern!(py, "testing"))?.getattr(intern!(py, "assert_almost_equal"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("decimal", decimal)?;
+    kwargs.set_item(intern!(py, "decimal"), decimal)?;
     if let Some(msg) = err_msg {
-        kwargs.set_item("err_msg", msg)?;
+        kwargs.set_item(intern!(py, "err_msg"), msg)?;
     }
-    kwargs.set_item("verbose", verbose)?;
+    kwargs.set_item(intern!(py, "verbose"), verbose)?;
     assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
     Ok(())
 }
@@ -66080,11 +66080,11 @@ fn testing_assert_array_almost_equal(
         .getattr(intern!(py, "testing"))?
         .getattr(intern!(py, "assert_array_almost_equal"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("decimal", decimal)?;
+    kwargs.set_item(intern!(py, "decimal"), decimal)?;
     if let Some(msg) = err_msg {
-        kwargs.set_item("err_msg", msg)?;
+        kwargs.set_item(intern!(py, "err_msg"), msg)?;
     }
-    kwargs.set_item("verbose", verbose)?;
+    kwargs.set_item(intern!(py, "verbose"), verbose)?;
     assert_fn.call((x.bind(py), y.bind(py)), Some(&kwargs))?;
     Ok(())
 }
@@ -66106,11 +66106,11 @@ fn testing_assert_array_less(
     let assert_fn = numpy.getattr(intern!(py, "testing"))?.getattr(intern!(py, "assert_array_less"))?;
     let kwargs = PyDict::new(py);
     if let Some(msg) = err_msg {
-        kwargs.set_item("err_msg", msg)?;
+        kwargs.set_item(intern!(py, "err_msg"), msg)?;
     }
-    kwargs.set_item("verbose", verbose)?;
+    kwargs.set_item(intern!(py, "verbose"), verbose)?;
     if strict {
-        kwargs.set_item("strict", true)?;
+        kwargs.set_item(intern!(py, "strict"), true)?;
     }
     assert_fn.call((x.bind(py), y.bind(py)), Some(&kwargs))?;
     Ok(())
@@ -66132,11 +66132,11 @@ fn testing_assert_approx_equal(
     let numpy = cached_numpy(py)?;
     let assert_fn = numpy.getattr(intern!(py, "testing"))?.getattr(intern!(py, "assert_approx_equal"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("significant", significant)?;
+    kwargs.set_item(intern!(py, "significant"), significant)?;
     if let Some(msg) = err_msg {
-        kwargs.set_item("err_msg", msg)?;
+        kwargs.set_item(intern!(py, "err_msg"), msg)?;
     }
-    kwargs.set_item("verbose", verbose)?;
+    kwargs.set_item(intern!(py, "verbose"), verbose)?;
     assert_fn.call((actual, desired), Some(&kwargs))?;
     Ok(())
 }
@@ -66214,13 +66214,13 @@ fn testing_assert_allclose(
     let fallback = |py: Python<'_>| -> PyResult<()> {
         let assert_fn = numpy.getattr(intern!(py, "testing"))?.getattr(intern!(py, "assert_allclose"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("rtol", rtol)?;
-        kwargs.set_item("atol", atol)?;
-        kwargs.set_item("equal_nan", equal_nan)?;
+        kwargs.set_item(intern!(py, "rtol"), rtol)?;
+        kwargs.set_item(intern!(py, "atol"), atol)?;
+        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
         if let Some(msg) = err_msg.as_ref() {
-            kwargs.set_item("err_msg", msg)?;
+            kwargs.set_item(intern!(py, "err_msg"), msg)?;
         }
-        kwargs.set_item("verbose", verbose)?;
+        kwargs.set_item(intern!(py, "verbose"), verbose)?;
         assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
         Ok(())
     };
@@ -66277,10 +66277,10 @@ fn testing_assert_array_equal(
         let assert_fn = numpy.getattr(intern!(py, "testing"))?.getattr(intern!(py, "assert_array_equal"))?;
         let kwargs = PyDict::new(py);
         if let Some(msg) = err_msg.as_ref() {
-            kwargs.set_item("err_msg", msg)?;
+            kwargs.set_item(intern!(py, "err_msg"), msg)?;
         }
-        kwargs.set_item("verbose", verbose)?;
-        kwargs.set_item("strict", strict)?;
+        kwargs.set_item(intern!(py, "verbose"), verbose)?;
+        kwargs.set_item(intern!(py, "strict"), strict)?;
         assert_fn.call((actual.bind(py), desired.bind(py)), Some(&kwargs))?;
         Ok(())
     };
@@ -66407,7 +66407,7 @@ fn unstack(py: Python<'_>, x: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != 0 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "unstack"))?
@@ -66434,7 +66434,7 @@ fn vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<P
     // defaults to axis=-1, and `inspect.signature` cannot say so because it is a gufunc
     // (`deadlock-audit-v46rn`).
     if axis != -1 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     Ok(numpy
         .getattr(intern!(py, "vecdot"))?
@@ -66454,7 +66454,7 @@ fn fromregex(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(enc) = encoding {
-        kwargs.set_item("encoding", enc)?;
+        kwargs.set_item(intern!(py, "encoding"), enc)?;
     }
     Ok(numpy
         .getattr(intern!(py, "fromregex"))?
@@ -66492,8 +66492,8 @@ fn mintypecode(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("typeset", typeset)?;
-    kwargs.set_item("default", default)?;
+    kwargs.set_item(intern!(py, "typeset"), typeset)?;
+    kwargs.set_item(intern!(py, "default"), default)?;
     Ok(numpy
         .getattr(intern!(py, "mintypecode"))?
         .call((typechars.bind(py),), Some(&kwargs))?
@@ -66509,7 +66509,7 @@ fn mintypecode(
 fn build_f64_eye(py: Python<'_>, n: usize, m: usize, k: i64) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "zeros"), ((n, m),), Some(&kwargs))?;
     if n > 0 && m > 0 {
         let i_start = if k < 0 { (-k) as usize } else { 0 };
@@ -66717,10 +66717,10 @@ fn identity(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         if let Some(like_val) = like.as_ref() {
-            kwargs.set_item("like", like_val.bind(py))?;
+            kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         }
         Ok(id_fn.call((n,), Some(&kwargs))?.unbind())
     };
@@ -66779,17 +66779,17 @@ fn logspace(
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let ls_fn = numpy.getattr(intern!(py, "logspace"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("num", num)?;
-        kwargs.set_item("endpoint", endpoint)?;
-        kwargs.set_item("base", base)?;
+        kwargs.set_item(intern!(py, "num"), num)?;
+        kwargs.set_item(intern!(py, "endpoint"), endpoint)?;
+        kwargs.set_item(intern!(py, "base"), base)?;
         if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         // numpy's own default for `logspace` is axis=0, verified against the
         // installed interpreter - sending it costs a dict entry and a keyword parse
         // to communicate the default (`deadlock-audit-v46rn`).
         if axis != 0 {
-            kwargs.set_item("axis", axis)?;
+            kwargs.set_item(intern!(py, "axis"), axis)?;
         }
         Ok(ls_fn
             .call((start.bind(py), stop.bind(py)), Some(&kwargs))?
@@ -66859,8 +66859,8 @@ fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<P
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let copy_fn = numpy.getattr(intern!(py, "copy"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("order", order)?;
-        kwargs.set_item("subok", subok)?;
+        kwargs.set_item(intern!(py, "order"), order)?;
+        kwargs.set_item(intern!(py, "subok"), subok)?;
         Ok(copy_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
     if !matches!(order, "C" | "K" | "F") {
@@ -67133,7 +67133,7 @@ fn try_zerocopy_f64_sort_flat(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<f64>::get(&out)?;
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
@@ -67213,7 +67213,7 @@ fn try_zerocopy_c128_sort_flat(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
     let out_buffer = PyBuffer::<f64>::get(&outview)?;
@@ -67306,7 +67306,7 @@ fn try_zerocopy_c128_unique_flat(
     }
     let nu = uniq.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
     let out_buffer = PyBuffer::<f64>::get(&outview)?;
@@ -67844,7 +67844,7 @@ fn try_zerocopy_c64_unique_flat(
     }
     let nu = uniq.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex64")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex64")?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float32",))?;
     let out_buffer = PyBuffer::<f32>::get(&outview)?;
@@ -67921,7 +67921,7 @@ fn try_native_datetime_unique_flat(
     let nu = ticks.len();
     // Fresh same-dtype (datetime64/timedelta64[unit]) output; write the unique ticks via an int64 view.
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), ("int64",))?;
     let out_buffer = PyBuffer::<i64>::get(&oview)?;
@@ -67999,7 +67999,7 @@ fn try_zerocopy_c128_sort_lastaxis(
     }
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float64",))?;
     let out_buffer = PyBuffer::<f64>::get(&outview)?;
@@ -68106,7 +68106,7 @@ fn try_zerocopy_c128_sort_axis0(
         (PyTuple::new(py, shape.iter().copied())?,),
         Some(&{
             let kw = PyDict::new(py);
-            kw.set_item("dtype", "complex128")?;
+            kw.set_item(intern!(py, "dtype"), "complex128")?;
             kw
         }),
     )?;
@@ -68226,7 +68226,7 @@ fn try_zerocopy_c128_sort_midaxis(
         (PyTuple::new(py, shape.iter().copied())?,),
         Some(&{
             let kw = PyDict::new(py);
-            kw.set_item("dtype", "complex128")?;
+            kw.set_item(intern!(py, "dtype"), "complex128")?;
             kw
         }),
     )?;
@@ -68310,7 +68310,7 @@ fn try_zerocopy_c64_sort_flat(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex64")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex64")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float32",))?;
     let out_buffer = PyBuffer::<f32>::get(&outview)?;
@@ -68394,7 +68394,7 @@ fn try_zerocopy_c64_sort_lastaxis(
     }
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex64")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex64")?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let outview = out.call_method1(intern!(py, "view"), ("float32",))?;
     let out_buffer = PyBuffer::<f32>::get(&outview)?;
@@ -68498,7 +68498,7 @@ fn try_zerocopy_c64_sort_axis0(
         (PyTuple::new(py, shape.iter().copied())?,),
         Some(&{
             let kw = PyDict::new(py);
-            kw.set_item("dtype", "complex64")?;
+            kw.set_item(intern!(py, "dtype"), "complex64")?;
             kw
         }),
     )?;
@@ -68615,7 +68615,7 @@ fn try_zerocopy_c64_sort_midaxis(
         (PyTuple::new(py, shape.iter().copied())?,),
         Some(&{
             let kw = PyDict::new(py);
-            kw.set_item("dtype", "complex64")?;
+            kw.set_item(intern!(py, "dtype"), "complex64")?;
             kw
         }),
     )?;
@@ -68671,7 +68671,7 @@ fn int_sort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send>(
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<T>::get(&out)?;
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
@@ -68750,7 +68750,7 @@ where
             },
         );
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<T>::get(&out)?;
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
@@ -68819,7 +68819,7 @@ fn bool_sort_flat_counting(
             },
         );
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "bool")?;
+    kwargs.set_item(intern!(py, "dtype"), "bool")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     let out_view = out.call_method1(intern!(py, "view"), ("uint8",))?;
     let out_buffer = PyBuffer::<u8>::get(&out_view)?;
@@ -69009,7 +69009,7 @@ fn try_native_string_sort_lastaxis(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -69148,7 +69148,7 @@ fn try_native_string_sort_nonlast(
         string_nonlast_prologue!(py, numpy, a, axis_spec, 1usize << 18);
     use rayon::prelude::*;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -69205,7 +69205,7 @@ fn try_native_string_argsort_stable_nonlast(
         string_nonlast_prologue!(py, numpy, a, axis_spec, 1usize << 18);
     use rayon::prelude::*;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -69340,7 +69340,7 @@ fn try_native_string_sort_flat(
     };
     // Fresh same-dtype output; gather sorted records (parallel disjoint writes).
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), ((n,),), Some(&out_kwargs))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
@@ -70532,7 +70532,7 @@ fn try_native_string_unique_full(
     let nu = group_starts.len();
 
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let unique_arr = numpy.call_method(intern!(py, "empty"), ((nu,),), Some(&out_kwargs))?;
     {
         let out_u8 = unique_arr.call_method1(intern!(py, "view"), (&uint8,))?;
@@ -70559,7 +70559,7 @@ fn try_native_string_unique_full(
     let mut outs: Vec<Bound<'_, PyAny>> = vec![unique_arr];
     if ret_index {
         let kw = PyDict::new(py);
-        kw.set_item("dtype", "intp")?;
+        kw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kw))?;
         let Ok(buf) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
@@ -70577,7 +70577,7 @@ fn try_native_string_unique_full(
     }
     if ret_inverse {
         let kw = PyDict::new(py);
-        kw.set_item("dtype", "intp")?;
+        kw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (n,), Some(&kw))?;
         let Ok(buf) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
@@ -70604,7 +70604,7 @@ fn try_native_string_unique_full(
     }
     if ret_counts {
         let kw = PyDict::new(py);
-        kw.set_item("dtype", "intp")?;
+        kw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (nu,), Some(&kw))?;
         let Ok(buf) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
@@ -70783,7 +70783,7 @@ fn try_native_f16_isin(
                 }
             }
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", "uint8")?;
+            kwargs.set_item(intern!(py, "dtype"), "uint8")?;
             let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
             if n > 0 {
                 let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
@@ -70887,7 +70887,7 @@ fn try_native_f16_searchsorted_table(
     }
     let fallback_to_numpy = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("side", side)?;
+        kwargs.set_item(intern!(py, "side"), side)?;
         numpy
             .getattr(intern!(py, "searchsorted"))?
             .call((a, v), Some(&kwargs))
@@ -70939,7 +70939,7 @@ fn try_native_f16_searchsorted_table(
     }
     let query_shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let flat = numpy.call_method(intern!(py, "empty"), (v_raw.len(),), Some(&kwargs))?;
     let Ok(output_buffer) = PyBuffer::<i64>::get(&flat) else {
         return Ok(None);
@@ -71675,7 +71675,7 @@ fn try_native_datetime_sort_flat(
     }
     // Fresh output of the SAME datetime/timedelta dtype, viewed as int64 for the parallel sort.
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), ((n,),), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), ("int64",))?;
     let out_buffer = PyBuffer::<i64>::get(&oview)?;
@@ -71789,7 +71789,7 @@ fn try_native_datetime_sort_axes(
     }
     // Fresh output of the SAME datetime/timedelta dtype, viewed as int64 for the parallel sort.
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), ("int64",))?;
@@ -71887,7 +71887,7 @@ fn int_sort_lastaxis_typed<T: pyo3::buffer::Element + Copy + Ord + Send>(
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), n) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<T>::get(&out)?;
@@ -72000,7 +72000,7 @@ fn int_sort_axis0_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + De
             lane.sort_unstable();
         });
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<T>::get(&out)?;
@@ -72109,7 +72109,7 @@ fn int_sort_midaxis_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + 
             vlane.sort_unstable();
         });
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<T>::get(&out)?;
@@ -72269,7 +72269,7 @@ fn try_zerocopy_f64_sort_lastaxis(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<f64>::get(&out)?;
@@ -72370,7 +72370,7 @@ fn try_zerocopy_f64_sort_axis0(
             lane.sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
         });
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<f64>::get(&out)?;
@@ -72483,7 +72483,7 @@ fn try_zerocopy_f64_sort_midaxis(
             dstlane.sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
         });
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<f64>::get(&out)?;
@@ -72581,7 +72581,7 @@ fn try_native_f16_sort(
     }
     let widened = a.call_method1(intern!(py, "astype"), (numpy.getattr(intern!(py, "float32"))?,))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("axis", -1)?;
+    kwargs.set_item(intern!(py, "axis"), -1)?;
     let sorted = numpy.call_method(intern!(py, "sort"), (widened,), Some(&kwargs))?;
     let out = sorted.call_method1(intern!(py, "astype"), (numpy.getattr(intern!(py, "float16"))?,))?;
     Ok(Some(out.unbind()))
@@ -75353,7 +75353,7 @@ fn string_argsort_stable_lastaxis(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "intp")?;
+    kwargs.set_item(intern!(py, "dtype"), "intp")?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -76746,7 +76746,7 @@ fn try_zerocopy_f64_sort_complex_flat(
     }
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
+    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n == 0 {
         return Ok(Some(out.unbind()));
@@ -76879,13 +76879,13 @@ fn nanmedian(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("overwrite_input", overwrite_input)?;
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         Ok(nanmedian_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
@@ -76966,12 +76966,12 @@ fn ma_average(
         let avg_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "average"))?;
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(weights_val) = weights_for_fallback.as_ref() {
-            kwargs.set_item("weights", weights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
-        kwargs.set_item("returned", returned)?;
+        kwargs.set_item(intern!(py, "returned"), returned)?;
         Ok(avg_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
@@ -77289,7 +77289,7 @@ fn size_count(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult
     let size_fn = numpy.getattr(intern!(py, "size"))?;
     let kwargs = PyDict::new(py);
     if let Some(axis_val) = axis {
-        kwargs.set_item("axis", axis_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
     }
     Ok(size_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -77476,18 +77476,18 @@ fn quantile(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
         if let Some(out_val) = out.as_ref() {
-            kwargs.set_item("out", out_val.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item("overwrite_input", overwrite_input)?;
+        kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
         if let Some(method_val) = method.as_ref() {
-            kwargs.set_item("method", method_val)?;
+            kwargs.set_item(intern!(py, "method"), method_val)?;
         }
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(weights_val) = weights.as_ref() {
-            kwargs.set_item("weights", weights_val.bind(py))?;
+            kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
         Ok(quantile_fn
             .call((a.bind(py), q.bind(py)), Some(&kwargs))?
@@ -77819,7 +77819,7 @@ fn try_zerocopy_f64_polyval(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -77907,7 +77907,7 @@ fn try_zerocopy_f32_polyval(
     let total = cells.len();
     let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
@@ -78033,10 +78033,10 @@ fn make_mask(
         let numpy = py.import("numpy")?;
         let make_mask_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "make_mask"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("copy", copy)?;
-        kwargs.set_item("shrink", shrink)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
+        kwargs.set_item(intern!(py, "shrink"), shrink)?;
         if let Some(dtype_val) = &dtype_for_fallback {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         Ok(make_mask_fn
             .call((m_for_fallback.bind(py),), Some(&kwargs))?
@@ -78073,7 +78073,7 @@ fn masked_all(py: Python<'_>, shape: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyR
         let masked_all_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "masked_all"))?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = &dtype_for_fallback {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         Ok(masked_all_fn
             .call((shape.bind(py),), Some(&kwargs))?
@@ -78166,7 +78166,7 @@ fn try_zerocopy_ma_compressed_f64(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (kept,), Some(&kwargs))?;
     if kept > 0 {
         let Ok(out_buf) = PyBuffer::<f64>::get(&flat) else {
@@ -78228,19 +78228,19 @@ fn ifft(
     let ifft_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "ifft"))?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
-        kwargs.set_item("n", n_val)?;
+        kwargs.set_item(intern!(py, "n"), n_val)?;
     }
     // numpy's own default for `ifft` is axis=-1, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != -1 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(ifft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -78262,16 +78262,16 @@ fn fft2(
     let fft2_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "fft2"))?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
-        kwargs.set_item("s", s_val.bind(py))?;
+        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
     }
     if let Some(axes_val) = axes {
-        kwargs.set_item("axes", axes_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(fft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -78294,16 +78294,16 @@ fn ifft2(
     let ifft2_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "ifft2"))?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
-        kwargs.set_item("s", s_val.bind(py))?;
+        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
     }
     if let Some(axes_val) = axes {
-        kwargs.set_item("axes", axes_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(ifft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -78327,16 +78327,16 @@ fn fftn(
     let fftn_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "fftn"))?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
-        kwargs.set_item("s", s_val.bind(py))?;
+        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
     }
     if let Some(axes_val) = axes {
-        kwargs.set_item("axes", axes_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(fftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -78360,16 +78360,16 @@ fn ifftn(
     let ifftn_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "ifftn"))?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
-        kwargs.set_item("s", s_val.bind(py))?;
+        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
     }
     if let Some(axes_val) = axes {
-        kwargs.set_item("axes", axes_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(ifftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -78686,7 +78686,7 @@ fn try_zerocopy_f64_cross_n3(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), ((n, 3),), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<f64>::get(&out) else {
@@ -78777,7 +78777,7 @@ fn int_cross_n3_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), ((n, 3),), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
@@ -78922,7 +78922,7 @@ fn try_zerocopy_f32_cross_n3(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let out = numpy.call_method(intern!(py, "empty"), ((n, 3),), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
@@ -79020,7 +79020,7 @@ where
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), ((3usize, n),), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
@@ -79180,11 +79180,11 @@ fn cross(
     let cross_fn = numpy.getattr(intern!(py, "cross"))?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axisa", axisa)?;
-        kwargs.set_item("axisb", axisb)?;
-        kwargs.set_item("axisc", axisc)?;
+        kwargs.set_item(intern!(py, "axisa"), axisa)?;
+        kwargs.set_item(intern!(py, "axisb"), axisb)?;
+        kwargs.set_item(intern!(py, "axisc"), axisc)?;
         if let Some(value) = axis.as_ref() {
-            kwargs.set_item("axis", value.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), value.bind(py))?;
         }
         Ok(cross_fn
             .call((a.bind(py), b.bind(py)), Some(&kwargs))?
@@ -79323,7 +79323,7 @@ fn multi_dot(py: Python<'_>, arrays: Py<PyAny>, out: Option<Py<PyAny>>) -> PyRes
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(value) = out.as_ref() {
-            kwargs.set_item("out", value.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), value.bind(py))?;
         }
         Ok(multi_dot_fn
             .call((arrays.bind(py),), Some(&kwargs))?
@@ -79426,10 +79426,10 @@ fn masked_values(
         let numpy = py.import("numpy")?;
         let masked_values_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "masked_values"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("rtol", rtol)?;
-        kwargs.set_item("atol", atol)?;
-        kwargs.set_item("copy", copy)?;
-        kwargs.set_item("shrink", shrink)?;
+        kwargs.set_item(intern!(py, "rtol"), rtol)?;
+        kwargs.set_item(intern!(py, "atol"), atol)?;
+        kwargs.set_item(intern!(py, "copy"), copy)?;
+        kwargs.set_item(intern!(py, "shrink"), shrink)?;
         Ok(masked_values_fn
             .call(
                 (x_for_fallback.bind(py), value_for_fallback.bind(py)),
@@ -79534,10 +79534,10 @@ fn ma_ediff1d(
         let ma_ediff1d_fn = numpy.getattr(intern!(py, "ma"))?.getattr(intern!(py, "ediff1d"))?;
         let kwargs = PyDict::new(py);
         if let Some(value) = &to_end_for_fallback {
-            kwargs.set_item("to_end", value.bind(py))?;
+            kwargs.set_item(intern!(py, "to_end"), value.bind(py))?;
         }
         if let Some(value) = &to_begin_for_fallback {
-            kwargs.set_item("to_begin", value.bind(py))?;
+            kwargs.set_item(intern!(py, "to_begin"), value.bind(py))?;
         }
         Ok(ma_ediff1d_fn
             .call((arr_for_fallback.bind(py),), Some(&kwargs))?
@@ -79621,7 +79621,7 @@ fn ma_ediff1d(
         if is_nomask {
             let shape = py_result.bind(py).getattr(intern!(py, "shape"))?;
             let zeros_kwargs = PyDict::new(py);
-            zeros_kwargs.set_item("dtype", numpy.getattr(intern!(py, "bool_"))?)?;
+            zeros_kwargs.set_item(intern!(py, "dtype"), numpy.getattr(intern!(py, "bool_"))?)?;
             let explicit_mask = numpy
                 .getattr(intern!(py, "zeros"))?
                 .call((shape,), Some(&zeros_kwargs))?;
@@ -79728,7 +79728,7 @@ fn try_zerocopy_f64_kron1d(
     let m = b_in.len();
     let total = n * m;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -79811,7 +79811,7 @@ fn try_zerocopy_f64_kron2d(
     let out_rows = am * bm;
     let out_cols = an * bn;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), ((out_rows, out_cols),), Some(&kwargs))?;
     let total = out_rows * out_cols;
     if total > 0 {
@@ -79903,7 +79903,7 @@ fn kron2d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) 
     let out_rows = am * bm;
     let out_cols = an * bn;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), ((out_rows, out_cols),), Some(&kwargs))?;
     let total = out_rows * out_cols;
     if total > 0 {
@@ -80027,7 +80027,7 @@ fn kron1d_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
     let m = b_in.len();
     let total = n * m;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&out) else {
@@ -80254,7 +80254,7 @@ fn try_zerocopy_f64_outer(
     let m = b_in.len();
     let total = n * m;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -80333,7 +80333,7 @@ fn outer_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) -
     let m = b_in.len();
     let total = n * m;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -80436,7 +80436,7 @@ fn outer(
     let outer_fn = numpy.getattr(intern!(py, "outer"))?;
     let kwargs = PyDict::new(py);
     if let Some(ref value) = out {
-        kwargs.set_item("out", value.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), value.bind(py))?;
     }
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(outer_fn
@@ -80579,7 +80579,7 @@ fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny
     }
     let kwargs = PyDict::new(py);
     if let Some(value) = p {
-        kwargs.set_item("p", value.bind(py))?;
+        kwargs.set_item(intern!(py, "p"), value.bind(py))?;
     }
     Ok(cond_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -80806,12 +80806,12 @@ fn norm(
     let norm_fn = numpy.getattr(intern!(py, "linalg"))?.getattr(intern!(py, "norm"))?;
     let kwargs = PyDict::new(py);
     if let Some(value) = ord {
-        kwargs.set_item("ord", value.bind(py))?;
+        kwargs.set_item(intern!(py, "ord"), value.bind(py))?;
     }
     if let Some(value) = axis {
-        kwargs.set_item("axis", value.bind(py))?;
+        kwargs.set_item(intern!(py, "axis"), value.bind(py))?;
     }
-    kwargs.set_item("keepdims", keepdims)?;
+    kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
     Ok(norm_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
 }
 
@@ -80847,7 +80847,7 @@ fn fft_shift_impl(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(value) = axes_for_fallback.as_ref() {
-            kwargs.set_item("axes", value.bind(py))?;
+            kwargs.set_item(intern!(py, "axes"), value.bind(py))?;
         }
         Ok(np_fn
             .call((x_for_fallback.bind(py),), Some(&kwargs))?
@@ -80880,7 +80880,7 @@ fn rfftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyRe
     // n==0 / d==0 already raise the same ZeroDivisionError numpy itself would.
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("d", d)?;
+    kwargs.set_item(intern!(py, "d"), d)?;
     Ok(numpy
         .getattr(intern!(py, "fft"))?
         .call_method(intern!(py, "rfftfreq"), (n,), Some(&kwargs))?
@@ -80924,19 +80924,19 @@ fn rfft(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
-        kwargs.set_item("n", n_val)?;
+        kwargs.set_item(intern!(py, "n"), n_val)?;
     }
     // numpy's own default for `rfft` is axis=-1, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != -1 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "fft"))?
@@ -80958,19 +80958,19 @@ fn irfft(
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(n) = n {
-        kwargs.set_item("n", n)?;
+        kwargs.set_item(intern!(py, "n"), n)?;
     }
     // numpy's own default for `irfft` is axis=-1, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != -1 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     if let Some(norm) = norm {
-        kwargs.set_item("norm", norm)?;
+        kwargs.set_item(intern!(py, "norm"), norm)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "fft"))?
@@ -80996,19 +80996,19 @@ fn hfft(
     let hfft_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "hfft"))?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
-        kwargs.set_item("n", n_val)?;
+        kwargs.set_item(intern!(py, "n"), n_val)?;
     }
     // numpy's own default for `hfft` is axis=-1, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != -1 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(hfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -81027,19 +81027,19 @@ fn ihfft(
     let ihfft_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "ihfft"))?;
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
-        kwargs.set_item("n", n_val)?;
+        kwargs.set_item(intern!(py, "n"), n_val)?;
     }
     // numpy's own default for `ihfft` is axis=-1, verified against the
     // installed interpreter - sending it costs a dict entry and a keyword parse
     // to communicate the default (`deadlock-audit-v46rn`).
     if axis != -1 {
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(ihfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -81062,16 +81062,16 @@ fn rfft2(
     let rfft2_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "rfft2"))?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
-        kwargs.set_item("s", s_val.bind(py))?;
+        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
     }
     if let Some(axes_val) = axes {
-        kwargs.set_item("axes", axes_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(rfft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -81094,16 +81094,16 @@ fn irfft2(
     let irfft2_fn = numpy.getattr(intern!(py, "fft"))?.getattr(intern!(py, "irfft2"))?;
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
-        kwargs.set_item("s", s_val.bind(py))?;
+        kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
     }
     if let Some(axes_val) = axes {
-        kwargs.set_item("axes", axes_val.bind(py))?;
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
     }
     if let Some(norm_val) = norm {
-        kwargs.set_item("norm", norm_val)?;
+        kwargs.set_item(intern!(py, "norm"), norm_val)?;
     }
     if let Some(out_val) = out {
-        kwargs.set_item("out", out_val.bind(py))?;
+        kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     Ok(irfft2_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
@@ -81178,7 +81178,7 @@ fn try_zerocopy_f64_diagflat(
     let abs_k = k.unsigned_abs() as usize;
     let s = n + abs_k;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "zeros"), ((s, s),), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -81302,7 +81302,7 @@ fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> Py
     if dtype_kind == "c" {
         let numpy = cached_numpy(py)?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("wrap", wrap)?;
+        kwargs.set_item(intern!(py, "wrap"), wrap)?;
         numpy
             .getattr(intern!(py, "fill_diagonal"))?
             .call((a, val.bind(py)), Some(&kwargs))?;
@@ -81324,7 +81324,7 @@ fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> Py
     // dtype-cast surface), so delegate.
     let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("wrap", wrap)?;
+    kwargs.set_item(intern!(py, "wrap"), wrap)?;
     numpy
         .getattr(intern!(py, "fill_diagonal"))?
         .call((a, val.bind(py)), Some(&kwargs))?;
@@ -81385,7 +81385,7 @@ fn try_zerocopy_repeat_each(
         let m = input.len();
         let total = m * times;
         let kw = PyDict::new(py);
-        kw.set_item("dtype", mover_name)?;
+        kw.set_item(intern!(py, "dtype"), mover_name)?;
         let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kw))?;
         if total > 0 {
             let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
@@ -81667,7 +81667,7 @@ fn try_zerocopy_ravel_c(
     const RAVEL_PAR_MIN: usize = 1 << 16;
     let par = n >= RAVEL_PAR_MIN && rayon::current_num_threads() >= 2;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     // raise-mode OOB is detected INLINE during the single fused pass (an out-of-range coord sets this flag,
     // relaxed; the parallel join barriers it). If set afterwards we discard the output and defer so numpy
@@ -81827,7 +81827,7 @@ fn try_zerocopy_unravel_c(
         let mut v = Vec::with_capacity(d);
         for _ in 0..d {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", "int64")?;
+            kwargs.set_item(intern!(py, "dtype"), "int64")?;
             v.push(numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?);
         }
         v
@@ -81997,7 +81997,7 @@ fn build_tri_indices(
         }
     }
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "int64")?;
+    kw.set_item(intern!(py, "dtype"), "int64")?;
     let rows = numpy.call_method(intern!(py, "empty"), (count,), Some(&kw))?;
     let cols = numpy.call_method(intern!(py, "empty"), (count,), Some(&kw))?;
     if count > 0 {
@@ -82336,7 +82336,7 @@ fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     };
     let total_out = outer * li * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", out_dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), out_dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (total_out,), Some(&kwargs))?;
     if total_out > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -82969,12 +82969,12 @@ fn zeros(
     let numpy = cached_numpy(py)?;
     let zeros_fn = numpy.getattr(intern!(py, "zeros"))?;
     let kw = PyDict::new(py);
-    kw.set_item("shape", shape)?;
+    kw.set_item(intern!(py, "shape"), shape)?;
     if let Some(d) = dtype {
-        kw.set_item("dtype", d)?;
+        kw.set_item(intern!(py, "dtype"), d)?;
     }
     if let Some(o) = order {
-        kw.set_item("order", o)?;
+        kw.set_item(intern!(py, "order"), o)?;
     }
     if let Some(extra) = kwargs {
         for (k, v) in extra.iter() {
@@ -83010,12 +83010,12 @@ fn ones(
     // Always passthrough to NumPy - see zeros() comment
     let ones_fn = numpy.getattr(intern!(py, "ones"))?;
     let kw = PyDict::new(py);
-    kw.set_item("shape", shape)?;
+    kw.set_item(intern!(py, "shape"), shape)?;
     if let Some(d) = dtype {
-        kw.set_item("dtype", d)?;
+        kw.set_item(intern!(py, "dtype"), d)?;
     }
     if let Some(o) = order {
-        kw.set_item("order", o)?;
+        kw.set_item(intern!(py, "order"), o)?;
     }
     if let Some(extra) = kwargs {
         for (k, v) in extra.iter() {
@@ -83520,17 +83520,17 @@ fn sum(
     let sum_fn = numpy.getattr(intern!(py, "sum"))?;
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
-        kw.set_item("axis", ax.bind(py))?;
+        kw.set_item(intern!(py, "axis"), ax.bind(py))?;
     }
     if let Some(dt) = dtype.as_ref() {
-        kw.set_item("dtype", dt.bind(py))?;
+        kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
     }
     if let Some(o) = out.as_ref() {
-        kw.set_item("out", o.bind(py))?;
+        kw.set_item(intern!(py, "out"), o.bind(py))?;
     }
-    kw.set_item("keepdims", keepdims)?;
+    kw.set_item(intern!(py, "keepdims"), keepdims)?;
     if let Some(init) = initial.as_ref() {
-        kw.set_item("initial", init.bind(py))?;
+        kw.set_item(intern!(py, "initial"), init.bind(py))?;
     }
     Ok(sum_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
@@ -83596,7 +83596,7 @@ fn try_zerocopy_f64_prod(
 
     let out_elems = outer * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -83912,7 +83912,7 @@ fn try_zerocopy_f64_minmax(
 
     let out_elems = outer * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -84049,7 +84049,7 @@ where
     let out_elems = outer * inner;
     let dt = a.getattr(intern!(py, "dtype"))?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dt)?;
+    kwargs.set_item(intern!(py, "dtype"), &dt)?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -84227,7 +84227,7 @@ fn minmax_bool_typed(
 
     let out_elems = outer * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let flat_u8 = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&flat_u8) else {
@@ -84326,9 +84326,9 @@ fn try_zerocopy_int_minmax(
         let op = if take_min { "min" } else { "max" };
         let kwargs = PyDict::new(py);
         if let Some(ax) = axis {
-            kwargs.set_item("axis", ax)?;
+            kwargs.set_item(intern!(py, "axis"), ax)?;
         }
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         return Ok(Some(numpy.getattr(op)?.call((a,), Some(&kwargs))?.unbind()));
     }
     match (kind.as_str(), itemsize) {
@@ -84371,20 +84371,20 @@ fn prod(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(dt) = dtype_for_fallback.as_ref() {
-            kw.set_item("dtype", dt.bind(py))?;
+            kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item("keepdims", keepdims)?;
+        kw.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(init) = initial_for_fallback.as_ref() {
-            kw.set_item("initial", init.bind(py))?;
+            kw.set_item(intern!(py, "initial"), init.bind(py))?;
         }
         if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item("where", w.bind(py))?;
+            kw.set_item(intern!(py, "where"), w.bind(py))?;
         }
         Ok(prod_fn
             .call((a_for_fallback.bind(py),), Some(&kw))?
@@ -84532,15 +84532,15 @@ fn mean(
     let mean_fn = numpy.getattr(intern!(py, "mean"))?;
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
-        kw.set_item("axis", ax.bind(py))?;
+        kw.set_item(intern!(py, "axis"), ax.bind(py))?;
     }
     if let Some(dt) = dtype.as_ref() {
-        kw.set_item("dtype", dt.bind(py))?;
+        kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
     }
     if let Some(o) = out.as_ref() {
-        kw.set_item("out", o.bind(py))?;
+        kw.set_item(intern!(py, "out"), o.bind(py))?;
     }
-    kw.set_item("keepdims", keepdims)?;
+    kw.set_item(intern!(py, "keepdims"), keepdims)?;
     Ok(mean_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
@@ -84552,8 +84552,8 @@ enum DdofArg {
 impl DdofArg {
     fn set_numpy_kwarg(&self, py: Python<'_>, kw: &Bound<'_, PyDict>) -> PyResult<()> {
         match self {
-            Self::Native(value) => kw.set_item("ddof", *value),
-            Self::Delegate(value) => kw.set_item("ddof", value.bind(py)),
+            Self::Native(value) => kw.set_item(intern!(py, "ddof"), *value),
+            Self::Delegate(value) => kw.set_item(intern!(py, "ddof"), value.bind(py)),
         }
     }
 }
@@ -84733,16 +84733,16 @@ fn py_std(
     let std_fn = numpy.getattr(intern!(py, "std"))?;
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
-        kw.set_item("axis", ax.bind(py))?;
+        kw.set_item(intern!(py, "axis"), ax.bind(py))?;
     }
     if let Some(dt) = dtype.as_ref() {
-        kw.set_item("dtype", dt.bind(py))?;
+        kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
     }
     if let Some(o) = out.as_ref() {
-        kw.set_item("out", o.bind(py))?;
+        kw.set_item(intern!(py, "out"), o.bind(py))?;
     }
     ddof.set_numpy_kwarg(py, &kw)?;
-    kw.set_item("keepdims", keepdims)?;
+    kw.set_item(intern!(py, "keepdims"), keepdims)?;
     Ok(std_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
@@ -84871,16 +84871,16 @@ fn var(
     let var_fn = numpy.getattr(intern!(py, "var"))?;
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
-        kw.set_item("axis", ax.bind(py))?;
+        kw.set_item(intern!(py, "axis"), ax.bind(py))?;
     }
     if let Some(dt) = dtype.as_ref() {
-        kw.set_item("dtype", dt.bind(py))?;
+        kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
     }
     if let Some(o) = out.as_ref() {
-        kw.set_item("out", o.bind(py))?;
+        kw.set_item(intern!(py, "out"), o.bind(py))?;
     }
     ddof.set_numpy_kwarg(py, &kw)?;
-    kw.set_item("keepdims", keepdims)?;
+    kw.set_item(intern!(py, "keepdims"), keepdims)?;
     Ok(var_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
@@ -85320,17 +85320,17 @@ fn py_min(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item("keepdims", keepdims)?;
+        kw.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(init) = initial_for_fallback.as_ref() {
-            kw.set_item("initial", init.bind(py))?;
+            kw.set_item(intern!(py, "initial"), init.bind(py))?;
         }
         if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item("where", w.bind(py))?;
+            kw.set_item(intern!(py, "where"), w.bind(py))?;
         }
         Ok(min_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
@@ -85499,17 +85499,17 @@ fn py_max(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item("keepdims", keepdims)?;
+        kw.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(init) = initial_for_fallback.as_ref() {
-            kw.set_item("initial", init.bind(py))?;
+            kw.set_item(intern!(py, "initial"), init.bind(py))?;
         }
         if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item("where", w.bind(py))?;
+            kw.set_item(intern!(py, "where"), w.bind(py))?;
         }
         Ok(max_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
@@ -85706,14 +85706,14 @@ fn all(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item("keepdims", keepdims)?;
+        kw.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item("where", w.bind(py))?;
+            kw.set_item(intern!(py, "where"), w.bind(py))?;
         }
         Ok(all_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
@@ -85810,14 +85810,14 @@ fn any(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item("keepdims", keepdims)?;
+        kw.set_item(intern!(py, "keepdims"), keepdims)?;
         if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item("where", w.bind(py))?;
+            kw.set_item(intern!(py, "where"), w.bind(py))?;
         }
         Ok(any_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
@@ -85927,7 +85927,7 @@ where
     }
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", complex_name)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
@@ -86067,7 +86067,7 @@ where
     }
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", complex_name)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
@@ -86219,7 +86219,7 @@ where
     // Output: one complex per lane (rows complex = 2*rows reals), shaped out_shape (the input shape
     // with the last axis dropped, or set to 1 for keepdims).
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", complex_name)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
@@ -86381,7 +86381,7 @@ where
     }
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", complex_name)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
@@ -86546,7 +86546,7 @@ where
     }
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", complex_name)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
@@ -86711,7 +86711,7 @@ where
     }
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", complex_name)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
@@ -86926,7 +86926,7 @@ where
     }
     let src: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), total) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", complex_name)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
@@ -87044,7 +87044,7 @@ where
             }
         });
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", complex_name)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
@@ -87154,7 +87154,7 @@ where
         });
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", complex_name)?;
+    kwargs.set_item(intern!(py, "dtype"), complex_name)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     let oview = out.call_method1(intern!(py, "view"), (real_name,))?;
@@ -87323,13 +87323,13 @@ fn cumsum(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kwargs.set_item("axis", ax.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(dt) = dtype_for_fallback.as_ref() {
-            kwargs.set_item("dtype", dt.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(cumsum_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
@@ -87518,13 +87518,13 @@ fn cumprod(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kwargs.set_item("axis", ax.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(dt) = dtype_for_fallback.as_ref() {
-            kwargs.set_item("dtype", dt.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(cumprod_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
@@ -87665,14 +87665,14 @@ fn trace(
         let numpy = cached_numpy(py)?;
         let trace_fn = numpy.getattr(intern!(py, "trace"))?;
         let kwargs = PyDict::new(py);
-        kwargs.set_item("offset", offset)?;
-        kwargs.set_item("axis1", axis1)?;
-        kwargs.set_item("axis2", axis2)?;
+        kwargs.set_item(intern!(py, "offset"), offset)?;
+        kwargs.set_item(intern!(py, "axis1"), axis1)?;
+        kwargs.set_item(intern!(py, "axis2"), axis2)?;
         if let Some(dt) = dtype_for_fallback.as_ref() {
-            kwargs.set_item("dtype", dt.bind(py))?;
+            kwargs.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(trace_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
@@ -88647,10 +88647,10 @@ fn argmax(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(argmax_fn
             .call((a_for_fallback.bind(py),), Some(&kw))?
@@ -88856,10 +88856,10 @@ fn argmin(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(argmin_fn
             .call((a_for_fallback.bind(py),), Some(&kw))?
@@ -89335,7 +89335,7 @@ fn try_zerocopy_f64_batched_matmul(
     out_shape.push(m);
     out_shape.push(n);
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(
         "empty",
         (PyTuple::new(py, out_shape.iter().copied())?,),
@@ -89405,7 +89405,7 @@ fn int_matmul_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs))?;
     if m * n > 0 && k > 0 {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -89686,7 +89686,7 @@ fn int_vecmat_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), ((n,),), Some(&kwargs))?;
     let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
         return Ok(None);
@@ -89755,7 +89755,7 @@ fn bool_matmul_bitpacked(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "bool")?;
+    kwargs.set_item(intern!(py, "dtype"), "bool")?;
     let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs))?;
     if m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (&u8t,))?;
@@ -89897,7 +89897,7 @@ fn try_native_f16_matmul(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float16")?;
+    kwargs.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs))?;
     if m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -90029,7 +90029,7 @@ fn batched_int_matmul_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_shape.to_vec(),), Some(&kwargs))?;
     if batch * m * n > 0 && k > 0 {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -90265,7 +90265,7 @@ fn bool_batched_matmul_bitpacked(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "bool")?;
+    kwargs.set_item(intern!(py, "dtype"), "bool")?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_shape.to_vec(),), Some(&kwargs))?;
     if batch * m * n > 0 && k > 0 {
         let out_view = flat.call_method1(intern!(py, "view"), (&u8t,))?;
@@ -90428,7 +90428,7 @@ fn try_native_f16_batched_matmul(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float16")?;
+    kwargs.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), (out_shape,), Some(&kwargs))?;
     if batch * m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -90851,7 +90851,7 @@ fn try_native_f16_broadcast_matmul(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float16")?;
+    kwargs.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), (out_shape,), Some(&kwargs))?;
     if batch * m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -91024,7 +91024,7 @@ fn try_native_f16_einsum_matmul(
         return Ok(None);
     }
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float16")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs_out))?;
     if m * n > 0 && k > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -91212,7 +91212,7 @@ fn try_native_f16_einsum_matmul_transposed(
         return Ok(None);
     }
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float16")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs_out))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -91432,7 +91432,7 @@ fn try_native_f16_einsum_matmul_gram(
         return Ok(None);
     }
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float16")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs_out))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -91610,7 +91610,7 @@ fn try_native_f16_einsum_full_contraction(
     }
     // Materialize the exact bits and hand back numpy's own float16 scalar.
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float16")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
     let holder = numpy.call_method(intern!(py, "empty"), (1,), Some(&kwargs_out))?;
     {
         let holder_view = holder.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -91721,7 +91721,7 @@ fn try_native_f16_einsum_matmul_batched(
         return Ok(None);
     }
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float16")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), ((bt, m, n),), Some(&kwargs_out))?;
     if bt * m * n > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -91927,7 +91927,7 @@ fn try_native_f16_einsum_transposed_batched(
         return Ok(None);
     }
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float16")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), ((bt, m, n),), Some(&kwargs_out))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -92115,7 +92115,7 @@ fn try_native_f16_einsum_gram_batched(
         return Ok(None);
     }
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float16")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), ((bt, m, n),), Some(&kwargs_out))?;
     if bt * m * n > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -92259,7 +92259,7 @@ fn try_native_f16_einsum_elementwise(
         return Ok(None);
     }
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float16")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
     let shape_tuple = PyTuple::new(py, a_shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (&shape_tuple,), Some(&kwargs_out))?;
     {
@@ -92375,7 +92375,7 @@ fn try_native_f64f32_einsum_elementwise(
         return Ok(None);
     }
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", if s1 == 8 { "float64" } else { "float32" })?;
+    kwargs_out.set_item(intern!(py, "dtype"), if s1 == 8 { "float64" } else { "float32" })?;
     let shape_tuple = PyTuple::new(py, a_shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (&shape_tuple,), Some(&kwargs_out))?;
     use rayon::prelude::*;
@@ -92816,7 +92816,7 @@ fn try_native_f16_einsum_reduce(
         acc
     };
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float16")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
     match mode {
         0 => {
             // Row sums: one tree per row, parallel over rows.
@@ -93100,7 +93100,7 @@ fn try_native_f64_einsum_reduce(
         (0.0 + v0) + v1
     };
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float64")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float64")?;
     match mode {
         0 => {
             let out_shape = PyTuple::new(py, a_shape[..split].iter().copied())?;
@@ -93369,7 +93369,7 @@ fn try_native_f32_einsum_reduce(
         (v0 + v1) + (v2 + v3)
     };
     let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item("dtype", "float32")?;
+    kwargs_out.set_item(intern!(py, "dtype"), "float32")?;
     match mode {
         0 => {
             let out_shape = PyTuple::new(py, a_shape[..split].iter().copied())?;
@@ -93574,7 +93574,7 @@ fn try_native_f16_einsum_chain3(
     // Ask numpy for the plan it would use.
     let numpy = cached_numpy(py)?;
     let path_kwargs = PyDict::new(py);
-    path_kwargs.set_item("optimize", true)?;
+    path_kwargs.set_item(intern!(py, "optimize"), true)?;
     let path_res = numpy.call_method(
         "einsum_path",
         (args.get_item(0)?, &x1, &x2, &x3),
@@ -95998,7 +95998,7 @@ fn try_zerocopy_f64_einsum_single_diagonal(
                 .extract::<bool>()?;
             if writeable {
                 let kwargs = PyDict::new(py);
-                kwargs.set_item("write", true)?;
+                kwargs.set_item(intern!(py, "write"), true)?;
                 diag_view.call_method(intern!(py, "setflags"), (), Some(&kwargs))?;
             }
             Ok(Some(diag_view.unbind()))
@@ -96819,7 +96819,7 @@ fn try_native_f16_unique_flat(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<
     }
     let m = out_bits.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float16")?;
+    kwargs.set_item(intern!(py, "dtype"), "float16")?;
     let out = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
     if m > 0 {
         let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
@@ -96904,7 +96904,7 @@ fn try_zerocopy_f64_unique_binary_grid(
     }
     let count = seen.iter().filter(|&&b| b != 0).count();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
     if count > 0 {
         let out_buffer = PyBuffer::<f64>::get(&out)?;
@@ -96987,7 +96987,7 @@ fn try_zerocopy_f64_unique_flat(
     sorted.dedup(); // sorted -> equal values are consecutive; == collapses them (single-sign zeros only)
     let m = sorted.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
     if m > 0 {
         let out_buffer = PyBuffer::<f64>::get(&out)?;
@@ -97210,7 +97210,7 @@ fn try_native_unique_struct_valuelex(
     }
     let nu = keep.len();
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&out_kwargs))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
@@ -97365,7 +97365,7 @@ fn try_native_struct_sort_valuelex(
     let mut perm: Vec<u32> = (0..n as u32).collect();
     perm.par_sort_unstable_by(|&i, &j| key(i).cmp(key(j)));
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&out_kwargs))?;
     {
         let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
@@ -97828,7 +97828,7 @@ fn try_native_unique_struct_valuelex_full(
     }
     let u = group_starts.len();
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let unique_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&out_kwargs))?;
     {
         let out_u8 = unique_arr.call_method1(intern!(py, "view"), (&uint8,))?;
@@ -97848,7 +97848,7 @@ fn try_native_unique_struct_valuelex_full(
     let mut outs: Vec<Bound<'_, PyAny>> = vec![unique_arr];
     if ret_index {
         let ikw = PyDict::new(py);
-        ikw.set_item("dtype", "intp")?;
+        ikw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
         let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
@@ -97865,7 +97865,7 @@ fn try_native_unique_struct_valuelex_full(
     }
     if ret_inverse {
         let vkw = PyDict::new(py);
-        vkw.set_item("dtype", "intp")?;
+        vkw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (n,), Some(&vkw))?;
         let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
@@ -97884,7 +97884,7 @@ fn try_native_unique_struct_valuelex_full(
     }
     if ret_counts {
         let ckw = PyDict::new(py);
-        ckw.set_item("dtype", "intp")?;
+        ckw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
         let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
@@ -98371,7 +98371,7 @@ fn try_native_unique_rows_composite_full(
         return Ok(None);
     }
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "int64")?;
+    kw.set_item(intern!(py, "dtype"), "int64")?;
     let i64arr = numpy.call_method(intern!(py, "ascontiguousarray"), (item,), Some(&kw))?;
     let Ok(buf) = PyBuffer::<i64>::get(&i64arr) else {
         return Ok(None);
@@ -98443,7 +98443,7 @@ fn try_native_unique_rows_composite_full(
     let u = group_starts.len();
     // Unique rows (decode) in original dtype.
     let out_kw = PyDict::new(py);
-    out_kw.set_item("dtype", "int64")?;
+    out_kw.set_item(intern!(py, "dtype"), "int64")?;
     let flat = numpy.call_method(intern!(py, "empty"), ((u, k),), Some(&out_kw))?;
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
@@ -98465,13 +98465,13 @@ fn try_native_unique_rows_composite_full(
             });
     }
     let cast_kw = PyDict::new(py);
-    cast_kw.set_item("copy", false)?;
+    cast_kw.set_item(intern!(py, "copy"), false)?;
     let unique_arr = flat.call_method(intern!(py, "astype"), (&dt,), Some(&cast_kw))?;
     let mut outs: Vec<Bound<'_, PyAny>> = vec![unique_arr];
     // return_index: first occurrence index per group (= pairs[group_start].1, min index in group).
     if ret_index {
         let ikw = PyDict::new(py);
-        ikw.set_item("dtype", "intp")?;
+        ikw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
         let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
@@ -98489,7 +98489,7 @@ fn try_native_unique_rows_composite_full(
     // return_inverse: for each ORIGINAL row, the index of its unique row (the factorize/group map).
     if ret_inverse {
         let vkw = PyDict::new(py);
-        vkw.set_item("dtype", "intp")?;
+        vkw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (n,), Some(&vkw))?;
         let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
@@ -98514,7 +98514,7 @@ fn try_native_unique_rows_composite_full(
     // return_counts: group sizes.
     if ret_counts {
         let ckw = PyDict::new(py);
-        ckw.set_item("dtype", "intp")?;
+        ckw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
         let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
@@ -98620,7 +98620,7 @@ fn try_native_unique_rows_lexsort_f64(
     }
     let nu = keep.len();
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), ((nu, ncols),), Some(&out_kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
@@ -98725,7 +98725,7 @@ fn try_native_unique_rows_lexsort_f32(
     }
     let nu = keep.len();
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), ((nu, ncols),), Some(&out_kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
@@ -99097,7 +99097,7 @@ fn try_native_unique_rows_narrow_int_via_i64(
     }
 
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "int64")?;
+    kw.set_item(intern!(py, "dtype"), "int64")?;
     let widened = numpy.call_method(intern!(py, "ascontiguousarray"), (item,), Some(&kw))?;
     match try_native_unique_rows_lexsort_int(py, &widened)? {
         Some(wide_unique) => Ok(Some(
@@ -99150,7 +99150,7 @@ fn try_native_unique_rows_narrow_int_via_i64_full(
     }
 
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "int64")?;
+    kw.set_item(intern!(py, "dtype"), "int64")?;
     let widened = numpy.call_method(intern!(py, "ascontiguousarray"), (item,), Some(&kw))?;
     match try_native_unique_rows_lexsort_int_full(py, &widened, ret_index, ret_inverse, ret_counts)?
     {
@@ -99255,7 +99255,7 @@ fn try_native_unique_rows_lexsort_int(
     let nu = keep.len();
     // Fresh (n_unique, ncols) same-dtype output; parallel gather from srt.
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), ((nu, ncols),), Some(&out_kwargs))?;
     {
         let oview = out.call_method1(intern!(py, "view"), ("int64",))?;
@@ -99365,7 +99365,7 @@ fn try_native_unique_rows_lexsort_f64_full(
     }
     let u = group_starts.len();
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let unique_arr = numpy.call_method(intern!(py, "empty"), ((u, ncols),), Some(&out_kwargs))?;
     {
         let Ok(ob) = PyBuffer::<f64>::get(&unique_arr) else {
@@ -99385,7 +99385,7 @@ fn try_native_unique_rows_lexsort_f64_full(
     let mut outs: Vec<Bound<'_, PyAny>> = vec![unique_arr];
     if ret_index {
         let ikw = PyDict::new(py);
-        ikw.set_item("dtype", "intp")?;
+        ikw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
         let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
@@ -99402,7 +99402,7 @@ fn try_native_unique_rows_lexsort_f64_full(
     }
     if ret_inverse {
         let vkw = PyDict::new(py);
-        vkw.set_item("dtype", "intp")?;
+        vkw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (rows,), Some(&vkw))?;
         let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
@@ -99422,7 +99422,7 @@ fn try_native_unique_rows_lexsort_f64_full(
     }
     if ret_counts {
         let ckw = PyDict::new(py);
-        ckw.set_item("dtype", "intp")?;
+        ckw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
         let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
@@ -99524,7 +99524,7 @@ fn try_native_unique_rows_lexsort_f32_full(
     }
     let u = group_starts.len();
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let unique_arr = numpy.call_method(intern!(py, "empty"), ((u, ncols),), Some(&out_kwargs))?;
     {
         let Ok(ob) = PyBuffer::<f32>::get(&unique_arr) else {
@@ -99544,7 +99544,7 @@ fn try_native_unique_rows_lexsort_f32_full(
     let mut outs: Vec<Bound<'_, PyAny>> = vec![unique_arr];
     if ret_index {
         let ikw = PyDict::new(py);
-        ikw.set_item("dtype", "intp")?;
+        ikw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
         let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
@@ -99561,7 +99561,7 @@ fn try_native_unique_rows_lexsort_f32_full(
     }
     if ret_inverse {
         let vkw = PyDict::new(py);
-        vkw.set_item("dtype", "intp")?;
+        vkw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (rows,), Some(&vkw))?;
         let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
@@ -99581,7 +99581,7 @@ fn try_native_unique_rows_lexsort_f32_full(
     }
     if ret_counts {
         let ckw = PyDict::new(py);
-        ckw.set_item("dtype", "intp")?;
+        ckw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
         let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
@@ -99689,7 +99689,7 @@ fn try_native_unique_rows_lexsort_int_full(
     let u = group_starts.len();
     // unique rows (u, ncols) same dtype.
     let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item("dtype", &dtype)?;
+    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let unique_arr = numpy.call_method(intern!(py, "empty"), ((u, ncols),), Some(&out_kwargs))?;
     {
         let oview = unique_arr.call_method1(intern!(py, "view"), ("int64",))?;
@@ -99711,7 +99711,7 @@ fn try_native_unique_rows_lexsort_int_full(
     // return_index: min original index per group = perm[group_start].
     if ret_index {
         let ikw = PyDict::new(py);
-        ikw.set_item("dtype", "intp")?;
+        ikw.set_item(intern!(py, "dtype"), "intp")?;
         let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
         let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
@@ -99729,7 +99729,7 @@ fn try_native_unique_rows_lexsort_int_full(
     // return_inverse: for each ORIGINAL row, its unique-row (group) index.
     if ret_inverse {
         let vkw = PyDict::new(py);
-        vkw.set_item("dtype", "intp")?;
+        vkw.set_item(intern!(py, "dtype"), "intp")?;
         let inv_arr = numpy.call_method(intern!(py, "empty"), (rows,), Some(&vkw))?;
         let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
@@ -99750,7 +99750,7 @@ fn try_native_unique_rows_lexsort_int_full(
     // return_counts: group sizes.
     if ret_counts {
         let ckw = PyDict::new(py);
-        ckw.set_item("dtype", "intp")?;
+        ckw.set_item(intern!(py, "dtype"), "intp")?;
         let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
         let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
@@ -99801,7 +99801,7 @@ fn try_native_unique_rows_composite(
         return Ok(None);
     }
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "int64")?;
+    kw.set_item(intern!(py, "dtype"), "int64")?;
     let i64arr = numpy.call_method(intern!(py, "ascontiguousarray"), (item,), Some(&kw))?;
     let Ok(buf) = PyBuffer::<i64>::get(&i64arr) else {
         return Ok(None);
@@ -99868,7 +99868,7 @@ fn try_native_unique_rows_composite(
     let u = comp.len();
     // Decode each unique composite back to a row (col value = (comp / mult_j) % span_j + min_j).
     let out_kw = PyDict::new(py);
-    out_kw.set_item("dtype", "int64")?;
+    out_kw.set_item(intern!(py, "dtype"), "int64")?;
     let flat = numpy.call_method(intern!(py, "empty"), ((u, k),), Some(&out_kw))?;
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
@@ -99890,7 +99890,7 @@ fn try_native_unique_rows_composite(
     }
     // Restore the input dtype exactly (values are the originals, so the narrowing cast is lossless).
     let cast_kw = PyDict::new(py);
-    cast_kw.set_item("copy", false)?;
+    cast_kw.set_item(intern!(py, "copy"), false)?;
     Ok(Some(
         flat.call_method(intern!(py, "astype"), (&dt,), Some(&cast_kw))?.unbind(),
     ))
@@ -99926,7 +99926,7 @@ fn try_native_unique_cols_composite(
         return Ok(None);
     }
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "int64")?;
+    kw.set_item(intern!(py, "dtype"), "int64")?;
     let i64arr = numpy.call_method(intern!(py, "ascontiguousarray"), (item,), Some(&kw))?;
     let Ok(buf) = PyBuffer::<i64>::get(&i64arr) else {
         return Ok(None);
@@ -99973,7 +99973,7 @@ fn try_native_unique_cols_composite(
     comp.dedup();
     let unique_cols = comp.len();
     let out_kw = PyDict::new(py);
-    out_kw.set_item("dtype", "int64")?;
+    out_kw.set_item(intern!(py, "dtype"), "int64")?;
     let flat = numpy.call_method(intern!(py, "empty"), ((rows, unique_cols),), Some(&out_kw))?;
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
@@ -99997,7 +99997,7 @@ fn try_native_unique_cols_composite(
             });
     }
     let cast_kw = PyDict::new(py);
-    cast_kw.set_item("copy", false)?;
+    cast_kw.set_item(intern!(py, "copy"), false)?;
     Ok(Some(
         flat.call_method(intern!(py, "astype"), (&dt,), Some(&cast_kw))?.unbind(),
     ))
@@ -100055,7 +100055,7 @@ fn unique_counting_typed<'py, T: pyo3::buffer::Element + Copy>(
     }
     let count = seen.iter().filter(|&&b| b).count();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let out = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
     if count > 0 {
         let Ok(obuf) = PyBuffer::<T>::get(&out) else {
@@ -100231,7 +100231,7 @@ fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     let count = uvals.len();
     // Build the unique-values array in the input dtype.
     let ukw = PyDict::new(py);
-    ukw.set_item("dtype", dtype_name)?;
+    ukw.set_item(intern!(py, "dtype"), dtype_name)?;
     let uarr = numpy.call_method(intern!(py, "empty"), (count,), Some(&ukw))?;
     {
         let Ok(ub) = PyBuffer::<T>::get(&uarr) else {
@@ -100247,7 +100247,7 @@ fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     // Helper: build an intp array from a Vec<i64>.
     let build_i64 = |data: &[i64]| -> PyResult<Option<Bound<'py, PyAny>>> {
         let kw = PyDict::new(py);
-        kw.set_item("dtype", "intp")?;
+        kw.set_item(intern!(py, "dtype"), "intp")?;
         let arr = numpy.call_method(intern!(py, "empty"), (data.len(),), Some(&kw))?;
         let Ok(ab) = PyBuffer::<i64>::get(&arr) else {
             return Ok(None);
@@ -100278,7 +100278,7 @@ fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     };
     let inverse_arr = if want_inverse {
         let kw = PyDict::new(py);
-        kw.set_item("dtype", "intp")?;
+        kw.set_item(intern!(py, "dtype"), "intp")?;
         let inv = numpy.call_method(intern!(py, "empty"), (n,), Some(&kw))?;
         {
             let Ok(ib) = PyBuffer::<i64>::get(&inv) else {
@@ -100396,7 +100396,7 @@ fn conj(
     let numpy = cached_numpy(py)?;
     let call_kwargs = PyDict::new(py);
     if let Some(out_val) = out {
-        call_kwargs.set_item("out", out_val.bind(py))?;
+        call_kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
     if let Some(kw) = kwargs {
         for (key, value) in kw.iter() {
@@ -100687,7 +100687,7 @@ fn try_zerocopy_bitwise_count(
     }
 
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint8")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
     let out = numpy.call_method(intern!(py, "empty"), (PyTuple::new(py, &shape)?,), Some(&kwargs))?;
 
     // Write POPCNT results STRAIGHT into the output buffer, parallel across cores (no intermediate Vec
@@ -100856,7 +100856,7 @@ fn unpackbits(
         return delegate();
     }
     let kw = PyDict::new(py);
-    kw.set_item("dtype", "uint8")?;
+    kw.set_item(intern!(py, "dtype"), "uint8")?;
     let out = numpy.call_method(intern!(py, "empty"), ((8 * n,),), Some(&kw))?;
     {
         let Ok(out_buf) = PyBuffer::<u8>::get(&out) else {
@@ -101931,7 +101931,7 @@ where
     let cin_a: &[E] = unsafe { std::slice::from_raw_parts(ca.as_ptr().cast::<E>(), n * wa) };
     let cin_b: &[E] = unsafe { std::slice::from_raw_parts(cb.as_ptr().cast::<E>(), n * wb) };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", format!("{kind_prefix}{wout}"))?;
+    kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{wout}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -102257,7 +102257,7 @@ where
         return Ok(None); // all-empty -> numpy (S0/U0 edge)
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", format!("{kind_prefix}{maxlen}"))?;
+    kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{maxlen}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -102451,7 +102451,7 @@ fn try_zerocopy_unicode_ispredicate(
     let bool_dtype = numpy.getattr(intern!(py, "bool_"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &bool_dtype)?;
+    kwargs.set_item(intern!(py, "dtype"), &bool_dtype)?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
         let u8_dtype = numpy.getattr(intern!(py, "uint8"))?;
@@ -102618,7 +102618,7 @@ where
         return Ok(None); // all-empty -> numpy (S1/U1 edge)
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", format!("{kind_prefix}{maxlen}"))?;
+    kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{maxlen}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -102818,7 +102818,7 @@ where
         return Ok(None); // all-empty and width 0 -> numpy (S1/U1 edge)
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", format!("{kind_prefix}{out_w}"))?;
+    kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{out_w}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -103024,7 +103024,7 @@ where
         return Ok(None); // all-empty / no content -> numpy (S1/U1 edge)
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", format!("{kind_prefix}{out_w}"))?;
+    kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{out_w}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -103345,7 +103345,7 @@ fn try_zerocopy_unicode_slice(
         (st, sp)
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", format!("U{w}"))?;
+    kwargs.set_item(intern!(py, "dtype"), format!("U{w}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -104624,7 +104624,7 @@ where
     let build =
         |width: usize, writer: &(dyn Fn(usize, &[E], &mut [E]) + Sync)| -> PyResult<Py<PyAny>> {
             let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", format!("{kind_prefix}{width}"))?; // width >= 1 (0-width parts deferred)
+            kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{width}"))?; // width >= 1 (0-width parts deferred)
             let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
             let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
             let wout = width;
@@ -104794,7 +104794,7 @@ fn try_native_strings_decode(
     }
     let n = total / w;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", format!("U{out_w}"))?;
+    kwargs.set_item(intern!(py, "dtype"), format!("U{out_w}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -105192,7 +105192,7 @@ fn try_zerocopy_f64_divmod(
     }
     let mk = |nm: &str| -> PyResult<Bound<'_, PyAny>> {
         let kw = PyDict::new(py);
-        kw.set_item("dtype", nm)?;
+        kw.set_item(intern!(py, "dtype"), nm)?;
         numpy.call_method(intern!(py, "empty"), (n,), Some(&kw))
     };
     let quotient = mk("float64")?;
@@ -105457,7 +105457,7 @@ where
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -105604,7 +105604,7 @@ where
     out_shape.remove(axu);
     let out_elems = outer * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", out_dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), out_dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
@@ -105977,7 +105977,7 @@ where
     out_shape.remove(ax);
     let out_elems = outer * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -106139,7 +106139,7 @@ fn try_zerocopy_int_ptp_axis(
     let size: usize = a.getattr(intern!(py, "size")).and_then(|s| s.extract()).unwrap_or(0);
     if itemsize <= 2 || size < (1 << 23) {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", axis)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
         return Ok(Some(
             numpy.getattr(intern!(py, "ptp"))?.call((a,), Some(&kwargs))?.unbind(),
         ));
@@ -106234,7 +106234,7 @@ fn try_zerocopy_f64_ptp_axis(
     out_shape.remove(ax);
     let out_elems = outer * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -106428,7 +106428,7 @@ fn try_zerocopy_f32_ptp_axis(
     out_shape.remove(ax);
     let out_elems = outer * inner;
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -106579,12 +106579,12 @@ fn ptp(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(ax) = axis_for_fallback.as_ref() {
-            kwargs.set_item("axis", ax.bind(py))?;
+            kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if let Some(o) = out_for_fallback.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kwargs.set_item("keepdims", keepdims)?;
+        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
         Ok(ptp_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
@@ -107253,7 +107253,7 @@ fn try_zerocopy_f64_around(
     let n = input.len();
     let scale = 10_f64.powi(decimals);
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -107330,7 +107330,7 @@ fn try_zerocopy_f32_around(
         // arithmetic below would not match numpy's own overflow result. Delegate
         // this pathological case straight to numpy.around for exact parity.
         let kwargs = PyDict::new(py);
-        kwargs.set_item("decimals", decimals)?;
+        kwargs.set_item(intern!(py, "decimals"), decimals)?;
         return Ok(Some(
             numpy.getattr(intern!(py, "around"))?.call((a,), Some(&kwargs))?.unbind(),
         ));
@@ -107344,7 +107344,7 @@ fn try_zerocopy_f32_around(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float32")?;
+    kwargs.set_item(intern!(py, "dtype"), "float32")?;
     let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -107440,7 +107440,7 @@ fn try_zerocopy_int_around(
         return Ok(Some(a.call_method0(intern!(py, "copy"))?.unbind()));
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("decimals", decimals)?;
+    kwargs.set_item(intern!(py, "decimals"), decimals)?;
     Ok(Some(
         numpy.getattr(intern!(py, "around"))?.call((a,), Some(&kwargs))?.unbind(),
     ))
@@ -107509,7 +107509,7 @@ fn try_zerocopy_f16_around(
         return Ok(None);
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "uint16")?;
+    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
     let out_u16 = numpy.call_method(intern!(py, "empty"), (shape,), Some(&kwargs))?;
     let hazard = std::sync::atomic::AtomicBool::new(false);
     {
@@ -107589,9 +107589,9 @@ fn around(
     let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("decimals", decimals)?;
+        kwargs.set_item(intern!(py, "decimals"), decimals)?;
         if let Some(o) = out_for_fallback.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
+            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(around_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
@@ -108149,7 +108149,7 @@ fn try_zerocopy_block_2d_grid(
         slices.push(unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), s.len()) });
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", &dt)?;
+    kwargs.set_item(intern!(py, "dtype"), &dt)?;
     let out = numpy.call_method(intern!(py, "empty"), ((total_h, total_w),), Some(&kwargs))?;
     {
         let out_view = out.call_method1(intern!(py, "view"), (&u8dt,))?;
@@ -108299,13 +108299,13 @@ fn array_api_unique_route(
     let one = PyTuple::new(py, [x])?;
     let uk = PyDict::new(py);
     if ret_index {
-        uk.set_item("return_index", true)?;
+        uk.set_item(intern!(py, "return_index"), true)?;
     }
     if ret_inverse {
-        uk.set_item("return_inverse", true)?;
+        uk.set_item(intern!(py, "return_inverse"), true)?;
     }
     if ret_counts {
-        uk.set_item("return_counts", true)?;
+        uk.set_item(intern!(py, "return_counts"), true)?;
     }
     let res = unique(py, &one, if uk.is_empty() { None } else { Some(&uk) })?;
     match result_type {
@@ -108540,7 +108540,7 @@ fn try_zerocopy_conv_corr_f64(
         return Ok(None);
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
     let out_arr = numpy.call_method(intern!(py, "empty"), (out_len,), Some(&kwargs))?;
     {
         let out_buf = PyBuffer::<f64>::get(&out_arr)?;
@@ -108632,7 +108632,7 @@ fn int_convolve_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
         k_start
     };
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", dtype_name)?;
+    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
     let flat = numpy.call_method(intern!(py, "empty"), (out_len,), Some(&kwargs))?;
     if out_len > 0 {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -108752,7 +108752,7 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
     let v_for_fallback = v.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("mode", mode)?;
+        kwargs.set_item(intern!(py, "mode"), mode)?;
         Ok(convolve_fn
             .call(
                 (a_for_fallback.bind(py), v_for_fallback.bind(py)),
@@ -108832,7 +108832,7 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
     let v_for_fallback = v.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("mode", mode)?;
+        kwargs.set_item(intern!(py, "mode"), mode)?;
         Ok(correlate_fn
             .call(
                 (a_for_fallback.bind(py), v_for_fallback.bind(py)),
@@ -108928,9 +108928,9 @@ fn isclose(
     let b_for_fallback = b.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("rtol", rtol)?;
-        kwargs.set_item("atol", atol)?;
-        kwargs.set_item("equal_nan", equal_nan)?;
+        kwargs.set_item(intern!(py, "rtol"), rtol)?;
+        kwargs.set_item(intern!(py, "atol"), atol)?;
+        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
         Ok(isclose_fn
             .call(
                 (a_for_fallback.bind(py), b_for_fallback.bind(py)),
@@ -109439,17 +109439,17 @@ fn histogram2d(
                     && s.extract::<usize>().is_err()
                 {
                     let akw = PyDict::new(py);
-                    akw.set_item("dtype", cached_float64_dtype(py)?)?;
+                    akw.set_item(intern!(py, "dtype"), cached_float64_dtype(py)?)?;
                     return Ok(numpy.call_method(intern!(py, "asarray"), (s,), Some(&akw))?.unbind());
                 }
                 let n = spec.and_then(|s| s.extract::<usize>().ok()).unwrap_or(10);
                 let ekw = PyDict::new(py);
-                ekw.set_item("bins", n)?;
+                ekw.set_item(intern!(py, "bins"), n)?;
                 if let Some(r) = range_arg.as_ref()
                     && let Ok(item) = r.get_item(index)
                     && !item.is_none()
                 {
-                    ekw.set_item("range", item)?;
+                    ekw.set_item(intern!(py, "range"), item)?;
                 }
                 Ok(numpy
                     .call_method(intern!(py, "histogram_bin_edges"), (sample,), Some(&ekw))?
@@ -109754,7 +109754,7 @@ fn histogramdd(
                                 break;
                             }
                         };
-                        if akw.set_item("dtype", dtype).is_err() {
+                        if akw.set_item(intern!(py, "dtype"), dtype).is_err() {
                             ok = false;
                             break;
                         }
@@ -109776,14 +109776,14 @@ fn histogramdd(
                     // accepts either, so no copy is taken to compute edges.
                     let column = &column_objects[axis];
                     let ekw = PyDict::new(py);
-                    if ekw.set_item("bins", n).is_err() {
+                    if ekw.set_item(intern!(py, "bins"), n).is_err() {
                         ok = false;
                         break;
                     }
                     if let Some(r) = range_arg.as_ref()
                         && let Ok(item) = r.get_item(axis)
                         && !item.is_none()
-                        && ekw.set_item("range", item).is_err()
+                        && ekw.set_item(intern!(py, "range"), item).is_err()
                     {
                         ok = false;
                         break;
@@ -111121,7 +111121,7 @@ fn try_native_datetime_as_string_day(
         _ => {}
     }
     let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", format!("U{out_w}"))?;
+    kwargs.set_item(intern!(py, "dtype"), format!("U{out_w}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
     {
@@ -111873,10 +111873,10 @@ fn ediff1d(
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(te) = to_end_ref.as_ref() {
-            kwargs.set_item("to_end", te.bind(py))?;
+            kwargs.set_item(intern!(py, "to_end"), te.bind(py))?;
         }
         if let Some(tb) = to_begin_ref.as_ref() {
-            kwargs.set_item("to_begin", tb.bind(py))?;
+            kwargs.set_item(intern!(py, "to_begin"), tb.bind(py))?;
         }
         Ok(ediff1d_fn
             .call((ary_ref.bind(py),), Some(&kwargs))?
@@ -113504,7 +113504,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let submodule_errors = PyDict::new(py);
         if let Ok(strings_upstream) =
             resolve_numpy_submodule(py, &numpy, "strings").inspect_err(|why| {
-                let _ = submodule_errors.set_item("strings", why);
+                let _ = submodule_errors.set_item(intern!(py, "strings"), why);
             })
         {
             let strings = PyModule::new(py, "strings")?;
@@ -113547,7 +113547,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add("strings", strings)?;
         }
         if let Ok(char_upstream) = resolve_numpy_submodule(py, &numpy, "char").inspect_err(|why| {
-            let _ = submodule_errors.set_item("char", why);
+            let _ = submodule_errors.set_item(intern!(py, "char"), why);
         }) {
             let char_mod = PyModule::new(py, "char")?;
             copy_numpy_module_attrs(&char_upstream, &char_mod)?;
