@@ -10,15 +10,89 @@ had already completed the metadata side of publishing. Every entry below maps to
 a date range on the `main` branch. Representative commits link to
 `https://github.com/Dicklesworthstone/franken_numpy/commit/<hash>`.
 
+Scope window: project inception on 2026-02-13 through HEAD on 2026-08-19.
+This 2026-08-19 refresh covers the previously undocumented window **2026-07-12
+through 2026-08-19** (post-`v0.2.0` Unreleased). The `v0.2.0` section and the
+pre-release `[0.1.x]` capability-area history are unchanged except for path
+corrections (`audit_numpy_reality.md` now lives under `docs/planning/`).
+Representative commits in each wave are live-linked to GitHub.
+
 The sections below are organized by **capability area** rather than diff order,
 so that readers can quickly find what changed in the subsystem they care about.
 
-### Version timeline
+## Version Timeline
 
 | Version | Date | Kind | Summary |
 |---|---|---|---|
-| `v0.2.0` | 2026-07-11 | GitHub Release | Native fast-path performance release: ~1,230 landed `perf(...)` commits (2026-06-01 → 2026-07-11) delivering measured speedups vs NumPy across float16, integer/complex/temporal, sort/unique/set-ops, reductions/scans, strings, and array construction — every win byte-exact by construction and recorded in the append-only negative-evidence ledger. |
-| `0.1.0` | 2026-02-13 → 2026-05-19 | untagged dev head | 100% `numpy.__all__` surface parity (499/499), zero hand-written `unsafe`, dual-mode runtime, conformance/fuzz/RaptorQ infrastructure. Preserved below under "[Unreleased]" and the pre-2026-03-21 detail. |
+| `[Unreleased]` | 2026-07-12 → 2026-08-19 | dev head on `main` | Post-`v0.2.0` Python-dispatch tax, IO parsers, int/bool GEMM/einsum, random-stream correctness, and the 2026-08-18/19 repo-janitor docs move. No new tag. |
+| [`v0.2.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.2.0) | 2026-07-11 | GitHub Release | Native fast-path performance release: ~1,230 landed `perf(...)` commits (2026-06-01 → 2026-07-11) delivering measured speedups vs NumPy across float16, integer/complex/temporal, sort/unique/set-ops, reductions/scans, strings, and array construction — every win byte-exact by construction and recorded in the append-only negative-evidence ledger. |
+| `0.1.0` | 2026-02-13 → 2026-05-19 | untagged dev head | 100% `numpy.__all__` surface parity (499/499), zero hand-written `unsafe`, dual-mode runtime, conformance/fuzz/RaptorQ infrastructure. Preserved below under "[0.1.x]" and the pre-2026-03-21 detail. |
+
+There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) is a **WIP evidence snapshot, not a Release**.
+
+---
+
+## [Unreleased] — post-`v0.2.0` development head (2026-07-12 through 2026-08-19)
+
+1,434 non-merge commits after the `v0.2.0` tag (HEAD 2026-08-19). 445 beads closed in the window. No new tag or GitHub Release. The campaign stays honesty-gated: measured vs NumPy in the same invocation, with losses and no-ships recorded rather than silently rerouted.
+
+### Repo-janitor docs reorganization (2026-08-18 .. 2026-08-19)
+
+Root planning/parity docs (`FEATURE_PARITY.md`, `audit_numpy_reality.md`, `audit_numpy_mocks.md`, `EXHAUSTIVE_LEGACY_ANALYSIS.md`, `PLAN_TO_PORT_NUMPY_TO_RUST.md`, and siblings) now live under [`docs/planning/`](docs/planning/). Agent-identity leaks, root scratch, skill-loop scratch, and already-gitignored beads recovery snapshots were untracked.
+
+- Untrack skill-loop scratch; move root planning docs into `docs/planning/`
+  ([cf904a8](https://github.com/Dicklesworthstone/franken_numpy/commit/cf904a8b7ce29a98a808ce3e9cf9f144fb439f93))
+- Untrack beads recovery snapshots already gitignored
+  ([31fc67d](https://github.com/Dicklesworthstone/franken_numpy/commit/31fc67d90fe6b34f619db69520aaaf0381afeaa7))
+- Drop agent-identity leaks and root scratch artifacts
+  ([15afd36](https://github.com/Dicklesworthstone/franken_numpy/commit/15afd369c7d3311ebc4f0f7576f067ae55ca0312))
+- Move remaining root planning/parity docs into `docs/planning/`
+  ([80bda22](https://github.com/Dicklesworthstone/franken_numpy/commit/80bda22a946d27cb2cda158f19963f4f289c477d))
+
+### Python-dispatch tax (2026-08-16 .. 2026-08-19)
+
+The deadlock-audit stream attacks the wrapper residual: intern getattr/call_method names used on every dispatch path, stop importing NumPy just to decline, and stop forwarding an `axis` NumPy already defaults to. `fnp.masked_mean` shares `masked_sum`'s pairwise tree.
+
+- Intern 4,022 getattr names used as probe attributes on every dispatch path
+  ([7dc53e9](https://github.com/Dicklesworthstone/franken_numpy/commit/7dc53e9545b7f4c1cc3b05b6977d29f07d0433f4))
+- Intern 1,599 `call_method` names (`deadlock-audit-s70kb`)
+  ([85518bb](https://github.com/Dicklesworthstone/franken_numpy/commit/85518bb2ef80c9af9a6824349ef588ca9d7c6550))
+- 78 probe functions stop importing NumPy just to decline (`deadlock-audit-v46rn`)
+  ([b7acbe0](https://github.com/Dicklesworthstone/franken_numpy/commit/b7acbe0d5c0fda29e44421cad07bfd9303e1ea99))
+- 22 functions stop forwarding an `axis` NumPy already defaults to
+  ([9d5719a](https://github.com/Dicklesworthstone/franken_numpy/commit/9d5719aa147b0c90a2fc2818c730f38bcf1087a1))
+- Add `fnp.masked_mean`, sharing `masked_sum`'s exact pairwise tree
+  ([e751b5b](https://github.com/Dicklesworthstone/franken_numpy/commit/e751b5b1a8aa61778a994d65e09db829f73d62e2))
+
+### Correctness: nditer, random streams, chebroots, `numpy.__all__` isolation (2026-08-08 .. 2026-08-09)
+
+- `nditer` Python bridge is an oracle, not a mirror (`slldg`)
+  ([d5178fe](https://github.com/Dicklesworthstone/franken_numpy/commit/d5178fe7157bd471b85a864aaee090690c210124))
+- Collapse unit axes in `external_loop` F-order chunking (`rkf2t`)
+  ([dd6dc37](https://github.com/Dicklesworthstone/franken_numpy/commit/dd6dc37ef965ac086583124212ab9378f67c8973))
+- Binomial BTPE stream desync vs NumPy (`36ilk`)
+  ([f29dce9](https://github.com/Dicklesworthstone/franken_numpy/commit/f29dce9038d5f78f6e827454d130fc47ade0d91d))
+- `chebroots` returned wrong roots at degree ≥ 5 (`xb1ue`)
+  ([e217c31](https://github.com/Dicklesworthstone/franken_numpy/commit/e217c31177e5992f16434f27cba326c6b6443350))
+- Importing `fnp_python` must not corrupt `numpy.__all__` (`deadlock-audit-335rd`)
+  ([57ab8d1](https://github.com/Dicklesworthstone/franken_numpy/commit/57ab8d1f145072f6e30bcf99bbddf6a1b0fb4c62))
+
+### Text IO parsers and int/bool GEMM/einsum (2026-07-12 .. 2026-07-23)
+
+Native `fnp_io` parsers take over `loadtxt`/`genfromtxt` float paths (a 0.574× loss becomes 1.445× on `loadtxt`; `genfromtxt` 4.19×→13.03×). Integer/bool GEMM and einsum idioms land as bitpacked / broadcast-batch kernels (matmul 8.6–32.9×, batched bool einsum 60.6×). `genfromtxt skip_footer>0` delegates to `genfromtxt_full`.
+
+- Delegate `loadtxt` float path to `fnp_io` parser, 0.574×→1.445× (`ixs5y.367`)
+  ([fb9fd23](https://github.com/Dicklesworthstone/franken_numpy/commit/fb9fd2360c07bdbfcf7e8c4de37e5d8e23577b1d))
+- Delegate `genfromtxt` float path to `fnp_io` parser, 4.19×→13.03× (`ixs5y.368`)
+  ([8d7415d](https://github.com/Dicklesworthstone/franken_numpy/commit/8d7415dc48887efc8925b9c2536ceec1d0a2bb9c))
+- Bitpacked OR-AND bool GEMM — matmul 8.6× / dot 8.7× / inner 16.0×
+  ([354b906](https://github.com/Dicklesworthstone/franken_numpy/commit/354b90663ba47066dccae8324e62d631714d0259))
+- Batched bitpacked bool GEMM — matmul 22.6×, bool einsum batched 60.6×
+  ([dbfae3b](https://github.com/Dicklesworthstone/franken_numpy/commit/dbfae3bd31850dcb66c9b1422fdb29e3e6966142))
+- Broadcast-batch int/bool matmul via zero-copy reshape — int 32.9×, bool 19.4×
+  ([947e986](https://github.com/Dicklesworthstone/franken_numpy/commit/947e986ae02e2f6d4d97b4edd490d404df3eb590))
+- `genfromtxt` float `skip_footer>0` delegates to `genfromtxt_full` (`ixs5y.6rr15`)
+  ([32cdeb8](https://github.com/Dicklesworthstone/franken_numpy/commit/32cdeb82a5493d35ddebf34ef394782b96058805))
 
 ---
 
@@ -292,7 +366,7 @@ regressions on the swept surface.
 
 ---
 
-## [Unreleased] — development head (2026-02-13 through 2026-05-19)
+## [0.1.x] — development head (2026-02-13 through 2026-05-19)
 
 ### Documentation precision waves (May 17-19, 2026)
 
@@ -316,10 +390,10 @@ wrapper for parity with the 4 sibling gate scripts).
 `numpy.__all__`** (499/499 names), structurally locked by the
 `fnp_python_covers_full_numpy_all` conformance test in
 `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs` so
-any regression fails CI. See `audit_numpy_reality.md` for the 43.3% →
+any regression fails CI. See [`docs/planning/audit_numpy_reality.md`](docs/planning/audit_numpy_reality.md) for the 43.3% →
 100% progression.
 
-`main` branch, no formal release tags yet. After 2026-03-21 the entries
+This `[0.1.x]` block is the pre-`v0.2.0` capability-area history (the `v0.2.0` GitHub Release is 2026-07-11). After 2026-03-21 the entries
 below summarize work by capability area rather than by date range,
 since many commits ship across multiple areas in a single session.
 
