@@ -6300,14 +6300,15 @@ fn masked_scalar_compare(
     value: Py<PyAny>,
     copy: bool,
     context: &str,
-    numpy_name: &str,
+    numpy_name: &Bound<'_, PyString>,
     op: BinaryOp,
 ) -> PyResult<Py<PyAny>> {
     let x_for_fallback = x.clone_ref(py);
     let value_for_fallback = value.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let masked_fn = numpy.getattr("ma")?.getattr(numpy_name)?;
+        // `cached_numpy_ma` is the module handle AND the `ma` attribute in one pointer deref;
+        // this used to import numpy and read `.ma` off it on every fallback call.
+        let masked_fn = cached_numpy_ma(py)?.getattr(numpy_name)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("copy", copy)?;
         Ok(masked_fn
@@ -6491,15 +6492,16 @@ fn masked_interval_compare(
     v2: Py<PyAny>,
     copy: bool,
     context: &str,
-    numpy_name: &str,
+    numpy_name: &Bound<'_, PyString>,
     outside: bool,
 ) -> PyResult<Py<PyAny>> {
     let x_for_fallback = x.clone_ref(py);
     let v1_for_fallback = v1.clone_ref(py);
     let v2_for_fallback = v2.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let masked_fn = numpy.getattr("ma")?.getattr(numpy_name)?;
+        // `cached_numpy_ma` is the module handle AND the `ma` attribute in one pointer deref;
+        // this used to import numpy and read `.ma` off it on every fallback call.
+        let masked_fn = cached_numpy_ma(py)?.getattr(numpy_name)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("copy", copy)?;
         Ok(masked_fn
@@ -30863,7 +30865,7 @@ fn native_rounding_unary(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     op: UnaryOp,
-    numpy_name: &str,
+    numpy_name: &Bound<'_, PyString>,
     extract_label: &str,
 ) -> PyResult<Py<PyAny>> {
     // float16 floor/ceil/trunc: numpy has no native f16 ALU and emulates via widen->f32->op->
@@ -30876,8 +30878,7 @@ fn native_rounding_unary(
     // float32 -> float32, bool -> bool). extract_numeric_array canonicalizes narrow
     // widths, so the native path only matches NumPy for float64; defer the rest.
     if !numpy_dtype_is_f64(py, x) {
-        let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind());
+        return Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind());
     }
     if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
         return Ok(out);
@@ -30899,7 +30900,7 @@ fn native_rounding_unary(
 }
 
 fn floor_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    native_rounding_unary(py, x, UnaryOp::Floor, "floor", "floor(x)")
+    native_rounding_unary(py, x, UnaryOp::Floor, intern!(py, "floor"), "floor(x)")
 }
 
 #[pyfunction]
@@ -30918,7 +30919,7 @@ fn floor(
 }
 
 fn ceil_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    native_rounding_unary(py, x, UnaryOp::Ceil, "ceil", "ceil(x)")
+    native_rounding_unary(py, x, UnaryOp::Ceil, intern!(py, "ceil"), "ceil(x)")
 }
 
 #[pyfunction]
@@ -30937,7 +30938,7 @@ fn ceil(
 }
 
 fn trunc_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    native_rounding_unary(py, x, UnaryOp::Trunc, "trunc", "trunc(x)")
+    native_rounding_unary(py, x, UnaryOp::Trunc, intern!(py, "trunc"), "trunc(x)")
 }
 
 #[pyfunction]
@@ -31008,7 +31009,7 @@ fn native_angle_conversion(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     op: UnaryOp,
-    numpy_name: &str,
+    numpy_name: &Bound<'_, PyString>,
     extract_label: &str,
 ) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
@@ -31019,18 +31020,14 @@ fn native_angle_conversion(
     // native path maps every integer to float64 (widening int8/int16), so defer all
     // non-float64 inputs to numpy for exact dtype + value parity.
     if !numpy_dtype_is_f64(py, x) {
-        return Ok(py
-            .import("numpy")?
-            .getattr(numpy_name)?
-            .call1((x,))?
-            .unbind());
+        return Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind());
     }
     let x = extract_precise_numeric_array(py, x, extract_label)?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(op))
 }
 
 fn degrees_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    native_angle_conversion(py, x, UnaryOp::Degrees, "degrees", "degrees(x)")
+    native_angle_conversion(py, x, UnaryOp::Degrees, intern!(py, "degrees"), "degrees(x)")
 }
 
 #[pyfunction]
@@ -31055,7 +31052,7 @@ fn degrees(
 }
 
 fn radians_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    native_angle_conversion(py, x, UnaryOp::Radians, "radians", "radians(x)")
+    native_angle_conversion(py, x, UnaryOp::Radians, intern!(py, "radians"), "radians(x)")
 }
 
 #[pyfunction]
@@ -40546,7 +40543,7 @@ fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> P
         value,
         copy,
         "masked_equal",
-        "masked_equal",
+        intern!(py, "masked_equal"),
         BinaryOp::Equal,
     )
 }
@@ -40565,7 +40562,7 @@ fn masked_not_equal(
         value,
         copy,
         "masked_not_equal",
-        "masked_not_equal",
+        intern!(py, "masked_not_equal"),
         BinaryOp::NotEqual,
     )
 }
@@ -40600,7 +40597,7 @@ fn masked_inside(
     v2: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    masked_interval_compare(py, x, v1, v2, copy, "masked_inside", "masked_inside", false)
+    masked_interval_compare(py, x, v1, v2, copy, "masked_inside", intern!(py, "masked_inside"), false)
 }
 
 #[pyfunction]
@@ -40617,7 +40614,7 @@ fn masked_greater_equal(
         value,
         copy,
         "masked_greater_equal",
-        "masked_greater_equal",
+        intern!(py, "masked_greater_equal"),
         BinaryOp::GreaterEqual,
     )
 }
@@ -79648,7 +79645,7 @@ fn masked_less_equal(
         value,
         copy,
         "masked_less_equal",
-        "masked_less_equal",
+        intern!(py, "masked_less_equal"),
         BinaryOp::LessEqual,
     )
 }
@@ -79669,7 +79666,7 @@ fn masked_outside(
         v2,
         copy,
         "masked_outside",
-        "masked_outside",
+        intern!(py, "masked_outside"),
         true,
     )
 }
@@ -80492,7 +80489,7 @@ fn masked_less(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> Py
         value,
         copy,
         "masked_less",
-        "masked_less",
+        intern!(py, "masked_less"),
         BinaryOp::Less,
     )
 }
@@ -80511,7 +80508,7 @@ fn masked_greater(
         value,
         copy,
         "masked_greater",
-        "masked_greater",
+        intern!(py, "masked_greater"),
         BinaryOp::Greater,
     )
 }
