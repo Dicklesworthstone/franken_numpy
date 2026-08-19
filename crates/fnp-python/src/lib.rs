@@ -109689,9 +109689,6 @@ fn histogramdd_native(
     ))
 }
 
-// Busday calendar functions (3).
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
 /// Is the native business-day kernel worth engaging? MEASURED FALSE.
 ///
 /// `bench_datetime_nat_busday_boundary`, worker `fixmydocuments` (Ryzen 7 5800X, 8 physical
@@ -109717,6 +109714,9 @@ fn histogramdd_native(
 /// than NumPy's C.
 const BUSDAY_NATIVE_ROUTE_BEATS_NUMPY: bool = false;
 
+// Busday calendar functions (3).
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
 fn busday_count(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
