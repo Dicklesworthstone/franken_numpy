@@ -127135,8 +127135,14 @@ mod tests {
                     let a_ref = theirs.call1((&x,))?;
                     let b_ref = ours.call1((&x,))?;
                     assert_eq!(
-                        a_ref.getattr("dtype")?.getattr("str")?.extract::<String>()?,
-                        b_ref.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                        a_ref
+                            .getattr("dtype")?
+                            .getattr("str")?
+                            .extract::<String>()?,
+                        b_ref
+                            .getattr("dtype")?
+                            .getattr("str")?
+                            .extract::<String>()?,
                         "{name}: dtype diverged - refusing to time two different computations"
                     );
                     assert_eq!(
