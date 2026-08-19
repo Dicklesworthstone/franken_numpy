@@ -82323,6 +82323,186 @@ fn cached_ndarray_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .bind(py))
 }
 
+/// The `numpy.dtype` TYPE OBJECT, on the same terms as `cached_ndarray_type`.
+///
+/// MUST BE `is_instance`, NEVER `is_exact_instance`: in numpy 2 every dtype is an instance of
+/// its OWN class (`numpy.dtypes.Float64DType`), never of `numpy.dtype` itself, so an exact test
+/// matches nothing at all and would silently disable whatever branch it guards.
+fn cached_dtype_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static DTYPE_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(DTYPE_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "dtype"))?.unbind())
+        })?
+        .bind(py))
+}
+
+// `isdtype`'s kind classes. These are the FIVE partitions numpy's `sctypes` draws plus a sixth
+// "none of them" - `bytes_`, `str_`, `void`, `object_`, `datetime64`, `timedelta64` and every
+// ABSTRACT type are accepted inputs that no kind string can ever match, which is why they are
+// carried in the table with class zero rather than left out of it. Leaving them out would be a
+// decline; carrying them as zero is the answer numpy gives (False), reached without numpy.
+const ISDTYPE_BOOL: u32 = 1 << 0;
+const ISDTYPE_SIGNED: u32 = 1 << 1;
+const ISDTYPE_UNSIGNED: u32 = 1 << 2;
+const ISDTYPE_FLOAT: u32 = 1 << 3;
+const ISDTYPE_COMPLEX: u32 = 1 << 4;
+const ISDTYPE_NO_KIND: u32 = 0;
+
+/// Every BUILTIN numpy scalar type, paired with the kind class it belongs to.
+///
+/// WHY A TABLE AT ALL: numpy's `isdtype` rebuilds its answer from scratch on EVERY call - for
+/// `kind="numeric"` it concatenates four `sctypes` lists (22 elements) into a new list, feeds
+/// that to `set.update`, and only then does one membership test. The set is identical on every
+/// call, so it is built once here and the per-call work drops to a pointer scan.
+///
+/// THE MEMBERSHIP IS BY IDENTITY, NOT EQUALITY, and that is what makes a table sound: numpy's
+/// `dtype in processed_kinds` hashes TYPE objects, whose hash and `__eq__` are both identity, so
+/// `is` here is the same predicate rather than an approximation of it.
+///
+/// ORDERED HOT FIRST - `float64`, `int64`, `bool_` and `float32` answer most real calls, so the
+/// scan usually stops in the first few entries.
+///
+/// A NAME THAT IS NOT PRESENT IS SKIPPED, NOT AN ERROR. The table is only ever allowed to be a
+/// SUBSET of numpy's `allTypes.values()`: a type missing from it declines to numpy, which is
+/// slower but never wrong, whereas a type in it that numpy does NOT accept would answer where
+/// numpy raises. Skipping keeps a numpy that renames a type on the safe side of that asymmetry.
+fn isdtype_class_table(py: Python<'_>) -> PyResult<&Vec<(Py<PyAny>, u32)>> {
+    static TABLE: PyOnceLock<Vec<(Py<PyAny>, u32)>> = PyOnceLock::new();
+    TABLE.get_or_try_init(py, || -> PyResult<Vec<(Py<PyAny>, u32)>> {
+        let numpy = cached_numpy(py)?;
+        let mut table: Vec<(Py<PyAny>, u32)> = Vec::new();
+        for (names, class) in [
+            (
+                &["float64", "float32", "float16", "longdouble"][..],
+                ISDTYPE_FLOAT,
+            ),
+            (
+                &["int64", "int32", "int16", "int8", "longlong"][..],
+                ISDTYPE_SIGNED,
+            ),
+            (&["bool_"][..], ISDTYPE_BOOL),
+            (
+                &["uint64", "uint32", "uint16", "uint8", "ulonglong"][..],
+                ISDTYPE_UNSIGNED,
+            ),
+            (
+                &["complex128", "complex64", "clongdouble"][..],
+                ISDTYPE_COMPLEX,
+            ),
+            (
+                &[
+                    "bytes_",
+                    "str_",
+                    "void",
+                    "object_",
+                    "datetime64",
+                    "timedelta64",
+                    "generic",
+                    "number",
+                    "integer",
+                    "signedinteger",
+                    "unsignedinteger",
+                    "inexact",
+                    "floating",
+                    "complexfloating",
+                    "flexible",
+                    "character",
+                ][..],
+                ISDTYPE_NO_KIND,
+            ),
+        ] {
+            for name in names {
+                if let Ok(ty) = numpy.getattr(*name) {
+                    table.push((ty.unbind(), class));
+                }
+            }
+        }
+        Ok(table)
+    })
+}
+
+/// numpy's `_preprocess_dtype`, as a lookup: the SCALAR TYPE an argument stands for, with its
+/// kind class, or `None` for anything this route will not answer.
+///
+/// `None` is never an answer of "no" - it means numpy must run, and numpy is then the one that
+/// raises. That is deliberate: a plain `int`, the string `'f8'`, an ndarray and `None` all reach
+/// `TypeError` inside numpy with a message this route does not have to reproduce, and every
+/// third-party or renamed scalar type lands here too rather than being guessed at.
+fn isdtype_scalar_type(py: Python<'_>, arg: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
+    // A dtype INSTANCE contributes its `.type`; `_preprocess_dtype` opens with exactly this.
+    let candidate = if arg.is_instance(cached_dtype_type(py)?)? {
+        arg.getattr(intern!(py, "type"))?
+    } else {
+        arg.clone()
+    };
+    // The INDEX, not the type object, is what callers compare - two entries are the same type
+    // exactly when the scan stopped at the same slot, and returning an index keeps the whole
+    // comparison off the Python side. First match wins, which also makes the answer canonical
+    // on a platform where two names ARE one object (`longdouble` is `float64` on some).
+    for (index, (ty, _)) in isdtype_class_table(py)?.iter().enumerate() {
+        if candidate.is(ty.bind(py)) {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+/// Native `numpy.isdtype`. `None` means pass through.
+///
+/// THE KIND ARGUMENT HAS TWO FORMS AND THEY ARE NOT THE SAME TEST. A kind STRING names a class
+/// and matches by class; a kind DTYPE names one type and matches that type ALONE - numpy adds it
+/// to the same set, where the comparison is again identity. `isdtype(np.float32, np.float64)` is
+/// False for that reason and is the cell a class-only reading gets wrong.
+///
+/// `kind` is a tuple ONLY when it is EXACTLY a tuple. numpy takes `isinstance(kind, tuple)` and
+/// then ITERATES, so a tuple subclass with its own `__iter__` would be iterated by numpy and
+/// scanned positionally here; that shape declines rather than being assumed equivalent.
+///
+/// An EMPTY tuple is a real input and answers False: no kind is required to match, and none can.
+fn native_isdtype(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<bool>> {
+    if !kwargs.is_none_or(|kw| kw.is_empty()) || args.len() != 2 {
+        return Ok(None);
+    }
+    let Some(target) = isdtype_scalar_type(py, &args.get_item(0)?)? else {
+        return Ok(None);
+    };
+    let target_class = isdtype_class_table(py)?[target].1;
+    let kind = args.get_item(1)?;
+    let items = if kind.is_exact_instance_of::<PyTuple>() {
+        kind.cast::<PyTuple>()?.iter().collect::<Vec<_>>()
+    } else {
+        vec![kind]
+    };
+    let mut mask = 0_u32;
+    let mut named_exactly = false;
+    for item in items {
+        if let Ok(name) = item.cast::<PyString>() {
+            mask |= match name.to_str()? {
+                "bool" => ISDTYPE_BOOL,
+                "signed integer" => ISDTYPE_SIGNED,
+                "unsigned integer" => ISDTYPE_UNSIGNED,
+                "integral" => ISDTYPE_SIGNED | ISDTYPE_UNSIGNED,
+                "real floating" => ISDTYPE_FLOAT,
+                "complex floating" => ISDTYPE_COMPLEX,
+                "numeric" => ISDTYPE_SIGNED | ISDTYPE_UNSIGNED | ISDTYPE_FLOAT | ISDTYPE_COMPLEX,
+                // An unknown kind name is a ValueError in numpy, with the name quoted back.
+                _ => return Ok(None),
+            };
+        } else {
+            let Some(kind_type) = isdtype_scalar_type(py, &item)? else {
+                return Ok(None);
+            };
+            named_exactly |= kind_type == target;
+        }
+    }
+    Ok(Some(named_exactly || mask & target_class != 0))
+}
+
 // ---------------------------------------------------------------------------
 // Historical reality-check (k74v.8) - 31 core numpy passthrough wrappers.
 //
@@ -106589,6 +106769,14 @@ fn isdtype(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // `np.isdtype` is pure Python that REBUILDS ITS ANSWER EVERY CALL: `kind="numeric"`
+    // concatenates four `sctypes` lists into a fresh list of 22 scalar types, pushes them
+    // through `set.update`, and performs ONE membership test against the set it just built.
+    // The set never differs between calls, so it is built once (`isdtype_class_table`) and the
+    // per-call work becomes a pointer scan and a mask test.
+    if let Some(verdict) = native_isdtype(py, args, kwargs)? {
+        return Ok(PyBool::new(py, verdict).to_owned().into_any().unbind());
+    }
     core_numpy_passthrough(py, "isdtype", args, kwargs)
 }
 
@@ -126251,6 +126439,156 @@ mod tests {
                 assert!(
                     ours.call1((&value, &floating)).is_err(),
                     "an operand numpy cannot interpret as a dtype must raise here too"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    /// `np.isdtype` must match NumPy on every kind spelling, and DECLINE everything it does
+    /// not answer rather than guessing (`deadlock-audit-6y5wp`).
+    ///
+    /// The incumbent is pure Python that rebuilds its answer on every call: each kind string
+    /// concatenates `sctypes` lists into a fresh list - 22 scalar types for `"numeric"` - and
+    /// pushes them through `set.update` before ONE membership test. The set is the same on
+    /// every call, so here it is a table built once and a mask test.
+    ///
+    /// THE CELLS A PLAUSIBLE IMPLEMENTATION GETS WRONG, all asserted below:
+    ///   - A kind that is a DTYPE matches that ONE type, not its class. `isdtype(np.float32,
+    ///     np.float64)` is FALSE even though both are real floating; numpy puts the dtype in
+    ///     the same set, where membership is identity.
+    ///   - `np.bool_` is NOT integral. `"integral"` is `sctypes["int"] + sctypes["uint"]`, and
+    ///     bool is in neither, so `isdtype(np.bool_, "integral")` is False while
+    ///     `isdtype(np.bool_, "bool")` is True.
+    ///   - `datetime64`, `str_`, `void` and the ABSTRACT types are ACCEPTED inputs that no
+    ///     kind string matches. They must answer False, not raise and not decline - which is
+    ///     why they are in the table with kind class zero instead of being left out of it.
+    ///   - An EMPTY tuple of kinds answers False.
+    ///
+    /// AND THE DECLINES, which must reach numpy so numpy raises its own error: a string
+    /// dtype spelling like `'f8'` (accepted by `issubdtype`, rejected by `isdtype` - the two
+    /// functions do NOT take the same arguments), a Python `int`, an ndarray, and an
+    /// unknown kind name.
+    #[test]
+    fn isdtype_matches_numpy_and_declines_what_it_does_not_answer() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_isdtype")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("isdtype")?;
+            let theirs = numpy.getattr("isdtype")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"cases = [\n\
+                      (np.float64, 'real floating'), (np.float32, 'real floating'),\n\
+                      (np.float16, 'real floating'), (np.longdouble, 'real floating'),\n\
+                      (np.int64, 'signed integer'), (np.int8, 'integral'),\n\
+                      (np.uint8, 'unsigned integer'), (np.uint64, 'integral'),\n\
+                      (np.int32, 'unsigned integer'), (np.uint32, 'signed integer'),\n\
+                      (np.bool_, 'bool'), (np.bool_, 'integral'), (np.bool_, 'numeric'),\n\
+                      (np.complex128, 'complex floating'), (np.complex64, 'numeric'),\n\
+                      (np.float64, 'numeric'), (np.int64, 'numeric'),\n\
+                      (np.float64, 'complex floating'), (np.complex128, 'real floating'),\n\
+                      (np.dtype('f8'), 'real floating'), (np.dtype('i4'), 'integral'),\n\
+                      (np.dtype('u1'), 'unsigned integer'), (np.dtype('?'), 'bool'),\n\
+                      (np.dtype('c16'), 'complex floating'), (np.dtype('m8[s]'), 'numeric'),\n\
+                      (np.datetime64, 'numeric'), (np.str_, 'numeric'), (np.void, 'bool'),\n\
+                      (np.bytes_, 'integral'), (np.object_, 'numeric'),\n\
+                      (np.floating, 'real floating'), (np.generic, 'numeric'),\n\
+                      # A DTYPE kind matches one type, not a class.\n\
+                      (np.float32, np.float64), (np.float64, np.float64),\n\
+                      (np.float64, np.dtype('f8')), (np.dtype('f8'), np.float64),\n\
+                      (np.int32, np.dtype('i4')), (np.int32, np.dtype('i8')),\n\
+                      # Tuples, including the empty one and mixed string/dtype members.\n\
+                      (np.float64, ()), (np.float64, ('integral',)),\n\
+                      (np.float64, ('real floating', 'complex floating')),\n\
+                      (np.int32, (np.float64, 'integral')), (np.int32, ('bool', np.int32)),\n\
+                      (np.uint8, (np.int8, np.uint8)), (np.uint8, (np.int8, np.int16)),\n\
+                  ]\n\
+                  # Shapes this route must NOT answer - numpy raises on every one.\n\
+                  declines = [\n\
+                      ('f8', 'real floating'), (5, 'numeric'), (None, 'numeric'),\n\
+                      (np.array([1]), 'integral'), (int, 'integral'), (float, 'numeric'),\n\
+                      (np.float64, 'bogus kind'), (np.float64, 'Bool'), (np.float64, ''),\n\
+                      (np.float64, ['integral']), (np.float64, 3), (np.float64, 'f8'),\n\
+                  ]\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let cases = locals
+                .get_item("cases")
+                .expect("fixture lookup failed")
+                .expect("cases missing");
+            let declines = locals
+                .get_item("declines")
+                .expect("fixture lookup failed")
+                .expect("declines missing");
+
+            for index in 0..cases.len()? {
+                let case = cases.get_item(index)?;
+                let (dtype, kind) = (case.get_item(0)?, case.get_item(1)?);
+                assert_eq!(
+                    ours.call1((&dtype, &kind))?.extract::<bool>()?,
+                    theirs.call1((&dtype, &kind))?.extract::<bool>()?,
+                    "isdtype case {index} diverged from numpy"
+                );
+                // ENGAGEMENT: every assertion above is satisfied by a passthrough, so the
+                // native route has to be shown to have answered this case itself.
+                assert!(
+                    native_isdtype(py, &PyTuple::new(py, [&dtype, &kind])?, None)?.is_some(),
+                    "the native route declined case {index}; parity alone proves nothing"
+                );
+            }
+
+            // The three cells a plausible implementation gets wrong, spelled out.
+            let f32 = numpy.getattr("float32")?;
+            let f64 = numpy.getattr("float64")?;
+            assert!(
+                !ours.call1((&f32, &f64))?.extract::<bool>()?,
+                "a DTYPE kind matches that one type, not its class - float32 is not float64"
+            );
+            let bool_ = numpy.getattr("bool_")?;
+            assert!(
+                !ours.call1((&bool_, "integral"))?.extract::<bool>()?,
+                "np.bool_ is NOT integral - `integral` is sctypes int + uint, and bool is in \
+                 neither"
+            );
+            assert!(
+                ours.call1((&bool_, "bool"))?.extract::<bool>()?,
+                "np.bool_ IS the bool kind"
+            );
+            assert!(
+                !ours
+                    .call1((numpy.getattr("datetime64")?, "numeric"))?
+                    .extract::<bool>()?,
+                "datetime64 is an ACCEPTED input that no kind matches - False, not an error"
+            );
+            assert!(
+                !ours.call1((&f64, PyTuple::empty(py)))?.extract::<bool>()?,
+                "an empty tuple of kinds answers False"
+            );
+
+            // The declines: the native route must not answer, and the passthrough must then
+            // reproduce numpy's error - which it does by BEING numpy.
+            for index in 0..declines.len()? {
+                let case = declines.get_item(index)?;
+                let (dtype, kind) = (case.get_item(0)?, case.get_item(1)?);
+                assert!(
+                    native_isdtype(py, &PyTuple::new(py, [&dtype, &kind])?, None)?.is_none(),
+                    "declines[{index}] must NOT be answered natively - numpy raises on it"
+                );
+                assert!(
+                    theirs.call1((&dtype, &kind)).is_err(),
+                    "declines[{index}] is supposed to be an input numpy rejects"
+                );
+                assert!(
+                    ours.call1((&dtype, &kind)).is_err(),
+                    "declines[{index}] must still raise here, through the passthrough"
                 );
             }
             Ok(())
