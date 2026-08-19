@@ -107793,6 +107793,138 @@ fn atleast_3d(
     core_numpy_passthrough_interned(py, intern!(py, "atleast_3d"), args, kwargs)
 }
 
+/// Native `numpy.apply_along_axis(func1d, axis, arr)`.
+///
+/// The incumbent is 40 lines of Python whose per-iteration cost is entirely Python: an
+/// `ndindex` generator, a tuple concatenation to append `Ellipsis`, a `__getitem__`, an
+/// `asanyarray`, and a `__setitem__` - all of it around ONE call to the user's `func1d`. This
+/// route drives the same loop from Rust and pays only for the `func1d` call and the two item
+/// operations.
+///
+/// THE TRAILING `Ellipsis` IS NOT DECORATION - it is gh-8642. Indexing with the bare index
+/// tuple would let a 0-d selection decay to a SCALAR, and the result buffer would then be
+/// filled from scalars instead of 0-d arrays. numpy appends `Ellipsis` for exactly this, and
+/// so does this route.
+///
+/// THE BUFFER IS `zeros_like(res, shape=...)`, NOT `zeros(shape, res.dtype)`, and the
+/// difference is the SUBCLASS: `zeros_like` preserves whatever `asanyarray(func1d(...))`
+/// returned. numpy uses the plain `zeros` form only for `matrix`, whose reshaping it refuses
+/// to preserve - both branches are reproduced here rather than declining, because by the time
+/// the result type is known `func1d` has ALREADY RUN ONCE, and declining then would run a
+/// side-effecting `func1d` on the first row twice.
+///
+/// THE OUTPUT PERMUTATION is numpy's: the iteration axis was moved to the END for a contiguous
+/// write order, so the result's own axes have to be rotated back into `axis`'s position.
+///
+/// DECLINES: a non-exact ndarray (numpy's `_array_converter` would wrap a subclass and this
+/// route does not reproduce `conv.wrap`), a non-`int` axis, an out-of-range axis (numpy raises
+/// `AxisError` with its own message), a 0-d operand, and any call carrying extra `*args` or
+/// `**kwargs` for `func1d`. An iteration dimension of length zero is an ERROR rather than a
+/// decline - it is numpy's own `ValueError` and can be raised before `func1d` is called at all.
+fn native_apply_along_axis(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !kwargs.is_none_or(|kw| kw.is_empty()) || args.len() != 3 {
+        return Ok(None);
+    }
+    let func1d = args.get_item(0)?;
+    let axis_arg = args.get_item(1)?;
+    let arr = args.get_item(2)?;
+    if !arr.is_exact_instance(cached_ndarray_type(py)?) || !axis_arg.is_exact_instance_of::<PyInt>()
+    {
+        return Ok(None);
+    }
+    let Ok(axis_in) = axis_arg.extract::<isize>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
+    let nd = shape.len();
+    if nd == 0 || axis_in < -(nd as isize) || axis_in >= nd as isize {
+        return Ok(None);
+    }
+    let axis = if axis_in < 0 {
+        (axis_in + nd as isize) as usize
+    } else {
+        axis_in as usize
+    };
+
+    // The iteration axis goes last, which is what makes each write contiguous.
+    let mut order: Vec<usize> = (0..nd).filter(|dim| *dim != axis).collect();
+    order.push(axis);
+    let view = arr.call_method1(intern!(py, "transpose"), (PyTuple::new(py, &order)?,))?;
+    let view_shape: Vec<usize> = view.getattr(intern!(py, "shape"))?.extract()?;
+    let outer = &view_shape[..nd - 1];
+    if outer.contains(&0) {
+        return Err(PyValueError::new_err(
+            "Cannot apply_along_axis when any iteration dimensions are 0",
+        ));
+    }
+
+    let numpy = cached_numpy(py)?;
+    let asanyarray = numpy.getattr(intern!(py, "asanyarray"))?;
+    let ellipsis = py.Ellipsis();
+    let index_for = |ind: &[usize]| -> PyResult<Bound<'_, PyAny>> {
+        let mut items: Vec<Bound<'_, PyAny>> = Vec::with_capacity(ind.len() + 1);
+        for value in ind {
+            items.push(value.into_pyobject(py)?.into_any());
+        }
+        items.push(ellipsis.bind(py).clone());
+        Ok(PyTuple::new(py, items)?.into_any())
+    };
+
+    let mut ind = vec![0_usize; outer.len()];
+    let first = index_for(&ind)?;
+    let first_result = asanyarray.call1((func1d.call1((view.get_item(&first)?,))?,))?;
+    let result_shape: Vec<usize> = first_result.getattr(intern!(py, "shape"))?.extract()?;
+    let mut buffer_shape: Vec<usize> = outer.to_vec();
+    buffer_shape.extend_from_slice(&result_shape);
+
+    let buffer = if first_result.is_instance(&numpy.getattr(intern!(py, "matrix"))?)? {
+        // numpy's own comment: "Matrices are nasty with reshaping, so do not preserve them."
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "dtype"), first_result.getattr(intern!(py, "dtype"))?)?;
+        numpy.getattr(intern!(py, "zeros"))?.call(
+            (PyTuple::new(py, &buffer_shape)?,),
+            Some(&kwargs),
+        )?
+    } else {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "shape"), PyTuple::new(py, &buffer_shape)?)?;
+        numpy
+            .getattr(intern!(py, "zeros_like"))?
+            .call((&first_result,), Some(&kwargs))?
+    };
+    buffer.set_item(&first, &first_result)?;
+
+    let total: usize = outer.iter().product();
+    for _ in 1..total {
+        for position in (0..outer.len()).rev() {
+            ind[position] += 1;
+            if ind[position] < outer[position] {
+                break;
+            }
+            ind[position] = 0;
+        }
+        let index = index_for(&ind)?;
+        let value = asanyarray.call1((func1d.call1((view.get_item(&index)?,))?,))?;
+        buffer.set_item(&index, value)?;
+    }
+
+    // out = buff.transpose(buff_permute), with the result's own axes rotated back to `axis`.
+    let buffer_nd = buffer_shape.len();
+    let result_nd = result_shape.len();
+    let mut permute: Vec<usize> = (0..axis).collect();
+    permute.extend(buffer_nd - result_nd..buffer_nd);
+    permute.extend(axis..buffer_nd - result_nd);
+    Ok(Some(
+        buffer
+            .call_method1(intern!(py, "transpose"), (PyTuple::new(py, &permute)?,))?
+            .unbind(),
+    ))
+}
+
 // Functional iteration helpers (2).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
@@ -107801,6 +107933,9 @@ fn apply_along_axis(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_apply_along_axis(py, args, kwargs)? {
+        return Ok(result);
+    }
     core_numpy_passthrough_interned(py, intern!(py, "apply_along_axis"), args, kwargs)
 }
 
@@ -114326,7 +114461,8 @@ mod tests {
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
         narrow_bitmap_setop, native_apply_over_axes, native_atleast, native_array_str, native_base_repr,
         native_isdtype,
-        native_binary_repr, native_format_float, native_scimath_fix_unary,
+        native_apply_along_axis, native_binary_repr, native_format_float,
+        native_scimath_fix_unary,
         native_scimath_logn,
         native_scimath_power, nextafter,
         numpy_dtype_is_f64, offset_business_days, place, put, put_along_axis, putmask,
@@ -127693,6 +127829,193 @@ mod tests {
                     "declines[{index}] must still raise here, through the passthrough"
                 );
             }
+            Ok(())
+        });
+    }
+
+    /// `np.apply_along_axis` must match NumPy for every result RANK the callback can return,
+    /// and decline what it does not answer (`deadlock-audit-6y5wp`).
+    ///
+    /// The incumbent's per-iteration cost is all Python - an `ndindex` generator, a tuple
+    /// concatenation to append `Ellipsis`, a `__getitem__`, an `asanyarray` and a
+    /// `__setitem__` - around one call to the user's function. The native route drives that
+    /// loop from Rust.
+    ///
+    /// WHAT THE FIXTURES ARE FOR, because the shape algebra is where this goes wrong:
+    ///   - `sum` returns a SCALAR, so the result has one axis fewer than the input.
+    ///   - `sorted` returns a 1-D of the SAME length, `first_two` a SHORTER one - a route that
+    ///     assumed the result length equals the input length passes the first and fails the
+    ///     second.
+    ///   - `outer2` returns 2-D, which is the only case that exercises the output permutation
+    ///     with `res.ndim > 1`.
+    ///   - `zerod` returns a 0-D array. THIS IS gh-8642: without the trailing `Ellipsis` the
+    ///     selection decays to a scalar and the buffer is filled from scalars.
+    ///   - `bool` changes the result DTYPE away from the input's, which is what `zeros_like`
+    ///     on the RESULT (not on the input) gets right.
+    /// A zero-length iteration dimension is numpy's `ValueError`, and a zero-length INNER
+    /// dimension is not an error at all - `zero_inner` covers that asymmetry.
+    #[test]
+    fn apply_along_axis_matches_numpy_for_every_result_rank() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_apply_along_axis")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("apply_along_axis")?;
+            let theirs = numpy.getattr("apply_along_axis")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"rng = np.random.default_rng(7)\n\
+                  arrays = {\n\
+                      'a2d': rng.standard_normal((4, 5)),\n\
+                      'a3d': rng.standard_normal((2, 3, 4)),\n\
+                      'a1d': rng.standard_normal(6),\n\
+                      'int2d': rng.integers(-9, 9, (3, 4)),\n\
+                      'f32': rng.standard_normal((3, 4)).astype('float32'),\n\
+                      'zero_inner': np.zeros((3, 0)),\n\
+                      'a4d': rng.standard_normal((2, 2, 3, 2)),\n\
+                  }\n\
+                  funcs = {\n\
+                      'sum': np.sum,\n\
+                      'sorted': np.sort,\n\
+                      'first_two': lambda v: v[:2],\n\
+                      'outer2': lambda v: np.stack([v, v * 2]),\n\
+                      'zerod': lambda v: np.asarray(v.sum()),\n\
+                      'pyfloat': lambda v: float(v.sum()),\n\
+                      'bool': lambda v: v > 0,\n\
+                  }\n\
+                  cases = [(an, fn, ax) for an, a in arrays.items()\n\
+                                        for fn in funcs\n\
+                                        for ax in ({-1, 0} | ({1} if a.ndim > 1 else set()))]\n\
+                  zero_outer = np.zeros((0, 3))\n\
+                  masked = np.ma.array([[1.0, 2.0], [3.0, 4.0]])\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("apply_along_axis fixture missing")
+            };
+            let arrays = g("arrays");
+            let funcs = g("funcs");
+            let cases = g("cases");
+
+            for index in 0..cases.len()? {
+                let case = cases.get_item(index)?;
+                let array_name = case.get_item(0)?;
+                let func_name = case.get_item(1)?;
+                let axis = case.get_item(2)?;
+                let arr = arrays.get_item(&array_name)?;
+                let func = funcs.get_item(&func_name)?;
+                let label = format!(
+                    "{}/{}/axis={}",
+                    array_name.extract::<String>()?,
+                    func_name.extract::<String>()?,
+                    axis.extract::<i64>()?
+                );
+                // SOME CELLS RAISE IN BOTH ARMS AND THAT IS THE CORRECT ANSWER: with
+                // `zero_inner` (3, 0) at axis 0 the iteration axis has length zero after the
+                // transpose, so numpy's `next(inds)` hits `StopIteration` and it raises. The
+                // match arms are ordered Ok/Ok, Err/Err, then mismatch - `(Ok(_), _)` first
+                // would silently swallow the Err/Err case.
+                match (
+                    ours.call1((&func, &axis, &arr)),
+                    theirs.call1((&func, &axis, &arr)),
+                ) {
+                    (Ok(mine), Ok(base)) => {
+                        assert_eq!(
+                            mine.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                            base.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                            "{label}: dtype diverged"
+                        );
+                        assert_eq!(
+                            mine.getattr("shape")?.extract::<Vec<usize>>()?,
+                            base.getattr("shape")?.extract::<Vec<usize>>()?,
+                            "{label}: SHAPE diverged - the output permutation puts the \
+                             callback's own axes back where the iteration axis was"
+                        );
+                        assert_eq!(
+                            mine.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                            base.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                            "{label}: bytes diverged"
+                        );
+                        // ENGAGEMENT: the assertions above are satisfied by a passthrough.
+                        assert!(
+                            native_apply_along_axis(
+                                py,
+                                &PyTuple::new(py, [&func, &axis, &arr])?,
+                                None
+                            )?
+                            .is_some(),
+                            "the native route declined {label}; parity alone proves nothing"
+                        );
+                    }
+                    (Err(mine), Err(base)) => {
+                        assert_eq!(
+                            mine.get_type(py).name()?.extract::<String>()?,
+                            base.get_type(py).name()?.extract::<String>()?,
+                            "{label}: both raise, but with different exception types"
+                        );
+                        assert_eq!(
+                            mine.value(py).str()?.extract::<String>()?,
+                            base.value(py).str()?.extract::<String>()?,
+                            "{label}: both raise, but with different messages"
+                        );
+                    }
+                    (mine, base) => {
+                        return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                            "{label}: one arm raised and the other did not - ours={mine:?} \
+                             numpy={base:?}"
+                        )));
+                    }
+                }
+            }
+
+            // A zero-length ITERATION dimension is numpy's ValueError, raised before the
+            // callback runs at all.
+            let sum_fn = funcs.get_item("sum")?;
+            let zero_outer = g("zero_outer");
+            for (arm, label) in [(&ours, "ours"), (&theirs, "numpy")] {
+                let err = arm
+                    .call1((&sum_fn, 1_i64, &zero_outer))
+                    .expect_err("a zero-length iteration dimension must raise");
+                assert!(
+                    err.value(py)
+                        .str()?
+                        .extract::<String>()?
+                        .contains("iteration dimensions are 0"),
+                    "{label}: the message must be numpy's own"
+                );
+            }
+
+            // The declines, each because numpy does something this route does not reproduce.
+            let masked = g("masked");
+            assert!(
+                native_apply_along_axis(
+                    py,
+                    &PyTuple::new(py, [&sum_fn, &1_i64.into_pyobject(py)?.into_any(), &masked])?,
+                    None
+                )?
+                .is_none(),
+                "a masked array must decline - `_array_converter` would wrap the result and \
+                 this route does not reproduce `conv.wrap`"
+            );
+            let a2d = arrays.get_item("a2d")?;
+            assert!(
+                native_apply_along_axis(
+                    py,
+                    &PyTuple::new(py, [&sum_fn, &5_i64.into_pyobject(py)?.into_any(), &a2d])?,
+                    None
+                )?
+                .is_none(),
+                "an out-of-range axis must decline so numpy raises its own AxisError"
+            );
             Ok(())
         });
     }
