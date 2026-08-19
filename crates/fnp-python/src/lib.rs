@@ -111016,6 +111016,207 @@ fn datetime_data(
     Ok(cached_numpy_datetime_data(py)?.call(args, kwargs)?.unbind())
 }
 
+/// numpy's `dragon4_positional` / `dragon4_scientific`, the C core both `format_float_*`
+/// wrappers exist to call. `None` means the attribute is not there and the caller must pass
+/// through.
+///
+/// PRIVATE API, CACHED SOFT. These live in `numpy._core.multiarray`, which is not a documented
+/// surface, so the cell holds an `Option` and a miss DECLINES rather than raising - a numpy that
+/// renames or moves them costs this route its lever, never its correctness.
+fn cached_dragon4(py: Python<'_>, scientific: bool) -> PyResult<Option<&Bound<'_, PyAny>>> {
+    static POSITIONAL: PyOnceLock<Option<Py<PyAny>>> = PyOnceLock::new();
+    static SCIENTIFIC: PyOnceLock<Option<Py<PyAny>>> = PyOnceLock::new();
+    let cell = if scientific { &SCIENTIFIC } else { &POSITIONAL };
+    let name = if scientific {
+        "dragon4_scientific"
+    } else {
+        "dragon4_positional"
+    };
+    Ok(cell
+        .get_or_try_init(py, || -> PyResult<Option<Py<PyAny>>> {
+            Ok(py
+                .import("numpy._core.multiarray")
+                .ok()
+                .and_then(|module| module.getattr(name).ok())
+                .map(|attr| attr.unbind()))
+        })?
+        .as_ref()
+        .map(|attr| attr.bind(py)))
+}
+
+/// numpy's `_none_or_positive_arg`, which is four lines and all of them matter:
+///
+/// ```text
+/// if x is None: return -1
+/// if x < 0:     raise ValueError(f"{name} must be >= 0")
+/// return x
+/// ```
+///
+/// `None` BECOMES -1, NOT 0. That sentinel is what makes the two guards downstream inert when
+/// the caller passed nothing: `-1 == 0` is false and `-1 > 0` is false, so
+/// `format_float_positional(x, fractional=False)` is legal precisely because `precision` is -1
+/// rather than 0. Defaulting the sentinel to 0 would reject that call.
+///
+/// Returns `Ok(None)` to DECLINE anything that is not `None` or an exact Python `int` - a float
+/// or a numpy scalar compares fine against 0 in Python and would then reach the C function as a
+/// type it may or may not accept, which is numpy's business rather than this route's. `bool` is
+/// excluded by the exactness test.
+fn none_or_positive_arg(value: Option<&Bound<'_, PyAny>>, name: &str) -> PyResult<Option<i64>> {
+    let Some(value) = value else {
+        return Ok(Some(-1));
+    };
+    if value.is_none() {
+        return Ok(Some(-1));
+    }
+    if !value.is_exact_instance_of::<PyInt>() {
+        return Ok(None);
+    }
+    let Ok(parsed) = value.extract::<i64>() else {
+        return Ok(None);
+    };
+    if parsed < 0 {
+        return Err(PyValueError::new_err(format!("{name} must be >= 0")));
+    }
+    Ok(Some(parsed))
+}
+
+/// Native `numpy.format_float_positional` / `format_float_scientific`: normalise four arguments
+/// and call the C core directly, instead of through a Python frame and four helper calls.
+///
+/// THE ORDER OF NORMALISATION IS OBSERVABLE and is numpy's: precision, pad_left, then
+/// pad_right (positional) or exp_digits (scientific), then min_digits. Two negative arguments
+/// mean the FIRST one names the error, so normalising in a different order would raise about the
+/// wrong argument.
+///
+/// Shapes this route answers: exactly ONE positional argument (the value) plus any subset of
+/// that function's own keywords. Extra positionals decline - numpy accepts them, and binding
+/// nine parameters by position here would be a second implementation of a signature this file
+/// has no other reason to know.
+fn native_format_float(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    scientific: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if args.len() != 1 {
+        return Ok(None);
+    }
+    let third = if scientific { "exp_digits" } else { "pad_right" };
+    let allowed: &[&str] = if scientific {
+        &[
+            "precision",
+            "unique",
+            "trim",
+            "sign",
+            "pad_left",
+            "exp_digits",
+            "min_digits",
+        ]
+    } else {
+        &[
+            "precision",
+            "unique",
+            "fractional",
+            "trim",
+            "sign",
+            "pad_left",
+            "pad_right",
+            "min_digits",
+        ]
+    };
+    let mut given: Vec<(String, Bound<'_, PyAny>)> = Vec::new();
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let Ok(key) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            if !allowed.contains(&key.as_str()) {
+                return Ok(None);
+            }
+            given.push((key, value));
+        }
+    }
+    let lookup = |name: &str| -> Option<&Bound<'_, PyAny>> {
+        given.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+    };
+
+    // Flags and `trim` are forwarded verbatim; anything but an exact bool / a str is numpy's
+    // problem, not this route's.
+    let flag = |name: &str, default: bool| -> Option<bool> {
+        match lookup(name) {
+            None => Some(default),
+            Some(value) if value.is_exact_instance_of::<PyBool>() => value.extract::<bool>().ok(),
+            Some(_) => None,
+        }
+    };
+    let (Some(unique), Some(sign)) = (flag("unique", true), flag("sign", false)) else {
+        return Ok(None);
+    };
+    let fractional = if scientific {
+        true
+    } else {
+        match flag("fractional", true) {
+            Some(value) => value,
+            None => return Ok(None),
+        }
+    };
+    let trim = match lookup("trim") {
+        None => intern!(py, "k").clone().into_any(),
+        Some(value) if value.is_instance_of::<PyString>() => value.clone(),
+        Some(_) => return Ok(None),
+    };
+
+    // ORDER MATTERS - the first negative argument is the one numpy names.
+    let mut normalised = [0_i64; 4];
+    for (slot, name) in normalised
+        .iter_mut()
+        .zip(["precision", "pad_left", third, "min_digits"])
+    {
+        match none_or_positive_arg(lookup(name), name)? {
+            Some(value) => *slot = value,
+            None => return Ok(None),
+        }
+    }
+    let [precision, pad_left, third_value, min_digits] = normalised;
+
+    if !scientific && !fractional && precision == 0 {
+        return Err(PyValueError::new_err(
+            "precision must be greater than 0 if fractional=False",
+        ));
+    }
+    if min_digits > 0 && precision > 0 && min_digits > precision {
+        return Err(PyValueError::new_err(
+            "min_digits must be less than or equal to precision",
+        ));
+    }
+
+    let Some(dragon4) = cached_dragon4(py, scientific)? else {
+        return Ok(None);
+    };
+    let call_kwargs = PyDict::new(py);
+    call_kwargs.set_item(intern!(py, "precision"), precision)?;
+    call_kwargs.set_item(intern!(py, "unique"), unique)?;
+    if !scientific {
+        call_kwargs.set_item(intern!(py, "fractional"), fractional)?;
+    }
+    call_kwargs.set_item(intern!(py, "trim"), trim)?;
+    call_kwargs.set_item(intern!(py, "sign"), sign)?;
+    call_kwargs.set_item(intern!(py, "pad_left"), pad_left)?;
+    // `intern!` needs a LITERAL, so the third keyword is branched rather than threaded
+    // through the `third` variable that names it above.
+    if scientific {
+        call_kwargs.set_item(intern!(py, "exp_digits"), third_value)?;
+    } else {
+        call_kwargs.set_item(intern!(py, "pad_right"), third_value)?;
+    }
+    call_kwargs.set_item(intern!(py, "min_digits"), min_digits)?;
+    Ok(Some(
+        dragon4
+            .call((args.get_item(0)?,), Some(&call_kwargs))?
+            .unbind(),
+    ))
+}
+
 // String-format helpers (4).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
@@ -111024,6 +111225,9 @@ fn format_float_positional(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_format_float(py, args, kwargs, false)? {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "format_float_positional", args, kwargs)
 }
 
@@ -111034,6 +111238,9 @@ fn format_float_scientific(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_format_float(py, args, kwargs, true)? {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "format_float_scientific", args, kwargs)
 }
 
@@ -114015,7 +114222,8 @@ mod tests {
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
         narrow_bitmap_setop, native_apply_over_axes, native_atleast, native_base_repr,
         native_isdtype,
-        native_binary_repr, native_scimath_fix_unary, native_scimath_logn,
+        native_binary_repr, native_format_float, native_scimath_fix_unary,
+        native_scimath_logn,
         native_scimath_power, nextafter,
         numpy_dtype_is_f64, offset_business_days, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
@@ -127241,6 +127449,187 @@ mod tests {
                     "declines[{index}] must still raise here, through the passthrough"
                 );
             }
+            Ok(())
+        });
+    }
+
+    /// `np.format_float_positional` / `format_float_scientific` must match NumPy exactly,
+    /// including which argument an error NAMES, and decline what they do not answer
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// Both incumbents are the same four lines: normalise four arguments with
+    /// `_none_or_positive_arg`, check two guards, call the C `dragon4_*`. The native route is
+    /// those four lines without the Python frame and without the four helper calls.
+    ///
+    /// THE SENTINEL IS -1, NOT 0, and that is the detail the whole thing turns on.
+    /// `_none_or_positive_arg(None, ...)` returns -1, which makes both downstream guards inert:
+    /// `-1 == 0` is false, so `format_float_positional(x, fractional=False)` is LEGAL, and
+    /// `-1 > 0` is false, so an unset `min_digits` never trips the precision comparison.
+    /// Defaulting to 0 rejects the first call and is the obvious wrong choice.
+    ///
+    /// THE ORDER OF NORMALISATION IS OBSERVABLE: precision, pad_left, then pad_right (or
+    /// exp_digits), then min_digits. With two negative arguments the FIRST one names the error,
+    /// so a route that normalised in a different order would raise about the wrong argument
+    /// with an otherwise perfect message.
+    #[test]
+    fn format_float_family_matches_numpy_including_which_argument_the_error_names() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_format_float")?;
+            fnp_python(&module)?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"values = [0.0, -0.0, 1.0, -1.5, 3.14159265358979, 1e-9, 1e300,\n\
+                            np.float32(2.5), np.float64(7.0), np.inf, -np.inf, np.nan,\n\
+                            2, np.float16(1.5), 0.1]\n\
+                  pos_kwargs = [{}, {'precision': 3}, {'precision': 0},\n\
+                                {'unique': False, 'precision': 4}, {'trim': '-'},\n\
+                                {'trim': '0'}, {'sign': True}, {'pad_left': 5},\n\
+                                {'pad_right': 4}, {'min_digits': 2, 'precision': 5},\n\
+                                {'min_digits': 3}, {'fractional': False, 'precision': 2}]\n\
+                  sci_kwargs = [{}, {'precision': 3}, {'exp_digits': 3},\n\
+                                {'precision': 2, 'exp_digits': 4}, {'sign': True},\n\
+                                {'trim': 'k'}, {'pad_left': 5}, {'min_digits': 2, 'precision': 5},\n\
+                                {'unique': False, 'precision': 6}]\n\
+                  raising = [{'precision': -1}, {'pad_left': -2}, {'min_digits': -3},\n\
+                             {'min_digits': 6, 'precision': 3},\n\
+                             {'precision': 0, 'fractional': False}]\n\
+                  both_negative = {'precision': -1, 'pad_left': -2}\n\
+                  declining = [{'precision': 2.5}, {'unique': 1}, {'trim': 7},\n\
+                               {'bogus_keyword': 1}, {'precision': np.int64(3)}]\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("format_float fixture missing")
+            };
+            let values = g("values");
+
+            for (flat, scientific, kwargs_name) in [
+                ("format_float_positional", false, "pos_kwargs"),
+                ("format_float_scientific", true, "sci_kwargs"),
+            ] {
+                let ours = module.getattr(flat)?;
+                let theirs = numpy.getattr(flat)?;
+                let kwargs_list = g(kwargs_name);
+                for value_index in 0..values.len()? {
+                    let value = values.get_item(value_index)?;
+                    for kwargs_index in 0..kwargs_list.len()? {
+                        let kwargs = kwargs_list.get_item(kwargs_index)?;
+                        let kwargs = kwargs.cast::<PyDict>()?;
+                        let mine = ours.call((&value,), Some(kwargs))?.extract::<String>()?;
+                        let base = theirs.call((&value,), Some(kwargs))?.extract::<String>()?;
+                        assert_eq!(
+                            mine, base,
+                            "{flat}(values[{value_index}], {kwargs_name}[{kwargs_index}]) \
+                             diverged from numpy"
+                        );
+                        // ENGAGEMENT: the passthrough satisfies the assertion above by itself.
+                        assert!(
+                            native_format_float(
+                                py,
+                                &PyTuple::new(py, [&value])?,
+                                Some(kwargs),
+                                scientific
+                            )?
+                            .is_some(),
+                            "the native route declined {flat}(values[{value_index}], \
+                             {kwargs_name}[{kwargs_index}]); parity alone proves nothing"
+                        );
+                    }
+                }
+
+                // The errors, which must be numpy's exception AND numpy's message.
+                let raising = g("raising");
+                for index in 0..raising.len()? {
+                    let kwargs = raising.get_item(index)?;
+                    let kwargs = kwargs.cast::<PyDict>()?;
+                    let mine = ours.call((1.5_f64,), Some(kwargs));
+                    let base = theirs.call((1.5_f64,), Some(kwargs));
+                    match (mine, base) {
+                        (Err(mine), Err(base)) => {
+                            assert_eq!(
+                                mine.get_type(py).name()?.extract::<String>()?,
+                                base.get_type(py).name()?.extract::<String>()?,
+                                "{flat} raising[{index}]: exception type diverged"
+                            );
+                            assert_eq!(
+                                mine.value(py).str()?.extract::<String>()?,
+                                base.value(py).str()?.extract::<String>()?,
+                                "{flat} raising[{index}]: message diverged"
+                            );
+                        }
+                        (mine, base) => {
+                            return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                                "{flat} raising[{index}] outcome diverged: ours={mine:?} \
+                                 theirs={base:?}"
+                            )));
+                        }
+                    }
+                }
+
+                // WHICH argument gets named when two are bad: the FIRST normalised one.
+                let both = g("both_negative");
+                let both = both.cast::<PyDict>()?;
+                let mine = ours.call((1.5_f64,), Some(both)).unwrap_err();
+                let base = theirs.call((1.5_f64,), Some(both)).unwrap_err();
+                assert_eq!(
+                    mine.value(py).str()?.extract::<String>()?,
+                    base.value(py).str()?.extract::<String>()?,
+                    "{flat}: with BOTH precision and pad_left negative, numpy names `precision` \
+                     because it normalises that one first - normalising in another order gives \
+                     a perfect message about the wrong argument"
+                );
+
+                // The declines: a float precision, a non-bool flag, a non-str trim, an unknown
+                // keyword, and a numpy integer (which compares fine against 0 in Python but is
+                // not an exact `int`). Each must reach numpy and still match it.
+                let declining = g("declining");
+                for index in 0..declining.len()? {
+                    let kwargs = declining.get_item(index)?;
+                    let kwargs = kwargs.cast::<PyDict>()?;
+                    assert!(
+                        native_format_float(
+                            py,
+                            &PyTuple::new(py, [1.5_f64])?,
+                            Some(kwargs),
+                            scientific
+                        )?
+                        .is_none(),
+                        "{flat} declining[{index}] must NOT be answered natively"
+                    );
+                    let mine = ours.call((1.5_f64,), Some(kwargs));
+                    let base = theirs.call((1.5_f64,), Some(kwargs));
+                    assert_eq!(
+                        mine.is_ok(),
+                        base.is_ok(),
+                        "{flat} declining[{index}]: ours and numpy disagreed on whether it raises"
+                    );
+                    if let (Ok(mine), Ok(base)) = (mine, base) {
+                        assert_eq!(
+                            mine.extract::<String>()?,
+                            base.extract::<String>()?,
+                            "{flat} declining[{index}] must still match numpy through the \
+                             passthrough"
+                        );
+                    }
+                }
+            }
+
+            // Extra positionals decline rather than being bound by hand.
+            assert!(
+                native_format_float(py, &PyTuple::new(py, [1.5_f64, 3.0])?, None, false)?.is_none(),
+                "a second positional argument must decline - numpy accepts it, and binding nine \
+                 parameters positionally here would be a second copy of that signature"
+            );
             Ok(())
         });
     }
