@@ -63989,18 +63989,158 @@ fn native_scimath_fix_unary(
     };
     let numpy = cached_numpy(py)?;
     let operand = if triggered {
-        let complex_type = numpy.getattr(if single {
-            intern!(py, "complex64")
-        } else {
-            intern!(py, "complex128")
-        })?;
-        x.call_method1(intern!(py, "astype"), (complex_type,))?
+        scimath_tocomplex(py, &x, single)?
     } else {
         // `asarray` is the identity on an exact ndarray and the fix did not fire, so
         // `_fix_real_lt_zero` returned the operand UNCHANGED - the ufunc gets it as it is.
-        x
+        x.unbind()
     };
     Ok(Some(numpy.getattr(name)?.call1((operand,))?.unbind()))
+}
+
+/// Which `_fix_*` the SCALAR operand of a two-operand `numpy.emath` entry carries.
+#[derive(Clone, Copy)]
+enum ScimathScalarFix {
+    /// `logn`'s base: `_fix_real_lt_zero`, so a negative base becomes COMPLEX.
+    RealLtZero,
+    /// `power`'s exponent: `_fix_int_lt_zero`, which multiplies by 1.0 instead - an integer
+    /// exponent has to become FLOAT so `power` does not refuse a negative integer power.
+    IntLtZero,
+}
+
+/// The scalar operand of `logn`/`power`, fixed exactly as numpy fixes it. `None` declines.
+///
+/// `asarray` IS LOAD-BEARING AND IS NOT A STEP TO SKIP. Every `_fix_*` opens with
+/// `x = asarray(x)`, which turns a Python scalar into a 0-d ARRAY - and under NEP 50 a 0-d
+/// array is NOT a weak scalar. `np.power(f32_array, 3.0)` keeps float32 because the Python
+/// float is weak; `np.power(f32_array, np.asarray(3.0))` PROMOTES TO FLOAT64. A Python-mirror
+/// fuzz against the installed numpy caught exactly this - 22 of 220 cells came back float32
+/// where numpy says float64 - before any of this existed in Rust. Passing the scalar straight
+/// through would be the obvious implementation and it is wrong on every float32 operand.
+///
+/// Only an EXACT Python `int` or `float`, which is what `logn(3.0, x)` and `power(x, 0.5)`
+/// actually pass. `bool` is excluded by the exactness test (it is an `int` subclass, and
+/// `asarray(True)` is a bool array, a different promotion story), and an array-valued second
+/// operand is left to numpy - `_fix_int_lt_zero` on an array multiplies the WHOLE array by 1.0,
+/// which is a different computation from anything here.
+fn scimath_fix_scalar(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    fix: ScimathScalarFix,
+) -> PyResult<Option<Py<PyAny>>> {
+    let negative = if value.is_exact_instance_of::<pyo3::types::PyFloat>() {
+        value.extract::<f64>()? < 0.0
+    } else if value.is_exact_instance_of::<PyInt>() {
+        match value.extract::<i64>() {
+            Ok(v) => v < 0,
+            // A Python int too large for i64 cannot be negative-and-small; leave it to numpy
+            // rather than guess at the sign of something this route cannot represent.
+            Err(_) => return Ok(None),
+        }
+    } else {
+        return Ok(None);
+    };
+    let numpy = cached_numpy(py)?;
+    let as_array = numpy.getattr(intern!(py, "asarray"))?.call1((value,))?;
+    if !negative {
+        return Ok(Some(as_array.unbind()));
+    }
+    let fixed = match fix {
+        // `_tocomplex`: `asarray` of a Python int is int64 and of a Python float is float64,
+        // and neither is in numpy's single-precision list, so both go to complex128.
+        ScimathScalarFix::RealLtZero => {
+            let complex_type = numpy.getattr(intern!(py, "complex128"))?;
+            as_array.call_method1(intern!(py, "astype"), (complex_type,))?
+        }
+        // `_fix_int_lt_zero` is `x * 1.0`, NOT `_tocomplex`. The two look interchangeable and
+        // are not: `power` needs a float exponent, not a complex one.
+        ScimathScalarFix::IntLtZero => as_array.call_method1(intern!(py, "__mul__"), (1.0_f64,))?,
+    };
+    Ok(Some(fixed.unbind()))
+}
+
+/// `_tocomplex` for the ARRAY operand: single precision to complex64, everything else to
+/// complex128. Of the dtypes these routes accept that is f32 -> complex64, f64 -> complex128.
+fn scimath_tocomplex(py: Python<'_>, x: &Bound<'_, PyAny>, single: bool) -> PyResult<Py<PyAny>> {
+    let complex_type = cached_numpy(py)?.getattr(if single {
+        intern!(py, "complex64")
+    } else {
+        intern!(py, "complex128")
+    })?;
+    Ok(x.call_method1(intern!(py, "astype"), (complex_type,))?
+        .unbind())
+}
+
+/// Native `numpy.emath.logn`: `log(fix(x)) / log(fix(n))`, with BOTH operands fixed.
+///
+/// numpy fixes `x` first and `n` second, and both with `_fix_real_lt_zero`, so a negative base
+/// is as much a complex trigger as a negative operand. The division is the array's own
+/// `__truediv__`, which is what `nx.log(x) / nx.log(n)` performs.
+fn native_scimath_logn(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !kwargs.is_none_or(|kw| kw.is_empty()) || args.len() != 2 {
+        return Ok(None);
+    }
+    // SIGNATURE IS `logn(n, x)` - the BASE COMES FIRST. Reading it as `logn(x, n)` gives a
+    // plausible-looking answer that is the reciprocal of the right one.
+    let base = args.get_item(0)?;
+    let x = args.get_item(1)?;
+    let Some((triggered, single)) = scimath_fix_triggers(py, &x, ScimathFix::RealLtZero)? else {
+        return Ok(None);
+    };
+    let Some(base_fixed) = scimath_fix_scalar(py, &base, ScimathScalarFix::RealLtZero)? else {
+        return Ok(None);
+    };
+    let x_fixed = if triggered {
+        scimath_tocomplex(py, &x, single)?
+    } else {
+        x.unbind()
+    };
+    let log = cached_numpy(py)?.getattr(intern!(py, "log"))?;
+    let numerator = log.call1((x_fixed,))?;
+    let denominator = log.call1((base_fixed,))?;
+    Ok(Some(
+        numerator
+            .call_method1(intern!(py, "__truediv__"), (denominator,))?
+            .unbind(),
+    ))
+}
+
+/// Native `numpy.emath.power`: `power(fix_real(x), fix_int(p))`.
+///
+/// THE TWO OPERANDS TAKE DIFFERENT FIXES and that is the whole subtlety - `x` can become
+/// complex, `p` only becomes float.
+fn native_scimath_power(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !kwargs.is_none_or(|kw| kw.is_empty()) || args.len() != 2 {
+        return Ok(None);
+    }
+    let x = args.get_item(0)?;
+    let exponent = args.get_item(1)?;
+    let Some((triggered, single)) = scimath_fix_triggers(py, &x, ScimathFix::RealLtZero)? else {
+        return Ok(None);
+    };
+    let Some(exponent_fixed) = scimath_fix_scalar(py, &exponent, ScimathScalarFix::IntLtZero)?
+    else {
+        return Ok(None);
+    };
+    let x_fixed = if triggered {
+        scimath_tocomplex(py, &x, single)?
+    } else {
+        x.unbind()
+    };
+    Ok(Some(
+        cached_numpy(py)?
+            .getattr(intern!(py, "power"))?
+            .call1((x_fixed, exponent_fixed))?
+            .unbind(),
+    ))
 }
 
 fn scimath_passthrough(
@@ -64098,6 +64238,9 @@ fn scimath_logn(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_scimath_logn(py, args, kwargs)? {
+        return Ok(result);
+    }
     scimath_passthrough(py, "logn", args, kwargs)
 }
 
@@ -64108,6 +64251,9 @@ fn scimath_power(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_scimath_power(py, args, kwargs)? {
+        return Ok(result);
+    }
     scimath_passthrough(py, "power", args, kwargs)
 }
 
@@ -113869,7 +114015,8 @@ mod tests {
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
         narrow_bitmap_setop, native_apply_over_axes, native_atleast, native_base_repr,
         native_isdtype,
-        native_binary_repr, native_scimath_fix_unary, nextafter,
+        native_binary_repr, native_scimath_fix_unary, native_scimath_logn,
+        native_scimath_power, nextafter,
         numpy_dtype_is_f64, offset_business_days, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
@@ -127092,6 +127239,197 @@ mod tests {
                 assert!(
                     ours.call1((&dtype, &kind)).is_err(),
                     "declines[{index}] must still raise here, through the passthrough"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    /// The TWO-OPERAND `numpy.emath` entries - `logn(n, x)` and `power(x, p)` - must match
+    /// NumPy in values, DTYPE and warnings, and decline what they do not answer
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// THE CELL THAT PINS THE WHOLE DESIGN: `power(float32_array, 3.0)` is FLOAT64, not
+    /// float32. Every `_fix_*` opens with `x = asarray(x)`, and under NEP 50 a 0-d array is
+    /// NOT a weak scalar - so numpy's own fix destroys the weak-scalar promotion that a bare
+    /// Python float would have had. Passing the scalar straight through to the ufunc is the
+    /// obvious implementation and it is wrong on EVERY float32 operand; a Python-mirror fuzz
+    /// against the installed numpy caught it at 22 of 220 cells before any Rust existed.
+    ///
+    /// THE TWO OPERANDS TAKE DIFFERENT FIXES, which is the other easy mistake:
+    ///   - `logn` fixes BOTH operands with `_fix_real_lt_zero`, so a negative BASE is a
+    ///     complex trigger just as a negative operand is.
+    ///   - `power` fixes its exponent with `_fix_int_lt_zero`, which is `p * 1.0` - FLOAT, not
+    ///     complex. Using `_tocomplex` there would give complex results for `power(x, -3)`.
+    ///
+    /// And the argument ORDER: `logn` takes the BASE FIRST. Reading it as `logn(x, n)` yields
+    /// the reciprocal of the right answer, which looks plausible in isolation.
+    #[test]
+    fn scimath_two_operand_family_matches_numpy_including_the_asarray_promotion() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let numpy_scimath = py.import("numpy.lib.scimath")?;
+            let module = PyModule::new(py, "fnp_python_test_scimath_two_operand")?;
+            fnp_python(&module)?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"pos = np.array([0.25, 1.0, 4.0, 9.0])\n\
+                  mixed = np.array([-4.0, -0.5, 0.5, 9.0])\n\
+                  zeros = np.zeros(4)\n\
+                  negzero = np.array([-0.0, 0.0, 1.0])\n\
+                  withnan = np.array([np.nan, 0.5, 2.0])\n\
+                  nanneg = np.array([np.nan, -0.5, 2.0])\n\
+                  empty = np.array([], dtype=np.float64)\n\
+                  two_d = np.arange(-6.0, 6.0).reshape(3, 4)\n\
+                  pos32 = np.array([0.25, 1.0, 4.0], dtype=np.float32)\n\
+                  mixed32 = np.array([-4.0, 0.5, 9.0], dtype=np.float32)\n\
+                  scalars = [3.0, 2, 10, 0.5, -2.0, -3, 0, 1, -1]\n\
+                  bad_scalars = [True, np.float64(2.0), np.array([2.0]), 'two', None]\n\
+                  bad_arrays = [np.array(4.0), np.arange(12.0)[::2], np.array([1, 4]), [1.0, 4.0]]\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            py.run(
+                c"import warnings\ndef capture2(f, a, b):\n    with warnings.catch_warnings(record=True) as w:\n        warnings.simplefilter('always')\n        r = np.asarray(f(a, b))\n    return (r.tobytes(), r.dtype.str, sorted(m.category.__name__ for m in w))\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("two-operand fixture missing")
+            };
+            let capture2 = g("capture2");
+            let scalars = g("scalars");
+            let arrays = [
+                "pos", "mixed", "zeros", "negzero", "withnan", "nanneg", "empty", "two_d", "pos32",
+                "mixed32",
+            ];
+
+            let ours_logn = module.getattr("scimath_logn")?;
+            let theirs_logn = numpy_scimath.getattr("logn")?;
+            let ours_power = module.getattr("scimath_power")?;
+            let theirs_power = numpy_scimath.getattr("power")?;
+            for array_name in arrays {
+                let x = g(array_name);
+                for index in 0..scalars.len()? {
+                    let scalar = scalars.get_item(index)?;
+                    // logn takes the BASE FIRST.
+                    let mine = capture2.call1((&ours_logn, &scalar, &x))?;
+                    let base = capture2.call1((&theirs_logn, &scalar, &x))?;
+                    assert_eq!(
+                        mine.get_item(1)?.extract::<String>()?,
+                        base.get_item(1)?.extract::<String>()?,
+                        "logn({array_name}, scalars[{index}]): DTYPE diverged"
+                    );
+                    assert_eq!(
+                        mine.get_item(0)?.extract::<Vec<u8>>()?,
+                        base.get_item(0)?.extract::<Vec<u8>>()?,
+                        "logn({array_name}, scalars[{index}]): bytes diverged"
+                    );
+                    assert_eq!(
+                        mine.get_item(2)?.extract::<Vec<String>>()?,
+                        base.get_item(2)?.extract::<Vec<String>>()?,
+                        "logn({array_name}, scalars[{index}]): warnings diverged"
+                    );
+                    assert!(
+                        native_scimath_logn(py, &PyTuple::new(py, [&scalar, &x])?, None)?.is_some(),
+                        "the native logn route declined ({array_name}, scalars[{index}])"
+                    );
+
+                    let mine = capture2.call1((&ours_power, &x, &scalar))?;
+                    let base = capture2.call1((&theirs_power, &x, &scalar))?;
+                    assert_eq!(
+                        mine.get_item(1)?.extract::<String>()?,
+                        base.get_item(1)?.extract::<String>()?,
+                        "power({array_name}, scalars[{index}]): DTYPE diverged - `asarray` in \
+                         `_fix_int_lt_zero` destroys the weak-scalar promotion"
+                    );
+                    assert_eq!(
+                        mine.get_item(0)?.extract::<Vec<u8>>()?,
+                        base.get_item(0)?.extract::<Vec<u8>>()?,
+                        "power({array_name}, scalars[{index}]): bytes diverged"
+                    );
+                    assert_eq!(
+                        mine.get_item(2)?.extract::<Vec<String>>()?,
+                        base.get_item(2)?.extract::<Vec<String>>()?,
+                        "power({array_name}, scalars[{index}]): warnings diverged"
+                    );
+                    assert!(
+                        native_scimath_power(py, &PyTuple::new(py, [&x, &scalar])?, None)?
+                            .is_some(),
+                        "the native power route declined ({array_name}, scalars[{index}])"
+                    );
+                }
+            }
+
+            // THE cell: a float32 operand with a Python float exponent is FLOAT64, because the
+            // incumbent's `asarray` made the exponent a 0-d array and 0-d arrays are not weak.
+            assert_eq!(
+                ours_power
+                    .call1((g("pos32"), 3.0_f64))?
+                    .getattr("dtype")?
+                    .getattr("str")?
+                    .extract::<String>()?,
+                "<f8",
+                "`_fix_int_lt_zero` calls `asarray`, so the exponent is a 0-d ARRAY and NEP 50 \
+                 promotes float32 to float64 - passing the Python float through keeps float32 \
+                 and is wrong"
+            );
+            // ...and `power` fixes its exponent to FLOAT, never to complex.
+            assert_eq!(
+                ours_power
+                    .call1((g("pos"), -3_i64))?
+                    .getattr("dtype")?
+                    .getattr("str")?
+                    .extract::<String>()?,
+                "<f8",
+                "`_fix_int_lt_zero` is `p * 1.0` - a negative exponent must stay REAL"
+            );
+            // A negative BASE is a complex trigger for logn, on the base alone.
+            assert_eq!(
+                ours_logn
+                    .call1((-3.0_f64, g("pos")))?
+                    .getattr("dtype")?
+                    .getattr("str")?
+                    .extract::<String>()?,
+                "<c16",
+                "logn fixes its BASE with `_fix_real_lt_zero` too - a negative base goes complex"
+            );
+
+            // The declines, both operands. Each must reach numpy, and still match it.
+            let bad_scalars = g("bad_scalars");
+            for index in 0..bad_scalars.len()? {
+                let scalar = bad_scalars.get_item(index)?;
+                assert!(
+                    native_scimath_power(py, &PyTuple::new(py, [&g("pos"), &scalar])?, None)?
+                        .is_none(),
+                    "bad_scalars[{index}] must decline: only an EXACT Python int/float is \
+                     handled - `bool` is an int subclass with its own promotion, and an array \
+                     exponent means `_fix_int_lt_zero` multiplies a whole array"
+                );
+            }
+            let bad_arrays = g("bad_arrays");
+            for index in 0..bad_arrays.len()? {
+                let x = bad_arrays.get_item(index)?;
+                assert!(
+                    native_scimath_logn(py, &PyTuple::new(py, [&g("pos"), &x])?, None)?.is_none(),
+                    "bad_arrays[{index}] must decline: 0-d yields no buffer slice, strided no \
+                     contiguous slice, and other dtypes need numpy's own `isreal`"
+                );
+                let mine = ours_logn.call1((3.0_f64, &x))?;
+                let base = theirs_logn.call1((3.0_f64, &x))?;
+                assert_eq!(
+                    mine.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    base.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "logn(3.0, bad_arrays[{index}]) must still match numpy through the \
+                     passthrough"
                 );
             }
             Ok(())
