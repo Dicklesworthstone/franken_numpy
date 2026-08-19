@@ -128100,6 +128100,83 @@ mod tests {
                     );
                 }
             }
+            // The SCALAR formatters. Their axis is not array size - they take ONE value - so
+            // the rows vary the KEYWORD SHAPE instead, which is what changes how much of the
+            // incumbent's wrapper runs.
+            //
+            // EACH CALL IS ABOUT A MICROSECOND, so a per-call `Instant` would be timing the
+            // clock as much as the callee. Every sample therefore batches BATCH calls and
+            // divides, which keeps the timer overhead off the row instead of inside it.
+            const BATCH: usize = 100;
+            let value = 3.14159265358979_f64;
+            let precision_kwargs = PyDict::new(py);
+            precision_kwargs.set_item("precision", 3)?;
+            for (name, shape) in [
+                ("format_float_positional", "bare"),
+                ("format_float_positional", "precision=3"),
+                ("format_float_scientific", "bare"),
+                ("format_float_scientific", "precision=3"),
+            ] {
+                let theirs = numpy.getattr(name)?;
+                let ours = module.getattr(name)?;
+                let kwargs = if shape == "bare" {
+                    None
+                } else {
+                    Some(&precision_kwargs)
+                };
+                assert_eq!(
+                    theirs.call((value,), kwargs)?.extract::<String>()?,
+                    ours.call((value,), kwargs)?.extract::<String>()?,
+                    "{name} ({shape}): output diverged - refusing to time two different \
+                     computations"
+                );
+
+                let time_it = |f: &Bound<'_, PyAny>| -> PyResult<Vec<u128>> {
+                    let mut out = Vec::with_capacity(REPS);
+                    for _ in 0..REPS {
+                        let t0 = Instant::now();
+                        for _ in 0..BATCH {
+                            let _ = f.call((value,), kwargs)?;
+                        }
+                        out.push(t0.elapsed().as_nanos() / BATCH as u128);
+                    }
+                    Ok(out)
+                };
+                let (mut a, mut b, mut null) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut load_a, mut load_b) = (String::new(), String::new());
+                for round in 0..ROUNDS {
+                    if round % 2 == 0 {
+                        load_a = loadavg();
+                        a.extend(time_it(&theirs)?);
+                        load_b = loadavg();
+                        b.extend(time_it(&ours)?);
+                    } else {
+                        load_b = loadavg();
+                        b.extend(time_it(&ours)?);
+                        load_a = loadavg();
+                        a.extend(time_it(&theirs)?);
+                    }
+                    null.extend(time_it(&theirs)?);
+                }
+                let median = |v: &mut Vec<u128>| -> f64 {
+                    v.sort_unstable();
+                    v[v.len() / 2] as f64
+                };
+                let (ma, mb, mn) = (median(&mut a), median(&mut b), median(&mut null));
+                let ratio = ma / mb;
+                let null_spread = ma.max(mn) / ma.min(mn);
+                let verdict = if (ratio - 1.0).abs() > 2.0 * (null_spread - 1.0) {
+                    "DECIDABLE"
+                } else {
+                    "UNDECIDABLE"
+                };
+                let label = format!("{}/{shape}", name.trim_start_matches("format_float_"));
+                println!(
+                    "{label:20} {ma:>11.0} {mb:>11.0} {ratio:>7.3}x {null_spread:>7.3}x \
+                     {verdict:>12}  {load_a:>5}/{load_b:<5}  {}",
+                    mhz()
+                );
+            }
             println!(
                 "ratio > 1 = OURS FASTER. null = incumbent-vs-itself through the same harness; \
                  a ratio inside 2x the null spread is UNDECIDABLE and must not be banked.\n"
