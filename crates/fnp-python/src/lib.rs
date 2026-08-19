@@ -107395,7 +107395,74 @@ fn apply_over_axes(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && args.len() == 3
+        && let (Ok(func), Ok(a), Ok(axes)) =
+            (args.get_item(0), args.get_item(1), args.get_item(2))
+        && let Some(result) = native_apply_over_axes(py, &func, &a, &axes)?
+    {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "apply_over_axes", args, kwargs)
+}
+
+/// `np.apply_over_axes(func, a, axes)`; the incumbent is a Python loop behind an
+/// `@array_function_dispatch` wrapper.
+///
+/// THE RANK COMES FROM `a`, NOT FROM `asarray(a)`. NumPy writes `val = asarray(a)` and then
+/// `N = a.ndim` on the ORIGINAL operand, so a list argument raises `AttributeError:
+/// 'list' object has no attribute 'ndim'` even though the `asarray` on the line above
+/// succeeded. That is not a rank this route can reproduce by converting, so a non-ndarray
+/// operand declines and numpy raises exactly as it does today. Confirmed against the
+/// incumbent rather than reasoned about; using `val.ndim` instead would silently ACCEPT the
+/// list input that numpy rejects.
+///
+/// The negative-axis wrap uses that same `N`, taken ONCE before the loop - not the rank of
+/// the running value, which the loop can change.
+fn native_apply_over_axes(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    a: &Bound<'_, PyAny>,
+    axes: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let numpy = cached_numpy(py)?;
+    let rank = a.getattr(intern!(py, "ndim"))?.extract::<i64>()?;
+
+    // NumPy tests `array(axes).ndim == 0` to decide whether `axes` is one axis or several.
+    // Extracting a sequence first and falling back to a single index is the same split
+    // without building an array to ask: a list, tuple or 1-d integer array yields many, and
+    // an int, a numpy integer or a 0-d array yields one.
+    let axis_list: Vec<i64> = match axes.extract::<Vec<i64>>() {
+        Ok(list) => list,
+        Err(_) => match python_index_as_i64(py, axes) {
+            Some(single) => vec![single],
+            None => return Ok(None),
+        },
+    };
+
+    let mut val = a.clone();
+    for axis in axis_list {
+        let axis = if axis < 0 { rank + axis } else { axis };
+        let val_ndim = val.getattr(intern!(py, "ndim"))?.extract::<i64>()?;
+        let res = func.call1((&val, axis))?;
+        if res.getattr(intern!(py, "ndim"))?.extract::<i64>()? == val_ndim {
+            val = res;
+            continue;
+        }
+        // The reduction dropped the axis: put it back and require the rank to match.
+        let expanded = numpy.call_method1(intern!(py, "expand_dims"), (&res, axis))?;
+        if expanded.getattr(intern!(py, "ndim"))?.extract::<i64>()? == val_ndim {
+            val = expanded;
+        } else {
+            return Err(PyValueError::new_err(
+                "function is not returning an array of the correct shape",
+            ));
+        }
+    }
+    Ok(Some(val.unbind()))
 }
 
 // Block / Array-API aliases (5).
@@ -113515,7 +113582,8 @@ mod tests {
         interp, is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native,
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, native_atleast, native_base_repr, native_binary_repr, nextafter,
+        narrow_bitmap_setop, native_apply_over_axes, native_atleast, native_base_repr,
+        native_binary_repr, nextafter,
         numpy_dtype_is_f64, offset_business_days, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
@@ -126336,6 +126404,136 @@ mod tests {
                 ours_isf.call1((g("lst"),)).is_err(),
                 "isfortran of a list must raise AttributeError, as numpy does - a list has \
                  no `.flags` at all"
+            );
+            Ok(())
+        });
+    }
+
+    /// `np.apply_over_axes` must match NumPy, including the rank quirk that decides which
+    /// inputs it accepts at all (`deadlock-audit-6y5wp`).
+    ///
+    /// THE RANK COMES FROM `a`, NOT FROM `asarray(a)`. NumPy writes `val = asarray(a)` and
+    /// then `N = a.ndim` on the ORIGINAL operand, so a LIST raises `AttributeError` even
+    /// though the `asarray` on the line above succeeded. An implementation that took the rank
+    /// from the converted value would silently ACCEPT input numpy rejects - so this is a
+    /// behavioural difference, not a performance one, and the native route declines
+    /// non-ndarray operands to keep it.
+    ///
+    /// The other two rules: a negative axis wraps against that same `N`, taken once before
+    /// the loop rather than against the running value whose rank the loop changes; and a
+    /// `func` that neither preserves the rank nor survives `expand_dims` raises
+    /// `ValueError: function is not returning an array of the correct shape`.
+    #[test]
+    fn apply_over_axes_matches_numpy_including_the_original_rank_rule() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_apply_over_axes")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("apply_over_axes")?;
+            let theirs = numpy.getattr("apply_over_axes")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"a = np.arange(24.0).reshape(2, 3, 4)\n\
+                  b = np.arange(6.0).reshape(2, 3)\n\
+                  keepdims = lambda x, ax: np.sum(x, ax, keepdims=True)\n\
+                  wrong = lambda x, ax: np.array(1.0)\n\
+                  lst = [[1.0, 2.0], [3.0, 4.0]]\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("apply_over_axes fixture missing")
+            };
+            let sum_fn = numpy.getattr("sum")?;
+
+            // Sequence axes, a single scalar axis, and a negative axis - the last of which
+            // is what the `N` taken from the ORIGINAL operand is for.
+            for axes in [vec![0i64, 2], vec![0], vec![1, 2]] {
+                let list = PyList::new(py, &axes)?;
+                assert_eq!(
+                    ours.call1((&sum_fn, g("a"), &list))?
+                        .getattr("shape")?
+                        .extract::<Vec<usize>>()?,
+                    theirs
+                        .call1((&sum_fn, g("a"), &list))?
+                        .getattr("shape")?
+                        .extract::<Vec<usize>>()?,
+                    "apply_over_axes with axes {axes:?} diverged from numpy"
+                );
+            }
+            for axis in [0i64, 1, 2, -1, -3] {
+                assert_eq!(
+                    ours.call1((&sum_fn, g("a"), axis))?
+                        .getattr("shape")?
+                        .extract::<Vec<usize>>()?,
+                    theirs
+                        .call1((&sum_fn, g("a"), axis))?
+                        .getattr("shape")?
+                        .extract::<Vec<usize>>()?,
+                    "apply_over_axes with scalar axis {axis} diverged from numpy"
+                );
+            }
+            // A func that already keeps the rank must take the no-expand branch.
+            let kd_axes = PyList::new(py, [0i64, 1])?;
+            assert_eq!(
+                ours.call1((g("keepdims"), g("a"), &kd_axes))?
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                theirs
+                    .call1((g("keepdims"), g("a"), &kd_axes))?
+                    .getattr("shape")?
+                    .extract::<Vec<usize>>()?,
+                "a keepdims func must take the rank-preserving branch"
+            );
+            // Values, not just shapes.
+            assert!(
+                numpy
+                    .call_method1(
+                        "array_equal",
+                        (
+                            ours.call1((&sum_fn, g("b"), PyList::new(py, [0i64])?))?,
+                            theirs.call1((&sum_fn, g("b"), PyList::new(py, [0i64])?))?
+                        )
+                    )?
+                    .extract::<bool>()?,
+                "contents diverged from numpy"
+            );
+
+            // A func returning the wrong shape raises there, so it must raise here.
+            assert!(
+                ours.call1((g("wrong"), g("a"), 0i64)).is_err(),
+                "a func that neither preserves the rank nor survives expand_dims must raise"
+            );
+
+            // THE RANK QUIRK: a list operand raises in numpy because `N = a.ndim` reads the
+            // ORIGINAL argument. The native route must decline it so numpy still raises.
+            assert!(
+                theirs.call1((&sum_fn, g("lst"), 0i64)).is_err(),
+                "the fixture is only meaningful if numpy itself rejects a list here"
+            );
+            assert!(
+                ours.call1((&sum_fn, g("lst"), 0i64)).is_err(),
+                "a list operand must still raise - numpy takes N from the ORIGINAL `a`, so \
+                 taking the rank from the converted value would ACCEPT what numpy rejects"
+            );
+            assert!(
+                native_apply_over_axes(py, &sum_fn, &g("lst"), &0i64.into_pyobject(py)?.into_any())?
+                    .is_none(),
+                "a non-ndarray operand must decline rather than convert"
+            );
+            // ENGAGEMENT: every equality above is satisfied by the passthrough.
+            assert!(
+                native_apply_over_axes(py, &sum_fn, &g("a"), &0i64.into_pyobject(py)?.into_any())?
+                    .is_some(),
+                "the native apply_over_axes route declined an ndarray operand"
             );
             Ok(())
         });
