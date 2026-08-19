@@ -10164,6 +10164,12 @@ fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
 // `F64_ACCUMULATE_NATIVE_MIN_LEN` was set by. The old 1 << 14 admitted 2^14 through
 // 2^18, a band where routing cost 5-10x what delegating would: at 2^18 it made divide
 // 1.0912x slower than NumPy where delegating is ~1.0096x.
+//
+// SUPERSEDED - THIS PARAGRAPH ARGUES FOR `1 << 19` AND THE CONSTANT BELOW IS `1 << 21`.
+// That is not a mistake to correct: the raise is justified immediately AFTER the constant,
+// on five runs per size, and 2^19 and 2^20 were both measured to COST 8.7% and 14.7%
+// against a delegating control. Lowering this to match the paragraph would re-admit exactly
+// that band. Read the block below the constant before touching the value.
 const F64_DIV_NATIVE_MIN_LEN: usize = 1 << 21;
 
 // RAISED 1<<19 -> 1<<21 on measurement, 2026-08-17 (`deadlock-audit-6y5wp`).
@@ -128413,6 +128419,144 @@ mod tests {
                      passthrough"
                 );
             }
+            Ok(())
+        });
+    }
+
+    /// PRICES THE INTERNING LEVER ITSELF - what `deadlock-audit-c5ecm` and
+    /// `deadlock-audit-s70kb` both ask for and neither has.
+    ///
+    ///   cargo test -p fnp-python --lib -- --ignored --nocapture attribute_key_cost
+    ///
+    /// Those beads count non-interned key sites (487 ndarray fetches, 3,448 `call_method`s) and
+    /// quote ~795 insns/call against ~202 interned, but that figure was COUNTED, not timed, and
+    /// this repo has since interned 6,970 production sites on the strength of it. A peer's
+    /// `array_str` route measured 0.9827x against a predicted 1.07x win, which is exactly why a
+    /// counted mechanism is not a result.
+    ///
+    /// THIS MEASURES THE MECHANISM, NOT OUR ROUTE, and that is deliberate: both arms call the
+    /// SAME PyO3 method on the SAME object, differing only in whether the key is a `&str` - so
+    /// PyO3 builds a fresh `PyString`, hashes it and drops it - or an `intern!` handle. Nothing
+    /// about numpy, our dispatch or any kernel is in the measurement, so the row cannot be
+    /// contaminated by a route change later.
+    ///
+    /// Same discipline as the emath harness: interleaved AB/BA, an A/A null arm, per-arm
+    /// loadavg and CPU MHz on the row, UNDECIDABLE inside twice the null spread, and each
+    /// sample batches many calls so the row is not measuring `Instant::now()`.
+    #[test]
+    #[ignore = "measurement, not a correctness gate"]
+    fn attribute_key_cost_interned_vs_literal() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let array = numpy
+                .getattr("arange")?
+                .call1((16_usize,))?
+                .call_method1("astype", ("float64",))?;
+
+            let loadavg = || -> String {
+                std::fs::read_to_string("/proc/loadavg")
+                    .map(|s| s.split_whitespace().take(1).collect::<String>())
+                    .unwrap_or_else(|_| "?".to_string())
+            };
+            let mhz = || -> String {
+                std::fs::read_to_string("/proc/cpuinfo")
+                    .ok()
+                    .and_then(|s| {
+                        s.lines()
+                            .find(|l| l.starts_with("cpu MHz"))
+                            .and_then(|l| l.split(':').nth(1))
+                            .map(|v| v.trim().to_string())
+                    })
+                    .unwrap_or_else(|| "?".to_string())
+            };
+            let profile = if cfg!(debug_assertions) {
+                "dev (UNOPTIMISED)"
+            } else {
+                "optimised"
+            };
+            println!("\ninterned vs literal attribute key - profile: {profile}");
+            println!(
+                "{:10} {:>12} {:>12} {:>8} {:>8} {:>12}  {:>11}  {}",
+                "attr", "literal ns", "interned ns", "ratio", "null", "verdict", "load a/b", "MHz"
+            );
+
+            const BATCH: usize = 200;
+            const REPS: usize = 11;
+            const ROUNDS: usize = 5;
+            for attr in ["dtype", "shape", "itemsize", "flags"] {
+                // Parity first: both arms must read the SAME attribute object.
+                assert!(
+                    array.getattr(attr)?.is(&array.getattr(pyo3::intern!(py, "dtype"))?)
+                        || attr != "dtype",
+                    "the two arms must address the same attribute"
+                );
+                let literal = |_: usize| -> PyResult<()> {
+                    for _ in 0..BATCH {
+                        let _ = array.getattr(attr)?;
+                    }
+                    Ok(())
+                };
+                let interned = |_: usize| -> PyResult<()> {
+                    for _ in 0..BATCH {
+                        let _ = match attr {
+                            "dtype" => array.getattr(pyo3::intern!(py, "dtype"))?,
+                            "shape" => array.getattr(pyo3::intern!(py, "shape"))?,
+                            "itemsize" => array.getattr(pyo3::intern!(py, "itemsize"))?,
+                            _ => array.getattr(pyo3::intern!(py, "flags"))?,
+                        };
+                    }
+                    Ok(())
+                };
+                let time_it = |f: &dyn Fn(usize) -> PyResult<()>| -> PyResult<Vec<u128>> {
+                    let mut out = Vec::with_capacity(REPS);
+                    for _ in 0..REPS {
+                        let t0 = Instant::now();
+                        f(0)?;
+                        out.push(t0.elapsed().as_nanos() / BATCH as u128);
+                    }
+                    Ok(out)
+                };
+                let (mut a, mut b, mut null) = (Vec::new(), Vec::new(), Vec::new());
+                let (mut load_a, mut load_b) = (String::new(), String::new());
+                for round in 0..ROUNDS {
+                    if round % 2 == 0 {
+                        load_a = loadavg();
+                        a.extend(time_it(&literal)?);
+                        load_b = loadavg();
+                        b.extend(time_it(&interned)?);
+                    } else {
+                        load_b = loadavg();
+                        b.extend(time_it(&interned)?);
+                        load_a = loadavg();
+                        a.extend(time_it(&literal)?);
+                    }
+                    null.extend(time_it(&literal)?);
+                }
+                let median = |v: &mut Vec<u128>| -> f64 {
+                    v.sort_unstable();
+                    v[v.len() / 2] as f64
+                };
+                let (ma, mb, mn) = (median(&mut a), median(&mut b), median(&mut null));
+                let ratio = ma / mb;
+                let null_spread = ma.max(mn) / ma.min(mn);
+                let verdict = if (ratio - 1.0).abs() > 2.0 * (null_spread - 1.0) {
+                    "DECIDABLE"
+                } else {
+                    "UNDECIDABLE"
+                };
+                println!(
+                    "{attr:10} {ma:>12.1} {mb:>12.1} {ratio:>7.3}x {null_spread:>7.3}x \
+                     {verdict:>12}  {load_a:>5}/{load_b:<5}  {}",
+                    mhz()
+                );
+            }
+            println!(
+                "ratio > 1 = INTERNED IS FASTER. This prices the KEY, not any route: both arms \
+                 call the same PyO3 method on the same object.\n"
+            );
             Ok(())
         });
     }
