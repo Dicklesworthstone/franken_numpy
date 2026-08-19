@@ -128583,6 +128583,67 @@ mod tests {
                     mhz()
                 );
             }
+            // ROUTE-LEVEL ARM, which is the number c5ecm and s70kb actually need. `np.shape`
+            // is the smallest real route in the library - its whole native body is ONE
+            // attribute read behind an exact-type check - so the key's share of a real call is
+            // directly visible here rather than inferred.
+            let module = PyModule::new(py, "fnp_python_key_share")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("shape")?;
+            let theirs = numpy.getattr("shape")?;
+            assert_eq!(
+                ours.call1((&array,))?.extract::<Vec<usize>>()?,
+                theirs.call1((&array,))?.extract::<Vec<usize>>()?,
+                "shape must agree before it is timed"
+            );
+            let route = |f: &Bound<'_, PyAny>| -> PyResult<Vec<u128>> {
+                let mut out = Vec::with_capacity(REPS);
+                for _ in 0..REPS {
+                    let t0 = Instant::now();
+                    for _ in 0..BATCH {
+                        let _ = f.call1((&array,))?;
+                    }
+                    out.push(t0.elapsed().as_nanos() / BATCH as u128);
+                }
+                Ok(out)
+            };
+            let (mut a, mut b, mut null) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut load_a, mut load_b) = (String::new(), String::new());
+            for round in 0..ROUNDS {
+                if round % 2 == 0 {
+                    load_a = loadavg();
+                    a.extend(route(&theirs)?);
+                    load_b = loadavg();
+                    b.extend(route(&ours)?);
+                } else {
+                    load_b = loadavg();
+                    b.extend(route(&ours)?);
+                    load_a = loadavg();
+                    a.extend(route(&theirs)?);
+                }
+                null.extend(route(&theirs)?);
+            }
+            let median = |v: &mut Vec<u128>| -> f64 {
+                v.sort_unstable();
+                v[v.len() / 2] as f64
+            };
+            let (ma, mb, mn) = (median(&mut a), median(&mut b), median(&mut null));
+            let ratio = ma / mb;
+            let null_spread = ma.max(mn) / ma.min(mn);
+            let verdict = if (ratio - 1.0).abs() > 2.0 * (null_spread - 1.0) {
+                "DECIDABLE"
+            } else {
+                "UNDECIDABLE"
+            };
+            println!(
+                "{:10} {ma:>12.1} {mb:>12.1} {ratio:>7.3}x {null_spread:>7.3}x {verdict:>12}  \
+                 {load_a:>5}/{load_b:<5}  {}",
+                "np.shape", mhz()
+            );
+            println!(
+                "the np.shape row is a WHOLE ROUTE (numpy's Python function vs ours); the rows \
+                 above it are the KEY alone, so the key's share of that route is the difference."
+            );
             println!(
                 "ratio > 1 = INTERNED IS FASTER. This prices the KEY, not any route: both arms \
                  call the same PyO3 method on the same object.\n"
