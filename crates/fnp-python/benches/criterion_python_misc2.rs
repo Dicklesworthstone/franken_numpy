@@ -1447,7 +1447,10 @@ floatingt = np.floating\n",
                 pyo3::types::PyTuple::new(py, [get("a1")]).expect("args"),
             ));
         }
-        for name in ["isfortran", "shape"] {
+        // `array_str` joins them: same per-call shape, but its callee (`array2string`) does
+        // real formatting work, so the wrapper this route removes is a SMALLER fraction of
+        // the total. Expect the apply_over_axes end of the range, not the shape end.
+        for name in ["isfortran", "shape", "array_str"] {
             rows.push((
                 format!("{name}_percall_vs_numpy_route"),
                 name,
