@@ -1365,6 +1365,162 @@ td = rng.integers(-50000, 50000, (4096, 512, 8)).astype('timedelta64[D]')\n",
 
 // np.max/min(datetime64/timedelta64, axis): int64-backed; the int64-view routes to the native int
 // min/max (~5-8x, result viewed back as the SAME temporal dtype). NaT pre-scan + defer.
+/// The PER-CALL SURFACE routes against NumPy: binary_repr, base_repr, atleast_1d/2d/3d,
+/// isfortran, shape, issubdtype and apply_over_axes (`deadlock-audit-6y5wp`).
+///
+/// EVERY ONE OF THESE SHIPPED WITH NO NUMBER, and the business-day family just demonstrated
+/// what that is worth: all three of those routes were correct, tested, and SLOWER than the
+/// passthrough they replaced (0.908x, 0.598x, 0.846x), and all three are now disengaged.
+/// These eight are the rest of that exposure.
+///
+/// OPERANDS ARE DELIBERATELY TINY. Unlike isnat, none of these is an elementwise kernel -
+/// what they can save is per-CALL dispatch, so a large operand would bury the only thing
+/// under test in array work common to both arms. A 3-element array puts the dispatch where
+/// the measurement can see it, which is the same regime the 2044 ns route floor was
+/// characterised in.
+///
+/// A self-timing group: criterion is taken and never used.
+fn bench_scalar_surface_boundary(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\
+a1 = np.arange(3.0)\n\
+a2 = np.arange(6.0).reshape(2, 3)\n\
+a3 = np.arange(8.0).reshape(2, 2, 2)\n\
+axes0 = [0]\n\
+big = 255\n\
+hexbase = 16\n\
+f64t = np.float64\n\
+floatingt = np.floating\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("scalar surface setup");
+        let get = |k: &str| ns.get_item(k).expect("fixture present");
+
+        // These return strings, bools, tuples and arrays, so there is no one numeric lane to
+        // read. `str()` of the result covers all of them and is computed OUTSIDE the timed
+        // region - the contract captures `elapsed` first.
+        let checksum = |result: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            let text = result
+                .str()
+                .expect("result is printable")
+                .extract::<String>()
+                .expect("result str is utf-8");
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for byte in text.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            hash
+        };
+
+        // Built by direct pushes rather than through a helper closure: a closure taking a
+        // `Bound<'_, PyTuple>` while holding `rows` mutably makes the operand's borrow escape
+        // (E0521), which is not worth working around for eight lines of setup.
+        let mut rows: Vec<(String, &str, pyo3::Bound<'_, pyo3::types::PyTuple>)> = Vec::new();
+        rows.push((
+            "binary_repr_percall_vs_numpy_route".to_string(),
+            "binary_repr",
+            pyo3::types::PyTuple::new(py, [get("big")]).expect("args"),
+        ));
+        rows.push((
+            "base_repr_percall_vs_numpy_route".to_string(),
+            "base_repr",
+            pyo3::types::PyTuple::new(py, [get("big"), get("hexbase")]).expect("args"),
+        ));
+        // atleast_1d on a 1-d operand is the SAME-OBJECT path; atleast_2d/3d on it promote.
+        for name in ["atleast_1d", "atleast_2d", "atleast_3d"] {
+            rows.push((
+                format!("{name}_percall_vs_numpy_route"),
+                name,
+                pyo3::types::PyTuple::new(py, [get("a1")]).expect("args"),
+            ));
+        }
+        for name in ["isfortran", "shape"] {
+            rows.push((
+                format!("{name}_percall_vs_numpy_route"),
+                name,
+                pyo3::types::PyTuple::new(py, [get("a2")]).expect("args"),
+            ));
+        }
+        rows.push((
+            "issubdtype_percall_vs_numpy_route".to_string(),
+            "issubdtype",
+            pyo3::types::PyTuple::new(py, [get("f64t"), get("floatingt")]).expect("args"),
+        ));
+        rows.push((
+            "apply_over_axes_percall_vs_numpy_route".to_string(),
+            "apply_over_axes",
+            pyo3::types::PyTuple::new(
+                py,
+                [
+                    numpy.getattr("sum").expect("np.sum").into_any(),
+                    get("a3"),
+                    get("axes0"),
+                ],
+            )
+            .expect("args"),
+        ));
+
+        for (row, name, args) in &rows {
+            let ours = module.getattr(*name).expect("fnp fn");
+            let theirs = numpy.getattr(*name).expect("numpy fn");
+            assert!(
+                !ours.is(&theirs),
+                "fnp.{name} IS numpy's object - there is no candidate arm"
+            );
+            let ours_probe = ours.call1(args).expect("fnp probe");
+            let theirs_probe = theirs.call1(args).expect("numpy probe");
+            assert_eq!(
+                checksum(&ours_probe),
+                checksum(&theirs_probe),
+                "fnp.{name} and numpy.{name} disagree on these operands"
+            );
+
+            let incumbent = || {
+                let started = Instant::now();
+                let result = theirs.call1(args).expect("numpy call");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum(&result),
+                }
+            };
+            let candidate = || {
+                let started = Instant::now();
+                let result = ours.call1(args).expect("fnp call");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum(&result),
+                }
+            };
+            let (effect, _incumbent_null, _candidate_null) =
+                common::run_dual_null_median_ci_contract(row, incumbent, candidate);
+            println!(
+                "SCALAR_SURFACE_ROW row={row} ratio_median={:.6} ci95=[{:.6},{:.6}] \
+                 numpy_ns={:.0} fnp_ns={:.0}",
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns
+            );
+        }
+    });
+}
+
 /// `np.isnat`, `np.busday_count` and `np.busday_offset` against NumPy, under the dual-null
 /// median-CI contract (`deadlock-audit-6y5wp`).
 ///
@@ -2114,6 +2270,10 @@ fn main() {
             (
                 "bench_timedelta_cumsum_boundary",
                 bench_timedelta_cumsum_boundary,
+            ),
+            (
+                "bench_scalar_surface_boundary",
+                bench_scalar_surface_boundary,
             ),
             (
                 "bench_datetime_nat_busday_boundary",
