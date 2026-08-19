@@ -56558,7 +56558,7 @@ fn positive(
         args,
         kwargs,
         UnaryOp::Positive,
-        "positive",
+        intern!(py, "positive"),
         "positive(x)",
     )
 }
@@ -56594,7 +56594,7 @@ fn reciprocal(
         py,
         x.bind(py),
         UnaryOp::Reciprocal,
-        "reciprocal",
+        intern!(py, "reciprocal"),
         "reciprocal(x)",
     )
 }
@@ -56701,7 +56701,7 @@ fn native_unary_elementwise(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     op: UnaryOp,
-    numpy_name: &str,
+    numpy_name: &Bound<'_, PyString>,
     context: &str,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
@@ -56823,7 +56823,7 @@ fn native_unary_promoting(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     op: UnaryOp,
-    numpy_name: &str,
+    numpy_name: &Bound<'_, PyString>,
     context: &str,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
@@ -56992,7 +56992,7 @@ fn native_unary_promoting_or_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
     op: UnaryOp,
-    numpy_name: &str,
+    numpy_name: &Bound<'_, PyString>,
     context: &str,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
@@ -57002,7 +57002,7 @@ fn native_unary_promoting_or_passthrough(
         emit_native_float_warnings(py)?;
         result
     } else {
-        core_numpy_passthrough(py, numpy_name, args, kwargs)
+        core_numpy_passthrough_interned(py, numpy_name, args, kwargs)
     }
 }
 
@@ -57011,14 +57011,14 @@ fn native_unary_elementwise_or_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
     op: UnaryOp,
-    numpy_name: &str,
+    numpy_name: &Bound<'_, PyString>,
     context: &str,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x = args.get_item(0)?;
         native_unary_elementwise(py, &x, op, numpy_name, context)
     } else {
-        core_numpy_passthrough(py, numpy_name, args, kwargs)
+        core_numpy_passthrough_interned(py, numpy_name, args, kwargs)
     }
 }
 
@@ -58201,7 +58201,7 @@ fn square(
         args,
         kwargs,
         UnaryOp::Square,
-        "square",
+        intern!(py, "square"),
         "square(x)",
     )
 }
@@ -58216,7 +58216,7 @@ fn cbrt(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Cbrt, "cbrt", "cbrt(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Cbrt, intern!(py, "cbrt"), "cbrt(x)")
 }
 
 #[pyfunction]
@@ -58251,7 +58251,7 @@ fn expm1(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Expm1, "expm1", "expm1(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Expm1, intern!(py, "expm1"), "expm1(x)")
 }
 
 #[pyfunction]
@@ -58264,7 +58264,7 @@ fn log1p(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Log1p, "log1p", "log1p(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Log1p, intern!(py, "log1p"), "log1p(x)")
 }
 
 #[pyfunction]
@@ -58304,7 +58304,7 @@ fn fabs(
     // Integer input promotes to float. native_unary_promoting falls back
     // to numpy for complex (which raises TypeError) and integer promotion;
     // out=/where=/dtype= route to numpy passthrough.
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Fabs, "fabs", "fabs(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Fabs, intern!(py, "fabs"), "fabs(x)")
 }
 
 #[pyfunction]
@@ -58319,7 +58319,7 @@ fn negative(
         args,
         kwargs,
         UnaryOp::Negative,
-        "negative",
+        intern!(py, "negative"),
         "negative(x)",
     )
 }
@@ -61408,7 +61408,7 @@ fn py_abs(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_elementwise_or_passthrough(py, args, kwargs, UnaryOp::Abs, "abs", "abs(x)")
+    native_unary_elementwise_or_passthrough(py, args, kwargs, UnaryOp::Abs, intern!(py, "abs"), "abs(x)")
 }
 
 #[pyfunction]
@@ -61426,7 +61426,7 @@ fn absolute(
         args,
         kwargs,
         UnaryOp::Abs,
-        "absolute",
+        intern!(py, "absolute"),
         "absolute(x)",
     )
 }
@@ -61504,7 +61504,7 @@ fn sin(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Sin, "sin", "sin(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Sin, intern!(py, "sin"), "sin(x)")
 }
 
 #[pyfunction]
@@ -61517,7 +61517,7 @@ fn cos(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Cos, "cos", "cos(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Cos, intern!(py, "cos"), "cos(x)")
 }
 
 #[pyfunction]
@@ -61601,7 +61601,7 @@ fn sqrt(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Sqrt, "sqrt", "sqrt(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Sqrt, intern!(py, "sqrt"), "sqrt(x)")
 }
 
 #[pyfunction]
@@ -61614,7 +61614,7 @@ fn arcsin(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arcsin, "arcsin", "arcsin(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arcsin, intern!(py, "arcsin"), "arcsin(x)")
 }
 
 #[pyfunction]
@@ -61627,7 +61627,7 @@ fn arccos(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arccos, "arccos", "arccos(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arccos, intern!(py, "arccos"), "arccos(x)")
 }
 
 #[pyfunction]
@@ -61640,7 +61640,7 @@ fn arctan(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arctan, "arctan", "arctan(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arctan, intern!(py, "arctan"), "arctan(x)")
 }
 
 #[pyfunction]
@@ -61671,7 +61671,7 @@ fn arcsinh(
         args,
         kwargs,
         UnaryOp::Arcsinh,
-        "arcsinh",
+        intern!(py, "arcsinh"),
         "arcsinh(x)",
     )
 }
@@ -61691,7 +61691,7 @@ fn arccosh(
         args,
         kwargs,
         UnaryOp::Arccosh,
-        "arccosh",
+        intern!(py, "arccosh"),
         "arccosh(x)",
     )
 }
@@ -61711,7 +61711,7 @@ fn arctanh(
         args,
         kwargs,
         UnaryOp::Arctanh,
-        "arctanh",
+        intern!(py, "arctanh"),
         "arctanh(x)",
     )
 }
@@ -61726,7 +61726,7 @@ fn sinh(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Sinh, "sinh", "sinh(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Sinh, intern!(py, "sinh"), "sinh(x)")
 }
 
 #[pyfunction]
@@ -61739,7 +61739,7 @@ fn cosh(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Cosh, "cosh", "cosh(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Cosh, intern!(py, "cosh"), "cosh(x)")
 }
 
 #[pyfunction]
@@ -61752,7 +61752,7 @@ fn tanh(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Tanh, "tanh", "tanh(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Tanh, intern!(py, "tanh"), "tanh(x)")
 }
 
 #[pyfunction]
@@ -65216,7 +65216,7 @@ fn einsum_path(
 fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Native implementation of modified Bessel function of the first kind, order 0.
     // Uses the Abramowitz and Stegun polynomial approximation via UnaryOp::I0.
-    native_unary_promoting(py, x.bind(py), UnaryOp::I0, "i0", "i0(x)")
+    native_unary_promoting(py, x.bind(py), UnaryOp::I0, intern!(py, "i0"), "i0(x)")
 }
 
 #[pyfunction]
@@ -82824,16 +82824,6 @@ fn native_isdtype(
 // amortizes the common work so each #[pyfunction] is a 3-line trampoline.
 // ---------------------------------------------------------------------------
 
-fn core_numpy_passthrough(
-    py: Python<'_>,
-    name: &str,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
-}
-
 /// `core_numpy_passthrough` with an INTERNED attribute name - what every wrapper whose name is a
 /// literal should use.
 ///
@@ -82850,8 +82840,11 @@ fn core_numpy_passthrough(
 /// every call, so a rebinding is still seen. It is the half of that lever with no behavioural
 /// cost, which is why it applies to all 179 literal sites rather than a chosen few.
 ///
-/// The `&str` form above stays for the four call sites whose name is a runtime value - `intern!`
-/// takes a literal and cannot reach them.
+/// THERE IS NO `&str` FORM ANY MORE. The four call sites that took their name from a runtime
+/// variable did so because the variable was threaded down from a caller that had a literal all
+/// along - `native_unary_promoting_or_passthrough` and friends. Interning at those callers made
+/// the `&str` helper dead, and a dead helper is a warning, so it is gone: every passthrough in
+/// this file now goes through an interned key.
 fn core_numpy_passthrough_interned(
     py: Python<'_>,
     name: &Bound<'_, PyString>,
@@ -100570,7 +100563,7 @@ fn acos(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arccos, "acos", "acos(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arccos, intern!(py, "acos"), "acos(x)")
 }
 
 #[pyfunction]
@@ -100580,7 +100573,7 @@ fn acosh(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arccosh, "acosh", "acosh(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arccosh, intern!(py, "acosh"), "acosh(x)")
 }
 
 #[pyfunction]
@@ -100590,7 +100583,7 @@ fn asin(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arcsin, "asin", "asin(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arcsin, intern!(py, "asin"), "asin(x)")
 }
 
 #[pyfunction]
@@ -100600,7 +100593,7 @@ fn asinh(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arcsinh, "asinh", "asinh(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arcsinh, intern!(py, "asinh"), "asinh(x)")
 }
 
 #[pyfunction]
@@ -100610,7 +100603,7 @@ fn atan(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arctan, "atan", "atan(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arctan, intern!(py, "atan"), "atan(x)")
 }
 
 #[pyfunction]
@@ -100634,7 +100627,7 @@ fn atanh(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arctanh, "atanh", "atanh(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arctanh, intern!(py, "atanh"), "atanh(x)")
 }
 
 #[pyfunction]
@@ -100644,7 +100637,7 @@ fn tan(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Tan, "tan", "tan(x)")
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Tan, intern!(py, "tan"), "tan(x)")
 }
 
 // Bitwise (11) — Array-API names + numpy legacy names.
@@ -108094,10 +108087,10 @@ fn cumulative_dispatch(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
-    numpy_name: &str,
+    numpy_name: &Bound<'_, PyString>,
     native: CumulativeNative,
 ) -> PyResult<Py<PyAny>> {
-    let passthrough = || core_numpy_passthrough(py, numpy_name, args, kwargs);
+    let passthrough = || core_numpy_passthrough_interned(py, numpy_name, args, kwargs);
     // x is positional-only; anything else (extra positionals) is numpy's to error on.
     if args.len() != 1 {
         return passthrough();
@@ -108137,7 +108130,7 @@ fn cumulative_prod(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    cumulative_dispatch(py, args, kwargs, "cumulative_prod", cumprod)
+    cumulative_dispatch(py, args, kwargs, intern!(py, "cumulative_prod"), cumprod)
 }
 
 #[pyfunction]
@@ -108147,7 +108140,7 @@ fn cumulative_sum(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    cumulative_dispatch(py, args, kwargs, "cumulative_sum", cumsum)
+    cumulative_dispatch(py, args, kwargs, intern!(py, "cumulative_sum"), cumsum)
 }
 
 // The numpy 2.x array-API `unique_*` functions are thin wrappers around `unique(x, return_*=True)` that pack
@@ -108160,13 +108153,13 @@ fn array_api_unique_route(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
-    np_name: &str,
+    np_name: &Bound<'_, PyString>,
     ret_index: bool,
     ret_inverse: bool,
     ret_counts: bool,
     result_type: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    let passthrough = |py: Python<'_>| core_numpy_passthrough(py, np_name, args, kwargs);
+    let passthrough = |py: Python<'_>| core_numpy_passthrough_interned(py, np_name, args, kwargs);
     if args.len() != 1 || kwargs.is_some_and(|k| !k.is_empty()) {
         return passthrough(py);
     }
@@ -108212,7 +108205,7 @@ fn unique_all(
         py,
         args,
         kwargs,
-        "unique_all",
+        intern!(py, "unique_all"),
         true,
         true,
         true,
@@ -108231,7 +108224,7 @@ fn unique_counts(
         py,
         args,
         kwargs,
-        "unique_counts",
+        intern!(py, "unique_counts"),
         false,
         false,
         true,
@@ -108250,7 +108243,7 @@ fn unique_inverse(
         py,
         args,
         kwargs,
-        "unique_inverse",
+        intern!(py, "unique_inverse"),
         false,
         true,
         false,
