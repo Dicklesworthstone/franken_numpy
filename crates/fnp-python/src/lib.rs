@@ -2677,7 +2677,7 @@ impl PyRandomGenerator {
             return build_random_i64_parts(py, shape, values, scalar);
         }
 
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let arr = numpy.call_method1("asarray", (a.bind(py),))?;
         let population_shape: Vec<usize> = arr.getattr("shape")?.extract()?;
         let axis = try_normalize_axis(axis, population_shape.len()).ok_or_else(|| {
@@ -2756,7 +2756,7 @@ impl PyRandomGenerator {
         // float64. The permutation order is the same bit-exact stream as before, and
         // numpy.permutation is itself a copy-then-shuffle along `axis`, so take(order,
         // axis) reproduces it byte-for-byte while preserving dtype.
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let arr = numpy.call_method1("asarray", (bound,))?;
         let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
         let axis = try_normalize_axis(axis, shape.len()).ok_or_else(|| {
@@ -2788,7 +2788,7 @@ impl PyRandomGenerator {
         // gather x along `axis` with the same bit-exact permutation order via numpy.take
         // (a same-dtype copy) and copyto that back — so the in-place write matches x's
         // dtype and the values match numpy's shuffle exactly.
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let shape: Vec<usize> = bound.getattr("shape")?.extract()?;
         if shape.is_empty() {
             return Err(PyTypeError::new_err("len() of unsized object"));
@@ -21351,7 +21351,7 @@ impl PyFromPyFunc {
             )));
         }
 
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let builtins = py.import("builtins")?;
         let object_dtype = builtins.getattr("object")?;
 
@@ -40464,7 +40464,7 @@ fn make_mask_none(
     // calloc-backed np.zeros(shape, bool) (~66us) — a >1000x gap on a pure
     // zero-mask constructor with no arithmetic.
     let _ = parse_shape_override(newshape, "make_mask_none")?;
-    let numpy = py.import("numpy.ma")?;
+    let numpy = cached_numpy_ma(py)?;
     let func = numpy.getattr("make_mask_none")?;
     if let Some(dtype) = dtype {
         let kwargs = PyDict::new(py);
