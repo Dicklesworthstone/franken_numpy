@@ -106945,21 +106945,16 @@ fn cached_issubclass(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
 /// A bad dtype spelling raises here exactly as it does there, because it is the SAME
 /// `np.dtype()` call that raises - `issubdtype('bad_name', np.floating)` is a `TypeError`
 /// either way, with numpy's own message.
-/// The `'py` here is not decoration: the normalisation closure returns a value borrowed from
-/// `arg` on one branch and from the cached `numpy` module on the other, and with two elided
-/// `'_` lifetimes those are independent, so the borrow checker cannot prove the result
-/// outlives the call. Naming one lifetime for the token, both operands and the closure ties
-/// all three together.
-fn native_issubdtype<'py>(
-    py: Python<'py>,
-    arg1: &Bound<'py, PyAny>,
-    arg2: &Bound<'py, PyAny>,
+fn native_issubdtype(
+    py: Python<'_>,
+    arg1: &Bound<'_, PyAny>,
+    arg2: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let generic = cached_numpy_generic(py)?;
     let issubclass = cached_issubclass(py)?;
 
-    let as_scalar_type = |arg: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyAny>> {
+    let as_scalar_type = |arg: &Bound<'_, PyAny>| -> PyResult<Bound<'_, PyAny>> {
         // `cast_into` succeeding IS the "is it a class" test that `issubclass_` performs by
         // catching TypeError.
         if arg.clone().cast_into::<PyType>().is_ok()
@@ -113803,7 +113798,6 @@ mod tests {
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
         narrow_bitmap_setop, native_apply_over_axes, native_atleast, native_base_repr,
-        native_isdtype,
         native_binary_repr, native_scimath_fix_unary, nextafter,
         numpy_dtype_is_f64, offset_business_days, place, put, put_along_axis, putmask,
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
