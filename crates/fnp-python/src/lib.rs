@@ -4510,7 +4510,7 @@ fn build_random_state_state(
 }
 
 fn random_state_state_keys_from_py(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let flat = array.call_method1("reshape", (-1,))?;
     flat.call_method1("astype", ("uint32",))?
@@ -4722,7 +4722,7 @@ fn extract_random_float_dtype(
         return Ok(DType::F64);
     }
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let parsed = numpy.getattr("dtype")?.call1((dtype,))?;
     let name = parsed.getattr("name")?.extract::<String>()?;
     match DType::parse(&name) {
@@ -5086,7 +5086,7 @@ fn bit_generator_random_raw(
 }
 
 fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let flat = array.call_method1("reshape", (-1,))?;
     flat.call_method1("astype", ("float64",))?
@@ -5099,7 +5099,7 @@ fn extract_random_u64_population(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<Vec<u64>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let flat = array.call_method1("reshape", (-1,))?;
     let values = flat
@@ -5426,7 +5426,7 @@ fn extract_index_vector(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<Vec<usize>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let flat = array.call_method1("reshape", (-1,))?;
     let indices = flat
@@ -5481,7 +5481,7 @@ fn extract_index_shape(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<Vec<usize>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let ndim = array.getattr("ndim")?.extract::<usize>()?;
 
@@ -5550,7 +5550,7 @@ fn extract_take_indices(
     // PyArray_FromAny converts Python floats to intp via per-element int()
     // truncation, while refusing to *cast* a float ndarray. Mirror that exactly,
     // including the int()-conversion guards for NaN / infinity / overflow.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let is_ndarray = value.is_instance(cached_ndarray_type(py)?)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let normalized = if !is_ndarray
@@ -5660,7 +5660,7 @@ fn extract_condition_mask(
     // of routing through extract_numeric_array, which materialises a full-width f64
     // values array (16 MB for a 2M mask) only to map it back to bools. Non-bool
     // conditions (int/float truthiness) keep the general `!= 0` path.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     if array
         .getattr("dtype")?
@@ -5795,7 +5795,7 @@ fn stack_helper_numpy_fallback(
     dtype: Option<Py<PyAny>>,
     casting: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     let mut has_kwargs = false;
 
@@ -5850,7 +5850,7 @@ fn stack_helper_default(
 
 #[allow(dead_code)]
 fn extract_split_sections(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     if array.getattr("ndim")?.extract::<usize>()? != 0 {
         return Ok(None);
@@ -5886,7 +5886,7 @@ fn split_helper_numpy_fallback(
     indices_or_sections: Py<PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     let has_kwargs = if let Some(axis) = axis {
         kwargs.set_item("axis", axis)?;
@@ -6102,7 +6102,7 @@ fn copy_result_into_numpy_array(
         buffer.copy_from_slice(py, array.values())?;
         return Ok(());
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let updated = build_numpy_array_from_ufunc(py, array)?;
     numpy.call_method1("copyto", (target, updated.bind(py)))?;
     Ok(())
@@ -6113,7 +6113,7 @@ fn extract_array_shape(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<Vec<usize>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     array
         .getattr("shape")?
@@ -6155,7 +6155,7 @@ fn extract_mask_metadata(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<(bool, Option<UFuncArray>, Vec<usize>)> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let asanyarray = numpy.call_method1("asanyarray", (value,))?;
     let shape = asanyarray.getattr("shape")?.extract::<Vec<usize>>()?;
@@ -6186,7 +6186,7 @@ fn extract_numeric_masked_array(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<Option<MaskedArray>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let asanyarray = numpy.call_method1("asanyarray", (value,))?;
     let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
@@ -6433,7 +6433,7 @@ fn matrix_rank_default_rcond(dtype: DType, max_dim: usize) -> Option<f64> {
 }
 
 fn build_numpy_slogdet_result(py: Python<'_>, sign: f64, logabsdet: f64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let eye = numpy.getattr("eye")?.call1((1,))?;
     let slogdet_result_type = numpy
         .getattr("linalg")?
@@ -6451,7 +6451,7 @@ fn build_numpy_slogdet_result_arrays(
     sign: &UFuncArray,
     logabsdet: &UFuncArray,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let eye = numpy.getattr("eye")?.call1((1,))?;
     let slogdet_result_type = numpy
         .getattr("linalg")?
@@ -6470,7 +6470,7 @@ fn build_numpy_eigh_result(
     eigenvalues: &UFuncArray,
     eigenvectors: &UFuncArray,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let eye = numpy.getattr("eye")?.call1((1,))?;
     let eigh_result_type = numpy
         .getattr("linalg")?
@@ -6629,7 +6629,7 @@ fn extract_python_dtype(
         return Ok(default);
     }
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let parsed = numpy.getattr("dtype")?.call1((dtype,))?;
     let name = parsed.getattr("name")?.extract::<String>()?;
     DType::parse(&name)
@@ -7261,7 +7261,7 @@ fn extract_structured_leaf_columns(
     base_ndim: usize,
     context: &str,
 ) -> PyResult<Vec<(DType, ArrayStorage, usize)>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let dtype = array.getattr("dtype")?;
     let names = dtype.getattr("names")?;
@@ -7316,7 +7316,7 @@ fn build_numpy_array_from_interleaved_storage(
     num_records: usize,
     target_dtype: DType,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let total_width = columns.iter().map(|(_, width)| *width).sum::<usize>();
     let total_len = num_records.saturating_mul(total_width);
     let kwargs = PyDict::new(py);
@@ -7697,7 +7697,7 @@ fn normalize_meshgrid_inputs(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     args.iter()
         .map(|value| {
             let array = numpy.call_method1("asarray", (value,))?;
@@ -7741,7 +7741,7 @@ fn parse_grid_slice(
         value.getattr("step")?.unbind()
     };
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let is_complex = numpy
         .getattr("iscomplexobj")?
@@ -7803,7 +7803,7 @@ fn parse_grid_key(
     key: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<(Vec<GridSpec>, Py<PyAny>, bool)> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
 
     if let Ok(tuple) = key.cast::<PyTuple>() {
         let mut specs = Vec::with_capacity(tuple.len());
@@ -7891,7 +7891,7 @@ fn build_grid_numpy_outputs(
             cast_numpy_array_dtype(py, output, dtype)
         }
     } else if tuple_input {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let tuple = build_numpy_tuple_from_ufuncs(py, arrays)?;
         let stacked = numpy.getattr("stack")?.call1((tuple.bind(py),))?;
         cast_numpy_array_dtype(py, stacked.unbind(), dtype)
@@ -7925,7 +7925,7 @@ fn axis_concatenator_slice_array(
     kind: AxisConcatenatorKind,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<UFuncArray> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy
         .getattr(kind.context())?
         .call_method1("__getitem__", (value,))?;
@@ -20808,7 +20808,7 @@ fn build_numpy_scalar_or_array(py: Python<'_>, array: &UFuncArray) -> PyResult<P
 }
 
 fn build_numpy_masked_array(py: Python<'_>, array: &MaskedArray) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ma = numpy.getattr("ma")?;
     let data = build_numpy_array_from_ufunc(py, array.data())?;
     let kwargs = PyDict::new(py);
@@ -20898,7 +20898,7 @@ fn extract_complex_interleaved_array(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<UFuncArray> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", numpy.getattr("complex128")?)?;
     let array = numpy.call_method("asarray", (value,), Some(&kwargs))?;
@@ -21005,7 +21005,7 @@ fn build_meshgrid_numpy_outputs(
         return build_numpy_tuple_from_pyarrays(py, &[]);
     }
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndim = arrays.len();
     let reshaped = arrays
         .iter()
@@ -21089,7 +21089,7 @@ fn extract_object_array_input(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<(Vec<usize>, Vec<Py<PyAny>>)> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", builtins.getattr("object")?)?;
@@ -21110,7 +21110,7 @@ fn build_numpy_object_array_from_flat_values(
     shape: &[usize],
     values: &[Py<PyAny>],
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", builtins.getattr("object")?)?;
@@ -21203,7 +21203,7 @@ fn extract_frompyfunc_where_mask(
         };
     }
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let builtins = py.import("builtins")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", builtins.getattr("bool")?)?;
@@ -40328,7 +40328,7 @@ fn mask_cols(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<
 }
 
 fn numpy_ma_unary(py: Python<'_>, name: &str, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let func = numpy.getattr("ma")?.getattr(name)?;
     Ok(func.call1((a.bind(py),))?.unbind())
 }
@@ -40339,7 +40339,7 @@ fn numpy_ma_axis(
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let func = numpy.getattr("ma")?.getattr(name)?;
     match axis {
         Some(axis) => {
@@ -40832,7 +40832,7 @@ where
 fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     let fill_value_for_fallback = fill_value.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let filled_fn = numpy.getattr("ma")?.getattr("filled")?;
         let kwargs = PyDict::new(py);
         if let Some(value) = &fill_value_for_fallback {
@@ -40969,7 +40969,7 @@ fn mask_or(
     let m1_for_fallback = m1.clone_ref(py);
     let m2_for_fallback = m2.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let mask_or_fn = numpy.getattr("ma")?.getattr("mask_or")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("copy", copy)?;
@@ -51789,7 +51789,7 @@ fn setop_inputs_are_float(
     ar1: &Bound<'_, PyAny>,
     ar2: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let a = numpy.call_method1("asarray", (ar1,))?;
     let b = numpy.call_method1("asarray", (ar2,))?;
     let ak = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
@@ -62005,7 +62005,7 @@ fn savetxt(
     comments: &str,
     encoding: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     if let Some(fmt_val) = fmt.as_ref() {
         kwargs.set_item("fmt", fmt_val.bind(py))?;
@@ -66507,7 +66507,7 @@ fn mintypecode(
 // is bit-identical to numpy (1.0 ones, +0.0 fill). The diagonal element (i, i+k)
 // is valid for max(0,-k) <= i < min(n, m-k).
 fn build_f64_eye(py: Python<'_>, n: usize, m: usize, k: i64) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
     let out = numpy.call_method("zeros", ((n, m),), Some(&kwargs))?;
@@ -78069,7 +78069,7 @@ fn make_mask(
 fn masked_all(py: Python<'_>, shape: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     let dtype_for_fallback = dtype.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let masked_all_fn = numpy.getattr("ma")?.getattr("masked_all")?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = &dtype_for_fallback {
@@ -79675,7 +79675,7 @@ fn masked_outside(
 #[pyo3(signature = (arr, axis=None))]
 fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let count_masked_fn = numpy.getattr("ma")?.getattr("count_masked")?;
         Ok(match &axis {
             Some(axis) => count_masked_fn.call1((arr.bind(py), axis.bind(py)))?,
@@ -81300,7 +81300,7 @@ fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> Py
     // Check for complex dtype and fallback to numpy
     let dtype_kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if dtype_kind == "c" {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("wrap", wrap)?;
         numpy
@@ -81889,7 +81889,7 @@ fn build_diag_indices_tuple(py: Python<'_>, n: usize, ndim: usize) -> PyResult<P
     // matching numpy. This drops the per-call dtype-dict, np.empty, PyBuffer fetch, and
     // fill loop the previous path paid — pure call overhead that dominated at small n
     // (1.32us -> ~numpy's 0.56us at n=64).
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let idx = numpy.call_method1("arange", (n,))?;
     let mut outputs = Vec::with_capacity(ndim);
     for _ in 0..ndim {
@@ -81980,7 +81980,7 @@ fn build_tri_indices(
     k: i64,
     upper: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let mut count: usize = 0;
     for i in 0..n {
         let r = i as i64;
@@ -94880,7 +94880,7 @@ fn try_einsum_broadcast_mul_2op(
     }
     // Reshape each operand to the output rank, inserting a size-1 axis for every output label
     // it lacks (a pure view since its labels are already in output order), then multiply.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let multiply_fn = numpy.getattr("multiply")?;
     let mut result: Option<Bound<'_, PyAny>> = None;
     for (g, x) in groups.iter().zip(operands.iter()) {
@@ -102165,7 +102165,7 @@ fn unicode_strip_or_numpy(
     if !chars_given && let Some(result) = try_zerocopy_unicode_strip(py, a.bind(py), mode)? {
         return Ok(result);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let f = numpy.getattr(namespace)?.getattr(method)?;
     match chars {
         Some(c) => Ok(f.call1((a.bind(py), c.bind(py)))?.unbind()),
@@ -102936,7 +102936,7 @@ fn unicode_pad_or_numpy(
     )? {
         return Ok(out);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let f = numpy.getattr(namespace)?.getattr(method)?;
     match fillchar {
         Some(fc) => Ok(f.call1((a.bind(py), width.bind(py), fc.bind(py)))?.unbind()),
@@ -104124,7 +104124,7 @@ fn unicode_search_or_numpy(
     require_found: bool,
     method: &str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let non_default = |o: &Option<Py<PyAny>>| o.as_ref().is_some_and(|v| !v.bind(py).is_none());
     // start/end restrict the search window -> defer (native handles the whole-string case only).
     if !non_default(&start)
@@ -104182,7 +104182,7 @@ fn unicode_replace_or_numpy(
     {
         return Ok(result);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let f = numpy.getattr(namespace)?.getattr("replace")?;
     match count {
         Some(c) => Ok(f
@@ -104865,7 +104865,7 @@ fn strings_decode_native(
     )? {
         return Ok(out);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let f = numpy.getattr("strings")?.getattr("decode")?;
     Ok(f.call1((
         a.bind(py),
@@ -104970,7 +104970,7 @@ fn strings_expandtabs_native(
     if let Some(out) = try_zerocopy_unicode_expandtabs(py, a.bind(py), &ts_bound)? {
         return Ok(out);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let f = numpy.getattr("strings")?.getattr("expandtabs")?;
     match tabsize {
         Some(t) => Ok(f.call1((a.bind(py), t.bind(py)))?.unbind()),
@@ -105072,7 +105072,7 @@ fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) ->
 // gate on this to defer narrow-float inputs to numpy, preserving exact dtype.
 fn numpy_dtype_is_narrow_float(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     let probe = || -> PyResult<bool> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let array = numpy.call_method1("asarray", (value,))?;
         let dtype = array.getattr("dtype")?;
         let kind: String = dtype.getattr("kind")?.extract()?;
@@ -105087,7 +105087,7 @@ fn numpy_dtype_is_narrow_float(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool
 // while median allows it; callers gate on this to reproduce that asymmetry.
 fn numpy_dtype_is_bool(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     let probe = || -> PyResult<bool> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let array = numpy.call_method1("asarray", (value,))?;
         let kind: String = array.getattr("dtype")?.getattr("kind")?.extract()?;
         Ok(kind == "b")
@@ -105104,7 +105104,7 @@ fn numpy_dtype_is_bool(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
 // every other dtype to NumPy, which keeps the original width.
 fn numpy_dtype_native_roundtrip_preserves(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     let probe = || -> PyResult<bool> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let array = numpy.call_method1("asarray", (value,))?;
         let dtype = array.getattr("dtype")?;
         let kind: String = dtype.getattr("kind")?.extract()?;
@@ -105121,7 +105121,7 @@ fn numpy_dtype_native_roundtrip_preserves(py: Python<'_>, value: &Bound<'_, PyAn
 // defer the widened cases to NumPy.
 fn numpy_dtype_is_subplatform_integer(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     let probe = || -> PyResult<bool> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let array = numpy.call_method1("asarray", (value,))?;
         let dtype = array.getattr("dtype")?;
         let kind: String = dtype.getattr("kind")?.extract()?;
@@ -111618,7 +111618,82 @@ fn array_str(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_array_str(py, args, kwargs)? {
+        return Ok(result);
+    }
     core_numpy_passthrough_interned(py, intern!(py, "array_str"), args, kwargs)
+}
+
+/// `np.array_str(a, max_line_width=None, precision=None, suppress_small=None)`.
+///
+/// The incumbent is an `@array_function_dispatch` wrapper around a Python function whose
+/// entire non-0-d body is one call to the PUBLIC `array2string`:
+///
+///     return array2string(a, max_line_width, precision, suppress_small, ' ', "")
+///
+/// So this route needs no numpy internals - it makes that same public call and skips the
+/// dispatcher and a Python frame. Checked against the incumbent across 1-d, 2-d, int, empty,
+/// 2000-element, bool, string, datetime64, structured and nan/inf/-0.0 arrays, and across all
+/// three optional arguments: byte-identical every time.
+///
+/// A 0-d OPERAND MUST DECLINE, and this is not a formality - the two disagree:
+///
+///     array_str(np.array(5.0))   == '5.0'      array2string(...) == '5.'
+///     array_str(np.array('hi'))  == 'hi'       array2string(...) == "'hi'"
+///
+/// NumPy's 0-d branch returns the str of the SCALAR, so floats are not truncated by
+/// `precision` and strings are not quoted. Reproducing that means `_guarded_repr_or_str` and
+/// the `legacy` format option, both private, so 0-d is left to numpy - which is also the only
+/// place the `legacy` setting can change this function's answer at all.
+fn native_array_str(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    const OPTIONALS: [&str; 3] = ["max_line_width", "precision", "suppress_small"];
+    if !kwargs.is_none_or(|kw| {
+        kw.keys().into_iter().all(|key| {
+            key.extract::<String>()
+                .map(|k| k == "a" || OPTIONALS.contains(&k.as_str()))
+                .unwrap_or(false)
+        })
+    }) || args.len() > 4
+    {
+        return Ok(None);
+    }
+    for (index, name) in OPTIONALS.iter().enumerate() {
+        if keyword_is_doubly_supplied(args, kwargs, name, index + 1) {
+            return Ok(None);
+        }
+    }
+    let Some(a) = kwargs
+        .and_then(|kw| kw.get_item("a").ok().flatten())
+        .or_else(|| args.get_item(0).ok())
+    else {
+        return Ok(None);
+    };
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0 {
+        return Ok(None);
+    }
+
+    let optional = |index: usize| -> Bound<'_, PyAny> {
+        kwargs
+            .and_then(|kw| kw.get_item(OPTIONALS[index]).ok().flatten())
+            .or_else(|| args.get_item(index + 1).ok())
+            .unwrap_or_else(|| py.None().into_bound(py))
+    };
+    let numpy = cached_numpy(py)?;
+    Ok(Some(
+        numpy
+            .call_method1(
+                intern!(py, "array2string"),
+                (&a, optional(0), optional(1), optional(2), " ", ""),
+            )?
+            .unbind(),
+    ))
 }
 
 // Elementwise differences (1).
@@ -114249,7 +114324,7 @@ mod tests {
         interp, is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native,
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
-        narrow_bitmap_setop, native_apply_over_axes, native_atleast, native_base_repr,
+        narrow_bitmap_setop, native_apply_over_axes, native_atleast, native_array_str, native_base_repr,
         native_isdtype,
         native_binary_repr, native_format_float, native_scimath_fix_unary,
         native_scimath_logn,
@@ -127248,6 +127323,121 @@ mod tests {
                 native_apply_over_axes(py, &sum_fn, &g("a"), &0i64.into_pyobject(py)?.into_any())?
                     .is_some(),
                 "the native apply_over_axes route declined an ndarray operand"
+            );
+            Ok(())
+        });
+    }
+
+    /// `np.array_str` must match NumPy byte-for-byte, and MUST decline 0-d
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// The incumbent's whole non-0-d body is one call to the public `array2string`, so this
+    /// route makes that same call and skips a dispatcher. The 0-d branch is the part that
+    /// cannot be reproduced from public API, and it genuinely differs:
+    ///
+    ///     array_str(np.array(5.0))  == "5.0"    array2string(...) == "5."
+    ///     array_str(np.array('hi')) == "hi"     array2string(...) == "'hi'"
+    ///
+    /// NumPy returns the str of the SCALAR there - floats not truncated by `precision`,
+    /// strings not quoted - which needs `_guarded_repr_or_str` and the private `legacy`
+    /// option. So 0-d declines, and the test asserts the decline rather than trusting it.
+    #[test]
+    fn array_str_matches_numpy_and_declines_zero_d() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_array_str")?;
+            fnp_python(&module)?;
+            let ours = module.getattr("array_str")?;
+            let theirs = numpy.getattr("array_str")?;
+
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"cases = {\n\
+                      'a1': np.arange(6.0),\n\
+                      'a2': np.arange(6.0).reshape(2, 3),\n\
+                      'ints': np.arange(4),\n\
+                      'empty': np.array([], dtype=np.float64),\n\
+                      'big': np.arange(2000.0),\n\
+                      'bools': np.array([True, False]),\n\
+                      'strs': np.array(['ab', 'cd']),\n\
+                      'dates': np.arange('2024-01-01','2024-01-04',dtype='datetime64[D]'),\n\
+                      'struct': np.zeros(2, dtype=[('a','i4'),('b','f8')]),\n\
+                      'edge': np.array([np.nan, np.inf, -0.0]),\n\
+                  }\n\
+                  zero_f = np.array(5.0)\n\
+                  zero_s = np.array('hi')\n\
+                  prec = np.array([1.23456789, 2.0])\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let cases = locals
+                .get_item("cases")
+                .expect("fixture lookup failed")
+                .expect("cases missing")
+                .cast_into::<PyDict>()
+                .expect("cases is a dict");
+            let g = |k: &str| {
+                locals
+                    .get_item(k)
+                    .expect("fixture lookup failed")
+                    .expect("array_str fixture missing")
+            };
+
+            for (name, array) in cases.iter() {
+                let what = name.extract::<String>()?;
+                assert_eq!(
+                    ours.call1((&array,))?.extract::<String>()?,
+                    theirs.call1((&array,))?.extract::<String>()?,
+                    "array_str({what}) diverged from numpy"
+                );
+                // ENGAGEMENT: every equality here is satisfied by the passthrough.
+                assert!(
+                    native_array_str(py, &PyTuple::new(py, [&array])?, None)?.is_some(),
+                    "the native array_str route declined {what}"
+                );
+            }
+
+            // All three optional arguments, positionally and by keyword.
+            for (mlw, prec, ss) in [
+                (py.None().into_bound(py), 3i64.into_pyobject(py)?.into_any(), py.None().into_bound(py)),
+                (10i64.into_pyobject(py)?.into_any(), py.None().into_bound(py), py.None().into_bound(py)),
+            ] {
+                assert_eq!(
+                    ours.call1((g("prec"), &mlw, &prec, &ss))?.extract::<String>()?,
+                    theirs.call1((g("prec"), &mlw, &prec, &ss))?.extract::<String>()?,
+                    "array_str with positional options diverged from numpy"
+                );
+            }
+            let kw = PyDict::new(py);
+            kw.set_item("precision", 3)?;
+            assert_eq!(
+                ours.call((g("prec"),), Some(&kw))?.extract::<String>()?,
+                theirs.call((g("prec"),), Some(&kw))?.extract::<String>()?,
+                "array_str(precision=3) diverged from numpy"
+            );
+
+            // 0-d MUST decline - and the passthrough must still give numpy's answer, which
+            // is NOT what array2string would have produced.
+            for (name, expected) in [("zero_f", "5.0"), ("zero_s", "hi")] {
+                assert!(
+                    native_array_str(py, &PyTuple::new(py, [g(name)])?, None)?.is_none(),
+                    "{name}: a 0-d operand must decline - numpy returns the SCALAR's str there"
+                );
+                assert_eq!(
+                    ours.call1((g(name),))?.extract::<String>()?,
+                    expected,
+                    "{name}: the decline must still return numpy's 0-d answer"
+                );
+            }
+            // A non-ndarray declines too (numpy's asanyarray path is not reproduced here).
+            let lst = PyList::new(py, [1i64, 2])?;
+            assert!(
+                native_array_str(py, &PyTuple::new(py, [lst.as_any()])?, None)?.is_none(),
+                "a list operand must decline"
             );
             Ok(())
         });
