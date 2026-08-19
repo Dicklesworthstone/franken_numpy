@@ -111262,13 +111262,37 @@ fn none_or_positive_arg(value: Option<&Bound<'_, PyAny>>, name: &str) -> PyResul
 /// that function's own keywords. Extra positionals decline - numpy accepts them, and binding
 /// nine parameters by position here would be a second implementation of a signature this file
 /// has no other reason to know.
+/// Is the native `format_float_*` route worth engaging? MEASURED FALSE.
+///
+/// `attribute_key_cost` + `emath_ratio` run, worker ovh-a, optimised profile, loadavg 4.29,
+/// iowait 0, interleaved AB/BA with an A/A null, every null at 1.000-1.002x:
+///
+///   positional/bare           numpy 772 ns   ours 1005 ns   0.768x  DECIDABLE
+///   positional/precision=3    numpy 623 ns   ours  940 ns   0.663x  DECIDABLE
+///   scientific/bare           numpy 740 ns   ours  965 ns   0.767x  DECIDABLE
+///   scientific/precision=3    numpy 599 ns   ours  900 ns   0.666x  DECIDABLE
+///
+/// 1.3-1.5x SLOWER than the pure-Python wrapper it replaced, on every shape measured. The
+/// prediction behind it - "the incumbent is four lines of Python, so the frame is the function"
+/// - was wrong about where the cost sits: `_none_or_positive_arg` x4 is cheap, and what the
+/// native route adds is a 9-ENTRY kwargs `PyDict` BUILT IN RUST PER CALL to reach `dragon4_*`.
+/// CPython's own keyword-call path is faster than assembling that dict through the PyO3 API, so
+/// the route pays more than it saves. The frame-elimination model that won on `emath` (2.5-7.5x
+/// at small n) does not transfer to a function whose delegation needs a wide kwargs dict.
+///
+/// The route and its test stay: parity is not the problem - `format_float_family_matches_numpy_
+/// including_which_argument_the_error_names` passes, including the -1 sentinel and the
+/// normalisation ORDER - and re-engaging is this one constant if the dict is ever built more
+/// cheaply (a cached kwargs template, or a positional call if `dragon4_*` ever accepts one).
+const FORMAT_FLOAT_NATIVE_ROUTE_BEATS_NUMPY: bool = false;
+
 fn native_format_float(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
     scientific: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if args.len() != 1 {
+    if !FORMAT_FLOAT_NATIVE_ROUTE_BEATS_NUMPY || args.len() != 1 {
         return Ok(None);
     }
     let third = if scientific { "exp_digits" } else { "pad_right" };
@@ -128130,7 +128154,12 @@ mod tests {
                             "{flat}(values[{value_index}], {kwargs_name}[{kwargs_index}]) \
                              diverged from numpy"
                         );
-                        // ENGAGEMENT: the passthrough satisfies the assertion above by itself.
+                        // DISENGAGED, AND THIS ASSERTION IS NOW THE OPPOSITE OF WHAT IT WAS.
+                        // The native route MEASURED 0.663-0.768x against the pure-Python
+                        // wrapper it replaced - 1.3-1.5x SLOWER on every shape - so
+                        // `FORMAT_FLOAT_NATIVE_ROUTE_BEATS_NUMPY` is false and every call
+                        // must reach numpy. The parity assertions above still run, through
+                        // the passthrough, so the route stays correct and re-engagable.
                         assert!(
                             native_format_float(
                                 py,
@@ -128138,9 +128167,10 @@ mod tests {
                                 Some(kwargs),
                                 scientific
                             )?
-                            .is_some(),
-                            "the native route declined {flat}(values[{value_index}], \
-                             {kwargs_name}[{kwargs_index}]); parity alone proves nothing"
+                            .is_none(),
+                            "the native route ENGAGED on {flat}(values[{value_index}], \
+                             {kwargs_name}[{kwargs_index}]) - it is disengaged on measured \
+                             evidence and must decline until the kwargs dict is cheaper"
                         );
                     }
                 }
