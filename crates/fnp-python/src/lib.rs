@@ -63899,6 +63899,113 @@ fn recfunctions_get_fieldstructure(
     recfunctions_passthrough(py, "get_fieldstructure", args, kwargs)
 }
 
+/// Which of numpy's two `_fix_*` guards a `numpy.emath` entry point carries.
+///
+/// Every function in `numpy.lib._scimath_impl` has the same two-line body: run one of these
+/// fixes over the operand, then call the ordinary ufunc. So the fix IS the function, and it is
+/// the only part with anything to remove.
+#[derive(Clone, Copy)]
+enum ScimathFix {
+    /// `_fix_real_lt_zero` - `sqrt`, `log`, `log2`, `log10`.
+    RealLtZero,
+    /// `_fix_real_abs_gt_1` - `arccos`, `arcsin`, `arctanh`.
+    RealAbsGt1,
+}
+
+/// Does the fix TRIGGER on this operand, and is the operand single precision? `None` declines.
+///
+/// WHAT NUMPY SPENDS HERE, and the whole reason this route exists: the fix is
+/// `any(isreal(x) & (x < 0))`, and every piece of that expression ALLOCATES A FULL ARRAY.
+/// `isreal` is `imag(x) == 0`, so a real-dtype operand materialises a zeros array for `.imag`,
+/// a bool array for the `== 0`, a second bool array for the comparison, a third for the `&`,
+/// and only then scans. For a REAL dtype `isreal` is all-true BY CONSTRUCTION, so the whole
+/// expression collapses to one scan for an element satisfying the comparison, allocating
+/// nothing. MEASURED ON THE INCUMBENT (numpy 2.4.3, this host): `np.emath.sqrt` costs 9.18x
+/// `np.sqrt` at n=2^8 and 1.44x at n=2^20; the smallest gap over the sweep - the honest worst
+/// cell - is `np.emath.log` at 1.14x, n=2^16.
+///
+/// The scan is SERIAL and early-exits. It is already a fifth of the traffic numpy moves for the
+/// same answer, and a parallel form would need its own size gate to not lose on small inputs.
+///
+/// DECLINES, each landing back on numpy which does its own thing correctly: a subclass (its
+/// `__array_function__` must dispatch), any dtype other than f64/f32 (a complex operand needs
+/// the real `isreal` test, an integer operand needs `_fix_int_lt_zero` semantics in `power`),
+/// a non-C-contiguous array, and a 0-d array - whose `PyBuffer` yields NO slice at all, so
+/// `as_slice` returning `None` is the decline rather than an error.
+fn scimath_fix_triggers(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    fix: ScimathFix,
+) -> PyResult<Option<(bool, bool)>> {
+    if !x.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    if let Ok(buffer) = PyBuffer::<f64>::get(x)
+        && let Some(cells) = buffer.as_slice(py)
+    {
+        let triggered = match fix {
+            ScimathFix::RealLtZero => cells.iter().any(|cell| cell.get() < 0.0),
+            ScimathFix::RealAbsGt1 => cells.iter().any(|cell| cell.get().abs() > 1.0),
+        };
+        return Ok(Some((triggered, false)));
+    }
+    if let Ok(buffer) = PyBuffer::<f32>::get(x)
+        && let Some(cells) = buffer.as_slice(py)
+    {
+        let triggered = match fix {
+            ScimathFix::RealLtZero => cells.iter().any(|cell| cell.get() < 0.0),
+            ScimathFix::RealAbsGt1 => cells.iter().any(|cell| cell.get().abs() > 1.0),
+        };
+        return Ok(Some((triggered, true)));
+    }
+    Ok(None)
+}
+
+/// Native `numpy.emath.<name>` for a real f64/f32 exact ndarray: run the fix as ONE scan, then
+/// hand the operand to the ordinary ufunc. `None` means pass through.
+///
+/// THE UFUNC IS STILL NUMPY'S, DELIBERATELY. What this removes is the fix's four temporaries
+/// and five passes, not the transcendental - so the values, the dtype and the RuntimeWarnings
+/// (`log(0)` divide-by-zero, `arctanh(1)`) are numpy's own by construction rather than by
+/// imitation. Routing the compute through this crate's `try_zerocopy_f64_unary` is a separate
+/// lever and MUST NOT be folded in here: that path carries its own FE-hazard deferral and its
+/// own `numpy_explog_matches_libm` ISA gate, and mixing the two would make a warning-parity
+/// failure impossible to attribute.
+///
+/// WHEN THE FIX TRIGGERS the operand is still converted here rather than declining, because
+/// `_tocomplex` is a plain `astype`: numpy sends `single`/`byte`/`short`/`ubyte`/`ushort`/
+/// `csingle` to `csingle` and everything else to `cdouble`, and of the dtypes this route
+/// accepts that is exactly f32 -> complex64, f64 -> complex128.
+fn native_scimath_fix_unary(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    fix: ScimathFix,
+    name: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !kwargs.is_none_or(|kw| kw.is_empty()) || args.len() != 1 {
+        return Ok(None);
+    }
+    let x = args.get_item(0)?;
+    let Some((triggered, single)) = scimath_fix_triggers(py, &x, fix)? else {
+        return Ok(None);
+    };
+    let numpy = cached_numpy(py)?;
+    let operand = if triggered {
+        let complex_type = numpy.getattr(if single {
+            intern!(py, "complex64")
+        } else {
+            intern!(py, "complex128")
+        })?;
+        x.call_method1(intern!(py, "astype"), (complex_type,))?
+    } else {
+        // `asarray` is the identity on an exact ndarray and the fix did not fire, so
+        // `_fix_real_lt_zero` returned the operand UNCHANGED - the ufunc gets it as it is.
+        x
+    };
+    Ok(Some(numpy.getattr(name)?.call1((operand,))?.unbind()))
+}
+
 fn scimath_passthrough(
     py: Python<'_>,
     name: &str,
@@ -63919,6 +64026,15 @@ fn scimath_sqrt(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_scimath_fix_unary(
+        py,
+        args,
+        kwargs,
+        ScimathFix::RealLtZero,
+        "sqrt",
+    )? {
+        return Ok(result);
+    }
     scimath_passthrough(py, "sqrt", args, kwargs)
 }
 
@@ -63929,6 +64045,15 @@ fn scimath_log(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_scimath_fix_unary(
+        py,
+        args,
+        kwargs,
+        ScimathFix::RealLtZero,
+        "log",
+    )? {
+        return Ok(result);
+    }
     scimath_passthrough(py, "log", args, kwargs)
 }
 
@@ -63939,6 +64064,15 @@ fn scimath_log2(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_scimath_fix_unary(
+        py,
+        args,
+        kwargs,
+        ScimathFix::RealLtZero,
+        "log2",
+    )? {
+        return Ok(result);
+    }
     scimath_passthrough(py, "log2", args, kwargs)
 }
 
@@ -63949,6 +64083,15 @@ fn scimath_log10(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_scimath_fix_unary(
+        py,
+        args,
+        kwargs,
+        ScimathFix::RealLtZero,
+        "log10",
+    )? {
+        return Ok(result);
+    }
     scimath_passthrough(py, "log10", args, kwargs)
 }
 
@@ -63979,6 +64122,15 @@ fn scimath_arccos(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_scimath_fix_unary(
+        py,
+        args,
+        kwargs,
+        ScimathFix::RealAbsGt1,
+        "arccos",
+    )? {
+        return Ok(result);
+    }
     scimath_passthrough(py, "arccos", args, kwargs)
 }
 
@@ -63989,6 +64141,15 @@ fn scimath_arcsin(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_scimath_fix_unary(
+        py,
+        args,
+        kwargs,
+        ScimathFix::RealAbsGt1,
+        "arcsin",
+    )? {
+        return Ok(result);
+    }
     scimath_passthrough(py, "arcsin", args, kwargs)
 }
 
@@ -63999,6 +64160,15 @@ fn scimath_arctanh(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = native_scimath_fix_unary(
+        py,
+        args,
+        kwargs,
+        ScimathFix::RealAbsGt1,
+        "arctanh",
+    )? {
+        return Ok(result);
+    }
     scimath_passthrough(py, "arctanh", args, kwargs)
 }
 
