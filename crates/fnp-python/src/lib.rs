@@ -40360,9 +40360,7 @@ fn numpy_ma_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("ma")?
+    Ok(cached_numpy_ma(py)?
         .getattr(name)?
         .call(args, kwargs)?
         .unbind())
@@ -63742,8 +63740,7 @@ fn recfunctions_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    Ok(py
-        .import("numpy.lib.recfunctions")?
+    Ok(cached_numpy_recfunctions(py)?
         .getattr(name)?
         .call(args, kwargs)?
         .unbind())
@@ -64012,8 +64009,7 @@ fn scimath_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    Ok(py
-        .import("numpy.lib.scimath")?
+    Ok(cached_numpy_scimath(py)?
         .getattr(name)?
         .call(args, kwargs)?
         .unbind())
@@ -64178,8 +64174,7 @@ fn array_utils_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    Ok(py
-        .import("numpy.lib.array_utils")?
+    Ok(cached_numpy_array_utils(py)?
         .getattr(name)?
         .call(args, kwargs)?
         .unbind())
@@ -82725,6 +82720,45 @@ cached_numpy_attr!(cached_numpy_can_cast, "can_cast");
 cached_numpy_attr!(cached_numpy_datetime_data, "datetime_data");
 cached_numpy_attr!(cached_numpy_promote_types, "promote_types");
 cached_numpy_attr!(cached_numpy_result_type, "result_type");
+
+/// Generates a cached accessor for one numpy SUBMODULE.
+///
+/// WHY: four passthrough helpers (`numpy_ma_passthrough`, `recfunctions_passthrough`,
+/// `scimath_passthrough`, `array_utils_passthrough`) and the six `linalg_*` Array-API wrappers
+/// each open with `py.import("numpy.<sub>")` - PER CALL. An import of an already-imported module
+/// is not free: PyO3 builds a `PyString` for the name, and `PyImport_ImportModuleLevelObject`
+/// then walks its own path (dotted-name split, `sys.modules` lookup, fromlist handling) before
+/// handing back a module that was resolved at interpreter start and cannot change. This is the
+/// `cached_numpy` bet one level down, and `cached_numpy_attr!` is the same idea one level up.
+///
+/// FAILS SOFT ON THE IMPORT, exactly as `cached_numpy` documents: a failing import leaves the
+/// cell UNINITIALISED rather than caching the failure, so a later successful import still
+/// populates it and the error surface stays "ImportError on every failing call".
+///
+/// WHAT THIS DOES NOT TOUCH: the `getattr(name)` that follows in each helper. Those take the
+/// function name as a RUNTIME `&str`, so `intern!` cannot reach them - that is the same
+/// unpriced lever `core_numpy_passthrough` carries, and it stays unpriced here.
+macro_rules! cached_numpy_submodule {
+    ($fn_name:ident, $module:literal) => {
+        fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+            static CACHE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+            Ok(CACHE
+                .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+                    Ok(py.import($module)?.unbind())
+                })?
+                .bind(py))
+        }
+    };
+}
+
+// `numpy.ma` is reached by IMPORT here where the helper used to read `numpy.getattr("ma")`.
+// Those are the same object - `np.ma is sys.modules["numpy.ma"]` - so the swap is identity,
+// checked against the installed numpy rather than assumed.
+cached_numpy_submodule!(cached_numpy_ma, "numpy.ma");
+cached_numpy_submodule!(cached_numpy_recfunctions, "numpy.lib.recfunctions");
+cached_numpy_submodule!(cached_numpy_scimath, "numpy.lib.scimath");
+cached_numpy_submodule!(cached_numpy_array_utils, "numpy.lib.array_utils");
+cached_numpy_submodule!(cached_numpy_linalg, "numpy.linalg");
 
 fn clone_py_kwargs<'py>(
     py: Python<'py>,
@@ -106642,7 +106676,7 @@ fn linalg_cross(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = py.import("numpy.linalg")?;
+    let np_linalg = cached_numpy_linalg(py)?;
     Ok(np_linalg.getattr("cross")?.call(args, kwargs)?.unbind())
 }
 
@@ -106669,7 +106703,7 @@ fn linalg_diagonal(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = py.import("numpy.linalg")?;
+    let np_linalg = cached_numpy_linalg(py)?;
     Ok(np_linalg.getattr("diagonal")?.call(args, kwargs)?.unbind())
 }
 
@@ -106680,7 +106714,7 @@ fn linalg_trace(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = py.import("numpy.linalg")?;
+    let np_linalg = cached_numpy_linalg(py)?;
     Ok(np_linalg.getattr("trace")?.call(args, kwargs)?.unbind())
 }
 
@@ -106691,7 +106725,7 @@ fn linalg_outer(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = py.import("numpy.linalg")?;
+    let np_linalg = cached_numpy_linalg(py)?;
     Ok(np_linalg
         .getattr(intern!(py, "outer"))?
         .call(args, kwargs)?
@@ -106705,7 +106739,7 @@ fn linalg_tensordot(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = py.import("numpy.linalg")?;
+    let np_linalg = cached_numpy_linalg(py)?;
     Ok(np_linalg.getattr("tensordot")?.call(args, kwargs)?.unbind())
 }
 
@@ -106718,7 +106752,7 @@ fn linalg_vector_norm(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = py.import("numpy.linalg")?;
+    let np_linalg = cached_numpy_linalg(py)?;
     Ok(np_linalg
         .getattr("vector_norm")?
         .call(args, kwargs)?
