@@ -5341,7 +5341,7 @@ fn extract_numeric_array(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<UFuncArray> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
     let flat = array.call_method1("reshape", (-1,))?;
@@ -5373,7 +5373,7 @@ fn extract_precise_numeric_array(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<UFuncArray> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
     let flat = array.call_method1("reshape", (-1,))?;
@@ -5451,7 +5451,7 @@ fn extract_integer_array(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<UFuncArray> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
     let flat = array.call_method1("reshape", (-1,))?;
@@ -9307,8 +9307,8 @@ fn try_zerocopy_f64_unary(
     x: &Bound<'_, PyAny>,
     op: UnaryOp,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? else {
+    let numpy = cached_numpy(py)?;
+    let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)? else {
         return Ok(None);
     };
     // No reshape: `zerocopy_f64_unary_flat` allocates at the final shape, so the buffer
@@ -9330,8 +9330,8 @@ fn try_zerocopy_f32_unary(
     x: &Bound<'_, PyAny>,
     op: UnaryOp,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some((flat, shape)) = zerocopy_f32_unary_flat(py, &numpy, x, op)? else {
+    let numpy = cached_numpy(py)?;
+    let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)? else {
         return Ok(None);
     };
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
@@ -9717,8 +9717,8 @@ fn try_zerocopy_f32_isclose(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some((flat, shape)) = zerocopy_f32_isclose_flat(py, &numpy, a, b, rtol, atol, equal_nan)?
+    let numpy = cached_numpy(py)?;
+    let Some((flat, shape)) = zerocopy_f32_isclose_flat(py, numpy, a, b, rtol, atol, equal_nan)?
     else {
         return Ok(None);
     };
@@ -9744,7 +9744,7 @@ fn try_zerocopy_f64_isclose_array_scalar(
     rtol: f64,
     atol: f64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
     if !a.is_exact_instance(&ndarray_t) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
@@ -9824,7 +9824,7 @@ fn try_zerocopy_f32_isclose_array_scalar(
     rtol: f64,
     atol: f64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
     if !a.is_exact_instance(&ndarray_t) || !numpy_dtype_is_f32(a) {
         return Ok(None);
@@ -9901,8 +9901,8 @@ fn try_zerocopy_f64_isclose(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some((flat, shape)) = zerocopy_f64_isclose_flat(py, &numpy, a, b, rtol, atol, equal_nan)?
+    let numpy = cached_numpy(py)?;
+    let Some((flat, shape)) = zerocopy_f64_isclose_flat(py, numpy, a, b, rtol, atol, equal_nan)?
     else {
         return Ok(None);
     };
@@ -11361,7 +11361,7 @@ fn try_zerocopy_f16_argextreme_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -11438,7 +11438,7 @@ fn try_zerocopy_f16_argextreme_axis(
     });
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat = numpy_array_from_slice(py, &numpy, &indices, "intp")?;
+    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
     if out_shape.is_empty() {
@@ -11558,7 +11558,7 @@ fn try_zerocopy_f16_minmax_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -11641,7 +11641,7 @@ fn try_zerocopy_f16_minmax_axis(
     // Build the f16 output: uint16 array -> view float16 -> reshape to the reduced shape.
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat_u16 = numpy_array_from_slice(py, &numpy, &ext, "uint16")?;
+    let flat_u16 = numpy_array_from_slice(py, numpy, &ext, "uint16")?;
     let flat = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
@@ -11750,7 +11750,7 @@ fn try_zerocopy_f16_ptp_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -11829,7 +11829,7 @@ fn try_zerocopy_f16_ptp_axis(
     });
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat_u16 = numpy_array_from_slice(py, &numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
     let flat = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
@@ -11946,7 +11946,7 @@ fn try_zerocopy_f16_nanextreme_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -12036,7 +12036,7 @@ fn try_zerocopy_f16_nanextreme_axis(
     }
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat_u16 = numpy_array_from_slice(py, &numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
     let flat = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
@@ -14482,7 +14482,7 @@ fn try_zerocopy_int_clip(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -14500,49 +14500,49 @@ fn try_zerocopy_int_clip(
             let (Ok(lo), Ok(hi)) = (a_min.extract::<i8>(), a_max.extract::<i8>()) else {
                 return Ok(None);
             };
-            clip_typed::<i8>(py, &numpy, a, "int8", lo, hi)?
+            clip_typed::<i8>(py, numpy, a, "int8", lo, hi)?
         }
         ("i", 2) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<i16>(), a_max.extract::<i16>()) else {
                 return Ok(None);
             };
-            clip_typed::<i16>(py, &numpy, a, "int16", lo, hi)?
+            clip_typed::<i16>(py, numpy, a, "int16", lo, hi)?
         }
         ("i", 4) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<i32>(), a_max.extract::<i32>()) else {
                 return Ok(None);
             };
-            clip_typed::<i32>(py, &numpy, a, "int32", lo, hi)?
+            clip_typed::<i32>(py, numpy, a, "int32", lo, hi)?
         }
         ("i", 8) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<i64>(), a_max.extract::<i64>()) else {
                 return Ok(None);
             };
-            clip_typed::<i64>(py, &numpy, a, "int64", lo, hi)?
+            clip_typed::<i64>(py, numpy, a, "int64", lo, hi)?
         }
         ("u", 1) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<u8>(), a_max.extract::<u8>()) else {
                 return Ok(None);
             };
-            clip_typed::<u8>(py, &numpy, a, "uint8", lo, hi)?
+            clip_typed::<u8>(py, numpy, a, "uint8", lo, hi)?
         }
         ("u", 2) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<u16>(), a_max.extract::<u16>()) else {
                 return Ok(None);
             };
-            clip_typed::<u16>(py, &numpy, a, "uint16", lo, hi)?
+            clip_typed::<u16>(py, numpy, a, "uint16", lo, hi)?
         }
         ("u", 4) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<u32>(), a_max.extract::<u32>()) else {
                 return Ok(None);
             };
-            clip_typed::<u32>(py, &numpy, a, "uint32", lo, hi)?
+            clip_typed::<u32>(py, numpy, a, "uint32", lo, hi)?
         }
         ("u", 8) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<u64>(), a_max.extract::<u64>()) else {
                 return Ok(None);
             };
-            clip_typed::<u64>(py, &numpy, a, "uint64", lo, hi)?
+            clip_typed::<u64>(py, numpy, a, "uint64", lo, hi)?
         }
         _ => return Ok(None),
     };
@@ -14915,7 +14915,7 @@ fn try_zerocopy_f64_where(
     x: &Bound<'_, PyAny>,
     y: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // cond must be a bool dtype ndarray; other kinds keep the dtype-aware path.
     if condition
         .getattr("dtype")?
@@ -15997,7 +15997,7 @@ fn try_zerocopy_any_roll(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let Ok(shift_scalar) = shift.extract::<i64>() else {
         return Ok(None);
     };
@@ -16093,7 +16093,7 @@ fn try_zerocopy_f64_roll_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -16371,7 +16371,7 @@ fn try_zerocopy_any_roll_2d_multi(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
@@ -18276,7 +18276,7 @@ fn try_zerocopy_int_cumsum(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -18299,7 +18299,7 @@ fn try_zerocopy_int_cumsum(
         let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
         return cumsum_typed::<u8, i64, _, _>(
             py,
-            &numpy,
+            numpy,
             &viewed,
             "int64",
             |v| v as i64,
@@ -18310,7 +18310,7 @@ fn try_zerocopy_int_cumsum(
     match (kind.as_str(), itemsize) {
         ("i", 1) => cumsum_typed::<i8, i64, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             "int64",
             |v| v as i64,
@@ -18319,7 +18319,7 @@ fn try_zerocopy_int_cumsum(
         ),
         ("i", 2) => cumsum_typed::<i16, i64, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             "int64",
             |v| v as i64,
@@ -18328,7 +18328,7 @@ fn try_zerocopy_int_cumsum(
         ),
         ("i", 4) => cumsum_typed::<i32, i64, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             "int64",
             |v| v as i64,
@@ -18337,7 +18337,7 @@ fn try_zerocopy_int_cumsum(
         ),
         ("i", 8) => cumsum_typed::<i64, i64, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             "int64",
             |v| v,
@@ -18346,7 +18346,7 @@ fn try_zerocopy_int_cumsum(
         ),
         ("u", 1) => cumsum_typed::<u8, u64, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             "uint64",
             |v| v as u64,
@@ -18355,7 +18355,7 @@ fn try_zerocopy_int_cumsum(
         ),
         ("u", 2) => cumsum_typed::<u16, u64, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             "uint64",
             |v| v as u64,
@@ -18364,7 +18364,7 @@ fn try_zerocopy_int_cumsum(
         ),
         ("u", 4) => cumsum_typed::<u32, u64, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             "uint64",
             |v| v as u64,
@@ -18373,7 +18373,7 @@ fn try_zerocopy_int_cumsum(
         ),
         ("u", 8) => cumsum_typed::<u64, u64, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             "uint64",
             |v| v,
@@ -18564,7 +18564,7 @@ fn try_zerocopy_f64_cumulative_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -18908,7 +18908,7 @@ fn try_zerocopy_int_cumsum_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -18922,7 +18922,7 @@ fn try_zerocopy_int_cumsum_axis(
         let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
         cumsum_axis_typed::<u8, i64, _, _>(
             py,
-            &numpy,
+            numpy,
             &viewed,
             axis,
             "int64",
@@ -18933,7 +18933,7 @@ fn try_zerocopy_int_cumsum_axis(
         match (kind.as_str(), itemsize) {
             ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "int64",
@@ -18942,7 +18942,7 @@ fn try_zerocopy_int_cumsum_axis(
             )?,
             ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "int64",
@@ -18951,7 +18951,7 @@ fn try_zerocopy_int_cumsum_axis(
             )?,
             ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "int64",
@@ -18959,11 +18959,11 @@ fn try_zerocopy_int_cumsum_axis(
                 add_i64,
             )?,
             ("i", 8) => {
-                cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, add_i64)?
+                cumsum_axis_typed::<i64, i64, _, _>(py, numpy, a, axis, "int64", |v| v, add_i64)?
             }
             ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "uint64",
@@ -18972,7 +18972,7 @@ fn try_zerocopy_int_cumsum_axis(
             )?,
             ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "uint64",
@@ -18981,7 +18981,7 @@ fn try_zerocopy_int_cumsum_axis(
             )?,
             ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "uint64",
@@ -18989,7 +18989,7 @@ fn try_zerocopy_int_cumsum_axis(
                 add_u64,
             )?,
             ("u", 8) => {
-                cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, add_u64)?
+                cumsum_axis_typed::<u64, u64, _, _>(py, numpy, a, axis, "uint64", |v| v, add_u64)?
             }
             _ => return Ok(None),
         }
@@ -19018,7 +19018,7 @@ fn try_zerocopy_f32_cumsum(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -19034,7 +19034,7 @@ fn try_zerocopy_f32_cumsum(
     if !flatten_ok {
         return Ok(None);
     }
-    cumsum_typed::<f32, f32, _, _>(py, &numpy, a, "float32", |v| v, |a, b| a + b, false)
+    cumsum_typed::<f32, f32, _, _>(py, numpy, a, "float32", |v| v, |a, b| a + b, false)
 }
 
 // Zero-copy per-axis float32 cumsum (explicit axis); slab-by-slab f32 accumulation
@@ -19050,7 +19050,7 @@ fn try_zerocopy_f32_cumsum_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -19058,7 +19058,7 @@ fn try_zerocopy_f32_cumsum_axis(
         return Ok(None);
     }
     let result =
-        cumsum_axis_typed::<f32, f32, _, _>(py, &numpy, a, axis, "float32", |v| v, |a, b| a + b)?;
+        cumsum_axis_typed::<f32, f32, _, _>(py, numpy, a, axis, "float32", |v| v, |a, b| a + b)?;
     let Some((flat, shape)) = result else {
         return Ok(None);
     };
@@ -19085,7 +19085,7 @@ fn try_zerocopy_f16_cumulative_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 2
@@ -19273,7 +19273,7 @@ fn try_zerocopy_f32_nancumulative_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -19283,7 +19283,7 @@ fn try_zerocopy_f32_nancumulative_axis(
     let result = if is_prod {
         cumsum_axis_typed::<f32, f32, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             axis,
             "float32",
@@ -19293,7 +19293,7 @@ fn try_zerocopy_f32_nancumulative_axis(
     } else {
         cumsum_axis_typed::<f32, f32, _, _>(
             py,
-            &numpy,
+            numpy,
             a,
             axis,
             "float32",
@@ -19342,7 +19342,7 @@ fn try_zerocopy_int_cumprod(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -19368,7 +19368,7 @@ fn try_zerocopy_int_cumprod(
         let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
         return cumsum_typed::<u8, i64, _, _>(
             py,
-            &numpy,
+            numpy,
             &viewed,
             "int64",
             |v| v as i64,
@@ -19378,25 +19378,25 @@ fn try_zerocopy_int_cumprod(
     }
     match (kind.as_str(), itemsize) {
         ("i", 1) => {
-            cumsum_typed::<i8, i64, _, _>(py, &numpy, a, "int64", |v| v as i64, mul_i64, true)
+            cumsum_typed::<i8, i64, _, _>(py, numpy, a, "int64", |v| v as i64, mul_i64, true)
         }
         ("i", 2) => {
-            cumsum_typed::<i16, i64, _, _>(py, &numpy, a, "int64", |v| v as i64, mul_i64, true)
+            cumsum_typed::<i16, i64, _, _>(py, numpy, a, "int64", |v| v as i64, mul_i64, true)
         }
         ("i", 4) => {
-            cumsum_typed::<i32, i64, _, _>(py, &numpy, a, "int64", |v| v as i64, mul_i64, true)
+            cumsum_typed::<i32, i64, _, _>(py, numpy, a, "int64", |v| v as i64, mul_i64, true)
         }
-        ("i", 8) => cumsum_typed::<i64, i64, _, _>(py, &numpy, a, "int64", |v| v, mul_i64, true),
+        ("i", 8) => cumsum_typed::<i64, i64, _, _>(py, numpy, a, "int64", |v| v, mul_i64, true),
         ("u", 1) => {
-            cumsum_typed::<u8, u64, _, _>(py, &numpy, a, "uint64", |v| v as u64, mul_u64, true)
+            cumsum_typed::<u8, u64, _, _>(py, numpy, a, "uint64", |v| v as u64, mul_u64, true)
         }
         ("u", 2) => {
-            cumsum_typed::<u16, u64, _, _>(py, &numpy, a, "uint64", |v| v as u64, mul_u64, true)
+            cumsum_typed::<u16, u64, _, _>(py, numpy, a, "uint64", |v| v as u64, mul_u64, true)
         }
         ("u", 4) => {
-            cumsum_typed::<u32, u64, _, _>(py, &numpy, a, "uint64", |v| v as u64, mul_u64, true)
+            cumsum_typed::<u32, u64, _, _>(py, numpy, a, "uint64", |v| v as u64, mul_u64, true)
         }
-        ("u", 8) => cumsum_typed::<u64, u64, _, _>(py, &numpy, a, "uint64", |v| v, mul_u64, true),
+        ("u", 8) => cumsum_typed::<u64, u64, _, _>(py, numpy, a, "uint64", |v| v, mul_u64, true),
         _ => Ok(None),
     }
 }
@@ -19413,7 +19413,7 @@ fn try_zerocopy_int_cumprod_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -19427,7 +19427,7 @@ fn try_zerocopy_int_cumprod_axis(
         let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
         cumsum_axis_typed::<u8, i64, _, _>(
             py,
-            &numpy,
+            numpy,
             &viewed,
             axis,
             "int64",
@@ -19438,7 +19438,7 @@ fn try_zerocopy_int_cumprod_axis(
         match (kind.as_str(), itemsize) {
             ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "int64",
@@ -19447,7 +19447,7 @@ fn try_zerocopy_int_cumprod_axis(
             )?,
             ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "int64",
@@ -19456,7 +19456,7 @@ fn try_zerocopy_int_cumprod_axis(
             )?,
             ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "int64",
@@ -19464,11 +19464,11 @@ fn try_zerocopy_int_cumprod_axis(
                 mul_i64,
             )?,
             ("i", 8) => {
-                cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, mul_i64)?
+                cumsum_axis_typed::<i64, i64, _, _>(py, numpy, a, axis, "int64", |v| v, mul_i64)?
             }
             ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "uint64",
@@ -19477,7 +19477,7 @@ fn try_zerocopy_int_cumprod_axis(
             )?,
             ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "uint64",
@@ -19486,7 +19486,7 @@ fn try_zerocopy_int_cumprod_axis(
             )?,
             ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 axis,
                 "uint64",
@@ -19494,7 +19494,7 @@ fn try_zerocopy_int_cumprod_axis(
                 mul_u64,
             )?,
             ("u", 8) => {
-                cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, mul_u64)?
+                cumsum_axis_typed::<u64, u64, _, _>(py, numpy, a, axis, "uint64", |v| v, mul_u64)?
             }
             _ => return Ok(None),
         }
@@ -19523,7 +19523,7 @@ fn try_zerocopy_f32_cumprod(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -19539,7 +19539,7 @@ fn try_zerocopy_f32_cumprod(
     if !flatten_ok {
         return Ok(None);
     }
-    cumsum_typed::<f32, f32, _, _>(py, &numpy, a, "float32", |v| v, |a, b| a * b, false)
+    cumsum_typed::<f32, f32, _, _>(py, numpy, a, "float32", |v| v, |a, b| a * b, false)
 }
 
 // Zero-copy per-axis float32 cumprod (explicit axis); slab-by-slab f32 product via
@@ -19555,7 +19555,7 @@ fn try_zerocopy_f32_cumprod_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -19563,7 +19563,7 @@ fn try_zerocopy_f32_cumprod_axis(
         return Ok(None);
     }
     let result =
-        cumsum_axis_typed::<f32, f32, _, _>(py, &numpy, a, axis, "float32", |v| v, |a, b| a * b)?;
+        cumsum_axis_typed::<f32, f32, _, _>(py, numpy, a, axis, "float32", |v| v, |a, b| a * b)?;
     let Some((flat, shape)) = result else {
         return Ok(None);
     };
@@ -19778,7 +19778,7 @@ fn try_zerocopy_any_tile_multidim(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let a_shape: Vec<usize> = a.getattr("shape")?.extract()?;
     if a_shape.len() < 2 {
         return Ok(None);
@@ -20273,7 +20273,7 @@ fn try_zerocopy_int_diff(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -20281,14 +20281,14 @@ fn try_zerocopy_int_diff(
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     let result = match (kind.as_str(), itemsize) {
-        ("i", 1) => diff_typed::<i8, _>(py, &numpy, a, "int8", axis, |x, y| x.wrapping_sub(y))?,
-        ("i", 2) => diff_typed::<i16, _>(py, &numpy, a, "int16", axis, |x, y| x.wrapping_sub(y))?,
-        ("i", 4) => diff_typed::<i32, _>(py, &numpy, a, "int32", axis, |x, y| x.wrapping_sub(y))?,
-        ("i", 8) => diff_typed::<i64, _>(py, &numpy, a, "int64", axis, |x, y| x.wrapping_sub(y))?,
-        ("u", 1) => diff_typed::<u8, _>(py, &numpy, a, "uint8", axis, |x, y| x.wrapping_sub(y))?,
-        ("u", 2) => diff_typed::<u16, _>(py, &numpy, a, "uint16", axis, |x, y| x.wrapping_sub(y))?,
-        ("u", 4) => diff_typed::<u32, _>(py, &numpy, a, "uint32", axis, |x, y| x.wrapping_sub(y))?,
-        ("u", 8) => diff_typed::<u64, _>(py, &numpy, a, "uint64", axis, |x, y| x.wrapping_sub(y))?,
+        ("i", 1) => diff_typed::<i8, _>(py, numpy, a, "int8", axis, |x, y| x.wrapping_sub(y))?,
+        ("i", 2) => diff_typed::<i16, _>(py, numpy, a, "int16", axis, |x, y| x.wrapping_sub(y))?,
+        ("i", 4) => diff_typed::<i32, _>(py, numpy, a, "int32", axis, |x, y| x.wrapping_sub(y))?,
+        ("i", 8) => diff_typed::<i64, _>(py, numpy, a, "int64", axis, |x, y| x.wrapping_sub(y))?,
+        ("u", 1) => diff_typed::<u8, _>(py, numpy, a, "uint8", axis, |x, y| x.wrapping_sub(y))?,
+        ("u", 2) => diff_typed::<u16, _>(py, numpy, a, "uint16", axis, |x, y| x.wrapping_sub(y))?,
+        ("u", 4) => diff_typed::<u32, _>(py, numpy, a, "uint32", axis, |x, y| x.wrapping_sub(y))?,
+        ("u", 8) => diff_typed::<u64, _>(py, numpy, a, "uint64", axis, |x, y| x.wrapping_sub(y))?,
         _ => return Ok(None),
     };
     let Some((flat, out_shape)) = result else {
@@ -20317,14 +20317,14 @@ fn try_zerocopy_f32_diff(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
     {
         return Ok(None);
     }
-    let result = diff_typed::<f32, _>(py, &numpy, a, "float32", axis, |x, y| x - y)?;
+    let result = diff_typed::<f32, _>(py, numpy, a, "float32", axis, |x, y| x - y)?;
     let Some((flat, out_shape)) = result else {
         return Ok(None);
     };
@@ -20678,20 +20678,20 @@ fn build_numpy_array_from_storage(
     shape: &[usize],
     storage: ArrayStorage,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let array = match storage {
         // Numeric dtypes whose Rust storage matches the NumPy element layout copy
         // through the buffer protocol (see numpy_array_from_slice).
-        ArrayStorage::I8(values) => numpy_array_from_slice(py, &numpy, &values, "int8")?,
-        ArrayStorage::I16(values) => numpy_array_from_slice(py, &numpy, &values, "int16")?,
-        ArrayStorage::I32(values) => numpy_array_from_slice(py, &numpy, &values, "int32")?,
-        ArrayStorage::I64(values) => numpy_array_from_slice(py, &numpy, &values, "int64")?,
-        ArrayStorage::U8(values) => numpy_array_from_slice(py, &numpy, &values, "uint8")?,
-        ArrayStorage::U16(values) => numpy_array_from_slice(py, &numpy, &values, "uint16")?,
-        ArrayStorage::U32(values) => numpy_array_from_slice(py, &numpy, &values, "uint32")?,
-        ArrayStorage::U64(values) => numpy_array_from_slice(py, &numpy, &values, "uint64")?,
-        ArrayStorage::F32(values) => numpy_array_from_slice(py, &numpy, &values, "float32")?,
-        ArrayStorage::F64(values) => numpy_array_from_slice(py, &numpy, &values, "float64")?,
+        ArrayStorage::I8(values) => numpy_array_from_slice(py, numpy, &values, "int8")?,
+        ArrayStorage::I16(values) => numpy_array_from_slice(py, numpy, &values, "int16")?,
+        ArrayStorage::I32(values) => numpy_array_from_slice(py, numpy, &values, "int32")?,
+        ArrayStorage::I64(values) => numpy_array_from_slice(py, numpy, &values, "int64")?,
+        ArrayStorage::U8(values) => numpy_array_from_slice(py, numpy, &values, "uint8")?,
+        ArrayStorage::U16(values) => numpy_array_from_slice(py, numpy, &values, "uint16")?,
+        ArrayStorage::U32(values) => numpy_array_from_slice(py, numpy, &values, "uint32")?,
+        ArrayStorage::U64(values) => numpy_array_from_slice(py, numpy, &values, "uint64")?,
+        ArrayStorage::F32(values) => numpy_array_from_slice(py, numpy, &values, "float32")?,
+        ArrayStorage::F64(values) => numpy_array_from_slice(py, numpy, &values, "float64")?,
         // NumPy bool_ is a single byte (1 = True, 0 = False), so build the result
         // through the uint8 buffer fast path (one memcpy) and reinterpret it as
         // bool_ with a zero-copy .view — bit-identical to the old per-element
@@ -20716,7 +20716,7 @@ fn build_numpy_array_from_storage(
             // performed by `numpy_array_from_slice`.
             let bytes: &[u8] =
                 unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len()) };
-            let u8_arr = numpy_array_from_slice(py, &numpy, bytes, "uint8")?;
+            let u8_arr = numpy_array_from_slice(py, numpy, bytes, "uint8")?;
             let bool_dtype = numpy.getattr("bool_")?;
             u8_arr.call_method1("view", (bool_dtype,))?
         }
@@ -20726,7 +20726,7 @@ fn build_numpy_array_from_storage(
             // to the old per-element PyList(f32) construction, which boxed one Python
             // float per element (~1700x slower than numpy on a 4M abs/sqrt result).
             let bits: Vec<u16> = values.iter().map(|value| value.to_bits()).collect();
-            let u16_arr = numpy_array_from_slice(py, &numpy, &bits, "uint16")?;
+            let u16_arr = numpy_array_from_slice(py, numpy, &bits, "uint16")?;
             u16_arr.call_method1("view", ("float16",))?
         }
         unsupported => {
@@ -23061,7 +23061,7 @@ fn trapezoid_impl(
     dx: f64,
     axis: isize,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // INT y/x (dtype-gap audit): numpy's int trapezoid adds/diffs in the int
     // dtype then promotes into the f64 temp chain; within +-2^51 the
     // converted-first values are IDENTICAL at every step (exact integers, no
@@ -23071,13 +23071,13 @@ fn trapezoid_impl(
     // non-contiguous inputs keep the original (helper returns None).
     // half_range: trapezoid ADDS y pairs (and diffs x pairs) in the original
     // dtype before promoting, so narrow widths must not be able to wrap.
-    let y = match try_int_input_to_f64_exact(py, &numpy, y.bind(py), true)? {
+    let y = match try_int_input_to_f64_exact(py, numpy, y.bind(py), true)? {
         Some(converted) => converted,
         None => y,
     };
     let x = match x {
         Some(xv) => Some(
-            match try_int_input_to_f64_exact(py, &numpy, xv.bind(py), true)? {
+            match try_int_input_to_f64_exact(py, numpy, xv.bind(py), true)? {
                 Some(converted) => converted,
                 None => xv,
             },
@@ -23102,15 +23102,15 @@ fn trapezoid_impl(
         }
         kwargs.set_item("dx", dx)?;
         kwargs.set_item("axis", axis)?;
-        return Ok(numpy_trapezoid_delegate(&numpy, name)?
+        return Ok(numpy_trapezoid_delegate(numpy, name)?
             .call((y.bind(py),), Some(&kwargs))?
             .unbind());
     }
     // Non-contiguous (transposed/strided) y/x bail into the cold transpose-copy extract
     // (~2.8x slower than numpy's strided trapezoid). Delegate to numpy.
-    if noncontiguous_ndarray(&numpy, y.bind(py))?
+    if noncontiguous_ndarray(numpy, y.bind(py))?
         || x.as_ref()
-            .is_some_and(|xv| noncontiguous_ndarray(&numpy, xv.bind(py)).unwrap_or(false))
+            .is_some_and(|xv| noncontiguous_ndarray(numpy, xv.bind(py)).unwrap_or(false))
     {
         let kwargs = PyDict::new(py);
         if let Some(xv) = x.as_ref() {
@@ -23118,7 +23118,7 @@ fn trapezoid_impl(
         }
         kwargs.set_item("dx", dx)?;
         kwargs.set_item("axis", axis)?;
-        return Ok(numpy_trapezoid_delegate(&numpy, name)?
+        return Ok(numpy_trapezoid_delegate(numpy, name)?
             .call((y.bind(py),), Some(&kwargs))?
             .unbind());
     }
@@ -23129,14 +23129,14 @@ fn trapezoid_impl(
     // naive kernel already differs at that level), and avoids the extract_numeric_array
     // copy that ~doubled memory traffic for the reduction.
     if x.is_none()
-        && let Some(out) = try_zerocopy_f64_trapezoid_flat(py, &numpy, y.bind(py), dx, axis)?
+        && let Some(out) = try_zerocopy_f64_trapezoid_flat(py, numpy, y.bind(py), dx, axis)?
     {
         return Ok(out);
     }
     // Zero-copy N-D trapezoid along the LAST (contiguous) axis: per-row sum shortcut,
     // parallel over rows. Avoids the extract copy + numpy's single-threaded temp-alloc.
     if x.is_none()
-        && let Some(out) = try_zerocopy_f64_trapezoid_lastaxis(py, &numpy, y.bind(py), dx, axis)?
+        && let Some(out) = try_zerocopy_f64_trapezoid_lastaxis(py, numpy, y.bind(py), dx, axis)?
     {
         return Ok(out);
     }
@@ -23145,7 +23145,7 @@ fn trapezoid_impl(
     // casts the result to f32 (numpy.trapezoid(f32) returns f32) — same values as the f64
     // extract path produced, now with the correct dtype and zero-copy/parallel.
     if x.is_none()
-        && let Some(out) = try_zerocopy_f32_trapezoid(py, &numpy, y.bind(py), dx, axis)?
+        && let Some(out) = try_zerocopy_f32_trapezoid(py, numpy, y.bind(py), dx, axis)?
     {
         return Ok(out);
     }
@@ -23877,10 +23877,10 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Large contiguous supported dtypes take the parallel two-pass kernel;
     // 1-D-or-any-shape is fine here because flatnonzero ravels by definition.
-    if let Some(out) = try_parallel_flatnonzero(py, &numpy, a)? {
+    if let Some(out) = try_parallel_flatnonzero(py, numpy, a)? {
         return Ok(Some(out));
     }
     // The SERIAL count+gather scan below is ~1.9-2.2x behind numpy's tight C
@@ -23905,7 +23905,7 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            flatnonzero_typed(py, &numpy, input, |v: $T| v != 0)
+            flatnonzero_typed(py, numpy, input, |v: $T| v != 0)
         }};
     }
     match (kind.as_str(), itemsize) {
@@ -23920,7 +23920,7 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            flatnonzero_typed(py, &numpy, input, |v: f64| v != 0.0)
+            flatnonzero_typed(py, numpy, input, |v: f64| v != 0.0)
         }
         ("f", 4) => {
             let Ok(buffer) = PyBuffer::<f32>::get(a) else {
@@ -23929,7 +23929,7 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            flatnonzero_typed(py, &numpy, input, |v: f32| v != 0.0)
+            flatnonzero_typed(py, numpy, input, |v: f32| v != 0.0)
         }
         _ => Ok(None),
     }
@@ -24068,7 +24068,7 @@ fn try_zerocopy_argwhere(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Optio
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let shape: Vec<usize> = a.getattr("shape")?.extract::<Vec<usize>>()?;
     if shape.is_empty() {
         return Ok(None); // 0-d: numpy's (1,0)/(0,0) shaping — defer
@@ -24089,7 +24089,7 @@ fn try_zerocopy_argwhere(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Optio
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            argwhere_typed(py, &numpy, input, &shape, |v: $T| v != 0)
+            argwhere_typed(py, numpy, input, &shape, |v: $T| v != 0)
         }};
     }
     match (kind.as_str(), itemsize) {
@@ -24104,7 +24104,7 @@ fn try_zerocopy_argwhere(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Optio
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            argwhere_typed(py, &numpy, input, &shape, |v: f64| v != 0.0)
+            argwhere_typed(py, numpy, input, &shape, |v: f64| v != 0.0)
         }
         ("f", 4) => {
             let Ok(buffer) = PyBuffer::<f32>::get(a) else {
@@ -24113,7 +24113,7 @@ fn try_zerocopy_argwhere(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Optio
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            argwhere_typed(py, &numpy, input, &shape, |v: f32| v != 0.0)
+            argwhere_typed(py, numpy, input, &shape, |v: f32| v != 0.0)
         }
         _ => Ok(None),
     }
@@ -24415,7 +24415,7 @@ fn try_zerocopy_count_nonzero(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -24438,13 +24438,13 @@ fn try_zerocopy_count_nonzero(
             const SWAR_MIN: usize = 1 << 16;
             if axis.is_none()
                 && input.len() >= SWAR_MIN
-                && let Some(count) = swar_count_nonzero_byte(py, &numpy, &a_u8, input)?
+                && let Some(count) = swar_count_nonzero_byte(py, numpy, &a_u8, input)?
             {
                 return Ok(Some(
                     numpy.getattr("int64")?.call1((count as i64,))?.unbind(),
                 ));
             }
-            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u8| v != 0)
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: u8| v != 0)
         }
         ("f", 8) => {
             let Ok(buffer) = PyBuffer::<f64>::get(a) else {
@@ -24453,7 +24453,7 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: f64| v != 0.0)
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: f64| v != 0.0)
         }
         ("f", 4) => {
             let Ok(buffer) = PyBuffer::<f32>::get(a) else {
@@ -24462,7 +24462,7 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: f32| v != 0.0)
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: f32| v != 0.0)
         }
         ("i" | "u", 1) => {
             let view = a.call_method1("view", (numpy.getattr("uint8")?,))?;
@@ -24475,13 +24475,13 @@ fn try_zerocopy_count_nonzero(
             const SWAR_MIN: usize = 1 << 16;
             if axis.is_none()
                 && input.len() >= SWAR_MIN
-                && let Some(count) = swar_count_nonzero_byte(py, &numpy, &view, input)?
+                && let Some(count) = swar_count_nonzero_byte(py, numpy, &view, input)?
             {
                 return Ok(Some(
                     numpy.getattr("int64")?.call1((count as i64,))?.unbind(),
                 ));
             }
-            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u8| v != 0)
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: u8| v != 0)
         }
         ("i" | "u", 2) => {
             let view = a.call_method1("view", (numpy.getattr("uint16")?,))?;
@@ -24491,7 +24491,7 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u16| v != 0)
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: u16| v != 0)
         }
         ("i" | "u", 4) => {
             let view = a.call_method1("view", (numpy.getattr("uint32")?,))?;
@@ -24501,7 +24501,7 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u32| v != 0)
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: u32| v != 0)
         }
         ("i" | "u", 8) => {
             let view = a.call_method1("view", (numpy.getattr("uint64")?,))?;
@@ -24511,7 +24511,7 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u64| v != 0)
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: u64| v != 0)
         }
         _ => Ok(None),
     }
@@ -24929,7 +24929,7 @@ fn try_zerocopy_any_all(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     let shape: Vec<usize> = a.getattr("shape")?.extract::<Vec<usize>>()?;
     match kind.as_str() {
@@ -24957,11 +24957,11 @@ fn try_zerocopy_any_all(
             }
             if let Some(ax) = axis
                 && let Some(out) =
-                    axis_any_all_fold(py, &numpy, input, &shape, ax, is_all, |v: u8| v != 0)?
+                    axis_any_all_fold(py, numpy, input, &shape, ax, is_all, |v: u8| v != 0)?
             {
                 return Ok(Some(out));
             }
-            finish_any_all(py, &numpy, input.len(), &shape, axis, is_all, |i| {
+            finish_any_all(py, numpy, input.len(), &shape, axis, is_all, |i| {
                 input[i].get() != 0
             })
         }
@@ -24986,11 +24986,11 @@ fn try_zerocopy_any_all(
             }
             if let Some(ax) = axis
                 && let Some(out) =
-                    axis_any_all_fold(py, &numpy, input, &shape, ax, is_all, |v: f64| v != 0.0)?
+                    axis_any_all_fold(py, numpy, input, &shape, ax, is_all, |v: f64| v != 0.0)?
             {
                 return Ok(Some(out));
             }
-            finish_any_all(py, &numpy, input.len(), &shape, axis, is_all, |i| {
+            finish_any_all(py, numpy, input.len(), &shape, axis, is_all, |i| {
                 input[i].get() != 0.0
             })
         }
@@ -25005,28 +25005,28 @@ fn try_zerocopy_any_all(
                 .extract::<usize>()?;
             match (kind.as_str(), itemsize) {
                 ("i", 1) => {
-                    zerocopy_any_all_buf::<i8, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
+                    zerocopy_any_all_buf::<i8, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
                 ("i", 2) => {
-                    zerocopy_any_all_buf::<i16, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
+                    zerocopy_any_all_buf::<i16, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
                 ("i", 4) => {
-                    zerocopy_any_all_buf::<i32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
+                    zerocopy_any_all_buf::<i32, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
                 ("i", 8) => {
-                    zerocopy_any_all_buf::<i64, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
+                    zerocopy_any_all_buf::<i64, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
                 ("u", 1) => {
-                    zerocopy_any_all_buf::<u8, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
+                    zerocopy_any_all_buf::<u8, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
                 ("u", 2) => {
-                    zerocopy_any_all_buf::<u16, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
+                    zerocopy_any_all_buf::<u16, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
                 ("u", 4) => {
-                    zerocopy_any_all_buf::<u32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
+                    zerocopy_any_all_buf::<u32, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
                 ("u", 8) => {
-                    zerocopy_any_all_buf::<u64, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0)
+                    zerocopy_any_all_buf::<u64, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
                 _ => Ok(None),
             }
@@ -25040,7 +25040,7 @@ fn try_zerocopy_any_all(
                 .getattr("itemsize")?
                 .extract::<usize>()?;
             if itemsize == 4 {
-                zerocopy_any_all_buf::<f32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0.0)
+                zerocopy_any_all_buf::<f32, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0.0)
             } else {
                 Ok(None)
             }
@@ -26426,7 +26426,7 @@ fn try_native_repeat_scalar(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // Rebound rather than replaced: the use below is `is_instance`, not
     // `is_exact_instance`, so it deliberately admits ndarray SUBCLASSES and the
     // cached exact-type check would silently narrow it (`deadlock-audit-v46rn`).
@@ -28239,7 +28239,7 @@ fn fix_invalid(
     let mask_for_fallback = mask.as_ref().map(|value| value.clone_ref(py));
     let fill_value_for_fallback = fill_value.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let fix_invalid_fn = numpy.getattr("ma")?.getattr("fix_invalid")?;
         let kwargs = PyDict::new(py);
         if let Some(mask_val) = &mask_for_fallback {
@@ -28779,7 +28779,7 @@ fn try_native_int_matrix_power(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
     if shape.len() != 2 || shape[0] != shape[1] || shape[0] < NATIVE_INT_MATPOW_MIN_DIM {
         return Ok(None);
@@ -28811,7 +28811,7 @@ fn try_native_int_matrix_power(
         ($t:ty, $name:literal) => {
             int_matrix_power_typed::<$t>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 dim,
                 power,
@@ -28834,7 +28834,7 @@ fn try_native_int_matrix_power(
         // bool A^n is OR-AND reachability: binary exponentiation where every
         // multiply is the bitpacked bool GEMM (dim >= 64 = exactly the 2-D
         // work gate, so steps never bounce off it).
-        ("b", 1) => bool_matrix_power_bitpacked(py, &numpy, a, power),
+        ("b", 1) => bool_matrix_power_bitpacked(py, numpy, a, power),
         _ => Ok(None),
     }
 }
@@ -29875,7 +29875,7 @@ fn try_native_lstsq_tsqr(
     b: &Bound<'_, PyAny>,
     rcond: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
     for operand in [a, b] {
         if !operand.is_exact_instance(&ndarray_t)
@@ -30262,7 +30262,7 @@ fn try_const_bool_integral(
     x: &Bound<'_, PyAny>,
     value: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !x.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -30293,7 +30293,7 @@ fn try_zerocopy_isinf_signed(
     x: &Bound<'_, PyAny>,
     positive: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !x.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -30466,7 +30466,7 @@ fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // element-wise (~49x slower than numpy for int32). np.signbit(int) = (x < 0)
     // (unsigned -> all False) is the exact oracle, so delegate instead.
     {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         if x.is_exact_instance(cached_ndarray_type(py)?) {
             let kind: String = x.getattr("dtype")?.getattr("kind")?.extract()?;
             // int/uint canonicalize lossy; non-contiguous bails the fast path into the
@@ -30583,7 +30583,7 @@ fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     }
     // Complex: numpy applies the predicate per-component (isinf(z)=isinf(re)|isinf(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if numpy_dtype_is_complex(x) {
         return Ok(numpy.getattr("isinf")?.call1((x,))?.unbind());
     }
@@ -30632,7 +30632,7 @@ fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     }
     // Complex: numpy ANDs the components (isfinite(z)=isfinite(re)&isfinite(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if numpy_dtype_is_complex(x) {
         return Ok(numpy.getattr("isfinite")?.call1((x,))?.unbind());
     }
@@ -30886,7 +30886,7 @@ fn native_rounding_unary(
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy path into the
     // cold extract → rebuild (transpose-copy, ~6x slower than numpy's strided ufunc).
     // Delegate them to numpy.
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
             .getattr("flags")?
@@ -33441,7 +33441,7 @@ fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // extract_numeric_array canonicalizes every narrow dtype to f64, so the native
     // kernel only matches numpy for float64 input; defer all other dtypes to numpy.frexp.
     if !numpy_dtype_is_f64(py, x.bind(py)) {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         return Ok(numpy.getattr("frexp")?.call1((x.bind(py),))?.unbind());
     }
     let x = extract_numeric_array(py, x.bind(py), "frexp(x)")?;
@@ -33569,7 +33569,7 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
 // both computed in f32 (integral = trunc toward zero; fractional carries the sign of x) -> the same
 // f32 ops are bit-identical to numpy. Non-f32 / 0-d / non-contiguous defer.
 fn try_zerocopy_f32_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !x.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(x) {
         return Ok(None);
     }
@@ -33722,7 +33722,7 @@ fn modf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // canonicalizes every narrow dtype to f64, so the native kernel only matches
     // numpy for float64 input; defer all other dtypes to numpy.modf for exact parity.
     if !numpy_dtype_is_f64(py, x.bind(py)) {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         return Ok(numpy.getattr("modf")?.call1((x.bind(py),))?.unbind());
     }
     let x = extract_numeric_array(py, x.bind(py), "modf(x)")?;
@@ -34040,7 +34040,7 @@ fn select(
     let choicelist_for_fallback = choicelist.clone_ref(py);
     let default_for_fallback = default.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let select_fn = numpy.getattr("select")?;
         if let Some(default) = default_for_fallback.as_ref() {
             let kwargs = PyDict::new(py);
@@ -34240,7 +34240,7 @@ fn try_zerocopy_int_choose(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let a_kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if a_kind != "i" && a_kind != "u" {
         return Ok(None);
@@ -34290,27 +34290,27 @@ fn try_zerocopy_int_choose(
     kw.set_item("dtype", "int64")?;
     let a64 = numpy.getattr("ascontiguousarray")?.call((a,), Some(&kw))?;
     match (kind.as_str(), itemsize) {
-        ("i", 8) => choose_typed::<i64>(py, &numpy, &a64, &items, "int64", &a_shape),
-        ("i", 4) => choose_typed::<i32>(py, &numpy, &a64, &items, "int32", &a_shape),
-        ("i", 2) => choose_typed::<i16>(py, &numpy, &a64, &items, "int16", &a_shape),
-        ("i", 1) => choose_typed::<i8>(py, &numpy, &a64, &items, "int8", &a_shape),
-        ("u", 8) => choose_typed::<u64>(py, &numpy, &a64, &items, "uint64", &a_shape),
-        ("u", 4) => choose_typed::<u32>(py, &numpy, &a64, &items, "uint32", &a_shape),
-        ("u", 2) => choose_typed::<u16>(py, &numpy, &a64, &items, "uint16", &a_shape),
-        ("u", 1) => choose_typed::<u8>(py, &numpy, &a64, &items, "uint8", &a_shape),
+        ("i", 8) => choose_typed::<i64>(py, numpy, &a64, &items, "int64", &a_shape),
+        ("i", 4) => choose_typed::<i32>(py, numpy, &a64, &items, "int32", &a_shape),
+        ("i", 2) => choose_typed::<i16>(py, numpy, &a64, &items, "int16", &a_shape),
+        ("i", 1) => choose_typed::<i8>(py, numpy, &a64, &items, "int8", &a_shape),
+        ("u", 8) => choose_typed::<u64>(py, numpy, &a64, &items, "uint64", &a_shape),
+        ("u", 4) => choose_typed::<u32>(py, numpy, &a64, &items, "uint32", &a_shape),
+        ("u", 2) => choose_typed::<u16>(py, numpy, &a64, &items, "uint16", &a_shape),
+        ("u", 1) => choose_typed::<u8>(py, numpy, &a64, &items, "uint8", &a_shape),
         // Float choose is a value-agnostic gather: view every (same-shape,
         // same-dtype) choice as the same-width unsigned integer, gather through the
         // existing u16/u32/u64 choose_typed instantiations, then view the result
         // back to the float dtype. No new monomorphizations, so the integer path is
         // unchanged. A non-contiguous choice makes .view raise; defer to numpy then.
         ("f", 8) => choose_float_via_unsigned::<u64>(
-            py, &numpy, &a64, &items, "uint64", "float64", &a_shape,
+            py, numpy, &a64, &items, "uint64", "float64", &a_shape,
         ),
         ("f", 4) => choose_float_via_unsigned::<u32>(
-            py, &numpy, &a64, &items, "uint32", "float32", &a_shape,
+            py, numpy, &a64, &items, "uint32", "float32", &a_shape,
         ),
         ("f", 2) => choose_float_via_unsigned::<u16>(
-            py, &numpy, &a64, &items, "uint16", "float16", &a_shape,
+            py, numpy, &a64, &items, "uint16", "float16", &a_shape,
         ),
         _ => Ok(None),
     }
@@ -36593,7 +36593,7 @@ fn try_zerocopy_histogram(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     // np.histogram operates on the FLATTENED input; for a C-contiguous N-D
     // ndarray the ravel is a ZERO-COPY reshape view, so normalize to 1-D and
     // let the typed kernels (which gate shape.len() == 1) serve it — the N-D
@@ -36614,20 +36614,20 @@ fn try_zerocopy_histogram(
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
-        ("f", 2) => try_zerocopy_histogram_f16(py, &numpy, a, nbins),
-        ("f", 4) => histogram_f32(py, &numpy, a, nbins),
-        ("f", 8) => histogram_typed::<f64>(py, &numpy, a, nbins, |x| x, true, |_| true),
-        ("i", 1) => histogram_typed::<i8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("i", 2) => histogram_typed::<i16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("i", 4) => histogram_typed::<i32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("f", 2) => try_zerocopy_histogram_f16(py, numpy, a, nbins),
+        ("f", 4) => histogram_f32(py, numpy, a, nbins),
+        ("f", 8) => histogram_typed::<f64>(py, numpy, a, nbins, |x| x, true, |_| true),
+        ("i", 1) => histogram_typed::<i8>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("i", 2) => histogram_typed::<i16>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("i", 4) => histogram_typed::<i32>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
         ("i", 8) => {
-            histogram_typed::<i64>(py, &numpy, a, nbins, |x| x as f64, false, i64_is_f64_exact)
+            histogram_typed::<i64>(py, numpy, a, nbins, |x| x as f64, false, i64_is_f64_exact)
         }
-        ("u", 1) => histogram_typed::<u8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("u", 2) => histogram_typed::<u16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("u", 4) => histogram_typed::<u32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("u", 1) => histogram_typed::<u8>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("u", 2) => histogram_typed::<u16>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ("u", 4) => histogram_typed::<u32>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
         ("u", 8) => {
-            histogram_typed::<u64>(py, &numpy, a, nbins, |x| x as f64, false, u64_is_f64_exact)
+            histogram_typed::<u64>(py, numpy, a, nbins, |x| x as f64, false, u64_is_f64_exact)
         }
         _ => Ok(None),
     }
@@ -40999,7 +40999,7 @@ fn ma_count(
     keepdims: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let count_fn = numpy.getattr("ma")?.getattr("count")?;
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
@@ -41635,8 +41635,8 @@ fn try_zerocopy_cov_two_rowvar_f64(
     let Some((result, n_vars)) = cov_gram_two_rowvar_f64(py, m, y, ddof)? else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    build_square_f64_matrix(py, &numpy, result, n_vars)
+    let numpy = cached_numpy(py)?;
+    build_square_f64_matrix(py, numpy, result, n_vars)
 }
 
 fn cov_gram_rowvar_f64(
@@ -41783,8 +41783,8 @@ fn try_zerocopy_cov_rowvar_f64(
     let Some((result, n_vars)) = cov_gram_rowvar_f64(py, m, ddof)? else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
-    build_square_f64_matrix(py, &numpy, result, n_vars)
+    let numpy = cached_numpy(py)?;
+    build_square_f64_matrix(py, numpy, result, n_vars)
 }
 
 // numpy.corrcoef normalizes the covariance by the outer product of the diagonal stddevs,
@@ -41829,8 +41829,8 @@ fn try_zerocopy_corrcoef_rowvar_f64(
     if corrcoef_normalize_in_place(&mut cov, n_vars).is_none() {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    build_square_f64_matrix(py, &numpy, cov, n_vars)
+    let numpy = cached_numpy(py)?;
+    build_square_f64_matrix(py, numpy, cov, n_vars)
 }
 
 // Two-operand corrcoef(m, y): same zero-copy two-buffer Gram as cov(m, y) (ddof=1,
@@ -41847,8 +41847,8 @@ fn try_zerocopy_corrcoef_two_rowvar_f64(
     if corrcoef_normalize_in_place(&mut cov, n_vars).is_none() {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    build_square_f64_matrix(py, &numpy, cov, n_vars)
+    let numpy = cached_numpy(py)?;
+    build_square_f64_matrix(py, numpy, cov, n_vars)
 }
 
 fn native_cov_unweighted(
@@ -42610,7 +42610,7 @@ fn try_zerocopy_f64_nansum_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -43241,7 +43241,7 @@ fn try_zerocopy_f64_nansum_flat(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -43323,8 +43323,8 @@ fn f64_contiguous_cells<'py>(
 // np.average and np.mean both reduce to umr_sum (pairwise) / n, so this matches
 // both. Empty input defers (numpy raises / warns). C-contiguous f64 only.
 fn try_zerocopy_f64_mean_flat(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -43394,8 +43394,8 @@ fn try_zerocopy_f64_nanmean_flat(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -43773,7 +43773,7 @@ fn try_zerocopy_f16_sum_lastaxis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -43843,7 +43843,7 @@ fn try_zerocopy_f16_sum_lastaxis(
     if keepdims {
         out_shape.push(1);
     }
-    let flat_u16 = numpy_array_from_slice(py, &numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
     let flat = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
@@ -43866,7 +43866,7 @@ fn try_zerocopy_f16_average_lastaxis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 2
@@ -43947,7 +43947,7 @@ fn try_zerocopy_f16_average_lastaxis(
             *output = f16::from_f32(sum / denominator).to_bits();
         });
 
-    let raw_output = numpy_array_from_slice(py, &numpy, &output_bits, "uint16")?;
+    let raw_output = numpy_array_from_slice(py, numpy, &output_bits, "uint16")?;
     let output = raw_output.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
     Ok(Some(
@@ -43973,7 +43973,7 @@ fn try_zerocopy_f16_nanmean_lastaxis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -44044,7 +44044,7 @@ fn try_zerocopy_f16_nanmean_lastaxis(
     if keepdims {
         out_shape.push(1);
     }
-    let flat_u16 = numpy_array_from_slice(py, &numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
     let flat = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
@@ -44073,7 +44073,7 @@ fn try_zerocopy_f16_sum_nonlast_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -44148,7 +44148,7 @@ fn try_zerocopy_f16_sum_nonlast_axis(
         out_shape.push(1);
     }
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat_u16 = numpy_array_from_slice(py, &numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
     let flat = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
@@ -44173,7 +44173,7 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -44254,7 +44254,7 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
         out_shape.push(1);
     }
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat_u16 = numpy_array_from_slice(py, &numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
     let flat = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
@@ -44284,7 +44284,7 @@ fn try_zerocopy_f16_nanvar_nonlast_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -44386,7 +44386,7 @@ fn try_zerocopy_f16_nanvar_nonlast_axis(
         out_shape.push(1);
     }
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat_u16 = numpy_array_from_slice(py, &numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
     let flat = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
@@ -44416,7 +44416,7 @@ fn try_zerocopy_f16_nanvar_lastaxis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -44513,7 +44513,7 @@ fn try_zerocopy_f16_nanvar_lastaxis(
     if keepdims {
         out_shape.push(1);
     }
-    let flat_u16 = numpy_array_from_slice(py, &numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
     let flat = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
@@ -44750,8 +44750,8 @@ fn compute_f64_nanvar_flat(
     a: &Bound<'_, PyAny>,
     ddof: usize,
 ) -> PyResult<Option<f64>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -44782,8 +44782,8 @@ fn compute_f64_var_flat(
     a: &Bound<'_, PyAny>,
     ddof: usize,
 ) -> PyResult<Option<f64>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -45131,8 +45131,8 @@ fn try_zerocopy_f64_nanprod_flat(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -45161,7 +45161,7 @@ fn try_zerocopy_f64_nanprod_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -45248,7 +45248,7 @@ fn try_zerocopy_f64_nanprod_axis(
     };
     let mut out_shape = shape.clone();
     out_shape.remove(ax);
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
         return Ok(Some(reshaped.get_item(())?.unbind()));
@@ -45446,7 +45446,7 @@ fn try_zerocopy_f64_nanextreme(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -45494,7 +45494,7 @@ fn try_zerocopy_f64_nanextreme_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -45681,7 +45681,7 @@ fn try_zerocopy_f64_nanextreme_axis(
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1("warn", ("All-NaN slice encountered", &category))?;
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[..ax].to_vec();
     out_shape.extend_from_slice(&shape[ax + 1..]);
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
@@ -45704,7 +45704,7 @@ fn try_zerocopy_f32_nanextreme_axis(
     axis_obj: &Bound<'_, PyAny>,
     take_max: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
@@ -45841,7 +45841,7 @@ fn try_zerocopy_f32_nanextreme_axis(
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1("warn", ("All-NaN slice encountered", &category))?;
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float32")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float32")?;
     let mut out_shape: Vec<usize> = shape[..ax].to_vec();
     out_shape.extend_from_slice(&shape[ax + 1..]);
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
@@ -45865,7 +45865,7 @@ fn try_zerocopy_f64_nanmean_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -45914,7 +45914,7 @@ fn try_zerocopy_f64_nanmean_axis(
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1("warn", ("Mean of empty slice", &category))?;
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let out_shape: Vec<usize> = shape[..ax].to_vec();
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
@@ -45939,8 +45939,8 @@ fn try_zerocopy_f64_nanmean_axis0(
     axis_obj: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Ok(ax_raw) = axis_obj.extract::<i64>() else {
@@ -45997,7 +45997,7 @@ fn try_zerocopy_f64_nanmean_axis0(
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1("warn", ("Mean of empty slice", &category))?;
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[1..].to_vec();
     if keepdims {
         out_shape.insert(0, 1);
@@ -46025,8 +46025,8 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
     axis_obj: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Ok(ax_raw) = axis_obj.extract::<i64>() else {
@@ -46109,7 +46109,7 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1("warn", ("Mean of empty slice", &category))?;
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = Vec::with_capacity(shape.len());
     out_shape.extend_from_slice(&shape[..axu]);
     if keepdims {
@@ -46144,7 +46144,7 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -46237,7 +46237,7 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1("warn", ("Mean of empty slice", &category))?;
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float32")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float32")?;
     let mut out_shape: Vec<usize> = Vec::with_capacity(shape.len());
     out_shape.extend_from_slice(&shape[..axu]);
     if keepdims {
@@ -46375,7 +46375,7 @@ fn try_zerocopy_f64_nanvar_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -46465,7 +46465,7 @@ fn try_zerocopy_f64_nanvar_axis(
     let Some(out): Option<Vec<f64>> = results.into_iter().collect() else {
         return Ok(None);
     };
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[..keep].to_vec();
     if keepdims {
         // numpy keeps every reduced trailing axis as length 1.
@@ -46500,7 +46500,7 @@ fn try_zerocopy_f32_nanmean_last_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -46582,7 +46582,7 @@ fn try_zerocopy_f32_nanmean_last_axis(
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1("warn", ("Mean of empty slice", &category))?;
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float32")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float32")?;
     let mut out_shape: Vec<usize> = shape[..keep].to_vec();
     if keepdims {
         out_shape.extend(std::iter::repeat_n(1, (ndim as usize).saturating_sub(keep)));
@@ -46615,7 +46615,7 @@ fn try_zerocopy_f32_nanvar_last_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -46695,7 +46695,7 @@ fn try_zerocopy_f32_nanvar_last_axis(
     let Some(out): Option<Vec<f32>> = results.into_iter().collect() else {
         return Ok(None);
     };
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float32")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float32")?;
     let mut out_shape: Vec<usize> = shape[..keep].to_vec();
     if keepdims {
         out_shape.extend(std::iter::repeat_n(1, (ndim as usize).saturating_sub(keep)));
@@ -46726,8 +46726,8 @@ fn try_zerocopy_f64_var_axis(
     take_sqrt: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
@@ -46806,7 +46806,7 @@ fn try_zerocopy_f64_var_axis(
     let Some(out): Option<Vec<f64>> = results.into_iter().collect() else {
         return Ok(None);
     };
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[..keep].to_vec();
     if keepdims {
         // numpy keeps every reduced trailing axis as length 1.
@@ -46840,8 +46840,8 @@ fn try_zerocopy_f64_var_axis0(
     take_sqrt: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Ok(ax_raw) = axis_obj.extract::<i64>() else {
@@ -46910,7 +46910,7 @@ fn try_zerocopy_f64_var_axis0(
     // noisier than this cache-friendly serial stream. The win here is numpy's temp
     // avoidance (it materializes a-mean and (a-mean)^2 whole-array temps), not threads.
     process(0, &mut out);
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[1..].to_vec();
     if keepdims {
         out_shape.insert(0, 1); // numpy keeps the reduced first axis as length 1
@@ -46942,8 +46942,8 @@ fn try_zerocopy_f64_var_nonlast_axis(
     take_sqrt: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Ok(ax_raw) = axis_obj.extract::<i64>() else {
@@ -47018,7 +47018,7 @@ fn try_zerocopy_f64_var_nonlast_axis(
             process_block(&data[o * block..(o + 1) * block], dst);
         }
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = Vec::with_capacity(shape.len());
     out_shape.extend_from_slice(&shape[..axu]);
     if keepdims {
@@ -47057,7 +47057,7 @@ fn try_zerocopy_f32_var_nonlast_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -47142,7 +47142,7 @@ fn try_zerocopy_f32_var_nonlast_axis(
             process_block(&data[o * block..(o + 1) * block], dst);
         }
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float32")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float32")?;
     let mut out_shape: Vec<usize> = Vec::with_capacity(shape.len());
     out_shape.extend_from_slice(&shape[..axu]);
     if keepdims {
@@ -47175,8 +47175,8 @@ fn try_zerocopy_f64_nanvar_axis0(
     take_sqrt: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Ok(ax_raw) = axis_obj.extract::<i64>() else {
@@ -47243,7 +47243,7 @@ fn try_zerocopy_f64_nanvar_axis0(
         let var = sq[j] / (cnt[j] as usize - ddof) as f64;
         out[j] = if take_sqrt { var.sqrt() } else { var };
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[1..].to_vec();
     if keepdims {
         out_shape.insert(0, 1);
@@ -47276,8 +47276,8 @@ fn try_zerocopy_f64_nanvar_nonlast_axis(
     take_sqrt: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Ok(ax_raw) = axis_obj.extract::<i64>() else {
@@ -47372,7 +47372,7 @@ fn try_zerocopy_f64_nanvar_nonlast_axis(
     if defer.load(Ordering::Relaxed) {
         return Ok(None); // a count <= ddof lane exists -> let numpy warn + emit NaN
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = Vec::with_capacity(shape.len());
     out_shape.extend_from_slice(&shape[..axu]);
     if keepdims {
@@ -47412,7 +47412,7 @@ fn try_zerocopy_f32_nanvar_nonlast_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 4
@@ -47517,7 +47517,7 @@ fn try_zerocopy_f32_nanvar_nonlast_axis(
     if defer.load(Ordering::Relaxed) {
         return Ok(None); // a count <= ddof lane exists -> let numpy warn + emit NaN
     }
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float32")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float32")?;
     let mut out_shape: Vec<usize> = Vec::with_capacity(shape.len());
     out_shape.extend_from_slice(&shape[..axu]);
     if keepdims {
@@ -47579,8 +47579,8 @@ fn try_zerocopy_f64_vector_norm_axis(
     kind: VectorNormKind,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Ok(ax_raw) = axis_obj.extract::<i64>() else {
@@ -47777,7 +47777,7 @@ fn try_zerocopy_f64_vector_norm_axis(
         s.extend_from_slice(&shape[ax + 1..]);
         (out_vec, s)
     };
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
         return Ok(Some(reshaped.get_item(())?.unbind()));
@@ -47801,7 +47801,7 @@ fn try_zerocopy_f32_vector_norm_axis(
         VectorNormKind::MaxAbs | VectorNormKind::MinAbs | VectorNormKind::Count => {}
         VectorNormKind::L2 | VectorNormKind::L1 => return Ok(None),
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
@@ -48003,7 +48003,7 @@ fn try_zerocopy_f32_vector_norm_axis(
         s.extend_from_slice(&shape[ax + 1..]);
         (out_vec, s)
     };
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float32")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float32")?;
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
         return Ok(Some(reshaped.get_item(())?.unbind()));
@@ -48030,8 +48030,8 @@ fn try_zerocopy_f64_frobenius_lastaxes(
     ax1: i64,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
@@ -48071,7 +48071,7 @@ fn try_zerocopy_f64_frobenius_lastaxes(
     } else {
         data.chunks_exact(block).map(lane_norm).collect()
     };
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[..nd - 2].to_vec();
     if keepdims {
         out_shape.push(1);
@@ -48134,8 +48134,8 @@ fn try_zerocopy_f64_matrix_norm_lastaxes(
     kind: MatrixNormKind,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
@@ -48202,7 +48202,7 @@ fn try_zerocopy_f64_matrix_norm_lastaxes(
     } else {
         data.chunks_exact(block).map(&block_norm).collect()
     };
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[..nd - 2].to_vec();
     if keepdims {
         out_shape.push(1);
@@ -51472,7 +51472,7 @@ fn try_zerocopy_f32_eighth_setxor1d(
     ar1: &Bound<'_, PyAny>,
     ar2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
     if !ar1.is_exact_instance(&ndarray_t) || !ar2.is_exact_instance(&ndarray_t) {
         return Ok(None);
@@ -51518,7 +51518,7 @@ fn try_zerocopy_f32_eighth_setxor1d(
     }
     if !saw {
         return Ok(Some(
-            numpy_array_from_slice(py, &numpy, &[] as &[f32], "float32")?.unbind(),
+            numpy_array_from_slice(py, numpy, &[] as &[f32], "float32")?.unbind(),
         ));
     }
     let span = (hi as i128 - lo as i128 + 1) as u128;
@@ -51553,7 +51553,7 @@ fn try_zerocopy_f32_eighth_setxor1d(
         }
     }
     Ok(Some(
-        numpy_array_from_slice(py, &numpy, &out, "float32")?.unbind(),
+        numpy_array_from_slice(py, numpy, &out, "float32")?.unbind(),
     ))
 }
 
@@ -51562,7 +51562,7 @@ fn try_zerocopy_f64_intersect1d_native(
     ar1: &Bound<'_, PyAny>,
     ar2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
     if !ar1.is_exact_instance(&ndarray_t) || !ar2.is_exact_instance(&ndarray_t) {
         return Ok(None);
@@ -51642,7 +51642,7 @@ fn try_zerocopy_f64_intersect1d_native(
         }
     }
     Ok(Some(
-        numpy_array_from_slice(py, &numpy, &out, "float64")?.unbind(),
+        numpy_array_from_slice(py, numpy, &out, "float64")?.unbind(),
     ))
 }
 
@@ -51666,7 +51666,7 @@ fn try_zerocopy_f64_setdiff1d_native(
     ar1: &Bound<'_, PyAny>,
     ar2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
     if !ar1.is_exact_instance(&ndarray_t) || !ar2.is_exact_instance(&ndarray_t) {
         return Ok(None);
@@ -51732,7 +51732,7 @@ fn try_zerocopy_f64_setdiff1d_native(
         }
     }
     Ok(Some(
-        numpy_array_from_slice(py, &numpy, &out, "float64")?.unbind(),
+        numpy_array_from_slice(py, numpy, &out, "float64")?.unbind(),
     ))
 }
 
@@ -51808,7 +51808,7 @@ fn try_narrow_int_setop_native(
     ar2: &Bound<'_, PyAny>,
     op: NarrowSetOp,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let a = numpy.call_method1("asarray", (ar1,))?;
     let b = numpy.call_method1("asarray", (ar2,))?;
     let adt = a.getattr("dtype")?.str()?.extract::<String>()?;
@@ -52067,7 +52067,7 @@ fn try_native_wide_int_setop(
     op: DtSetOp,
 ) -> PyResult<Option<Py<PyAny>>> {
     const WIDE_SETOP_MIN: usize = 1 << 17;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nd = cached_ndarray_type(numpy.py())?.clone();
     if !ar1.is_exact_instance(&nd) || !ar2.is_exact_instance(&nd) {
         return Ok(None);
@@ -52106,10 +52106,10 @@ fn try_native_wide_int_setop(
         return Ok(None);
     }
     match (kind.as_str(), itemsize) {
-        ("i", 4) => wide_int_setop_typed::<i32>(py, &numpy, ar1, ar2, op, "int32"),
-        ("i", 8) => wide_int_setop_typed::<i64>(py, &numpy, ar1, ar2, op, "int64"),
-        ("u", 4) => wide_int_setop_typed::<u32>(py, &numpy, ar1, ar2, op, "uint32"),
-        ("u", 8) => wide_int_setop_typed::<u64>(py, &numpy, ar1, ar2, op, "uint64"),
+        ("i", 4) => wide_int_setop_typed::<i32>(py, numpy, ar1, ar2, op, "int32"),
+        ("i", 8) => wide_int_setop_typed::<i64>(py, numpy, ar1, ar2, op, "int64"),
+        ("u", 4) => wide_int_setop_typed::<u32>(py, numpy, ar1, ar2, op, "uint32"),
+        ("u", 8) => wide_int_setop_typed::<u64>(py, numpy, ar1, ar2, op, "uint64"),
         _ => Ok(None),
     }
 }
@@ -52120,7 +52120,7 @@ fn try_native_datetime_setop(
     ar2: &Bound<'_, PyAny>,
     op: DtSetOp,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nd = cached_ndarray_type(numpy.py())?.clone();
     if !ar1.is_exact_instance(&nd) || !ar2.is_exact_instance(&nd) {
         return Ok(None);
@@ -55337,7 +55337,7 @@ fn native_like_array(
         return Ok(None);
     }
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let source_array = numpy.call_method1("asanyarray", (source,))?;
     let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     if subok && !source_array.is_exact_instance(&ndarray_type) {
@@ -56507,8 +56507,8 @@ fn heaviside(
         if numpy_dtype_is_f64(py, &a)
             && let Ok(h) = b.extract::<f64>()
         {
-            let numpy = py.import("numpy")?;
-            if let Some(out) = try_zerocopy_f64_heaviside_scalar(py, &numpy, &a, h)? {
+            let numpy = cached_numpy(py)?;
+            if let Some(out) = try_zerocopy_f64_heaviside_scalar(py, numpy, &a, h)? {
                 return Ok(out);
             }
         }
@@ -56701,7 +56701,7 @@ fn native_unary_elementwise(
     numpy_name: &Bound<'_, PyString>,
     context: &str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
         Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind())
     };
@@ -56722,7 +56722,7 @@ fn native_unary_elementwise(
     // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Bit-identical to
     // the direct output path below; all other inputs fall through unchanged.
-    if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? {
+    if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)? {
         // No reshape: the helper allocates at the final shape (`deadlock-audit-ei9jz`).
         let output = flat.unbind();
         if shape.is_empty() {
@@ -56733,7 +56733,7 @@ fn native_unary_elementwise(
     // int64 zero-copy fast path (negative/positive/abs/square). Without it int64
     // input ran the cold extract Vec and then fell straight back to numpy below,
     // ~180-200x slower than numpy for a discarded result.
-    if let Some((flat, shape)) = zerocopy_i64_unary_flat(py, &numpy, x, op)? {
+    if let Some((flat, shape)) = zerocopy_i64_unary_flat(py, numpy, x, op)? {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if shape.is_empty() {
@@ -56744,7 +56744,7 @@ fn native_unary_elementwise(
     // int32 zero-copy fast path. Same extract-then-discard cost as int64, plus
     // the f64 round-trip mis-wrapped square (saturating cast); this keeps int32
     // in int32 with wrapping ops, bit-identical to numpy.
-    if let Some((flat, shape)) = zerocopy_i32_unary_flat(py, &numpy, x, op)? {
+    if let Some((flat, shape)) = zerocopy_i32_unary_flat(py, numpy, x, op)? {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if shape.is_empty() {
@@ -56755,7 +56755,7 @@ fn native_unary_elementwise(
     // Narrow signed / all unsigned integer widths (int8/int16, uint8/16/32/64):
     // same extract-then-discard cost as int64, plus the f64 round-trip mis-wraps
     // square. Keeps each width native with wrapping ops, bit-identical to numpy.
-    if let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, &numpy, x, op)? {
+    if let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, numpy, x, op)? {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if shape.is_empty() {
@@ -56766,7 +56766,7 @@ fn native_unary_elementwise(
     // float32 zero-copy fast path. float32 input otherwise extracted to an f64
     // Vec and rebuilt (~60-360x slower), and `sign` returned float64; this keeps
     // float32 in float32 throughout, bit-identical to numpy.
-    if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, &numpy, x, op)? {
+    if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)? {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if shape.is_empty() {
@@ -56794,7 +56794,7 @@ fn native_unary_elementwise(
     {
         return fallback(py);
     }
-    if let Some(flat) = numpy_array_from_direct_f64_unary(py, &numpy, &native, op)? {
+    if let Some(flat) = numpy_array_from_direct_f64_unary(py, numpy, &native, op)? {
         let output_shape = PyTuple::new(py, native.shape().iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if native.shape().is_empty() {
@@ -56823,7 +56823,7 @@ fn native_unary_promoting(
     numpy_name: &Bound<'_, PyString>,
     context: &str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
         Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind())
     };
@@ -56875,14 +56875,14 @@ fn native_unary_promoting(
     // is not a give-up. The row itself is left untouched (the ledger_integrity
     // pre-commit hook holds historical rows to the current evidence standard,
     // which a 2026-07-10 row cannot retroactively meet).
-    if !numpy_f64_native_unary_is_byte_exact(py, &numpy, op) {
+    if !numpy_f64_native_unary_is_byte_exact(py, numpy, op) {
         return fallback(py);
     }
     // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Integer inputs
     // (which this promoting path widens to float) are not float64 ndarrays, so
     // they correctly fall through unchanged.
-    if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? {
+    if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)? {
         // No reshape: the helper allocates at the final shape (`deadlock-audit-ei9jz`).
         let output = flat.unbind();
         if shape.is_empty() {
@@ -56921,7 +56921,7 @@ fn native_unary_promoting(
     }
     // float32 input is float-preserving here (only integers promote to f64), so
     // the zero-copy float32 path applies to the ops it supports (e.g. sqrt).
-    if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, &numpy, x, op)? {
+    if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)? {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if shape.is_empty() {
@@ -56950,7 +56950,7 @@ fn native_unary_promoting(
     {
         return fallback(py);
     }
-    if let Some(flat) = numpy_array_from_direct_f64_unary(py, &numpy, &native, op)? {
+    if let Some(flat) = numpy_array_from_direct_f64_unary(py, numpy, &native, op)? {
         let output_shape = PyTuple::new(py, native.shape().iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if native.shape().is_empty() {
@@ -57077,9 +57077,9 @@ fn native_binary_arctan2_or_passthrough(
         )? {
             return Ok(out);
         }
-        let numpy = py.import("numpy")?;
-        if noncontiguous_ndarray(&numpy, &args.get_item(0)?)?
-            || noncontiguous_ndarray(&numpy, &args.get_item(1)?)?
+        let numpy = cached_numpy(py)?;
+        if noncontiguous_ndarray(numpy, &args.get_item(0)?)?
+            || noncontiguous_ndarray(numpy, &args.get_item(1)?)?
         {
             return core_numpy_passthrough_interned(py, intern!(py, "arctan2"), args, kwargs);
         }
@@ -57307,9 +57307,9 @@ fn native_binary_remainder_or_passthrough(
         {
             return core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs);
         }
-        let numpy = py.import("numpy")?;
-        if noncontiguous_ndarray(&numpy, &args.get_item(0)?)?
-            || noncontiguous_ndarray(&numpy, &args.get_item(1)?)?
+        let numpy = cached_numpy(py)?;
+        if noncontiguous_ndarray(numpy, &args.get_item(0)?)?
+            || noncontiguous_ndarray(numpy, &args.get_item(1)?)?
         {
             return core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs);
         }
@@ -57885,19 +57885,19 @@ fn try_zerocopy_narrow_shift(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     match (kind.as_str(), itemsize, is_left) {
-        ("i", 1, true) => shift_typed_nw::<i8, _>(py, &numpy, a, b, "int8", "i", 1, |a, b| {
+        ("i", 1, true) => shift_typed_nw::<i8, _>(py, numpy, a, b, "int8", "i", 1, |a, b| {
             if (0..8).contains(&b) {
                 a.wrapping_shl(b as u32)
             } else {
                 0
             }
         }),
-        ("i", 1, false) => shift_typed_nw::<i8, _>(py, &numpy, a, b, "int8", "i", 1, |a, b| {
+        ("i", 1, false) => shift_typed_nw::<i8, _>(py, numpy, a, b, "int8", "i", 1, |a, b| {
             if (0..8).contains(&b) {
                 a.wrapping_shr(b as u32)
             } else if a < 0 {
@@ -57906,14 +57906,14 @@ fn try_zerocopy_narrow_shift(
                 0
             }
         }),
-        ("i", 2, true) => shift_typed_nw::<i16, _>(py, &numpy, a, b, "int16", "i", 2, |a, b| {
+        ("i", 2, true) => shift_typed_nw::<i16, _>(py, numpy, a, b, "int16", "i", 2, |a, b| {
             if (0..16).contains(&b) {
                 a.wrapping_shl(b as u32)
             } else {
                 0
             }
         }),
-        ("i", 2, false) => shift_typed_nw::<i16, _>(py, &numpy, a, b, "int16", "i", 2, |a, b| {
+        ("i", 2, false) => shift_typed_nw::<i16, _>(py, numpy, a, b, "int16", "i", 2, |a, b| {
             if (0..16).contains(&b) {
                 a.wrapping_shr(b as u32)
             } else if a < 0 {
@@ -57922,14 +57922,14 @@ fn try_zerocopy_narrow_shift(
                 0
             }
         }),
-        ("i", 4, true) => shift_typed_nw::<i32, _>(py, &numpy, a, b, "int32", "i", 4, |a, b| {
+        ("i", 4, true) => shift_typed_nw::<i32, _>(py, numpy, a, b, "int32", "i", 4, |a, b| {
             if (0..32).contains(&b) {
                 a.wrapping_shl(b as u32)
             } else {
                 0
             }
         }),
-        ("i", 4, false) => shift_typed_nw::<i32, _>(py, &numpy, a, b, "int32", "i", 4, |a, b| {
+        ("i", 4, false) => shift_typed_nw::<i32, _>(py, numpy, a, b, "int32", "i", 4, |a, b| {
             if (0..32).contains(&b) {
                 a.wrapping_shr(b as u32)
             } else if a < 0 {
@@ -57938,28 +57938,28 @@ fn try_zerocopy_narrow_shift(
                 0
             }
         }),
-        ("u", 1, true) => shift_typed_nw::<u8, _>(py, &numpy, a, b, "uint8", "u", 1, |a, b| {
+        ("u", 1, true) => shift_typed_nw::<u8, _>(py, numpy, a, b, "uint8", "u", 1, |a, b| {
             if b < 8 { a.wrapping_shl(b as u32) } else { 0 }
         }),
-        ("u", 1, false) => shift_typed_nw::<u8, _>(py, &numpy, a, b, "uint8", "u", 1, |a, b| {
+        ("u", 1, false) => shift_typed_nw::<u8, _>(py, numpy, a, b, "uint8", "u", 1, |a, b| {
             if b < 8 { a.wrapping_shr(b as u32) } else { 0 }
         }),
-        ("u", 2, true) => shift_typed_nw::<u16, _>(py, &numpy, a, b, "uint16", "u", 2, |a, b| {
+        ("u", 2, true) => shift_typed_nw::<u16, _>(py, numpy, a, b, "uint16", "u", 2, |a, b| {
             if b < 16 { a.wrapping_shl(b as u32) } else { 0 }
         }),
-        ("u", 2, false) => shift_typed_nw::<u16, _>(py, &numpy, a, b, "uint16", "u", 2, |a, b| {
+        ("u", 2, false) => shift_typed_nw::<u16, _>(py, numpy, a, b, "uint16", "u", 2, |a, b| {
             if b < 16 { a.wrapping_shr(b as u32) } else { 0 }
         }),
-        ("u", 4, true) => shift_typed_nw::<u32, _>(py, &numpy, a, b, "uint32", "u", 4, |a, b| {
+        ("u", 4, true) => shift_typed_nw::<u32, _>(py, numpy, a, b, "uint32", "u", 4, |a, b| {
             if b < 32 { a.wrapping_shl(b) } else { 0 }
         }),
-        ("u", 4, false) => shift_typed_nw::<u32, _>(py, &numpy, a, b, "uint32", "u", 4, |a, b| {
+        ("u", 4, false) => shift_typed_nw::<u32, _>(py, numpy, a, b, "uint32", "u", 4, |a, b| {
             if b < 32 { a.wrapping_shr(b) } else { 0 }
         }),
-        ("u", 8, true) => shift_typed_nw::<u64, _>(py, &numpy, a, b, "uint64", "u", 8, |a, b| {
+        ("u", 8, true) => shift_typed_nw::<u64, _>(py, numpy, a, b, "uint64", "u", 8, |a, b| {
             if b < 64 { a.wrapping_shl(b as u32) } else { 0 }
         }),
-        ("u", 8, false) => shift_typed_nw::<u64, _>(py, &numpy, a, b, "uint64", "u", 8, |a, b| {
+        ("u", 8, false) => shift_typed_nw::<u64, _>(py, numpy, a, b, "uint64", "u", 8, |a, b| {
             if b < 64 { a.wrapping_shr(b as u32) } else { 0 }
         }),
         _ => Ok(None),
@@ -58678,7 +58678,7 @@ fn try_native_unwrap_default(
     p: &Bound<'_, PyAny>,
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !p.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -58710,8 +58710,8 @@ fn try_native_unwrap_default(
         return Ok(None);
     }
     match itemsize {
-        8 => unwrap_fill_typed::<f64>(py, &numpy, p, row),
-        4 => unwrap_fill_typed::<f32>(py, &numpy, p, row),
+        8 => unwrap_fill_typed::<f64>(py, numpy, p, row),
+        4 => unwrap_fill_typed::<f32>(py, numpy, p, row),
         _ => Ok(None), // float16 / longdouble -> delegate
     }
 }
@@ -61166,7 +61166,7 @@ fn triangular_impl(
     upper: bool,
     numpy_name: &'static str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let numpy_fn = numpy.getattr(numpy_name)?;
     let m_for_fallback = m.clone_ref(py);
     let fallback =
@@ -65725,7 +65725,7 @@ fn try_zerocopy_f64_average_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let is_f64 = |x: &Bound<'_, PyAny>| -> PyResult<bool> {
         let dt = x.getattr("dtype")?;
         Ok(dt.getattr("kind")?.extract::<String>()? == "f"
@@ -65820,7 +65820,7 @@ fn try_zerocopy_f64_average_axis(
         }
         let out_shape: Vec<usize> = shape[..ax].to_vec();
         let avg: Vec<f64> = pairs.iter().map(|(n, d)| n / d).collect();
-        let avg_flat = numpy_array_from_slice(py, &numpy, &avg, "float64")?;
+        let avg_flat = numpy_array_from_slice(py, numpy, &avg, "float64")?;
         let avg_arr =
             avg_flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
         let avg_output = if out_shape.is_empty() {
@@ -65830,7 +65830,7 @@ fn try_zerocopy_f64_average_axis(
         };
         if returned {
             let sow: Vec<f64> = pairs.iter().map(|(_, d)| *d).collect();
-            let sow_flat = numpy_array_from_slice(py, &numpy, &sow, "float64")?;
+            let sow_flat = numpy_array_from_slice(py, numpy, &sow, "float64")?;
             let sow_arr = sow_flat
                 .call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
             let sow_output = if out_shape.is_empty() {
@@ -76496,7 +76496,7 @@ fn argsort(
             }
         }
         if !other_kwarg && sort_kind_fast_path(kind_spec.as_deref()).is_some() {
-            let numpy = py.import("numpy")?;
+            let numpy = cached_numpy(py)?;
             let a = args.get_item(0)?;
             // np.argsort(a, axis=None) argsorts the FLATTENED array (indices into the
             // ravel). For a C-contiguous ndarray the ravel is a ZERO-COPY reshape view,
@@ -76523,27 +76523,27 @@ fn argsort(
                 // kind='stable'/'mergesort' int/uint/float: (value, orig-index) stable argsort handles TIES
                 // byte-exactly (the default-kind paths below defer on ties). numpy ~0.9-1.2s @8M with repeats.
                 if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
-                    && let Some(out) = try_native_argsort_stable_flat(py, &numpy, &a)?
+                    && let Some(out) = try_native_argsort_stable_flat(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
                 // kind='stable'/'mergesort' datetime/timedelta: int64-view stable argsort handles
                 // ties by original index; NaT still defers to NumPy's special ordering.
                 if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
-                    && let Some(out) = try_native_datetime_argsort_stable(py, &numpy, &a)?
+                    && let Some(out) = try_native_datetime_argsort_stable(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
                 // kind='stable'/'mergesort' complex: lexicographic (re, im, original-index)
                 // permutation. NaN components still defer to NumPy's special ordering.
                 if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
-                    && let Some(out) = try_native_complex_argsort_stable(py, &numpy, &a)?
+                    && let Some(out) = try_native_complex_argsort_stable(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
                 // Float flat argsort, DISTINCT data: gather-free radix on IEEE-linearized keys (numpy default
                 // introsort ~1.3s @16M; the gather-bound comparison paths below are far slower than radix).
-                match try_native_float_argsort_default_radix(py, &numpy, &a)? {
+                match try_native_float_argsort_default_radix(py, numpy, &a)? {
                     FloatArgsortRadixOutcome::Done(out) => return Ok(out),
                     // NaN or ties proven on this buffer: the comparison candidates below would
                     // re-run the identical NaN scan + sampled tie oracle (dense ties: the
@@ -76551,50 +76551,50 @@ fn argsort(
                     // pay-twice sort) and defer to the same numpy delegate. Skip them.
                     FloatArgsortRadixOutcome::DeferData => {}
                     FloatArgsortRadixOutcome::NotApplicable => {
-                        if let Some(out) = try_zerocopy_f64_argsort_flat(py, &numpy, &a)? {
+                        if let Some(out) = try_zerocopy_f64_argsort_flat(py, numpy, &a)? {
                             return Ok(out);
                         }
                         // f32 flat argsort (numpy index-introsort single-threaded, NaN/tie defer, byte-exact).
-                        if let Some(out) = try_zerocopy_f32_argsort_flat(py, &numpy, &a)? {
+                        if let Some(out) = try_zerocopy_f32_argsort_flat(py, numpy, &a)? {
                             return Ok(out);
                         }
                     }
                 }
                 // 4-/8-byte integer flat argsort, DISTINCT data: gather-free parallel LSD radix (numpy's default
                 // introsort is ~1.3s @16M; the gather-bound comparison path below is far slower than radix).
-                if let Some(out) = try_native_int_argsort_default_radix(py, &numpy, &a)? {
+                if let Some(out) = try_native_int_argsort_default_radix(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // 4-/8-byte integer flat argsort (numpy introsort single-threaded ~1354ms@16M i64);
                 // defers on ties (distinct -> unique perm, byte-exact).
-                if let Some(out) = try_native_int_argsort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_native_int_argsort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // datetime64/timedelta64 flat argsort (int64-backed; numpy non-simd introsort; NaT/tie
                 // defer, byte-exact via int64 value order).
-                if let Some(out) = try_native_datetime_argsort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_native_datetime_argsort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // complex128 flat argsort (numpy lexicographic comparison introsort, no simd-sort for
                 // complex); NaN/tie defer, byte-exact for distinct (re, im).
-                if let Some(out) = try_zerocopy_c128_argsort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_zerocopy_c128_argsort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // complex64 flat argsort (f32 mirror; NaN/tie defer, byte-exact for distinct (re,im)).
-                if let Some(out) = try_zerocopy_c64_argsort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_zerocopy_c64_argsort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // structured records, kind='stable'/'mergesort' only: byte-transform stable value-lex argsort
                 // (numpy ~3.4s @2M i8+f8). The default quicksort tie order is unmatchable, so gate to stable.
                 if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
-                    && let Some(out) = try_native_argsort_struct_stable(py, &numpy, &a)?
+                    && let Some(out) = try_native_argsort_struct_stable(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
                 // Latin-1 'U'/'S' strings, kind='stable'/'mergesort' only: memcmp stable argsort (numpy per-
                 // record codepoint comparator ~1.3s @2M U6). Default quicksort tie order unmatchable -> stable only.
                 if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
-                    && let Some(out) = try_native_string_argsort_stable(py, &numpy, &a)?
+                    && let Some(out) = try_native_string_argsort_stable(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
@@ -76602,7 +76602,7 @@ fn argsort(
                 // Tie order is algorithm-specific, so this path detects adjacent equal keys and defers.
                 if !matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                     && let Some(out) =
-                        try_native_struct_argsort_valuelex(py, &numpy, &a, axis_spec)?
+                        try_native_struct_argsort_valuelex(py, numpy, &a, axis_spec)?
                 {
                     return Ok(out);
                 }
@@ -76610,7 +76610,7 @@ fn argsort(
             // kind='stable'/'mergesort' per-lane int/float last-axis argsort handles TIES byte-exactly (the
             // default-kind last-axis paths below defer on ties). numpy per-lane stable sort (~0.3-0.4s @8M dense).
             if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
-                && let Some(out) = try_native_argsort_stable_lastaxis(py, &numpy, &a, axis_spec)?
+                && let Some(out) = try_native_argsort_stable_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
@@ -76618,69 +76618,69 @@ fn argsort(
             // ties keep ascending in-lane index == numpy's stable contract).
             if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                 && let Some(out) =
-                    try_native_string_argsort_stable_nonlast(py, &numpy, &a, axis_spec)?
+                    try_native_string_argsort_stable_nonlast(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_argsort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f64_argsort_lastaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // integer per-lane last-axis argsort (numpy introsort per lane; defer on ties).
-            if let Some(out) = try_native_int_argsort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_int_argsort_lastaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // f32 per-lane last-axis argsort (numpy index-introsort; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_f32_argsort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f32_argsort_lastaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex128 per-lane last-axis argsort (lexicographic; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_argsort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c128_argsort_lastaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex64 per-lane last-axis argsort (f32 mirror; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_argsort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c64_argsort_lastaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_argsort_axis0(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f64_argsort_axis0(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // integer per-column axis-0 argsort (numpy introsort per column; defer on ties).
-            if let Some(out) = try_native_int_argsort_axis0(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_int_argsort_axis0(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // f32 per-column axis-0 argsort (numpy index-introsort; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_f32_argsort_axis0(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f32_argsort_axis0(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex128 per-column axis-0 argsort (lexicographic; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_argsort_axis0(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c128_argsort_axis0(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex64 per-column axis-0 argsort (f32 mirror; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_argsort_axis0(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c64_argsort_axis0(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_argsort_midaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f64_argsort_midaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // integer per-lane middle-axis argsort (numpy introsort per lane; defer on ties).
-            if let Some(out) = try_native_int_argsort_midaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_int_argsort_midaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // f32 per-lane middle-axis argsort (numpy index-introsort; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_f32_argsort_midaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f32_argsort_midaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex128 per-lane middle-axis argsort (lexicographic; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_argsort_midaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c128_argsort_midaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex64 per-lane middle-axis argsort (f32 mirror; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_argsort_midaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c64_argsort_midaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // datetime64/timedelta64 per-lane argsort along last/axis0/middle (int64 view; NaT/tie defer).
-            if let Some(out) = try_native_datetime_argsort_axes(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_datetime_argsort_axes(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }
@@ -80840,7 +80840,7 @@ fn fft_shift_impl(
     _inverse: bool,
     numpy_name: &'static str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let np_fn = numpy.getattr("fft")?.getattr(numpy_name)?;
     let x_for_fallback = x.clone_ref(py);
     let axes_for_fallback = axes.as_ref().map(|v| v.clone_ref(py));
@@ -83062,8 +83062,8 @@ fn try_zerocopy_f64_sum_lastaxis(
     axis_obj: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+    let numpy = cached_numpy(py)?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
         return Ok(None);
     };
     let Ok(ax_raw) = axis_obj.extract::<i64>() else {
@@ -83103,7 +83103,7 @@ fn try_zerocopy_f64_sum_lastaxis(
     } else {
         data.chunks_exact(axis_len).map(lane_sum).collect()
     };
-    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let flat = numpy_array_from_slice(py, numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[..ax].to_vec();
     if keepdims {
         out_shape.push(1);
@@ -83176,7 +83176,7 @@ fn try_zerocopy_float_sum_flat(
     // dtypes; 8 MiB f64 was only 1.07x and is deliberately left to NumPy.
     const FLOAT_SUM_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -83192,7 +83192,7 @@ fn try_zerocopy_float_sum_flat(
         return Ok(None);
     }
     // Refuse to route unless this NumPy's reduction tree is provably ours.
-    if !float_pairwise_tree_matches_numpy(&numpy) {
+    if !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
 
@@ -83245,7 +83245,7 @@ fn try_zerocopy_float_sum_flat(
         _ => return Ok(None),
     };
     if keepdims {
-        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+        return Ok(Some(keepdims_reshape_scalar(py, numpy, a, scalar)?));
     }
     Ok(Some(scalar))
 }
@@ -83262,7 +83262,7 @@ fn try_zerocopy_float_mean_flat(
 ) -> PyResult<Option<Py<PyAny>>> {
     const FLOAT_MEAN_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -83318,7 +83318,7 @@ fn try_zerocopy_float_mean_flat(
         _ => return Ok(None),
     };
     if keepdims {
-        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+        return Ok(Some(keepdims_reshape_scalar(py, numpy, a, scalar)?));
     }
     Ok(Some(scalar))
 }
@@ -83391,7 +83391,7 @@ fn try_zerocopy_integer_sum_flat(
     a: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -83405,7 +83405,7 @@ fn try_zerocopy_integer_sum_flat(
         ($input:ty, $acc:ty, $dtype:literal, $convert:expr) => {
             integer_sum_typed::<$input, $acc, _, _>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 $dtype,
                 0,
@@ -83429,7 +83429,7 @@ fn try_zerocopy_integer_sum_flat(
         return Ok(None);
     };
     if keepdims {
-        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+        return Ok(Some(keepdims_reshape_scalar(py, numpy, a, scalar)?));
     }
     Ok(Some(scalar))
 }
@@ -84306,11 +84306,11 @@ fn try_zerocopy_int_minmax(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind == "b" {
-        return minmax_bool_typed(py, &numpy, a, axis, keepdims, take_min);
+        return minmax_bool_typed(py, numpy, a, axis, keepdims, take_min);
     }
     if kind != "i" && kind != "u" {
         return Ok(None);
@@ -84332,14 +84332,14 @@ fn try_zerocopy_int_minmax(
         return Ok(Some(numpy.getattr(op)?.call((a,), Some(&kwargs))?.unbind()));
     }
     match (kind.as_str(), itemsize) {
-        ("i", 1) => minmax_int_typed::<i8>(py, &numpy, a, axis, keepdims, take_min),
-        ("i", 2) => minmax_int_typed::<i16>(py, &numpy, a, axis, keepdims, take_min),
-        ("i", 4) => minmax_int_typed::<i32>(py, &numpy, a, axis, keepdims, take_min),
-        ("i", 8) => minmax_int_typed::<i64>(py, &numpy, a, axis, keepdims, take_min),
-        ("u", 1) => minmax_int_typed::<u8>(py, &numpy, a, axis, keepdims, take_min),
-        ("u", 2) => minmax_int_typed::<u16>(py, &numpy, a, axis, keepdims, take_min),
-        ("u", 4) => minmax_int_typed::<u32>(py, &numpy, a, axis, keepdims, take_min),
-        ("u", 8) => minmax_int_typed::<u64>(py, &numpy, a, axis, keepdims, take_min),
+        ("i", 1) => minmax_int_typed::<i8>(py, numpy, a, axis, keepdims, take_min),
+        ("i", 2) => minmax_int_typed::<i16>(py, numpy, a, axis, keepdims, take_min),
+        ("i", 4) => minmax_int_typed::<i32>(py, numpy, a, axis, keepdims, take_min),
+        ("i", 8) => minmax_int_typed::<i64>(py, numpy, a, axis, keepdims, take_min),
+        ("u", 1) => minmax_int_typed::<u8>(py, numpy, a, axis, keepdims, take_min),
+        ("u", 2) => minmax_int_typed::<u16>(py, numpy, a, axis, keepdims, take_min),
+        ("u", 4) => minmax_int_typed::<u32>(py, numpy, a, axis, keepdims, take_min),
+        ("u", 8) => minmax_int_typed::<u64>(py, numpy, a, axis, keepdims, take_min),
         _ => Ok(None),
     }
 }
@@ -85061,7 +85061,7 @@ fn try_zerocopy_f64_arg_extremum_flat(
     a: &Bound<'_, PyAny>,
     want_min: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -85220,7 +85220,7 @@ fn try_zerocopy_f64_extremum_flat(
     want_min: bool,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -85289,7 +85289,7 @@ fn try_zerocopy_f64_extremum_flat(
     }
     let scalar = numpy.getattr("float64")?.call1((value,))?.unbind();
     if keepdims {
-        return Ok(Some(keepdims_reshape_scalar(py, &numpy, a, scalar)?));
+        return Ok(Some(keepdims_reshape_scalar(py, numpy, a, scalar)?));
     }
     Ok(Some(scalar))
 }
@@ -85966,7 +85966,7 @@ fn try_zerocopy_complex_cumsum_lastaxis(
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_CUMSUM_PARALLEL_MIN: usize = 1 << 18; // complex elements
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -86000,7 +86000,7 @@ fn try_zerocopy_complex_cumsum_lastaxis(
     match itemsize {
         16 => complex_cumsum_lastaxis_typed::<f64>(
             py,
-            &numpy,
+            numpy,
             a,
             "float64",
             "complex128",
@@ -86010,7 +86010,7 @@ fn try_zerocopy_complex_cumsum_lastaxis(
         ),
         8 => complex_cumsum_lastaxis_typed::<f32>(
             py,
-            &numpy,
+            numpy,
             a,
             "float32",
             "complex64",
@@ -86113,7 +86113,7 @@ fn try_zerocopy_complex_cumprod_lastaxis(
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_CUMPROD_PARALLEL_MIN: usize = 1 << 18; // complex elements
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -86147,7 +86147,7 @@ fn try_zerocopy_complex_cumprod_lastaxis(
     match itemsize {
         16 => complex_cumprod_lastaxis_typed::<f64>(
             py,
-            &numpy,
+            numpy,
             a,
             "float64",
             "complex128",
@@ -86157,7 +86157,7 @@ fn try_zerocopy_complex_cumprod_lastaxis(
         ),
         8 => complex_cumprod_lastaxis_typed::<f32>(
             py,
-            &numpy,
+            numpy,
             a,
             "float32",
             "complex64",
@@ -86269,7 +86269,7 @@ fn try_zerocopy_complex_prod_lastaxis(
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_PROD_PARALLEL_MIN: usize = 1 << 18; // complex elements
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -86311,7 +86311,7 @@ fn try_zerocopy_complex_prod_lastaxis(
     match itemsize {
         16 => complex_prod_lastaxis_typed::<f64>(
             py,
-            &numpy,
+            numpy,
             a,
             "float64",
             "complex128",
@@ -86321,7 +86321,7 @@ fn try_zerocopy_complex_prod_lastaxis(
         ),
         8 => complex_prod_lastaxis_typed::<f32>(
             py,
-            &numpy,
+            numpy,
             a,
             "float32",
             "complex64",
@@ -86436,7 +86436,7 @@ fn try_zerocopy_complex_nanprod_lastaxis(
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_NANPROD_PARALLEL_MIN: usize = 1 << 18; // complex elements
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -86474,7 +86474,7 @@ fn try_zerocopy_complex_nanprod_lastaxis(
     match itemsize {
         16 => complex_nanprod_lastaxis_typed::<f64>(
             py,
-            &numpy,
+            numpy,
             a,
             "float64",
             "complex128",
@@ -86486,7 +86486,7 @@ fn try_zerocopy_complex_nanprod_lastaxis(
         ),
         8 => complex_nanprod_lastaxis_typed::<f32>(
             py,
-            &numpy,
+            numpy,
             a,
             "float32",
             "complex64",
@@ -86604,7 +86604,7 @@ fn try_zerocopy_complex_nancumulative_lastaxis(
     is_prod: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_NANCUM_PARALLEL_MIN: usize = 1 << 18; // complex elements
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -86638,7 +86638,7 @@ fn try_zerocopy_complex_nancumulative_lastaxis(
     match itemsize {
         16 => complex_nancumulative_lastaxis_typed::<f64>(
             py,
-            &numpy,
+            numpy,
             a,
             "float64",
             "complex128",
@@ -86651,7 +86651,7 @@ fn try_zerocopy_complex_nancumulative_lastaxis(
         ),
         8 => complex_nancumulative_lastaxis_typed::<f32>(
             py,
-            &numpy,
+            numpy,
             a,
             "float32",
             "complex64",
@@ -86775,7 +86775,7 @@ fn try_zerocopy_complex_nancumulative_nonlast(
     is_prod: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_NANCUM_NONLAST_PARALLEL_MIN: usize = 1 << 18; // complex elements
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -86835,7 +86835,7 @@ fn try_zerocopy_complex_nancumulative_nonlast(
         }
         return complex_nancumulative_axis0_typed::<f64>(
             py,
-            &numpy,
+            numpy,
             a,
             "float64",
             "complex128",
@@ -86851,7 +86851,7 @@ fn try_zerocopy_complex_nancumulative_nonlast(
     match itemsize {
         16 => complex_nancumulative_nonlast_typed::<f64>(
             py,
-            &numpy,
+            numpy,
             a,
             "float64",
             "complex128",
@@ -86865,7 +86865,7 @@ fn try_zerocopy_complex_nancumulative_nonlast(
         ),
         8 => complex_nancumulative_nonlast_typed::<f32>(
             py,
-            &numpy,
+            numpy,
             a,
             "float32",
             "complex64",
@@ -87191,7 +87191,7 @@ fn try_zerocopy_complex_cumulative_nonlast(
     is_prod: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const COMPLEX_CUM_NONLAST_PARALLEL_MIN: usize = 1 << 18; // complex elements
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -87249,7 +87249,7 @@ fn try_zerocopy_complex_cumulative_nonlast(
         return match itemsize {
             16 => complex_cumulative_axis0_typed::<f64>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 "float64",
                 "complex128",
@@ -87260,7 +87260,7 @@ fn try_zerocopy_complex_cumulative_nonlast(
             ),
             8 => complex_cumulative_axis0_typed::<f32>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 "float32",
                 "complex64",
@@ -87276,7 +87276,7 @@ fn try_zerocopy_complex_cumulative_nonlast(
     match itemsize {
         16 => complex_cumulative_nonlast_typed::<f64>(
             py,
-            &numpy,
+            numpy,
             a,
             "float64",
             "complex128",
@@ -87288,7 +87288,7 @@ fn try_zerocopy_complex_cumulative_nonlast(
         ),
         8 => complex_cumulative_nonlast_typed::<f32>(
             py,
-            &numpy,
+            numpy,
             a,
             "float32",
             "complex64",
@@ -87662,7 +87662,7 @@ fn trace(
     let fallback = || -> PyResult<Py<PyAny>> {
         // Import numpy lazily here so the native fast paths below pay neither the
         // module-import lookup nor the `trace` attribute fetch on the hot path.
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let trace_fn = numpy.getattr("trace")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("offset", offset)?;
@@ -87874,7 +87874,7 @@ fn try_zerocopy_f64_argextreme(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -88071,7 +88071,7 @@ fn try_zerocopy_lastaxis_argextreme(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a
         .getattr("flags")?
         .getattr("c_contiguous")?
@@ -88204,7 +88204,7 @@ fn try_zerocopy_lastaxis_argextreme(
         return Ok(None);
     };
 
-    let flat = numpy_array_from_slice(py, &numpy, &indices, "intp")?;
+    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
     let reshaped = flat.call_method1("reshape", (out_shape,))?;
     Ok(Some(reshaped.unbind()))
 }
@@ -88230,7 +88230,7 @@ fn try_zerocopy_f64_argextreme_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -88314,7 +88314,7 @@ fn try_zerocopy_f64_argextreme_axis(
     }
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat = numpy_array_from_slice(py, &numpy, &indices, "intp")?;
+    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
     if out_shape.is_empty() {
@@ -88338,7 +88338,7 @@ fn try_zerocopy_f32_argextreme_axis(
     let Some(ax) = axis else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(a) {
         return Ok(None);
     }
@@ -88415,7 +88415,7 @@ fn try_zerocopy_f32_argextreme_axis(
     }
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat = numpy_array_from_slice(py, &numpy, &indices, "intp")?;
+    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1("reshape", (&output_shape,))?;
     if out_shape.is_empty() {
@@ -88517,7 +88517,7 @@ fn try_zerocopy_int_argextreme_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -88538,17 +88538,17 @@ fn try_zerocopy_int_argextreme_axis(
         // bool as uint8: argmax/argmin(u8 0/1) per inner = first True / first False, matching
         // numpy bool semantics. Reuse the u8 typed path on a uint8 view (no bool->f64 widen).
         let view = a.call_method1("view", (numpy.getattr("uint8")?,))?;
-        return argextreme_axis_int_typed::<u8>(py, &numpy, &view, &shape, k, take_max);
+        return argextreme_axis_int_typed::<u8>(py, numpy, &view, &shape, k, take_max);
     }
     match (kind.as_str(), itemsize) {
-        ("i", 1) => argextreme_axis_int_typed::<i8>(py, &numpy, a, &shape, k, take_max),
-        ("i", 2) => argextreme_axis_int_typed::<i16>(py, &numpy, a, &shape, k, take_max),
-        ("i", 4) => argextreme_axis_int_typed::<i32>(py, &numpy, a, &shape, k, take_max),
-        ("i", 8) => argextreme_axis_int_typed::<i64>(py, &numpy, a, &shape, k, take_max),
-        ("u", 1) => argextreme_axis_int_typed::<u8>(py, &numpy, a, &shape, k, take_max),
-        ("u", 2) => argextreme_axis_int_typed::<u16>(py, &numpy, a, &shape, k, take_max),
-        ("u", 4) => argextreme_axis_int_typed::<u32>(py, &numpy, a, &shape, k, take_max),
-        ("u", 8) => argextreme_axis_int_typed::<u64>(py, &numpy, a, &shape, k, take_max),
+        ("i", 1) => argextreme_axis_int_typed::<i8>(py, numpy, a, &shape, k, take_max),
+        ("i", 2) => argextreme_axis_int_typed::<i16>(py, numpy, a, &shape, k, take_max),
+        ("i", 4) => argextreme_axis_int_typed::<i32>(py, numpy, a, &shape, k, take_max),
+        ("i", 8) => argextreme_axis_int_typed::<i64>(py, numpy, a, &shape, k, take_max),
+        ("u", 1) => argextreme_axis_int_typed::<u8>(py, numpy, a, &shape, k, take_max),
+        ("u", 2) => argextreme_axis_int_typed::<u16>(py, numpy, a, &shape, k, take_max),
+        ("u", 4) => argextreme_axis_int_typed::<u32>(py, numpy, a, &shape, k, take_max),
+        ("u", 8) => argextreme_axis_int_typed::<u64>(py, numpy, a, &shape, k, take_max),
         _ => Ok(None),
     }
 }
@@ -88568,7 +88568,7 @@ fn try_zerocopy_bool_argextreme_flat(
     if axis_val.is_some() {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
     if !a.is_exact_instance(&ndarray_t)
         || a.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b"
@@ -89141,7 +89141,7 @@ fn python_native_gemm_f64_2d_metadata_gate_for_op(
     b_obj: &Bound<'_, PyAny>,
     op: PythonNativeGemmOp,
 ) -> PyResult<bool> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray = cached_ndarray_type(numpy.py())?.clone();
     if !a_obj.is_instance(&ndarray)? || !b_obj.is_instance(&ndarray)? {
         return Ok(false);
@@ -96840,7 +96840,7 @@ fn try_zerocopy_f64_unique_binary_grid(
     py: Python<'_>,
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !item.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, item) {
         return Ok(None);
     }
@@ -96947,7 +96947,7 @@ fn try_zerocopy_f64_unique_flat(
     if !f64_unique_native_is_profitable() {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !item.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, item) {
         return Ok(None);
     }
@@ -98351,7 +98351,7 @@ fn try_native_unique_rows_composite_full(
     ret_counts: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     use rayon::prelude::*;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, item)? || item.getattr("ndim")?.extract::<usize>()? != 2 {
         return Ok(None);
     }
@@ -98546,7 +98546,7 @@ fn try_native_unique_rows_lexsort_f64(
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN_ROWS: usize = 1 << 16;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !item.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -98652,7 +98652,7 @@ fn try_native_unique_rows_lexsort_f32(
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN_ROWS: usize = 1 << 16;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !item.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -99180,7 +99180,7 @@ fn try_native_unique_rows_lexsort_int(
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN_ROWS: usize = 1 << 16;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !item.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -101414,7 +101414,7 @@ fn try_zerocopy_bytes_ascii_case(
     if !matches!(method, "upper" | "lower" | "swapcase") {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -101722,7 +101722,7 @@ fn try_zerocopy_unicode_ascii_translate(
         }
         lookup[ki as usize] = vi as u32;
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -101817,7 +101817,7 @@ fn try_zerocopy_bytes_translate(
     }
     let mut lookup = [0u8; 256];
     lookup.copy_from_slice(&tbytes);
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -101976,7 +101976,7 @@ fn try_zerocopy_unicode_concat(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray = cached_ndarray_type(numpy.py())?.clone();
     if !a.is_exact_instance(&ndarray) || !b.is_exact_instance(&ndarray) {
         return Ok(None);
@@ -102010,9 +102010,9 @@ fn try_zerocopy_unicode_concat(
             if isa % 4 != 0 || isb % 4 != 0 {
                 return Ok(None);
             }
-            run_concat::<u32>(py, &numpy, a, b, &shape, isa / 4, isb / 4, "U", "uint32")
+            run_concat::<u32>(py, numpy, a, b, &shape, isa / 4, isb / 4, "U", "uint32")
         }
-        ("S", "S") => run_concat::<u8>(py, &numpy, a, b, &shape, isa, isb, "S", "uint8"),
+        ("S", "S") => run_concat::<u8>(py, numpy, a, b, &shape, isa, isb, "S", "uint8"),
         _ => Ok(None),
     }
 }
@@ -102311,7 +102311,7 @@ fn try_zerocopy_unicode_replace(
     old: &Bound<'_, PyAny>,
     new: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -102348,7 +102348,7 @@ fn try_zerocopy_unicode_replace(
             }
             run_replace::<u32>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 &shape,
                 itemsize / 4,
@@ -102371,7 +102371,7 @@ fn try_zerocopy_unicode_replace(
                 return Ok(None);
             }
             run_replace::<u8>(
-                py, &numpy, a, &shape, itemsize, &old_b, &new_b, "S", "uint8", false,
+                py, numpy, a, &shape, itemsize, &old_b, &new_b, "S", "uint8", false,
             )
         }
         _ => Ok(None),
@@ -102658,7 +102658,7 @@ fn try_zerocopy_unicode_multiply(
         return Ok(None); // n<=0 -> numpy (empty strings, U1 edge)
     }
     let reps = reps as usize;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -102680,13 +102680,13 @@ fn try_zerocopy_unicode_multiply(
             if itemsize == 0 || itemsize % 4 != 0 {
                 return Ok(None);
             }
-            run_multiply::<u32>(py, &numpy, a, &shape, itemsize / 4, reps, "U", "uint32")
+            run_multiply::<u32>(py, numpy, a, &shape, itemsize / 4, reps, "U", "uint32")
         }
         "S" => {
             if itemsize == 0 {
                 return Ok(None);
             }
-            run_multiply::<u8>(py, &numpy, a, &shape, itemsize, reps, "S", "uint8")
+            run_multiply::<u8>(py, numpy, a, &shape, itemsize, reps, "S", "uint8")
         }
         _ => Ok(None),
     }
@@ -102854,7 +102854,7 @@ fn try_zerocopy_unicode_pad(
         return Ok(None);
     }
     let width = width as usize;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -102892,7 +102892,7 @@ fn try_zerocopy_unicode_pad(
                     }
                 }
             };
-            run_pad::<u32>(py, &numpy, a, &shape, w, width, fill, mode, "U", "uint32")
+            run_pad::<u32>(py, numpy, a, &shape, w, width, fill, mode, "U", "uint32")
         }
         "S" => {
             if itemsize == 0 {
@@ -102912,7 +102912,7 @@ fn try_zerocopy_unicode_pad(
                     b[0]
                 }
             };
-            run_pad::<u8>(py, &numpy, a, &shape, w, width, fill, mode, "S", "uint8")
+            run_pad::<u8>(py, numpy, a, &shape, w, width, fill, mode, "S", "uint8")
         }
         _ => Ok(None),
     }
@@ -103087,7 +103087,7 @@ fn try_zerocopy_unicode_expandtabs(
         return Ok(None);
     }
     let tabsize = tabsize as usize;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -103110,13 +103110,13 @@ fn try_zerocopy_unicode_expandtabs(
             if itemsize == 0 || itemsize % 4 != 0 {
                 return Ok(None);
             }
-            run_expandtabs::<u32>(py, &numpy, a, &shape, itemsize / 4, tabsize, "U", "uint32")
+            run_expandtabs::<u32>(py, numpy, a, &shape, itemsize / 4, tabsize, "U", "uint32")
         }
         "S" => {
             if itemsize == 0 {
                 return Ok(None);
             }
-            run_expandtabs::<u8>(py, &numpy, a, &shape, itemsize, tabsize, "S", "uint8")
+            run_expandtabs::<u8>(py, numpy, a, &shape, itemsize, tabsize, "S", "uint8")
         }
         _ => Ok(None),
     }
@@ -103143,7 +103143,7 @@ fn try_zerocopy_unicode_search(
         return Ok(None); // empty-sub edge (count=len+1, find=0) -> numpy
     }
     let sub_cp: Vec<u32> = sub_str.chars().map(|c| c as u32).collect();
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -104685,7 +104685,7 @@ fn try_native_strings_partition(
     sep: &Bound<'_, PyAny>,
     from_right: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -104715,7 +104715,7 @@ fn try_native_strings_partition(
             }
             run_partition::<u32>(
                 py,
-                &numpy,
+                numpy,
                 a,
                 itemsize / 4,
                 &sep_cp,
@@ -104734,7 +104734,7 @@ fn try_native_strings_partition(
             if itemsize == 0 {
                 return Ok(None);
             }
-            run_partition::<u8>(py, &numpy, a, itemsize, &sep_b, from_right, "S", "uint8")
+            run_partition::<u8>(py, numpy, a, itemsize, &sep_b, from_right, "S", "uint8")
         }
         _ => Ok(None),
     }
@@ -105143,7 +105143,7 @@ fn try_zerocopy_f64_divmod(
     x1: &Bound<'_, PyAny>,
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
     if !x1.is_exact_instance(&ndarray_t)
         || !x2.is_exact_instance(&ndarray_t)
@@ -105479,7 +105479,7 @@ fn try_zerocopy_int_sign(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Optio
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -105488,21 +105488,21 @@ fn try_zerocopy_int_sign(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Optio
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     let result = match (kind.as_str(), itemsize) {
         ("i", 1) => {
-            sign_typed::<i8, _>(py, &numpy, a, "int8", |v| i8::from(v > 0) - i8::from(v < 0))?
+            sign_typed::<i8, _>(py, numpy, a, "int8", |v| i8::from(v > 0) - i8::from(v < 0))?
         }
-        ("i", 2) => sign_typed::<i16, _>(py, &numpy, a, "int16", |v| {
+        ("i", 2) => sign_typed::<i16, _>(py, numpy, a, "int16", |v| {
             i16::from(v > 0) - i16::from(v < 0)
         })?,
-        ("i", 4) => sign_typed::<i32, _>(py, &numpy, a, "int32", |v| {
+        ("i", 4) => sign_typed::<i32, _>(py, numpy, a, "int32", |v| {
             i32::from(v > 0) - i32::from(v < 0)
         })?,
-        ("i", 8) => sign_typed::<i64, _>(py, &numpy, a, "int64", |v| {
+        ("i", 8) => sign_typed::<i64, _>(py, numpy, a, "int64", |v| {
             i64::from(v > 0) - i64::from(v < 0)
         })?,
-        ("u", 1) => sign_typed::<u8, _>(py, &numpy, a, "uint8", |v| u8::from(v > 0))?,
-        ("u", 2) => sign_typed::<u16, _>(py, &numpy, a, "uint16", |v| u16::from(v > 0))?,
-        ("u", 4) => sign_typed::<u32, _>(py, &numpy, a, "uint32", |v| u32::from(v > 0))?,
-        ("u", 8) => sign_typed::<u64, _>(py, &numpy, a, "uint64", |v| u64::from(v > 0))?,
+        ("u", 1) => sign_typed::<u8, _>(py, numpy, a, "uint8", |v| u8::from(v > 0))?,
+        ("u", 2) => sign_typed::<u16, _>(py, numpy, a, "uint16", |v| u16::from(v > 0))?,
+        ("u", 4) => sign_typed::<u32, _>(py, numpy, a, "uint32", |v| u32::from(v > 0))?,
+        ("u", 8) => sign_typed::<u64, _>(py, numpy, a, "uint64", |v| u64::from(v > 0))?,
         _ => return Ok(None),
     };
     let Some((flat, shape)) = result else {
@@ -105658,7 +105658,7 @@ fn try_zerocopy_int_prod(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" && kind != "b" {
@@ -105672,10 +105672,10 @@ fn try_zerocopy_int_prod(
         let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
         let mul = |x: i64, y: i64| x.wrapping_mul(y);
         return match axis {
-            None => prod_typed::<u8, i64, _, _>(py, &numpy, &viewed, "int64", 1, |v| v as i64, mul),
+            None => prod_typed::<u8, i64, _, _>(py, numpy, &viewed, "int64", 1, |v| v as i64, mul),
             Some(ax) => prod_axis_typed::<u8, i64, _, _>(
                 py,
-                &numpy,
+                numpy,
                 &viewed,
                 "int64",
                 1,
@@ -105690,12 +105690,12 @@ fn try_zerocopy_int_prod(
     macro_rules! dispatch {
         ($t:ty, $a:ty, $dt:literal, $conv:expr) => {
             match axis {
-                None => prod_typed::<$t, $a, _, _>(py, &numpy, a, $dt, 1, $conv, |x: $a, y: $a| {
+                None => prod_typed::<$t, $a, _, _>(py, numpy, a, $dt, 1, $conv, |x: $a, y: $a| {
                     x.wrapping_mul(y)
                 }),
                 Some(ax) => prod_axis_typed::<$t, $a, _, _>(
                     py,
-                    &numpy,
+                    numpy,
                     a,
                     $dt,
                     1,
@@ -105830,7 +105830,7 @@ fn try_zerocopy_int_argextreme(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -105857,10 +105857,10 @@ fn try_zerocopy_int_argextreme(
         return Ok(Some(numpy.getattr(op)?.call1((a,))?.unbind()));
     }
     match (kind.as_str(), itemsize) {
-        ("i", 4) => argextreme_typed::<i32>(py, &numpy, a, take_max),
-        ("i", 8) => argextreme_typed::<i64>(py, &numpy, a, take_max),
-        ("u", 4) => argextreme_typed::<u32>(py, &numpy, a, take_max),
-        ("u", 8) => argextreme_typed::<u64>(py, &numpy, a, take_max),
+        ("i", 4) => argextreme_typed::<i32>(py, numpy, a, take_max),
+        ("i", 8) => argextreme_typed::<i64>(py, numpy, a, take_max),
+        ("u", 4) => argextreme_typed::<u32>(py, numpy, a, take_max),
+        ("u", 8) => argextreme_typed::<u64>(py, numpy, a, take_max),
         _ => Ok(None),
     }
 }
@@ -105914,7 +105914,7 @@ fn try_zerocopy_int_ptp(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -105922,14 +105922,14 @@ fn try_zerocopy_int_ptp(
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
-        ("i", 1) => ptp_typed::<i8, _>(py, &numpy, a, "int8", |x, y| x.wrapping_sub(y)),
-        ("i", 2) => ptp_typed::<i16, _>(py, &numpy, a, "int16", |x, y| x.wrapping_sub(y)),
-        ("i", 4) => ptp_typed::<i32, _>(py, &numpy, a, "int32", |x, y| x.wrapping_sub(y)),
-        ("i", 8) => ptp_typed::<i64, _>(py, &numpy, a, "int64", |x, y| x.wrapping_sub(y)),
-        ("u", 1) => ptp_typed::<u8, _>(py, &numpy, a, "uint8", |x, y| x.wrapping_sub(y)),
-        ("u", 2) => ptp_typed::<u16, _>(py, &numpy, a, "uint16", |x, y| x.wrapping_sub(y)),
-        ("u", 4) => ptp_typed::<u32, _>(py, &numpy, a, "uint32", |x, y| x.wrapping_sub(y)),
-        ("u", 8) => ptp_typed::<u64, _>(py, &numpy, a, "uint64", |x, y| x.wrapping_sub(y)),
+        ("i", 1) => ptp_typed::<i8, _>(py, numpy, a, "int8", |x, y| x.wrapping_sub(y)),
+        ("i", 2) => ptp_typed::<i16, _>(py, numpy, a, "int16", |x, y| x.wrapping_sub(y)),
+        ("i", 4) => ptp_typed::<i32, _>(py, numpy, a, "int32", |x, y| x.wrapping_sub(y)),
+        ("i", 8) => ptp_typed::<i64, _>(py, numpy, a, "int64", |x, y| x.wrapping_sub(y)),
+        ("u", 1) => ptp_typed::<u8, _>(py, numpy, a, "uint8", |x, y| x.wrapping_sub(y)),
+        ("u", 2) => ptp_typed::<u16, _>(py, numpy, a, "uint16", |x, y| x.wrapping_sub(y)),
+        ("u", 4) => ptp_typed::<u32, _>(py, numpy, a, "uint32", |x, y| x.wrapping_sub(y)),
+        ("u", 8) => ptp_typed::<u64, _>(py, numpy, a, "uint64", |x, y| x.wrapping_sub(y)),
         _ => Ok(None),
     }
 }
@@ -106125,7 +106125,7 @@ fn try_zerocopy_int_ptp_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
@@ -106145,27 +106145,27 @@ fn try_zerocopy_int_ptp_axis(
         ));
     }
     let Some((flat, out_shape)) = (match (kind.as_str(), itemsize) {
-        ("i", 1) => ptp_axis_typed::<i8, _>(py, &numpy, a, axis, "int8", |x, y| x.wrapping_sub(y))?,
+        ("i", 1) => ptp_axis_typed::<i8, _>(py, numpy, a, axis, "int8", |x, y| x.wrapping_sub(y))?,
         ("i", 2) => {
-            ptp_axis_typed::<i16, _>(py, &numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?
+            ptp_axis_typed::<i16, _>(py, numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?
         }
         ("i", 4) => {
-            ptp_axis_typed::<i32, _>(py, &numpy, a, axis, "int32", |x, y| x.wrapping_sub(y))?
+            ptp_axis_typed::<i32, _>(py, numpy, a, axis, "int32", |x, y| x.wrapping_sub(y))?
         }
         ("i", 8) => {
-            ptp_axis_typed::<i64, _>(py, &numpy, a, axis, "int64", |x, y| x.wrapping_sub(y))?
+            ptp_axis_typed::<i64, _>(py, numpy, a, axis, "int64", |x, y| x.wrapping_sub(y))?
         }
         ("u", 1) => {
-            ptp_axis_typed::<u8, _>(py, &numpy, a, axis, "uint8", |x, y| x.wrapping_sub(y))?
+            ptp_axis_typed::<u8, _>(py, numpy, a, axis, "uint8", |x, y| x.wrapping_sub(y))?
         }
         ("u", 2) => {
-            ptp_axis_typed::<u16, _>(py, &numpy, a, axis, "uint16", |x, y| x.wrapping_sub(y))?
+            ptp_axis_typed::<u16, _>(py, numpy, a, axis, "uint16", |x, y| x.wrapping_sub(y))?
         }
         ("u", 4) => {
-            ptp_axis_typed::<u32, _>(py, &numpy, a, axis, "uint32", |x, y| x.wrapping_sub(y))?
+            ptp_axis_typed::<u32, _>(py, numpy, a, axis, "uint32", |x, y| x.wrapping_sub(y))?
         }
         ("u", 8) => {
-            ptp_axis_typed::<u64, _>(py, &numpy, a, axis, "uint64", |x, y| x.wrapping_sub(y))?
+            ptp_axis_typed::<u64, _>(py, numpy, a, axis, "uint64", |x, y| x.wrapping_sub(y))?
         }
         _ => return Ok(None),
     }) else {
@@ -106198,7 +106198,7 @@ fn try_zerocopy_f64_ptp_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = a.getattr("dtype")?;
     if dtype.getattr("kind")?.extract::<String>()? != "f"
         || dtype.getattr("itemsize")?.extract::<usize>()? != 8
@@ -107431,7 +107431,7 @@ fn try_zerocopy_int_around(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if kind != "i" && kind != "u" {
         return Ok(None);
@@ -107477,7 +107477,7 @@ fn try_zerocopy_f16_around(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dt = a.getattr("dtype")?;
     if dt.getattr("kind")?.extract::<String>()? != "f"
         || dt.getattr("itemsize")?.extract::<usize>()? != 2
@@ -108044,7 +108044,7 @@ fn try_zerocopy_block_2d_grid(
     nested: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const BLOCK_PAR_MIN_BYTES: usize = 1 << 22;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let nd = cached_ndarray_type(numpy.py())?.clone();
     // Exactly one nesting level of lists: [[A, B, ...], [C, D, ...], ...],
     // every leaf a C-contiguous 2-D exact ndarray of ONE shared dtype.
@@ -109176,7 +109176,7 @@ fn piecewise_native(
         return Ok(None);
     }
     let x = args.get_item(0)?;
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let ndarray = cached_ndarray_type(numpy.py())?.clone();
     if !x.is_exact_instance(&ndarray) {
         return Ok(None);
