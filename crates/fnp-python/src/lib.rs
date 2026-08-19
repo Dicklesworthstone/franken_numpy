@@ -127115,7 +127115,10 @@ mod tests {
             // THE FOUR EDGE CASES, spelled out as literals so a regression reads as the rule
             // it broke rather than as a fuzz mismatch.
             for (num, width, expected) in [
-                (0i64, 0i64, ""),
+                // A ZERO width is FALSY, so `'0' * (width or 1)` gives ONE digit; only a
+                // NEGATIVE width gives the empty string. Transcribing these the other way
+                // round is what this table got wrong on its first run.
+                (0i64, 0i64, "0"),
                 (0, -3, ""),
                 (0, 1, "0"),
                 (0, 5, "00000"),
