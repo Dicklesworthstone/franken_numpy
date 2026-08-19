@@ -30415,9 +30415,9 @@ fn isposinf(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
         isposinf_native(py, &x_arg)
-            .or_else(|_| core_numpy_passthrough(py, "isposinf", args, kwargs))
+            .or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "isposinf"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "isposinf", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "isposinf"), args, kwargs)
     }
 }
 
@@ -30443,9 +30443,9 @@ fn isneginf(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
         isneginf_native(py, &x_arg)
-            .or_else(|_| core_numpy_passthrough(py, "isneginf", args, kwargs))
+            .or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "isneginf"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "isneginf", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "isneginf"), args, kwargs)
     }
 }
 
@@ -30502,9 +30502,9 @@ fn signbit(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
-        signbit_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "signbit", args, kwargs))
+        signbit_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "signbit"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "signbit", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "signbit"), args, kwargs)
     }
 }
 
@@ -30557,9 +30557,9 @@ fn isnan(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
-        isnan_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "isnan", args, kwargs))
+        isnan_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "isnan"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "isnan", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "isnan"), args, kwargs)
     }
 }
 
@@ -30608,9 +30608,9 @@ fn isinf(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
-        isinf_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "isinf", args, kwargs))
+        isinf_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "isinf"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "isinf", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "isinf"), args, kwargs)
     }
 }
 
@@ -30658,9 +30658,9 @@ fn isfinite(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
         isfinite_native(py, &x_arg)
-            .or_else(|_| core_numpy_passthrough(py, "isfinite", args, kwargs))
+            .or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "isfinite"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "isfinite", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "isfinite"), args, kwargs)
     }
 }
 
@@ -30746,7 +30746,7 @@ fn spacing(
 ) -> PyResult<Py<PyAny>> {
     // out=/where=/dtype= etc → numpy passthrough (matches np.spacing accepting out=).
     if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1) {
-        return core_numpy_passthrough(py, "spacing", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "spacing"), args, kwargs);
     }
     let x: Py<PyAny> = args.get_item(0)?.unbind();
     // NumPy's spacing returns a float result whose width follows numpy's type
@@ -30806,7 +30806,7 @@ fn sign(
     // out=/where=/dtype= etc → numpy passthrough (full ufunc kwarg surface, matching
     // np.sign which accepts out=). Bare single-arg call uses the native fast paths below.
     if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1) {
-        return core_numpy_passthrough(py, "sign", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "sign"), args, kwargs);
     }
     let x: Py<PyAny> = args.get_item(0)?.unbind();
     let numpy = cached_numpy(py)?;
@@ -30911,9 +30911,9 @@ fn floor(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
-        floor_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "floor", args, kwargs))
+        floor_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "floor"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "floor", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "floor"), args, kwargs)
     }
 }
 
@@ -30930,9 +30930,9 @@ fn ceil(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
-        ceil_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "ceil", args, kwargs))
+        ceil_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "ceil"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "ceil", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "ceil"), args, kwargs)
     }
 }
 
@@ -30949,9 +30949,9 @@ fn trunc(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
-        trunc_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "trunc", args, kwargs))
+        trunc_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "trunc"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "trunc", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "trunc"), args, kwargs)
     }
 }
 
@@ -30998,9 +30998,9 @@ fn rint(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x_arg = args.get_item(0)?;
-        rint_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "rint", args, kwargs))
+        rint_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "rint"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "rint", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "rint"), args, kwargs)
     }
 }
 
@@ -31048,9 +31048,9 @@ fn degrees(
         if let Some(out) = try_zerocopy_f16_unary_widen(py, &x_arg, UnaryOp::Degrees)? {
             return Ok(out);
         }
-        degrees_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "degrees", args, kwargs))
+        degrees_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "degrees"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "degrees", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "degrees"), args, kwargs)
     }
 }
 
@@ -31073,9 +31073,9 @@ fn radians(
         if let Some(out) = try_zerocopy_f16_unary_widen(py, &x_arg, UnaryOp::Radians)? {
             return Ok(out);
         }
-        radians_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "radians", args, kwargs))
+        radians_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "radians"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "radians", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "radians"), args, kwargs)
     }
 }
 
@@ -32878,7 +32878,7 @@ fn copysign(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "copysign", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "copysign"), args, kwargs)
 }
 
 #[pyfunction]
@@ -32893,7 +32893,7 @@ fn nextafter(
 ) -> PyResult<Py<PyAny>> {
     // out=/where=/dtype= etc → numpy passthrough (matches np.nextafter accepting out=).
     if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2) {
-        return core_numpy_passthrough(py, "nextafter", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "nextafter"), args, kwargs);
     }
     let x1: Py<PyAny> = args.get_item(0)?.unbind();
     let x2: Py<PyAny> = args.get_item(1)?.unbind();
@@ -32948,7 +32948,7 @@ fn hypot(
 ) -> PyResult<Py<PyAny>> {
     // out=/where=/dtype= etc → numpy passthrough (matches np.hypot accepting out=).
     if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2) {
-        return core_numpy_passthrough(py, "hypot", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "hypot"), args, kwargs);
     }
     let x1: Py<PyAny> = args.get_item(0)?.unbind();
     let x2: Py<PyAny> = args.get_item(1)?.unbind();
@@ -33026,7 +33026,7 @@ fn logaddexp(
 ) -> PyResult<Py<PyAny>> {
     // out=/where=/dtype= etc → numpy passthrough (matches np.logaddexp accepting out=).
     if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2) {
-        return core_numpy_passthrough(py, "logaddexp", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "logaddexp"), args, kwargs);
     }
     let x1: Py<PyAny> = args.get_item(0)?.unbind();
     let x2: Py<PyAny> = args.get_item(1)?.unbind();
@@ -33073,7 +33073,7 @@ fn logaddexp2(
 ) -> PyResult<Py<PyAny>> {
     // out=/where=/dtype= etc → numpy passthrough (matches np.logaddexp2 accepting out=).
     if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2) {
-        return core_numpy_passthrough(py, "logaddexp2", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "logaddexp2"), args, kwargs);
     }
     let x1: Py<PyAny> = args.get_item(0)?.unbind();
     let x2: Py<PyAny> = args.get_item(1)?.unbind();
@@ -56521,7 +56521,7 @@ fn heaviside(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "heaviside", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "heaviside"), args, kwargs)
 }
 
 #[pyfunction]
@@ -56540,9 +56540,9 @@ fn rad2deg(
         if let Some(out) = try_zerocopy_f16_unary_widen(py, &x_arg, UnaryOp::Degrees)? {
             return Ok(out);
         }
-        degrees_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "rad2deg", args, kwargs))
+        degrees_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "rad2deg"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "rad2deg", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "rad2deg"), args, kwargs)
     }
 }
 
@@ -56575,7 +56575,7 @@ fn reciprocal(
 ) -> PyResult<Py<PyAny>> {
     // out=/where=/dtype= etc → numpy passthrough (matches np.reciprocal accepting out=).
     if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1) {
-        return core_numpy_passthrough(py, "reciprocal", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "reciprocal"), args, kwargs);
     }
     let x: Py<PyAny> = args.get_item(0)?.unbind();
     // Integer reciprocal is exact only for ±1: numpy yields 0 for |n|>1 and the
@@ -56682,7 +56682,7 @@ fn fmod(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "fmod", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "fmod"), args, kwargs)
 }
 
 #[pyfunction]
@@ -57066,7 +57066,7 @@ fn native_binary_arctan2_or_passthrough(
         if !numpy_dtype_is_f64(py, &args.get_item(0)?)
             || !numpy_dtype_is_f64(py, &args.get_item(1)?)
         {
-            return core_numpy_passthrough(py, "arctan2", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "arctan2"), args, kwargs);
         }
         // Zero-copy parallel path for same-shape C-contiguous f64 ndarrays: reduce
         // straight off the borrowed buffers with a rayon-parallel atan2, skipping the
@@ -57084,13 +57084,13 @@ fn native_binary_arctan2_or_passthrough(
         if noncontiguous_ndarray(&numpy, &args.get_item(0)?)?
             || noncontiguous_ndarray(&numpy, &args.get_item(1)?)?
         {
-            return core_numpy_passthrough(py, "arctan2", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "arctan2"), args, kwargs);
         }
         // Scalar / broadcasting f64 operands: ufunc_arctan2's extract+broadcast is 2-2.8x slower
         // than numpy's C arctan2 (the same-shape case won above). Delegate. (BlackThrush 2026-06-23.)
-        core_numpy_passthrough(py, "arctan2", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "arctan2"), args, kwargs)
     } else {
-        core_numpy_passthrough(py, "arctan2", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "arctan2"), args, kwargs)
     }
 }
 
@@ -57116,21 +57116,21 @@ fn native_binary_fmax_or_passthrough(
             .getattr("kind")?
             .extract::<String>()?;
         if dtype1_kind == "c" || dtype2_kind == "c" {
-            return core_numpy_passthrough(py, "fmax", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "fmax"), args, kwargs);
         }
         // fmax preserves the input dtype exactly; the f64 kernel widens narrow
         // ints/floats, so defer anything but float64 to numpy.
         if !numpy_dtype_is_f64(py, &args.get_item(0)?)
             || !numpy_dtype_is_f64(py, &args.get_item(1)?)
         {
-            return core_numpy_passthrough(py, "fmax", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "fmax"), args, kwargs);
         }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "fmax(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "fmax(x2)")?;
         let result = ufunc_fmax(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "fmax", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "fmax"), args, kwargs)
     }
 }
 
@@ -57153,21 +57153,21 @@ fn native_binary_fmin_or_passthrough(
             .getattr("kind")?
             .extract::<String>()?;
         if dtype1_kind == "c" || dtype2_kind == "c" {
-            return core_numpy_passthrough(py, "fmin", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "fmin"), args, kwargs);
         }
         // fmin preserves the input dtype exactly; the f64 kernel widens narrow
         // ints/floats, so defer anything but float64 to numpy.
         if !numpy_dtype_is_f64(py, &args.get_item(0)?)
             || !numpy_dtype_is_f64(py, &args.get_item(1)?)
         {
-            return core_numpy_passthrough(py, "fmin", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "fmin"), args, kwargs);
         }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "fmin(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "fmin(x2)")?;
         let result = ufunc_fmin(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "fmin", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "fmin"), args, kwargs)
     }
 }
 
@@ -57190,14 +57190,14 @@ fn native_binary_maximum_or_passthrough(
             .getattr("kind")?
             .extract::<String>()?;
         if dtype1_kind == "c" || dtype2_kind == "c" {
-            return core_numpy_passthrough(py, "maximum", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "maximum"), args, kwargs);
         }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "maximum(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "maximum(x2)")?;
         let result = ufunc_maximum(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "maximum", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "maximum"), args, kwargs)
     }
 }
 
@@ -57220,14 +57220,14 @@ fn native_binary_minimum_or_passthrough(
             .getattr("kind")?
             .extract::<String>()?;
         if dtype1_kind == "c" || dtype2_kind == "c" {
-            return core_numpy_passthrough(py, "minimum", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "minimum"), args, kwargs);
         }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "minimum(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "minimum(x2)")?;
         let result = ufunc_minimum(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "minimum", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "minimum"), args, kwargs)
     }
 }
 
@@ -57247,7 +57247,7 @@ fn native_binary_gcd_or_passthrough(
         return Ok(out);
     }
     // Delegate to NumPy to preserve integer dtype and scalar return type.
-    core_numpy_passthrough(py, "gcd", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "gcd"), args, kwargs)
 }
 
 fn native_binary_lcm_or_passthrough(
@@ -57266,7 +57266,7 @@ fn native_binary_lcm_or_passthrough(
         return Ok(out);
     }
     // Delegate to NumPy to preserve integer dtype and scalar return type.
-    core_numpy_passthrough(py, "lcm", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "lcm"), args, kwargs)
 }
 
 fn native_binary_float_power_or_passthrough(
@@ -57294,7 +57294,7 @@ fn native_binary_float_power_or_passthrough(
     {
         return Ok(out);
     }
-    core_numpy_passthrough(py, "float_power", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "float_power"), args, kwargs)
 }
 
 fn native_binary_remainder_or_passthrough(
@@ -57308,23 +57308,23 @@ fn native_binary_remainder_or_passthrough(
         if !numpy_dtype_is_f64(py, &args.get_item(0)?)
             || !numpy_dtype_is_f64(py, &args.get_item(1)?)
         {
-            return core_numpy_passthrough(py, "remainder", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs);
         }
         let numpy = py.import("numpy")?;
         if noncontiguous_ndarray(&numpy, &args.get_item(0)?)?
             || noncontiguous_ndarray(&numpy, &args.get_item(1)?)?
         {
-            return core_numpy_passthrough(py, "remainder", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs);
         }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "remainder(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "remainder(x2)")?;
         if contains_zero_divisor(&x2) {
-            return core_numpy_passthrough(py, "remainder", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs);
         }
         let result = ufunc_remainder(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "remainder", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs)
     }
 }
 
@@ -57337,19 +57337,19 @@ fn native_binary_equal_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let x1 = match extract_numeric_array(py, &args.get_item(0)?, "equal(x1)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "equal"), args, kwargs),
         };
         let x2 = match extract_numeric_array(py, &args.get_item(1)?, "equal(x2)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "equal"), args, kwargs),
         };
         let result = match ufunc_equal(&x1, &x2) {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "equal"), args, kwargs),
         };
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "equal", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "equal"), args, kwargs)
     }
 }
 
@@ -57362,19 +57362,19 @@ fn native_binary_not_equal_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let x1 = match extract_numeric_array(py, &args.get_item(0)?, "not_equal(x1)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "not_equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "not_equal"), args, kwargs),
         };
         let x2 = match extract_numeric_array(py, &args.get_item(1)?, "not_equal(x2)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "not_equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "not_equal"), args, kwargs),
         };
         let result = match ufunc_not_equal(&x1, &x2) {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "not_equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "not_equal"), args, kwargs),
         };
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "not_equal", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "not_equal"), args, kwargs)
     }
 }
 
@@ -57387,19 +57387,19 @@ fn native_binary_greater_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let x1 = match extract_numeric_array(py, &args.get_item(0)?, "greater(x1)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "greater", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "greater"), args, kwargs),
         };
         let x2 = match extract_numeric_array(py, &args.get_item(1)?, "greater(x2)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "greater", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "greater"), args, kwargs),
         };
         let result = match ufunc_greater(&x1, &x2) {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "greater", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "greater"), args, kwargs),
         };
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "greater", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "greater"), args, kwargs)
     }
 }
 
@@ -57412,19 +57412,19 @@ fn native_binary_greater_equal_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let x1 = match extract_numeric_array(py, &args.get_item(0)?, "greater_equal(x1)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "greater_equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "greater_equal"), args, kwargs),
         };
         let x2 = match extract_numeric_array(py, &args.get_item(1)?, "greater_equal(x2)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "greater_equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "greater_equal"), args, kwargs),
         };
         let result = match ufunc_greater_equal(&x1, &x2) {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "greater_equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "greater_equal"), args, kwargs),
         };
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "greater_equal", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "greater_equal"), args, kwargs)
     }
 }
 
@@ -57437,19 +57437,19 @@ fn native_binary_less_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let x1 = match extract_numeric_array(py, &args.get_item(0)?, "less(x1)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "less", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "less"), args, kwargs),
         };
         let x2 = match extract_numeric_array(py, &args.get_item(1)?, "less(x2)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "less", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "less"), args, kwargs),
         };
         let result = match ufunc_less(&x1, &x2) {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "less", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "less"), args, kwargs),
         };
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "less", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "less"), args, kwargs)
     }
 }
 
@@ -57462,19 +57462,19 @@ fn native_binary_less_equal_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let x1 = match extract_numeric_array(py, &args.get_item(0)?, "less_equal(x1)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "less_equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "less_equal"), args, kwargs),
         };
         let x2 = match extract_numeric_array(py, &args.get_item(1)?, "less_equal(x2)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "less_equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "less_equal"), args, kwargs),
         };
         let result = match ufunc_less_equal(&x1, &x2) {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "less_equal", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "less_equal"), args, kwargs),
         };
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "less_equal", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "less_equal"), args, kwargs)
     }
 }
 
@@ -57490,7 +57490,7 @@ fn native_binary_logical_and_or_passthrough(
         let result = ufunc_logical_and(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "logical_and", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "logical_and"), args, kwargs)
     }
 }
 
@@ -57506,7 +57506,7 @@ fn native_binary_logical_or_or_passthrough(
         let result = ufunc_logical_or(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "logical_or", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "logical_or"), args, kwargs)
     }
 }
 
@@ -57522,7 +57522,7 @@ fn native_binary_logical_xor_or_passthrough(
         let result = ufunc_logical_xor(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "logical_xor", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "logical_xor"), args, kwargs)
     }
 }
 
@@ -57597,7 +57597,7 @@ fn native_unary_logical_not_or_passthrough(
         let result = ufunc_logical_not(&x).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "logical_not", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "logical_not"), args, kwargs)
     }
 }
 
@@ -57613,7 +57613,7 @@ fn native_binary_bitwise_and_or_passthrough(
         let result = ufunc_bitwise_and(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "bitwise_and", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "bitwise_and"), args, kwargs)
     }
 }
 
@@ -57629,7 +57629,7 @@ fn native_binary_bitwise_or_or_passthrough(
         let result = ufunc_bitwise_or(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "bitwise_or", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "bitwise_or"), args, kwargs)
     }
 }
 
@@ -57645,7 +57645,7 @@ fn native_binary_bitwise_xor_or_passthrough(
         let result = ufunc_bitwise_xor(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "bitwise_xor", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "bitwise_xor"), args, kwargs)
     }
 }
 
@@ -57988,7 +57988,7 @@ fn native_binary_left_shift_or_passthrough(
         let result = ufunc_left_shift(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "left_shift", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "left_shift"), args, kwargs)
     }
 }
 
@@ -58011,7 +58011,7 @@ fn native_binary_right_shift_or_passthrough(
         let result = ufunc_right_shift(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "right_shift", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "right_shift"), args, kwargs)
     }
 }
 
@@ -58109,9 +58109,9 @@ fn native_unary_invert_or_passthrough(
         // Residual (numpy scalars, python lists, exotic dtypes): the old
         // extract -> ufunc_invert path widened narrow ints to int64 and crashed on
         // unsigned scalars. numpy.invert is the exact oracle, so delegate.
-        core_numpy_passthrough(py, "invert", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "invert"), args, kwargs)
     } else {
-        core_numpy_passthrough(py, "invert", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "invert"), args, kwargs)
     }
 }
 
@@ -58124,19 +58124,19 @@ fn native_binary_power_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let x1 = match extract_numeric_array(py, &args.get_item(0)?, "power(x1)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "power", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "power"), args, kwargs),
         };
         let x2 = match extract_numeric_array(py, &args.get_item(1)?, "power(x2)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "power", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "power"), args, kwargs),
         };
         let result = match ufunc_power(&x1, &x2) {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "power", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "power"), args, kwargs),
         };
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "power", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "power"), args, kwargs)
     }
 }
 
@@ -58150,22 +58150,22 @@ fn native_binary_divide_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "divide(x1)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs),
         };
         let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "divide(x2)") {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs),
         };
         if contains_zero_divisor(&x2) {
-            return core_numpy_passthrough(py, "divide", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs);
         }
         let result = match ufunc_divide(&x1, &x2) {
             Ok(value) => value,
-            Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs),
         };
         build_numpy_scalar_or_array(py, &result)
     } else {
-        core_numpy_passthrough(py, "divide", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs)
     }
 }
 
@@ -58283,9 +58283,9 @@ fn deg2rad(
         if let Some(out) = try_zerocopy_f16_unary_widen(py, &x_arg, UnaryOp::Radians)? {
             return Ok(out);
         }
-        radians_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "deg2rad", args, kwargs))
+        radians_native(py, &x_arg).or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "deg2rad"), args, kwargs))
     } else {
-        core_numpy_passthrough(py, "deg2rad", args, kwargs)
+        core_numpy_passthrough_interned(py, intern!(py, "deg2rad"), args, kwargs)
     }
 }
 
@@ -58535,7 +58535,7 @@ fn invert(
     // Passthrough to np.invert (bitwise NOT for integer and boolean dtypes; aliased as
     // bitwise_not). Rejects float/complex with a TypeError that must surface
     // identically; out=/where=/dtype= forwarded for full ufunc parity.
-    core_numpy_passthrough(py, "invert", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "invert"), args, kwargs)
 }
 
 // Float element abstraction for the native unwrap kernel (f32 + f64). numpy
@@ -60699,7 +60699,7 @@ fn true_divide(
     // (an O(n) pre-scan for zero divisors + a non-competitive native divide; serial-confirmed,
     // BlackThrush 2026-06-22). Delegate to numpy.true_divide for divide-parity. (ARRAY-API-
     // ALIAS fix: route the alias to numpy's optimized impl, cf atan2->arctan2.)
-    core_numpy_passthrough(py, "true_divide", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "true_divide"), args, kwargs)
 }
 
 // Per-element np.isclose predicate: finite values use the asymmetric tolerance
@@ -61443,7 +61443,7 @@ fn add(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "add", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "add"), args, kwargs)
 }
 
 #[allow(dead_code)]
@@ -61461,22 +61461,22 @@ fn subtract(
     if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
         let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "subtract(x1)") {
             Ok(arr) => arr,
-            Err(_) => return core_numpy_passthrough(py, "subtract", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs),
         };
         let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "subtract(x2)") {
             Ok(arr) => arr,
-            Err(_) => return core_numpy_passthrough(py, "subtract", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs),
         };
         if x1.has_integer_sidecar() || x2.has_integer_sidecar() {
-            return core_numpy_passthrough(py, "subtract", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs);
         }
         let result = match x1.elementwise_binary(&x2, BinaryOp::Sub) {
             Ok(r) => r,
-            Err(_) => return core_numpy_passthrough(py, "subtract", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs),
         };
         return build_numpy_scalar_or_array(py, &result);
     }
-    core_numpy_passthrough(py, "subtract", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs)
 }
 
 #[allow(dead_code)]
@@ -61491,7 +61491,7 @@ fn multiply(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "multiply", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "multiply"), args, kwargs)
 }
 
 #[pyfunction]
@@ -61548,7 +61548,7 @@ fn log(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "log", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "log"), args, kwargs)
 }
 
 // The 2026-06-09 "numpy exp ~2x faster than the rayon scalar-libm path, do not
@@ -61588,7 +61588,7 @@ fn exp(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "exp", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "exp"), args, kwargs)
 }
 
 #[pyfunction]
@@ -72872,7 +72872,7 @@ fn sort(
             }
         }
     }
-    core_numpy_passthrough(py, "sort", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "sort"), args, kwargs)
 }
 
 // Sampled tie oracle for the float argsort fast paths. Those paths are byte-exact vs numpy's UNSTABLE
@@ -76688,7 +76688,7 @@ fn argsort(
             }
         }
     }
-    core_numpy_passthrough(py, "argsort", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "argsort"), args, kwargs)
 }
 
 fn try_zerocopy_f64_sort_complex_flat(
@@ -82827,6 +82827,34 @@ fn native_isdtype(
 fn core_numpy_passthrough(
     py: Python<'_>,
     name: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = cached_numpy(py)?;
+    Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
+}
+
+/// `core_numpy_passthrough` with an INTERNED attribute name - what every wrapper whose name is a
+/// literal should use.
+///
+/// WHAT IT SAVES: `getattr` takes its name as `impl IntoPyObject<Target = PyString>`, so a `&str`
+/// makes PyO3 BUILD A FRESH `PyString` - allocate, copy, hash - on EVERY call and then throw it
+/// away. This campaign has counted that pattern at ~795 insns/call against ~202 for an interned
+/// read. On a wrapper whose entire body is "look the function up and forward to it", the
+/// allocation is a large fraction of the wrapper.
+///
+/// WHY THIS AND NOT A CACHED ATTRIBUTE: `68c9466b` caches the resolved FUNCTION for six numpy
+/// entries and deliberately stopped there - caching the function means a later native
+/// implementation, or anything that rebinds `numpy.<name>`, stops being observed. Interning the
+/// KEY changes nothing about lookup semantics: the attribute is still read from the module on
+/// every call, so a rebinding is still seen. It is the half of that lever with no behavioural
+/// cost, which is why it applies to all 179 literal sites rather than a chosen few.
+///
+/// The `&str` form above stays for the four call sites whose name is a runtime value - `intern!`
+/// takes a literal and cannot reach them.
+fn core_numpy_passthrough_interned(
+    py: Python<'_>,
+    name: &Bound<'_, PyString>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
@@ -94920,7 +94948,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && spec.contains("...")
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // Single-operand reduction ("ijk->k") = sum over the dropped axes. The GENERIC
     // native kernel is 1.6-2.6x slower than numpy's optimized einsum reduction here,
@@ -94944,7 +94972,7 @@ fn einsum(
                 return Ok(result);
             }
         }
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // Single-operand diagonal extraction with a repeated index ("bii->bi", "...ii->...i",
     // "iij->ij", "ii"=trace) that the plain-"ii->i" fast path above misses: the generic
@@ -94953,7 +94981,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_single_diag(&spec)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // Generalized outer product ("i,j,k->ijk", "ij,k->ijk", "ij,kl->ijkl", no contraction):
     // the generic native kernel is 2-16x slower than numpy's optimized outer build. Delegate
@@ -94963,7 +94991,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_outer(&spec)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // 2-operand vector contraction the native kernel runs slowly (matvec-LEFT "i,ij->j" 6-7x,
     // tensor-vector "ijk,k->ij" 3-12x). The fast matvec-RIGHT "ij,j->i" is kept native by the
@@ -94972,7 +95000,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_slow_vector_contraction(&spec)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // Batched vector contraction ("bij,bj->bi" 4x, "bi,bij->bj" 8x, "bijk,bk->bij" 3x): the
     // per-batch GEMV loop loses to numpy's batched build. (bead x6ndg, BlackThrush 2026-06-22.)
@@ -94980,7 +95008,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_batched_vector_contraction(&spec)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // 2-operand contraction with a diagonal operand ("ii,jj->ij" 22x, "iij,jk->ik" 41x): a repeated
     // index makes the operand a diagonal -> never GEMM-able -> native kernel loses 10-41x. Delegate.
@@ -94989,7 +95017,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_diagonal_2op(&spec)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // 2-operand ellipsis non-GEMM ("i...,i->..." dot 42x, "...ij,...j->...i" batched-matvec 3.2x):
     // ellipsis-batched-matmul stays native (wins). (bead x6ndg, BlackThrush 2026-06-23.)
@@ -94997,7 +95025,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_ellipsis_2op_nongemm(&spec)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // Second-operand multi-free contraction ("ij,bjk->bik" 39x): op2 carries >=2 free dims the
     // native kernel won't reshape into one GEMM. The op1-multi-free mirror "bij,jk->bik" WINS and
@@ -95006,7 +95034,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_op2_multifree_contraction(&spec)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // All-shared NON-PREFIX contraction ("ijk,ijk->k" 17x, "ijk,ijk->jk"/"->ik"/"->ji" 13-18x):
     // both operands carry the same >=3-label string and the output keeps a NON-prefix subset, so
@@ -95018,7 +95046,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_allshared_nonprefix_contraction(&spec, args.len() - 1)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // Op2-subset MULTI-axis contraction ("ijk,jk->i" 12x, "ijk,ij->k" 36x, "ijk,ik->j" 31x,
     // "ijkl,kl->ij" 2.5x): op2's labels are a strict subset of op1's, all of them contracted, and
@@ -95030,7 +95058,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_op2_subset_multicontract(&spec, args.len() - 1)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // TRANSPOSED full contraction ("ij,ji->" 3x, "ijk,jik->" 28x, "ijk,ikj->" 26x): both operands
     // carry the same distinct label set in a different order and the output is empty (scalar). The
@@ -95041,7 +95069,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_transposed_full_contraction(&spec, args.len() - 1)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // HUB contraction ("i,ij,j->", "a,abc,c->b", "bi,bij,bj->b"): one operand contains
     // every other operand/output label, so numpy's single fused pass over that hub beats the
@@ -95051,7 +95079,7 @@ fn einsum(
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_hub_contraction(&spec, args.len() - 1)
     {
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // NO-CONTRACTION einsum (Hadamard "ij,ij->ij"/"i,i->i", broadcast "ij,j->ij"/"ijk,k->ijk"):
     // every operand label appears in the output and nothing is summed, so it is a broadcasted
@@ -95088,7 +95116,7 @@ fn einsum(
                 return Ok(result);
             }
         }
-        return core_numpy_passthrough(py, "einsum", args, kwargs);
+        return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // Route the common case (string subscripts, real-float operands, no special
     // kwargs) through our native UFuncArray::einsum — which sends GEMM-shaped
@@ -95500,7 +95528,7 @@ fn einsum(
             }
         }
     }
-    core_numpy_passthrough(py, "einsum", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs)
 }
 
 #[derive(Clone, Copy)]
@@ -98126,20 +98154,20 @@ fn unique(
         // (measured 1.1-2.4x at 50K-512K), so delegate. int/other dtypes fall through to the
         // native path unchanged below.
         if is_exact_numpy_ndarray(py, &item)? && numpy_dtype_is_f64(py, &item) {
-            return core_numpy_passthrough(py, "unique", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "unique"), args, kwargs);
         }
         // NumPy's unique preserves the input dtype exactly; our native kernel
         // canonicalizes narrow ints/floats (int32 -> int64, float32 -> float64),
         // so defer any non-canonical width to NumPy.
         if !numpy_dtype_native_roundtrip_preserves(py, &item) {
-            return core_numpy_passthrough(py, "unique", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "unique"), args, kwargs);
         }
         let arr = match extract_numeric_array(py, &item, "unique(ar)") {
             Ok(a) => a,
-            Err(_) => return core_numpy_passthrough(py, "unique", args, kwargs),
+            Err(_) => return core_numpy_passthrough_interned(py, intern!(py, "unique"), args, kwargs),
         };
         if arr.has_integer_sidecar() {
-            return core_numpy_passthrough(py, "unique", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "unique"), args, kwargs);
         }
         let result = arr.unique();
         return build_numpy_array_from_ufunc(py, &result);
@@ -98317,7 +98345,7 @@ fn unique(
             }
         }
     }
-    core_numpy_passthrough(py, "unique", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "unique"), args, kwargs)
 }
 
 // unique(2-D small-range int, axis=0) with return_index/return_inverse/return_counts. Same packed
@@ -100462,7 +100490,7 @@ fn log2(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "log2", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "log2"), args, kwargs)
 }
 
 #[pyfunction]
@@ -100491,7 +100519,7 @@ fn log10(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "log10", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "log10"), args, kwargs)
 }
 
 #[pyfunction]
@@ -100520,7 +100548,7 @@ fn exp2(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "exp2", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "exp2"), args, kwargs)
 }
 
 // ---------------------------------------------------------------------------
@@ -101104,7 +101132,7 @@ fn fmax(
     // array extractions + rebuild) was 60-72x SLOWER than numpy's in-place SIMD
     // fmax for zero benefit — numpy preserves the input dtype exactly too
     // (measured 2026-06-12: numpy 43us vs native 3109us @131k). Byte-identical.
-    core_numpy_passthrough(py, "fmax", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "fmax"), args, kwargs)
 }
 
 #[pyfunction]
@@ -101125,7 +101153,7 @@ fn fmin(
     }
     // Passthrough: native f64 path was 59-61x SLOWER than numpy's in-place SIMD
     // fmin for zero benefit (numpy 43us vs native 3081us @131k). Byte-identical.
-    core_numpy_passthrough(py, "fmin", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "fmin"), args, kwargs)
 }
 
 #[allow(dead_code)]
@@ -105328,7 +105356,7 @@ fn isnat(
     {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "isnat", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "isnat"), args, kwargs)
 }
 
 /// A contiguous `datetime64`/`timedelta64` array's raw counts, whatever its unit.
@@ -106786,7 +106814,7 @@ fn vecmat(
     {
         return Ok(out);
     }
-    core_numpy_passthrough(py, "vecmat", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "vecmat"), args, kwargs)
 }
 
 #[pyfunction]
@@ -106808,7 +106836,7 @@ fn matvec(
     {
         return Ok(out);
     }
-    core_numpy_passthrough(py, "matvec", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "matvec"), args, kwargs)
 }
 
 // linalg.cross passthrough — distinct from top-level np.cross because
@@ -106932,7 +106960,7 @@ fn astype(
     {
         return Ok(out);
     }
-    core_numpy_passthrough(py, "astype", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "astype"), args, kwargs)
 }
 
 // Native parallel datetime64/timedelta64 unit conversion. numpy converts absolute/relative times
@@ -107076,7 +107104,7 @@ fn issubdtype(
     {
         return native_issubdtype(py, &arg1, &arg2);
     }
-    core_numpy_passthrough(py, "issubdtype", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "issubdtype"), args, kwargs)
 }
 
 /// `numpy.generic`, the base of every numpy scalar type, cached for the process.
@@ -107175,7 +107203,7 @@ fn isdtype(
     if let Some(verdict) = native_isdtype(py, args, kwargs)? {
         return Ok(PyBool::new(py, verdict).to_owned().into_any().unbind());
     }
-    core_numpy_passthrough(py, "isdtype", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "isdtype"), args, kwargs)
 }
 
 #[pyfunction]
@@ -107205,7 +107233,7 @@ fn isfortran(
             .getattr(intern!(py, "fnc"))?
             .unbind());
     }
-    core_numpy_passthrough(py, "isfortran", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "isfortran"), args, kwargs)
 }
 
 // Zero-copy np.around(a, decimals) for decimals != 0 on a C-contiguous float64
@@ -107746,7 +107774,7 @@ fn atleast_1d(
     if let Some(result) = native_atleast(py, args, kwargs, 1)? {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "atleast_1d", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "atleast_1d"), args, kwargs)
 }
 
 #[pyfunction]
@@ -107759,7 +107787,7 @@ fn atleast_2d(
     if let Some(result) = native_atleast(py, args, kwargs, 2)? {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "atleast_2d", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "atleast_2d"), args, kwargs)
 }
 
 #[pyfunction]
@@ -107772,7 +107800,7 @@ fn atleast_3d(
     if let Some(result) = native_atleast(py, args, kwargs, 3)? {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "atleast_3d", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "atleast_3d"), args, kwargs)
 }
 
 // Functional iteration helpers (2).
@@ -107783,7 +107811,7 @@ fn apply_along_axis(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "apply_along_axis", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "apply_along_axis"), args, kwargs)
 }
 
 #[pyfunction]
@@ -107801,7 +107829,7 @@ fn apply_over_axes(
     {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "apply_over_axes", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "apply_over_axes"), args, kwargs)
 }
 
 /// `np.apply_over_axes(func, a, axes)`; the incumbent is a Python loop behind an
@@ -107883,7 +107911,7 @@ fn block(
     {
         return Ok(out);
     }
-    core_numpy_passthrough(py, "block", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "block"), args, kwargs)
 }
 
 fn try_zerocopy_block_2d_grid(
@@ -108945,7 +108973,7 @@ fn nancumprod(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "nancumprod", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "nancumprod"), args, kwargs)
 }
 
 #[pyfunction]
@@ -108998,7 +109026,7 @@ fn nancumsum(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "nancumsum", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "nancumsum"), args, kwargs)
 }
 
 // Piecewise + shape intro (2).
@@ -109154,7 +109182,7 @@ fn piecewise(
     if let Some(result) = piecewise_native(py, args, kwargs)? {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "piecewise", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "piecewise"), args, kwargs)
 }
 
 #[pyfunction]
@@ -109178,7 +109206,7 @@ fn shape(
     {
         return Ok(a.getattr(intern!(py, "shape"))?.unbind());
     }
-    core_numpy_passthrough(py, "shape", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "shape"), args, kwargs)
 }
 
 // Histogram family (2).
@@ -109251,7 +109279,7 @@ fn histogram2d(
             .as_ref()
             .is_some_and(|d| d.is_truthy().unwrap_or(false));
         if want_density && weights_arg.is_some() {
-            return core_numpy_passthrough(py, "histogram2d", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "histogram2d"), args, kwargs);
         }
         // NumPy's own disambiguation, copied rather than guessed:
         //     N = len(bins)                    (TypeError -> N = 1, i.e. a scalar)
@@ -109359,7 +109387,7 @@ fn histogram2d(
             }
         }
     }
-    core_numpy_passthrough(py, "histogram2d", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "histogram2d"), args, kwargs)
 }
 
 /// Native histogram2d fast path: the common `(x, y, bins=int|[int,int])` form
@@ -109503,7 +109531,7 @@ fn histogramdd(
             .as_ref()
             .is_some_and(|d| d.is_truthy().unwrap_or(false));
         if want_density && weights_arg.is_some() {
-            return core_numpy_passthrough(py, "histogramdd", args, kwargs);
+            return core_numpy_passthrough_interned(py, intern!(py, "histogramdd"), args, kwargs);
         }
         // Only the `(N, D)` array form; a sequence of D arrays is NumPy's other accepted
         // spelling and keeps the general path.
@@ -109736,7 +109764,7 @@ fn histogramdd(
             }
         }
     }
-    core_numpy_passthrough(py, "histogramdd", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "histogramdd"), args, kwargs)
 }
 
 /// Native histogramdd fast path: `(sample[N,D], bins=int|[int;D])` with auto range
@@ -109905,7 +109933,7 @@ fn busday_count(
     {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "busday_count", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "busday_count"), args, kwargs)
 }
 
 /// True when a keyword ALSO arrives positionally, which the incumbent rejects with
@@ -110112,7 +110140,7 @@ fn busday_offset(
     {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "busday_offset", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "busday_offset"), args, kwargs)
 }
 
 #[pyfunction]
@@ -110163,7 +110191,7 @@ fn is_busday(
     {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "is_busday", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "is_busday"), args, kwargs)
 }
 
 /// The weekmask as seven Monday-first flags: the default, a 7-character '0'/'1' string, or
@@ -111012,7 +111040,7 @@ fn datetime_as_string(
             return Ok(out);
         }
     }
-    core_numpy_passthrough(py, "datetime_as_string", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "datetime_as_string"), args, kwargs)
 }
 
 #[pyfunction]
@@ -111239,7 +111267,7 @@ fn format_float_positional(
     if let Some(result) = native_format_float(py, args, kwargs, false)? {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "format_float_positional", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "format_float_positional"), args, kwargs)
 }
 
 #[pyfunction]
@@ -111252,7 +111280,7 @@ fn format_float_scientific(
     if let Some(result) = native_format_float(py, args, kwargs, true)? {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "format_float_scientific", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "format_float_scientific"), args, kwargs)
 }
 
 #[pyfunction]
@@ -111284,7 +111312,7 @@ fn binary_repr(
     {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "binary_repr", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "binary_repr"), args, kwargs)
 }
 
 /// An index tuple of `leading` new axes, `spans` full slices, and `trailing` new axes -
@@ -111500,7 +111528,7 @@ fn base_repr(
     {
         return Ok(result);
     }
-    core_numpy_passthrough(py, "base_repr", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "base_repr"), args, kwargs)
 }
 
 /// `np.base_repr(number, base=2, padding=0)` in native code.
@@ -111580,7 +111608,7 @@ fn array2string(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "array2string", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "array2string"), args, kwargs)
 }
 
 #[pyfunction]
@@ -111590,7 +111618,7 @@ fn array_repr(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "array_repr", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "array_repr"), args, kwargs)
 }
 
 #[pyfunction]
@@ -111600,7 +111628,7 @@ fn array_str(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "array_str", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "array_str"), args, kwargs)
 }
 
 // Elementwise differences (1).
@@ -111747,7 +111775,7 @@ fn set_printoptions(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "set_printoptions", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "set_printoptions"), args, kwargs)
 }
 
 #[pyfunction]
@@ -111757,7 +111785,7 @@ fn printoptions(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "printoptions", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "printoptions"), args, kwargs)
 }
 
 #[pyfunction]
@@ -111767,7 +111795,7 @@ fn setbufsize(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "setbufsize", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "setbufsize"), args, kwargs)
 }
 
 // Legacy matrix / env helpers (3) — present in numpy.__all__ 2.4.x even
@@ -111780,7 +111808,7 @@ fn asmatrix(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "asmatrix", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "asmatrix"), args, kwargs)
 }
 
 #[pyfunction]
@@ -111790,7 +111818,7 @@ fn bmat(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "bmat", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "bmat"), args, kwargs)
 }
 
 #[pyfunction]
@@ -111800,7 +111828,7 @@ fn get_include(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "get_include", args, kwargs)
+    core_numpy_passthrough_interned(py, intern!(py, "get_include"), args, kwargs)
 }
 
 /// Copy another module's `__all__` into a fresh list before binding it to one
