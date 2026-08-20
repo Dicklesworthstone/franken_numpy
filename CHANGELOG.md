@@ -36,6 +36,10 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
 
 1,434 non-merge commits after the `v0.2.0` tag (HEAD 2026-08-19). 445 beads closed in the window. No new tag or GitHub Release. The campaign stays honesty-gated: measured vs NumPy in the same invocation, with losses and no-ships recorded rather than silently rerouted.
 
+### Closed workstreams
+
+- 445 beads closed in this window. Tracker: [`.beads/issues.jsonl`](https://github.com/Dicklesworthstone/franken_numpy/blob/main/.beads/issues.jsonl).
+
 ### Repo-janitor docs reorganization (2026-08-18 .. 2026-08-19)
 
 Root planning/parity docs (`FEATURE_PARITY.md`, `audit_numpy_reality.md`, `audit_numpy_mocks.md`, `EXHAUSTIVE_LEGACY_ANALYSIS.md`, `PLAN_TO_PORT_NUMPY_TO_RUST.md`, and siblings) now live under [`docs/planning/`](docs/planning/). Agent-identity leaks, root scratch, skill-loop scratch, and already-gitignored beads recovery snapshots were untracked.
