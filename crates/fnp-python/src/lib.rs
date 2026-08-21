@@ -10045,6 +10045,12 @@ fn divide_slice_detecting_fe_hazards(lhs: &[f64], rhs: &[f64], out: &mut [f64]) 
 /// `saw_non_normal` meant. `assert_bitmask_classifier_matches_boolean_classifier` in the
 /// bench pins the same claim over twelve cases chosen so each non-normal exponent class
 /// is the ONLY thing separating a case from an all-normal control.
+// STILL LIVE, JUST NOT ON x86_64. This is the classifier the portable
+// `divide_slice_detecting_fe_hazards` fallback uses on targets where the glibc
+// `FE_*` values are not the ABI, and it is the equivalence witness
+// `bitmask_evidence_matches_the_boolean_normality_predicate` pins. Deleting it
+// would leave those targets with no hazard detection at all.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline]
 fn f64_divide_quotient_non_normal_evidence(bits: u64) -> u64 {
     const EXPONENT_MASK: u64 = 0x7ff0_0000_0000_0000;
@@ -10054,6 +10060,12 @@ fn f64_divide_quotient_non_normal_evidence(bits: u64) -> u64 {
 }
 
 /// True when the accumulated evidence says some quotient was non-normal.
+// STILL LIVE, JUST NOT ON x86_64. This is the classifier the portable
+// `divide_slice_detecting_fe_hazards` fallback uses on targets where the glibc
+// `FE_*` values are not the ABI, and it is the equivalence witness
+// `bitmask_evidence_matches_the_boolean_normality_predicate` pins. Deleting it
+// would leave those targets with no hazard detection at all.
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
 #[inline]
 fn f64_divide_evidence_saw_non_normal(evidence: u64) -> bool {
     evidence >> 63 != 0
@@ -10627,66 +10639,63 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                     });
             }
         } else if matches!(op, BinaryOp::Div) {
-            // Same fusion as the parallel arm above: accumulate the cheap
-            // normality flag beside the divide rather than streaming the whole
-            // output a second time to find it.
+            // HARDWARE FLAGS, NOT SOFTWARE CLASSIFICATION — the same detector the parallel
+            // arm above already uses, now on this arm too (`deadlock-audit-6y5wp`).
             //
-            // BITMASK EVIDENCE, not a boolean (`deadlock-audit-6y5wp`). The boolean form
-            // forced a 4-lane compare mask down to a `bool` every iteration; OR-ing raw
-            // evidence keeps the accumulator in the vector domain and tests it once. See
-            // `f64_divide_quotient_non_normal_evidence` for the exponent-class equivalence
-            // argument. Measured 4.04% on this arm, 5/5 runs, stdev 0.0030.
+            // MEASURED, and this is the first number the FE-flag detector has ever carried:
+            // `5baab8f9` landed it UNBUILT under the disk freeze and wired it into the
+            // parallel arm only. Head-to-head against the bitmask classifier it replaces, in
+            // ONE schedule, on a SHARED output buffer, at n=2^20 on thinkstation1:
             //
-            // THE PARALLEL ARM ABOVE DELIBERATELY KEEPS THE BOOLEAN FORM. The 4.04% was
-            // measured at n=2^20, which is BELOW the `1 << 21` rayon threshold, so it says
-            // nothing about the parallel arm. The transformation is semantics-preserving
-            // there too, but its ratio is unmeasured and this campaign does not ship
-            // extrapolations - converting it needs its own measurement at n >= 2^21.
-            // INDEXED, NOT A ZIP-OF-ZIP (`deadlock-audit-6y5wp`). UNMEASURED AT THE TIME OF
-            // WRITING - landed unbuilt under a disk freeze; see the retry predicate below.
+            //   1.107354  1.136422  1.151501  1.129598  1.139361      (5/5 DECIDABLE_WIN)
             //
-            // WHY: a per-iteration disassembly census put this loop at 22 instructions per 8
-            // doubles against NumPy's `DOUBLE_divide_X86_V3` at 10, and three of our twelve
-            // extra instructions are `mov ..(%rsp),%rdi` - RELOADS of the a/b/out base pointers
-            // from the stack, once per iteration. NumPy keeps all three bases live in registers
-            // (%rbx/%r10/%r11) and walks them with ONE index in %rax. We spill because the
-            // zip-of-zip below held three independent iterator states live at once, on top of
-            // the FE-hazard accumulate's three vector constants and its accumulator.
+            // Every run's dual nulls straddled unity. Quote the WORST cell, 1.1074x, not the
+            // 1.1515x. Against NumPy the same five runs move this kernel's median ratio from
+            // 0.7692 to 0.8509 — still a LOSS of about 1.18x, which is the honest state of
+            // this kernel and is why the decline band above still exists.
             //
-            // So this mirrors the incumbent's loop shape: one induction variable, three
-            // invariant bases. Both forms are already vectorised - the census found 2 x `vdivpd`
-            // on ymm in each, 8 doubles per iteration - so this is NOT about packing or unroll
-            // width. Those two hypotheses are DEAD and their rows say so.
+            // WHY IT IS FASTER: the loop body becomes a BARE divide. NumPy's live
+            // `DOUBLE_divide_X86_V3` measures 10 instructions per 8 doubles precisely because
+            // it classifies nothing per element — it asks MXCSR once, afterwards, through
+            // `npy_get_floatstatus_barrier`. Our bitmask accumulator spent roughly 20 of 35
+            // instructions per 16 doubles recomputing in software what the hardware had
+            // already recorded. This is the incumbent's own algorithm, not a trick.
             //
-            // CHUNKING IS NOT THE FIX AND MUST NOT BE RE-TRIED: the blocked form was measured
-            // and rejected, with `insns 1440 -> 2211, vdivpd 1 -> 0, vdivsd 1 -> 15`. It
-            // DEVECTORISED the divide entirely. Chunking is the textbook answer to register
-            // pressure and it is the wrong answer here.
+            // CLEARING FLAGS ON THE CALLING THREAD IS SAFE BECAUSE IT IS WHAT NUMPY DOES,
+            // verified against the installed numpy 2.4.3 rather than assumed. Raising
+            // FE_DIVBYZERO inside `np.errstate(all='ignore')` and then running a clean
+            // `np.divide` under `seterr(all='warn')` produces NO warning: NumPy clears at
+            // ufunc entry, so a stale flag is never attributed to a later op. Our clear
+            // therefore cannot lose a warning NumPy would have raised. (The parallel arm
+            // never had to answer this — it clears on rayon workers, whose MXCSR is not the
+            // caller's. This arm runs on the calling thread, so the question is live here.)
             //
-            // THE THREE-WAY `min` PRESERVES BEHAVIOUR EXACTLY. `zip` stops at the shortest
-            // sequence, so slicing all three to the common length keeps that and cannot panic;
-            // `&output[..len]` alone would panic where the old loop silently truncated. Callers
-            // already guarantee `a_in.len() == b_in.len()` (identical shapes are checked above,
-            // and a mismatch declines), so `len` is `n` on every reachable path - the `min` is
-            // here to keep the failure mode, not because it is expected to bind.
+            // THE RARE PATH IS UNCHANGED: a raised flag still triggers the exact value-based
+            // scan below, so warning parity with NumPy is decided by the same predicate as
+            // before. Only how the COMMON case — nothing raised — is detected has changed.
             //
-            // ONE CHANGE ONLY, deliberately. A second candidate exists - reformulating the
-            // evidence test as a single unsigned range check to free one more vector register -
-            // and it is NOT bundled here, because two changes in one A/B cannot be attributed.
-            let mut evidence: u64 = 0;
+            // THE THREE-WAY `min` PRESERVES BEHAVIOUR EXACTLY, as it did for the loop it
+            // replaces: `zip` stops at the shortest sequence, so slicing all three to the
+            // common length keeps that and cannot panic. Callers already guarantee identical
+            // shapes, so `len` is `n` on every reachable path.
             let len = output.len().min(a_in.len()).min(b_in.len());
-            let (a_s, b_s, o_s) = (&a_in[..len], &b_in[..len], &output[..len]);
-            for i in 0..len {
-                let quotient = a_s[i].get() / b_s[i].get();
-                o_s[i].set(quotient);
-                evidence |= f64_divide_quotient_non_normal_evidence(quotient.to_bits());
-            }
-            if f64_divide_evidence_saw_non_normal(evidence)
-                && output.iter().zip(a_in.iter()).zip(b_in.iter()).any(
-                    |((slot, a_cell), b_cell)| {
-                        f64_divide_raises_fp_error(a_cell.get(), b_cell.get(), slot.get())
-                    },
-                )
+            // The same reinterpretation the parallel arm performs, for the same reason: the
+            // detector takes plain slices so its loop body is a bare divide with no `Cell`
+            // accessor in it. `ReadOnlyCell<f64>`/`Cell<f64>` are `repr(transparent)` over
+            // `f64`; the inputs are read-only under the GIL and `output` is a buffer we own
+            // with no alias.
+            let lhs: &[f64] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), len) };
+            let rhs: &[f64] =
+                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), len) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, len) };
+            if divide_slice_detecting_fe_hazards(lhs, rhs, out_data)
+                && lhs
+                    .iter()
+                    .zip(rhs.iter())
+                    .zip(out_data.iter())
+                    .any(|((&x, &y), &q)| f64_divide_raises_fp_error(x, y, q))
             {
                 divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -171630,6 +171639,124 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             F64_DIV_OUT_DECLINE_MIN_LEN < F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN,
             "the decline band must be non-empty"
         );
+    }
+
+    /// The SERIAL `out=` Div arm must still DEFER on every FE hazard class now that it
+    /// detects them from the HARDWARE flags instead of by classifying each quotient
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// WHY THIS TEST DID NOT EXIST BEFORE AND HAD TO NOW. Every other `out=`-route test
+    /// divides hazard-free operands, so this arm's DEFERRAL half was pinned only
+    /// indirectly, by the detector's own unit test. That test proves
+    /// `divide_slice_detecting_fe_hazards` REPORTS a hazard; it does not prove the ROUTE
+    /// acts on the report. Swapping the detector is exactly the change that can break the
+    /// wiring while leaving both halves individually correct — and the failure is silent,
+    /// because the quotients stay bit-identical either way. What NumPy adds that we
+    /// cannot is the RuntimeWarning, so losing the deferral loses parity without losing
+    /// a single value.
+    ///
+    /// THE HAZARD-FREE CONTROL AT THE END IS LOAD-BEARING. A detector that reported a
+    /// hazard on EVERYTHING would satisfy every deferral assertion above it while
+    /// destroying the arm's entire purpose — and a mask that admitted `FE_INEXACT` does
+    /// precisely that, since almost every inexact quotient raises it. Only the control
+    /// separates "defers correctly" from "defers always".
+    #[test]
+    fn serial_out_route_defers_on_every_fe_hazard_class() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(numpy) => numpy,
+                Err(_) => return,
+            };
+            // Below the `out=` decline band, which is the only size range where the
+            // SERIAL arm this test is about actually runs: inside the band the route
+            // declines for size reasons and every assertion below would pass vacuously.
+            let len = 1024usize;
+            assert!(
+                len < F64_DIV_OUT_DECLINE_MIN_LEN,
+                "the fixture must sit BELOW the out= decline band, or the route declines \
+                 on SIZE and this test proves nothing about hazard detection"
+            );
+
+            // One exceptional pair buried in an otherwise ordinary run, because that is
+            // the shape the detector has to survive: the flag must still be readable
+            // after ~1000 unremarkable divides have run past it.
+            let hazards: &[(f64, f64, &str)] = &[
+                (
+                    1.0,
+                    0.0,
+                    "x/0 -> FE_DIVBYZERO, NumPy warns 'divide by zero'",
+                ),
+                (0.0, 0.0, "0/0 -> FE_INVALID, NumPy warns 'invalid value'"),
+                (f64::INFINITY, f64::INFINITY, "inf/inf -> FE_INVALID"),
+                (f64::MAX, f64::MIN_POSITIVE, "overflow -> FE_OVERFLOW"),
+                (f64::MIN_POSITIVE, f64::MAX, "underflow -> FE_UNDERFLOW"),
+            ];
+            for (numerator, divisor, what) in hazards.iter().copied() {
+                let a = numpy
+                    .call_method1("full", (len, 6.0f64))
+                    .expect("numpy.full numerator");
+                let b = numpy
+                    .call_method1("full", (len, 3.0f64))
+                    .expect("numpy.full divisor");
+                a.set_item(17usize, numerator).expect("seed the numerator");
+                b.set_item(17usize, divisor).expect("seed the divisor");
+                let out = numpy
+                    .call_method1("empty", (len,))
+                    .expect("numpy.empty caller buffer");
+                let routed = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div)
+                    .expect("the out= route must not error");
+                assert!(
+                    routed.is_none(),
+                    "{what}: the serial out= arm did NOT defer. NumPy raises a warning here \
+                     that this kernel cannot, so producing the (bit-identical) quotients \
+                     ourselves silently drops it — the exact divergence class \
+                     `deadlock-audit-2nmd1` closed."
+                );
+            }
+
+            // THE CONTROL. `6.0/3.0` is exact and `1.0/3.0` is inexact-but-nothing-else;
+            // both must stay native, or the mask has swallowed FE_INEXACT and the route
+            // now defers everything.
+            for (numerator, divisor, what) in [
+                (6.0f64, 3.0f64, "exact quotient"),
+                (1.0f64, 3.0f64, "inexact quotient"),
+            ] {
+                let a = numpy
+                    .call_method1("full", (len, numerator))
+                    .expect("numpy.full numerator");
+                let b = numpy
+                    .call_method1("full", (len, divisor))
+                    .expect("numpy.full divisor");
+                let out = numpy
+                    .call_method1("empty", (len,))
+                    .expect("numpy.empty caller buffer");
+                let engaged = try_zerocopy_f64_binary_into(py, &a, &b, &out, BinaryOp::Div)
+                    .expect("the out= route must not error")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{what}: the serial out= arm declined on hazard-free operands. \
+                             If FE_INEXACT is in the hazard mask every call takes this \
+                             branch, the route gets SLOWER than the code it replaced, and \
+                             every parity test still passes."
+                        )
+                    });
+                assert!(
+                    engaged.bind(py).is(&out),
+                    "{what}: the out= route must return the caller's buffer"
+                );
+                let expected = numpy
+                    .call_method1("divide", (&a, &b))
+                    .expect("numpy.divide oracle");
+                assert!(
+                    numpy
+                        .call_method1("array_equal", (&out, &expected))
+                        .and_then(|equal| equal.extract::<bool>())
+                        .expect("numpy.array_equal"),
+                    "{what}: the native serial out= kernel diverged from numpy.divide"
+                );
+            }
+        });
     }
 
     /// The native `out=` divide kernel must agree with NumPy on BOTH sides of

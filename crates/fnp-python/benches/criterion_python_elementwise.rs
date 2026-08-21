@@ -1282,6 +1282,10 @@ fn main() {
                 bench_divide_classifier_accumulator_form,
             ),
             (
+                "bench_divide_fe_flag_detector_vs_numpy",
+                bench_divide_fe_flag_detector_vs_numpy,
+            ),
+            (
                 "bench_divide_kernel_on_numpy_buffers",
                 bench_divide_kernel_on_numpy_buffers,
             ),
@@ -1869,6 +1873,124 @@ fn divide_bitmask_fused_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
             .zip(b.iter())
             .zip(out.iter())
             .any(|((&x, &y), &q)| bench_divide_raises_fp_error(x, y, q))
+}
+
+// ---------------------------------------------------------------------------
+// THE HARDWARE-FLAG DETECTOR, replicated for measurement (`deadlock-audit-6y5wp`).
+//
+// `5baab8f9` landed `divide_slice_detecting_fe_hazards` in the shipped route UNBUILT
+// under the disk freeze: not compiled, not tested, not measured. It is wired into the
+// PARALLEL Div arm only. This replica exists so the lever can be given a live
+// vs-incumbent ratio and a same-schedule head-to-head against the shipped serial
+// bitmask classifier it would replace.
+//
+// It must stay a TEXTUAL replica of the shipped helper. If the two drift, the ratio
+// below stops describing the route.
+// ---------------------------------------------------------------------------
+unsafe extern "C" {
+    fn feclearexcept(excepts: core::ffi::c_int) -> core::ffi::c_int;
+    fn fetestexcept(excepts: core::ffi::c_int) -> core::ffi::c_int;
+}
+
+/// x86-64 glibc `bits/fenv.h` values, matching the shipped `FE_DIVIDE_HAZARD_MASK`.
+///
+/// `FE_INEXACT` (0x20) is DELIBERATELY EXCLUDED, and this is the single mistake that
+/// would make the whole lever look correct while destroying it: almost every division
+/// that is not exactly representable sets it, so a mask containing it reports a hazard
+/// on essentially every call, sends every divide down the rare exact-scan path, and
+/// gets SLOWER — with every parity test still green, because deferring more is always
+/// correctness-preserving. `assert_fe_flag_replica_matches_the_shipped_contract`
+/// divides 1.0/3.0 specifically to catch it.
+const BENCH_FE_DIVIDE_HAZARD_MASK: core::ffi::c_int = 0x01   // FE_INVALID   (0/0, inf/inf)
+    | 0x04                                                   // FE_DIVBYZERO (x/0)
+    | 0x08                                                   // FE_OVERFLOW  (quotient -> inf)
+    | 0x10; // FE_UNDERFLOW (quotient -> subnormal or 0)
+
+/// Replica of the shipped `divide_slice_detecting_fe_hazards`: a BARE divide loop,
+/// with the hazard question asked once of MXCSR afterwards instead of of every
+/// quotient in software. This is the incumbent's own algorithm — its live
+/// `DOUBLE_divide_X86_V3` measures 10 instructions per 8 doubles precisely because it
+/// classifies nothing per element and calls `npy_get_floatstatus_barrier` at the end.
+///
+/// THE BARRIER is not decoration. LLVM does not model the FP environment, so nothing
+/// inherently stops it sinking the divide loop past the test; NumPy defends the same
+/// hazard by passing a pointer into `npy_get_floatstatus_barrier`, and `black_box` on
+/// the output pointer is the same trick.
+#[inline(never)]
+fn divide_fe_flag_serial(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+    // SAFETY: both are plain glibc calls on an integer mask, with no memory operands.
+    unsafe { feclearexcept(BENCH_FE_DIVIDE_HAZARD_MASK) };
+    for ((slot, &x), &y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
+        *slot = x / y;
+    }
+    black_box(out.as_ptr());
+    // SAFETY: as above.
+    unsafe { fetestexcept(BENCH_FE_DIVIDE_HAZARD_MASK) != 0 }
+}
+
+/// Pins the FE-flag replica against the software classifier it would replace, before
+/// any timing runs (`deadlock-audit-6y5wp`).
+///
+/// THE NEGATIVE CASES a plausible-but-wrong detector fails:
+///
+///   * `1.0/3.0` is INEXACT and nothing else. A mask that let `FE_INEXACT` in reports
+///     a hazard here — and only here — so this case is the whole defence against a
+///     change that is correctness-preserving and catastrophically slower.
+///   * Each hazard class is embedded at ONE index inside 33 ordinary divides, so a
+///     detector that only reads the flags of the last element, or that clears them
+///     after the loop rather than before it, fails while a hazard-only run would pass.
+///   * The quotients themselves must stay bit-identical to a plain divide: a detector
+///     that perturbed the values would produce a fast arm measuring different work.
+fn assert_fe_flag_replica_matches_the_shipped_contract() {
+    let lhs = [6.0_f64, 1.0, 2.5, 1.0e10, -7.5];
+    let rhs = [3.0_f64, 3.0, 0.5, 4.0, 2.5];
+    let mut out = [0.0_f64; 5];
+    assert!(
+        !divide_fe_flag_serial(&lhs, &rhs, &mut out),
+        "ordinary division reported a hazard — if FE_INEXACT crept into the mask every \
+         call would take the rare exact-scan path and this arm would be timing the wrong \
+         branch while every parity test stayed green"
+    );
+    for ((got, &x), &y) in out.iter().zip(lhs.iter()).zip(rhs.iter()) {
+        assert_eq!(
+            got.to_bits(),
+            (x / y).to_bits(),
+            "quotient is not a plain divide"
+        );
+    }
+
+    let hazards: &[(f64, f64, &str)] = &[
+        (1.0, 0.0, "x/0 -> FE_DIVBYZERO"),
+        (0.0, 0.0, "0/0 -> FE_INVALID"),
+        (f64::INFINITY, f64::INFINITY, "inf/inf -> FE_INVALID"),
+        (f64::MAX, f64::MIN_POSITIVE, "overflow -> FE_OVERFLOW"),
+        (f64::MIN_POSITIVE, f64::MAX, "underflow -> FE_UNDERFLOW"),
+    ];
+    for (numerator, divisor, what) in hazards.iter().copied() {
+        let mut l = vec![6.0_f64; 33];
+        let mut r = vec![3.0_f64; 33];
+        l[17] = numerator;
+        r[17] = divisor;
+        let mut fe_out = vec![0.0_f64; 33];
+        let mut bitmask_out = vec![0.0_f64; 33];
+        assert!(
+            divide_fe_flag_serial(&l, &r, &mut fe_out),
+            "{what}: the FE-flag detector missed a hazard, which loses NumPy warning \
+             parity silently because the exact scan it gates is then skipped"
+        );
+        assert!(
+            divide_bitmask_fused_serial(&l, &r, &mut bitmask_out),
+            "{what}: the shipped bitmask classifier and the FE flags disagree about the \
+             same run, so the two arms below would not be answering one question"
+        );
+        assert!(
+            fe_out
+                .iter()
+                .zip(bitmask_out.iter())
+                .all(|(l, r)| l.to_bits() == r.to_bits()),
+            "{what}: the two detectors produced different quotients"
+        );
+    }
 }
 
 /// Pins the bitmask accumulator against the boolean one it replaces, on operand
@@ -3709,6 +3831,232 @@ fn bench_divide_classifier_accumulator_form(_c: &mut Criterion) {
             bitmask_effect.ratio_ci_high,
             fused_effect.arm_a_median_ns,
             bitmask_effect.arm_a_median_ns,
+            head_to_head.arm_a_median_ns,
+            head_to_head.arm_b_median_ns,
+            head_to_head.ratio_median,
+            head_to_head.ratio_ci_low,
+            head_to_head.ratio_ci_high,
+        );
+    });
+}
+
+// Does asking the HARDWARE what was raised beat recomputing it in software?
+// (`deadlock-audit-6y5wp`)
+//
+// WHY THIS GROUP EXISTS. `5baab8f9` landed the FE-flag detector in the shipped
+// PARALLEL Div arm and said so in its own subject line: UNBUILT. It was never
+// compiled, never tested and never measured, so the campaign holds no number for it
+// and none of its reasoning may be quoted. This group supplies the number.
+//
+// WHAT IS ALREADY SETTLED, so this is not another guess. A static census of the three
+// loops involved put NumPy's live `DOUBLE_divide_X86_V3` at 10 instructions per 8
+// doubles against our shipped bitmask arm's 35 per 16, and every one of the loops is
+// already packed `vdivpd` on ymm — so "restore packing" is refuted, and the surviving
+// difference is the CLASSIFICATION, roughly 20 of our 35 instructions. NumPy does not
+// spend them because it does not classify: `_multiarray_umath...so` imports
+// `feclearexcept`/`fetestexcept` from glibc and asks MXCSR once, afterwards. This arm
+// is that algorithm, and the question is whether removing the software classifier
+// moves the ratio or whether it was sitting in the divider's shadow all along (the
+// boolean-to-bitmask reshaping, worth 8 of 43 instructions, moved cycles 0.76%).
+//
+// CLEARING FLAGS ON THE CALLING THREAD IS THE INCUMBENT'S OWN BEHAVIOUR, verified
+// against the installed numpy 2.4.3 rather than assumed: raising FE_DIVBYZERO inside
+// `np.errstate(all='ignore')` and then running a clean `np.divide` under
+// `seterr(all='warn')` produces NO warning, i.e. NumPy clears at ufunc entry, so a
+// stale flag can never be attributed to a later op. Our clear cannot therefore lose a
+// warning NumPy would have raised.
+//
+// EVERY ARM SHARES ONE OUTPUT BUFFER, reminted per call and never held. Separate 8 MiB
+// buffers race page residency against this host's ~32 MiB L3, and on this very route
+// that race reversed the classifier verdict outright (fused "1.42-1.62x better" became
+// "fused costs 7.9%"). The head-to-head is the contract that most needs it, because
+// there the two arms ARE the comparison.
+//
+// BOTH ARMS ARE REPLICAS, not the shipped route. Neither allocates: NumPy is handed a
+// preallocated `out=`, and the replicas write into a preallocated Vec. The vs-NumPy
+// rows are the only competitive statement here; the head-to-head is a self-speedup and
+// is labelled as one.
+fn bench_divide_fe_flag_detector_vs_numpy(_c: &mut Criterion) {
+    assert_divide_hazard_replica_matches_contract();
+    assert_bitmask_classifier_matches_boolean_classifier();
+    assert_fe_flag_replica_matches_the_shipped_contract();
+    let n = DIVIDE_SERIAL_N;
+    let (a_vec, b_vec) = divide_hazard_free_operands(n);
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_py = locals.get_item("a").expect("a operand");
+        let b_py = locals.get_item("b").expect("b operand");
+        let out_py = locals.get_item("out").expect("out buffer");
+        let args = PyTuple::new(py, [&a_py, &b_py]).expect("args");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &out_py).expect("bind out");
+        let numpy_divide = numpy.getattr("divide").expect("numpy.divide");
+
+        // Parity gate before any timing, on the REAL operands. Two things are checked
+        // that a green run would otherwise hide: the FE arm must reproduce NumPy's
+        // quotients bit for bit, and it must report NO hazard here — if it did, it
+        // would be timing the rare exact-scan branch rather than the common one, and
+        // the ratio would describe work the shipped route does not do.
+        let numpy_result = numpy_divide
+            .call(&args, Some(&out_kwargs))
+            .expect("numpy.divide probe");
+        let numpy_sum = numpy_divide_checksum(&numpy_result, n);
+        let mut probe_out = vec![0.0_f64; n];
+        let bitmask_hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, &mut probe_out);
+        assert!(
+            !bitmask_hazard,
+            "these operands must be hazard-free or the arms take their rare second pass"
+        );
+        assert_eq!(
+            divide_checksum(&probe_out),
+            numpy_sum,
+            "the bitmask replica does not reproduce numpy.divide bit for bit"
+        );
+        let fe_hazard = divide_fe_flag_serial(&a_vec, &b_vec, &mut probe_out);
+        assert!(
+            !fe_hazard,
+            "the FE-flag arm reports a hazard on hazard-free operands — it would be \
+             timing the rare branch, and a mask containing FE_INEXACT does exactly this"
+        );
+        assert_eq!(
+            divide_checksum(&probe_out),
+            numpy_sum,
+            "the FE-flag replica does not reproduce numpy.divide bit for bit"
+        );
+
+        let mut shared_out = vec![0.0_f64; n];
+        let shared_ptr = shared_out.as_mut_ptr();
+        let mint = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(shared_ptr, n) } };
+
+        let incumbent_bitmask = || {
+            let started = Instant::now();
+            let result = numpy_divide
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.divide call");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let candidate_bitmask = || {
+            let started = Instant::now();
+            let hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, mint());
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(mint());
+            black_box(shared_ptr);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (bitmask_effect, _in_null, _cand_null) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_shipped_bitmask_classifier_vs_numpy",
+            incumbent_bitmask,
+            candidate_bitmask,
+        );
+
+        let incumbent_fe = || {
+            let started = Instant::now();
+            let result = numpy_divide
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy.divide call");
+            let elapsed = started.elapsed();
+            let checksum = numpy_divide_checksum(&result, n);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let candidate_fe = || {
+            let started = Instant::now();
+            let hazard = divide_fe_flag_serial(&a_vec, &b_vec, mint());
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(mint());
+            black_box(shared_ptr);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (fe_effect, _in_null2, _cand_null2) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_fe_flag_detector_vs_numpy",
+            incumbent_fe,
+            candidate_fe,
+        );
+
+        // THE HEAD-TO-HEAD. The two ratios above are each internally valid but they are
+        // different schedules, so their difference straddles whatever the host did in
+        // between — on this group's sibling, NumPy itself drifted 3.9% between two
+        // contracts and flattered the second candidate without either arm changing.
+        // Only one schedule can size the lever.
+        let mut head_out = vec![0.0_f64; n];
+        let head_ptr = head_out.as_mut_ptr();
+        let mint_head = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(head_ptr, n) } };
+        let bitmask_arm = || {
+            let started = Instant::now();
+            let hazard = divide_bitmask_fused_serial(&a_vec, &b_vec, mint_head());
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(mint_head());
+            black_box(head_ptr);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let fe_arm = || {
+            let started = Instant::now();
+            let hazard = divide_fe_flag_serial(&a_vec, &b_vec, mint_head());
+            let elapsed = started.elapsed();
+            assert!(!hazard, "operands must stay hazard-free during timing");
+            let checksum = divide_checksum(mint_head());
+            black_box(head_ptr);
+            common::ContractObservation { elapsed, checksum }
+        };
+        let (head_to_head, _in_null3, _cand_null3) = common::run_dual_null_median_ci_contract(
+            "divide_f64_1m_fe_flags_over_bitmask_classifier",
+            bitmask_arm,
+            fe_arm,
+        );
+
+        let classifier_removal_saving_ns =
+            head_to_head.arm_a_median_ns - head_to_head.arm_b_median_ns;
+        println!(
+            "DIVIDE_FE_FLAG_DETECTOR n={n} numpy_version={numpy_version} worker={} \
+             harness=common::run_dual_null_median_ci_contract \
+             arms_are_replicas_not_the_shipped_route=true \
+             arms_are_preallocated_no_alloc_either_side=true \
+             shared_output_buffer_all_arms=true \
+             static_census_numpy_insns_per_16_doubles=20 \
+             static_census_bitmask_insns_per_16_doubles=35 \
+             static_census_fe_flag_insns_per_16_doubles=unmeasured \
+             shipped_bitmask_ratio={:.6} shipped_bitmask_ci95=[{:.6},{:.6}] \
+             fe_flag_ratio={:.6} fe_flag_ci95=[{:.6},{:.6}] \
+             numpy_ns_in_bitmask_contract={:.1} numpy_ns_in_fe_contract={:.1} \
+             bitmask_ns={:.1} fe_flag_ns={:.1} \
+             head_to_head_is_a_self_speedup_not_a_win=true \
+             head_to_head_ratio={:.6} head_to_head_ci95=[{:.6},{:.6}] \
+             classifier_removal_saving_ns={classifier_removal_saving_ns:.1}",
+            measurement_worker(),
+            bitmask_effect.ratio_median,
+            bitmask_effect.ratio_ci_low,
+            bitmask_effect.ratio_ci_high,
+            fe_effect.ratio_median,
+            fe_effect.ratio_ci_low,
+            fe_effect.ratio_ci_high,
+            bitmask_effect.arm_a_median_ns,
+            fe_effect.arm_a_median_ns,
             head_to_head.arm_a_median_ns,
             head_to_head.arm_b_median_ns,
             head_to_head.ratio_median,
