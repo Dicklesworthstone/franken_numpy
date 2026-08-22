@@ -56322,3 +56322,39 @@ column was the whole signal.
 such collision recorded today across both directions (`364a4933`, `44b736fd`, `b742665f`, this one).
 The durable fix is not vigilance: it is to commit with an explicit pathspec - `git commit -F msg --
 <path>` - which ignores the index entirely and cannot pick up anyone else's staged files.
+
+## 2026-08-22 — MEASURED: corrected bench_maximum_arms_vs_numpy under the fixed allocation-symmetric harness - serial native is a DECIDABLE_REGRESSION at 0.9315x, parallel a DECIDABLE_WIN at 1.5326x; the withdrawn 1.352x serial "win" was the buffer artifact, now confirmed by direct re-measurement (deadlock-audit-48by6)
+
+**Campaign result class:** maintenance-self-speedup for the arms group as a whole - both arms are
+replicas (`arms_are_replicas_not_the_shipped_route=true`); these rows may never be quoted against
+NumPy as route-level claims. Route-level numbers remain RedLynx's 0.907848 (maximum) / 0.913424
+(minimum).
+
+RedLynx's e5d5a67d fix gave the incumbent a preallocated `out=` so neither arm allocates, and
+flagged the remaining acceptance item: "re-run and bank the true numbers either way." This row is
+that re-run.
+
+- Harness: `common::run_dual_null_median_ci_contract`, one invocation, alternating arms.
+- Worker provenance: `HOST_BASELINE host=thinkstation1 cpu_model=AMD_Ryzen_Threadripper_PRO_5975WX_32-Cores physical_cores=32 logical_threads=64 governor=powersave`
+- PROFILE DISCLOSURE: measured via the local `cargo test --release --bench
+  criterion_python_elementwise` route (the rch release-bench build hit RCH-E104 on vmi1153651),
+  i.e. stock `release`, NOT `release-perf`. Ratios within the single binary are fair; absolute ns
+  are triage-grade and must not be compared to release-perf rows.
+- numpy 2.4.3, n=2^22, op=maximum.
+
+| arm | ratio | ci95 | verdict |
+|---|---|---|---|
+| maximum_f64_serial_vs_numpy | 0.931527 | [0.917436, 0.945738] | DECIDABLE_REGRESSION |
+| maximum_f64_parallel_vs_numpy | 1.532619 | [1.509596, 1.570538] | DECIDABLE_WIN |
+
+Both dual nulls straddle unity with half-widths 0.0058-0.0145; effect CIs exclude 1.0 and clear the
+2x-null-margin clause. `cv_is_provenance_only=true`.
+
+Reading, stated plainly: the corrected group CONFIRMS hzl1w's original direction at replica level -
+the serial native kernel loses to NumPy (~1.07x) once the allocation asymmetry is removed, and the
+withdrawn "serial BEATS NumPy 1.352401x" figure was measuring a 32 MB first-touch, not a kernel.
+The parallel replica wins big but is not the shipped route. Whether to delegate f64
+maximum/minimum still needs route-vs-route numbers in one binary (hzl1w's own framing), which this
+row does not provide.
+
+AGENT_NAME=PinkWolf.
