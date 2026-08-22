@@ -1365,14 +1365,8 @@ fn main() {
                 "bench_binary_counter_divide_numpy",
                 bench_binary_counter_divide_numpy,
             ),
-            (
-                "bench_sort_counter_fnp_i64",
-                bench_sort_counter_fnp_i64,
-            ),
-            (
-                "bench_sort_counter_numpy_i64",
-                bench_sort_counter_numpy_i64,
-            ),
+            ("bench_sort_counter_fnp_i64", bench_sort_counter_fnp_i64),
+            ("bench_sort_counter_numpy_i64", bench_sort_counter_numpy_i64),
             (
                 "bench_argsort_counter_fnp_i64",
                 bench_argsort_counter_fnp_i64,
@@ -2963,6 +2957,13 @@ fn bench_percall_floor_stage_attribution(_c: &mut Criterion) {
         let worker = measurement_worker();
         let accounted_fraction = accounted / ours_ns;
         let live_unattributed_fraction = live_unattributed / ours_ns;
+        // NumPy's own 451 ns-class cost is inside `live_unattributed` but is work ANY
+        // implementation must pay, so attributing it to us flatters the unknown in the
+        // OTHER direction. The quantity that aims the next lever is the unattributed
+        // share of OUR OVERHEAD only (`deadlock-audit-kido6`, RedLynx's reopening).
+        let our_overhead = ours_ns - numpy_ns;
+        let live_unattributed_overhead = our_overhead - live_accounted;
+        let live_unattributed_overhead_fraction = live_unattributed_overhead / our_overhead;
         let fnp_over_numpy = ours_ns / numpy_ns;
         println!(
             "PERCALL_FLOOR_STAGES n={N} numpy_version={numpy_version} worker={worker} \
@@ -2976,6 +2977,9 @@ fn bench_percall_floor_stage_attribution(_c: &mut Criterion) {
              live_accounted_ns={live_accounted:.1} \
              live_unattributed_ns={live_unattributed:.1} \
              live_unattributed_fraction={live_unattributed_fraction:.3} \
+             our_overhead_ns={our_overhead:.1} \
+             live_unattributed_overhead_ns={live_unattributed_overhead:.1} \
+             live_unattributed_overhead_fraction={live_unattributed_overhead_fraction:.3} \
              fnp_multiply_ns={ours_ns:.1} numpy_multiply_ns={numpy_ns:.1} \
              fnp_over_numpy={fnp_over_numpy:.3}"
         );
@@ -7481,9 +7485,11 @@ fn argsort_counter_probe(use_fnp: bool) {
         // int64, unsorted, no ties: exercises the decline chain without letting a tie
         // pre-check or an already-sorted fast path change which route runs.
         py.run(
-            std::ffi::CString::new("i = np.arange(n)\na = ((i * 1103515245 + 12345) % 65536).astype(np.int64)\n")
-                .unwrap()
-                .as_c_str(),
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = ((i * 1103515245 + 12345) % 65536).astype(np.int64)\n",
+            )
+            .unwrap()
+            .as_c_str(),
             Some(&locals),
             Some(&locals),
         )
@@ -7545,9 +7551,11 @@ fn sort_counter_probe(use_fnp: bool) {
         locals.set_item("np", &numpy).expect("bind numpy");
         locals.set_item("n", N).expect("bind n");
         py.run(
-            std::ffi::CString::new("i = np.arange(n)\na = ((i * 1103515245 + 12345) % 65536).astype(np.int64)\n")
-                .unwrap()
-                .as_c_str(),
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = ((i * 1103515245 + 12345) % 65536).astype(np.int64)\n",
+            )
+            .unwrap()
+            .as_c_str(),
             Some(&locals),
             Some(&locals),
         )

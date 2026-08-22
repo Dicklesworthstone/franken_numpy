@@ -931,8 +931,12 @@ fn lu_forward_back_multi(lu: &[f64], perm: &[usize], b: &[f64], n: usize, m: usi
 /// The substitutions touch `n * panel` f64 at a time, so the width is chosen to keep that near
 /// 256 KiB - L2-resident on the hosts this campaign measures on - and then clamped so the inner
 /// `axpy` stays wide enough to vectorise and short enough to be worth panelling at all.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of lu_forward_back_multi_panelled, unwired pending A/B
 const fn trsm_panel_width(n: usize) -> usize {
-    let by_n = if n == 0 { 64 } else { 32_768 / n };
+    // A zero `n` has no meaningful working set; normalising the divisor to 1 sends the
+    // quotient through the clamp below, which pins the width at 64 - the same answer the
+    // direct `n == 0` guard used to produce.
+    let by_n = 32_768 / if n == 0 { 1 } else { n };
     if by_n < 8 {
         8
     } else if by_n > 64 {
@@ -965,6 +969,7 @@ const fn trsm_panel_width(n: usize) -> usize {
 ///
 /// The row permutation stays a whole-matrix pass at the top, as in the unblocked routine: it
 /// gathers `b`'s rows and is not part of the substitution.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; wire via gate once A/B'd
 fn lu_forward_back_multi_panelled(
     lu: &[f64],
     perm: &[usize],
@@ -989,9 +994,7 @@ fn lu_forward_back_multi_panelled(
                 // Split borrow, sub-ranged to the panel. Same reasoning as the unpanelled
                 // routine; the slices are narrowed to `c0..c1` so the panel bound is preserved.
                 let (row_i, row_j) = two_rows_mut(&mut x, i, j, m);
-                for (target, &src) in
-                    row_i[c0..c1].iter_mut().zip(row_j[c0..c1].iter())
-                {
+                for (target, &src) in row_i[c0..c1].iter_mut().zip(row_j[c0..c1].iter()) {
                     *target -= l_ij * src;
                 }
             }
@@ -1000,9 +1003,7 @@ fn lu_forward_back_multi_panelled(
             for j in (i + 1)..n {
                 let u_ij = lu[i * n + j];
                 let (row_i, row_j) = two_rows_mut(&mut x, i, j, m);
-                for (target, &src) in
-                    row_i[c0..c1].iter_mut().zip(row_j[c0..c1].iter())
-                {
+                for (target, &src) in row_i[c0..c1].iter_mut().zip(row_j[c0..c1].iter()) {
                     *target -= u_ij * src;
                 }
             }
@@ -1490,8 +1491,15 @@ fn inv_from_lu_unblocked(lu: &[f64], perm: &[usize], n: usize) -> Vec<f64> {
 /// for n = 1024, which is L2-resident on the hosts this campaign measures on, while staying wide
 /// enough that the inner `axpy` still vectorises. Mirrors `cholesky_panel_width`'s shape rather
 /// than inventing a second convention.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of inv_from_lu_blocked, unwired pending A/B
 const fn inv_panel_width(n: usize) -> usize {
-    if n >= 512 { 64 } else if n >= 128 { 32 } else { n }
+    if n >= 512 {
+        64
+    } else if n >= 128 {
+        32
+    } else {
+        n
+    }
 }
 
 /// `A^-1` from an LU factorisation, blocked over COLUMN PANELS of the right-hand side.
@@ -1523,6 +1531,7 @@ const fn inv_panel_width(n: usize) -> usize {
 ///
 /// The permutation pass stays whole-matrix and runs once at the end: it permutes within each row
 /// across all `n` columns, so it is the one step that is not column-separable.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; wire via gate once A/B'd
 fn inv_from_lu_blocked(lu: &[f64], perm: &[usize], n: usize) -> Vec<f64> {
     let mut x = vec![0.0; n * n];
     for i in 0..n {
@@ -1559,8 +1568,8 @@ fn inv_from_lu_blocked(lu: &[f64], perm: &[usize], n: usize) -> Vec<f64> {
             }
             let u_ii = lu[i * n + i];
             let row_i = &mut x[i * n..i * n + n];
-            for col in c0..c1 {
-                row_i[col] /= u_ii;
+            for slot in &mut row_i[c0..c1] {
+                *slot /= u_ii;
             }
         }
         c0 = c1;
@@ -3521,13 +3530,16 @@ pub fn tsqr_qtb(
 /// a STARTING POINT, not as a measured result: our `R` comes from the parallel `tsqr_r` while
 /// LAPACK's comes from a serial `dgeqrf`, so the true crossover on this crate is likely LOWER and
 /// has to be measured before any gate uses it.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: crossover start point for the unwired R-route gate
 const SVD_TALL_QR_NUM: usize = 11;
+#[allow(dead_code)] // franken_numpy-ixs5y staging: crossover start point for the unwired R-route gate
 const SVD_TALL_QR_DEN: usize = 6;
 
 /// Whether an `m x n` input is tall enough that reducing through `R` is the cheaper route.
 ///
 /// Written as a cross-multiplication in `u128` so a large `m` cannot overflow the comparison - the
 /// whole point of this path is inputs where `m` is enormous.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: predicate for the unwired svd_values_via_r gate
 fn svd_tall_qr_pays(m: usize, n: usize) -> bool {
     (m as u128) * (SVD_TALL_QR_DEN as u128) >= (n as u128) * (SVD_TALL_QR_NUM as u128)
 }
@@ -3561,6 +3573,7 @@ fn svd_tall_qr_pays(m: usize, n: usize) -> bool {
 /// values - so wiring it needs a gate plus regenerated digests, exactly as with the blocked
 /// bidiagonal reduction. `svd_tall_qr_pays` is the predicate that gate would use once the crossover
 /// has been MEASURED on this crate rather than inherited from LAPACK.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; needs gate + regenerated digests
 fn svd_values_via_r(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
     // `tsqr_r` enforces `m >= n` itself and returns the shape error, so this propagates rather
     // than asserting.
@@ -3569,6 +3582,7 @@ fn svd_values_via_r(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgErr
 }
 
 /// Whether the `R` route pays for EITHER orientation, comparing the long side against the short.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of the unwired svd_values_via_r_any route
 fn svd_r_pays_either_orientation(m: usize, n: usize) -> bool {
     svd_tall_qr_pays(m.max(n), m.min(n))
 }
@@ -3586,6 +3600,7 @@ fn svd_r_pays_either_orientation(m: usize, n: usize) -> bool {
 ///
 /// The transpose is O(m n) against an O(m n^2) reduction, so it is not a meaningful share of the
 /// cost it removes.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; needs gate + regenerated digests
 fn svd_values_via_r_any(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
     if m >= n {
         svd_values_via_r(a, m, n)
@@ -4910,6 +4925,7 @@ fn svd_values_from_bidiag(
 /// to `svd_via_jacobi_full`. Swapping it in therefore keeps the Jacobi fallback intact for free.
 ///
 /// Requires `m >= n`; the caller transposes wide inputs before reaching here.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; one-line swap once gated
 fn svd_values_blocked(
     a: &[f64],
     m: usize,
@@ -5049,6 +5065,7 @@ fn svd_bidiag_qr_values(
 /// the large matrices blocking exists to serve. The panel accumulators are inherently O(m) tall;
 /// they are not meant to be cache-resident, and the quantity that wants tuning is the ratio of
 /// level-2 panel work to the level-3 trailing update, which is not a cache-capacity question.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: default width for the unwired blocked bidiagonal reduction
 const BIDIAG_PANEL_NB: usize = 32;
 
 /// Householder reflector in the LAPACK `dlarfg` convention: writes `v` with `v[0] == 1` into
@@ -5056,6 +5073,7 @@ const BIDIAG_PANEL_NB: usize = 32;
 ///
 /// `tau == 0` means "no reflection needed" - the tail is already zero - and every caller must skip
 /// the update in that case rather than applying a zero reflector.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of the unwired bidiag_reduce_blocked
 fn bidiag_reflector_into(x: &[f64], v_out: &mut [f64]) -> f64 {
     let len = x.len();
     if len == 0 {
@@ -5091,6 +5109,7 @@ fn bidiag_reflector_into(x: &[f64], v_out: &mut [f64]) -> f64 {
 /// of these per column, so allocating a fresh result each time churned O(n^2) of allocation across
 /// a factorisation for no arithmetic benefit - and this crate has already been bitten by
 /// large-buffer allocation churn dominating a kernel's measured time.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of the unwired bidiag_reduce_blocked
 fn bidiag_gemv_into(
     a: &[f64],
     rows: usize,
@@ -5111,6 +5130,7 @@ fn bidiag_gemv_into(
 
 /// `out[..cols] = A^T x`, same submatrix convention. `out[..cols]` is zeroed first, since this one
 /// accumulates.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: helper of the unwired bidiag_reduce_blocked
 fn bidiag_gemv_t_into(
     a: &[f64],
     rows: usize,
@@ -5175,6 +5195,7 @@ fn bidiag_gemv_t_into(
 /// [`bidiag_reduce_blocked`] at the default panel width.
 ///
 /// UNMEASURED and UNWIRED, like the reduction it calls.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above
 fn bidiag_reduce_blocked_default(
     a: &[f64],
     m: usize,
@@ -5183,6 +5204,7 @@ fn bidiag_reduce_blocked_default(
     bidiag_reduce_blocked(a, m, n, BIDIAG_PANEL_NB)
 }
 
+#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; needs gate + regenerated digests
 fn bidiag_reduce_blocked(
     a: &[f64],
     m: usize,
@@ -9035,6 +9057,7 @@ fn packed_gemm_serial_tiled_apacked<const MR: usize>(
 /// change: it needs coordinated edits to the band kernel's signature, its tail handling, the
 /// driver, and the test that calls the kernel directly, and that is more than should be changed
 /// blind under a build freeze.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: packing half of the unwired block-wise GEMM structure
 fn pack_b_panel_block(b: &[f64], k: usize, n: usize, panel0: usize, panels: usize) -> Vec<f64> {
     let mut bp = vec![0.0f64; panels * k * PACKED_NR];
     for p in 0..panels {
@@ -9071,6 +9094,8 @@ fn pack_b_panel_block(b: &[f64], k: usize, n: usize, panel0: usize, panels: usiz
 /// BIT-IDENTICAL to the scalar kernel: lane `jj` accumulates `kk` ascending into one register
 /// tile with no cross-lane interaction, multiply and add kept SEPARATE so both roundings survive.
 /// No `mul_add`.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: band half of the unwired block-wise GEMM structure
+#[allow(clippy::too_many_arguments)] // GEMM micro-kernel: flat args keep each call site auditable (repo convention)
 fn packed_gemm_band_block<const MR: usize>(
     ap: &[f64],
     bp: &[f64],
@@ -9120,6 +9145,7 @@ fn packed_gemm_band_block<const MR: usize>(
 /// Sized so the packed block `k * panels * PACKED_NR * 8` stays near 256 KiB - the same L2 target
 /// the existing kernels already use for their `nc` loop, so this introduces no new constant, only
 /// the same one expressed in panels. At least one panel always, or the block loop cannot advance.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: sizing helper of the unwired packed-GEMM drivers
 fn packed_block_panels(k: usize) -> usize {
     let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
     (cols / PACKED_NR).max(1)
@@ -9151,6 +9177,7 @@ fn packed_block_panels(k: usize) -> usize {
 ///
 /// TAILS RUN ONCE, after every block, because remainder columns span all blocks and remainder rows
 /// span all of `c`. Running them per block would apply them repeatedly.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above
 fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut c = vec![0.0; m * n];
     let n_full = n - n % PACKED_NR;
@@ -9257,6 +9284,7 @@ fn packed_gemm_blocked(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Ve
 /// `PACKED_NR` is 8, so each accumulator row is one 512-bit or two 256-bit vectors depending on
 /// what the target supports; portable SIMD picks that, which is the point of using it rather than
 /// naming a width.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: UNMEASURED/UNWIRED per doc above; explicit-SIMD micro-kernel
 fn packed_gemm_serial_tiled_simd<const MR: usize>(
     a: &[f64],
     b: &[f64],
@@ -9546,6 +9574,8 @@ fn packed_gemm_sub_assign_serial_tiled<const MR: usize>(
 /// tile with no cross-lane interaction, multiply and add kept SEPARATE, and the store subtracts in
 /// the same direction (`target - acc`, matching `*slot -= v`). No `mul_add`, which would round once
 /// instead of twice and drift the golden digests this path is pinned by.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: sub-assign band kernel of the unwired blocked structure
+#[allow(clippy::too_many_arguments)] // GEMM micro-kernel: flat args keep each call site auditable (repo convention)
 fn packed_gemm_sub_assign_band_block<const MR: usize>(
     ap: &[f64],
     bp: &[f64],
@@ -9619,6 +9649,7 @@ fn packed_gemm_sub_assign_band_block<const MR: usize>(
 /// sequentially, each element accumulates over the full `k` inside one register tile within a
 /// single block, and remainder rows and columns are applied after every block rather than per
 /// block.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: sub-assign driver of the unwired blocked structure
 fn packed_gemm_sub_assign_blocked(
     a: &[f64],
     b: &[f64],
@@ -9745,6 +9776,7 @@ fn packed_gemm_sub_assign_blocked(
 ///
 /// Tails run ONCE after the block loop, not once per block, and now go through the shared
 /// `packed_row_tail_sub_assign` with an explicit `row_stride`.
+#[allow(dead_code)] // franken_numpy-ixs5y staging: strided sub-assign driver of the unwired blocked structure
 fn packed_gemm_sub_assign_strided_blocked(
     a: &[f64],
     b: &[f64],
@@ -9867,6 +9899,7 @@ fn packed_gemm_sub_assign_strided_blocked(
 /// until `franken_numpy-ixs5y`, which is precisely what confined the blocked sub_assign driver to
 /// the non-strided case and forced the strided kernel to carry a duplicate inline tail. Contiguous
 /// callers pass `n` for both and are arithmetically unchanged.
+#[allow(clippy::too_many_arguments)] // tail kernel shares the packed-GEMM argument shape for auditability
 fn packed_row_tail_sub_assign(
     a: &[f64],
     b: &[f64],
@@ -23121,9 +23154,7 @@ except Exception as exc:
 
     fn packed_apack_bit_exact_at<const MR: usize>() {
         for &(m, k, n) in &[(4, 3, 8), (8, 5, 16), (9, 7, 19), (12, 33, 24), (5, 2, 9)] {
-            let a: Vec<f64> = (0..m * k)
-                .map(|i| ((i * 37 % 101) as f64) - 50.5)
-                .collect();
+            let a: Vec<f64> = (0..m * k).map(|i| ((i * 37 % 101) as f64) - 50.5).collect();
             let b: Vec<f64> = (0..k * n)
                 .map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25)
                 .collect();
@@ -23165,7 +23196,6 @@ except Exception as exc:
         }
     }
 
-
     /// The column-panel blocked inverse must equal the unblocked one to the BIT.
     ///
     /// Blocking by column is only legitimate because the substitutions are column-separable:
@@ -23199,7 +23229,8 @@ except Exception as exc:
             let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
             let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
             assert_eq!(
-                want_bits, got_bits,
+                want_bits,
+                got_bits,
                 "blocked inverse diverged in BITS at n={n} (panel={})",
                 super::inv_panel_width(n)
             );
@@ -23218,8 +23249,6 @@ except Exception as exc:
             assert!(w <= n.max(1), "panel width {w} exceeds n={n}");
         }
     }
-
-
 
     /// The column-panelled multi-RHS solve must equal the unblocked one to the BIT.
     ///
@@ -23254,7 +23283,8 @@ except Exception as exc:
             let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
             let got_bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
             assert_eq!(
-                want_bits, got_bits,
+                want_bits,
+                got_bits,
                 "panelled multi-RHS solve diverged in BITS at n={n} (panel={})",
                 super::trsm_panel_width(n)
             );
@@ -23269,7 +23299,10 @@ except Exception as exc:
     fn trsm_panel_width_bounds_the_working_set() {
         for &n in &[1usize, 64, 128, 512, 1024, 4096, 16384] {
             let w = super::trsm_panel_width(n);
-            assert!((8..=64).contains(&w), "panel width {w} out of bounds at n={n}");
+            assert!(
+                (8..=64).contains(&w),
+                "panel width {w} out of bounds at n={n}"
+            );
             // n * panel * 8 bytes must stay within a small multiple of the 256 KiB target; the
             // floor of 8 means very large n cannot hold the target exactly.
             let bytes = n * w * 8;
@@ -23284,7 +23317,6 @@ except Exception as exc:
         );
     }
 
-
     /// The explicit-SIMD micro-kernel must equal the scalar tiled kernel to the BIT.
     ///
     /// This is the test that makes the SIMD rewrite safe to consider at all. Lane `jj` of an
@@ -23297,9 +23329,16 @@ except Exception as exc:
     #[test]
     fn gemm_simd_kernel_is_bit_exact_vs_tiled() {
         const MR: usize = super::PACKED_MR;
-        for &(m, k, n) in &[(4usize, 3usize, 8usize), (8, 5, 16), (9, 7, 19), (12, 33, 24)] {
+        for &(m, k, n) in &[
+            (4usize, 3usize, 8usize),
+            (8, 5, 16),
+            (9, 7, 19),
+            (12, 33, 24),
+        ] {
             let a: Vec<f64> = (0..m * k).map(|i| ((i * 37 % 101) as f64) - 50.5).collect();
-            let b: Vec<f64> = (0..k * n).map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25).collect();
+            let b: Vec<f64> = (0..k * n)
+                .map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25)
+                .collect();
             let mut want = vec![0.0f64; m * n];
             let mut got = vec![0.0f64; m * n];
             super::packed_gemm_serial_tiled::<MR>(&a, &b, m, k, n, &mut want);
@@ -23312,8 +23351,6 @@ except Exception as exc:
             );
         }
     }
-
-
 
     /// `pack_b_panel_block` must place every element the layout formula names, at any offset.
     ///
@@ -23347,7 +23384,6 @@ except Exception as exc:
         }
     }
 
-
     /// Driving the block kernel over every column block, then tails once, must equal the scalar
     /// kernel to the BIT - at SEVERAL block widths.
     ///
@@ -23363,9 +23399,16 @@ except Exception as exc:
     fn gemm_band_block_over_all_blocks_is_bit_exact_vs_tiled() {
         const MR: usize = super::PACKED_MR;
         const NR: usize = super::PACKED_NR;
-        for &(m, k, n) in &[(4usize, 3usize, 8usize), (8, 5, 16), (9, 7, 19), (12, 33, 24)] {
+        for &(m, k, n) in &[
+            (4usize, 3usize, 8usize),
+            (8, 5, 16),
+            (9, 7, 19),
+            (12, 33, 24),
+        ] {
             let a: Vec<f64> = (0..m * k).map(|i| ((i * 37 % 101) as f64) - 50.5).collect();
-            let b: Vec<f64> = (0..k * n).map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25).collect();
+            let b: Vec<f64> = (0..k * n)
+                .map(|i| ((i * 53 % 97) as f64) / 8.0 - 6.25)
+                .collect();
             let mut want = vec![0.0f64; m * n];
             super::packed_gemm_serial_tiled::<MR>(&a, &b, m, k, n, &mut want);
             let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
@@ -23399,7 +23442,6 @@ except Exception as exc:
         }
     }
 
-
     /// The block-wise driver must equal `packed_gemm` to the BIT.
     ///
     /// Valid on EITHER path: with a multi-threaded rayon pool and dimensions past
@@ -23418,8 +23460,12 @@ except Exception as exc:
             (128, 128, 128),
             (130, 129, 132),
         ] {
-            let a: Vec<f64> = (0..m * k).map(|i| ((i * 31 % 89) as f64) / 4.0 - 11.125).collect();
-            let b: Vec<f64> = (0..k * n).map(|i| ((i * 43 % 79) as f64) / 16.0 - 2.4375).collect();
+            let a: Vec<f64> = (0..m * k)
+                .map(|i| ((i * 31 % 89) as f64) / 4.0 - 11.125)
+                .collect();
+            let b: Vec<f64> = (0..k * n)
+                .map(|i| ((i * 43 % 79) as f64) / 16.0 - 2.4375)
+                .collect();
             let want = super::packed_gemm(&a, &b, m, k, n);
             let got = super::packed_gemm_blocked(&a, &b, m, k, n);
             let want_bits: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
@@ -23442,14 +23488,16 @@ except Exception as exc:
             let panels = super::packed_block_panels(k);
             assert!(panels >= 1, "block width {panels} not positive at k={k}");
             let bytes = k * panels * super::PACKED_NR * 8;
-            assert!(bytes <= 512 * 1024, "block {bytes} B exceeds the L2 target at k={k}");
+            assert!(
+                bytes <= 512 * 1024,
+                "block {bytes} B exceeds the L2 target at k={k}"
+            );
         }
         assert!(
             super::packed_block_panels(4096) <= super::packed_block_panels(64),
             "block width must not grow with k"
         );
     }
-
 
     /// Driving the sub_assign block kernel over every column block, then tails once, must equal
     /// the serial sub_assign kernel to the BIT - at several block widths.
@@ -23465,7 +23513,12 @@ except Exception as exc:
     /// accumulation error that only shows up against live data.
     #[test]
     fn sub_assign_band_block_over_all_blocks_is_bit_exact() {
-        for &(m, k, n) in &[(4usize, 3usize, 8usize), (8, 5, 16), (9, 7, 19), (12, 33, 24)] {
+        for &(m, k, n) in &[
+            (4usize, 3usize, 8usize),
+            (8, 5, 16),
+            (9, 7, 19),
+            (12, 33, 24),
+        ] {
             // Use the SAME tile height the reference dispatcher picks. It selects the narrow
             // tile for small `k`, and all four test shapes are small, so hardcoding PACKED_MR
             // would compare MR=4 against a reference built at MR=2. The file asserts those are
@@ -23483,8 +23536,12 @@ except Exception as exc:
     fn sub_assign_block_bit_exact_at<const MR: usize>(m: usize, k: usize, n: usize) {
         const NR: usize = super::PACKED_NR;
         {
-            let a: Vec<f64> = (0..m * k).map(|i| ((i * 29 % 83) as f64) / 2.0 - 20.25).collect();
-            let b: Vec<f64> = (0..k * n).map(|i| ((i * 47 % 71) as f64) / 8.0 - 4.375).collect();
+            let a: Vec<f64> = (0..m * k)
+                .map(|i| ((i * 29 % 83) as f64) / 2.0 - 20.25)
+                .collect();
+            let b: Vec<f64> = (0..k * n)
+                .map(|i| ((i * 47 % 71) as f64) / 8.0 - 4.375)
+                .collect();
             let seed: Vec<f64> = (0..m * n).map(|i| ((i * 17 % 61) as f64) - 30.5).collect();
 
             let mut want = seed.clone();
@@ -23523,7 +23580,6 @@ except Exception as exc:
         }
     }
 
-
     /// The blocked sub_assign driver must equal `packed_gemm_sub_assign` to the BIT.
     ///
     /// Valid on EITHER path: a multi-threaded pool past `MATMUL_PARALLEL_MIN_DIM` takes the
@@ -23545,8 +23601,12 @@ except Exception as exc:
             (128, 128, 128),
             (130, 129, 132),
         ] {
-            let a: Vec<f64> = (0..m * k).map(|i| ((i * 29 % 83) as f64) / 2.0 - 20.25).collect();
-            let b: Vec<f64> = (0..k * n).map(|i| ((i * 47 % 71) as f64) / 8.0 - 4.375).collect();
+            let a: Vec<f64> = (0..m * k)
+                .map(|i| ((i * 29 % 83) as f64) / 2.0 - 20.25)
+                .collect();
+            let b: Vec<f64> = (0..k * n)
+                .map(|i| ((i * 47 % 71) as f64) / 8.0 - 4.375)
+                .collect();
             let seed: Vec<f64> = (0..m * n).map(|i| ((i * 17 % 61) as f64) - 30.5).collect();
 
             let mut want = seed.clone();
@@ -23578,20 +23638,23 @@ except Exception as exc:
             // leaves remainder rows, which is exactly what a per-block tail would corrupt.
             (130, 129, 132, 150),
         ] {
-            let a: Vec<f64> = (0..m * k).map(|i| ((i * 29 % 83) as f64) / 2.0 - 20.25).collect();
-            let b: Vec<f64> = (0..k * n).map(|i| ((i * 47 % 71) as f64) / 8.0 - 4.375).collect();
+            let a: Vec<f64> = (0..m * k)
+                .map(|i| ((i * 29 % 83) as f64) / 2.0 - 20.25)
+                .collect();
+            let b: Vec<f64> = (0..k * n)
+                .map(|i| ((i * 47 % 71) as f64) / 8.0 - 4.375)
+                .collect();
             // Non-zero seed: this path SUBTRACTS into live data, so a zero seed would hide a sign
             // or accumulation error. The buffer spans the full pitch, so the columns in
             // `n..row_stride` are padding the kernel must never write.
-            let seed: Vec<f64> =
-                (0..m * row_stride).map(|i| ((i * 17 % 61) as f64) - 30.5).collect();
+            let seed: Vec<f64> = (0..m * row_stride)
+                .map(|i| ((i * 17 % 61) as f64) - 30.5)
+                .collect();
 
             let mut want = seed.clone();
             super::packed_gemm_sub_assign_strided(&a, &b, m, k, n, row_stride, &mut want);
             let mut got = seed;
-            super::packed_gemm_sub_assign_strided_blocked(
-                &a, &b, m, k, n, row_stride, &mut got,
-            );
+            super::packed_gemm_sub_assign_strided_blocked(&a, &b, m, k, n, row_stride, &mut got);
 
             // Compared over the WHOLE buffer, padding included. A strided kernel that ran off the
             // end of a row would differ only in those columns, and a comparison restricted to the
@@ -23633,7 +23696,8 @@ except Exception as exc:
                 .collect();
             let (d, e) = super::bidiag_reduce_blocked(&a, m, n, nb).expect("blocked reduction");
             // The default entry must satisfy the same invariant, not just the swept widths.
-            let (dd, ed) = super::bidiag_reduce_blocked_default(&a, m, n).expect("default reduction");
+            let (dd, ed) =
+                super::bidiag_reduce_blocked_default(&a, m, n).expect("default reduction");
             assert_eq!(dd.len(), d.len(), "default entry length m={m} n={n}");
             assert_eq!(ed.len(), e.len(), "default entry length m={m} n={n}");
 
