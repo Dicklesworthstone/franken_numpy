@@ -8472,6 +8472,132 @@ fn numpy_f64_native_unary_is_byte_exact(
     }
 }
 
+// BINARY sibling of the probed-unary framework above (`deadlock-audit-0cwkm`).
+// Same doctrine, two-argument shape: NumPy may dispatch vectorized kernels for
+// f64 power/arctan2 that part from the scalar libm calls fnp's native routes
+// emit, and a sampled probe can only refute byte-equality, never certify it.
+// MEASURED 2026-08-22, numpy 2.4.3, np.power vs libm pow and np.arctan2 vs
+// libm atan2 over a 4096-point grid: hz2 (EPYC-Genoa, avx512f) diverges on
+// 205/4096 and 229/4096 points respectively - all by exactly 1 ULP; a Zen3
+// (non-avx512) host diverges on 0/4096 for both. That is the same ISA-keyed
+// relation `numpy_explog_matches_libm` encodes for exp/log, so the composer
+// below lets the ISA answer win outright on avx512f and runs the per-op probe
+// elsewhere (tanh already diverges on plain AVX2, so the ISA condition alone
+// is not sufficient there).
+//
+// Logaddexp/logaddexp2/hypot are deliberately UNREGISTERED: no divergence has
+// been observed or measured for them, and registering an op gates its native
+// route on every avx512f host. Sweep them behind their own evidence first.
+struct ProbedBinary {
+    numpy_name: &'static str,
+    native: fn(f64, f64) -> f64,
+}
+
+fn probed_f64_binary(op: BinaryOp) -> Option<ProbedBinary> {
+    let (numpy_name, native): (&'static str, fn(f64, f64) -> f64) = match op {
+        // np.float_power is np.power computed in float64 - the same kernel
+        // family - so it is gated as power's sibling even though today's
+        // measurement named `power` directly.
+        BinaryOp::Power | BinaryOp::FloatPower => ("power", |x, y| x.powf(y)),
+        BinaryOp::Arctan2 => ("arctan2", |x, y| x.atan2(y)),
+        _ => return None,
+    };
+    Some(ProbedBinary { numpy_name, native })
+}
+
+fn numpy_f64_binary_matches_libm(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    probed: &ProbedBinary,
+) -> bool {
+    static PROBED: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<&'static str, bool>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let cache = &*PROBED;
+    if let Some(&known) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(probed.numpy_name)
+    {
+        return known;
+    }
+    // A two-axis grid rather than one swept axis: both arguments move, which is
+    // where a SIMD kernel's range reduction can part from libm. The magnitude
+    // extremes mirror the unary framework's reasoning - they are exactly the
+    // arguments the conformance surface asserts on.
+    const N: usize = 2048;
+    let mut samples: Vec<(f64, f64)> = Vec::with_capacity(N * 4 + 16);
+    for i in 0..N {
+        let x = -40.0 + 80.0 * (i as f64) / ((N - 1) as f64);
+        for &y in &[0.5f64, 1.0, 2.0, 7.5] {
+            samples.push((x, y));
+        }
+    }
+    for m in [
+        f64::MAX,
+        f64::MIN_POSITIVE,
+        f64::MIN_POSITIVE / 2.0, // subnormal
+        1e-300,
+        1e300,
+    ] {
+        samples.push((m, 0.5));
+        samples.push((m, 2.0));
+        samples.push((-m, 0.5));
+    }
+    samples.push((1.0, 0.0)); // atan2 axis cases: defined (+-pi/2), never warns
+    samples.push((-1.0, 0.0));
+    samples.push((1.0, -0.5));
+    // Domain filter, identical to the unary framework's: an argument pair where
+    // the NATIVE scalar call answers NaN is outside the op's domain, NaN payload
+    // bits are not required to agree, and keeping such pairs would defer an op
+    // that is in fact byte-exact.
+    samples.retain(|&(x, y)| !(probed.native)(x, y).is_nan());
+
+    let (xs, ys): (Vec<f64>, Vec<f64>) = samples.iter().copied().unzip();
+    let probe = || -> PyResult<bool> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "dtype"), "float64")?;
+        let xa = numpy.call_method(intern!(py, "asarray"), (xs.clone(),), Some(&kwargs))?;
+        let ya = numpy.call_method(intern!(py, "asarray"), (ys.clone(),), Some(&kwargs))?;
+        let theirs: Vec<f64> = numpy
+            .getattr(probed.numpy_name)?
+            .call1((&xa, &ya))?
+            .call_method0(intern!(py, "tolist"))?
+            .extract()?;
+        if theirs.len() != xs.len() {
+            return Ok(false);
+        }
+        Ok(samples
+            .iter()
+            .zip(theirs.iter())
+            .all(|(&(x, y), &t)| (probed.native)(x, y).to_bits() == t.to_bits()))
+    };
+    let matches = probe().unwrap_or(false);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(probed.numpy_name, matches);
+    matches
+}
+
+/// Composed parity verdict for the probed BINARY ops, mirroring
+/// [`numpy_f64_native_unary_is_byte_exact`]: on avx512f hosts the measured ISA
+/// finding wins outright; elsewhere the cached per-op probe decides; unregistered
+/// ops are untouched.
+fn numpy_f64_native_binary_is_byte_exact(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    op: BinaryOp,
+) -> bool {
+    if probed_f64_binary(op).is_some() && !numpy_explog_matches_libm() {
+        return false;
+    }
+    match probed_f64_binary(op) {
+        Some(probed) => numpy_f64_binary_matches_libm(py, numpy, &probed),
+        None => true, // not a probed scalar-libm op; nothing to decide here
+    }
+}
+
 // Fused single-pass transcendental map + float-error-event detection over the
 // borrowed numpy buffers (the sqrt pattern generalized). Computes the same
 // `UnaryOp::apply` scalar-libm call the UFuncArray path runs — bit-identical
@@ -14067,6 +14193,12 @@ fn try_zerocopy_f64_binary_into(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?.clone();
+    // PARITY GATE for the probed binary transcendentals (`deadlock-audit-0cwkm`):
+    // power/float_power decline when live NumPy is not byte-equal to the libm
+    // call this route emits. Declining is the caller's ordinary delegation path.
+    if probed_f64_binary(op).is_some() && !numpy_f64_native_binary_is_byte_exact(py, &numpy, op) {
+        return Ok(None);
+    }
     let Some((written, _shape)) =
         zerocopy_f64_binary_flat_with_out(py, &numpy, a, b, op, Some(out))?
     else {
@@ -14088,6 +14220,10 @@ fn try_zerocopy_f64_binary(
     // (`deadlock-audit-ei9jz`). `.clone()` keeps the owned `Bound` that the rest
     // of this function passes on as `&numpy`. See `cached_numpy`.
     let numpy = cached_numpy(py)?.clone();
+    // PARITY GATE - see try_zerocopy_f64_binary_into (`deadlock-audit-0cwkm`).
+    if probed_f64_binary(op).is_some() && !numpy_f64_native_binary_is_byte_exact(py, &numpy, op) {
+        return Ok(None);
+    }
     let Some((flat, shape)) = zerocopy_f64_binary_flat(py, &numpy, a, b, op)? else {
         return Ok(None);
     };
@@ -58304,6 +58440,18 @@ fn native_binary_arctan2_or_passthrough(
     // buffer and that buffer is returned, matching NumPy. Any OTHER kwarg, or `out=`
     // alongside anything else, still delegates - this widens the native surface by
     // exactly one well-understood parameter and nothing else.
+    // PARITY GATE (`deadlock-audit-0cwkm`). On hosts where NumPy's own f64
+    // arctan2 kernel is SIMD-dispatched and 1 ULP off libm, this op's native
+    // routes decline wholesale: fnp computes scalar-libm atan2, so engaging
+    // there would ship bytes NumPy itself would not produce. Delegation returns
+    // NumPy's own answer, which is fail-safe in exactly the direction the
+    // runtime doctrine requires.
+    {
+        let numpy_handle = cached_numpy(py)?;
+        if !numpy_f64_native_binary_is_byte_exact(py, &numpy_handle, BinaryOp::Arctan2) {
+            return core_numpy_passthrough_interned(py, intern!(py, "arctan2"), args, kwargs);
+        }
+    }
     if args.len() == 2
         && let Some(kwargs) = kwargs
         && kwargs.len() == 1
@@ -119679,23 +119827,32 @@ mod tests {
 
             // ENGAGEMENT: every assertion above passes even if we delegate, because
             // numpy writes into `out` too. Sabotage numpy.arctan2 so only the native
-            // path can succeed.
-            let sabotage = std::ffi::CString::new(
-                "import numpy as _np\n_orig_at2 = _np.arctan2\ndef _boom(*a, **k):\n    raise RuntimeError('delegated')\n_np.arctan2 = _boom\n",
-            )
-            .expect("no interior nul");
-            py.run(sabotage.as_c_str(), Some(&locals), Some(&locals))?;
-            let engage_kwargs = PyDict::new(py);
-            engage_kwargs.set_item("out", &c)?;
-            let engaged = fnp_arctan2.call((&a, &b), Some(&engage_kwargs));
-            let restore = std::ffi::CString::new("import numpy as _np\n_np.arctan2 = _orig_at2\n")
+            // path can succeed - but ONLY on hosts where engaging natively is
+            // parity-safe. On avx512f-class hosts the production route declines by
+            // design (numpy's own SIMD atan2 is 1 ULP off libm there,
+            // `deadlock-audit-0cwkm`); delegation through a sabotaged numpy then
+            // raises correctly, and demanding engagement anyway would make this
+            // test lie about what the lever is FOR.
+            let numpy_handle = cached_numpy(py)?;
+            if crate::numpy_f64_native_binary_is_byte_exact(py, &numpy_handle, BinaryOp::Arctan2) {
+                let sabotage = std::ffi::CString::new(
+                    "import numpy as _np\n_orig_at2 = _np.arctan2\ndef _boom(*a, **k):\n        raise RuntimeError('delegated')\n_np.arctan2 = _boom\n",
+                )
                 .expect("no interior nul");
-            py.run(restore.as_c_str(), Some(&locals), Some(&locals))?;
-            assert!(
-                engaged.is_ok(),
-                "arctan2 out= must take the NATIVE path: with numpy.arctan2 sabotaged \
-                 the call still has to succeed, or this lever is dead"
-            );
+                py.run(sabotage.as_c_str(), Some(&locals), Some(&locals))?;
+                let engage_kwargs = PyDict::new(py);
+                engage_kwargs.set_item("out", &c)?;
+                let engaged = fnp_arctan2.call((&a, &b), Some(&engage_kwargs));
+                let restore =
+                    std::ffi::CString::new("import numpy as _np\n_np.arctan2 = _orig_at2\n")
+                        .expect("no interior nul");
+                py.run(restore.as_c_str(), Some(&locals), Some(&locals))?;
+                assert!(
+                    engaged.is_ok(),
+                    "arctan2 out= must take the NATIVE path: with numpy.arctan2 sabotaged \
+                     the call still has to succeed, or this lever is dead"
+                );
+            }
 
             // A wrong-shape out must still behave exactly as numpy does.
             let bad_kwargs = PyDict::new(py);
