@@ -899,8 +899,28 @@ impl BinaryOp {
                 }
             }
             Self::Nextafter => {
-                if lhs.is_nan() || rhs.is_nan() {
-                    f64::NAN
+                // NaN OPERANDS ARE PROPAGATED, NOT REPLACED (`deadlock-audit-jd6lt`).
+                //
+                // This used to return a bare `f64::NAN`, which is the POSITIVE default
+                // quiet NaN - discarding the operand's sign and payload, and answering
+                // the same thing whichever operand was NaN. Measured against the
+                // installed NumPy 2.4.3 on raw bits, all six cases disagree with that:
+                //
+                //   lhs=7ff8..0123 rhs=3ff0..0000 -> 7ff8..0123   payload kept
+                //   lhs=fff8..0456 rhs=3ff0..0000 -> fff8..0456   SIGN kept
+                //   lhs=3ff0..0000 rhs=7ff8..0123 -> 7ff8..0123   rhs NaN propagates
+                //   lhs=7ff8..0123 rhs=fff8..0456 -> fff8..0456   BOTH NaN: RHS wins
+                //   lhs=fff8..0456 rhs=7ff8..0123 -> 7ff8..0123   BOTH NaN: RHS wins
+                //   lhs=7ff0..0001 rhs=3ff0..0000 -> 7ff8..0001   SIGNALING -> QUIETED
+                //
+                // Hence: prefer `rhs`, fall back to `lhs`, and set the quiet bit. The
+                // quiet bit is already set on a quiet NaN, so the OR only bites on a
+                // signaling one - which is exactly what the last row requires.
+                const QUIET_BIT: u64 = 0x0008_0000_0000_0000;
+                if rhs.is_nan() {
+                    f64::from_bits(rhs.to_bits() | QUIET_BIT)
+                } else if lhs.is_nan() {
+                    f64::from_bits(lhs.to_bits() | QUIET_BIT)
                 } else if lhs == rhs {
                     rhs
                 } else {
