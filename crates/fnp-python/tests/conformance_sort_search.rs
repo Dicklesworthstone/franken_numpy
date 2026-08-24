@@ -1978,3 +1978,50 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn int64_small_flat_sort_is_byte_exact_and_bypasses_numpy_sort() -> Result<(), String> {
+    // The small-i64 route is a value sort: equal values have identical bytes,
+    // so every NumPy `kind` has the same observable output. A temporary spy
+    // makes route engagement observable without weakening that byte contract.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260824)
+a = rng.integers(-(1 << 62), 1 << 62, 256, dtype=np.int64)
+a[:16] = np.array([
+    np.iinfo(np.int64).min, np.iinfo(np.int64).max,
+    -1, 0, 1, -1, 0, 1, -7, 7, -7, 7, 13, 13, -13, -13,
+], dtype=np.int64)
+rng.shuffle(a)
+original_sort = np.sort
+checks = []
+for kind in [None, "quicksort", "stable", "mergesort", "heapsort"]:
+    kwargs = {} if kind is None else {"kind": kind}
+    expected = original_sort(a, **kwargs)
+    calls = []
+    def sort_spy(*args, **spy_kwargs):
+        calls.append(1)
+        return original_sort(*args, **spy_kwargs)
+    np.sort = sort_spy
+    try:
+        actual = fnp.sort(a, **kwargs)
+    finally:
+        np.sort = original_sort
+    checks.append(
+        len(calls) == 0
+        and actual.dtype == expected.dtype
+        and actual.shape == expected.shape
+        and actual.tobytes() == expected.tobytes()
+    )
+print(all(checks))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "small int64 flat sort must stay byte-exact and bypass numpy.sort: {result}"
+    );
+    Ok(())
+}

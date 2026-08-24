@@ -26,6 +26,8 @@
 #![forbid(unsafe_code)]
 #![feature(portable_simd)]
 
+pub mod sort_small;
+
 use fnp_dtype::{
     ArrayStorage, DType, f16, promote, promote_for_mean_reduction, promote_for_sum_reduction,
 };

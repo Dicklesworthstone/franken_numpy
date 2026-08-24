@@ -70485,6 +70485,43 @@ fn int_sort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send>(
     Ok(Some(out.unbind()))
 }
 
+// Small 1-D int64 value sorts are dispatch-bound: taking the NumPy fallback
+// costs an extra Python call that dominates its short C qsort.  The output is
+// still a fresh `numpy.empty` allocation, matching the public NumPy result
+// lifecycle.  Integers have neither NaNs nor signed zeros; equal values have
+// identical bytes, so the serial value order is bit-exact for every kind.
+fn int64_sort_flat_small(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Ok(buffer) = PyBuffer::<i64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
+    let src: &[i64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), n) };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "dtype"), "int64")?;
+    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+    let dst: &mut [i64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    dst.copy_from_slice(src);
+    fnp_ufunc::sort_small::sort_i64(dst);
+    Ok(Some(out.unbind()))
+}
+
 // NumPy's AVX2-class int32 qsort was already within 1.7% of the native Rayon
 // path on the sampled many-core worker. On small pools, avoid paying the copy +
 // comparison-sort fan-out when NumPy has that SIMD basis. Pre-AVX2/non-x86
@@ -70651,6 +70688,7 @@ fn try_native_int_sort_flat(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_PARALLEL_MIN: usize = 1 << 20;
+    const I64_SMALL_SORT_MAX: usize = 256;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -70672,10 +70710,13 @@ fn try_native_int_sort_flat(
         .extract::<Vec<usize>>()?
         .iter()
         .product();
+    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    if kind == "i" && itemsize == std::mem::size_of::<i64>() && n <= I64_SMALL_SORT_MAX {
+        return int64_sort_flat_small(py, numpy, a, n);
+    }
     if n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     // 4-/8-byte ints: numpy uses AVX-512 simd-sort (int64 16M 189ms -> par 2.35x, int32
     // 1.44x); a comparison par_sort wins. 1-/2-byte ints: numpy's own sort is a SERIAL O(n)
     // radix/counting pass (a comparison par_sort cannot beat it - measured, ledger 2026-06),

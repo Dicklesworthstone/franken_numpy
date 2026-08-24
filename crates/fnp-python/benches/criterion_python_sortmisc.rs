@@ -441,8 +441,217 @@ fn main() {
                 "bench_flat_f64_unique_median_gate",
                 bench_flat_f64_unique_median_gate,
             ),
+            (
+                "bench_flat_i64_sort_256_dual_null",
+                bench_flat_i64_sort_256_dual_null,
+            ),
         ],
     );
+}
+
+/// Full `fnp.sort` dispatch versus the live `numpy.sort` incumbent for the
+/// small integer cell that the retired counter harness could not certify.
+///
+/// The preflight spy is outside timing and records whether this build still
+/// delegates to `numpy.sort`; the timed arms are always the public callables,
+/// so both the baseline and the cutoff build charge the shipped route.
+fn bench_flat_i64_sort_256_dual_null(_c: &mut criterion::Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_flat_i64_sort").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python flat-i64-sort module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let numpy_version: String = numpy
+            .getattr("__version__")
+            .expect("numpy version")
+            .extract()
+            .expect("numpy version string");
+        assert_eq!(
+            numpy_version, "2.4.3",
+            "this benchmark is pinned to the live NumPy 2.4.3 incumbent"
+        );
+        let build_route =
+            std::env::var("FNP_BENCH_BUILD_ROUTE").unwrap_or_else(|_| "unreported".to_owned());
+        let np_sort = numpy.getattr("sort").expect("numpy.sort");
+        let fnp_sort = module.getattr("sort").expect("fnp.sort");
+        assert!(
+            !fnp_sort.is(&np_sort),
+            "dispatch trap: fnp.sort resolved to the NumPy callable"
+        );
+        common::report_numpy_incumbent_identity(py, "sort", &np_sort);
+        common::report_incumbent_topology_with_shared_component(
+            "fnp.sort",
+            "numpy.sort",
+            "per_call_output_allocation",
+        );
+
+        let setup = "import numpy as np\n\\
+rng = np.random.default_rng(20260824)\n\\
+a = rng.integers(-(1 << 62), 1 << 62, 256, dtype=np.int64)\n\\
+a[:16] = np.array([np.iinfo(np.int64).min, np.iinfo(np.int64).max, -1, 0, 1, -1, 0, 1, -7, 7, -7, 7, 13, 13, -13, -13], dtype=np.int64)\n\\
+rng.shuffle(a)\n";
+        let ns = PyDict::new(py);
+        ns.set_item("fnp", &module).expect("bind fnp module");
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int64 corpus setup");
+        let input = ns.get_item("a").expect("int64 corpus present");
+        assert_eq!(
+            input.getattr("size").unwrap().extract::<usize>().unwrap(),
+            256,
+            "the contract cell is exactly n=256"
+        );
+        assert_eq!(
+            input.getattr("dtype").unwrap().str().unwrap().to_string(),
+            "int64",
+            "the contract cell is exactly int64"
+        );
+        assert!(
+            input
+                .getattr("flags")
+                .unwrap()
+                .getattr("c_contiguous")
+                .unwrap()
+                .extract::<bool>()
+                .unwrap(),
+            "the contract cell is C contiguous"
+        );
+
+        // Detect engagement without charging the spy to either timed arm.
+        py.run(
+            std::ffi::CString::new(
+                "original_sort = np.sort\n\\
+fnp_sort_calls = []\n\\
+def sort_spy(*args, **kwargs):\n\\
+    fnp_sort_calls.append(1)\n\\
+    return original_sort(*args, **kwargs)\n\\
+np.sort = sort_spy\n\\
+try:\n\\
+    route_probe = fnp.sort(a)\n\\
+finally:\n\\
+    np.sort = original_sort\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("route engagement probe");
+        let candidate_numpy_sort_calls = ns
+            .get_item("fnp_sort_calls")
+            .expect("route probe calls")
+            .len()
+            .expect("route probe call count");
+
+        let run_incumbent = || np_sort.call1((black_box(&input),)).expect("NumPy sort arm");
+        let run_candidate = || {
+            fnp_sort
+                .call1((black_box(&input),))
+                .expect("FrankenNumPy sort arm")
+        };
+        let ours = run_candidate();
+        let theirs = run_incumbent();
+        assert!(
+            ours.get_type().is(theirs.get_type()),
+            "int64 n=256 sorted result type differs from NumPy"
+        );
+        assert_eq!(
+            ours.getattr("dtype").unwrap().str().unwrap().to_string(),
+            theirs.getattr("dtype").unwrap().str().unwrap().to_string(),
+            "int64 n=256 sorted dtype differs from NumPy"
+        );
+        assert_eq!(
+            ours.call_method0("tobytes")
+                .unwrap()
+                .extract::<Vec<u8>>()
+                .unwrap(),
+            theirs
+                .call_method0("tobytes")
+                .unwrap()
+                .extract::<Vec<u8>>()
+                .unwrap(),
+            "int64 n=256 sort is not byte-exact versus NumPy"
+        );
+        let checksum_of = |result: &pyo3::Bound<'_, pyo3::PyAny>| -> u64 {
+            result
+                .call_method0("tobytes")
+                .unwrap()
+                .extract::<Vec<u8>>()
+                .unwrap()
+                .iter()
+                .fold(0xcbf2_9ce4_8422_2325_u64, |state, &byte| {
+                    (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                })
+        };
+        let candidate_route = if candidate_numpy_sort_calls == 0 {
+            "native_int64_small_sort"
+        } else {
+            "numpy_sort_passthrough"
+        };
+        let row = "python_flat_i64_sort_n256_vs_numpy";
+        println!(
+            "PARITY row={row} exact_bytes=passed exact_dtype=passed numpy_version={numpy_version} \\
+             input_elements=256 input_bytes=2048 checksum={:016x}",
+            checksum_of(&theirs)
+        );
+        println!(
+            "ROUTE_ENGAGEMENT row={row} candidate_route={candidate_route} \\
+             candidate_numpy_sort_calls_preflight={candidate_numpy_sort_calls} \\
+             axis=default dtype=int64 c_contiguous=true nan_placement=not_applicable"
+        );
+        println!(
+            "ALLOCATION_PARITY row={row} incumbent_output_allocation=per_call \\
+             candidate_output_allocation=per_call timed_path=public_callable"
+        );
+
+        let mut observe_incumbent = || {
+            let started = std::time::Instant::now();
+            let result = run_incumbent();
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let mut observe_candidate = || {
+            let started = std::time::Instant::now();
+            let result = run_candidate();
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: checksum_of(&result),
+            }
+        };
+        let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+            row,
+            &mut observe_incumbent,
+            &mut observe_candidate,
+        );
+        let verdict = common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+        println!(
+            "FLAT_I64_SORT_RESULT row={row} verdict={verdict} \\
+             incumbent_median_ns={:.3} candidate_median_ns={:.3} \\
+             ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \\
+             incumbent_null_ratio={:.6} incumbent_null_ci95=[{:.6},{:.6}] \\
+             candidate_null_ratio={:.6} candidate_null_ci95=[{:.6},{:.6}] \\
+             incumbent=numpy_live_same_invocation build_route={build_route}",
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            incumbent_null.ratio_median,
+            incumbent_null.ratio_ci_low,
+            incumbent_null.ratio_ci_high,
+            candidate_null.ratio_median,
+            candidate_null.ratio_ci_low,
+            candidate_null.ratio_ci_high,
+        );
+    });
 }
 
 /// Flat `float64` `np.unique` against live NumPy, same invocation, swept across
