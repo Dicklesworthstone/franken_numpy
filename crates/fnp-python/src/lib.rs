@@ -70702,8 +70702,8 @@ fn try_native_int_sort_flat(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" && kind != "b" {
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'i' | 'u' | 'b') {
         return Ok(None);
     }
     let n: usize = a
@@ -70712,7 +70712,7 @@ fn try_native_int_sort_flat(
         .iter()
         .product();
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    if kind == "i" && itemsize == std::mem::size_of::<i64>() && n <= I64_SMALL_SORT_MAX {
+    if kind == 'i' && itemsize == std::mem::size_of::<i64>() && n <= I64_SMALL_SORT_MAX {
         return int64_sort_flat_small(py, numpy, a, n);
     }
     if n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
@@ -70723,8 +70723,8 @@ fn try_native_int_sort_flat(
     // radix/counting pass (a comparison par_sort cannot beat it - measured, ledger 2026-06),
     // so they route to the parallel COUNTING sort instead (different primitive: par histogram
     // + memset-speed run-fill). bool == u8 byte order (see bool_sort_flat_counting).
-    match (kind.as_str(), itemsize) {
-        ("i", 1) => int_sort_flat_counting::<i8, 256>(
+    match (kind, itemsize) {
+        ('i', 1) => int_sort_flat_counting::<i8, 256>(
             py,
             numpy,
             a,
@@ -70733,10 +70733,10 @@ fn try_native_int_sort_flat(
             |v| (v as i16 - i8::MIN as i16) as usize,
             |b| (b as i16 + i8::MIN as i16) as i8,
         ),
-        ("u", 1) => {
+        ('u', 1) => {
             int_sort_flat_counting::<u8, 256>(py, numpy, a, n, "uint8", |v| v as usize, |b| b as u8)
         }
-        ("i", 2) => int_sort_flat_counting::<i16, 65536>(
+        ('i', 2) => int_sort_flat_counting::<i16, 65536>(
             py,
             numpy,
             a,
@@ -70745,7 +70745,7 @@ fn try_native_int_sort_flat(
             |v| (v as i32 - i16::MIN as i32) as usize,
             |b| (b as i32 + i16::MIN as i32) as i16,
         ),
-        ("u", 2) => int_sort_flat_counting::<u16, 65536>(
+        ('u', 2) => int_sort_flat_counting::<u16, 65536>(
             py,
             numpy,
             a,
@@ -70754,14 +70754,14 @@ fn try_native_int_sort_flat(
             |v| v as usize,
             |b| b as u16,
         ),
-        ("b", 1) => bool_sort_flat_counting(py, numpy, a, n),
-        ("i", 4) if i32_flat_sort_native_is_profitable() => {
+        ('b', 1) => bool_sort_flat_counting(py, numpy, a, n),
+        ('i', 4) if i32_flat_sort_native_is_profitable() => {
             int_sort_flat_typed::<i32>(py, numpy, a, n, "int32")
         }
-        ("i", 4) => Ok(None),
-        ("i", 8) => int_sort_flat_typed::<i64>(py, numpy, a, n, "int64"),
-        ("u", 4) => int_sort_flat_typed::<u32>(py, numpy, a, n, "uint32"),
-        ("u", 8) => int_sort_flat_typed::<u64>(py, numpy, a, n, "uint64"),
+        ('i', 4) => Ok(None),
+        ('i', 8) => int_sort_flat_typed::<i64>(py, numpy, a, n, "int64"),
+        ('u', 4) => int_sort_flat_typed::<u32>(py, numpy, a, n, "uint32"),
+        ('u', 8) => int_sort_flat_typed::<u64>(py, numpy, a, n, "uint64"),
         _ => Ok(None),
     }
 }
