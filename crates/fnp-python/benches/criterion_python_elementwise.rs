@@ -1303,6 +1303,10 @@ fn main() {
             ),
             ("bench_shipped_gemm_vs_numpy", bench_shipped_gemm_vs_numpy),
             (
+                "bench_maximum_out_stage_profile",
+                bench_maximum_out_stage_profile,
+            ),
+            (
                 "bench_shipped_binary_route_vs_numpy",
                 bench_shipped_binary_route_vs_numpy,
             ),
@@ -5154,6 +5158,116 @@ fn matmul_corner_checksum(result: &pyo3::Bound<'_, pyo3::PyAny>) -> u64 {
         ^ lane(m, 0).rotate_left(29)
         ^ lane(m, n).rotate_left(41)
         ^ lane(m / 2, n / 2).rotate_left(53)
+}
+
+/// WHERE DOES THE `maximum out=` LOSS LIVE - kernel or entry (`deadlock-audit-hzl1w`)?
+///
+/// The shipped `out=` route is a reproducible DECIDABLE_REGRESSION at n=2^20 (0.932146 /
+/// 0.915101 / 0.936650 across three runs). The branchless kernel rewrite narrowed it and
+/// did not close it, so before anyone writes another kernel this decomposes the route the
+/// same way the i64 sort was decomposed - which is what proved the sort's compare path
+/// could not close its cell.
+///
+/// Three timings, all min-of-many in ONE run so the residual is not a min-vs-median
+/// artifact: NumPy's whole `out=` call, our whole `out=` route, and the KERNEL alone -
+/// the exact monomorphic loop the specialized route runs, over the same numpy-allocated
+/// buffers, with no Python boundary crossed.
+///
+/// `route - kernel` is then the entry cost: argument handling, the `PyUFunc::__call__`
+/// dispatch, the ndarray/dtype/contiguity probes and the buffer acquisitions. If that
+/// dominates, no kernel work can close this cell and the lever is the entry path.
+fn bench_maximum_out_stage_profile(_c: &mut Criterion) {
+    use fnp_ufunc::BinaryOp;
+    const N: usize = 1 << 20;
+    const REPS: usize = 400;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let module = PyModule::new(py, "fnp_max_profile").expect("bench module");
+        fnp_python(&module).expect("initialize fnp module");
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_obj = locals.get_item("a").expect("a");
+        let b_obj = locals.get_item("b").expect("b");
+        let out_obj = locals.get_item("out").expect("out");
+        let args = PyTuple::new(py, [&a_obj, &b_obj]).expect("args");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &out_obj).expect("bind out=");
+
+        let np_max = numpy.getattr("maximum").expect("numpy.maximum");
+        let fnp_max = module.getattr("maximum").expect("fnp.maximum");
+        assert!(!fnp_max.is(&np_max), "dispatch trap: candidate IS numpy");
+
+        // Zero-copy views of the SAME buffers the route uses, so the kernel stage is not
+        // measured on differently-provenanced memory (`deadlock-audit-48by6`).
+        let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_obj).expect("a buffer");
+        let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_obj).expect("b buffer");
+        let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&out_obj).expect("out buffer");
+        let lhs: &[f64] =
+            unsafe { std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), N) };
+        let rhs: &[f64] =
+            unsafe { std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), N) };
+        let out_ptr = out_buffer.buf_ptr().cast::<f64>();
+        let mint = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(out_ptr, N) } };
+
+        let mut numpy_min = u128::MAX;
+        for _ in 0..REPS {
+            let started = Instant::now();
+            let r = np_max
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy maximum");
+            let e = started.elapsed().as_nanos();
+            black_box(&r);
+            numpy_min = numpy_min.min(e);
+        }
+        let mut route_min = u128::MAX;
+        for _ in 0..REPS {
+            let started = Instant::now();
+            let r = fnp_max.call(&args, Some(&out_kwargs)).expect("fnp maximum");
+            let e = started.elapsed().as_nanos();
+            black_box(&r);
+            route_min = route_min.min(e);
+        }
+        // The kernel exactly as the specialized route runs it: a CONSTANT op, so
+        // `apply` inlines and the loop is the one that ships.
+        let mut kernel_min = u128::MAX;
+        for _ in 0..REPS {
+            let started = Instant::now();
+            let out = mint();
+            for ((slot, &x), &y) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                *slot = BinaryOp::Maximum.apply(x, y);
+            }
+            let e = started.elapsed().as_nanos();
+            black_box(out.as_ptr());
+            kernel_min = kernel_min.min(e);
+        }
+
+        let residual = route_min.saturating_sub(kernel_min);
+        println!(
+            "MAXIMUM_OUT_STAGE_PROFILE n={N} reps={REPS} statistic=min_ns \
+             numpy_whole_call_ns={numpy_min} fnp_whole_route_ns={route_min} \
+             kernel_only_ns={kernel_min} entry_residual_ns={residual} \
+             kernel_share_of_route={:.4} residual_share_of_route={:.4} \
+             route_floor_if_kernel_were_free_ns={residual} \
+             numpy_minus_kernel_ns={} \
+             is_decomposition_of_our_arm_not_a_vs_numpy_claim=true",
+            kernel_min as f64 / route_min as f64,
+            residual as f64 / route_min as f64,
+            numpy_min as i128 - kernel_min as i128,
+        );
+    });
 }
 
 fn bench_shipped_binary_route_vs_numpy(_c: &mut Criterion) {
