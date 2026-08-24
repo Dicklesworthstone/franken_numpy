@@ -22,6 +22,8 @@
 //! complex functions fall back to NumPy for exact parity (marked with
 //! "Passthrough to np." comments).
 
+mod searchsorted_array_needle;
+
 use fnp_dtype::{ArrayStorage, DType, f16, promote};
 use fnp_io::{
     IOSupportedDType, load as io_load, save as io_save, savez as io_savez,
@@ -36320,14 +36322,22 @@ fn try_zerocopy_f64_searchsorted(
                     }
                 });
         } else {
-            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+            // A sorted tiny needle batch uses the isolated fixed-shape lower bound.
+            // Unsorted needles keep the established guessed search unchanged.
             let a_raw: &[f64] =
                 unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), a_s.len()) };
-            let mut guess = 0usize;
-            for (o, vc) in output.iter().zip(v_s.iter()) {
-                let idx = search_index_f64_raw_guess(a_raw, vc.get(), right, guess);
-                guess = idx;
-                o.set(idx as i64);
+            let v_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            if !searchsorted_array_needle::f64_sorted_needle_indices(a_raw, v_raw, right, out_data)
+            {
+                let mut guess = 0usize;
+                for (slot, &key) in out_data.iter_mut().zip(v_raw) {
+                    let idx = search_index_f64_raw_guess(a_raw, key, right, guess);
+                    guess = idx;
+                    *slot = idx as i64;
+                }
             }
         }
     }
