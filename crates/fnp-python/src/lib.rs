@@ -85429,22 +85429,30 @@ fn try_zerocopy_float_sum_flat(
     a: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // The directional size matrix crossed decisively at 16 MiB for both
-    // dtypes; 8 MiB f64 was only 1.07x and is deliberately left to NumPy.
-    const FLOAT_SUM_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+    // The refreshed public contract finds a decidable f64 mean loss at one
+    // million elements. The exact-tree SIMD route removes it there; retain
+    // the separately measured 16 MiB floor for f32.
+    const F64_SUM_PARALLEL_MIN_ELEMENTS: usize = 1_000_000;
+    const F32_SUM_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
     let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    let min_bytes = match itemsize {
+        8 => F64_SUM_PARALLEL_MIN_ELEMENTS * std::mem::size_of::<f64>(),
+        4 => F32_SUM_PARALLEL_MIN_BYTES,
+        _ => return Ok(None),
+    };
     if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
         || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
         || !a
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
-        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLOAT_SUM_PARALLEL_MIN_BYTES
+        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < min_bytes
     {
         return Ok(None);
     }
@@ -85453,7 +85461,7 @@ fn try_zerocopy_float_sum_flat(
         return Ok(None);
     }
 
-    let scalar = match dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
+    let scalar = match itemsize {
         4 => {
             let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
                 return Ok(None);
@@ -85523,25 +85531,39 @@ fn try_zerocopy_float_mean_flat(
     a: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const FLOAT_MEAN_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+    // Keep float32 at its independently measured 16 MiB floor, but admit the
+    // f64 public-contract size through the same exact NumPy pairwise tree.
+    const F64_MEAN_PARALLEL_MIN_ELEMENTS: usize = 1_000_000;
+    const F32_MEAN_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
     let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    let min_bytes = match itemsize {
+        8 => F64_MEAN_PARALLEL_MIN_ELEMENTS * std::mem::size_of::<f64>(),
+        4 => F32_MEAN_PARALLEL_MIN_BYTES,
+        _ => return Ok(None),
+    };
     if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
         || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
         || !a
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
-        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLOAT_MEAN_PARALLEL_MIN_BYTES
+        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < min_bytes
     {
         return Ok(None);
     }
+    // Sum already checks this runtime witness. Mean uses the same tree before
+    // its scalar divide, so it must decline on a NumPy build with another tree.
+    if !float_pairwise_tree_matches_numpy(numpy) {
+        return Ok(None);
+    }
 
-    let scalar = match dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
+    let scalar = match itemsize {
         4 => {
             let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
                 return Ok(None);

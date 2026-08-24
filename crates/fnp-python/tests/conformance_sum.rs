@@ -983,6 +983,37 @@ print(ok)
     Ok(())
 }
 
+/// A 1M f64 array is the lowered native-admission boundary. Capture NumPy's
+/// exact result first, then poison only the module-level fallback callable:
+/// the route's tree probe uses `ndarray.sum`, while a fallback through
+/// `numpy.sum` must fail. This proves the boundary really executes the SIMD
+/// pairwise tree rather than merely comparing two delegated calls.
+#[test]
+fn sum_f64_1m_native_pairwise_path_survives_numpy_sum_poison() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+rng = np.random.default_rng(1_000_003)
+a = rng.standard_normal(1_000_000, dtype=np.float64)
+a[:8] = [1e300, -1e300, 1.0, -0.0, 3.0, -3.0, 2.0**-53, -2.0**-53]
+expected = np.sum(a)
+
+def poisoned_sum(*args, **kwargs):
+    raise AssertionError("native f64 sum route unexpectedly delegated")
+
+np.sum = poisoned_sum
+got = fnp.sum(a)
+print(type(got) is type(expected) and got.tobytes() == expected.tobytes())
+"#
+        .into(),
+    );
+    assert_eq!(
+        numpy_oracle(&script)?,
+        "True",
+        "1M f64 sum must use the native exact-tree route and remain bit-exact"
+    );
+    Ok(())
+}
+
 /// REGRESSION: `add.reduce` folds in a `+0.0` identity, so summing an all-`-0.0`
 /// buffer yields `+0.0` in NumPy while a bare pairwise tree yields `-0.0`
 /// (because `-0.0 + -0.0 == -0.0`). Sized above the parallel gate so the native

@@ -694,3 +694,33 @@ print(ok)
     );
     Ok(())
 }
+
+/// The lowered f64 boundary must engage the native pairwise mean rather than
+/// its module-level NumPy fallback. The expected scalar is captured before
+/// poisoning `numpy.mean`; cancellation and signed zero keep the exact-tree
+/// requirement observable.
+#[test]
+fn mean_f64_1m_native_pairwise_path_survives_numpy_mean_poison() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+rng = np.random.default_rng(1_000_019)
+a = rng.standard_normal(1_000_000, dtype=np.float64)
+a[:8] = [1e300, -1e300, 1.0, -0.0, 3.0, -3.0, 2.0**-53, -2.0**-53]
+expected = np.mean(a)
+
+def poisoned_mean(*args, **kwargs):
+    raise AssertionError("native f64 mean route unexpectedly delegated")
+
+np.mean = poisoned_mean
+got = fnp.mean(a)
+print(type(got) is type(expected) and got.tobytes() == expected.tobytes())
+"#
+        .into(),
+    );
+    assert_eq!(
+        numpy_oracle(&script)?,
+        "True",
+        "1M f64 mean must use the native exact-tree route and remain bit-exact"
+    );
+    Ok(())
+}
