@@ -11,9 +11,9 @@ use common::ensure_numpy_available;
 use criterion::Criterion;
 use fnp_python::fnp_python;
 use pyo3::Python;
-use pyo3::types::{PyAnyMethods, PyDict, PyModule};
+use pyo3::types::{PyAny, PyAnyMethods, PyDict, PyModule, PyStringMethods};
 use std::hint::black_box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn bench_f16_ops_boundary(c: &mut Criterion) {
     // np.unique / isin / searchsorted on float16. numpy has no f16 SIMD (converts per-element -> ~170-330ms);
@@ -107,6 +107,179 @@ ib = (rng.integers(0, 2000, 1_000_000) / 7).astype(np.float16)\n";
         });
     });
     group.finish();
+}
+
+fn bench_f16_searchsorted_table_dual_null(c: &mut Criterion) {
+    // Keep the measurement in the shipped Python route: the candidate must build
+    // its cumulative table from the same native-endian, sorted float16 haystack a
+    // user passes to `fnp.searchsorted`. Both arms allocate the intp result.
+    let _ = c;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module =
+            PyModule::new(py, "fnp_python_f16_searchsorted_table_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\\
+rng = np.random.default_rng(20260824)\n\\
+haystack = np.sort((rng.integers(-3000, 3001, 1_000_000) / 7).astype(np.float16))\n\\
+queries = (rng.integers(-3000, 3001, 1_000_000) / 7).astype(np.float16)\n",
+            )
+            .expect("f16 searchsorted table setup CString")
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f16 searchsorted table setup");
+        let haystack = ns.get_item("haystack").expect("f16 haystack");
+        let queries = ns.get_item("queries").expect("f16 queries");
+        assert!(
+            haystack
+                .getattr("flags")
+                .expect("haystack flags")
+                .getattr("c_contiguous")
+                .expect("haystack C-contiguous flag")
+                .extract::<bool>()
+                .expect("haystack C-contiguous value"),
+            "the table row requires a C-contiguous haystack"
+        );
+        assert_eq!(
+            haystack
+                .getattr("dtype")
+                .expect("haystack dtype")
+                .str()
+                .expect("haystack dtype string")
+                .to_str()
+                .expect("UTF-8 dtype"),
+            "float16",
+            "the table row must use float16"
+        );
+        let fnp_searchsorted = module.getattr("searchsorted").expect("fnp.searchsorted");
+        let numpy_searchsorted = numpy.getattr("searchsorted").expect("numpy.searchsorted");
+        assert!(
+            !fnp_searchsorted.is(&numpy_searchsorted),
+            "dispatch trap: fnp.searchsorted resolved to NumPy"
+        );
+        common::report_numpy_incumbent_identity(py, "searchsorted", &numpy_searchsorted);
+
+        for side in ["left", "right"] {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("side", side).expect("searchsorted side");
+            let run_incumbent = || {
+                numpy_searchsorted
+                    .call((&haystack, &queries), Some(&kwargs))
+                    .expect("NumPy float16 searchsorted arm")
+            };
+            let run_candidate = || {
+                fnp_searchsorted
+                    .call((&haystack, &queries), Some(&kwargs))
+                    .expect("FrankenNumPy float16 searchsorted arm")
+            };
+
+            // Full output equality proves the candidate is the user-visible
+            // table route before either arm enters the timing schedule.
+            let expected = run_incumbent();
+            let actual = run_candidate();
+            assert_eq!(
+                actual
+                    .getattr("dtype")
+                    .expect("candidate dtype")
+                    .str()
+                    .expect("candidate dtype string")
+                    .to_str()
+                    .expect("candidate dtype UTF-8"),
+                expected
+                    .getattr("dtype")
+                    .expect("incumbent dtype")
+                    .str()
+                    .expect("incumbent dtype string")
+                    .to_str()
+                    .expect("incumbent dtype UTF-8"),
+                "f16 searchsorted {side} dtype differs from NumPy"
+            );
+            assert_eq!(
+                actual
+                    .call_method0("tobytes")
+                    .expect("candidate bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("candidate byte vector"),
+                expected
+                    .call_method0("tobytes")
+                    .expect("incumbent bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("incumbent byte vector"),
+                "f16 searchsorted {side} differs from NumPy"
+            );
+            let checksum = |result: &pyo3::Bound<'_, PyAny>| {
+                result
+                    .call_method0("tobytes")
+                    .expect("searchsorted result bytes")
+                    .extract::<Vec<u8>>()
+                    .expect("searchsorted result byte vector")
+                    .into_iter()
+                    .fold(0xcbf2_9ce4_8422_u64, |state, byte| {
+                        (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                    })
+            };
+            let row = format!("python_f16_searchsorted_table_1m_1m_{side}_vs_numpy");
+            println!(
+                "PARITY row={row} exact_bytes=passed haystack_elements=1000000 \\
+                 query_elements=1000000 candidate_route=f16_cumulative_table \\
+                 output_allocation=both_arms_intp"
+            );
+            let mut observe_incumbent = || {
+                let started = Instant::now();
+                let result = run_incumbent();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum(&result),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = Instant::now();
+                let result = run_candidate();
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: checksum(&result),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &row,
+                    &mut observe_incumbent,
+                    &mut observe_candidate,
+                    9,
+                    1,
+                );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "F16_SEARCHSORTED_TABLE_RESULT row={row} side={side} verdict={verdict} \\
+                 incumbent_median_ms={:.6} candidate_median_ms={:.6} ratio_median={:.6} \\
+                 ratio_ci95=[{:.6},{:.6}] incumbent_null_ratio={:.6} \\
+                 incumbent_null_ci95=[{:.6},{:.6}] candidate_null_ratio={:.6} \\
+                 candidate_null_ci95=[{:.6},{:.6}] incumbent=numpy_live_same_invocation \\
+                 dual_nulls=required",
+                effect.arm_a_median_ns / 1_000_000.0,
+                effect.arm_b_median_ns / 1_000_000.0,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_median,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+            );
+        }
+    });
 }
 
 fn bench_f16_setops_boundary(c: &mut Criterion) {
@@ -838,6 +1011,10 @@ fn main() {
         include_str!("criterion_python_misc1.rs"),
         &[
             ("bench_f16_ops_boundary", bench_f16_ops_boundary),
+            (
+                "bench_f16_searchsorted_table_dual_null",
+                bench_f16_searchsorted_table_dual_null,
+            ),
             ("bench_f16_setops_boundary", bench_f16_setops_boundary),
             ("bench_tile_boundary", bench_tile_boundary),
             ("bench_digitize_boundary", bench_digitize_boundary),
