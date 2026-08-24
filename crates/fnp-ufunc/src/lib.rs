@@ -886,6 +886,22 @@ impl BinaryOp {
                 // vblendvpd per vector), because folding a float `a > b ? a : b` into
                 // `maxpd` is only legal under fast-math - `maxpd` and the ternary differ on
                 // NaN and signed zero, which is exactly what this op must preserve.
+                //
+                // PORTABLE SIMD DOES NOT HELP EITHER - measured, three ways, on an
+                // AVX2 build of a standalone probe:
+                //   `simd_max` alone            vmaxpd + vcmpunordpd + vblendvpd   3 ops
+                //   NumPy's rule via simd_gt    vcmpltpd + vorpd + vcmpunordpd
+                //                                        + vblendvpd               4 ops
+                //   `simd_max` + lhs-NaN fixup  vmaxpd + 2 vcmpunordpd
+                //                                       + 2 vblendvpd              5 ops
+                // `simd_max` DOES reach `vmaxpd`, but it is IEEE maxNum and pays its own
+                // NaN fix-up, so building NumPy's lhs-preferring rule on top costs MORE
+                // than the four ops here. NumPy's DOUBLE_maximum_X86_V3 reaches the 3-op
+                // shape (23 vmaxpd, 51 vblendvpd, zero vcmpunordpd/vcmpltpd/vorpd) because
+                // C intrinsics can name raw `maxpd`, whose "return src2 when unordered"
+                // behaviour portable SIMD deliberately does not expose. The ~19% extra
+                // instructions are therefore the price of matching NumPy's bits in safe
+                // portable Rust, not a defect to keep attacking.
                 if lhs.is_nan() || lhs > rhs { lhs } else { rhs }
             }
             Self::Arctan2 => lhs.atan2(rhs),
