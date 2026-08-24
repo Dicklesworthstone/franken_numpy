@@ -6871,11 +6871,14 @@ fn bench_predecline_levers_vs_numpy(_c: &mut Criterion) {
                 "a = np.arange(4096.0)\n\
                  hay = np.arange(0.0, 8192.0, 2.0)\n\
                  needle_arr = np.array([1.0, 777.0, 8191.0])\n\
+                 hay32 = np.arange(0.0, 8192.0, 2.0, dtype=np.float32)\n\
+                 needle_arr32 = np.array([1.0, 777.0, 8191.0], dtype=np.float32)\n\
                  hay_list = hay.tolist()\n\
                  CASES = {\n\
                    'clip_one_sided': ('clip', (a, 0.0, None)),\n\
                    'clip_two_sided': ('clip', (a, 0.0, 3000.0)),\n\
                    'ss_array_needle': ('searchsorted', (hay, needle_arr)),\n\
+                   'ss_f32_array_needle': ('searchsorted', (hay32, needle_arr32)),\n\
                    'ss_scalar_needle': ('searchsorted', (hay, 777.0)),\n\
                    'ss_list_haystack': ('searchsorted', (hay_list, needle_arr)),\n\
                  }\n",
@@ -6892,6 +6895,9 @@ fn bench_predecline_levers_vs_numpy(_c: &mut Criterion) {
             ("clip_one_sided", true),
             ("clip_two_sided", false),
             ("ss_array_needle", true),
+            // This arm prices the f32 half of the exact-width dispatch change. It skips
+            // the f16 plus both f64 probes, whereas f64 only skips the f16 probe.
+            ("ss_f32_array_needle", true),
             ("ss_scalar_needle", false),
             // DESIGNED CONTROL (`deadlock-audit-v46rn`): a LIST haystack must still go
             // through `asarray`, so the asarray-skip lever cannot reach it. It shares the
