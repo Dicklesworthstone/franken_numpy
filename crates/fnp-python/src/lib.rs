@@ -36238,6 +36238,12 @@ fn try_zerocopy_f64_searchsorted(
             }
         }
     }
+    // `flat` already has the exact intp dtype and `(m,)` shape for a 1-D
+    // query. Avoid allocating a shape tuple and asking NumPy to create an
+    // identity reshape view on the common array-needle route.
+    if v_buf.dimensions() == 1 {
+        return Ok(Some(flat.unbind()));
+    }
     let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
     Ok(Some(
@@ -36704,6 +36710,12 @@ fn try_zerocopy_f32_searchsorted(
                 o.set(idx as i64);
             }
         }
+    }
+    // `flat` already has the exact intp dtype and `(m,)` shape for a 1-D
+    // query. Avoid allocating a shape tuple and asking NumPy to create an
+    // identity reshape view on the common array-needle route.
+    if v_buf.dimensions() == 1 {
+        return Ok(Some(flat.unbind()));
     }
     let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
