@@ -11085,6 +11085,25 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // accessor in it. `ReadOnlyCell<f64>`/`Cell<f64>` are `repr(transparent)` over
             // `f64`; the inputs are read-only under the GIL and `output` is a buffer we own
             // with no alias.
+            //
+            // SAFETY INVARIANT, MIRI-VERIFIED (`deadlock-audit-8nj9b`). Materialising
+            // `&mut [f64]` from `output: &[Cell<f64>]` asserts uniqueness over memory that
+            // is ALSO reachable through a shared reference, so it is sound only while that
+            // shared view is left alone. The rule is exact and easy to break:
+            //
+            //   *** WHILE `out_data` IS LIVE, READ THE OUTPUT THROUGH `out_data` ONLY. ***
+            //   *** A SINGLE `output[i].get()` HERE IS UNDEFINED BEHAVIOUR.            ***
+            //
+            // That is why the rare-path scan below iterates `out_data.iter()` and not
+            // `output.iter()`. The two look interchangeable and are not.
+            //
+            // Checked rather than argued: the shape below and the interleaved variant were
+            // both reproduced standalone (no PyO3, since Miri cannot run the Python C API)
+            // and run under Miri. Stacked Borrows accepts this shape and REJECTS the
+            // interleaved one - "attempting a read access using <tag>, but that tag does
+            // not exist in the borrow stack", the `Unique` retag having been invalidated by
+            // the `Cell` read. Tree Borrows accepts both. So this code is sound under both
+            // models today, and one `output`-read away from UB under Stacked Borrows.
             let lhs: &[f64] =
                 unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), len) };
             let rhs: &[f64] =
