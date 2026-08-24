@@ -173980,6 +173980,61 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
         });
     }
 
+    /// One-sided `clip` on a float array must match NumPy BIT FOR BIT after the
+    /// infinity substitution, and must not touch integer dtypes
+    /// (`deadlock-audit-v46rn`).
+    ///
+    /// A missing bound now becomes an infinite one so the native two-sided kernel serves
+    /// the call. That is an identity on values - `min(max(x, lo), +inf) == max(x, lo)` -
+    /// but it is exactly the kind of rewrite that is right on ordinary numbers and wrong
+    /// on the edges, so the edges are the test: NaN (which must propagate, not be
+    /// clipped), infinities on both sides, and signed zeros against a `0.0` bound, where
+    /// returning `-0.0` instead of `+0.0` is a real byte difference that `==` cannot see.
+    ///
+    /// THE INTEGER CASES ARE THE PLANTED NEGATIVE. If the substitution ever leaks past
+    /// the float gate, an int64 one-sided clip comes back as float64 - a dtype change,
+    /// not a slower answer - so the dtype is asserted alongside the bytes.
+    #[test]
+    fn one_sided_clip_matches_numpy_bytes_and_keeps_integer_dtypes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            let module = PyModule::new(py, "fnp_clip_test").expect("module");
+            crate::fnp_python(&module).expect("init");
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("fnp", &module).expect("bind fnp");
+            // Every awkward float lane, plus integer arrays for the dtype guard, plus a
+            // both-None call which NumPy raises on and which must keep raising.
+            let script = "f = np.array([np.nan, -np.nan, np.inf, -np.inf, 0.0, -0.0, -1.5, 1.5, 3e300], dtype=np.float64)\ng = f.astype(np.float32)\ni = np.array([-9, -1, 0, 1, 9], dtype=np.int64)\ncases = [(f, 0.0, None), (f, None, 0.0), (g, 0.0, None), (g, None, 0.0), (f, -np.inf, None), (f, None, np.inf), (i, 0, None), (i, None, 0), (f, 0.0, 3000.0), (g, 0.0, 3000.0), (f, None, None)]\nbad = []\nfor arr, lo, hi in cases:\n    want = np.clip(arr, lo, hi)\n    got = fnp.clip(arr, lo, hi)\n    if want.dtype != got.dtype:\n        bad.append((str(want.dtype), str(got.dtype)))\n    elif want.tobytes() != got.tobytes():\n        bad.append((want.tolist(), got.tolist()))\nbad_count = len(bad)\nbad_msg = str(bad)\n";
+            py.run(
+                std::ffi::CString::new(script).unwrap().as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("clip parity script");
+            let bad_count: i64 = locals
+                .get_item("bad_count")
+                .expect("bad_count lookup")
+                .expect("bad_count present")
+                .extract()
+                .expect("bad_count is an int");
+            let bad_msg: String = locals
+                .get_item("bad_msg")
+                .expect("bad_msg lookup")
+                .expect("bad_msg present")
+                .extract()
+                .expect("bad_msg is a str");
+            assert_eq!(
+                bad_count, 0,
+                "one-sided clip diverged from numpy: {bad_msg}"
+            );
+        });
+    }
+
     /// `maximum`/`minimum` must PROPAGATE a NaN operand verbatim, LHS first
     /// (`deadlock-audit-jd6lt`).
     ///
