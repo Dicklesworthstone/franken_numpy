@@ -35902,6 +35902,25 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && a_float_char == 'f'
+        // SKIP THE IMPOSSIBLE MERGE PROBE (`deadlock-audit-v46rn`). Same fix `92a74fbb`
+        // applied to the f64 twin, which the f32 arm never received.
+        //
+        // `try_zerocopy_f32_searchsorted_merge` declines on
+        // `n < MERGE_MIN_HAYSTACK || m < MERGE_MIN_QUERIES` (both `1 << 19`) - but it
+        // reaches that test only AFTER independently validating both arrays and
+        // borrowing both PyBuffers. For any haystack below the threshold that preflight
+        // is pure waste: it cannot possibly engage, and the sibling
+        // `try_zerocopy_f32_searchsorted` immediately below is what actually serves this
+        // shape.
+        //
+        // MEASURED: `ss_f32_array_needle` (4096-element haystack, 3 needles - both far
+        // below `1 << 19`) reads 0.805125 ci95=[0.802279,0.815137], i.e. 1.24x slower
+        // than live NumPy, on a cell whose real work is three binary searches.
+        //
+        // Gating on the haystack alone mirrors the f64 arm exactly rather than inventing
+        // a second condition; the query length is not cheaply available here, and the
+        // haystack test already excludes every case this cell represents.
+        && a_arr.len().is_ok_and(|n| n >= (1 << 19))
         && let Some(out) = try_zerocopy_f32_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
