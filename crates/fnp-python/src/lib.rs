@@ -58448,7 +58448,7 @@ fn native_binary_arctan2_or_passthrough(
     // runtime doctrine requires.
     {
         let numpy_handle = cached_numpy(py)?;
-        if !numpy_f64_native_binary_is_byte_exact(py, &numpy_handle, BinaryOp::Arctan2) {
+        if !numpy_f64_native_binary_is_byte_exact(py, numpy_handle, BinaryOp::Arctan2) {
             return core_numpy_passthrough_interned(py, intern!(py, "arctan2"), args, kwargs);
         }
     }
@@ -119834,7 +119834,7 @@ mod tests {
             // raises correctly, and demanding engagement anyway would make this
             // test lie about what the lever is FOR.
             let numpy_handle = cached_numpy(py)?;
-            if crate::numpy_f64_native_binary_is_byte_exact(py, &numpy_handle, BinaryOp::Arctan2) {
+            if crate::numpy_f64_native_binary_is_byte_exact(py, numpy_handle, BinaryOp::Arctan2) {
                 let sabotage = std::ffi::CString::new(
                     "import numpy as _np\n_orig_at2 = _np.arctan2\ndef _boom(*a, **k):\n        raise RuntimeError('delegated')\n_np.arctan2 = _boom\n",
                 )
