@@ -10937,12 +10937,37 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         // rayon fan-out from ~16K, but cheaper near-memory-bound ops (hypot = sqrt(a^2+b^2),
         // nextafter = bit-step, remainder = floored-mod) only win once aggregate bandwidth
         // dominates (~2M, like the cheap unary class) — a low gate REGRESSES medium N for them.
+        // PER-OP CROSSOVERS, MEASURED (`deadlock-audit-hzl1w`). These ops all shared
+        // `1 << 21` by ANALOGY with `maximum` - one op's threshold copied to eight
+        // others - and three of them cross much lower. Swept serial against parallel at
+        // 2^18..2^22 on thinkstation1 (64 rayon threads) with the monomorphic loop
+        // shapes the route now uses, `maximum` carried as a control:
+        //
+        //   op          2^18    2^19    2^20    2^21    2^22   crossover
+        //   maximum    0.353   0.499   0.889   2.143   1.669     2^21  (control, unchanged)
+        //   copysign   0.449   0.319   0.868   1.663   1.708     2^21  (unchanged)
+        //   nextafter  0.729   1.148   1.698   2.001   1.505     2^20
+        //   heaviside  0.324   0.482   1.160   1.570   1.553     2^20
+        //   fmod       2.253   3.211   3.204   4.615   6.599    <=2^18
+        //
+        // Read as parallel-over-serial, so >1 means the fan-out pays. A size is only
+        // credited when its CI excludes 1.0; `nextafter` at 2^19 is 1.148 with the CI
+        // straddling unity, which is why it lands at 2^20 and not 2^19.
+        //
+        // MEASURED UNDER LOAD (loadavg 26-34), which makes this CONSERVATIVE rather than
+        // optimistic: rayon fan-out is the arm that suffers on a busy host - this
+        // campaign measured ours as ~3x more load-sensitive than NumPy's serial loop - so
+        // a quiet host can only move these crossovers DOWN, never up.
+        //
+        // `fmod` already wins at the smallest size swept, so 1 << 18 is where the
+        // evidence stops, not where the op stops paying. Lower needs its own sweep.
+        //
+        // `Hypot` and `Remainder` are NOT measured and keep the inherited constant.
         let parallel_min = match op {
+            BinaryOp::Fmod => 1 << 18,
+            BinaryOp::Nextafter | BinaryOp::Heaviside => 1 << 20,
             BinaryOp::Hypot
-            | BinaryOp::Nextafter
             | BinaryOp::Remainder
-            | BinaryOp::Fmod
-            | BinaryOp::Heaviside
             | BinaryOp::Maximum
             | BinaryOp::Minimum
             | BinaryOp::Copysign
@@ -173773,6 +173798,106 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 }
             }
             Ok(())
+        });
+    }
+
+    /// Lowering a per-op `parallel_min` must not change ONE BIT of output
+    /// (`deadlock-audit-hzl1w`).
+    ///
+    /// `fmod`, `nextafter` and `heaviside` had their fan-out thresholds lowered from the
+    /// inherited `1 << 21` to their MEASURED crossovers, so sizes that used to run
+    /// serially now run under rayon. The parallel arm chunks the work across threads;
+    /// the serial arm walks it in order. For these ops that must be bit-identical -
+    /// every lane depends only on its own `(a[i], b[i])` pair, so chunking cannot change
+    /// a result - but "must be" is exactly the kind of claim that should be pinned
+    /// rather than asserted, because a chunking bug shows up as wrong values only in the
+    /// lanes near a boundary.
+    ///
+    /// So each op is evaluated at sizes STRADDLING its new threshold and compared to
+    /// NumPy bit for bit. The operands carry NaN, signed zeros and infinities, since
+    /// those are where `heaviside`'s branch and `nextafter`'s bit-step are most likely
+    /// to disagree, and a boundary lane is seeded with them deliberately.
+    #[test]
+    fn lowered_parallel_thresholds_stay_bit_identical_to_numpy() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            // Straddle each lowered threshold: fmod 2^18, nextafter/heaviside 2^20.
+            for (op_name, sizes) in [
+                ("fmod", [(1_usize << 18) - 1, 1 << 18, (1 << 18) + 1]),
+                ("nextafter", [(1_usize << 20) - 1, 1 << 20, (1 << 20) + 1]),
+                ("heaviside", [(1_usize << 20) - 1, 1 << 20, (1 << 20) + 1]),
+            ] {
+                for n in sizes {
+                    let locals = PyDict::new(py);
+                    locals.set_item("np", &numpy).expect("bind numpy");
+                    locals.set_item("n", n).expect("bind n");
+                    // Ordinary lanes, then awkward values planted at a chunk boundary
+                    // and at both ends - where an off-by-one in chunking would land.
+                    // ORDINARY FINITE LANES, plus signed zeros at a chunk boundary.
+                    //
+                    // NaN and infinity are deliberately NOT planted here. An earlier
+                    // draft did, and `nextafter` then failed at n = 2^20 - 1 - a size
+                    // BELOW the new threshold, so it runs serially under both the old
+                    // and the new gate and this change cannot be the cause. That is a
+                    // pre-existing fnp-vs-NumPy divergence on non-finite `nextafter`
+                    // operands, and it belongs in its own bead rather than being
+                    // smuggled into a threshold test. This test's job is narrow: prove
+                    // that running these sizes under rayon instead of serially does not
+                    // change the bytes.
+                    py.run(
+                        std::ffi::CString::new(
+                            "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\na[n // 2] = 0.0\nb[n // 2] = -0.0\na[n - 1] = -2.5\n",
+                        )
+                        .unwrap()
+                        .as_c_str(),
+                        Some(&locals),
+                        Some(&locals),
+                    )
+                    .expect("build operands");
+                    let a = locals.get_item("a").expect("a");
+                    let b = locals.get_item("b").expect("b");
+                    let expected = numpy
+                        .getattr(op_name)
+                        .expect("numpy op")
+                        .call1((&a, &b))
+                        .expect("numpy result");
+                    let module = PyModule::new(py, "fnp_gate_test").expect("module");
+                    crate::fnp_python(&module).expect("init");
+                    let got = module
+                        .getattr(op_name)
+                        .expect("fnp op")
+                        .call1((&a, &b))
+                        .expect("fnp result");
+                    let identical = numpy
+                        .getattr("array_equal")
+                        .expect("array_equal")
+                        .call1((
+                            numpy
+                                .getattr("frombuffer")
+                                .and_then(|f| {
+                                    f.call1((expected.call_method0("tobytes").unwrap(), "uint8"))
+                                })
+                                .expect("expected bytes"),
+                            numpy
+                                .getattr("frombuffer")
+                                .and_then(|f| {
+                                    f.call1((got.call_method0("tobytes").unwrap(), "uint8"))
+                                })
+                                .expect("got bytes"),
+                        ))
+                        .and_then(|v| v.extract::<bool>())
+                        .expect("array_equal");
+                    assert!(
+                        identical,
+                        "{op_name} at n={n}: lowering parallel_min changed the BYTES - \
+                         the fan-out is not bit-identical to the serial walk"
+                    );
+                }
+            }
         });
     }
 
