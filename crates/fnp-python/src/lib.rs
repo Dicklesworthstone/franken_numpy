@@ -35826,6 +35826,10 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && a_float_char == 'd'
+        // The merge arm declines every haystack smaller than this after independently
+        // validating both arrays and borrowing both buffers. Avoid that duplicate preflight
+        // when the existing 1-D haystack cannot possibly engage the merge kernel.
+        && a_arr.len().is_ok_and(|n| n >= (1 << 19))
         && let Some(out) = try_zerocopy_f64_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);

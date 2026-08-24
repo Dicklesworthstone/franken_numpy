@@ -1426,7 +1426,9 @@ fn searchsorted_f64_array_needle_keeps_nan_last_order_without_numpy_delegate() -
     // comparison as false, putting a NaN needle at zero. Capture NumPy's exact
     // left/right answers first, then poison the fallback. This proves the native
     // f64 array-needle path handles NaN-last placement, duplicate boundaries, and
-    // signed-zero ties itself instead of silently delegating to NumPy.
+    // signed-zero ties itself instead of silently delegating to NumPy. These small
+    // haystacks are deliberately below the merge cutoff, so this also catches a
+    // dispatch gate that bypasses the native binary-search continuation.
     let script = fnp_script(
         r#"
 cases = [
