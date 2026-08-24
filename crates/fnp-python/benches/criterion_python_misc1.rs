@@ -291,6 +291,132 @@ queries = (rng.integers(-3000, 3001, 1_000_000) / 7).astype(np.float16)\n",
     });
 }
 
+fn bench_f64_reduction_dot_dual_null(c: &mut Criterion) {
+    // Refresh the old cross-engine snapshot in the public Python surface.  The
+    // candidate is fnp_python's actual exported callable; the incumbent is the
+    // live NumPy callable imported into this very interpreter.  The scalar bit
+    // pattern is checked before the timing contract, so a fast but different
+    // summation tree cannot produce a benchmark row.
+    let _ = c;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_f64_reduction_dot_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                "import numpy as np\n\\
+sum_mean_values = np.linspace(-3.0, 7.0, 1_000_000, dtype=np.float64)\n\\
+dot_lhs = np.linspace(-1.0, 2.0, 10_000, dtype=np.float64)\n\\
+dot_rhs = np.linspace(3.0, -2.0, 10_000, dtype=np.float64)\n",
+            )
+            .expect("f64 reduction/dot setup CString")
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("f64 reduction/dot setup");
+        let values = ns.get_item("sum_mean_values").expect("f64 sum/mean values");
+        let dot_lhs = ns.get_item("dot_lhs").expect("f64 dot lhs");
+        let dot_rhs = ns.get_item("dot_rhs").expect("f64 dot rhs");
+
+        for (operation, incumbent_name, candidate, incumbent, args) in [
+            (
+                "sum_1m",
+                "sum",
+                module.getattr("sum").expect("fnp.sum"),
+                numpy.getattr("sum").expect("numpy.sum"),
+                pyo3::types::PyTuple::new(py, [&values]).expect("sum arguments"),
+            ),
+            (
+                "mean_1m",
+                "mean",
+                module.getattr("mean").expect("fnp.mean"),
+                numpy.getattr("mean").expect("numpy.mean"),
+                pyo3::types::PyTuple::new(py, [&values]).expect("mean arguments"),
+            ),
+            (
+                "dot_10k",
+                "dot",
+                module.getattr("dot").expect("fnp.dot"),
+                numpy.getattr("dot").expect("numpy.dot"),
+                pyo3::types::PyTuple::new(py, [&dot_lhs, &dot_rhs]).expect("dot arguments"),
+            ),
+        ] {
+            assert!(
+                !candidate.is(&incumbent),
+                "dispatch trap: fnp.{operation} resolved to NumPy"
+            );
+            common::report_numpy_incumbent_identity(py, incumbent_name, &incumbent);
+            let expected = incumbent.call1(&args).expect("NumPy result");
+            let actual = candidate.call1(&args).expect("FrankenNumPy result");
+            let expected_bits = expected
+                .extract::<f64>()
+                .expect("NumPy f64 scalar")
+                .to_bits();
+            let actual_bits = actual
+                .extract::<f64>()
+                .expect("FrankenNumPy f64 scalar")
+                .to_bits();
+            assert_eq!(
+                actual_bits, expected_bits,
+                "f64 {operation} must match NumPy's scalar bit pattern"
+            );
+            let row = format!("python_f64_{operation}_vs_numpy");
+            println!(
+                "PARITY row={row} exact_scalar_bits=passed candidate_public_surface=fnp_python \\
+                 incumbent=numpy_live_same_invocation"
+            );
+            let mut observe_incumbent = || {
+                let started = Instant::now();
+                let result = incumbent.call1(&args).expect("NumPy arm");
+                common::ContractObservation {
+                    elapsed: started.elapsed(),
+                    checksum: result.extract::<f64>().expect("NumPy scalar").to_bits(),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = Instant::now();
+                let result = candidate.call1(&args).expect("FrankenNumPy arm");
+                common::ContractObservation {
+                    elapsed: started.elapsed(),
+                    checksum: result
+                        .extract::<f64>()
+                        .expect("FrankenNumPy scalar")
+                        .to_bits(),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                &row,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "F64_REDUCTION_DOT_RESULT row={row} verdict={verdict} \\
+                 incumbent_median_ns={:.1} candidate_median_ns={:.1} ratio_median={:.6} \\
+                 ratio_ci95=[{:.6},{:.6}] incumbent_null_ratio={:.6} \\
+                 incumbent_null_ci95=[{:.6},{:.6}] candidate_null_ratio={:.6} \\
+                 candidate_null_ci95=[{:.6},{:.6}] dual_nulls=required",
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                incumbent_null.ratio_ci_low,
+                incumbent_null.ratio_ci_high,
+                candidate_null.ratio_median,
+                candidate_null.ratio_ci_low,
+                candidate_null.ratio_ci_high,
+            );
+        }
+    });
+}
+
 fn bench_f16_setops_boundary(c: &mut Criterion) {
     // np.union1d/intersect1d/setdiff1d/setxor1d on float16. numpy f16 set-ops ~172ms (no SIMD); fnp widens
     // exact to f32 -> f32 set-op -> narrows back to f16. bit-exact.
@@ -1023,6 +1149,10 @@ fn main() {
             (
                 "bench_f16_searchsorted_table_dual_null",
                 bench_f16_searchsorted_table_dual_null,
+            ),
+            (
+                "bench_f64_reduction_dot_dual_null",
+                bench_f64_reduction_dot_dual_null,
             ),
             ("bench_f16_setops_boundary", bench_f16_setops_boundary),
             ("bench_tile_boundary", bench_tile_boundary),
