@@ -22,7 +22,6 @@
 //! complex functions fall back to NumPy for exact parity (marked with
 //! "Passthrough to np." comments).
 
-mod dot_f64_passthrough;
 mod searchsorted_array_needle;
 
 use fnp_dtype::{ArrayStorage, DType, f16, promote};
@@ -96481,11 +96480,6 @@ fn matmul(
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    if let Some(result) =
-        dot_f64_passthrough::try_full_thread_f64_dot(py, a.bind(py), b.bind(py), out.as_ref())?
-    {
-        return Ok(result);
-    }
     if python_explicit_out_is_absent_or_none(py, out.as_ref())
         && let Some(result) =
             python_native_gemm_f64_2d(py, a.bind(py), b.bind(py), PythonNativeGemmOp::Dot, true)?
@@ -173808,6 +173802,91 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 }
             }
             Ok(())
+        });
+    }
+
+    /// `nextafter` must PROPAGATE a NaN operand, not replace it with `+NaN`
+    /// (`deadlock-audit-jd6lt`).
+    ///
+    /// The kernel used to answer a bare `f64::NAN` whenever either operand was NaN,
+    /// which is the positive default quiet NaN - so it lost the operand's SIGN, lost its
+    /// PAYLOAD, and returned the same thing regardless of which operand was NaN. NumPy
+    /// propagates the operand.
+    ///
+    /// THIS IS A PLANTED NEGATIVE: every pair below is chosen so that the OLD code
+    /// returns `7ff8000000000000` and NumPy does not, so the test fails on the code it
+    /// was written against. A test built from `np.nan` alone would have passed on the
+    /// bug, because the positive default quiet NaN is the one case where the old answer
+    /// was accidentally right - which is exactly how this survived.
+    ///
+    /// COMPARISON IS ON RAW BYTES, not `==`: every assertion here is about a NaN, and
+    /// NaN is never equal to anything, so an equality-based check passes vacuously no
+    /// matter what the bits are.
+    #[test]
+    fn nextafter_propagates_nan_operands_bit_for_bit_like_numpy() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            const QUIET_POS: u64 = 0x7ff8_0000_0000_0123;
+            const QUIET_NEG: u64 = 0xfff8_0000_0000_0456;
+            const SIGNALING: u64 = 0x7ff0_0000_0000_0001;
+            const ONE: u64 = 0x3ff0_0000_0000_0000;
+            const NEG_ONE: u64 = 0xbff0_0000_0000_0000;
+            // Non-finite pairs, plus infinities so the fix cannot silently change the
+            // finite-overflow edges while it is in the neighbourhood.
+            let pairs: [(u64, u64); 12] = [
+                (QUIET_POS, ONE),
+                (QUIET_NEG, ONE),
+                (ONE, QUIET_POS),
+                (ONE, QUIET_NEG),
+                (QUIET_POS, QUIET_NEG),
+                (QUIET_NEG, QUIET_POS),
+                (SIGNALING, ONE),
+                (ONE, SIGNALING),
+                (0x7ff0_0000_0000_0000, 0x0000_0000_0000_0000),
+                (0xfff0_0000_0000_0000, 0x0000_0000_0000_0000),
+                (0x7fef_ffff_ffff_ffff, 0x7ff0_0000_0000_0000),
+                (NEG_ONE, QUIET_NEG),
+            ];
+            let np_nextafter = numpy.getattr("nextafter").expect("numpy.nextafter");
+            let float64 = numpy.getattr("float64").expect("numpy.float64");
+            for (lhs_bits, rhs_bits) in pairs {
+                let lhs = f64::from_bits(lhs_bits);
+                let rhs = f64::from_bits(rhs_bits);
+                // NumPy must be asked with float64 scalars so the answer is a float64
+                // and its bytes are directly comparable.
+                let expected_bits: u64 = np_nextafter
+                    .call1((
+                        float64.call1((lhs,)).expect("np.float64(lhs)"),
+                        float64.call1((rhs,)).expect("np.float64(rhs)"),
+                    ))
+                    .and_then(|value| value.extract::<f64>())
+                    .expect("numpy.nextafter result")
+                    .to_bits();
+                // THE PLANTED NEGATIVE, made permanent rather than asserted in prose:
+                // the OLD kernel answered exactly `f64::NAN` for every NaN pair, so if
+                // NumPy's answer here ever equals that, the pair has stopped
+                // discriminating and this test would pass on the bug it exists to catch.
+                if lhs.is_nan() || rhs.is_nan() {
+                    assert_ne!(
+                        expected_bits,
+                        f64::NAN.to_bits(),
+                        "nextafter({lhs_bits:016x}, {rhs_bits:016x}): NumPy returns the \
+                         default +NaN here, so this pair cannot detect the sign/payload \
+                         bug - replace it with one that can"
+                    );
+                }
+                let got_bits = fnp_ufunc::BinaryOp::Nextafter.apply(lhs, rhs).to_bits();
+                assert_eq!(
+                    got_bits, expected_bits,
+                    "nextafter({lhs_bits:016x}, {rhs_bits:016x}): got {got_bits:016x}, \
+                     numpy says {expected_bits:016x} - a NaN operand must be propagated \
+                     with its sign and payload, quieted, and rhs wins when both are NaN"
+                );
+            }
         });
     }
 
