@@ -867,26 +867,18 @@ impl BinaryOp {
             // maximum(0.0, -0.0) is -0.0 and maximum(-0.0, 0.0) is +0.0, both measured.
             // `f64::max` would answer +0.0 for both.
             Self::Minimum => {
-                if lhs.is_nan() {
-                    lhs
-                } else if rhs.is_nan() {
-                    rhs
-                } else if lhs == rhs {
-                    rhs
-                } else {
-                    lhs.min(rhs)
-                }
+                // Mirror of `Maximum` below; see the note there. `-0.0 < 0.0` is false, so
+                // a tie again yields `rhs`, matching NumPy.
+                if lhs.is_nan() || lhs < rhs { lhs } else { rhs }
             }
             Self::Maximum => {
-                if lhs.is_nan() {
-                    lhs
-                } else if rhs.is_nan() {
-                    rhs
-                } else if lhs == rhs {
-                    rhs
-                } else {
-                    lhs.max(rhs)
-                }
+                // TWO CONDITIONS, NOT FOUR BRANCHES (`deadlock-audit-hzl1w`). `lhs > rhs`
+                // already yields `rhs` for every tie INCLUDING signed zeros - `0.0 > -0.0`
+                // is false, so `-0.0` is returned, which is what NumPy answers - and it is
+                // false whenever `rhs` is NaN, so the rhs-NaN case falls out for free. Only
+                // an lhs NaN needs asking about, because a NaN compares false against
+                // everything. Same bits as the four-branch form on all 12 measured pairs.
+                if lhs.is_nan() || lhs > rhs { lhs } else { rhs }
             }
             Self::Arctan2 => lhs.atan2(rhs),
             Self::Fmod => {
