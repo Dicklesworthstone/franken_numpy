@@ -1301,6 +1301,7 @@ fn main() {
                 "bench_cheap_alu_parallel_crossover",
                 bench_cheap_alu_parallel_crossover,
             ),
+            ("bench_shipped_gemm_vs_numpy", bench_shipped_gemm_vs_numpy),
             (
                 "bench_shipped_binary_route_vs_numpy",
                 bench_shipped_binary_route_vs_numpy,
@@ -4869,6 +4870,214 @@ fn bench_cheap_alu_parallel_crossover(_c: &mut Criterion) {
 /// must really be NumPy's own callable and must NOT be ours. A "win" against our own
 /// function wearing NumPy's name is the failure mode this repo has already produced
 /// once, so it is asserted rather than assumed.
+/// Does the shipped f64 GEMM actually lose to NumPy - and in which regime
+/// (`franken_numpy-ixs5y`)?
+///
+/// The claim "our f64 dot/GEMM loses to numpy" cannot be evaluated without naming the
+/// BLAS regime, because the route is GATED ON IT. `blas_is_single_threaded()` returns
+/// true only when one of OPENBLAS/OMP/MKL/BLIS `_NUM_THREADS` is exactly "1"; otherwise
+/// `matmul`/`dot` DELEGATE to NumPy for 2-D f64. So on a default multi-threaded host the
+/// native packed GEMM never runs, and any "loss" measured there is our wrapper against
+/// NumPy's own BLAS - not a kernel comparison at all.
+///
+/// This group therefore reports the regime it is running in, and asserts ENGAGEMENT
+/// rather than assuming it: `numpy.matmul` is sabotaged so only a native path can
+/// succeed. When the route is expected to delegate, the sabotage is expected to RAISE -
+/// and that expectation is asserted too, so "we delegated" is a recorded fact rather
+/// than an inference.
+///
+/// Sizes straddle the shipped window: `PY_NATIVE_GEMM_MAX_DIM` is 1024 for `dot` and
+/// `PY_NATIVE_MATMUL_MAX_DIM` is 1536 for `matmul`, with a `PY_NATIVE_GEMM_MIN_FLOPS`
+/// floor of 320^3.
+///
+/// SAMPLING IS REDUCED on purpose: a 1024^3 GEMM is ~20 ms per call, so the default
+/// 41-round min-of-3 schedule would be ~3000 calls per row. Eleven rounds min-of-1 keeps
+/// the dual-null structure and the interleaving while fitting the run in seconds.
+fn bench_shipped_gemm_vs_numpy(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+
+        // The same predicate the route consults, read here so the row can name its regime.
+        let serial_blas = [
+            "OPENBLAS_NUM_THREADS",
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "BLIS_NUM_THREADS",
+        ]
+        .iter()
+        .any(|var| matches!(std::env::var(var), Ok(ref v) if v.trim() == "1"));
+
+        for dim in [512_usize, 1024, 1536] {
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("d", dim).expect("bind d");
+            // Deterministic, well-scaled operands: a fixed seed keeps the two regimes
+            // comparable, and values near 1.0 keep the products away from overflow so the
+            // comparison is of speed and not of exceptional-value handling.
+            py.run(
+                std::ffi::CString::new(
+                    "rng = np.random.default_rng(20260824)\na = (1.0 + rng.random((d, d))).astype(np.float64)\nb = (1.0 + rng.random((d, d))).astype(np.float64)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a_obj = locals.get_item("a").expect("a operand");
+            let b_obj = locals.get_item("b").expect("b operand");
+
+            let np_matmul = numpy.getattr("matmul").expect("numpy.matmul");
+            let fnp_matmul = module.getattr("matmul").expect("fnp.matmul");
+            assert!(
+                !fnp_matmul.is(&np_matmul),
+                "the candidate IS numpy.matmul - this row would be NumPy against itself"
+            );
+
+            // PARITY BEFORE TIMING. The native GEMM is bit-exact only where NumPy is
+            // no-FMA, so this asserts allclose rather than bit equality - the same
+            // standard the route's own conformance uses for this path.
+            let expected = np_matmul.call1((&a_obj, &b_obj)).expect("numpy matmul");
+            let got = fnp_matmul.call1((&a_obj, &b_obj)).expect("fnp matmul");
+            let close = numpy
+                .getattr("allclose")
+                .expect("allclose")
+                .call1((&expected, &got))
+                .and_then(|v| v.extract::<bool>())
+                .expect("allclose result");
+            assert!(close, "dim={dim}: fnp.matmul does not match numpy.matmul");
+
+            // ENGAGEMENT, ASSERTED IN BOTH DIRECTIONS. Sabotage numpy.matmul so only a
+            // native path can survive, then record what actually happened. `dot` and
+            // `matmul` have different caps, so `matmul` at 1536 is inside its window
+            // while `dot` would already be outside.
+            let sabotage = std::ffi::CString::new(
+                "import numpy as _np\n_orig_mm = _np.matmul\ndef _boom(*a, **k):\n    raise RuntimeError('delegated to numpy')\n_np.matmul = _boom\n",
+            )
+            .expect("no interior nul");
+            py.run(sabotage.as_c_str(), Some(&locals), Some(&locals))
+                .expect("install sabotage");
+            let engaged = fnp_matmul.call1((&a_obj, &b_obj)).is_ok();
+            py.run(
+                std::ffi::CString::new("_np.matmul = _orig_mm\n")
+                    .unwrap()
+                    .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("restore numpy");
+            let expected_to_engage = serial_blas && dim >= 512;
+            assert_eq!(
+                engaged, expected_to_engage,
+                "dim={dim} serial_blas={serial_blas}: engagement disagrees with the gate \
+                 - either the route changed or this bench's model of it is stale"
+            );
+
+            let incumbent = || {
+                let started = Instant::now();
+                let result = np_matmul.call1((&a_obj, &b_obj)).expect("numpy matmul");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: matmul_corner_checksum(&result),
+                }
+            };
+            let candidate = || {
+                let started = Instant::now();
+                let result = fnp_matmul.call1((&a_obj, &b_obj)).expect("fnp matmul");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: matmul_corner_checksum(&result),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) =
+                common::run_dual_null_median_ci_contract_with_sampling(
+                    &format!("shipped_matmul_f64_{dim}"),
+                    incumbent,
+                    candidate,
+                    11,
+                    1,
+                );
+            println!(
+                "SHIPPED_GEMM op=matmul dim={dim} numpy_version={numpy_version} worker={} \
+                 harness=common::run_dual_null_median_ci_contract_with_sampling rounds=11 min_of=1 \
+                 serial_blas={serial_blas} native_route_engaged={engaged} \
+                 arms_are_the_shipped_route_not_replicas=true incumbent_is_live_numpy=true \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
+                 faster_than_numpy={} incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_ci_low > 1.0,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
+/// Cheap fingerprint of a 2-D result: four corners plus the centre. A full checksum
+/// would cost more than the GEMM at these sizes; the corners catch an arm that silently
+/// returned a different matrix.
+///
+/// DELIBERATELY TOLERANT, AND THIS IS A REAL WEAKENING THAT THE ROW MUST CARRY. Every
+/// other group in this file fingerprints on raw `to_bits`, because its two arms are
+/// bit-identical. THIS pair is not and cannot be: NumPy's f64 GEMM goes to OpenBLAS,
+/// whose kernel is FMA-contracted, while ours is constrained to no-FMA for
+/// reproducibility - so the two agree only to `allclose`. A raw-bits checksum therefore
+/// fails the harness's equal-checksum gate on correct results, which is exactly what it
+/// did on the first run (left 12767356870043618866, right 12812392864706235917 at
+/// dim=512).
+///
+/// So the lanes are quantised to seven significant decimal digits before hashing.
+/// Summation-order differences between these two kernels land around 1e-13 relative, so
+/// 1e-7 has ~six orders of headroom, while a genuinely different matrix still collides
+/// only by accident. The gate this preserves is "did an arm return a different result",
+/// not "are the arms bit-identical" - and for this pair the latter is not a property the
+/// code has.
+fn matmul_corner_checksum(result: &pyo3::Bound<'_, pyo3::PyAny>) -> u64 {
+    let quantize = |v: f64| -> u64 {
+        if v == 0.0 || !v.is_finite() {
+            return v.to_bits();
+        }
+        let scale = 10f64.powf(6.0 - v.abs().log10().floor());
+        ((v * scale).round() as i64) as u64
+    };
+    let lane = |i: usize, j: usize| -> u64 {
+        result
+            .get_item((i, j))
+            .and_then(|v| v.extract::<f64>())
+            .map(quantize)
+            .unwrap_or(0)
+    };
+    let shape: Vec<usize> = result
+        .getattr("shape")
+        .and_then(|s| s.extract())
+        .unwrap_or_default();
+    if shape.len() != 2 || shape[0] == 0 || shape[1] == 0 {
+        return 0;
+    }
+    let (m, n) = (shape[0] - 1, shape[1] - 1);
+    lane(0, 0)
+        ^ lane(0, n).rotate_left(13)
+        ^ lane(m, 0).rotate_left(29)
+        ^ lane(m, n).rotate_left(41)
+        ^ lane(m / 2, n / 2).rotate_left(53)
+}
+
 fn bench_shipped_binary_route_vs_numpy(_c: &mut Criterion) {
     const N: usize = 1 << 20;
     Python::initialize();
