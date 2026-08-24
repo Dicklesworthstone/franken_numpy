@@ -22,6 +22,8 @@
 //! complex functions fall back to NumPy for exact parity (marked with
 //! "Passthrough to np." comments).
 
+mod searchsorted_array_needle;
+
 use fnp_dtype::{ArrayStorage, DType, f16, promote};
 use fnp_io::{
     IOSupportedDType, load as io_load, save as io_save, savez as io_savez,
@@ -10416,6 +10418,132 @@ fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
         || (bits & 0x7fff_ffff_ffff_ffff == 0 && a == 0.0 && b.is_finite() && b != 0.0)
 }
 
+/// The specialized serial binary loop, in ITS OWN FRAME (`deadlock-audit-hzl1w`).
+///
+/// WHY THIS IS A FUNCTION AND NOT AN INLINE LOOP. `with_specialized_binary_op!` expands
+/// 35 arms into `zerocopy_f64_binary_flat_with_out`, and inlining 35 loops into one body
+/// starves the register allocator. Disassembled from a release build, the shipped
+/// `Maximum` arm reloaded ALL THREE base pointers from the stack on every iteration:
+///
+/// ```text
+///   mov    0x10(%rsp),%rdx      ; lhs base, reloaded
+///   vmovupd x2
+///   mov    0x18(%rsp),%rdx      ; rhs base, reloaded
+///   vmovupd x2
+///   vcmpunordpd x2, vcmpltpd x2, vorpd x2, vblendvpd x2
+///   mov    0x8(%rsp),%rdx       ; out base, reloaded
+///   vmovupd x2
+///   add, cmp, jne               ; 20 instructions per 8 doubles
+/// ```
+///
+/// The identical arithmetic written as a standalone loop keeps its bases in registers and
+/// costs 18 - three scalar loads per 8 doubles fewer, which over n=2^20 is 393_216 loads
+/// the shipped arm pays and this one does not. The spilling is uneven across arms (one
+/// reloads a single base, another reloads all three twice), which is the signature of
+/// one-big-function register allocation rather than anything about the ops themselves.
+///
+/// `#[inline(never)]` is the whole point: it forces a separate frame per monomorphisation
+/// so each op gets its own allocation. The closure is a ZST, so `f(x, y)` still inlines
+/// INSIDE this function and the loop body stays exactly what it was - the call happens
+/// once per ARRAY, not per element.
+///
+/// This is the same defect class the divide loop carried: `deadlock-audit-6y5wp`'s census
+/// found three `mov ..(%rsp)` reloads there too, and they vanished once `b50b9d88` removed
+/// the FE-hazard accumulate and freed the registers.
+#[inline(never)]
+fn serial_binary_into<F: Fn(f64, f64) -> f64>(
+    output: &[std::cell::Cell<f64>],
+    a_in: &[pyo3::buffer::ReadOnlyCell<f64>],
+    b_in: &[pyo3::buffer::ReadOnlyCell<f64>],
+    f: F,
+) {
+    for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+        slot.set(f(a_cell.get(), b_cell.get()));
+    }
+}
+
+/// Run `body` with the op as a COMPILE-TIME constant, so `BinaryOp::apply` inlines
+/// (`deadlock-audit-hzl1w`).
+///
+/// THE DEFECT THIS EXISTS TO REMOVE, read out of the shipped ELF rather than guessed.
+/// `zerocopy_f64_binary_flat_with_out` took `op` as a runtime value, so its serial
+/// fallback compiled to a scalar loop with an OUT-OF-LINE CALL PER ELEMENT:
+///
+/// ```text
+///   mov    0xb8(%rsp),%rax          ; reload lhs base from the stack
+///   vmovsd (%rax,%r14,8),%xmm0      ; lhs[i]
+///   mov    0xb0(%rsp),%rax          ; reload rhs base from the stack
+///   vmovsd (%rax,%r14,8),%xmm1      ; rhs[i]
+///   mov    %ebx,%edi                ; op discriminant into the argument register
+///   call   <fnp_ufunc::BinaryOp>::apply     ; 2283-byte callee, EVERY element
+///   vmovsd %xmm0,(%r12,%r14,8)      ; out[i]
+/// ```
+///
+/// Eleven instructions per ELEMENT, one opaque call, everything scalar - the call is
+/// what forbids vectorisation, and it also forces the two base pointers to be respilled
+/// each iteration. A monomorphic loop over the same op is 6 instructions per FOUR
+/// elements on ymm.
+///
+/// WHY A MACRO AND NOT A GENERIC FUNCTION: the arm must name a CONSTANT `BinaryOp`, so
+/// that `apply`'s own `match self` folds away at compile time and its body inlines. A
+/// generic over `Fn(f64, f64) -> f64` would work equally well but would require writing
+/// all 35 closures out by hand; matching on the variant reuses `apply` verbatim, which
+/// is what makes the result bit-identical BY CONSTRUCTION rather than by review.
+///
+/// BIT-EXACTNESS: every arm calls the very same `BinaryOp::apply` on the very same
+/// inputs in the same order. The only difference is that the discriminant is known to
+/// the compiler. There is no arithmetic here to get wrong.
+///
+/// The match is EXHAUSTIVE on purpose - a new `BinaryOp` variant fails the build here
+/// rather than silently falling back to the slow path.
+macro_rules! with_specialized_binary_op {
+    ($op:expr, |$specialized:ident| $body:block) => {{
+        macro_rules! __arm {
+            ($variant:ident) => {{
+                const $specialized: BinaryOp = BinaryOp::$variant;
+                $body
+            }};
+        }
+        match $op {
+            BinaryOp::Add => __arm!(Add),
+            BinaryOp::Sub => __arm!(Sub),
+            BinaryOp::Mul => __arm!(Mul),
+            BinaryOp::Div => __arm!(Div),
+            BinaryOp::Power => __arm!(Power),
+            BinaryOp::Remainder => __arm!(Remainder),
+            BinaryOp::Minimum => __arm!(Minimum),
+            BinaryOp::Maximum => __arm!(Maximum),
+            BinaryOp::Arctan2 => __arm!(Arctan2),
+            BinaryOp::Fmod => __arm!(Fmod),
+            BinaryOp::Copysign => __arm!(Copysign),
+            BinaryOp::Fmax => __arm!(Fmax),
+            BinaryOp::Fmin => __arm!(Fmin),
+            BinaryOp::Heaviside => __arm!(Heaviside),
+            BinaryOp::Nextafter => __arm!(Nextafter),
+            BinaryOp::LogicalAnd => __arm!(LogicalAnd),
+            BinaryOp::LogicalOr => __arm!(LogicalOr),
+            BinaryOp::LogicalXor => __arm!(LogicalXor),
+            BinaryOp::Equal => __arm!(Equal),
+            BinaryOp::NotEqual => __arm!(NotEqual),
+            BinaryOp::Less => __arm!(Less),
+            BinaryOp::LessEqual => __arm!(LessEqual),
+            BinaryOp::Greater => __arm!(Greater),
+            BinaryOp::GreaterEqual => __arm!(GreaterEqual),
+            BinaryOp::Hypot => __arm!(Hypot),
+            BinaryOp::Logaddexp => __arm!(Logaddexp),
+            BinaryOp::Logaddexp2 => __arm!(Logaddexp2),
+            BinaryOp::Ldexp => __arm!(Ldexp),
+            BinaryOp::FloorDivide => __arm!(FloorDivide),
+            BinaryOp::FloatPower => __arm!(FloatPower),
+            BinaryOp::BitwiseAnd => __arm!(BitwiseAnd),
+            BinaryOp::BitwiseOr => __arm!(BitwiseOr),
+            BinaryOp::BitwiseXor => __arm!(BitwiseXor),
+            BinaryOp::LeftShift => __arm!(LeftShift),
+            BinaryOp::RightShift => __arm!(RightShift),
+        }
+    }};
+}
+
 // Two-input f64-output counterpart of zerocopy_f64_unary_flat. When a and b are
 // exact same-shape C-contiguous float64 ndarrays, read both buffers and write
 // `op.apply(a[i], b[i])` straight into the output buffer — no intermediate Rust
@@ -10853,12 +10981,37 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         // rayon fan-out from ~16K, but cheaper near-memory-bound ops (hypot = sqrt(a^2+b^2),
         // nextafter = bit-step, remainder = floored-mod) only win once aggregate bandwidth
         // dominates (~2M, like the cheap unary class) — a low gate REGRESSES medium N for them.
+        // PER-OP CROSSOVERS, MEASURED (`deadlock-audit-hzl1w`). These ops all shared
+        // `1 << 21` by ANALOGY with `maximum` - one op's threshold copied to eight
+        // others - and three of them cross much lower. Swept serial against parallel at
+        // 2^18..2^22 on thinkstation1 (64 rayon threads) with the monomorphic loop
+        // shapes the route now uses, `maximum` carried as a control:
+        //
+        //   op          2^18    2^19    2^20    2^21    2^22   crossover
+        //   maximum    0.353   0.499   0.889   2.143   1.669     2^21  (control, unchanged)
+        //   copysign   0.449   0.319   0.868   1.663   1.708     2^21  (unchanged)
+        //   nextafter  0.729   1.148   1.698   2.001   1.505     2^20
+        //   heaviside  0.324   0.482   1.160   1.570   1.553     2^20
+        //   fmod       2.253   3.211   3.204   4.615   6.599    <=2^18
+        //
+        // Read as parallel-over-serial, so >1 means the fan-out pays. A size is only
+        // credited when its CI excludes 1.0; `nextafter` at 2^19 is 1.148 with the CI
+        // straddling unity, which is why it lands at 2^20 and not 2^19.
+        //
+        // MEASURED UNDER LOAD (loadavg 26-34), which makes this CONSERVATIVE rather than
+        // optimistic: rayon fan-out is the arm that suffers on a busy host - this
+        // campaign measured ours as ~3x more load-sensitive than NumPy's serial loop - so
+        // a quiet host can only move these crossovers DOWN, never up.
+        //
+        // `fmod` already wins at the smallest size swept, so 1 << 18 is where the
+        // evidence stops, not where the op stops paying. Lower needs its own sweep.
+        //
+        // `Hypot` and `Remainder` are NOT measured and keep the inherited constant.
         let parallel_min = match op {
+            BinaryOp::Fmod => 1 << 18,
+            BinaryOp::Nextafter | BinaryOp::Heaviside => 1 << 20,
             BinaryOp::Hypot
-            | BinaryOp::Nextafter
             | BinaryOp::Remainder
-            | BinaryOp::Fmod
-            | BinaryOp::Heaviside
             | BinaryOp::Maximum
             | BinaryOp::Minimum
             | BinaryOp::Copysign
@@ -10915,15 +11068,20 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                     divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             } else {
-                out_data
-                    .par_chunks_mut(chunk)
-                    .zip(lhs.par_chunks(chunk))
-                    .zip(rhs.par_chunks(chunk))
-                    .for_each(|((o, l), r)| {
-                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                            *s = op.apply(x, y);
-                        }
-                    });
+                // SPECIALIZED (`deadlock-audit-hzl1w`): `KERNEL` is a constant here, so
+                // `apply` inlines and this body vectorises instead of calling out once
+                // per element. Bit-identical - same `apply`, same operands, same order.
+                with_specialized_binary_op!(op, |KERNEL| {
+                    out_data
+                        .par_chunks_mut(chunk)
+                        .zip(lhs.par_chunks(chunk))
+                        .zip(rhs.par_chunks(chunk))
+                        .for_each(|((o, l), r)| {
+                            for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                                *s = KERNEL.apply(x, y);
+                            }
+                        });
+                });
             }
         } else if matches!(op, BinaryOp::Div) {
             // HARDWARE FLAGS, NOT SOFTWARE CLASSIFICATION — the same detector the parallel
@@ -10971,6 +11129,25 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // accessor in it. `ReadOnlyCell<f64>`/`Cell<f64>` are `repr(transparent)` over
             // `f64`; the inputs are read-only under the GIL and `output` is a buffer we own
             // with no alias.
+            //
+            // SAFETY INVARIANT, MIRI-VERIFIED (`deadlock-audit-8nj9b`). Materialising
+            // `&mut [f64]` from `output: &[Cell<f64>]` asserts uniqueness over memory that
+            // is ALSO reachable through a shared reference, so it is sound only while that
+            // shared view is left alone. The rule is exact and easy to break:
+            //
+            //   *** WHILE `out_data` IS LIVE, READ THE OUTPUT THROUGH `out_data` ONLY. ***
+            //   *** A SINGLE `output[i].get()` HERE IS UNDEFINED BEHAVIOUR.            ***
+            //
+            // That is why the rare-path scan below iterates `out_data.iter()` and not
+            // `output.iter()`. The two look interchangeable and are not.
+            //
+            // Checked rather than argued: the shape below and the interleaved variant were
+            // both reproduced standalone (no PyO3, since Miri cannot run the Python C API)
+            // and run under Miri. Stacked Borrows accepts this shape and REJECTS the
+            // interleaved one - "attempting a read access using <tag>, but that tag does
+            // not exist in the borrow stack", the `Unique` retag having been invalidated by
+            // the `Cell` read. Tree Borrows accepts both. So this code is sound under both
+            // models today, and one `output`-read away from UB under Stacked Borrows.
             let lhs: &[f64] =
                 unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), len) };
             let rhs: &[f64] =
@@ -10987,9 +11164,13 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         } else {
-            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-                slot.set(op.apply(a_cell.get(), b_cell.get()));
-            }
+            // SPECIALIZED (`deadlock-audit-hzl1w`). This is the loop the ELF showed
+            // compiling to `call <BinaryOp>::apply` PER ELEMENT; with `KERNEL` constant
+            // the callee inlines, the discriminant match folds away, and the base
+            // pointers stop being respilled every iteration.
+            with_specialized_binary_op!(op, |KERNEL| {
+                serial_binary_into(output, a_in, b_in, |x, y| KERNEL.apply(x, y));
+            });
         }
     }
     if divide_hazard.load(std::sync::atomic::Ordering::Relaxed) {
@@ -35632,15 +35813,49 @@ fn searchsorted(
     // (int / float / bool). Lists, tuples, and other sequences fail that
     // extraction and correctly fall through to the array branch.
     let v_bound = v.bind(py);
-    let v_is_scalar = match v_bound
-        .getattr(intern!(py, "ndim"))
-        .and_then(|n| n.extract::<i64>())
+    // TYPE CHECK BEFORE THE getattr THAT RAISES (`deadlock-audit-v46rn`).
+    //
+    // A plain Python `float` or `int` needle has no `ndim` attribute, so the `getattr`
+    // below RAISES AttributeError and we immediately discard it. CPython materialises a
+    // real exception for that - object, args, traceback plumbing - and this sits on the
+    // scalar-needle path, which is a MEASURED regression: `ss_scalar_needle` reads
+    // 0.697544 / 0.701455 across two runs, i.e. ~1.43x slower than live NumPy, and its
+    // native arm is a single binary search that cannot itself account for that.
+    //
+    // `is_instance_of` is a C-level type check that raises nothing.
+    //
+    // SEMANTICS ARE PRESERVED EXACTLY, case by case, because this predicate decides
+    // whether the result is a NumPy scalar or an array:
+    //   * Python float / int / bool - previously: no `ndim`, then `extract` succeeds ->
+    //     scalar. Now: type check -> scalar. Same.
+    //   * `np.float64` - it SUBCLASSES Python `float`, so it takes the new fast path;
+    //     previously it had `ndim == 0` -> scalar. Same answer either way.
+    //   * `np.int64` - does NOT subclass Python `int`, so it still falls through to the
+    //     `ndim == 0` branch. Unchanged.
+    //   * 0-d ndarray - not a float/int, falls through, `ndim == 0` -> scalar. Unchanged.
+    //   * 1-d ndarray - falls through, `ndim == 1` -> not scalar. Unchanged.
+    //   * list / tuple - falls through, `ndim` raises, every `extract` fails -> not
+    //     scalar. Unchanged, and still pays the raise, which is correct: that case has to
+    //     ask.
+    //
+    // `PyBool` is checked first only for clarity; `bool` subclasses `int` in Python, so
+    // either arm would answer scalar.
+    let v_is_scalar = if v_bound.is_instance_of::<PyBool>()
+        || v_bound.is_instance_of::<PyInt>()
+        || v_bound.is_instance_of::<pyo3::types::PyFloat>()
     {
-        Ok(ndim_val) => ndim_val == 0,
-        Err(_) => {
-            v_bound.extract::<i64>().is_ok()
-                || v_bound.extract::<f64>().is_ok()
-                || v_bound.extract::<bool>().is_ok()
+        true
+    } else {
+        match v_bound
+            .getattr(intern!(py, "ndim"))
+            .and_then(|n| n.extract::<i64>())
+        {
+            Ok(ndim_val) => ndim_val == 0,
+            Err(_) => {
+                v_bound.extract::<i64>().is_ok()
+                    || v_bound.extract::<f64>().is_ok()
+                    || v_bound.extract::<bool>().is_ok()
+            }
         }
     };
     // Zero-copy scalar-query fast path: a single binary search over the haystack
@@ -35706,6 +35921,10 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && a_float_char == 'd'
+        // The merge arm declines every haystack smaller than this after independently
+        // validating both arrays and borrowing both buffers. Avoid that duplicate preflight
+        // when the existing 1-D haystack cannot possibly engage the merge kernel.
+        && a_arr.len().is_ok_and(|n| n >= (1 << 19))
         && let Some(out) = try_zerocopy_f64_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
@@ -35725,6 +35944,25 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && a_float_char == 'f'
+        // SKIP THE IMPOSSIBLE MERGE PROBE (`deadlock-audit-v46rn`). Same fix `92a74fbb`
+        // applied to the f64 twin, which the f32 arm never received.
+        //
+        // `try_zerocopy_f32_searchsorted_merge` declines on
+        // `n < MERGE_MIN_HAYSTACK || m < MERGE_MIN_QUERIES` (both `1 << 19`) - but it
+        // reaches that test only AFTER independently validating both arrays and
+        // borrowing both PyBuffers. For any haystack below the threshold that preflight
+        // is pure waste: it cannot possibly engage, and the sibling
+        // `try_zerocopy_f32_searchsorted` immediately below is what actually serves this
+        // shape.
+        //
+        // MEASURED: `ss_f32_array_needle` (4096-element haystack, 3 needles - both far
+        // below `1 << 19`) reads 0.805125 ci95=[0.802279,0.815137], i.e. 1.24x slower
+        // than live NumPy, on a cell whose real work is three binary searches.
+        //
+        // Gating on the haystack alone mirrors the f64 arm exactly rather than inventing
+        // a second condition; the query length is not cheaply available here, and the
+        // haystack test already excludes every case this cell represents.
+        && a_arr.len().is_ok_and(|n| n >= (1 << 19))
         && let Some(out) = try_zerocopy_f32_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
@@ -36227,16 +36465,30 @@ fn try_zerocopy_f64_searchsorted(
                     }
                 });
         } else {
-            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+            // A sorted tiny needle batch uses the isolated fixed-shape lower bound.
+            // Unsorted needles keep the established guessed search unchanged.
             let a_raw: &[f64] =
                 unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), a_s.len()) };
-            let mut guess = 0usize;
-            for (o, vc) in output.iter().zip(v_s.iter()) {
-                let idx = search_index_f64_raw_guess(a_raw, vc.get(), right, guess);
-                guess = idx;
-                o.set(idx as i64);
+            let v_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            if !searchsorted_array_needle::f64_sorted_needle_indices(a_raw, v_raw, right, out_data)
+            {
+                let mut guess = 0usize;
+                for (slot, &key) in out_data.iter_mut().zip(v_raw) {
+                    let idx = search_index_f64_raw_guess(a_raw, key, right, guess);
+                    guess = idx;
+                    *slot = idx as i64;
+                }
             }
         }
+    }
+    // `flat` already has the exact intp dtype and `(m,)` shape for a 1-D
+    // query. Avoid allocating a shape tuple and asking NumPy to create an
+    // identity reshape view on the common array-needle route.
+    if v_buf.dimensions() == 1 {
+        return Ok(Some(flat.unbind()));
     }
     let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
@@ -36704,6 +36956,12 @@ fn try_zerocopy_f32_searchsorted(
                 o.set(idx as i64);
             }
         }
+    }
+    // `flat` already has the exact intp dtype and `(m,)` shape for a 1-D
+    // query. Avoid allocating a shape tuple and asking NumPy to create an
+    // identity reshape view on the common array-needle route.
+    if v_buf.dimensions() == 1 {
+        return Ok(Some(flat.unbind()));
     }
     let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
@@ -70507,9 +70765,10 @@ fn int64_sort_flat_small(
     }
     // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
     let src: &[i64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), n) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "int64")?;
-    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    // `numpy.empty` takes dtype as its second positional argument.  Keeping it
+    // out of a kwargs dict removes a reached Python allocation from this
+    // dispatch-bound path without changing the result's dtype or layout.
+    let out = numpy.call_method1(intern!(py, "empty"), (n, "int64"))?;
     let out_buffer = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
         return Ok(None);
@@ -70701,17 +70960,25 @@ fn try_native_int_sort_flat(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" && kind != "b" {
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'i' | 'u' | 'b') {
         return Ok(None);
     }
-    let n: usize = a
-        .getattr(intern!(py, "shape"))?
-        .extract::<Vec<usize>>()?
-        .iter()
-        .product();
+    // `len()`, NOT `shape` -> `Vec<usize>` -> product (`franken_numpy-ixs5y.409`).
+    //
+    // `ndim == 1` is already established above, so the shape tuple has exactly one entry
+    // and its product IS `len(a)`. The old spelling paid a `shape` getattr, a
+    // PyTuple-to-`Vec<usize>` conversion that HEAP-ALLOCATES, and an iterator product, to
+    // compute a number one `PyObject_Length` call already returns.
+    //
+    // This is worth doing HERE specifically because the entry path is where this cell's
+    // time is: profiled at n=256 the route is 3566 ns, of which the comparison sort is
+    // 1092 (30.6%) and the Python entry residual is 2074 (58.2%). Work on the sort is
+    // capped - with a FREE sort the route still floors at 2474 ns against NumPy's 1552 -
+    // so the residual is the only lever that can reach this cell.
+    let n: usize = a.len()?;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    if kind == "i" && itemsize == std::mem::size_of::<i64>() && n <= I64_SMALL_SORT_MAX {
+    if kind == 'i' && itemsize == std::mem::size_of::<i64>() && n <= I64_SMALL_SORT_MAX {
         return int64_sort_flat_small(py, numpy, a, n);
     }
     if n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
@@ -70722,8 +70989,8 @@ fn try_native_int_sort_flat(
     // radix/counting pass (a comparison par_sort cannot beat it - measured, ledger 2026-06),
     // so they route to the parallel COUNTING sort instead (different primitive: par histogram
     // + memset-speed run-fill). bool == u8 byte order (see bool_sort_flat_counting).
-    match (kind.as_str(), itemsize) {
-        ("i", 1) => int_sort_flat_counting::<i8, 256>(
+    match (kind, itemsize) {
+        ('i', 1) => int_sort_flat_counting::<i8, 256>(
             py,
             numpy,
             a,
@@ -70732,10 +70999,10 @@ fn try_native_int_sort_flat(
             |v| (v as i16 - i8::MIN as i16) as usize,
             |b| (b as i16 + i8::MIN as i16) as i8,
         ),
-        ("u", 1) => {
+        ('u', 1) => {
             int_sort_flat_counting::<u8, 256>(py, numpy, a, n, "uint8", |v| v as usize, |b| b as u8)
         }
-        ("i", 2) => int_sort_flat_counting::<i16, 65536>(
+        ('i', 2) => int_sort_flat_counting::<i16, 65536>(
             py,
             numpy,
             a,
@@ -70744,7 +71011,7 @@ fn try_native_int_sort_flat(
             |v| (v as i32 - i16::MIN as i32) as usize,
             |b| (b as i32 + i16::MIN as i32) as i16,
         ),
-        ("u", 2) => int_sort_flat_counting::<u16, 65536>(
+        ('u', 2) => int_sort_flat_counting::<u16, 65536>(
             py,
             numpy,
             a,
@@ -70753,14 +71020,14 @@ fn try_native_int_sort_flat(
             |v| v as usize,
             |b| b as u16,
         ),
-        ("b", 1) => bool_sort_flat_counting(py, numpy, a, n),
-        ("i", 4) if i32_flat_sort_native_is_profitable() => {
+        ('b', 1) => bool_sort_flat_counting(py, numpy, a, n),
+        ('i', 4) if i32_flat_sort_native_is_profitable() => {
             int_sort_flat_typed::<i32>(py, numpy, a, n, "int32")
         }
-        ("i", 4) => Ok(None),
-        ("i", 8) => int_sort_flat_typed::<i64>(py, numpy, a, n, "int64"),
-        ("u", 4) => int_sort_flat_typed::<u32>(py, numpy, a, n, "uint32"),
-        ("u", 8) => int_sort_flat_typed::<u64>(py, numpy, a, n, "uint64"),
+        ('i', 4) => Ok(None),
+        ('i', 8) => int_sort_flat_typed::<i64>(py, numpy, a, n, "int64"),
+        ('u', 4) => int_sort_flat_typed::<u32>(py, numpy, a, n, "uint32"),
+        ('u', 8) => int_sort_flat_typed::<u64>(py, numpy, a, n, "uint64"),
         _ => Ok(None),
     }
 }
@@ -82224,6 +82491,10 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         };
         let in_native_window = blas_is_single_threaded()
             && m.saturating_mul(k).saturating_mul(n) >= PY_NATIVE_GEMM_MIN_FLOPS
+            // Same minimum-output-dimension condition as the 2-D predicate, kept in step
+            // with it deliberately: the packing economics are a property of the kernel,
+            // not of which entry point reached it (`franken_numpy-ixs5y`).
+            && m.min(n) >= PY_NATIVE_GEMM_MIN_OUTPUT_DIM
             && m <= PY_NATIVE_GEMM_MAX_DIM
             && k <= PY_NATIVE_GEMM_MAX_DIM
             && n <= PY_NATIVE_GEMM_MAX_DIM;
@@ -85313,22 +85584,30 @@ fn try_zerocopy_float_sum_flat(
     a: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // The directional size matrix crossed decisively at 16 MiB for both
-    // dtypes; 8 MiB f64 was only 1.07x and is deliberately left to NumPy.
-    const FLOAT_SUM_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+    // The refreshed public contract finds a decidable f64 mean loss at one
+    // million elements. The exact-tree SIMD route removes it there; retain
+    // the separately measured 16 MiB floor for f32.
+    const F64_SUM_PARALLEL_MIN_ELEMENTS: usize = 1_000_000;
+    const F32_SUM_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
     let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    let min_bytes = match itemsize {
+        8 => F64_SUM_PARALLEL_MIN_ELEMENTS * std::mem::size_of::<f64>(),
+        4 => F32_SUM_PARALLEL_MIN_BYTES,
+        _ => return Ok(None),
+    };
     if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
         || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
         || !a
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
-        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLOAT_SUM_PARALLEL_MIN_BYTES
+        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < min_bytes
     {
         return Ok(None);
     }
@@ -85337,7 +85616,7 @@ fn try_zerocopy_float_sum_flat(
         return Ok(None);
     }
 
-    let scalar = match dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
+    let scalar = match itemsize {
         4 => {
             let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
                 return Ok(None);
@@ -85407,25 +85686,39 @@ fn try_zerocopy_float_mean_flat(
     a: &Bound<'_, PyAny>,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const FLOAT_MEAN_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
+    // Keep float32 at its independently measured 16 MiB floor, but admit the
+    // f64 public-contract size through the same exact NumPy pairwise tree.
+    const F64_MEAN_PARALLEL_MIN_ELEMENTS: usize = 1_000_000;
+    const F32_MEAN_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
     let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    let min_bytes = match itemsize {
+        8 => F64_MEAN_PARALLEL_MIN_ELEMENTS * std::mem::size_of::<f64>(),
+        4 => F32_MEAN_PARALLEL_MIN_BYTES,
+        _ => return Ok(None),
+    };
     if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
         || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
         || !a
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
-        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLOAT_MEAN_PARALLEL_MIN_BYTES
+        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < min_bytes
     {
         return Ok(None);
     }
+    // Sum already checks this runtime witness. Mean uses the same tree before
+    // its scalar divide, so it must decline on a NumPy build with another tree.
+    if !float_pairwise_tree_matches_numpy(numpy) {
+        return Ok(None);
+    }
 
-    let scalar = match dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
+    let scalar = match itemsize {
         4 => {
             let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
                 return Ok(None);
@@ -91266,6 +91559,12 @@ fn blas_is_single_threaded() -> bool {
 }
 
 const PY_NATIVE_GEMM_MIN_FLOPS: usize = 320 * 320 * 320;
+/// Smallest output dimension the packed GEMM is MEASURED to win at
+/// (`franken_numpy-ixs5y`). See the sweep in `python_native_gemm_f64_2d_eligible_for_op`:
+/// `min(m, n) = 256` loses to serial OpenBLAS at every `k` tested, `384` wins decidably.
+/// Packing amortises over `m*n/(m+n)`, which is independent of `k`, so a FLOPS floor
+/// cannot express this condition and a long `k` was buying admission it could not repay.
+const PY_NATIVE_GEMM_MIN_OUTPUT_DIM: usize = 384;
 // Upper dim bound for routing np.matmul/np.dot to the native packed GEMM. The
 // B-micropanel packing (e509860c, ~5x) moved the crossover vs the local numpy
 // BLAS from 896 to 1024 (measured same-host, parity=True: at n=1024 fnp 20.0 ms
@@ -91313,6 +91612,36 @@ fn python_native_gemm_f64_2d_eligible_for_op(
     let (k2, n) = (b.shape()[0], b.shape()[1]);
     let max_dim = python_native_gemm_max_dim_for_op(op);
     if k1 != k2 || [m, k1, n].iter().any(|&dim| dim == 0 || dim > max_dim) {
+        return false;
+    }
+    // MINIMUM OUTPUT DIMENSION (`franken_numpy-ixs5y`). A FLOPS floor alone admits a
+    // shape class where the packed GEMM cannot win: small `m` and `n` with a long `k`.
+    // Packing writes O(m*k + k*n) while compute is O(m*k*n), so work-per-packed-byte is
+    // m*k*n / (m*k + k*n) = m*n / (m + n) - which for square output is m/2 and DOES NOT
+    // DEPEND ON k. A gate keyed on m*k*n therefore lets a long `k` buy admission that
+    // the packing can never repay.
+    //
+    // Measured against live NumPy (serial BLAS, thinkstation1, dual-null contract), which
+    // is what sets the constant rather than the algebra:
+    //
+    //   m=n=256 k=512    0.751475 [0.721708,0.771966]  DECIDABLE_REGRESSION
+    //   m=n=256 k=1024   0.835948 [0.816630,0.875057]  negative (undecided)
+    //   m=n=256 k=1024   0.884104 [0.846093,0.906281]  DECIDABLE_REGRESSION (earlier run)
+    //   m=n=256 k=1536   0.962768 [0.882462,0.968800]  negative (undecided)
+    //   m=n=384 k=1024   1.314727 [1.238846,1.382866]  DECIDABLE_WIN
+    //   m=n=512 k=1024   1.654026 [1.606771,1.783517]  DECIDABLE_WIN
+    //   m=n=768 k=1024   2.205432 [2.075813,2.258520]  DECIDABLE_WIN
+    //
+    // Negative at 256 for EVERY k tested, decidably positive from 384 up. The threshold
+    // is set at the smallest MEASURED win rather than interpolated into the untested
+    // (256, 384) gap, so it is conservative by construction: it can only decline shapes
+    // we have not shown ourselves winning.
+    //
+    // `min(m, n)` and not `m*n`: the rectangular cells settle it. 1024x256x1024 wins
+    // 1.687068 with a SMALL k, and 1536x384x1536 wins 2.988959 - both have a large
+    // min(m, n) - while every small-min(m, n) case loses regardless of how large m*n or
+    // the FLOP count gets.
+    if m.min(n) < PY_NATIVE_GEMM_MIN_OUTPUT_DIM {
         return false;
     }
     if a.values()
@@ -121060,13 +121389,63 @@ mod tests {
                 "native matmul/dot helper output bit pattern changed"
             );
 
+            // 320^3 USED TO BE ASSERTED ELIGIBLE HERE, ON AN EARLIER PROFILE. Direct
+            // measurement against live NumPy refutes that: 320x320x320 reads 0.825322
+            // ci95=[0.802650,0.861323] DECIDABLE_REGRESSION under the dual-null contract
+            // (serial BLAS, thinkstation1) - it LOSES 1.21x. It is now declined by
+            // PY_NATIVE_GEMM_MIN_OUTPUT_DIM, and this assertion is inverted to match the
+            // measurement rather than the old profile (`franken_numpy-ixs5y`).
             let medium_a =
                 UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
             let medium_b =
                 UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
             assert!(
-                python_native_gemm_f64_2d_eligible(&medium_a, &medium_b),
-                "profiled 320^3 f64 GEMM should take the native gate"
+                !python_native_gemm_f64_2d_eligible(&medium_a, &medium_b),
+                "320^3 f64 GEMM is a MEASURED regression (0.825322) and must delegate"
+            );
+            // The smallest output dimension measured to win decidably (1.314727 at
+            // k=1024). This is the boundary the constant encodes, so it is pinned.
+            let win_dim = super::PY_NATIVE_GEMM_MIN_OUTPUT_DIM;
+            let at_min_a =
+                UFuncArray::new(vec![win_dim, 1024], vec![1.0; win_dim * 1024], DType::F64)
+                    .unwrap();
+            let at_min_b =
+                UFuncArray::new(vec![1024, win_dim], vec![1.0; 1024 * win_dim], DType::F64)
+                    .unwrap();
+            assert!(
+                python_native_gemm_f64_2d_eligible(&at_min_a, &at_min_b),
+                "min(m,n)={win_dim} is the smallest MEASURED win and must take the native gate"
+            );
+            // One below the boundary must decline, so the constant is load-bearing rather
+            // than decorative.
+            let below_a = UFuncArray::new(
+                vec![win_dim - 1, 1024],
+                vec![1.0; (win_dim - 1) * 1024],
+                DType::F64,
+            )
+            .unwrap();
+            let below_b = UFuncArray::new(
+                vec![1024, win_dim - 1],
+                vec![1.0; 1024 * (win_dim - 1)],
+                DType::F64,
+            )
+            .unwrap();
+            assert!(
+                !python_native_gemm_f64_2d_eligible(&below_a, &below_b),
+                "min(m,n) below {win_dim} must delegate"
+            );
+            // A LONG k MUST NOT BUY ADMISSION. This is the whole point of the condition:
+            // 256x4096x256 clears the FLOPS floor eight times over, yet its packing can
+            // never repay - m*n/(m+n) is 128 regardless of k, and every measured k at
+            // m=n=256 lost.
+            let long_k_a =
+                UFuncArray::new(vec![256, 4096], vec![1.0; 256 * 4096], DType::F64).unwrap();
+            let long_k_b =
+                UFuncArray::new(vec![4096, 256], vec![1.0; 4096 * 256], DType::F64).unwrap();
+            assert!(
+                !python_native_gemm_f64_2d_eligible(&long_k_a, &long_k_b),
+                "a long k must not buy admission for a small output - that is the shape \
+                 class the FLOPS floor alone admitted and the packing cannot repay"
             );
 
             let small_a =
@@ -121089,24 +121468,29 @@ mod tests {
             // A dimension above PY_NATIVE_GEMM_MAX_DIM (1024 since e6468d9c raised the
             // crossover from 896) must stay on the numpy fallback. 1024 itself is now
             // at the cap and eligible, so test one genuinely above it.
+            // These cases exercise the CAP, so their other dimensions are kept at or above
+            // PY_NATIVE_GEMM_MIN_OUTPUT_DIM - otherwise the min-output condition would
+            // decline them first and the cap would never be reached, leaving the
+            // assertions passing for the wrong reason.
             let cap = super::PY_NATIVE_GEMM_MAX_DIM;
+            let wide = win_dim.max(512);
             let too_large_a =
-                UFuncArray::new(vec![1280, 320], vec![1.0; 1280 * 320], DType::F64).unwrap();
+                UFuncArray::new(vec![1280, wide], vec![1.0; 1280 * wide], DType::F64).unwrap();
             let too_large_b =
-                UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
+                UFuncArray::new(vec![wide, wide], vec![1.0; wide * wide], DType::F64).unwrap();
             assert!(
                 !python_native_gemm_f64_2d_eligible(&too_large_a, &too_large_b),
                 "dimension above the {cap} cap should stay on numpy fallback"
             );
             // And the cap boundary itself is eligible under the raised crossover.
             let at_cap_a =
-                UFuncArray::new(vec![cap, 320], vec![1.0; cap * 320], DType::F64).unwrap();
+                UFuncArray::new(vec![cap, wide], vec![1.0; cap * wide], DType::F64).unwrap();
             assert!(
                 python_native_gemm_f64_2d_eligible(&at_cap_a, &too_large_b),
                 "dimension at the {cap} cap should take the native gate"
             );
             let matmul_wide =
-                UFuncArray::new(vec![1536, 320], vec![1.0; 1536 * 320], DType::F64).unwrap();
+                UFuncArray::new(vec![1536, wide], vec![1.0; 1536 * wide], DType::F64).unwrap();
             assert!(
                 !python_native_gemm_f64_2d_eligible(&matmul_wide, &too_large_b),
                 "dot should keep the shared {cap} cap"
@@ -173636,6 +174020,422 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             }
             Ok(())
         });
+    }
+
+    /// One-sided `clip` on a float array must match NumPy BIT FOR BIT after the
+    /// infinity substitution, and must not touch integer dtypes
+    /// (`deadlock-audit-v46rn`).
+    ///
+    /// A missing bound now becomes an infinite one so the native two-sided kernel serves
+    /// the call. That is an identity on values - `min(max(x, lo), +inf) == max(x, lo)` -
+    /// but it is exactly the kind of rewrite that is right on ordinary numbers and wrong
+    /// on the edges, so the edges are the test: NaN (which must propagate, not be
+    /// clipped), infinities on both sides, and signed zeros against a `0.0` bound, where
+    /// returning `-0.0` instead of `+0.0` is a real byte difference that `==` cannot see.
+    ///
+    /// THE INTEGER CASES ARE THE PLANTED NEGATIVE. If the substitution ever leaks past
+    /// the float gate, an int64 one-sided clip comes back as float64 - a dtype change,
+    /// not a slower answer - so the dtype is asserted alongside the bytes.
+    #[test]
+    fn one_sided_clip_matches_numpy_bytes_and_keeps_integer_dtypes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            let module = PyModule::new(py, "fnp_clip_test").expect("module");
+            crate::fnp_python(&module).expect("init");
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("fnp", &module).expect("bind fnp");
+            // Every awkward float lane, plus integer arrays for the dtype guard, plus a
+            // both-None call which NumPy raises on and which must keep raising.
+            let script = "f = np.array([np.nan, -np.nan, np.inf, -np.inf, 0.0, -0.0, -1.5, 1.5, 3e300], dtype=np.float64)\ng = f.astype(np.float32)\ni = np.array([-9, -1, 0, 1, 9], dtype=np.int64)\ncases = [(f, 0.0, None), (f, None, 0.0), (g, 0.0, None), (g, None, 0.0), (f, -np.inf, None), (f, None, np.inf), (i, 0, None), (i, None, 0), (f, 0.0, 3000.0), (g, 0.0, 3000.0), (f, None, None)]\nbad = []\nfor arr, lo, hi in cases:\n    want = np.clip(arr, lo, hi)\n    got = fnp.clip(arr, lo, hi)\n    if want.dtype != got.dtype:\n        bad.append((str(want.dtype), str(got.dtype)))\n    elif want.tobytes() != got.tobytes():\n        bad.append((want.tolist(), got.tolist()))\nbad_count = len(bad)\nbad_msg = str(bad)\n";
+            py.run(
+                std::ffi::CString::new(script).unwrap().as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("clip parity script");
+            let bad_count: i64 = locals
+                .get_item("bad_count")
+                .expect("bad_count lookup")
+                .expect("bad_count present")
+                .extract()
+                .expect("bad_count is an int");
+            let bad_msg: String = locals
+                .get_item("bad_msg")
+                .expect("bad_msg lookup")
+                .expect("bad_msg present")
+                .extract()
+                .expect("bad_msg is a str");
+            assert_eq!(
+                bad_count, 0,
+                "one-sided clip diverged from numpy: {bad_msg}"
+            );
+        });
+    }
+
+    /// `maximum`/`minimum` must PROPAGATE a NaN operand verbatim, LHS first
+    /// (`deadlock-audit-jd6lt`).
+    ///
+    /// Same defect class as `nextafter`, found by reading the neighbouring arms after
+    /// fixing that one: both answered a bare `f64::NAN` for any NaN operand, losing the
+    /// sign, losing the payload, and answering identically whichever side was NaN.
+    ///
+    /// THE RULES ARE NOT SHARED ACROSS THE FAMILY, which is why each is measured rather
+    /// than copied: `maximum`/`minimum` prefer the LHS on a both-NaN tie and return the
+    /// NaN VERBATIM (a signaling NaN stays signaling), whereas `nextafter` prefers the
+    /// RHS and quiets it. Assuming one rule for both would have produced a confidently
+    /// wrong fix.
+    ///
+    /// PLANTED NEGATIVE: every NaN pair asserts NumPy's answer is NOT the default
+    /// `+NaN`, so a pair that stops discriminating fails loudly instead of passing on the
+    /// bug. A test using plain `np.nan` would have passed on the old code, since the
+    /// positive default quiet NaN is the one case it got right by accident.
+    ///
+    /// SIGNED ZEROS ARE PINNED TOO, because the `lhs == rhs` arm the fix preserves is
+    /// what makes them agree: NumPy returns the RIGHT operand for equal operands, so
+    /// `maximum(0.0, -0.0)` is `-0.0`. A naive `f64::max` answers `+0.0` and would pass
+    /// any `==`-based check while being wrong in the bits.
+    #[test]
+    fn maximum_minimum_propagate_nan_operands_bit_for_bit_like_numpy() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            const QUIET_POS: u64 = 0x7ff8_0000_0000_0123;
+            const QUIET_NEG: u64 = 0xfff8_0000_0000_0456;
+            const SIGNALING: u64 = 0x7ff0_0000_0000_0001;
+            const ONE: u64 = 0x3ff0_0000_0000_0000;
+            const NEG_ONE: u64 = 0xbff0_0000_0000_0000;
+            const POS_ZERO: u64 = 0x0000_0000_0000_0000;
+            const NEG_ZERO: u64 = 0x8000_0000_0000_0000;
+            let pairs: [(u64, u64); 12] = [
+                (QUIET_POS, ONE),
+                (QUIET_NEG, ONE),
+                (ONE, QUIET_POS),
+                (ONE, QUIET_NEG),
+                (QUIET_POS, QUIET_NEG),
+                (QUIET_NEG, QUIET_POS),
+                (SIGNALING, ONE),
+                (ONE, SIGNALING),
+                (POS_ZERO, NEG_ZERO),
+                (NEG_ZERO, POS_ZERO),
+                (ONE, NEG_ONE),
+                (NEG_ONE, ONE),
+            ];
+            for (name, op) in [
+                ("maximum", fnp_ufunc::BinaryOp::Maximum),
+                ("minimum", fnp_ufunc::BinaryOp::Minimum),
+            ] {
+                let np_fn = numpy.getattr(name).expect("numpy callable");
+                let float64 = numpy.getattr("float64").expect("numpy.float64");
+                for (lhs_bits, rhs_bits) in pairs {
+                    let lhs = f64::from_bits(lhs_bits);
+                    let rhs = f64::from_bits(rhs_bits);
+                    let expected_bits: u64 = np_fn
+                        .call1((
+                            float64.call1((lhs,)).expect("np.float64(lhs)"),
+                            float64.call1((rhs,)).expect("np.float64(rhs)"),
+                        ))
+                        .and_then(|value| value.extract::<f64>())
+                        .expect("numpy result")
+                        .to_bits();
+                    if lhs.is_nan() || rhs.is_nan() {
+                        assert_ne!(
+                            expected_bits,
+                            f64::NAN.to_bits(),
+                            "{name}({lhs_bits:016x}, {rhs_bits:016x}): NumPy returns the \
+                             default +NaN, so this pair cannot detect the sign/payload bug"
+                        );
+                    }
+                    let got_bits = op.apply(lhs, rhs).to_bits();
+                    assert_eq!(
+                        got_bits, expected_bits,
+                        "{name}({lhs_bits:016x}, {rhs_bits:016x}): got {got_bits:016x}, \
+                         numpy says {expected_bits:016x}"
+                    );
+                }
+            }
+        });
+    }
+
+    /// `nextafter` must PROPAGATE a NaN operand, not replace it with `+NaN`
+    /// (`deadlock-audit-jd6lt`).
+    ///
+    /// The kernel used to answer a bare `f64::NAN` whenever either operand was NaN,
+    /// which is the positive default quiet NaN - so it lost the operand's SIGN, lost its
+    /// PAYLOAD, and returned the same thing regardless of which operand was NaN. NumPy
+    /// propagates the operand.
+    ///
+    /// THIS IS A PLANTED NEGATIVE: every pair below is chosen so that the OLD code
+    /// returns `7ff8000000000000` and NumPy does not, so the test fails on the code it
+    /// was written against. A test built from `np.nan` alone would have passed on the
+    /// bug, because the positive default quiet NaN is the one case where the old answer
+    /// was accidentally right - which is exactly how this survived.
+    ///
+    /// COMPARISON IS ON RAW BYTES, not `==`: every assertion here is about a NaN, and
+    /// NaN is never equal to anything, so an equality-based check passes vacuously no
+    /// matter what the bits are.
+    #[test]
+    fn nextafter_propagates_nan_operands_bit_for_bit_like_numpy() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            const QUIET_POS: u64 = 0x7ff8_0000_0000_0123;
+            const QUIET_NEG: u64 = 0xfff8_0000_0000_0456;
+            const SIGNALING: u64 = 0x7ff0_0000_0000_0001;
+            const ONE: u64 = 0x3ff0_0000_0000_0000;
+            const NEG_ONE: u64 = 0xbff0_0000_0000_0000;
+            // Non-finite pairs, plus infinities so the fix cannot silently change the
+            // finite-overflow edges while it is in the neighbourhood.
+            let pairs: [(u64, u64); 12] = [
+                (QUIET_POS, ONE),
+                (QUIET_NEG, ONE),
+                (ONE, QUIET_POS),
+                (ONE, QUIET_NEG),
+                (QUIET_POS, QUIET_NEG),
+                (QUIET_NEG, QUIET_POS),
+                (SIGNALING, ONE),
+                (ONE, SIGNALING),
+                (0x7ff0_0000_0000_0000, 0x0000_0000_0000_0000),
+                (0xfff0_0000_0000_0000, 0x0000_0000_0000_0000),
+                (0x7fef_ffff_ffff_ffff, 0x7ff0_0000_0000_0000),
+                (NEG_ONE, QUIET_NEG),
+            ];
+            let np_nextafter = numpy.getattr("nextafter").expect("numpy.nextafter");
+            let float64 = numpy.getattr("float64").expect("numpy.float64");
+            for (lhs_bits, rhs_bits) in pairs {
+                let lhs = f64::from_bits(lhs_bits);
+                let rhs = f64::from_bits(rhs_bits);
+                // NumPy must be asked with float64 scalars so the answer is a float64
+                // and its bytes are directly comparable.
+                let expected_bits: u64 = np_nextafter
+                    .call1((
+                        float64.call1((lhs,)).expect("np.float64(lhs)"),
+                        float64.call1((rhs,)).expect("np.float64(rhs)"),
+                    ))
+                    .and_then(|value| value.extract::<f64>())
+                    .expect("numpy.nextafter result")
+                    .to_bits();
+                // THE PLANTED NEGATIVE, made permanent rather than asserted in prose:
+                // the OLD kernel answered exactly `f64::NAN` for every NaN pair, so if
+                // NumPy's answer here ever equals that, the pair has stopped
+                // discriminating and this test would pass on the bug it exists to catch.
+                if lhs.is_nan() || rhs.is_nan() {
+                    assert_ne!(
+                        expected_bits,
+                        f64::NAN.to_bits(),
+                        "nextafter({lhs_bits:016x}, {rhs_bits:016x}): NumPy returns the \
+                         default +NaN here, so this pair cannot detect the sign/payload \
+                         bug - replace it with one that can"
+                    );
+                }
+                let got_bits = fnp_ufunc::BinaryOp::Nextafter.apply(lhs, rhs).to_bits();
+                assert_eq!(
+                    got_bits, expected_bits,
+                    "nextafter({lhs_bits:016x}, {rhs_bits:016x}): got {got_bits:016x}, \
+                     numpy says {expected_bits:016x} - a NaN operand must be propagated \
+                     with its sign and payload, quieted, and rhs wins when both are NaN"
+                );
+            }
+        });
+    }
+
+    /// Lowering a per-op `parallel_min` must not change ONE BIT of output
+    /// (`deadlock-audit-hzl1w`).
+    ///
+    /// `fmod`, `nextafter` and `heaviside` had their fan-out thresholds lowered from the
+    /// inherited `1 << 21` to their MEASURED crossovers, so sizes that used to run
+    /// serially now run under rayon. The parallel arm chunks the work across threads;
+    /// the serial arm walks it in order. For these ops that must be bit-identical -
+    /// every lane depends only on its own `(a[i], b[i])` pair, so chunking cannot change
+    /// a result - but "must be" is exactly the kind of claim that should be pinned
+    /// rather than asserted, because a chunking bug shows up as wrong values only in the
+    /// lanes near a boundary.
+    ///
+    /// So each op is evaluated at sizes STRADDLING its new threshold and compared to
+    /// NumPy bit for bit. The operands carry NaN, signed zeros and infinities, since
+    /// those are where `heaviside`'s branch and `nextafter`'s bit-step are most likely
+    /// to disagree, and a boundary lane is seeded with them deliberately.
+    #[test]
+    fn lowered_parallel_thresholds_stay_bit_identical_to_numpy() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            // Straddle each lowered threshold: fmod 2^18, nextafter/heaviside 2^20.
+            for (op_name, sizes) in [
+                ("fmod", [(1_usize << 18) - 1, 1 << 18, (1 << 18) + 1]),
+                ("nextafter", [(1_usize << 20) - 1, 1 << 20, (1 << 20) + 1]),
+                ("heaviside", [(1_usize << 20) - 1, 1 << 20, (1 << 20) + 1]),
+            ] {
+                for n in sizes {
+                    let locals = PyDict::new(py);
+                    locals.set_item("np", &numpy).expect("bind numpy");
+                    locals.set_item("n", n).expect("bind n");
+                    // Ordinary lanes, then awkward values planted at a chunk boundary
+                    // and at both ends - where an off-by-one in chunking would land.
+                    // ORDINARY FINITE LANES, plus signed zeros at a chunk boundary.
+                    //
+                    // NaN and infinity are deliberately NOT planted here. An earlier
+                    // draft did, and `nextafter` then failed at n = 2^20 - 1 - a size
+                    // BELOW the new threshold, so it runs serially under both the old
+                    // and the new gate and this change cannot be the cause. That is a
+                    // pre-existing fnp-vs-NumPy divergence on non-finite `nextafter`
+                    // operands, and it belongs in its own bead rather than being
+                    // smuggled into a threshold test. This test's job is narrow: prove
+                    // that running these sizes under rayon instead of serially does not
+                    // change the bytes.
+                    py.run(
+                        std::ffi::CString::new(
+                            "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\na[n // 2] = 0.0\nb[n // 2] = -0.0\na[n - 1] = -2.5\n",
+                        )
+                        .unwrap()
+                        .as_c_str(),
+                        Some(&locals),
+                        Some(&locals),
+                    )
+                    .expect("build operands");
+                    let a = locals.get_item("a").expect("a");
+                    let b = locals.get_item("b").expect("b");
+                    let expected = numpy
+                        .getattr(op_name)
+                        .expect("numpy op")
+                        .call1((&a, &b))
+                        .expect("numpy result");
+                    let module = PyModule::new(py, "fnp_gate_test").expect("module");
+                    crate::fnp_python(&module).expect("init");
+                    let got = module
+                        .getattr(op_name)
+                        .expect("fnp op")
+                        .call1((&a, &b))
+                        .expect("fnp result");
+                    let identical = numpy
+                        .getattr("array_equal")
+                        .expect("array_equal")
+                        .call1((
+                            numpy
+                                .getattr("frombuffer")
+                                .and_then(|f| {
+                                    f.call1((expected.call_method0("tobytes").unwrap(), "uint8"))
+                                })
+                                .expect("expected bytes"),
+                            numpy
+                                .getattr("frombuffer")
+                                .and_then(|f| {
+                                    f.call1((got.call_method0("tobytes").unwrap(), "uint8"))
+                                })
+                                .expect("got bytes"),
+                        ))
+                        .and_then(|v| v.extract::<bool>())
+                        .expect("array_equal");
+                    assert!(
+                        identical,
+                        "{op_name} at n={n}: lowering parallel_min changed the BYTES - \
+                         the fan-out is not bit-identical to the serial walk"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Specializing the binary kernel per op must not change ONE BIT of output
+    /// (`deadlock-audit-hzl1w`).
+    ///
+    /// `with_specialized_binary_op!` replaced a runtime `op.apply(..)` in the hot loop
+    /// with an exhaustive match whose arms each call `apply` on a CONSTANT variant. That
+    /// is meant to be a pure codegen change - same function, same operands, same order -
+    /// so this pins the claim instead of asserting it: for every one of the 35 variants,
+    /// the specialized dispatch must reproduce `op.apply` BIT for BIT on operands chosen
+    /// to hit the awkward lanes.
+    ///
+    /// THE OPERANDS ARE THE POINT. Signed zeros separate `Maximum` from a naive
+    /// `f64::max`; NaN separates `Maximum` from `Fmax` and drives `Heaviside`'s branch;
+    /// infinities drive `Logaddexp` and `Hypot`; a zero divisor exercises `Div`, `Fmod`
+    /// and `Remainder`; negative bases exercise `Power` and `FloatPower`; and the
+    /// integer-flavoured ops (`Bitwise*`, shifts, `Ldexp`) are reached with values that
+    /// are exactly representable so their casts are unambiguous. Comparison is on
+    /// `to_bits`, so a NaN payload change or a sign-of-zero flip fails.
+    #[test]
+    fn specialized_binary_dispatch_is_bit_identical_to_the_runtime_op() {
+        const OPS: [BinaryOp; 35] = [
+            BinaryOp::Add,
+            BinaryOp::Sub,
+            BinaryOp::Mul,
+            BinaryOp::Div,
+            BinaryOp::Power,
+            BinaryOp::Remainder,
+            BinaryOp::Minimum,
+            BinaryOp::Maximum,
+            BinaryOp::Arctan2,
+            BinaryOp::Fmod,
+            BinaryOp::Copysign,
+            BinaryOp::Fmax,
+            BinaryOp::Fmin,
+            BinaryOp::Heaviside,
+            BinaryOp::Nextafter,
+            BinaryOp::LogicalAnd,
+            BinaryOp::LogicalOr,
+            BinaryOp::LogicalXor,
+            BinaryOp::Equal,
+            BinaryOp::NotEqual,
+            BinaryOp::Less,
+            BinaryOp::LessEqual,
+            BinaryOp::Greater,
+            BinaryOp::GreaterEqual,
+            BinaryOp::Hypot,
+            BinaryOp::Logaddexp,
+            BinaryOp::Logaddexp2,
+            BinaryOp::Ldexp,
+            BinaryOp::FloorDivide,
+            BinaryOp::FloatPower,
+            BinaryOp::BitwiseAnd,
+            BinaryOp::BitwiseOr,
+            BinaryOp::BitwiseXor,
+            BinaryOp::LeftShift,
+            BinaryOp::RightShift,
+        ];
+        let operands: [f64; 14] = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.0,
+            -2.0,
+            3.0,
+            0.5,
+            -0.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+        ];
+        for op in OPS {
+            for &x in &operands {
+                for &y in &operands {
+                    let reference = op.apply(x, y);
+                    let specialized =
+                        with_specialized_binary_op!(op, |KERNEL| { KERNEL.apply(x, y) });
+                    assert_eq!(
+                        specialized.to_bits(),
+                        reference.to_bits(),
+                        "{op:?}({x:?}, {y:?}): specialized dispatch changed the bits - \
+                         the macro is meant to be a codegen change and nothing else"
+                    );
+                }
+            }
+        }
     }
 
     /// The size gate must decline the native f64 divide route only for `Div` and

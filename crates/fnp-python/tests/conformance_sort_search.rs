@@ -1420,6 +1420,61 @@ print(ok)
 }
 
 #[test]
+fn searchsorted_f64_array_needle_keeps_nan_last_order_without_numpy_delegate() -> Result<(), String>
+{
+    // Planted negative: ordinary `PartialOrd` binary search treats every NaN
+    // comparison as false, putting a NaN needle at zero. Capture NumPy's exact
+    // left/right answers first, then poison the fallback. This proves the native
+    // f64 array-needle path handles NaN-last placement, duplicate boundaries, and
+    // signed-zero ties itself instead of silently delegating to NumPy. These small
+    // haystacks are deliberately below the merge cutoff, so this also catches a
+    // dispatch gate that bypasses the native binary-search continuation.
+    let script = fnp_script(
+        r#"
+cases = [
+    (
+        np.array([-np.inf, -0.0, 0.0, 1.0, 1.0, np.inf, np.nan], dtype=np.float64),
+        np.array([-np.inf, -0.0, 0.0, 1.0, np.inf, np.nan], dtype=np.float64),
+    ),
+    (
+        np.array([-3.0, -3.0, 2.0, 7.0, np.nan, np.nan], dtype=np.float64),
+        np.array([-4.0, -3.0, 2.0, 6.0, 7.0, 8.0, np.nan], dtype=np.float64),
+    ),
+]
+expected = [
+    (np.searchsorted(a, v, side="left"), np.searchsorted(a, v, side="right"))
+    for a, v in cases
+]
+
+def delegated_searchsorted(*args, **kwargs):
+    raise AssertionError("f64 native array-needle path delegated to numpy.searchsorted")
+
+np.searchsorted = delegated_searchsorted
+try:
+    actual = [
+        (fnp.searchsorted(a, v, side="left"), fnp.searchsorted(a, v, side="right"))
+        for a, v in cases
+    ]
+finally:
+    del np.searchsorted
+
+print(all(
+    np.array_equal(got_left, want_left) and np.array_equal(got_right, want_right)
+    for (got_left, got_right), (want_left, want_right) in zip(actual, expected)
+))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f64 native searchsorted must retain NumPy's NaN-last left/right boundaries: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_large_i64_array_matches_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"

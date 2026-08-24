@@ -322,21 +322,24 @@ dot_rhs = np.linspace(3.0, -2.0, 10_000, dtype=np.float64)\n",
         let dot_lhs = ns.get_item("dot_lhs").expect("f64 dot lhs");
         let dot_rhs = ns.get_item("dot_rhs").expect("f64 dot rhs");
 
-        for (operation, candidate, incumbent, args) in [
+        for (operation, incumbent_name, candidate, incumbent, args) in [
             (
                 "sum_1m",
+                "sum",
                 module.getattr("sum").expect("fnp.sum"),
                 numpy.getattr("sum").expect("numpy.sum"),
                 pyo3::types::PyTuple::new(py, [&values]).expect("sum arguments"),
             ),
             (
                 "mean_1m",
+                "mean",
                 module.getattr("mean").expect("fnp.mean"),
                 numpy.getattr("mean").expect("numpy.mean"),
                 pyo3::types::PyTuple::new(py, [&values]).expect("mean arguments"),
             ),
             (
                 "dot_10k",
+                "dot",
                 module.getattr("dot").expect("fnp.dot"),
                 numpy.getattr("dot").expect("numpy.dot"),
                 pyo3::types::PyTuple::new(py, [&dot_lhs, &dot_rhs]).expect("dot arguments"),
@@ -346,7 +349,7 @@ dot_rhs = np.linspace(3.0, -2.0, 10_000, dtype=np.float64)\n",
                 !candidate.is(&incumbent),
                 "dispatch trap: fnp.{operation} resolved to NumPy"
             );
-            common::report_numpy_incumbent_identity(py, operation, &incumbent);
+            common::report_numpy_incumbent_identity(py, incumbent_name, &incumbent);
             let expected = incumbent.call1(&args).expect("NumPy result");
             let actual = candidate.call1(&args).expect("FrankenNumPy result");
             let expected_bits = expected

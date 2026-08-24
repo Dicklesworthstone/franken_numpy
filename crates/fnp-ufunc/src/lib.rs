@@ -844,23 +844,65 @@ impl BinaryOp {
                     rem
                 }
             }
+            // NaN OPERANDS ARE PROPAGATED VERBATIM, LHS FIRST (`deadlock-audit-jd6lt`).
+            //
+            // These used to answer a bare `f64::NAN`, which is the POSITIVE default quiet
+            // NaN - losing the operand's sign, losing its payload, and answering the same
+            // thing whichever operand was NaN. Measured against the installed NumPy 2.4.3
+            // on raw bits (identical for `maximum` and `minimum`):
+            //
+            //   lhs=fff8..0456 rhs=3ff0..0000 -> fff8..0456   SIGN kept
+            //   lhs=3ff0..0000 rhs=fff8..0456 -> fff8..0456   rhs NaN propagates
+            //   lhs=7ff8..0123 rhs=fff8..0456 -> 7ff8..0123   BOTH NaN: LHS wins
+            //   lhs=fff8..0456 rhs=7ff8..0123 -> fff8..0456   BOTH NaN: LHS wins
+            //   lhs=7ff0..0001 rhs=3ff0..0000 -> 7ff0..0001   SIGNALING kept VERBATIM
+            //   lhs=3ff0..0000 rhs=7ff0..0001 -> 7ff0..0001
+            //
+            // Note LHS wins here where `nextafter` prefers RHS, and the NaN is NOT
+            // quieted where `nextafter` quiets it. The two were checked separately rather
+            // than assumed to share a rule, because they do not.
+            //
+            // THE `lhs == rhs` ARM IS LOAD-BEARING AND STAYS: NumPy returns the RIGHT
+            // operand for equal operands, which is what makes signed zeros agree -
+            // maximum(0.0, -0.0) is -0.0 and maximum(-0.0, 0.0) is +0.0, both measured.
+            // `f64::max` would answer +0.0 for both.
             Self::Minimum => {
-                if lhs.is_nan() || rhs.is_nan() {
-                    f64::NAN
-                } else if lhs == rhs {
-                    rhs
-                } else {
-                    lhs.min(rhs)
-                }
+                // Mirror of `Maximum` below; see the note there, including why splitting it
+                // for a `vminpd` does not work. `-0.0 < 0.0` is false, so a tie again
+                // yields `rhs`, matching NumPy.
+                if lhs.is_nan() || lhs < rhs { lhs } else { rhs }
             }
             Self::Maximum => {
-                if lhs.is_nan() || rhs.is_nan() {
-                    f64::NAN
-                } else if lhs == rhs {
-                    rhs
-                } else {
-                    lhs.max(rhs)
-                }
+                // TWO CONDITIONS, NOT FOUR BRANCHES (`deadlock-audit-hzl1w`). `lhs > rhs`
+                // already yields `rhs` for every tie INCLUDING signed zeros - `0.0 > -0.0`
+                // is false, so `-0.0` is returned, which is what NumPy answers - and it is
+                // false whenever `rhs` is NaN, so the rhs-NaN case falls out for free. Only
+                // an lhs NaN needs asking about, because a NaN compares false against
+                // everything. Same bits as the four-branch form on all 12 measured pairs.
+                //
+                // DO NOT SPLIT THIS INTO `let m = if lhs > rhs {..}; if lhs.is_nan() {..}`
+                // hoping for a `vmaxpd`. Tried and measured: LLVM canonicalises both forms
+                // to the SAME 31-instruction loop (vcmpunordpd + vcmpltpd + vorpd +
+                // vblendvpd per vector), because folding a float `a > b ? a : b` into
+                // `maxpd` is only legal under fast-math - `maxpd` and the ternary differ on
+                // NaN and signed zero, which is exactly what this op must preserve.
+                //
+                // PORTABLE SIMD DOES NOT HELP EITHER - measured, three ways, on an
+                // AVX2 build of a standalone probe:
+                //   `simd_max` alone            vmaxpd + vcmpunordpd + vblendvpd   3 ops
+                //   NumPy's rule via simd_gt    vcmpltpd + vorpd + vcmpunordpd
+                //                                        + vblendvpd               4 ops
+                //   `simd_max` + lhs-NaN fixup  vmaxpd + 2 vcmpunordpd
+                //                                       + 2 vblendvpd              5 ops
+                // `simd_max` DOES reach `vmaxpd`, but it is IEEE maxNum and pays its own
+                // NaN fix-up, so building NumPy's lhs-preferring rule on top costs MORE
+                // than the four ops here. NumPy's DOUBLE_maximum_X86_V3 reaches the 3-op
+                // shape (23 vmaxpd, 51 vblendvpd, zero vcmpunordpd/vcmpltpd/vorpd) because
+                // C intrinsics can name raw `maxpd`, whose "return src2 when unordered"
+                // behaviour portable SIMD deliberately does not expose. The ~19% extra
+                // instructions are therefore the price of matching NumPy's bits in safe
+                // portable Rust, not a defect to keep attacking.
+                if lhs.is_nan() || lhs > rhs { lhs } else { rhs }
             }
             Self::Arctan2 => lhs.atan2(rhs),
             Self::Fmod => {
@@ -899,8 +941,28 @@ impl BinaryOp {
                 }
             }
             Self::Nextafter => {
-                if lhs.is_nan() || rhs.is_nan() {
-                    f64::NAN
+                // NaN OPERANDS ARE PROPAGATED, NOT REPLACED (`deadlock-audit-jd6lt`).
+                //
+                // This used to return a bare `f64::NAN`, which is the POSITIVE default
+                // quiet NaN - discarding the operand's sign and payload, and answering
+                // the same thing whichever operand was NaN. Measured against the
+                // installed NumPy 2.4.3 on raw bits, all six cases disagree with that:
+                //
+                //   lhs=7ff8..0123 rhs=3ff0..0000 -> 7ff8..0123   payload kept
+                //   lhs=fff8..0456 rhs=3ff0..0000 -> fff8..0456   SIGN kept
+                //   lhs=3ff0..0000 rhs=7ff8..0123 -> 7ff8..0123   rhs NaN propagates
+                //   lhs=7ff8..0123 rhs=fff8..0456 -> fff8..0456   BOTH NaN: RHS wins
+                //   lhs=fff8..0456 rhs=7ff8..0123 -> 7ff8..0123   BOTH NaN: RHS wins
+                //   lhs=7ff0..0001 rhs=3ff0..0000 -> 7ff8..0001   SIGNALING -> QUIETED
+                //
+                // Hence: prefer `rhs`, fall back to `lhs`, and set the quiet bit. The
+                // quiet bit is already set on a quiet NaN, so the OR only bites on a
+                // signaling one - which is exactly what the last row requires.
+                const QUIET_BIT: u64 = 0x0008_0000_0000_0000;
+                if rhs.is_nan() {
+                    f64::from_bits(rhs.to_bits() | QUIET_BIT)
+                } else if lhs.is_nan() {
+                    f64::from_bits(lhs.to_bits() | QUIET_BIT)
                 } else if lhs == rhs {
                     rhs
                 } else {

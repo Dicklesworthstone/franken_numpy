@@ -442,8 +442,16 @@ fn main() {
                 bench_flat_f64_unique_median_gate,
             ),
             (
+                "bench_flat_i64_sort_256_stage_profile",
+                bench_flat_i64_sort_256_stage_profile,
+            ),
+            (
                 "bench_flat_i64_sort_256_dual_null",
                 bench_flat_i64_sort_256_dual_null,
+            ),
+            (
+                "bench_flat_i64_sort_256_allocation_control",
+                bench_flat_i64_sort_256_allocation_control,
             ),
         ],
     );
@@ -455,6 +463,146 @@ fn main() {
 /// The preflight spy is outside timing and records whether this build still
 /// delegates to `numpy.sort`; the timed arms are always the public callables,
 /// so both the baseline and the cutoff build charge the shipped route.
+/// WHERE DO THE i64 n=256 SORT NANOSECONDS ACTUALLY GO
+/// (`franken_numpy-ixs5y.409`)?
+///
+/// The cell is a live-NumPy regression - NumPy 1754 ns against our 4158 ns - and the
+/// remaining cost was characterised as "Python-entry / copy + PDQ". Those are three very
+/// different levers and only one of them is the comparison path, so this decomposes the
+/// route before anyone optimises it:
+///
+///   1. `numpy.empty(n, "int64")` - the output allocation the route must do, because
+///      `np.sort` returns a fresh owning array.
+///   2. `PyBuffer` acquisition plus `copy_from_slice` of the 2 KiB input.
+///   3. `sort_unstable` - the actual comparison/branch path.
+///
+/// Each stage is timed on its own, min-of-many so a scheduler blip cannot inflate a
+/// stage, and the three are printed next to the whole-route and NumPy figures. If the
+/// sort is a minority of the total then a faster comparison kernel cannot close this
+/// cell, and that is worth knowing BEFORE writing a sorting network.
+///
+/// This is a decomposition of OUR arm, not a vs-NumPy claim: NumPy's own total is
+/// reported alongside purely as the target to beat, and the stage numbers are self-timed
+/// rather than contract-gated.
+fn bench_flat_i64_sort_256_stage_profile(_c: &mut criterion::Criterion) {
+    use std::time::Instant;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let ns = PyDict::new(py);
+        ns.set_item("np", &numpy).expect("bind numpy");
+        py.run(
+            std::ffi::CString::new(
+                "rng = np.random.default_rng(20260824)\na = rng.integers(-(1 << 62), 1 << 62, 256, dtype=np.int64)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int64 corpus setup");
+        let input = ns.get_item("a").expect("corpus");
+        let np_sort = numpy.getattr("sort").expect("numpy.sort");
+        let n = 256usize;
+        const REPS: usize = 2000;
+
+        // Stage 1: the output allocation, positional dtype (the form the route uses).
+        let mut alloc_min = u128::MAX;
+        for _ in 0..REPS {
+            let started = Instant::now();
+            let out = numpy
+                .call_method1(pyo3::intern!(py, "empty"), (n, "int64"))
+                .expect("numpy.empty");
+            let elapsed = started.elapsed().as_nanos();
+            black_box(&out);
+            alloc_min = alloc_min.min(elapsed);
+        }
+
+        // Stage 2: buffer acquisition + the 2 KiB copy, on a buffer allocated ONCE so
+        // this stage does not re-charge stage 1.
+        let scratch = numpy
+            .call_method1(pyo3::intern!(py, "empty"), (n, "int64"))
+            .expect("scratch");
+        let src_buffer = pyo3::buffer::PyBuffer::<i64>::get(&input).expect("src buffer");
+        let src_cells = src_buffer.as_slice(py).expect("src slice");
+        let src: &[i64] =
+            unsafe { std::slice::from_raw_parts(src_cells.as_ptr().cast::<i64>(), n) };
+        let mut copy_min = u128::MAX;
+        for _ in 0..REPS {
+            let started = Instant::now();
+            let out_buffer = pyo3::buffer::PyBuffer::<i64>::get(&scratch).expect("out buffer");
+            let out_cells = out_buffer.as_mut_slice(py).expect("out slice");
+            let dst: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+            dst.copy_from_slice(src);
+            let elapsed = started.elapsed().as_nanos();
+            black_box(dst.as_ptr());
+            copy_min = copy_min.min(elapsed);
+        }
+
+        // Stage 3: the comparison/branch path alone, on a Rust buffer refilled from the
+        // SAME unsorted corpus each rep - sorting an already-sorted slice would flatter
+        // PDQ enormously and is the obvious way to get this stage wrong.
+        let mut work = vec![0i64; n];
+        let mut sort_min = u128::MAX;
+        for _ in 0..REPS {
+            work.copy_from_slice(src);
+            let started = Instant::now();
+            fnp_ufunc::sort_small::sort_i64(&mut work);
+            let elapsed = started.elapsed().as_nanos();
+            black_box(work.as_ptr());
+            sort_min = sort_min.min(elapsed);
+        }
+
+        // NumPy's whole call, as the target.
+        let mut numpy_min = u128::MAX;
+        for _ in 0..REPS {
+            let started = Instant::now();
+            let out = np_sort.call1((&input,)).expect("numpy.sort");
+            let elapsed = started.elapsed().as_nanos();
+            black_box(&out);
+            numpy_min = numpy_min.min(elapsed);
+        }
+
+        // OUR WHOLE ROUTE, timed HERE rather than compared against a median banked in
+        // another run. The residual below is only meaningful if the route and the stages
+        // are the same statistic, on the same host, in the same moment - a min-of-2000
+        // stage sum subtracted from someone else's median would invent overhead that is
+        // really just min-vs-median.
+        let module = PyModule::new(py, "fnp_python_sort_profile").expect("bench module");
+        fnp_python(&module).expect("initialize fnp module");
+        let fnp_sort = module.getattr("sort").expect("fnp.sort");
+        assert!(
+            !fnp_sort.is(&np_sort),
+            "dispatch trap: fnp.sort resolved to the NumPy callable"
+        );
+        let mut route_min = u128::MAX;
+        for _ in 0..REPS {
+            let started = Instant::now();
+            let out = fnp_sort.call1((&input,)).expect("fnp.sort");
+            let elapsed = started.elapsed().as_nanos();
+            black_box(&out);
+            route_min = route_min.min(elapsed);
+        }
+
+        let stages = alloc_min + copy_min + sort_min;
+        let residual = route_min.saturating_sub(stages);
+        println!(
+            "I64_SORT_STAGE_PROFILE n={n} reps={REPS} statistic=min_ns \
+             numpy_whole_call_ns={numpy_min} fnp_whole_route_ns={route_min} \
+             alloc_ns={alloc_min} buffer_plus_copy_ns={copy_min} sort_unstable_ns={sort_min} \
+             stage_sum_ns={stages} entry_residual_ns={residual} \
+             sort_share_of_route={:.4} residual_share_of_route={:.4} \
+             route_floor_if_sort_were_free_ns={} \
+             is_decomposition_of_our_arm_not_a_vs_numpy_claim=true",
+            sort_min as f64 / route_min as f64,
+            residual as f64 / route_min as f64,
+            route_min - sort_min,
+        );
+    });
+}
+
 fn bench_flat_i64_sort_256_dual_null(_c: &mut criterion::Criterion) {
     Python::initialize();
     Python::attach(|py| {
@@ -650,6 +798,106 @@ finally:\n\\
             candidate_null.ratio_median,
             candidate_null.ratio_ci_low,
             candidate_null.ratio_ci_high,
+        );
+    });
+}
+
+/// Measure the reached allocation call changed by the small-int64 route.
+///
+/// This is a same-binary maintenance control, not an incumbent comparison:
+/// both arms allocate the identical fresh C-contiguous `int64` output and
+/// differ only in whether dtype travels through a kwargs dict or NumPy's second
+/// positional parameter.  It prices the allocation slice without pretending
+/// the kernel or Python entry path executed in this control.
+fn bench_flat_i64_sort_256_allocation_control(_c: &mut criterion::Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let n = 256usize;
+        let kwargs = || {
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("dtype", "int64")
+                .expect("set int64 dtype keyword");
+            numpy
+                .call_method("empty", (n,), Some(&kwargs))
+                .expect("kwargs int64 allocation")
+        };
+        let positional = || {
+            numpy
+                .call_method1("empty", (n, "int64"))
+                .expect("positional int64 allocation")
+        };
+        let kw_probe = kwargs();
+        let positional_probe = positional();
+        for result in [&kw_probe, &positional_probe] {
+            assert_eq!(
+                result.getattr("dtype").unwrap().str().unwrap().to_string(),
+                "int64",
+                "allocation control changed dtype"
+            );
+            assert_eq!(
+                result
+                    .getattr("shape")
+                    .unwrap()
+                    .extract::<Vec<usize>>()
+                    .unwrap(),
+                vec![n],
+                "allocation control changed shape"
+            );
+            assert!(
+                result
+                    .getattr("flags")
+                    .unwrap()
+                    .getattr("c_contiguous")
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap(),
+                "allocation control changed layout"
+            );
+        }
+        let mut observe_kwargs = || {
+            let started = std::time::Instant::now();
+            let _result = kwargs();
+            common::ContractObservation {
+                elapsed: started.elapsed(),
+                checksum: n as u64,
+            }
+        };
+        let mut observe_positional = || {
+            let started = std::time::Instant::now();
+            let _result = positional();
+            common::ContractObservation {
+                elapsed: started.elapsed(),
+                checksum: n as u64,
+            }
+        };
+        let (effect, kwargs_null, positional_null) = common::run_dual_null_median_ci_contract(
+            "python_flat_i64_sort_n256_allocation_positional_over_kwargs",
+            &mut observe_positional,
+            &mut observe_kwargs,
+        );
+        let verdict = common::dual_null_contract_verdict(effect, kwargs_null, positional_null);
+        println!(
+            "FLAT_I64_SORT_ALLOCATION_CONTROL n={n} verdict={verdict} \\
+             positional_median_ns={:.3} kwargs_median_ns={:.3} \\
+             positional_over_kwargs={:.6} ci95=[{:.6},{:.6}] \\
+             kwargs_null={:.6} kwargs_null_ci95=[{:.6},{:.6}] \\
+             positional_null={:.6} positional_null_ci95=[{:.6},{:.6}] \\
+             same_binary=true same_result_dtype_shape_layout=true \\
+             scope=reached_result_allocation_only_not_full_sort",
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            kwargs_null.ratio_median,
+            kwargs_null.ratio_ci_low,
+            kwargs_null.ratio_ci_high,
+            positional_null.ratio_median,
+            positional_null.ratio_ci_low,
+            positional_null.ratio_ci_high,
         );
     });
 }
