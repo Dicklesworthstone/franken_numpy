@@ -55,6 +55,42 @@ print(np.isclose(result, expected))
 }
 
 #[test]
+fn dot_1d_f64_preserves_numpy_pairwise_bits_and_signed_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# NumPy's vector kernel is not a naive left-to-right sum: this planted
+# cancellation case produces 12.0, while the naive loop produces 14.0.
+a = np.ones(16, dtype=np.float64)
+a[0] = 1e16
+a[1] = -1e16
+b = np.ones_like(a)
+expected = np.dot(a, b)
+naive = 0.0
+for x, y in zip(a, b):
+    naive += x * y
+actual = fnp.dot(a, b)
+
+zeros = np.array([-0.0, -0.0], dtype=np.float64)
+zero_expected = np.dot(zeros, np.ones_like(zeros))
+zero_actual = fnp.dot(zeros, np.ones_like(zeros))
+print(
+    expected != naive
+    and actual.tobytes() == expected.tobytes()
+    and zero_actual.tobytes() == zero_expected.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "1-D f64 dot must retain NumPy's pairwise bits and signed zero: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn dot_2d_matrices() -> Result<(), String> {
     let script = fnp_script(
         r#"
