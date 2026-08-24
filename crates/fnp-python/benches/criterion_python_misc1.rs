@@ -166,118 +166,127 @@ queries = (rng.integers(-3000, 3001, 1_000_000) / 7).astype(np.float16)\n",
         );
         common::report_numpy_incumbent_identity(py, "searchsorted", &numpy_searchsorted);
 
-        for side in ["left", "right"] {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("side", side).expect("searchsorted side");
-            let run_incumbent = || {
-                numpy_searchsorted
-                    .call((&haystack, &queries), Some(&kwargs))
-                    .expect("NumPy float16 searchsorted arm")
-            };
-            let run_candidate = || {
-                fnp_searchsorted
-                    .call((&haystack, &queries), Some(&kwargs))
-                    .expect("FrankenNumPy float16 searchsorted arm")
-            };
+        for query_elements in [4_096_usize, 8_192, 16_384, 32_768, 65_536, 1_000_000] {
+            let query = queries
+                .call_method1(
+                    "__getitem__",
+                    (pyo3::types::PySlice::new(py, 0, query_elements as isize, 1),),
+                )
+                .expect("query prefix");
+            for side in ["left", "right"] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("side", side).expect("searchsorted side");
+                let run_incumbent = || {
+                    numpy_searchsorted
+                        .call((&haystack, &query), Some(&kwargs))
+                        .expect("NumPy float16 searchsorted arm")
+                };
+                let run_candidate = || {
+                    fnp_searchsorted
+                        .call((&haystack, &query), Some(&kwargs))
+                        .expect("FrankenNumPy float16 searchsorted arm")
+                };
 
-            // Full output equality proves the candidate is the user-visible
-            // table route before either arm enters the timing schedule.
-            let expected = run_incumbent();
-            let actual = run_candidate();
-            assert_eq!(
-                actual
-                    .getattr("dtype")
-                    .expect("candidate dtype")
-                    .str()
-                    .expect("candidate dtype string")
-                    .to_str()
-                    .expect("candidate dtype UTF-8"),
-                expected
-                    .getattr("dtype")
-                    .expect("incumbent dtype")
-                    .str()
-                    .expect("incumbent dtype string")
-                    .to_str()
-                    .expect("incumbent dtype UTF-8"),
-                "f16 searchsorted {side} dtype differs from NumPy"
-            );
-            assert_eq!(
-                actual
-                    .call_method0("tobytes")
-                    .expect("candidate bytes")
-                    .extract::<Vec<u8>>()
-                    .expect("candidate byte vector"),
-                expected
-                    .call_method0("tobytes")
-                    .expect("incumbent bytes")
-                    .extract::<Vec<u8>>()
-                    .expect("incumbent byte vector"),
-                "f16 searchsorted {side} differs from NumPy"
-            );
-            let checksum = |result: &pyo3::Bound<'_, PyAny>| {
-                result
-                    .call_method0("tobytes")
-                    .expect("searchsorted result bytes")
-                    .extract::<Vec<u8>>()
-                    .expect("searchsorted result byte vector")
-                    .into_iter()
-                    .fold(0xcbf2_9ce4_8422_u64, |state, byte| {
-                        (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-                    })
-            };
-            let row = format!("python_f16_searchsorted_table_1m_1m_{side}_vs_numpy");
-            println!(
-                "PARITY row={row} exact_bytes=passed haystack_elements=1000000 \\
-                 query_elements=1000000 candidate_route=f16_cumulative_table \\
-                 output_allocation=both_arms_intp"
-            );
-            let mut observe_incumbent = || {
-                let started = Instant::now();
-                let result = run_incumbent();
-                let elapsed = started.elapsed();
-                common::ContractObservation {
-                    elapsed,
-                    checksum: checksum(&result),
-                }
-            };
-            let mut observe_candidate = || {
-                let started = Instant::now();
-                let result = run_candidate();
-                let elapsed = started.elapsed();
-                common::ContractObservation {
-                    elapsed,
-                    checksum: checksum(&result),
-                }
-            };
-            let (effect, incumbent_null, candidate_null) =
-                common::run_dual_null_median_ci_contract_with_sampling(
-                    &row,
-                    &mut observe_incumbent,
-                    &mut observe_candidate,
-                    9,
-                    1,
+                // Full output equality proves the candidate is the user-visible
+                // table route before either arm enters the timing schedule.
+                let expected = run_incumbent();
+                let actual = run_candidate();
+                assert_eq!(
+                    actual
+                        .getattr("dtype")
+                        .expect("candidate dtype")
+                        .str()
+                        .expect("candidate dtype string")
+                        .to_str()
+                        .expect("candidate dtype UTF-8"),
+                    expected
+                        .getattr("dtype")
+                        .expect("incumbent dtype")
+                        .str()
+                        .expect("incumbent dtype string")
+                        .to_str()
+                        .expect("incumbent dtype UTF-8"),
+                    "f16 searchsorted {side} dtype differs from NumPy"
                 );
-            let verdict =
-                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
-            println!(
-                "F16_SEARCHSORTED_TABLE_RESULT row={row} side={side} verdict={verdict} \\
+                assert_eq!(
+                    actual
+                        .call_method0("tobytes")
+                        .expect("candidate bytes")
+                        .extract::<Vec<u8>>()
+                        .expect("candidate byte vector"),
+                    expected
+                        .call_method0("tobytes")
+                        .expect("incumbent bytes")
+                        .extract::<Vec<u8>>()
+                        .expect("incumbent byte vector"),
+                    "f16 searchsorted {side} differs from NumPy"
+                );
+                let checksum = |result: &pyo3::Bound<'_, PyAny>| {
+                    result
+                        .call_method0("tobytes")
+                        .expect("searchsorted result bytes")
+                        .extract::<Vec<u8>>()
+                        .expect("searchsorted result byte vector")
+                        .into_iter()
+                        .fold(0xcbf2_9ce4_8422_u64, |state, byte| {
+                            (state ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+                        })
+                };
+                let row =
+                    format!("python_f16_searchsorted_table_1m_{query_elements}_{side}_vs_numpy");
+                println!(
+                    "PARITY row={row} exact_bytes=passed haystack_elements=1000000 \\
+                     query_elements={query_elements} candidate_route=f16_cumulative_table \\
+                     output_allocation=both_arms_intp"
+                );
+                let mut observe_incumbent = || {
+                    let started = Instant::now();
+                    let result = run_incumbent();
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: checksum(&result),
+                    }
+                };
+                let mut observe_candidate = || {
+                    let started = Instant::now();
+                    let result = run_candidate();
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: checksum(&result),
+                    }
+                };
+                let (effect, incumbent_null, candidate_null) =
+                    common::run_dual_null_median_ci_contract_with_sampling(
+                        &row,
+                        &mut observe_incumbent,
+                        &mut observe_candidate,
+                        9,
+                        1,
+                    );
+                let verdict =
+                    common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+                println!(
+                    "F16_SEARCHSORTED_TABLE_RESULT row={row} side={side} verdict={verdict} \\
                  incumbent_median_ms={:.6} candidate_median_ms={:.6} ratio_median={:.6} \\
                  ratio_ci95=[{:.6},{:.6}] incumbent_null_ratio={:.6} \\
                  incumbent_null_ci95=[{:.6},{:.6}] candidate_null_ratio={:.6} \\
                  candidate_null_ci95=[{:.6},{:.6}] incumbent=numpy_live_same_invocation \\
                  dual_nulls=required",
-                effect.arm_a_median_ns / 1_000_000.0,
-                effect.arm_b_median_ns / 1_000_000.0,
-                effect.ratio_median,
-                effect.ratio_ci_low,
-                effect.ratio_ci_high,
-                incumbent_null.ratio_median,
-                incumbent_null.ratio_ci_low,
-                incumbent_null.ratio_ci_high,
-                candidate_null.ratio_median,
-                candidate_null.ratio_ci_low,
-                candidate_null.ratio_ci_high,
-            );
+                    effect.arm_a_median_ns / 1_000_000.0,
+                    effect.arm_b_median_ns / 1_000_000.0,
+                    effect.ratio_median,
+                    effect.ratio_ci_low,
+                    effect.ratio_ci_high,
+                    incumbent_null.ratio_median,
+                    incumbent_null.ratio_ci_low,
+                    incumbent_null.ratio_ci_high,
+                    candidate_null.ratio_median,
+                    candidate_null.ratio_ci_low,
+                    candidate_null.ratio_ci_high,
+                );
+            }
         }
     });
 }
