@@ -10230,12 +10230,65 @@ const FE_DIVIDE_HAZARD_MASK: core::ffi::c_int = 0x01   // FE_INVALID   (0/0, inf
 /// NumPy guards the same hazard by passing a pointer into `npy_get_floatstatus_barrier`;
 /// `black_box` on the output pointer is the same trick - it makes the loop's effect
 /// observably live across the call, so the loop cannot be moved over it.
+/// TWO DOUBLES-PER-LANE GROUPS PER ITERATION, matching the incumbent's own shape
+/// (`deadlock-audit-6y5wp`). Censused on this host from `target/release` artefacts, main
+/// loop only, both loops reading the buffers the route actually uses:
+///
+/// ```text
+///   numpy DOUBLE_divide_X86_V3   9 insns / 8 doubles   2 x vdivpd ymm   0 stack reloads
+///   ours, zip-of-zip            12 insns / 8 doubles   1 x vdivpd ymm   0 stack reloads
+/// ```
+///
+/// The plain `zip`-of-`zip` above emitted a 1x-unrolled body - one `vmovupd`, one
+/// `vdivpd`, one `vmovupd`, then index/compare/branch, six instructions for four
+/// doubles. NumPy issues TWO independent `vdivpd` per iteration against three invariant
+/// base pointers indexed by one induction variable. Stepping eight doubles at a time
+/// through fixed-size `[f64; 8]` groups asks LLVM for exactly that body.
+///
+/// THE MECHANISM IS MEMORY-LEVEL PARALLELISM, NOT INSTRUCTION COUNT. At the sizes this
+/// route runs, three streams of 8 MiB do not sit in cache, so the loop's speed is set by
+/// how many cache-line requests are outstanding at once. A 1x body has one load pair and
+/// one store in flight per iteration; a 2x body has two of each. Instruction count falls
+/// 12 -> 9 per 8 doubles as a side effect, but that is not the claim.
+///
+/// WHY THIS IS NOT THE "WIDER UNROLL" LEVER ALREADY REFUTED. That refutation
+/// (2026-08-16) rested on a static anti-correlation across three arms whose unroll factor
+/// co-varied perfectly with whether they carried the FE-hazard classifier - the 4x arms
+/// were the classifier arms. The 2026-08-17 re-analysis corrected it in this file's own
+/// ledger: the anti-correlation is regime-scoped and in the bare regime unroll is
+/// POSITIVELY correlated with speed here. `b50b9d88` then removed the classifier from
+/// this loop, so the shipped body is now bare AND 1x-unrolled - a configuration that did
+/// not exist when that reject was written, and one its census (which recorded the shipped
+/// arm as 2x-unrolled) no longer describes.
+///
+/// NOT THE REJECTED BLOCKED FORM EITHER. The chunked reject devectorised the divide
+/// outright (`vdivpd` 1 -> 0, `vdivsd` 1 -> 15) because it blocked a loop that still
+/// carried the classifier. Fixed-size `[f64; 8]` groups keep the divide packed - but that
+/// is a claim about codegen, so it is CHECKED BY DISASSEMBLY before any timing is
+/// believed: expect 2 x `vdivpd` on ymm retained and no `cmp`/`jae` bounds-check pairs
+/// inside the body. If the divide devectorises, this is a loss and reverts.
+///
+/// BEHAVIOUR IS UNCHANGED. `zip` stops at the shortest sequence; truncating all three to
+/// their common length keeps exactly that and cannot panic. Every quotient is the same
+/// IEEE division of the same lane pair in the same order, so the bits, and the MXCSR
+/// flags they raise, are identical.
 #[cfg(target_arch = "x86_64")]
 fn divide_slice_detecting_fe_hazards(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> bool {
     // SAFETY: both are plain glibc calls on an integer mask, with no memory operands.
     unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
-    for ((slot, &x), &y) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
-        *slot = x / y;
+    let len = out.len().min(lhs.len()).min(rhs.len());
+    {
+        let (out_groups, out_tail) = out[..len].as_chunks_mut::<8>();
+        let (lhs_groups, lhs_tail) = lhs[..len].as_chunks::<8>();
+        let (rhs_groups, rhs_tail) = rhs[..len].as_chunks::<8>();
+        for ((slots, xs), ys) in out_groups.iter_mut().zip(lhs_groups).zip(rhs_groups) {
+            for lane in 0..8 {
+                slots[lane] = xs[lane] / ys[lane];
+            }
+        }
+        for ((slot, &x), &y) in out_tail.iter_mut().zip(lhs_tail).zip(rhs_tail) {
+            *slot = x / y;
+        }
     }
     std::hint::black_box(out.as_ptr());
     // SAFETY: as above.
@@ -173686,6 +173739,81 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             assert!(
                 f64_divide_evidence_saw_non_normal(evidence),
                 "{what}: the FE flags and the value classifier disagree about the same run"
+            );
+        }
+    }
+
+    /// The 8-at-a-time body and its scalar tail must together reproduce a plain
+    /// element-wise divide at EVERY length, not just multiples of eight
+    /// (`deadlock-audit-6y5wp`).
+    ///
+    /// WHY THIS EXISTS: the detector was changed from a `zip`-of-`zip` to fixed-size
+    /// `[f64; 8]` groups plus a remainder, to give LLVM the incumbent's two-divides-per
+    /// iteration body. That split is exactly the kind of edit that is correct on the
+    /// aligned case and silently wrong on the remainder - dropping the tail, or running
+    /// it from the wrong offset, still passes any test whose length happens to be a
+    /// multiple of eight. So every length from 0 to 33 is checked, which straddles four
+    /// full groups and every possible tail width.
+    ///
+    /// BIT-EXACTNESS, not approximate agreement: the route's whole contract is that it
+    /// produces the bytes NumPy produces, so the comparison is on `to_bits`. Hazard lanes
+    /// are included because they are the ones whose quotient is not an ordinary number,
+    /// and the detector must still report them once the loop shape has changed.
+    #[test]
+    fn divide_detector_group_and_tail_match_a_plain_divide_at_every_length() {
+        for len in 0..=33_usize {
+            let lhs: Vec<f64> = (0..len)
+                .map(|i| match i % 7 {
+                    0 => 1.0 + i as f64,
+                    1 => -(2.0 + i as f64),
+                    2 => 0.0,
+                    3 => f64::MAX,
+                    4 => f64::MIN_POSITIVE,
+                    5 => f64::INFINITY,
+                    _ => 6.0,
+                })
+                .collect();
+            let rhs: Vec<f64> = (0..len)
+                .map(|i| match i % 5 {
+                    0 => 3.0,
+                    1 => 0.5,
+                    2 => 0.0,
+                    3 => f64::MIN_POSITIVE,
+                    _ => -2.5,
+                })
+                .collect();
+
+            let expected: Vec<u64> = lhs
+                .iter()
+                .zip(rhs.iter())
+                .map(|(&x, &y)| (x / y).to_bits())
+                .collect();
+            let mut out = vec![0.0_f64; len];
+            let reported = divide_slice_detecting_fe_hazards(&lhs, &rhs, &mut out);
+
+            let got: Vec<u64> = out.iter().map(|q| q.to_bits()).collect();
+            assert_eq!(
+                got, expected,
+                "len={len}: the grouped body plus tail is not a plain element-wise divide \
+                 - a mismatch here is wrong BYTES, not merely slower"
+            );
+
+            // NO FALSE NEGATIVES is the safety-critical direction, and it is the only one
+            // that holds. The detector reads MXCSR; the scan it gates uses the exact
+            // value predicate, and the two are deliberately NOT the same set - `0.0/3.0`
+            // is an exact zero quotient the value classifier calls non-normal while the
+            // hardware raises nothing. A false POSITIVE only costs a scan. A false
+            // negative skips the scan and silently loses a NumPy warning, so that is what
+            // is asserted here, at every tail width.
+            let lanes_raising = lhs
+                .iter()
+                .zip(rhs.iter())
+                .zip(out.iter())
+                .any(|((&x, &y), &q)| f64_divide_raises_fp_error(x, y, q));
+            assert!(
+                !lanes_raising || reported,
+                "len={len}: a lane raises an FP error the detector did not report, so the \
+                 exact scan is skipped and NumPy's warning is lost silently"
             );
         }
     }
