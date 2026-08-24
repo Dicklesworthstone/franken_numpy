@@ -10418,6 +10418,50 @@ fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
         || (bits & 0x7fff_ffff_ffff_ffff == 0 && a == 0.0 && b.is_finite() && b != 0.0)
 }
 
+/// The specialized serial binary loop, in ITS OWN FRAME (`deadlock-audit-hzl1w`).
+///
+/// WHY THIS IS A FUNCTION AND NOT AN INLINE LOOP. `with_specialized_binary_op!` expands
+/// 35 arms into `zerocopy_f64_binary_flat_with_out`, and inlining 35 loops into one body
+/// starves the register allocator. Disassembled from a release build, the shipped
+/// `Maximum` arm reloaded ALL THREE base pointers from the stack on every iteration:
+///
+/// ```text
+///   mov    0x10(%rsp),%rdx      ; lhs base, reloaded
+///   vmovupd x2
+///   mov    0x18(%rsp),%rdx      ; rhs base, reloaded
+///   vmovupd x2
+///   vcmpunordpd x2, vcmpltpd x2, vorpd x2, vblendvpd x2
+///   mov    0x8(%rsp),%rdx       ; out base, reloaded
+///   vmovupd x2
+///   add, cmp, jne               ; 20 instructions per 8 doubles
+/// ```
+///
+/// The identical arithmetic written as a standalone loop keeps its bases in registers and
+/// costs 18 - three scalar loads per 8 doubles fewer, which over n=2^20 is 393_216 loads
+/// the shipped arm pays and this one does not. The spilling is uneven across arms (one
+/// reloads a single base, another reloads all three twice), which is the signature of
+/// one-big-function register allocation rather than anything about the ops themselves.
+///
+/// `#[inline(never)]` is the whole point: it forces a separate frame per monomorphisation
+/// so each op gets its own allocation. The closure is a ZST, so `f(x, y)` still inlines
+/// INSIDE this function and the loop body stays exactly what it was - the call happens
+/// once per ARRAY, not per element.
+///
+/// This is the same defect class the divide loop carried: `deadlock-audit-6y5wp`'s census
+/// found three `mov ..(%rsp)` reloads there too, and they vanished once `b50b9d88` removed
+/// the FE-hazard accumulate and freed the registers.
+#[inline(never)]
+fn serial_binary_into<F: Fn(f64, f64) -> f64>(
+    output: &[std::cell::Cell<f64>],
+    a_in: &[pyo3::buffer::ReadOnlyCell<f64>],
+    b_in: &[pyo3::buffer::ReadOnlyCell<f64>],
+    f: F,
+) {
+    for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+        slot.set(f(a_cell.get(), b_cell.get()));
+    }
+}
+
 /// Run `body` with the op as a COMPILE-TIME constant, so `BinaryOp::apply` inlines
 /// (`deadlock-audit-hzl1w`).
 ///
@@ -11125,9 +11169,7 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             // the callee inlines, the discriminant match folds away, and the base
             // pointers stop being respilled every iteration.
             with_specialized_binary_op!(op, |KERNEL| {
-                for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-                    slot.set(KERNEL.apply(a_cell.get(), b_cell.get()));
-                }
+                serial_binary_into(output, a_in, b_in, |x, y| KERNEL.apply(x, y));
             });
         }
     }
