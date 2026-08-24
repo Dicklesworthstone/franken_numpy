@@ -96447,42 +96447,10 @@ fn matmul(
     }
 }
 
-// Exact 1-D ndarrays have no native dot kernel: every native arm below either
-// requires a matrix operand or a different dtype/shape.  Route them directly
-// to NumPy before those probes so NumPy keeps ownership of its SIMD/pairwise
-// reduction order (including signed zero and cancellation behavior).
-fn try_exact_ndarray_1d_dot_passthrough(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    b: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray)
-        || !b.is_exact_instance(&ndarray)
-        || a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
-        || b.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
-    {
-        return Ok(None);
-    }
-    Ok(Some(
-        numpy
-            .getattr(intern!(py, "dot"))?
-            .call((a, b), None)?
-            .unbind(),
-    ))
-}
-
 // Same profiled native GEMM gate as matmul for the 2-D float64 dot case.
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    if python_explicit_out_is_absent_or_none(py, out.as_ref())
-        && let Some(result) = try_exact_ndarray_1d_dot_passthrough(py, a.bind(py), b.bind(py))?
-    {
-        return Ok(result);
-    }
-
     if python_explicit_out_is_absent_or_none(py, out.as_ref())
         && let Some(result) =
             python_native_gemm_f64_2d(py, a.bind(py), b.bind(py), PythonNativeGemmOp::Dot, true)?
