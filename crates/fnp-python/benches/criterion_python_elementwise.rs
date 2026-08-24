@@ -4139,7 +4139,7 @@ fn bench_divide_fe_flag_detector_vs_numpy(_c: &mut Criterion) {
 /// This group answers both, in ONE invocation, with no kernel anywhere in it.
 ///
 /// ROW 1, `allocation_symmetry_planted_negative` - THE GUARD. Both arms do exactly the
-/// same thing: allocate one `numpy.empty_like` and nothing else. Identical work in both
+/// same thing: allocate one `numpy.empty_like` and fill it. Identical work in both
 /// slots MUST read ~1.0. This is a planted negative in the strict sense - a case
 /// engineered to have no effect, where any decidable verdict is a defect in the
 /// measurement rather than a finding. If this row ever goes decidable, allocation timing
@@ -4147,10 +4147,13 @@ fn bench_divide_fe_flag_detector_vs_numpy(_c: &mut Criterion) {
 /// including the ones `48by6` corrected.
 ///
 /// ROW 2, `allocation_asymmetry_planted_positive` - THE MAGNITUDE. Arm A allocates a
-/// fresh `numpy.empty_like` per call; arm B writes a byte into a buffer allocated ONCE
-/// outside the loop. This is precisely the shape `48by6` condemns, reduced until nothing
-/// but the asymmetry is left. Its ratio is therefore a direct measurement of what the
-/// defect is worth on this host - the quantity `48by6` asserts but never measured.
+/// fresh `numpy.empty_like` per call and fills it; arm B performs the SAME fill into a
+/// buffer allocated ONCE outside the loop. The fill is common to both and cancels, so
+/// what the ratio isolates is the allocation plus its first-touch page faults - exactly
+/// what a preallocated candidate is handed for free when it is timed against an
+/// allocating NumPy call. This is the shape `48by6` condemns, reduced until nothing but
+/// the asymmetry is left, and its ratio is what the defect is worth on this host - the
+/// quantity `48by6` asserts but never measured.
 ///
 /// WHY BOTH ROWS AND NOT JUST THE SECOND: row 2 alone cannot distinguish "allocation is
 /// expensive" from "the harness favours arm A". Row 1 rules the second out, in the same
@@ -4187,16 +4190,25 @@ fn bench_allocation_symmetry_planted_negative(_c: &mut Criterion) {
         let a_obj = locals.get_item("a").expect("a operand");
         let held = locals.get_item("held").expect("preallocated buffer");
 
-        // Allocate and TOUCH one element. The touch is what makes the first-touch page
-        // faults happen inside the timed region rather than lazily afterwards - an
-        // untouched `empty` can be little more than an mmap, which would understate the
-        // very cost this group exists to price.
-        let allocate_and_touch = || {
+        // Allocate and FILL THE WHOLE BUFFER. Filling, not touching one element, is what
+        // makes this row mean anything: `numpy.empty` is close to a bare `mmap`, so its
+        // pages are not resident until something writes them. An arm that allocates and
+        // touches ONE element pays the allocation call but almost none of the
+        // first-touch page faults, and the row then prices a `malloc` rather than the
+        // defect. A real allocating NumPy call writes every element of its fresh output,
+        // so it pays every fault - and that is the cost a preallocated candidate is being
+        // handed for free.
+        //
+        // Both arms of row 2 do the SAME fill, so the fill cancels and what remains is
+        // exactly the allocation plus its first-touch faults.
+        let allocate_and_fill = || {
             let started = Instant::now();
             let fresh = numpy
                 .call_method1("empty_like", (&a_obj,))
                 .expect("fresh numpy output");
-            fresh.set_item(0, 1.0_f64).expect("first touch");
+            fresh
+                .call_method1("fill", (1.0_f64,))
+                .expect("first-touch every page");
             let elapsed = started.elapsed();
             common::ContractObservation {
                 elapsed,
@@ -4208,8 +4220,8 @@ fn bench_allocation_symmetry_planted_negative(_c: &mut Criterion) {
         {
             let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
                 "allocation_symmetry_planted_negative",
-                allocate_and_touch,
-                allocate_and_touch,
+                allocate_and_fill,
+                allocate_and_fill,
             );
             println!(
                 "ALLOCATION_PLANTED_NEGATIVE row=symmetry n={n} numpy_version={numpy_version} \
@@ -4231,10 +4243,11 @@ fn bench_allocation_symmetry_planted_negative(_c: &mut Criterion) {
 
         // ROW 2: the `48by6` shape, stripped to nothing but the asymmetry.
         {
-            let allocating_arm = allocate_and_touch;
+            let allocating_arm = allocate_and_fill;
             let preallocated_arm = || {
                 let started = Instant::now();
-                held.set_item(0, 1.0_f64).expect("write into held buffer");
+                held.call_method1("fill", (1.0_f64,))
+                    .expect("same fill, into the buffer allocated once");
                 let elapsed = started.elapsed();
                 common::ContractObservation {
                     elapsed,
