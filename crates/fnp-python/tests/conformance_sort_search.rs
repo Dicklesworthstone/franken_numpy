@@ -1420,6 +1420,61 @@ print(ok)
 }
 
 #[test]
+fn searchsorted_f64_array_needle_keeps_nan_last_order_without_numpy_delegate() -> Result<(), String>
+{
+    // Planted negative: ordinary `PartialOrd` binary search treats every NaN
+    // comparison as false, putting a NaN needle at zero. Capture NumPy's exact
+    // left/right answers first, then poison the fallback. This proves the native
+    // f64 array-needle path handles NaN-last placement, duplicate boundaries, and
+    // signed-zero ties itself instead of silently delegating to NumPy. These small
+    // haystacks are deliberately below the merge cutoff, so this also catches a
+    // dispatch gate that bypasses the native binary-search continuation.
+    let script = fnp_script(
+        r#"
+cases = [
+    (
+        np.array([-np.inf, -0.0, 0.0, 1.0, 1.0, np.inf, np.nan], dtype=np.float64),
+        np.array([-np.inf, -0.0, 0.0, 1.0, np.inf, np.nan], dtype=np.float64),
+    ),
+    (
+        np.array([-3.0, -3.0, 2.0, 7.0, np.nan, np.nan], dtype=np.float64),
+        np.array([-4.0, -3.0, 2.0, 6.0, 7.0, 8.0, np.nan], dtype=np.float64),
+    ),
+]
+expected = [
+    (np.searchsorted(a, v, side="left"), np.searchsorted(a, v, side="right"))
+    for a, v in cases
+]
+
+def delegated_searchsorted(*args, **kwargs):
+    raise AssertionError("f64 native array-needle path delegated to numpy.searchsorted")
+
+np.searchsorted = delegated_searchsorted
+try:
+    actual = [
+        (fnp.searchsorted(a, v, side="left"), fnp.searchsorted(a, v, side="right"))
+        for a, v in cases
+    ]
+finally:
+    del np.searchsorted
+
+print(all(
+    np.array_equal(got_left, want_left) and np.array_equal(got_right, want_right)
+    for (got_left, got_right), (want_left, want_right) in zip(actual, expected)
+))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f64 native searchsorted must retain NumPy's NaN-last left/right boundaries: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_large_i64_array_matches_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -1975,6 +2030,53 @@ print(verdicts if verdicts else True)
     assert_eq!(
         last, "True",
         "f64 sort signed-zero handling must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn int64_small_flat_sort_is_byte_exact_and_bypasses_numpy_sort() -> Result<(), String> {
+    // The small-i64 route is a value sort: equal values have identical bytes,
+    // so every NumPy `kind` has the same observable output. A temporary spy
+    // makes route engagement observable without weakening that byte contract.
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260824)
+a = rng.integers(-(1 << 62), 1 << 62, 256, dtype=np.int64)
+a[:16] = np.array([
+    np.iinfo(np.int64).min, np.iinfo(np.int64).max,
+    -1, 0, 1, -1, 0, 1, -7, 7, -7, 7, 13, 13, -13, -13,
+], dtype=np.int64)
+rng.shuffle(a)
+original_sort = np.sort
+checks = []
+for kind in [None, "quicksort", "stable", "mergesort", "heapsort"]:
+    kwargs = {} if kind is None else {"kind": kind}
+    expected = original_sort(a, **kwargs)
+    calls = []
+    def sort_spy(*args, **spy_kwargs):
+        calls.append(1)
+        return original_sort(*args, **spy_kwargs)
+    np.sort = sort_spy
+    try:
+        actual = fnp.sort(a, **kwargs)
+    finally:
+        np.sort = original_sort
+    checks.append(
+        len(calls) == 0
+        and actual.dtype == expected.dtype
+        and actual.shape == expected.shape
+        and actual.tobytes() == expected.tobytes()
+    )
+print(all(checks))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "small int64 flat sort must stay byte-exact and bypass numpy.sort: {result}"
     );
     Ok(())
 }

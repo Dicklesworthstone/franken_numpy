@@ -1290,6 +1290,22 @@ fn main() {
                 bench_divide_kernel_on_numpy_buffers,
             ),
             (
+                "bench_allocation_symmetry_planted_negative",
+                bench_allocation_symmetry_planted_negative,
+            ),
+            (
+                "bench_maximum_parallel_crossover",
+                bench_maximum_parallel_crossover,
+            ),
+            (
+                "bench_cheap_alu_parallel_crossover",
+                bench_cheap_alu_parallel_crossover,
+            ),
+            (
+                "bench_shipped_binary_route_vs_numpy",
+                bench_shipped_binary_route_vs_numpy,
+            ),
+            (
                 "bench_divide_allocator_provenance",
                 bench_divide_allocator_provenance,
             ),
@@ -4123,6 +4139,880 @@ fn bench_divide_fe_flag_detector_vs_numpy(_c: &mut Criterion) {
 // dTLB gap is not costing time, and the third mechanism joins the two already
 // refuted. Bank either way; a tie is the more useful outcome because it closes a
 // door that would otherwise invalidate a whole lane of banked numbers.
+/// THE PLANTED NEGATIVE FOR `deadlock-audit-48by6`: prove the harness is allocation
+/// NEUTRAL, then measure what the allocation asymmetry is actually worth.
+///
+/// `48by6` established that a group timing a preallocated Rust replica against an
+/// ALLOCATING NumPy call prices a 32 MB buffer rather than a kernel, and that the dual
+/// A/A nulls CANNOT see it - a null proves each arm is internally reproducible, never
+/// that the two arms are comparable. That leaves an obvious question unanswered: is the
+/// asymmetry real and how big is it, or is some of it an artefact of the instrument?
+///
+/// This group answers both, in ONE invocation, with no kernel anywhere in it.
+///
+/// ROW 1, `allocation_symmetry_planted_negative` - THE GUARD. Both arms do exactly the
+/// same thing: allocate one `numpy.empty_like` and fill it. Identical work in both
+/// slots MUST read ~1.0. This is a planted negative in the strict sense - a case
+/// engineered to have no effect, where any decidable verdict is a defect in the
+/// measurement rather than a finding. If this row ever goes decidable, allocation timing
+/// is biased by ARM POSITION and every allocation-bearing row in this repo is suspect,
+/// including the ones `48by6` corrected.
+///
+/// ROW 2, `allocation_asymmetry_planted_positive` - THE MAGNITUDE. Arm A allocates a
+/// fresh `numpy.empty_like` per call and fills it; arm B performs the SAME fill into a
+/// buffer allocated ONCE outside the loop. The fill is common to both and cancels, so
+/// what the ratio isolates is the allocation plus its first-touch page faults - exactly
+/// what a preallocated candidate is handed for free when it is timed against an
+/// allocating NumPy call. This is the shape `48by6` condemns, reduced until nothing but
+/// the asymmetry is left, and its ratio is what the defect is worth on this host - the
+/// quantity `48by6` asserts but never measured.
+///
+/// WHY BOTH ROWS AND NOT JUST THE SECOND: row 2 alone cannot distinguish "allocation is
+/// expensive" from "the harness favours arm A". Row 1 rules the second out, in the same
+/// invocation, on the same host, at the same size. Neither row means anything without
+/// the other.
+///
+/// NEITHER ROW IS A PERFORMANCE CLAIM. There is no kernel and no incumbent algorithm
+/// here - both arms are NumPy allocation calls. These are INSTRUMENT rows and must never
+/// be quoted as a vs-NumPy result.
+fn bench_allocation_symmetry_planted_negative(_c: &mut Criterion) {
+    let n = DIVIDE_SERIAL_N;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new("a = np.empty(n)\nheld = np.empty(n)\n")
+                .unwrap()
+                .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_obj = locals.get_item("a").expect("a operand");
+        let held = locals.get_item("held").expect("preallocated buffer");
+
+        // Allocate and FILL THE WHOLE BUFFER. Filling, not touching one element, is what
+        // makes this row mean anything: `numpy.empty` is close to a bare `mmap`, so its
+        // pages are not resident until something writes them. An arm that allocates and
+        // touches ONE element pays the allocation call but almost none of the
+        // first-touch page faults, and the row then prices a `malloc` rather than the
+        // defect. A real allocating NumPy call writes every element of its fresh output,
+        // so it pays every fault - and that is the cost a preallocated candidate is being
+        // handed for free.
+        //
+        // Both arms of row 2 do the SAME fill, so the fill cancels and what remains is
+        // exactly the allocation plus its first-touch faults.
+        let allocate_and_fill = || {
+            let started = Instant::now();
+            let fresh = numpy
+                .call_method1("empty_like", (&a_obj,))
+                .expect("fresh numpy output");
+            fresh
+                .call_method1("fill", (1.0_f64,))
+                .expect("first-touch every page");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: 0x0a11_0c00,
+            }
+        };
+
+        // ROW 1: identical work in both slots. Must read ~1.0.
+        {
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                "allocation_symmetry_planted_negative",
+                allocate_and_fill,
+                allocate_and_fill,
+            );
+            println!(
+                "ALLOCATION_PLANTED_NEGATIVE row=symmetry n={n} numpy_version={numpy_version} \
+                 worker={} harness=common::run_dual_null_median_ci_contract \
+                 both_arms_allocate=true is_instrument_row_not_a_perf_claim=true \
+                 expectation=ratio_near_one_any_decidable_verdict_is_a_defect \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] arm_a_ns={:.1} arm_b_ns={:.1} \
+                 incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+
+        // ROW 2: the `48by6` shape, stripped to nothing but the asymmetry.
+        {
+            let allocating_arm = allocate_and_fill;
+            let preallocated_arm = || {
+                let started = Instant::now();
+                held.call_method1("fill", (1.0_f64,))
+                    .expect("same fill, into the buffer allocated once");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: 0x0a11_0c00,
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                "allocation_asymmetry_planted_positive",
+                allocating_arm,
+                preallocated_arm,
+            );
+            println!(
+                "ALLOCATION_PLANTED_NEGATIVE row=asymmetry n={n} numpy_version={numpy_version} \
+                 worker={} harness=common::run_dual_null_median_ci_contract \
+                 arm_a_allocates_per_call=true arm_b_writes_preallocated=true \
+                 is_instrument_row_not_a_perf_claim=true \
+                 meaning=this_ratio_is_what_the_48by6_defect_is_worth_here \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] arm_a_ns={:.1} arm_b_ns={:.1} \
+                 incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+
+        // ROW 3: the SAME asymmetry with the fresh buffers RETAINED, which is what
+        // decides its magnitude.
+        //
+        // Row 2 drops each fresh buffer at the end of the iteration that made it, so the
+        // allocator hands the SAME mapping back on the next call and the first-touch
+        // faults are already paid. That is why row 2 reads ~1.02 rather than the 2.8x
+        // mmap churn and 26.1x retained-output figures this ledger already carries: the
+        // floor on this effect is object LIFETIME, not byte count.
+        //
+        // Holding a ring of live buffers defeats that reuse - the allocator cannot return
+        // a mapping that is still referenced, so every call takes fresh pages and pays
+        // real faults. Arm B is unchanged, so the fill still cancels and the ratio is
+        // still allocation-plus-faults; only the allocator's freedom to recycle differs.
+        //
+        // THE RING IS BOUNDED ON PURPOSE. Retaining every observation would grow without
+        // limit across the contract's rounds; a fixed window is enough to stop immediate
+        // reuse while keeping the footprint at RING x n x 8 bytes. The retain happens
+        // AFTER `elapsed` is taken, so bookkeeping is never inside the timed region.
+        {
+            const RING: usize = 16;
+            let mut ring: Vec<Bound<'_, PyAny>> = Vec::with_capacity(RING);
+            let mut slot = 0_usize;
+            let retaining_arm = || {
+                let started = Instant::now();
+                let fresh = numpy
+                    .call_method1("empty_like", (&a_obj,))
+                    .expect("fresh numpy output");
+                fresh
+                    .call_method1("fill", (1.0_f64,))
+                    .expect("first-touch every page");
+                let elapsed = started.elapsed();
+                if ring.len() < RING {
+                    ring.push(fresh);
+                } else {
+                    ring[slot] = fresh;
+                    slot = (slot + 1) % RING;
+                }
+                common::ContractObservation {
+                    elapsed,
+                    checksum: 0x0a11_0c00,
+                }
+            };
+            let preallocated_arm = || {
+                let started = Instant::now();
+                held.call_method1("fill", (1.0_f64,))
+                    .expect("same fill, into the buffer allocated once");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: 0x0a11_0c00,
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                "allocation_retained_planted_positive",
+                retaining_arm,
+                preallocated_arm,
+            );
+            println!(
+                "ALLOCATION_PLANTED_NEGATIVE row=retained n={n} numpy_version={numpy_version} \
+                 worker={} harness=common::run_dual_null_median_ci_contract \
+                 arm_a_allocates_and_RETAINS=true retained_ring={RING} \
+                 arm_b_writes_preallocated=true is_instrument_row_not_a_perf_claim=true \
+                 meaning=upper_bound_on_the_48by6_defect_when_the_output_outlives_the_call \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] arm_a_ns={:.1} arm_b_ns={:.1} \
+                 incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
+/// WHERE IS THE CROSSOVER for `maximum`'s rayon fan-out (`deadlock-audit-hzl1w`)?
+///
+/// `hzl1w` proposed declining the native parallel arm for Maximum/Minimum on a
+/// compute-vs-bandwidth rule. Every measurement the bead rests on was taken at ONE size,
+/// n=2^22, where the parallel arm wins 4/4 across the corrected runs (1.53x-2.26x). A
+/// gate, though, is a statement about a THRESHOLD, and no one has measured either side
+/// of the one that ships: `parallel_min` for these ops is `1 << 21`.
+///
+/// So this sweeps serial against parallel directly, across the threshold, and lets the
+/// crossover decide whether `1 << 21` is in the right place.
+///
+/// BOTH ARMS ARE OURS. `ratio > 1` means the PARALLEL arm is faster, because the serial
+/// arm is passed as the incumbent and the contract reports arm_a/arm_b. This is an
+/// INTERNAL comparison - `maintenance` class, never an incumbent-win - and it is exactly
+/// the comparison the gate turns on: given that we take the native route at all, should
+/// it fan out? NumPy is not in this group and no row here may be quoted against it.
+///
+/// ALLOCATION-SYMMETRIC AND PROVENANCE-MATCHED BY CONSTRUCTION (`deadlock-audit-48by6`):
+/// operands and the single output are all numpy-allocated, the replicas see them through
+/// zero-copy views, and BOTH arms write the SAME output buffer with the `&mut` reminted
+/// per call - so neither arm allocates, neither pays a Rust-`Vec` provenance tax, and the
+/// two are not racing each other for page residency.
+fn bench_maximum_parallel_crossover(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let threads = rayon::current_num_threads();
+
+        for shift in 18_u32..=22 {
+            let n = 1_usize << shift;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            // NaN and signed-zero lanes so the replicas' semantics are exercised rather
+            // than assumed - a replica using bare `f64::max` diverges on these.
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = (1.0 + (i % 1000) / 1000.0) * np.where(i % 3 == 0, -1.0, 1.0)\nb = (1.25 + (i % 997) / 997.0) * np.where(i % 5 == 0, -1.0, 1.0)\na[3] = np.nan\nb[7] = np.nan\na[11] = 0.0\nb[11] = -0.0\nout = np.empty(n)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a_obj = locals.get_item("a").expect("a operand");
+            let b_obj = locals.get_item("b").expect("b operand");
+            let out_obj = locals.get_item("out").expect("out buffer");
+
+            let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_obj).expect("a buffer");
+            let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_obj).expect("b buffer");
+            let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&out_obj).expect("out buffer");
+            for (label, buffer, object) in [
+                ("a", &a_buffer, &a_obj),
+                ("b", &b_buffer, &b_obj),
+                ("out", &out_buffer, &out_obj),
+            ] {
+                let owner_ptr = object
+                    .getattr("ctypes")
+                    .and_then(|c| c.getattr("data"))
+                    .and_then(|d| d.extract::<usize>())
+                    .expect("numpy array exposes ctypes.data");
+                assert_eq!(
+                    buffer.buf_ptr() as usize,
+                    owner_ptr,
+                    "PyBuffer handed back a COPY for `{label}` - the arms would run on \
+                     Rust memory and pay a provenance tax this group exists to avoid"
+                );
+                assert!(buffer.is_c_contiguous(), "`{label}` is not C-contiguous");
+            }
+            let lhs: &[f64] = unsafe {
+                std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+            };
+            let rhs: &[f64] = unsafe {
+                std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+            };
+            let out_ptr = out_buffer.buf_ptr().cast::<f64>();
+            let mint = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(out_ptr, n) } };
+
+            // PARITY BEFORE TIMING: the two arms must agree bit for bit, or the ratio is
+            // between two different computations. Sequential, since they share a buffer.
+            maximum_serial(lhs, rhs, mint());
+            let serial_checksum = divide_checksum(mint());
+            maximum_parallel(lhs, rhs, mint());
+            assert_eq!(
+                divide_checksum(mint()),
+                serial_checksum,
+                "n=2^{shift}: the parallel replica does not match the serial one"
+            );
+
+            let serial_arm = || {
+                let started = Instant::now();
+                maximum_serial(lhs, rhs, mint());
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: divide_checksum(mint()),
+                }
+            };
+            let parallel_arm = || {
+                let started = Instant::now();
+                maximum_parallel(lhs, rhs, mint());
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: divide_checksum(mint()),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                &format!("maximum_parallel_over_serial_2p{shift}"),
+                serial_arm,
+                parallel_arm,
+            );
+            println!(
+                "MAXIMUM_CROSSOVER n=2^{shift} n_elems={n} numpy_version={numpy_version} \
+                 worker={} rayon_threads={threads} shipped_parallel_min=2^21 \
+                 harness=common::run_dual_null_median_ci_contract \
+                 both_arms_are_ours_internal_comparison_not_an_incumbent_win=true \
+                 allocation=neither_arm_allocates shared_output_buffer_reminted_per_call=true \
+                 operands_are_numpy_allocated_zerocopy_views=true \
+                 parallel_over_serial={:.6} ci95=[{:.6},{:.6}] \
+                 serial_ns={:.1} parallel_ns={:.1} parallel_is_faster={} \
+                 incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_ci_low > 1.0,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
+/// The remaining four cheap-ALU ops that share `maximum`'s `1 << 21` fan-out threshold
+/// and have NEVER been measured: `nextafter`, `fmod`, `heaviside`, `copysign`
+/// (`deadlock-audit-hzl1w`).
+///
+/// `maximum`'s crossover was measured at 2^21 - exactly where its gate sits - so that
+/// threshold is correct FOR MAXIMUM. These four were given the same constant by analogy,
+/// never by measurement, and they are not the same op: `fmod` carries a division-class
+/// cost per element while `copysign` is a single bit operation. If arithmetic intensity
+/// sets the crossover, these four cannot all cross in the same place, and any that
+/// crosses ABOVE 2^21 is currently fanning out into a regime where it loses.
+///
+/// THIS TIMES THE SHIPPED KERNEL, NOT A REPLICA. `BinaryOp::apply` is the same function
+/// the route calls, and both arms here use the identical serial/parallel loop shapes the
+/// route uses (`par_chunks_mut` at `n.div_ceil(current_num_threads())`). So the only
+/// thing that differs between the arms is the fan-out - which is the whole question.
+///
+/// `ratio > 1` means PARALLEL is faster: the serial arm is passed as the incumbent and
+/// the contract reports arm_a/arm_b. Both arms are OURS, so this is an INTERNAL
+/// comparison - maintenance class, never an incumbent-win. NumPy is not in this group.
+///
+/// Allocation-symmetric and provenance-matched by construction
+/// (`deadlock-audit-48by6`): operands and the single output are numpy-allocated, read
+/// through zero-copy views, and BOTH arms write the SAME buffer with the `&mut` reminted
+/// per call - so neither allocates, neither pays a Rust-`Vec` provenance tax, and they
+/// are not racing each other for page residency.
+fn bench_cheap_alu_parallel_crossover(_c: &mut Criterion) {
+    use fnp_ufunc::BinaryOp;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let threads = rayon::current_num_threads();
+
+        // `maximum` rides along as a CONTROL: its crossover is already measured at 2^21
+        // in `bench_maximum_parallel_crossover`, so if it does not reproduce here the
+        // run is suspect and the other four rows must not be read.
+        let ops: &[(&str, BinaryOp)] = &[
+            ("maximum_control", BinaryOp::Maximum),
+            ("nextafter", BinaryOp::Nextafter),
+            ("fmod", BinaryOp::Fmod),
+            ("heaviside", BinaryOp::Heaviside),
+            ("copysign", BinaryOp::Copysign),
+        ];
+
+        for (op_name, op) in ops.iter().copied() {
+            for shift in 18_u32..=22 {
+                let n = 1_usize << shift;
+                let locals = PyDict::new(py);
+                locals.set_item("np", &numpy).expect("bind numpy");
+                locals.set_item("n", n).expect("bind n");
+                // Clean, finite, strictly POSITIVE operands. `fmod` divides by `b`, so a
+                // zero divisor would put some lanes on a NaN path and time a different
+                // branch than the one that runs in practice; keeping every lane ordinary
+                // is what makes the five ops comparable to each other.
+                py.run(
+                    std::ffi::CString::new(
+                        "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\n",
+                    )
+                    .unwrap()
+                    .as_c_str(),
+                    Some(&locals),
+                    Some(&locals),
+                )
+                .expect("build operands");
+                let a_obj = locals.get_item("a").expect("a operand");
+                let b_obj = locals.get_item("b").expect("b operand");
+                let out_obj = locals.get_item("out").expect("out buffer");
+
+                let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_obj).expect("a buffer");
+                let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_obj).expect("b buffer");
+                let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&out_obj).expect("out buffer");
+                for (label, buffer, object) in [
+                    ("a", &a_buffer, &a_obj),
+                    ("b", &b_buffer, &b_obj),
+                    ("out", &out_buffer, &out_obj),
+                ] {
+                    let owner_ptr = object
+                        .getattr("ctypes")
+                        .and_then(|c| c.getattr("data"))
+                        .and_then(|d| d.extract::<usize>())
+                        .expect("numpy array exposes ctypes.data");
+                    assert_eq!(
+                        buffer.buf_ptr() as usize,
+                        owner_ptr,
+                        "PyBuffer handed back a COPY for `{label}` - the arms would run \
+                         on Rust memory and pay a provenance tax this group avoids"
+                    );
+                    assert!(buffer.is_c_contiguous(), "`{label}` is not C-contiguous");
+                }
+                let lhs: &[f64] = unsafe {
+                    std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+                };
+                let rhs: &[f64] = unsafe {
+                    std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+                };
+                let out_ptr = out_buffer.buf_ptr().cast::<f64>();
+                let mint =
+                    || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(out_ptr, n) } };
+                let chunk = n.div_ceil(threads);
+
+                // THE OP IS A COMPILE-TIME CONSTANT IN BOTH ARMS (`deadlock-audit-hzl1w`).
+                //
+                // The first version of this group closed over a RUNTIME `op`, so both
+                // loops compiled to a call per element and the serial arm carried a
+                // 1.42x-6.98x dispatch tax - which is exactly what the `maximum` control
+                // caught. `ddfe5673` removed that from the shipped route by matching the
+                // op once, outside the loop, into arms that name a constant. These
+                // benches must use the SAME shape or they measure a loop that no longer
+                // exists. The match below happens once per contract run, not per element.
+                macro_rules! monomorphic_arms {
+                    ($($variant:ident),*) => {{
+                        let serial: Box<dyn Fn(&mut [f64])> = match op {
+                            $(BinaryOp::$variant => Box::new(|out: &mut [f64]| {
+                                for ((slot, &x), &y) in
+                                    out.iter_mut().zip(lhs.iter()).zip(rhs.iter())
+                                {
+                                    *slot = BinaryOp::$variant.apply(x, y);
+                                }
+                            }),)*
+                            other => panic!("unexpected op in this group: {other:?}"),
+                        };
+                        let parallel: Box<dyn Fn(&mut [f64])> = match op {
+                            $(BinaryOp::$variant => Box::new(move |out: &mut [f64]| {
+                                out.par_chunks_mut(chunk)
+                                    .zip(lhs.par_chunks(chunk))
+                                    .zip(rhs.par_chunks(chunk))
+                                    .for_each(|((o, l), r)| {
+                                        for ((slot, &x), &y) in
+                                            o.iter_mut().zip(l.iter()).zip(r.iter())
+                                        {
+                                            *slot = BinaryOp::$variant.apply(x, y);
+                                        }
+                                    });
+                            }),)*
+                            other => panic!("unexpected op in this group: {other:?}"),
+                        };
+                        (serial, parallel)
+                    }};
+                }
+                // The `Box<dyn Fn>` costs ONE indirect call per contract observation -
+                // per whole-array pass, not per element - which is far below this
+                // group's resolution. What matters is that the loop BODY is monomorphic.
+                let (run_serial, run_parallel) =
+                    monomorphic_arms!(Maximum, Nextafter, Fmod, Heaviside, Copysign);
+
+                // Both arms call the SAME `op.apply`, so agreement is structural rather
+                // than hoped-for - but the checksums still catch a chunking bug that
+                // drops or double-writes lanes, which is the real failure mode here.
+                run_serial(mint());
+                let serial_checksum = divide_checksum(mint());
+                run_parallel(mint());
+                assert_eq!(
+                    divide_checksum(mint()),
+                    serial_checksum,
+                    "{op_name} n=2^{shift}: parallel chunking does not reproduce serial"
+                );
+
+                let serial_arm = || {
+                    let started = Instant::now();
+                    run_serial(mint());
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: divide_checksum(mint()),
+                    }
+                };
+                let parallel_arm = || {
+                    let started = Instant::now();
+                    run_parallel(mint());
+                    let elapsed = started.elapsed();
+                    common::ContractObservation {
+                        elapsed,
+                        checksum: divide_checksum(mint()),
+                    }
+                };
+                let (effect, incumbent_null, candidate_null) =
+                    common::run_dual_null_median_ci_contract(
+                        &format!("{op_name}_parallel_over_serial_2p{shift}"),
+                        serial_arm,
+                        parallel_arm,
+                    );
+                println!(
+                    "CHEAP_ALU_CROSSOVER op={op_name} n=2^{shift} n_elems={n} \
+                     numpy_version={numpy_version} worker={} rayon_threads={threads} \
+                     shipped_parallel_min=2^21 kernel=fnp_ufunc::BinaryOp::apply \
+                     harness=common::run_dual_null_median_ci_contract \
+                     both_arms_are_ours_internal_comparison_not_an_incumbent_win=true \
+                     allocation=neither_arm_allocates \
+                     shared_output_buffer_reminted_per_call=true \
+                     parallel_over_serial={:.6} ci95=[{:.6},{:.6}] \
+                     serial_ns={:.1} parallel_ns={:.1} parallel_is_faster={} \
+                     incumbent_null={:.6} candidate_null={:.6}",
+                    measurement_worker(),
+                    effect.ratio_median,
+                    effect.ratio_ci_low,
+                    effect.ratio_ci_high,
+                    effect.arm_a_median_ns,
+                    effect.arm_b_median_ns,
+                    effect.ratio_ci_low > 1.0,
+                    incumbent_null.ratio_median,
+                    candidate_null.ratio_median,
+                );
+            }
+        }
+
+        // THE DISPATCH TAX, and why the `maximum_control` above does not reproduce
+        // `bench_maximum_parallel_crossover`.
+        //
+        // That group times `maximum_serial`, a MONOMORPHIC `#[inline(never)]` loop whose
+        // body is a fixed comparison. This group times `op.apply(x, y)` where `op` is a
+        // runtime `BinaryOp`, so the enum match sits INSIDE the loop, per element, and
+        // the body cannot vectorise the same way. Two different loops for one op - so the
+        // two groups' small-n numbers were never comparable, and the control catching
+        // that is the control doing its job.
+        //
+        // This row prices the difference DIRECTLY, both arms in one invocation on one
+        // buffer, so it is not a cross-run inference. `ratio > 1` means the monomorphic
+        // loop is faster, i.e. the ratio IS the per-element dispatch tax.
+        //
+        // It matters for the gate because the shipped route calls `op.apply` with a
+        // runtime `op` too. If the tax is large, then the serial arm that actually ships
+        // is the slow one, every crossover measured against a monomorphic replica sits at
+        // the wrong n, and specialising the dispatch is a bigger lever than moving any
+        // threshold.
+        for shift in [18_u32, 20, 22] {
+            let n = 1_usize << shift;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a_obj = locals.get_item("a").expect("a operand");
+            let b_obj = locals.get_item("b").expect("b operand");
+            let out_obj = locals.get_item("out").expect("out buffer");
+            let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_obj).expect("a buffer");
+            let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_obj).expect("b buffer");
+            let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&out_obj).expect("out buffer");
+            let lhs: &[f64] = unsafe {
+                std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+            };
+            let rhs: &[f64] = unsafe {
+                std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+            };
+            let out_ptr = out_buffer.buf_ptr().cast::<f64>();
+            let mint = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(out_ptr, n) } };
+            let dispatched = BinaryOp::Maximum;
+
+            // Both write the same bits: `maximum_serial` is the exact replica of
+            // `BinaryOp::Maximum`, asserted here rather than assumed.
+            maximum_serial(lhs, rhs, mint());
+            let mono_checksum = divide_checksum(mint());
+            for ((slot, &x), &y) in mint().iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                *slot = dispatched.apply(x, y);
+            }
+            assert_eq!(
+                divide_checksum(mint()),
+                mono_checksum,
+                "n=2^{shift}: op.apply and maximum_serial disagree, so the tax row would \
+                 be comparing two different computations"
+            );
+
+            let monomorphic_arm = || {
+                let started = Instant::now();
+                maximum_serial(lhs, rhs, mint());
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: divide_checksum(mint()),
+                }
+            };
+            let dispatched_arm = || {
+                let started = Instant::now();
+                for ((slot, &x), &y) in mint().iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+                    *slot = dispatched.apply(x, y);
+                }
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: divide_checksum(mint()),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                &format!("maximum_dispatch_tax_2p{shift}"),
+                dispatched_arm,
+                monomorphic_arm,
+            );
+            println!(
+                "DISPATCH_TAX op=maximum n=2^{shift} n_elems={n} numpy_version={numpy_version} \
+                 worker={} rayon_threads={threads} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 both_arms_are_ours_internal_comparison_not_an_incumbent_win=true \
+                 allocation=neither_arm_allocates shared_output_buffer_reminted_per_call=true \
+                 meaning=ratio_is_the_per_element_cost_of_a_runtime_BinaryOp_match \
+                 monomorphic_over_dispatched={:.6} ci95=[{:.6},{:.6}] \
+                 dispatched_ns={:.1} monomorphic_ns={:.1} \
+                 incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
+/// THE LIVE ROW `ddfe5673` OWES: the SHIPPED binary route against live NumPy
+/// (`deadlock-audit-hzl1w`).
+///
+/// `ddfe5673` specialized the binary kernel per op after the ELF showed the serial
+/// fallback calling `BinaryOp::apply` once per element. Everything backing that change
+/// so far is either static (instruction counts out of the ELF) or bench-local (the
+/// dispatch-tax rows). Neither is a vs-incumbent number, and a before/after across two
+/// builds would be a cross-build A/B, which this repo's rules invalidate.
+///
+/// So this measures the thing itself: `fnp.multiply(a, b, out=c)` against
+/// `numpy.multiply(a, b, out=c)`, both arms in ONE invocation, alternating, under the
+/// dual-null contract. `add` rides along because it reaches the same route.
+///
+/// WHY `maximum` AND `minimum`, AND NOT `multiply`/`add`. The probe has to satisfy two
+/// conditions at once, and multiply/add fail the first:
+///
+///  1. IT MUST REACH THE NATIVE ROUTE. On the `out=` path the binop match admits only
+///     `Remainder`, `Power`, `Maximum`, `Minimum` and `Divide`; `Mul` and `Add` hit
+///     `_ => None` and DELEGATE. Measured with multiply first, and the engagement
+///     assertion below fired - proving those rows were NumPy against itself.
+///  2. IT MUST TAKE THE SERIAL FALLBACK, which is the loop `ddfe5673` specialized.
+///     `parallel_min` for maximum/minimum is `1 << 21`, so at n = 2^20 they run serial.
+///     `Power` would have gone parallel here (its threshold is 16384) and `Divide`
+///     declines outright inside the certified `out=` band [2^14, 2^21).
+///
+/// So maximum/minimum at 2^20 is the only pairing that is both engaged and serial.
+///
+/// `out=` ON BOTH SIDES, so neither arm allocates and the row is not measuring a 32 MB
+/// buffer (`deadlock-audit-48by6`). Both write the SAME output array, so they are not
+/// racing each other for page residency either.
+///
+/// THE DISPATCH TRAP IS CHECKED AT RUNTIME, INSIDE THE MEASURED BINARY: the incumbent
+/// must really be NumPy's own callable and must NOT be ours. A "win" against our own
+/// function wearing NumPy's name is the failure mode this repo has already produced
+/// once, so it is asserted rather than assumed.
+fn bench_shipped_binary_route_vs_numpy(_c: &mut Criterion) {
+    const N: usize = 1 << 20;
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        assert_eq!(
+            numpy
+                .getattr("__name__")
+                .and_then(|v| v.extract::<String>())
+                .expect("numpy.__name__"),
+            "numpy",
+            "the incumbent module is not NumPy"
+        );
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", N).expect("bind n");
+        py.run(
+            std::ffi::CString::new(
+                "i = np.arange(n)\na = 1.0 + (i % 1000) / 1000.0\nb = 1.25 + (i % 997) / 997.0\nout = np.empty(n)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_obj = locals.get_item("a").expect("a operand");
+        let b_obj = locals.get_item("b").expect("b operand");
+        let out_obj = locals.get_item("out").expect("out buffer");
+        let args = PyTuple::new(py, [&a_obj, &b_obj]).expect("args");
+        let out_kwargs = PyDict::new(py);
+        out_kwargs.set_item("out", &out_obj).expect("bind out=");
+
+        for op_name in ["maximum", "minimum"] {
+            let numpy_fn = numpy.getattr(op_name).expect("numpy callable");
+            let fnp_fn = module.getattr(op_name).expect("fnp callable");
+            assert!(
+                !fnp_fn.is(&numpy_fn),
+                "{op_name}: the candidate IS NumPy's own callable - this row would be \
+                 NumPy against itself"
+            );
+
+            // PARITY BEFORE TIMING, on the same shared buffer, sequentially: NumPy
+            // fills it and its checksum is taken, then ours overwrites it. Bit-exact or
+            // the ratio is between two different computations.
+            let numpy_result = numpy_fn
+                .call(&args, Some(&out_kwargs))
+                .expect("numpy into out=");
+            let numpy_checksum = numpy_divide_checksum(&numpy_result, N);
+            let fnp_result = fnp_fn
+                .call(&args, Some(&out_kwargs))
+                .expect("fnp into out=");
+            assert_eq!(
+                numpy_divide_checksum(&fnp_result, N),
+                numpy_checksum,
+                "{op_name}: the shipped route does not reproduce NumPy bit for bit"
+            );
+
+            // ENGAGEMENT, ASSERTED - without this the row is worthless. Bit-exact
+            // agreement proves nothing about WHICH code produced the bits: if our route
+            // declined and delegated, the candidate arm IS NumPy and the contract would
+            // report a clean ~1.0 "parity" that is really NumPy against itself. That is
+            // this repo's own documented false-win shape.
+            //
+            // So: sabotage `numpy.<op>` so ONLY the native path can succeed, call ours,
+            // and restore. Supplying `out=` means the route needs no output allocation,
+            // and the ndarray type check uses a cached TYPE rather than this callable,
+            // so replacing the function cannot break a route that never calls it.
+            let sabotage = std::ffi::CString::new(format!(
+                "import numpy as _np\n_orig = _np.{op_name}\ndef _boom(*a, **k):\n    raise RuntimeError('delegated to numpy')\n_np.{op_name} = _boom\n"
+            ))
+            .expect("no interior nul");
+            py.run(sabotage.as_c_str(), Some(&locals), Some(&locals))
+                .expect("install sabotage");
+            let engaged = fnp_fn.call(&args, Some(&out_kwargs));
+            let restore = std::ffi::CString::new(format!("_np.{op_name} = _orig\n"))
+                .expect("no interior nul");
+            py.run(restore.as_c_str(), Some(&locals), Some(&locals))
+                .expect("restore numpy");
+            assert!(
+                engaged.is_ok(),
+                "{op_name}: the shipped route DELEGATED to numpy - this row would be \
+                 numpy against itself, not a measurement of our kernel"
+            );
+
+            let incumbent = || {
+                let started = Instant::now();
+                let result = numpy_fn
+                    .call(&args, Some(&out_kwargs))
+                    .expect("numpy into out=");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: numpy_divide_checksum(&result, N),
+                }
+            };
+            let candidate = || {
+                let started = Instant::now();
+                let result = fnp_fn
+                    .call(&args, Some(&out_kwargs))
+                    .expect("fnp into out=");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: numpy_divide_checksum(&result, N),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                &format!("shipped_{op_name}_out_vs_numpy_2p20"),
+                incumbent,
+                candidate,
+            );
+            println!(
+                "SHIPPED_ROUTE op={op_name} n={N} numpy_version={numpy_version} worker={} \
+                 harness=common::run_dual_null_median_ci_contract \
+                 arms_are_the_shipped_route_not_replicas=true \
+                 incumbent_is_live_numpy=true both_arms_use_out_kwarg=true \
+                 allocation=neither_arm_allocates shared_output_buffer=true \
+                 takes_the_serial_fallback_specialized_by_ddfe5673=true \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
+                 faster_than_numpy={} incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_ci_low > 1.0,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
 fn bench_divide_allocator_provenance(_c: &mut Criterion) {
     let n = DIVIDE_SERIAL_N;
     let (a_vec, b_vec) = divide_hazard_free_operands(n);
@@ -6727,11 +7617,14 @@ fn bench_predecline_levers_vs_numpy(_c: &mut Criterion) {
                 "a = np.arange(4096.0)\n\
                  hay = np.arange(0.0, 8192.0, 2.0)\n\
                  needle_arr = np.array([1.0, 777.0, 8191.0])\n\
+                 hay32 = np.arange(0.0, 8192.0, 2.0, dtype=np.float32)\n\
+                 needle_arr32 = np.array([1.0, 777.0, 8191.0], dtype=np.float32)\n\
                  hay_list = hay.tolist()\n\
                  CASES = {\n\
                    'clip_one_sided': ('clip', (a, 0.0, None)),\n\
                    'clip_two_sided': ('clip', (a, 0.0, 3000.0)),\n\
                    'ss_array_needle': ('searchsorted', (hay, needle_arr)),\n\
+                   'ss_f32_array_needle': ('searchsorted', (hay32, needle_arr32)),\n\
                    'ss_scalar_needle': ('searchsorted', (hay, 777.0)),\n\
                    'ss_list_haystack': ('searchsorted', (hay_list, needle_arr)),\n\
                  }\n",
@@ -6748,6 +7641,9 @@ fn bench_predecline_levers_vs_numpy(_c: &mut Criterion) {
             ("clip_one_sided", true),
             ("clip_two_sided", false),
             ("ss_array_needle", true),
+            // This arm prices the f32 half of the exact-width dispatch change. It skips
+            // the f16 plus both f64 probes, whereas f64 only skips the f16 probe.
+            ("ss_f32_array_needle", true),
             ("ss_scalar_needle", false),
             // DESIGNED CONTROL (`deadlock-audit-v46rn`): a LIST haystack must still go
             // through `asarray`, so the asarray-skip lever cannot reach it. It shares the
@@ -10041,41 +10937,118 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
         // A/A NULLS CANNOT SEE THIS. Both arms were internally reproducible and both nulls
         // sat on unity throughout; a null proves an arm is stable, never that two arms are
         // comparable. That blind spot is the reason this survived so long.
+        // TWO FURTHER ASYMMETRIES, both certified elsewhere in this campaign, survived
+        // the allocation fix above and are removed here. Preallocating both sides stops
+        // either arm paying a fresh 32 MB mapping per iteration, but it does not make the
+        // two arms' MEMORY comparable, and this group's numbers turned on exactly that.
+        //
+        // (1) BUFFER-PROVENANCE TAX. The replicas used to read `a_vec`/`b_vec` (Rust
+        //     `Vec`s built by `tolist()`) and write `serial_out`/`parallel_out` (Rust
+        //     `Vec`s), while NumPy read its own arrays and wrote a `numpy.empty_like`.
+        //     Certified 2026-08-16 on this host: an identical loop is a MEDIAN 1.072x
+        //     slower on a Rust `Vec` than on numpy-allocated memory (5.96x the dTLB
+        //     misses at 55 cycles apiece, identical instructions, identical L1D misses).
+        //     That is a systematic bias AGAINST the candidate of the same magnitude as
+        //     the effect this group reports, and it also made the replicas unlike the
+        //     shipped route, which reads numpy arrays and writes a `numpy.empty`.
+        //
+        // (2) SEPARATE-OUTPUT-BUFFER RESIDENCY RACE. Three distinct 32 MB outputs
+        //     (`np_out`, `serial_out`, `parallel_out`) meant the arms competed for page
+        //     residency rather than being compared on code. At this size that race is
+        //     worth 3-9% and is SIGN-FLIPPING, which is the documented signature of the
+        //     two banked re-runs of this very group disagreeing at 1.027788 and 0.931527
+        //     with disjoint CIs on one host and byte-identical source.
+        //
+        // Both are fixed the way the campaign's worked example
+        // (`bench_divide_allocator_provenance`) does it: every operand and the single
+        // output are numpy-allocated, the replicas see them through zero-copy views, and
+        // ONE output array is shared by all three arms.
+        //
+        // A/A NULLS CANNOT SEE ANY OF THIS. Both arms were internally reproducible and
+        // both nulls sat on unity throughout; a null proves an arm is stable, never that
+        // two arms are comparable. That blind spot is the reason this survived so long.
         let np_out = numpy
             .call_method1("empty_like", (&a_obj,))
             .expect("preallocated numpy output");
         let out_kwargs = PyDict::new(py);
         out_kwargs.set_item("out", &np_out).expect("bind out=");
 
-        let a_vec: Vec<f64> = a_obj
-            .call_method0("tolist")
-            .expect("a list")
-            .extract()
-            .expect("a f64s");
-        let b_vec: Vec<f64> = b_obj
-            .call_method0("tolist")
-            .expect("b list")
-            .extract()
-            .expect("b f64s");
-        let mut serial_out = vec![0.0_f64; N];
-        let mut parallel_out = vec![0.0_f64; N];
+        // Zero-copy views of numpy's own memory, the same acquisition the shipped route
+        // performs.
+        let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_obj).expect("a buffer");
+        let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_obj).expect("b buffer");
+        let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&np_out).expect("out buffer");
+
+        // THE NO-COPY GATE. `PyBuffer` silently hands back a COPY for a non-contiguous
+        // or otherwise unsuitable array. That copy is memory WE allocate, so the arms
+        // would quietly become Rust-vs-Rust again and report a reassuring "no
+        // difference" - the exact failure this whole correction exists to stop.
+        for (label, buffer, object) in [
+            ("a", &a_buffer, &a_obj),
+            ("b", &b_buffer, &b_obj),
+            ("out", &out_buffer, &np_out),
+        ] {
+            let owner_ptr = object
+                .getattr("ctypes")
+                .and_then(|c| c.getattr("data"))
+                .and_then(|d| d.extract::<usize>())
+                .expect("numpy array exposes ctypes.data");
+            assert_eq!(
+                buffer.buf_ptr() as usize,
+                owner_ptr,
+                "PyBuffer handed back a COPY for `{label}`, not a view of numpy's \
+                 allocation - the replicas would then run on Rust memory and pay the \
+                 provenance tax this group was corrected to remove"
+            );
+            assert!(
+                buffer.is_c_contiguous(),
+                "`{label}` is not C-contiguous, so the replica would not be walking \
+                 numpy's buffer the way the shipped route does"
+            );
+            assert_eq!(
+                buffer.item_count(),
+                N,
+                "`{label}` has an unexpected element count"
+            );
+        }
+
+        // `ReadOnlyCell<f64>`/`Cell<f64>` are `repr(transparent)` over `f64`, the
+        // operands are read-only under the GIL, and `np_out` is a distinct fresh array
+        // that neither operand aliases - the same argument the shipped
+        // `zerocopy_f64_binary_flat` makes for the same conversion.
+        let a_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), N) };
+        let b_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), N) };
+
+        // THE SHARED OUTPUT IS RE-DERIVED PER CALL, never held. Sharing one array
+        // between NumPy's `out=` arm and both Rust arms is what removes the residency
+        // race, but holding a long-lived `&mut [f64]` over an allocation NumPy also
+        // writes would trade a measurement artifact for an aliasing one. So no `&mut`
+        // outlives the call that uses it: each arm mints its slice, writes, and drops it
+        // before any other arm runs. The arms are strictly sequential under the GIL, so
+        // at most one exists at a time.
+        let out_ptr = out_buffer.buf_ptr().cast::<f64>();
+        let mint = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(out_ptr, N) } };
 
         // PARITY BEFORE TIMING: both replicas must reproduce NumPy bit for bit on
         // these operands, NaN and signed-zero lanes included, or the ratio is
-        // between two different computations.
-        maximum_serial(&a_vec, &b_vec, &mut serial_out);
-        maximum_parallel(&a_vec, &b_vec, &mut parallel_out);
+        // between two different computations. Sequential, because all three arms now
+        // write the same buffer: NumPy fills it and its checksum is taken first, then
+        // each replica overwrites it in turn.
         let numpy_probe = np_maximum
             .call(&args, Some(&out_kwargs))
             .expect("numpy.maximum probe into out=");
         let numpy_checksum = numpy_divide_checksum(&numpy_probe, N);
+        maximum_serial(a_np, b_np, mint());
         assert_eq!(
-            divide_checksum(&serial_out),
+            divide_checksum(mint()),
             numpy_checksum,
             "serial maximum replica diverges from numpy.maximum"
         );
+        maximum_parallel(a_np, b_np, mint());
         assert_eq!(
-            divide_checksum(&parallel_out),
+            divide_checksum(mint()),
             numpy_checksum,
             "parallel maximum replica diverges from numpy.maximum"
         );
@@ -10094,9 +11067,9 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
             };
             let parallel_arm = || {
                 let started = Instant::now();
-                maximum_parallel(&a_vec, &b_vec, &mut parallel_out);
+                maximum_parallel(a_np, b_np, mint());
                 let elapsed = started.elapsed();
-                let checksum = divide_checksum(&parallel_out);
+                let checksum = divide_checksum(mint());
                 common::ContractObservation { elapsed, checksum }
             };
             let (effect, _, _) = common::run_dual_null_median_ci_contract(
@@ -10109,7 +11082,10 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
                  harness=common::run_dual_null_median_ci_contract \
                  allocation=neither_arm_allocates \
                  incumbent_writes_into_preallocated_numpy_out=true \
-                 candidate_writes_into_preallocated_vec=true \
+                 candidate_writes_into_the_same_numpy_out=true \
+                 operands_are_numpy_allocated_zerocopy_views=true \
+                 shared_output_buffer_reminted_per_call=true \
+                 buffer_provenance_tax_removed=true \
                  arms_are_replicas_not_the_shipped_route=true \
                  correction=deadlock-audit-48by6 \
                  ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
@@ -10138,9 +11114,9 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
             };
             let serial_arm = || {
                 let started = Instant::now();
-                maximum_serial(&a_vec, &b_vec, &mut serial_out);
+                maximum_serial(a_np, b_np, mint());
                 let elapsed = started.elapsed();
-                let checksum = divide_checksum(&serial_out);
+                let checksum = divide_checksum(mint());
                 common::ContractObservation { elapsed, checksum }
             };
             let (effect, _, _) = common::run_dual_null_median_ci_contract(
@@ -10153,7 +11129,10 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
                  harness=common::run_dual_null_median_ci_contract \
                  allocation=neither_arm_allocates \
                  incumbent_writes_into_preallocated_numpy_out=true \
-                 candidate_writes_into_preallocated_vec=true \
+                 candidate_writes_into_the_same_numpy_out=true \
+                 operands_are_numpy_allocated_zerocopy_views=true \
+                 shared_output_buffer_reminted_per_call=true \
+                 buffer_provenance_tax_removed=true \
                  arms_are_replicas_not_the_shipped_route=true \
                  correction=deadlock-audit-48by6 \
                  ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
