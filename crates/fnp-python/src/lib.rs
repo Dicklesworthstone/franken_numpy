@@ -22,6 +22,7 @@
 //! complex functions fall back to NumPy for exact parity (marked with
 //! "Passthrough to np." comments).
 
+mod dot_f64_passthrough;
 mod searchsorted_array_needle;
 
 use fnp_dtype::{ArrayStorage, DType, f16, promote};
@@ -96480,6 +96481,11 @@ fn matmul(
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    if let Some(result) =
+        dot_f64_passthrough::try_full_thread_f64_dot(py, a.bind(py), b.bind(py), out.as_ref())?
+    {
+        return Ok(result);
+    }
     if python_explicit_out_is_absent_or_none(py, out.as_ref())
         && let Some(result) =
             python_native_gemm_f64_2d(py, a.bind(py), b.bind(py), PythonNativeGemmOp::Dot, true)?

@@ -55,6 +55,40 @@ print(np.isclose(result, expected))
 }
 
 #[test]
+fn dot_f64_pairwise_cancellation_and_signed_zero_are_exact() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# NumPy's f64 dot kernel does not use a naive left-to-right sum here.
+a = np.ones(16, dtype=np.float64)
+a[0] = 1e16
+a[1] = -1e16
+b = np.ones_like(a)
+expected = np.dot(a, b)
+naive = 0.0
+for x, y in zip(a, b):
+    naive += x * y
+actual = fnp.dot(a, b)
+zeros = np.array([-0.0, -0.0], dtype=np.float64)
+zero_expected = np.dot(zeros, np.ones_like(zeros))
+zero_actual = fnp.dot(zeros, np.ones_like(zeros))
+print(
+    expected != naive
+    and actual.tobytes() == expected.tobytes()
+    and zero_actual.tobytes() == zero_expected.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "f64 dot must retain NumPy's pairwise bits and signed zero: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn dot_2d_matrices() -> Result<(), String> {
     let script = fnp_script(
         r#"
