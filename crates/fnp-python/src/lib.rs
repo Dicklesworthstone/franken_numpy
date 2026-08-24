@@ -10230,65 +10230,68 @@ const FE_DIVIDE_HAZARD_MASK: core::ffi::c_int = 0x01   // FE_INVALID   (0/0, inf
 /// NumPy guards the same hazard by passing a pointer into `npy_get_floatstatus_barrier`;
 /// `black_box` on the output pointer is the same trick - it makes the loop's effect
 /// observably live across the call, so the loop cannot be moved over it.
-/// TWO DOUBLES-PER-LANE GROUPS PER ITERATION, matching the incumbent's own shape
-/// (`deadlock-audit-6y5wp`). Censused on this host from `target/release` artefacts, main
-/// loop only, both loops reading the buffers the route actually uses:
+/// DO NOT RE-CHUNK THIS LOOP. Tried and REVERTED 2026-08-24 (`deadlock-audit-6y5wp`),
+/// killed by its own pre-registered disassembly gate before it was ever timed.
+///
+/// THE CENSUS THAT MOTIVATED THE ATTEMPT stands and is still the state of this route.
+/// Read from artefacts on thinkstation1; numpy's live loop established from ISA (this
+/// host has no avx512f and the installed .so defines no `DOUBLE_divide_X86_V4` symbol at
+/// all, so `DOUBLE_divide_X86_V3` is what runs):
 ///
 /// ```text
-///   numpy DOUBLE_divide_X86_V3   9 insns / 8 doubles   2 x vdivpd ymm   0 stack reloads
-///   ours, zip-of-zip            12 insns / 8 doubles   1 x vdivpd ymm   0 stack reloads
+///   per 8 doubles              numpy V3   ours
+///   instructions                    9      12
+///   vdivpd in flight                2       1
+///   unroll                         2x      1x
+///   base-pointer stack reloads      0       0
 /// ```
 ///
-/// The plain `zip`-of-`zip` above emitted a 1x-unrolled body - one `vmovupd`, one
-/// `vdivpd`, one `vmovupd`, then index/compare/branch, six instructions for four
-/// doubles. NumPy issues TWO independent `vdivpd` per iteration against three invariant
-/// base pointers indexed by one induction variable. Stepping eight doubles at a time
-/// through fixed-size `[f64; 8]` groups asks LLVM for exactly that body.
+/// So NumPy issues two independent `vdivpd` per iteration against three invariant bases
+/// indexed by one induction variable, and we issue one. Note the stack reloads are now
+/// ZERO on both sides: the three `mov ..(%rsp),%rdi` spills the 2026-08-18 census found
+/// were the FE-hazard accumulate's register pressure, and `b50b9d88` removed them by
+/// removing the accumulate. That hypothesis is confirmed and spent.
 ///
-/// THE MECHANISM IS MEMORY-LEVEL PARALLELISM, NOT INSTRUCTION COUNT. At the sizes this
-/// route runs, three streams of 8 MiB do not sit in cache, so the loop's speed is set by
-/// how many cache-line requests are outstanding at once. A 1x body has one load pair and
-/// one store in flight per iteration; a 2x body has two of each. Instruction count falls
-/// 12 -> 9 per 8 doubles as a side effect, but that is not the claim.
+/// WHAT WAS TRIED: stepping eight doubles at a time through fixed-size `[f64; 8]` groups
+/// (`as_chunks`/`as_chunks_mut`) plus a scalar tail, to ask LLVM for NumPy's body. The
+/// hoped-for mechanism was memory-level parallelism - three 8 MiB streams do not sit in
+/// cache, so speed is set by how many cache-line requests are outstanding, and a 2x body
+/// doubles them.
 ///
-/// WHY THIS IS NOT THE "WIDER UNROLL" LEVER ALREADY REFUTED. That refutation
-/// (2026-08-16) rested on a static anti-correlation across three arms whose unroll factor
-/// co-varied perfectly with whether they carried the FE-hazard classifier - the 4x arms
-/// were the classifier arms. The 2026-08-17 re-analysis corrected it in this file's own
-/// ledger: the anti-correlation is regime-scoped and in the bare regime unroll is
-/// POSITIVELY correlated with speed here. `b50b9d88` then removed the classifier from
-/// this loop, so the shipped body is now bare AND 1x-unrolled - a configuration that did
-/// not exist when that reject was written, and one its census (which recorded the shipped
-/// arm as 2x-unrolled) no longer describes.
+/// WHAT LLVM ACTUALLY EMITTED, hot body, 16 doubles per iteration:
 ///
-/// NOT THE REJECTED BLOCKED FORM EITHER. The chunked reject devectorised the divide
-/// outright (`vdivpd` 1 -> 0, `vdivsd` 1 -> 15) because it blocked a loop that still
-/// carried the classifier. Fixed-size `[f64; 8]` groups keep the divide packed - but that
-/// is a claim about codegen, so it is CHECKED BY DISASSEMBLY before any timing is
-/// believed: expect 2 x `vdivpd` on ymm retained and no `cmp`/`jae` bounds-check pairs
-/// inside the body. If the divide devectorises, this is a loss and reverts.
+/// ```text
+///   16 vmovsd + 16 vmovhpd + 10 vinsertf128 + 2 vunpcklpd + 2 vunpckhpd + 2 vperm2f128
+///    + 4 vdivpd + 4 vmovupd + loop control   =   ~29 instructions per 8 doubles
+/// ```
 ///
-/// BEHAVIOUR IS UNCHANGED. `zip` stops at the shortest sequence; truncating all three to
-/// their common length keeps exactly that and cannot panic. Every quotient is the same
-/// IEEE division of the same lane pair in the same order, so the bits, and the MXCSR
-/// flags they raise, are identical.
+/// The divide stayed packed and no bounds checks appeared - but the LOADS shattered into
+/// scalar `vmovsd`/`vmovhpd` pairs re-assembled with `vinsertf128`/`vperm2f128`. That is
+/// **29 instructions per 8 doubles against the 12 it replaced**, a 2.4x codegen
+/// regression, so it was reverted unmeasured. Timing it would only have priced a loop
+/// nobody should ship.
+///
+/// THIS RE-CONFIRMS THE STANDING "CHUNKING IS DEAD" REJECT BY A SECOND, DIFFERENT FAILURE
+/// MODE. The earlier chunked reject devectorised the DIVIDE (`vdivpd` 1 -> 0, `vdivsd`
+/// 1 -> 15). This one keeps the divide packed and devectorises the LOADS instead. Two
+/// independent shapes, same conclusion: on this loop, handing LLVM fixed-size groups
+/// costs more than the body shape it buys.
+///
+/// WHAT IS STILL OPEN: the 9-vs-12 gap is real and unexplained, and "give the loop
+/// NumPy's body" is not refuted as an OBJECTIVE - only this way of asking for it is.
+/// Anything attempted here must be gated on disassembly BEFORE timing, because both
+/// failures so far were invisible in the source and obvious in the instruction stream.
+///
+/// THE LOOP BELOW IS THE ONE THAT SHIPS: a plain `zip`-of-`zip`, which LLVM lowers to a
+/// 1x-unrolled `vmovupd`/`vdivpd`/`vmovupd` body with no spills and no bounds checks.
+///
+/// BEHAVIOUR: `zip` stops at the shortest sequence, so a short slice cannot panic.
 #[cfg(target_arch = "x86_64")]
 fn divide_slice_detecting_fe_hazards(lhs: &[f64], rhs: &[f64], out: &mut [f64]) -> bool {
     // SAFETY: both are plain glibc calls on an integer mask, with no memory operands.
     unsafe { feclearexcept(FE_DIVIDE_HAZARD_MASK) };
-    let len = out.len().min(lhs.len()).min(rhs.len());
-    {
-        let (out_groups, out_tail) = out[..len].as_chunks_mut::<8>();
-        let (lhs_groups, lhs_tail) = lhs[..len].as_chunks::<8>();
-        let (rhs_groups, rhs_tail) = rhs[..len].as_chunks::<8>();
-        for ((slots, xs), ys) in out_groups.iter_mut().zip(lhs_groups).zip(rhs_groups) {
-            for lane in 0..8 {
-                slots[lane] = xs[lane] / ys[lane];
-            }
-        }
-        for ((slot, &x), &y) in out_tail.iter_mut().zip(lhs_tail).zip(rhs_tail) {
-            *slot = x / y;
-        }
+    for ((slot, &x), &y) in out.iter_mut().zip(lhs.iter()).zip(rhs.iter()) {
+        *slot = x / y;
     }
     std::hint::black_box(out.as_ptr());
     // SAFETY: as above.
