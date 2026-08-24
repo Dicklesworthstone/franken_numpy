@@ -10041,41 +10041,118 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
         // A/A NULLS CANNOT SEE THIS. Both arms were internally reproducible and both nulls
         // sat on unity throughout; a null proves an arm is stable, never that two arms are
         // comparable. That blind spot is the reason this survived so long.
+        // TWO FURTHER ASYMMETRIES, both certified elsewhere in this campaign, survived
+        // the allocation fix above and are removed here. Preallocating both sides stops
+        // either arm paying a fresh 32 MB mapping per iteration, but it does not make the
+        // two arms' MEMORY comparable, and this group's numbers turned on exactly that.
+        //
+        // (1) BUFFER-PROVENANCE TAX. The replicas used to read `a_vec`/`b_vec` (Rust
+        //     `Vec`s built by `tolist()`) and write `serial_out`/`parallel_out` (Rust
+        //     `Vec`s), while NumPy read its own arrays and wrote a `numpy.empty_like`.
+        //     Certified 2026-08-16 on this host: an identical loop is a MEDIAN 1.072x
+        //     slower on a Rust `Vec` than on numpy-allocated memory (5.96x the dTLB
+        //     misses at 55 cycles apiece, identical instructions, identical L1D misses).
+        //     That is a systematic bias AGAINST the candidate of the same magnitude as
+        //     the effect this group reports, and it also made the replicas unlike the
+        //     shipped route, which reads numpy arrays and writes a `numpy.empty`.
+        //
+        // (2) SEPARATE-OUTPUT-BUFFER RESIDENCY RACE. Three distinct 32 MB outputs
+        //     (`np_out`, `serial_out`, `parallel_out`) meant the arms competed for page
+        //     residency rather than being compared on code. At this size that race is
+        //     worth 3-9% and is SIGN-FLIPPING, which is the documented signature of the
+        //     two banked re-runs of this very group disagreeing at 1.027788 and 0.931527
+        //     with disjoint CIs on one host and byte-identical source.
+        //
+        // Both are fixed the way the campaign's worked example
+        // (`bench_divide_allocator_provenance`) does it: every operand and the single
+        // output are numpy-allocated, the replicas see them through zero-copy views, and
+        // ONE output array is shared by all three arms.
+        //
+        // A/A NULLS CANNOT SEE ANY OF THIS. Both arms were internally reproducible and
+        // both nulls sat on unity throughout; a null proves an arm is stable, never that
+        // two arms are comparable. That blind spot is the reason this survived so long.
         let np_out = numpy
             .call_method1("empty_like", (&a_obj,))
             .expect("preallocated numpy output");
         let out_kwargs = PyDict::new(py);
         out_kwargs.set_item("out", &np_out).expect("bind out=");
 
-        let a_vec: Vec<f64> = a_obj
-            .call_method0("tolist")
-            .expect("a list")
-            .extract()
-            .expect("a f64s");
-        let b_vec: Vec<f64> = b_obj
-            .call_method0("tolist")
-            .expect("b list")
-            .extract()
-            .expect("b f64s");
-        let mut serial_out = vec![0.0_f64; N];
-        let mut parallel_out = vec![0.0_f64; N];
+        // Zero-copy views of numpy's own memory, the same acquisition the shipped route
+        // performs.
+        let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_obj).expect("a buffer");
+        let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_obj).expect("b buffer");
+        let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&np_out).expect("out buffer");
+
+        // THE NO-COPY GATE. `PyBuffer` silently hands back a COPY for a non-contiguous
+        // or otherwise unsuitable array. That copy is memory WE allocate, so the arms
+        // would quietly become Rust-vs-Rust again and report a reassuring "no
+        // difference" - the exact failure this whole correction exists to stop.
+        for (label, buffer, object) in [
+            ("a", &a_buffer, &a_obj),
+            ("b", &b_buffer, &b_obj),
+            ("out", &out_buffer, &np_out),
+        ] {
+            let owner_ptr = object
+                .getattr("ctypes")
+                .and_then(|c| c.getattr("data"))
+                .and_then(|d| d.extract::<usize>())
+                .expect("numpy array exposes ctypes.data");
+            assert_eq!(
+                buffer.buf_ptr() as usize,
+                owner_ptr,
+                "PyBuffer handed back a COPY for `{label}`, not a view of numpy's \
+                 allocation - the replicas would then run on Rust memory and pay the \
+                 provenance tax this group was corrected to remove"
+            );
+            assert!(
+                buffer.is_c_contiguous(),
+                "`{label}` is not C-contiguous, so the replica would not be walking \
+                 numpy's buffer the way the shipped route does"
+            );
+            assert_eq!(
+                buffer.item_count(),
+                N,
+                "`{label}` has an unexpected element count"
+            );
+        }
+
+        // `ReadOnlyCell<f64>`/`Cell<f64>` are `repr(transparent)` over `f64`, the
+        // operands are read-only under the GIL, and `np_out` is a distinct fresh array
+        // that neither operand aliases - the same argument the shipped
+        // `zerocopy_f64_binary_flat` makes for the same conversion.
+        let a_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), N) };
+        let b_np: &[f64] =
+            unsafe { std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), N) };
+
+        // THE SHARED OUTPUT IS RE-DERIVED PER CALL, never held. Sharing one array
+        // between NumPy's `out=` arm and both Rust arms is what removes the residency
+        // race, but holding a long-lived `&mut [f64]` over an allocation NumPy also
+        // writes would trade a measurement artifact for an aliasing one. So no `&mut`
+        // outlives the call that uses it: each arm mints its slice, writes, and drops it
+        // before any other arm runs. The arms are strictly sequential under the GIL, so
+        // at most one exists at a time.
+        let out_ptr = out_buffer.buf_ptr().cast::<f64>();
+        let mint = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(out_ptr, N) } };
 
         // PARITY BEFORE TIMING: both replicas must reproduce NumPy bit for bit on
         // these operands, NaN and signed-zero lanes included, or the ratio is
-        // between two different computations.
-        maximum_serial(&a_vec, &b_vec, &mut serial_out);
-        maximum_parallel(&a_vec, &b_vec, &mut parallel_out);
+        // between two different computations. Sequential, because all three arms now
+        // write the same buffer: NumPy fills it and its checksum is taken first, then
+        // each replica overwrites it in turn.
         let numpy_probe = np_maximum
             .call(&args, Some(&out_kwargs))
             .expect("numpy.maximum probe into out=");
         let numpy_checksum = numpy_divide_checksum(&numpy_probe, N);
+        maximum_serial(a_np, b_np, mint());
         assert_eq!(
-            divide_checksum(&serial_out),
+            divide_checksum(mint()),
             numpy_checksum,
             "serial maximum replica diverges from numpy.maximum"
         );
+        maximum_parallel(a_np, b_np, mint());
         assert_eq!(
-            divide_checksum(&parallel_out),
+            divide_checksum(mint()),
             numpy_checksum,
             "parallel maximum replica diverges from numpy.maximum"
         );
@@ -10094,9 +10171,9 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
             };
             let parallel_arm = || {
                 let started = Instant::now();
-                maximum_parallel(&a_vec, &b_vec, &mut parallel_out);
+                maximum_parallel(a_np, b_np, mint());
                 let elapsed = started.elapsed();
-                let checksum = divide_checksum(&parallel_out);
+                let checksum = divide_checksum(mint());
                 common::ContractObservation { elapsed, checksum }
             };
             let (effect, _, _) = common::run_dual_null_median_ci_contract(
@@ -10109,7 +10186,10 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
                  harness=common::run_dual_null_median_ci_contract \
                  allocation=neither_arm_allocates \
                  incumbent_writes_into_preallocated_numpy_out=true \
-                 candidate_writes_into_preallocated_vec=true \
+                 candidate_writes_into_the_same_numpy_out=true \
+                 operands_are_numpy_allocated_zerocopy_views=true \
+                 shared_output_buffer_reminted_per_call=true \
+                 buffer_provenance_tax_removed=true \
                  arms_are_replicas_not_the_shipped_route=true \
                  correction=deadlock-audit-48by6 \
                  ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
@@ -10138,9 +10218,9 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
             };
             let serial_arm = || {
                 let started = Instant::now();
-                maximum_serial(&a_vec, &b_vec, &mut serial_out);
+                maximum_serial(a_np, b_np, mint());
                 let elapsed = started.elapsed();
-                let checksum = divide_checksum(&serial_out);
+                let checksum = divide_checksum(mint());
                 common::ContractObservation { elapsed, checksum }
             };
             let (effect, _, _) = common::run_dual_null_median_ci_contract(
@@ -10153,7 +10233,10 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
                  harness=common::run_dual_null_median_ci_contract \
                  allocation=neither_arm_allocates \
                  incumbent_writes_into_preallocated_numpy_out=true \
-                 candidate_writes_into_preallocated_vec=true \
+                 candidate_writes_into_the_same_numpy_out=true \
+                 operands_are_numpy_allocated_zerocopy_views=true \
+                 shared_output_buffer_reminted_per_call=true \
+                 buffer_provenance_tax_removed=true \
                  arms_are_replicas_not_the_shipped_route=true \
                  correction=deadlock-audit-48by6 \
                  ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
