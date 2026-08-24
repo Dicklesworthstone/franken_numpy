@@ -70507,9 +70507,10 @@ fn int64_sort_flat_small(
     }
     // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
     let src: &[i64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), n) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "int64")?;
-    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    // `numpy.empty` takes dtype as its second positional argument.  Keeping it
+    // out of a kwargs dict removes a reached Python allocation from this
+    // dispatch-bound path without changing the result's dtype or layout.
+    let out = numpy.call_method1(intern!(py, "empty"), (n, "int64"))?;
     let out_buffer = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
         return Ok(None);
