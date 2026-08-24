@@ -1414,6 +1414,59 @@ print(ok)
 }
 
 #[test]
+fn f32_searchsorted_small_native_path_is_nan_and_signed_zero_exact() -> Result<(), String> {
+    // This is a planted negative for the f32 dispatch path: the old implementation
+    // pre-scanned either buffer for NaN and then delegated to np.searchsorted. Poison
+    // that delegate after capturing NumPy's expected bytes, so this only passes when
+    // the small f32 array-needle route itself implements NumPy's NaN-last ordering.
+    // The finite case carries both signed zeros and duplicate ties; the NaN-haystack
+    // and NaN-needle cases exercise the ordering predicate that a plain PartialOrd
+    // binary search gets wrong.
+    let script = fnp_script(
+        r#"
+finite_a = np.array([-np.inf, -2.0, -0.0, 0.0, 0.0, 1.0, np.inf], dtype=np.float32)
+finite_v = np.array([-0.0, 0.0, 0.5, np.inf], dtype=np.float32)
+nan_a = np.array([-np.inf, -1.0, -0.0, 0.0, 1.0, np.inf, np.nan, np.nan], dtype=np.float32)
+nan_v = np.array([-0.0, 0.0, 0.5, np.inf, np.nan], dtype=np.float32)
+cases = ((finite_a, finite_v), (nan_a, nan_v))
+expected = [
+    (np.searchsorted(a, v, side="left").copy(), np.searchsorted(a, v, side="right").copy())
+    for a, v in cases
+]
+original = np.searchsorted
+def delegated_searchsorted(*args, **kwargs):
+    raise AssertionError("f32 native array-needle path delegated to numpy.searchsorted")
+np.searchsorted = delegated_searchsorted
+try:
+    actual = [
+        (fnp.searchsorted(a, v, side="left"), fnp.searchsorted(a, v, side="right"))
+        for a, v in cases
+    ]
+finally:
+    np.searchsorted = original
+ok = all(
+    left.dtype == expected_left.dtype
+    and right.dtype == expected_right.dtype
+    and left.shape == expected_left.shape
+    and right.shape == expected_right.shape
+    and left.tobytes() == expected_left.tobytes()
+    and right.tobytes() == expected_right.tobytes()
+    for (left, right), (expected_left, expected_right) in zip(actual, expected)
+)
+print(bool(ok))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "small f32 searchsorted must keep signed-zero and NaN ordering native and exact: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn f16_searchsorted_cumulative_table_matches_numpy_and_defers_edge_inputs() -> Result<(), String> {
     // The native f16 table path is only valid for a C-contiguous sorted finite
     // haystack. Build that order from the bit-order key instead of float16 sort

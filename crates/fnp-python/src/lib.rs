@@ -35880,6 +35880,57 @@ fn search_index_f64_raw_guess(s: &[f64], key: f64, right: bool, hint: usize) -> 
     lo
 }
 
+// Float32 companion of the f64 guessed search.  Keep the same NaN-last predicate:
+// `f32::partial_cmp` alone treats every NaN comparison as false, which would place
+// a NaN needle at zero instead of after the final NaN run.  Equal signed zeros take
+// the same left/right boundaries because neither zero sorts before the other.
+#[inline]
+fn search_index_f32_raw_guess(s: &[f32], key: f32, right: bool, hint: usize) -> usize {
+    let n = s.len();
+    if n == 0 {
+        return 0;
+    }
+    let cond = |probe: f32| -> bool {
+        if right {
+            !(key < probe || (probe.is_nan() && !key.is_nan()))
+        } else {
+            probe < key || (key.is_nan() && !probe.is_nan())
+        }
+    };
+    let h = if hint >= n { n - 1 } else { hint };
+    let (mut lo, mut hi);
+    if cond(s[h]) {
+        lo = h + 1;
+        hi = n;
+        let mut step = 1usize;
+        loop {
+            let probe = h + step;
+            if probe >= n {
+                break;
+            }
+            if cond(s[probe]) {
+                lo = probe + 1;
+                step <<= 1;
+            } else {
+                hi = probe;
+                break;
+            }
+        }
+    } else {
+        lo = 0;
+        hi = h;
+    }
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if cond(s[mid]) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 // Zero-copy np.searchsorted for a SCALAR query `v` over a 1-D numeric haystack `a`,
 // returning numpy's np.intp scalar. Reads `a`'s buffer directly and runs one binary
 // search — no extract of the haystack. Handles the haystacks where the comparison is
@@ -36588,18 +36639,10 @@ fn try_zerocopy_f32_searchsorted(
     v: &Bound<'_, PyAny>,
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // ALL THREE OF THESE RUN ON THE PATH THAT ENGAGES (`deadlock-audit-v46rn`), which is
-    // the filter that separates this from four levers that measured zero: rows 60, 62 and
-    // 63 all changed something a caller had already guarded, and row 64 could not separate
-    // a change that ran but was small. This function is where the f64 array-needle cell -
-    // 5.7x slower than NumPy - actually does its work.
-    //
-    //   * `py.import("numpy")` per call. This is not a `#[pyfunction]`, so the 338-site
-    //     wrapper sweep never reached it; the import measured 656 ns on the ufunc methods.
-    //   * `getattr("ndarray")` builds and hashes a fresh `PyString`; the cached `PyType`
-    //     answers the same question for both operands.
-    //   * the output allocation passed `dtype` through a `PyDict`, where `numpy.empty`
-    //     takes it as the SECOND POSITIONAL parameter (`d16ee71a`).
+    // Match the f64 zero-copy path instead of pre-scanning both buffers then
+    // re-acquiring them in `searchsorted_typed`.  The raw helper has NumPy's
+    // NaN-last ordering itself, so this remains native for NaN and signed-zero
+    // inputs as well as the common finite case.
     let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, v)? {
         return Ok(None);
@@ -36615,25 +36658,59 @@ fn try_zerocopy_f32_searchsorted(
         "right" => true,
         _ => return Ok(None),
     };
-    // NaN pre-scan: defer to numpy if any NaN is present (its NaN-as-largest searchsorted
-    // semantics differ from the plain comparison binary search).
-    {
-        let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<f32>::get(a), PyBuffer::<f32>::get(v)) else {
+    let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<f32>::get(a), PyBuffer::<f32>::get(v)) else {
+        return Ok(None);
+    };
+    let (Some(a_s), Some(v_s)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    let m = v_s.len();
+    let flat = numpy.call_method1(intern!(py, "empty"), (m, "intp"))?;
+    if m > 0 {
+        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
         };
-        let (Some(a_s), Some(v_s)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
+        let Some(output) = o_buf.as_mut_slice(py) else {
             return Ok(None);
         };
-        use rayon::prelude::*;
+        // SAFETY: ReadOnlyCell<f32>/Cell<i64> are repr(transparent); the inputs are
+        // read-only under the GIL and `flat` is this call's fresh output allocation.
         let a_raw: &[f32] =
             unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f32>(), a_s.len()) };
-        let v_raw: &[f32] =
-            unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), v_s.len()) };
-        if a_raw.iter().any(|x| x.is_nan()) || v_raw.par_iter().any(|x| x.is_nan()) {
-            return Ok(None);
+        const SEARCHSORTED_PARALLEL_MIN: usize = 1 << 21;
+        if m >= SEARCHSORTED_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let v_raw: &[f32] =
+                unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            let chunk = m.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(v_raw.par_chunks(chunk))
+                .for_each(|(o, vq)| {
+                    let mut guess = 0usize;
+                    for (slot, &key) in o.iter_mut().zip(vq.iter()) {
+                        let idx = search_index_f32_raw_guess(a_raw, key, right, guess);
+                        guess = idx;
+                        *slot = idx as i64;
+                    }
+                });
+        } else {
+            let mut guess = 0usize;
+            for (o, vc) in output.iter().zip(v_s.iter()) {
+                let idx = search_index_f32_raw_guess(a_raw, vc.get(), right, guess);
+                guess = idx;
+                o.set(idx as i64);
+            }
         }
     }
-    Ok(searchsorted_typed::<f32>(py, numpy, a, v, right)?.map(|f| f.unbind()))
+    let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(
+        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?
+            .unbind(),
+    ))
 }
 
 #[pyfunction]
