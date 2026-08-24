@@ -1294,6 +1294,10 @@ fn main() {
                 bench_allocation_symmetry_planted_negative,
             ),
             (
+                "bench_maximum_parallel_crossover",
+                bench_maximum_parallel_crossover,
+            ),
+            (
                 "bench_divide_allocator_provenance",
                 bench_divide_allocator_provenance,
             ),
@@ -4349,6 +4353,149 @@ fn bench_allocation_symmetry_planted_negative(_c: &mut Criterion) {
                 effect.ratio_ci_high,
                 effect.arm_a_median_ns,
                 effect.arm_b_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
+/// WHERE IS THE CROSSOVER for `maximum`'s rayon fan-out (`deadlock-audit-hzl1w`)?
+///
+/// `hzl1w` proposed declining the native parallel arm for Maximum/Minimum on a
+/// compute-vs-bandwidth rule. Every measurement the bead rests on was taken at ONE size,
+/// n=2^22, where the parallel arm wins 4/4 across the corrected runs (1.53x-2.26x). A
+/// gate, though, is a statement about a THRESHOLD, and no one has measured either side
+/// of the one that ships: `parallel_min` for these ops is `1 << 21`.
+///
+/// So this sweeps serial against parallel directly, across the threshold, and lets the
+/// crossover decide whether `1 << 21` is in the right place.
+///
+/// BOTH ARMS ARE OURS. `ratio > 1` means the PARALLEL arm is faster, because the serial
+/// arm is passed as the incumbent and the contract reports arm_a/arm_b. This is an
+/// INTERNAL comparison - `maintenance` class, never an incumbent-win - and it is exactly
+/// the comparison the gate turns on: given that we take the native route at all, should
+/// it fan out? NumPy is not in this group and no row here may be quoted against it.
+///
+/// ALLOCATION-SYMMETRIC AND PROVENANCE-MATCHED BY CONSTRUCTION (`deadlock-audit-48by6`):
+/// operands and the single output are all numpy-allocated, the replicas see them through
+/// zero-copy views, and BOTH arms write the SAME output buffer with the `&mut` reminted
+/// per call - so neither arm allocates, neither pays a Rust-`Vec` provenance tax, and the
+/// two are not racing each other for page residency.
+fn bench_maximum_parallel_crossover(_c: &mut Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+        let threads = rayon::current_num_threads();
+
+        for shift in 18_u32..=22 {
+            let n = 1_usize << shift;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy).expect("bind numpy");
+            locals.set_item("n", n).expect("bind n");
+            // NaN and signed-zero lanes so the replicas' semantics are exercised rather
+            // than assumed - a replica using bare `f64::max` diverges on these.
+            py.run(
+                std::ffi::CString::new(
+                    "i = np.arange(n)\na = (1.0 + (i % 1000) / 1000.0) * np.where(i % 3 == 0, -1.0, 1.0)\nb = (1.25 + (i % 997) / 997.0) * np.where(i % 5 == 0, -1.0, 1.0)\na[3] = np.nan\nb[7] = np.nan\na[11] = 0.0\nb[11] = -0.0\nout = np.empty(n)\n",
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
+            )
+            .expect("build operands");
+            let a_obj = locals.get_item("a").expect("a operand");
+            let b_obj = locals.get_item("b").expect("b operand");
+            let out_obj = locals.get_item("out").expect("out buffer");
+
+            let a_buffer = pyo3::buffer::PyBuffer::<f64>::get(&a_obj).expect("a buffer");
+            let b_buffer = pyo3::buffer::PyBuffer::<f64>::get(&b_obj).expect("b buffer");
+            let out_buffer = pyo3::buffer::PyBuffer::<f64>::get(&out_obj).expect("out buffer");
+            for (label, buffer, object) in [
+                ("a", &a_buffer, &a_obj),
+                ("b", &b_buffer, &b_obj),
+                ("out", &out_buffer, &out_obj),
+            ] {
+                let owner_ptr = object
+                    .getattr("ctypes")
+                    .and_then(|c| c.getattr("data"))
+                    .and_then(|d| d.extract::<usize>())
+                    .expect("numpy array exposes ctypes.data");
+                assert_eq!(
+                    buffer.buf_ptr() as usize,
+                    owner_ptr,
+                    "PyBuffer handed back a COPY for `{label}` - the arms would run on \
+                     Rust memory and pay a provenance tax this group exists to avoid"
+                );
+                assert!(buffer.is_c_contiguous(), "`{label}` is not C-contiguous");
+            }
+            let lhs: &[f64] = unsafe {
+                std::slice::from_raw_parts(a_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+            };
+            let rhs: &[f64] = unsafe {
+                std::slice::from_raw_parts(b_buffer.buf_ptr().cast::<f64>().cast_const(), n)
+            };
+            let out_ptr = out_buffer.buf_ptr().cast::<f64>();
+            let mint = || -> &mut [f64] { unsafe { std::slice::from_raw_parts_mut(out_ptr, n) } };
+
+            // PARITY BEFORE TIMING: the two arms must agree bit for bit, or the ratio is
+            // between two different computations. Sequential, since they share a buffer.
+            maximum_serial(lhs, rhs, mint());
+            let serial_checksum = divide_checksum(mint());
+            maximum_parallel(lhs, rhs, mint());
+            assert_eq!(
+                divide_checksum(mint()),
+                serial_checksum,
+                "n=2^{shift}: the parallel replica does not match the serial one"
+            );
+
+            let serial_arm = || {
+                let started = Instant::now();
+                maximum_serial(lhs, rhs, mint());
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: divide_checksum(mint()),
+                }
+            };
+            let parallel_arm = || {
+                let started = Instant::now();
+                maximum_parallel(lhs, rhs, mint());
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: divide_checksum(mint()),
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                &format!("maximum_parallel_over_serial_2p{shift}"),
+                serial_arm,
+                parallel_arm,
+            );
+            println!(
+                "MAXIMUM_CROSSOVER n=2^{shift} n_elems={n} numpy_version={numpy_version} \
+                 worker={} rayon_threads={threads} shipped_parallel_min=2^21 \
+                 harness=common::run_dual_null_median_ci_contract \
+                 both_arms_are_ours_internal_comparison_not_an_incumbent_win=true \
+                 allocation=neither_arm_allocates shared_output_buffer_reminted_per_call=true \
+                 operands_are_numpy_allocated_zerocopy_views=true \
+                 parallel_over_serial={:.6} ci95=[{:.6},{:.6}] \
+                 serial_ns={:.1} parallel_ns={:.1} parallel_is_faster={} \
+                 incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_ci_low > 1.0,
                 incumbent_null.ratio_median,
                 candidate_null.ratio_median,
             );
