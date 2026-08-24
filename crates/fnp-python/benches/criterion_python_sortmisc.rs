@@ -445,6 +445,10 @@ fn main() {
                 "bench_flat_i64_sort_256_dual_null",
                 bench_flat_i64_sort_256_dual_null,
             ),
+            (
+                "bench_flat_i64_sort_256_allocation_control",
+                bench_flat_i64_sort_256_allocation_control,
+            ),
         ],
     );
 }
@@ -650,6 +654,106 @@ finally:\n\\
             candidate_null.ratio_median,
             candidate_null.ratio_ci_low,
             candidate_null.ratio_ci_high,
+        );
+    });
+}
+
+/// Measure the reached allocation call changed by the small-int64 route.
+///
+/// This is a same-binary maintenance control, not an incumbent comparison:
+/// both arms allocate the identical fresh C-contiguous `int64` output and
+/// differ only in whether dtype travels through a kwargs dict or NumPy's second
+/// positional parameter.  It prices the allocation slice without pretending
+/// the kernel or Python entry path executed in this control.
+fn bench_flat_i64_sort_256_allocation_control(_c: &mut criterion::Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let n = 256usize;
+        let kwargs = || {
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("dtype", "int64")
+                .expect("set int64 dtype keyword");
+            numpy
+                .call_method("empty", (n,), Some(&kwargs))
+                .expect("kwargs int64 allocation")
+        };
+        let positional = || {
+            numpy
+                .call_method1("empty", (n, "int64"))
+                .expect("positional int64 allocation")
+        };
+        let kw_probe = kwargs();
+        let positional_probe = positional();
+        for result in [&kw_probe, &positional_probe] {
+            assert_eq!(
+                result.getattr("dtype").unwrap().str().unwrap().to_string(),
+                "int64",
+                "allocation control changed dtype"
+            );
+            assert_eq!(
+                result
+                    .getattr("shape")
+                    .unwrap()
+                    .extract::<Vec<usize>>()
+                    .unwrap(),
+                vec![n],
+                "allocation control changed shape"
+            );
+            assert!(
+                result
+                    .getattr("flags")
+                    .unwrap()
+                    .getattr("c_contiguous")
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap(),
+                "allocation control changed layout"
+            );
+        }
+        let mut observe_kwargs = || {
+            let started = std::time::Instant::now();
+            let _result = kwargs();
+            common::ContractObservation {
+                elapsed: started.elapsed(),
+                checksum: n as u64,
+            }
+        };
+        let mut observe_positional = || {
+            let started = std::time::Instant::now();
+            let _result = positional();
+            common::ContractObservation {
+                elapsed: started.elapsed(),
+                checksum: n as u64,
+            }
+        };
+        let (effect, kwargs_null, positional_null) = common::run_dual_null_median_ci_contract(
+            "python_flat_i64_sort_n256_allocation_positional_over_kwargs",
+            &mut observe_positional,
+            &mut observe_kwargs,
+        );
+        let verdict = common::dual_null_contract_verdict(effect, kwargs_null, positional_null);
+        println!(
+            "FLAT_I64_SORT_ALLOCATION_CONTROL n={n} verdict={verdict} \\
+             positional_median_ns={:.3} kwargs_median_ns={:.3} \\
+             positional_over_kwargs={:.6} ci95=[{:.6},{:.6}] \\
+             kwargs_null={:.6} kwargs_null_ci95=[{:.6},{:.6}] \\
+             positional_null={:.6} positional_null_ci95=[{:.6},{:.6}] \\
+             same_binary=true same_result_dtype_shape_layout=true \\
+             scope=reached_result_allocation_only_not_full_sort",
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            kwargs_null.ratio_median,
+            kwargs_null.ratio_ci_low,
+            kwargs_null.ratio_ci_high,
+            positional_null.ratio_median,
+            positional_null.ratio_ci_low,
+            positional_null.ratio_ci_high,
         );
     });
 }
