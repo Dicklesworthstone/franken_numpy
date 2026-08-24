@@ -173919,6 +173919,93 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
         });
     }
 
+    /// `maximum`/`minimum` must PROPAGATE a NaN operand verbatim, LHS first
+    /// (`deadlock-audit-jd6lt`).
+    ///
+    /// Same defect class as `nextafter`, found by reading the neighbouring arms after
+    /// fixing that one: both answered a bare `f64::NAN` for any NaN operand, losing the
+    /// sign, losing the payload, and answering identically whichever side was NaN.
+    ///
+    /// THE RULES ARE NOT SHARED ACROSS THE FAMILY, which is why each is measured rather
+    /// than copied: `maximum`/`minimum` prefer the LHS on a both-NaN tie and return the
+    /// NaN VERBATIM (a signaling NaN stays signaling), whereas `nextafter` prefers the
+    /// RHS and quiets it. Assuming one rule for both would have produced a confidently
+    /// wrong fix.
+    ///
+    /// PLANTED NEGATIVE: every NaN pair asserts NumPy's answer is NOT the default
+    /// `+NaN`, so a pair that stops discriminating fails loudly instead of passing on the
+    /// bug. A test using plain `np.nan` would have passed on the old code, since the
+    /// positive default quiet NaN is the one case it got right by accident.
+    ///
+    /// SIGNED ZEROS ARE PINNED TOO, because the `lhs == rhs` arm the fix preserves is
+    /// what makes them agree: NumPy returns the RIGHT operand for equal operands, so
+    /// `maximum(0.0, -0.0)` is `-0.0`. A naive `f64::max` answers `+0.0` and would pass
+    /// any `==`-based check while being wrong in the bits.
+    #[test]
+    fn maximum_minimum_propagate_nan_operands_bit_for_bit_like_numpy() {
+        Python::initialize();
+        Python::attach(|py| {
+            let numpy = match py.import("numpy") {
+                Ok(module) => module,
+                Err(_) => return,
+            };
+            const QUIET_POS: u64 = 0x7ff8_0000_0000_0123;
+            const QUIET_NEG: u64 = 0xfff8_0000_0000_0456;
+            const SIGNALING: u64 = 0x7ff0_0000_0000_0001;
+            const ONE: u64 = 0x3ff0_0000_0000_0000;
+            const NEG_ONE: u64 = 0xbff0_0000_0000_0000;
+            const POS_ZERO: u64 = 0x0000_0000_0000_0000;
+            const NEG_ZERO: u64 = 0x8000_0000_0000_0000;
+            let pairs: [(u64, u64); 12] = [
+                (QUIET_POS, ONE),
+                (QUIET_NEG, ONE),
+                (ONE, QUIET_POS),
+                (ONE, QUIET_NEG),
+                (QUIET_POS, QUIET_NEG),
+                (QUIET_NEG, QUIET_POS),
+                (SIGNALING, ONE),
+                (ONE, SIGNALING),
+                (POS_ZERO, NEG_ZERO),
+                (NEG_ZERO, POS_ZERO),
+                (ONE, NEG_ONE),
+                (NEG_ONE, ONE),
+            ];
+            for (name, op) in [
+                ("maximum", fnp_ufunc::BinaryOp::Maximum),
+                ("minimum", fnp_ufunc::BinaryOp::Minimum),
+            ] {
+                let np_fn = numpy.getattr(name).expect("numpy callable");
+                let float64 = numpy.getattr("float64").expect("numpy.float64");
+                for (lhs_bits, rhs_bits) in pairs {
+                    let lhs = f64::from_bits(lhs_bits);
+                    let rhs = f64::from_bits(rhs_bits);
+                    let expected_bits: u64 = np_fn
+                        .call1((
+                            float64.call1((lhs,)).expect("np.float64(lhs)"),
+                            float64.call1((rhs,)).expect("np.float64(rhs)"),
+                        ))
+                        .and_then(|value| value.extract::<f64>())
+                        .expect("numpy result")
+                        .to_bits();
+                    if lhs.is_nan() || rhs.is_nan() {
+                        assert_ne!(
+                            expected_bits,
+                            f64::NAN.to_bits(),
+                            "{name}({lhs_bits:016x}, {rhs_bits:016x}): NumPy returns the \
+                             default +NaN, so this pair cannot detect the sign/payload bug"
+                        );
+                    }
+                    let got_bits = op.apply(lhs, rhs).to_bits();
+                    assert_eq!(
+                        got_bits, expected_bits,
+                        "{name}({lhs_bits:016x}, {rhs_bits:016x}): got {got_bits:016x}, \
+                         numpy says {expected_bits:016x}"
+                    );
+                }
+            }
+        });
+    }
+
     /// `nextafter` must PROPAGATE a NaN operand, not replace it with `+NaN`
     /// (`deadlock-audit-jd6lt`).
     ///

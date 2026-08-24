@@ -844,9 +844,33 @@ impl BinaryOp {
                     rem
                 }
             }
+            // NaN OPERANDS ARE PROPAGATED VERBATIM, LHS FIRST (`deadlock-audit-jd6lt`).
+            //
+            // These used to answer a bare `f64::NAN`, which is the POSITIVE default quiet
+            // NaN - losing the operand's sign, losing its payload, and answering the same
+            // thing whichever operand was NaN. Measured against the installed NumPy 2.4.3
+            // on raw bits (identical for `maximum` and `minimum`):
+            //
+            //   lhs=fff8..0456 rhs=3ff0..0000 -> fff8..0456   SIGN kept
+            //   lhs=3ff0..0000 rhs=fff8..0456 -> fff8..0456   rhs NaN propagates
+            //   lhs=7ff8..0123 rhs=fff8..0456 -> 7ff8..0123   BOTH NaN: LHS wins
+            //   lhs=fff8..0456 rhs=7ff8..0123 -> fff8..0456   BOTH NaN: LHS wins
+            //   lhs=7ff0..0001 rhs=3ff0..0000 -> 7ff0..0001   SIGNALING kept VERBATIM
+            //   lhs=3ff0..0000 rhs=7ff0..0001 -> 7ff0..0001
+            //
+            // Note LHS wins here where `nextafter` prefers RHS, and the NaN is NOT
+            // quieted where `nextafter` quiets it. The two were checked separately rather
+            // than assumed to share a rule, because they do not.
+            //
+            // THE `lhs == rhs` ARM IS LOAD-BEARING AND STAYS: NumPy returns the RIGHT
+            // operand for equal operands, which is what makes signed zeros agree -
+            // maximum(0.0, -0.0) is -0.0 and maximum(-0.0, 0.0) is +0.0, both measured.
+            // `f64::max` would answer +0.0 for both.
             Self::Minimum => {
-                if lhs.is_nan() || rhs.is_nan() {
-                    f64::NAN
+                if lhs.is_nan() {
+                    lhs
+                } else if rhs.is_nan() {
+                    rhs
                 } else if lhs == rhs {
                     rhs
                 } else {
@@ -854,8 +878,10 @@ impl BinaryOp {
                 }
             }
             Self::Maximum => {
-                if lhs.is_nan() || rhs.is_nan() {
-                    f64::NAN
+                if lhs.is_nan() {
+                    lhs
+                } else if rhs.is_nan() {
+                    rhs
                 } else if lhs == rhs {
                     rhs
                 } else {
