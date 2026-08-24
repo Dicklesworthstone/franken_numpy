@@ -4916,16 +4916,41 @@ fn bench_shipped_gemm_vs_numpy(_c: &mut Criterion) {
         .iter()
         .any(|var| matches!(std::env::var(var), Ok(ref v) if v.trim() == "1"));
 
-        for dim in [512_usize, 1024, 1536] {
+        // (label, m, k, n, dtype). The native predicate demands f64, 2-D, k1 == k2, every
+        // dim <= the op's cap (1536 for matmul), and m*k*n >= PY_NATIVE_GEMM_MIN_FLOPS
+        // (320^3 = 32_768_000). Nothing there requires a SQUARE matrix, so the
+        // rectangular cases below are expected to engage exactly like the square ones -
+        // and the f32 and oversized cases are expected to DELEGATE, which is asserted
+        // rather than assumed.
+        let cases: &[(&str, usize, usize, usize, &str)] = &[
+            ("square_512", 512, 512, 512, "float64"),
+            ("square_1024", 1024, 1024, 1024, "float64"),
+            ("square_1536", 1536, 1536, 1536, "float64"),
+            // Rectangular, both orientations: wide-k and narrow-k.
+            ("wide_1024x256x1024", 1024, 256, 1024, "float64"),
+            ("narrow_256x1024x256", 256, 1024, 256, "float64"),
+            ("tall_1536x384x1536", 1536, 384, 1536, "float64"),
+            // Above the cap: must delegate, which is what keeps the 2048 REJECT honest.
+            ("oversize_2048", 2048, 2048, 2048, "float64"),
+            // f32 has NO native GEMM route at all - the predicate is f64-only.
+            ("f32_1024", 1024, 1024, 1024, "float32"),
+        ];
+
+        for (label, m, k, n, dtype) in cases.iter().copied() {
             let locals = PyDict::new(py);
             locals.set_item("np", &numpy).expect("bind numpy");
-            locals.set_item("d", dim).expect("bind d");
-            // Deterministic, well-scaled operands: a fixed seed keeps the two regimes
+            locals.set_item("m", m).expect("bind m");
+            locals.set_item("k", k).expect("bind k");
+            locals.set_item("n", n).expect("bind n");
+            locals.set_item("dt", dtype).expect("bind dtype");
+            // Deterministic, well-scaled operands: a fixed seed keeps the regimes
             // comparable, and values near 1.0 keep the products away from overflow so the
-            // comparison is of speed and not of exceptional-value handling.
+            // comparison is of speed and not of exceptional-value handling. Note the
+            // native predicate also rejects any non-finite input, so finite operands are
+            // required for the engaging cases to engage at all.
             py.run(
                 std::ffi::CString::new(
-                    "rng = np.random.default_rng(20260824)\na = (1.0 + rng.random((d, d))).astype(np.float64)\nb = (1.0 + rng.random((d, d))).astype(np.float64)\n",
+                    "rng = np.random.default_rng(20260824)\na = (1.0 + rng.random((m, k))).astype(dt)\nb = (1.0 + rng.random((k, n))).astype(dt)\n",
                 )
                 .unwrap()
                 .as_c_str(),
@@ -4954,7 +4979,7 @@ fn bench_shipped_gemm_vs_numpy(_c: &mut Criterion) {
                 .call1((&expected, &got))
                 .and_then(|v| v.extract::<bool>())
                 .expect("allclose result");
-            assert!(close, "dim={dim}: fnp.matmul does not match numpy.matmul");
+            assert!(close, "{label}: fnp.matmul does not match numpy.matmul");
 
             // ENGAGEMENT, ASSERTED IN BOTH DIRECTIONS. Sabotage numpy.matmul so only a
             // native path can survive, then record what actually happened. `dot` and
@@ -4975,10 +5000,20 @@ fn bench_shipped_gemm_vs_numpy(_c: &mut Criterion) {
                 Some(&locals),
             )
             .expect("restore numpy");
-            let expected_to_engage = serial_blas && dim >= 512;
+            // The bench's model of the gate, spelled out so a routing change fails HERE
+            // rather than silently turning a row into NumPy-against-itself: f64 only,
+            // every dim within the matmul cap, and at or above the FLOPS floor.
+            const MATMUL_MAX_DIM: usize = 1536;
+            const MIN_FLOPS: usize = 320 * 320 * 320;
+            let expected_to_engage = serial_blas
+                && dtype == "float64"
+                && m <= MATMUL_MAX_DIM
+                && k <= MATMUL_MAX_DIM
+                && n <= MATMUL_MAX_DIM
+                && m.saturating_mul(k).saturating_mul(n) >= MIN_FLOPS;
             assert_eq!(
                 engaged, expected_to_engage,
-                "dim={dim} serial_blas={serial_blas}: engagement disagrees with the gate \
+                "{label} serial_blas={serial_blas}: engagement disagrees with the gate \
                  - either the route changed or this bench's model of it is stale"
             );
 
@@ -5000,17 +5035,33 @@ fn bench_shipped_gemm_vs_numpy(_c: &mut Criterion) {
                     checksum: matmul_corner_checksum(&result),
                 }
             };
+            // ROUNDS ARE SCALED TO THE WORK, because the null envelope is what decides a
+            // row and a cheap case can afford a much tighter one. At 11 rounds the
+            // `narrow_256x1024x256` case came back UNDECIDED with a controlling null
+            // half-width of 0.1206 - its effect was 7.2% against a required 24.1%, so the
+            // gate could not call it either way even though the CI excluded unity. It is
+            // a 2.8 ms call, so it can pay for 41 rounds and be decided properly.
+            // The 2048 case is 8x the work of 1024 and gets the minimum legal count.
+            let flops = m.saturating_mul(k).saturating_mul(n);
+            let rounds = if flops > 2_000_000_000 {
+                9
+            } else if flops < 100_000_000 {
+                41
+            } else {
+                11
+            };
             let (effect, incumbent_null, candidate_null) =
                 common::run_dual_null_median_ci_contract_with_sampling(
-                    &format!("shipped_matmul_f64_{dim}"),
+                    &format!("shipped_matmul_{label}"),
                     incumbent,
                     candidate,
-                    11,
+                    rounds,
                     1,
                 );
             println!(
-                "SHIPPED_GEMM op=matmul dim={dim} numpy_version={numpy_version} worker={} \
-                 harness=common::run_dual_null_median_ci_contract_with_sampling rounds=11 min_of=1 \
+                "SHIPPED_GEMM op=matmul case={label} m={m} k={k} n={n} dtype={dtype} \
+                 numpy_version={numpy_version} worker={} \
+                 harness=common::run_dual_null_median_ci_contract_with_sampling rounds={rounds} min_of=1 \
                  serial_blas={serial_blas} native_route_engaged={engaged} \
                  arms_are_the_shipped_route_not_replicas=true incumbent_is_live_numpy=true \
                  ratio={:.6} ratio_ci95=[{:.6},{:.6}] numpy_ns={:.1} fnp_ns={:.1} \
