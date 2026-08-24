@@ -1290,6 +1290,10 @@ fn main() {
                 bench_divide_kernel_on_numpy_buffers,
             ),
             (
+                "bench_allocation_symmetry_planted_negative",
+                bench_allocation_symmetry_planted_negative,
+            ),
+            (
                 "bench_divide_allocator_provenance",
                 bench_divide_allocator_provenance,
             ),
@@ -4123,6 +4127,146 @@ fn bench_divide_fe_flag_detector_vs_numpy(_c: &mut Criterion) {
 // dTLB gap is not costing time, and the third mechanism joins the two already
 // refuted. Bank either way; a tie is the more useful outcome because it closes a
 // door that would otherwise invalidate a whole lane of banked numbers.
+/// THE PLANTED NEGATIVE FOR `deadlock-audit-48by6`: prove the harness is allocation
+/// NEUTRAL, then measure what the allocation asymmetry is actually worth.
+///
+/// `48by6` established that a group timing a preallocated Rust replica against an
+/// ALLOCATING NumPy call prices a 32 MB buffer rather than a kernel, and that the dual
+/// A/A nulls CANNOT see it - a null proves each arm is internally reproducible, never
+/// that the two arms are comparable. That leaves an obvious question unanswered: is the
+/// asymmetry real and how big is it, or is some of it an artefact of the instrument?
+///
+/// This group answers both, in ONE invocation, with no kernel anywhere in it.
+///
+/// ROW 1, `allocation_symmetry_planted_negative` - THE GUARD. Both arms do exactly the
+/// same thing: allocate one `numpy.empty_like` and nothing else. Identical work in both
+/// slots MUST read ~1.0. This is a planted negative in the strict sense - a case
+/// engineered to have no effect, where any decidable verdict is a defect in the
+/// measurement rather than a finding. If this row ever goes decidable, allocation timing
+/// is biased by ARM POSITION and every allocation-bearing row in this repo is suspect,
+/// including the ones `48by6` corrected.
+///
+/// ROW 2, `allocation_asymmetry_planted_positive` - THE MAGNITUDE. Arm A allocates a
+/// fresh `numpy.empty_like` per call; arm B writes a byte into a buffer allocated ONCE
+/// outside the loop. This is precisely the shape `48by6` condemns, reduced until nothing
+/// but the asymmetry is left. Its ratio is therefore a direct measurement of what the
+/// defect is worth on this host - the quantity `48by6` asserts but never measured.
+///
+/// WHY BOTH ROWS AND NOT JUST THE SECOND: row 2 alone cannot distinguish "allocation is
+/// expensive" from "the harness favours arm A". Row 1 rules the second out, in the same
+/// invocation, on the same host, at the same size. Neither row means anything without
+/// the other.
+///
+/// NEITHER ROW IS A PERFORMANCE CLAIM. There is no kernel and no incumbent algorithm
+/// here - both arms are NumPy allocation calls. These are INSTRUMENT rows and must never
+/// be quoted as a vs-NumPy result.
+fn bench_allocation_symmetry_planted_negative(_c: &mut Criterion) {
+    let n = DIVIDE_SERIAL_N;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_version = numpy
+            .getattr("__version__")
+            .expect("numpy.__version__")
+            .extract::<String>()
+            .expect("numpy version is a string");
+
+        let locals = PyDict::new(py);
+        locals.set_item("np", &numpy).expect("bind numpy");
+        locals.set_item("n", n).expect("bind n");
+        py.run(
+            std::ffi::CString::new("a = np.empty(n)\nheld = np.empty(n)\n")
+                .unwrap()
+                .as_c_str(),
+            Some(&locals),
+            Some(&locals),
+        )
+        .expect("build operands");
+        let a_obj = locals.get_item("a").expect("a operand");
+        let held = locals.get_item("held").expect("preallocated buffer");
+
+        // Allocate and TOUCH one element. The touch is what makes the first-touch page
+        // faults happen inside the timed region rather than lazily afterwards - an
+        // untouched `empty` can be little more than an mmap, which would understate the
+        // very cost this group exists to price.
+        let allocate_and_touch = || {
+            let started = Instant::now();
+            let fresh = numpy
+                .call_method1("empty_like", (&a_obj,))
+                .expect("fresh numpy output");
+            fresh.set_item(0, 1.0_f64).expect("first touch");
+            let elapsed = started.elapsed();
+            common::ContractObservation {
+                elapsed,
+                checksum: 0x0a11_0c00,
+            }
+        };
+
+        // ROW 1: identical work in both slots. Must read ~1.0.
+        {
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                "allocation_symmetry_planted_negative",
+                allocate_and_touch,
+                allocate_and_touch,
+            );
+            println!(
+                "ALLOCATION_PLANTED_NEGATIVE row=symmetry n={n} numpy_version={numpy_version} \
+                 worker={} harness=common::run_dual_null_median_ci_contract \
+                 both_arms_allocate=true is_instrument_row_not_a_perf_claim=true \
+                 expectation=ratio_near_one_any_decidable_verdict_is_a_defect \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] arm_a_ns={:.1} arm_b_ns={:.1} \
+                 incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+
+        // ROW 2: the `48by6` shape, stripped to nothing but the asymmetry.
+        {
+            let allocating_arm = allocate_and_touch;
+            let preallocated_arm = || {
+                let started = Instant::now();
+                held.set_item(0, 1.0_f64).expect("write into held buffer");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: 0x0a11_0c00,
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                "allocation_asymmetry_planted_positive",
+                allocating_arm,
+                preallocated_arm,
+            );
+            println!(
+                "ALLOCATION_PLANTED_NEGATIVE row=asymmetry n={n} numpy_version={numpy_version} \
+                 worker={} harness=common::run_dual_null_median_ci_contract \
+                 arm_a_allocates_per_call=true arm_b_writes_preallocated=true \
+                 is_instrument_row_not_a_perf_claim=true \
+                 meaning=this_ratio_is_what_the_48by6_defect_is_worth_here \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] arm_a_ns={:.1} arm_b_ns={:.1} \
+                 incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
 fn bench_divide_allocator_provenance(_c: &mut Criterion) {
     let n = DIVIDE_SERIAL_N;
     let (a_vec, b_vec) = divide_hazard_free_operands(n);
