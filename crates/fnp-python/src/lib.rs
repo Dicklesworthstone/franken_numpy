@@ -10416,6 +10416,88 @@ fn f64_divide_fast_accepts_without_fp_error(a: f64, b: f64, q: f64) -> bool {
         || (bits & 0x7fff_ffff_ffff_ffff == 0 && a == 0.0 && b.is_finite() && b != 0.0)
 }
 
+/// Run `body` with the op as a COMPILE-TIME constant, so `BinaryOp::apply` inlines
+/// (`deadlock-audit-hzl1w`).
+///
+/// THE DEFECT THIS EXISTS TO REMOVE, read out of the shipped ELF rather than guessed.
+/// `zerocopy_f64_binary_flat_with_out` took `op` as a runtime value, so its serial
+/// fallback compiled to a scalar loop with an OUT-OF-LINE CALL PER ELEMENT:
+///
+/// ```text
+///   mov    0xb8(%rsp),%rax          ; reload lhs base from the stack
+///   vmovsd (%rax,%r14,8),%xmm0      ; lhs[i]
+///   mov    0xb0(%rsp),%rax          ; reload rhs base from the stack
+///   vmovsd (%rax,%r14,8),%xmm1      ; rhs[i]
+///   mov    %ebx,%edi                ; op discriminant into the argument register
+///   call   <fnp_ufunc::BinaryOp>::apply     ; 2283-byte callee, EVERY element
+///   vmovsd %xmm0,(%r12,%r14,8)      ; out[i]
+/// ```
+///
+/// Eleven instructions per ELEMENT, one opaque call, everything scalar - the call is
+/// what forbids vectorisation, and it also forces the two base pointers to be respilled
+/// each iteration. A monomorphic loop over the same op is 6 instructions per FOUR
+/// elements on ymm.
+///
+/// WHY A MACRO AND NOT A GENERIC FUNCTION: the arm must name a CONSTANT `BinaryOp`, so
+/// that `apply`'s own `match self` folds away at compile time and its body inlines. A
+/// generic over `Fn(f64, f64) -> f64` would work equally well but would require writing
+/// all 35 closures out by hand; matching on the variant reuses `apply` verbatim, which
+/// is what makes the result bit-identical BY CONSTRUCTION rather than by review.
+///
+/// BIT-EXACTNESS: every arm calls the very same `BinaryOp::apply` on the very same
+/// inputs in the same order. The only difference is that the discriminant is known to
+/// the compiler. There is no arithmetic here to get wrong.
+///
+/// The match is EXHAUSTIVE on purpose - a new `BinaryOp` variant fails the build here
+/// rather than silently falling back to the slow path.
+macro_rules! with_specialized_binary_op {
+    ($op:expr, |$specialized:ident| $body:block) => {{
+        macro_rules! __arm {
+            ($variant:ident) => {{
+                const $specialized: BinaryOp = BinaryOp::$variant;
+                $body
+            }};
+        }
+        match $op {
+            BinaryOp::Add => __arm!(Add),
+            BinaryOp::Sub => __arm!(Sub),
+            BinaryOp::Mul => __arm!(Mul),
+            BinaryOp::Div => __arm!(Div),
+            BinaryOp::Power => __arm!(Power),
+            BinaryOp::Remainder => __arm!(Remainder),
+            BinaryOp::Minimum => __arm!(Minimum),
+            BinaryOp::Maximum => __arm!(Maximum),
+            BinaryOp::Arctan2 => __arm!(Arctan2),
+            BinaryOp::Fmod => __arm!(Fmod),
+            BinaryOp::Copysign => __arm!(Copysign),
+            BinaryOp::Fmax => __arm!(Fmax),
+            BinaryOp::Fmin => __arm!(Fmin),
+            BinaryOp::Heaviside => __arm!(Heaviside),
+            BinaryOp::Nextafter => __arm!(Nextafter),
+            BinaryOp::LogicalAnd => __arm!(LogicalAnd),
+            BinaryOp::LogicalOr => __arm!(LogicalOr),
+            BinaryOp::LogicalXor => __arm!(LogicalXor),
+            BinaryOp::Equal => __arm!(Equal),
+            BinaryOp::NotEqual => __arm!(NotEqual),
+            BinaryOp::Less => __arm!(Less),
+            BinaryOp::LessEqual => __arm!(LessEqual),
+            BinaryOp::Greater => __arm!(Greater),
+            BinaryOp::GreaterEqual => __arm!(GreaterEqual),
+            BinaryOp::Hypot => __arm!(Hypot),
+            BinaryOp::Logaddexp => __arm!(Logaddexp),
+            BinaryOp::Logaddexp2 => __arm!(Logaddexp2),
+            BinaryOp::Ldexp => __arm!(Ldexp),
+            BinaryOp::FloorDivide => __arm!(FloorDivide),
+            BinaryOp::FloatPower => __arm!(FloatPower),
+            BinaryOp::BitwiseAnd => __arm!(BitwiseAnd),
+            BinaryOp::BitwiseOr => __arm!(BitwiseOr),
+            BinaryOp::BitwiseXor => __arm!(BitwiseXor),
+            BinaryOp::LeftShift => __arm!(LeftShift),
+            BinaryOp::RightShift => __arm!(RightShift),
+        }
+    }};
+}
+
 // Two-input f64-output counterpart of zerocopy_f64_unary_flat. When a and b are
 // exact same-shape C-contiguous float64 ndarrays, read both buffers and write
 // `op.apply(a[i], b[i])` straight into the output buffer — no intermediate Rust
@@ -10915,15 +10997,20 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                     divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             } else {
-                out_data
-                    .par_chunks_mut(chunk)
-                    .zip(lhs.par_chunks(chunk))
-                    .zip(rhs.par_chunks(chunk))
-                    .for_each(|((o, l), r)| {
-                        for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
-                            *s = op.apply(x, y);
-                        }
-                    });
+                // SPECIALIZED (`deadlock-audit-hzl1w`): `KERNEL` is a constant here, so
+                // `apply` inlines and this body vectorises instead of calling out once
+                // per element. Bit-identical - same `apply`, same operands, same order.
+                with_specialized_binary_op!(op, |KERNEL| {
+                    out_data
+                        .par_chunks_mut(chunk)
+                        .zip(lhs.par_chunks(chunk))
+                        .zip(rhs.par_chunks(chunk))
+                        .for_each(|((o, l), r)| {
+                            for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                                *s = KERNEL.apply(x, y);
+                            }
+                        });
+                });
             }
         } else if matches!(op, BinaryOp::Div) {
             // HARDWARE FLAGS, NOT SOFTWARE CLASSIFICATION — the same detector the parallel
@@ -10987,9 +11074,15 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
                 divide_hazard.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         } else {
-            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-                slot.set(op.apply(a_cell.get(), b_cell.get()));
-            }
+            // SPECIALIZED (`deadlock-audit-hzl1w`). This is the loop the ELF showed
+            // compiling to `call <BinaryOp>::apply` PER ELEMENT; with `KERNEL` constant
+            // the callee inlines, the discriminant match folds away, and the base
+            // pointers stop being respilled every iteration.
+            with_specialized_binary_op!(op, |KERNEL| {
+                for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+                    slot.set(KERNEL.apply(a_cell.get(), b_cell.get()));
+                }
+            });
         }
     }
     if divide_hazard.load(std::sync::atomic::Ordering::Relaxed) {
@@ -173649,6 +173742,95 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             }
             Ok(())
         });
+    }
+
+    /// Specializing the binary kernel per op must not change ONE BIT of output
+    /// (`deadlock-audit-hzl1w`).
+    ///
+    /// `with_specialized_binary_op!` replaced a runtime `op.apply(..)` in the hot loop
+    /// with an exhaustive match whose arms each call `apply` on a CONSTANT variant. That
+    /// is meant to be a pure codegen change - same function, same operands, same order -
+    /// so this pins the claim instead of asserting it: for every one of the 35 variants,
+    /// the specialized dispatch must reproduce `op.apply` BIT for BIT on operands chosen
+    /// to hit the awkward lanes.
+    ///
+    /// THE OPERANDS ARE THE POINT. Signed zeros separate `Maximum` from a naive
+    /// `f64::max`; NaN separates `Maximum` from `Fmax` and drives `Heaviside`'s branch;
+    /// infinities drive `Logaddexp` and `Hypot`; a zero divisor exercises `Div`, `Fmod`
+    /// and `Remainder`; negative bases exercise `Power` and `FloatPower`; and the
+    /// integer-flavoured ops (`Bitwise*`, shifts, `Ldexp`) are reached with values that
+    /// are exactly representable so their casts are unambiguous. Comparison is on
+    /// `to_bits`, so a NaN payload change or a sign-of-zero flip fails.
+    #[test]
+    fn specialized_binary_dispatch_is_bit_identical_to_the_runtime_op() {
+        const OPS: [BinaryOp; 35] = [
+            BinaryOp::Add,
+            BinaryOp::Sub,
+            BinaryOp::Mul,
+            BinaryOp::Div,
+            BinaryOp::Power,
+            BinaryOp::Remainder,
+            BinaryOp::Minimum,
+            BinaryOp::Maximum,
+            BinaryOp::Arctan2,
+            BinaryOp::Fmod,
+            BinaryOp::Copysign,
+            BinaryOp::Fmax,
+            BinaryOp::Fmin,
+            BinaryOp::Heaviside,
+            BinaryOp::Nextafter,
+            BinaryOp::LogicalAnd,
+            BinaryOp::LogicalOr,
+            BinaryOp::LogicalXor,
+            BinaryOp::Equal,
+            BinaryOp::NotEqual,
+            BinaryOp::Less,
+            BinaryOp::LessEqual,
+            BinaryOp::Greater,
+            BinaryOp::GreaterEqual,
+            BinaryOp::Hypot,
+            BinaryOp::Logaddexp,
+            BinaryOp::Logaddexp2,
+            BinaryOp::Ldexp,
+            BinaryOp::FloorDivide,
+            BinaryOp::FloatPower,
+            BinaryOp::BitwiseAnd,
+            BinaryOp::BitwiseOr,
+            BinaryOp::BitwiseXor,
+            BinaryOp::LeftShift,
+            BinaryOp::RightShift,
+        ];
+        let operands: [f64; 14] = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.0,
+            -2.0,
+            3.0,
+            0.5,
+            -0.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+        ];
+        for op in OPS {
+            for &x in &operands {
+                for &y in &operands {
+                    let reference = op.apply(x, y);
+                    let specialized =
+                        with_specialized_binary_op!(op, |KERNEL| { KERNEL.apply(x, y) });
+                    assert_eq!(
+                        specialized.to_bits(),
+                        reference.to_bits(),
+                        "{op:?}({x:?}, {y:?}): specialized dispatch changed the bits - \
+                         the macro is meant to be a codegen change and nothing else"
+                    );
+                }
+            }
+        }
     }
 
     /// The size gate must decline the native f64 divide route only for `Div` and
