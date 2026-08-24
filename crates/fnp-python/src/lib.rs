@@ -82388,6 +82388,10 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         };
         let in_native_window = blas_is_single_threaded()
             && m.saturating_mul(k).saturating_mul(n) >= PY_NATIVE_GEMM_MIN_FLOPS
+            // Same minimum-output-dimension condition as the 2-D predicate, kept in step
+            // with it deliberately: the packing economics are a property of the kernel,
+            // not of which entry point reached it (`franken_numpy-ixs5y`).
+            && m.min(n) >= PY_NATIVE_GEMM_MIN_OUTPUT_DIM
             && m <= PY_NATIVE_GEMM_MAX_DIM
             && k <= PY_NATIVE_GEMM_MAX_DIM
             && n <= PY_NATIVE_GEMM_MAX_DIM;
@@ -91452,6 +91456,12 @@ fn blas_is_single_threaded() -> bool {
 }
 
 const PY_NATIVE_GEMM_MIN_FLOPS: usize = 320 * 320 * 320;
+/// Smallest output dimension the packed GEMM is MEASURED to win at
+/// (`franken_numpy-ixs5y`). See the sweep in `python_native_gemm_f64_2d_eligible_for_op`:
+/// `min(m, n) = 256` loses to serial OpenBLAS at every `k` tested, `384` wins decidably.
+/// Packing amortises over `m*n/(m+n)`, which is independent of `k`, so a FLOPS floor
+/// cannot express this condition and a long `k` was buying admission it could not repay.
+const PY_NATIVE_GEMM_MIN_OUTPUT_DIM: usize = 384;
 // Upper dim bound for routing np.matmul/np.dot to the native packed GEMM. The
 // B-micropanel packing (e509860c, ~5x) moved the crossover vs the local numpy
 // BLAS from 896 to 1024 (measured same-host, parity=True: at n=1024 fnp 20.0 ms
@@ -91499,6 +91509,36 @@ fn python_native_gemm_f64_2d_eligible_for_op(
     let (k2, n) = (b.shape()[0], b.shape()[1]);
     let max_dim = python_native_gemm_max_dim_for_op(op);
     if k1 != k2 || [m, k1, n].iter().any(|&dim| dim == 0 || dim > max_dim) {
+        return false;
+    }
+    // MINIMUM OUTPUT DIMENSION (`franken_numpy-ixs5y`). A FLOPS floor alone admits a
+    // shape class where the packed GEMM cannot win: small `m` and `n` with a long `k`.
+    // Packing writes O(m*k + k*n) while compute is O(m*k*n), so work-per-packed-byte is
+    // m*k*n / (m*k + k*n) = m*n / (m + n) - which for square output is m/2 and DOES NOT
+    // DEPEND ON k. A gate keyed on m*k*n therefore lets a long `k` buy admission that
+    // the packing can never repay.
+    //
+    // Measured against live NumPy (serial BLAS, thinkstation1, dual-null contract), which
+    // is what sets the constant rather than the algebra:
+    //
+    //   m=n=256 k=512    0.751475 [0.721708,0.771966]  DECIDABLE_REGRESSION
+    //   m=n=256 k=1024   0.835948 [0.816630,0.875057]  negative (undecided)
+    //   m=n=256 k=1024   0.884104 [0.846093,0.906281]  DECIDABLE_REGRESSION (earlier run)
+    //   m=n=256 k=1536   0.962768 [0.882462,0.968800]  negative (undecided)
+    //   m=n=384 k=1024   1.314727 [1.238846,1.382866]  DECIDABLE_WIN
+    //   m=n=512 k=1024   1.654026 [1.606771,1.783517]  DECIDABLE_WIN
+    //   m=n=768 k=1024   2.205432 [2.075813,2.258520]  DECIDABLE_WIN
+    //
+    // Negative at 256 for EVERY k tested, decidably positive from 384 up. The threshold
+    // is set at the smallest MEASURED win rather than interpolated into the untested
+    // (256, 384) gap, so it is conservative by construction: it can only decline shapes
+    // we have not shown ourselves winning.
+    //
+    // `min(m, n)` and not `m*n`: the rectangular cells settle it. 1024x256x1024 wins
+    // 1.687068 with a SMALL k, and 1536x384x1536 wins 2.988959 - both have a large
+    // min(m, n) - while every small-min(m, n) case loses regardless of how large m*n or
+    // the FLOP count gets.
+    if m.min(n) < PY_NATIVE_GEMM_MIN_OUTPUT_DIM {
         return false;
     }
     if a.values()
@@ -121246,13 +121286,63 @@ mod tests {
                 "native matmul/dot helper output bit pattern changed"
             );
 
+            // 320^3 USED TO BE ASSERTED ELIGIBLE HERE, ON AN EARLIER PROFILE. Direct
+            // measurement against live NumPy refutes that: 320x320x320 reads 0.825322
+            // ci95=[0.802650,0.861323] DECIDABLE_REGRESSION under the dual-null contract
+            // (serial BLAS, thinkstation1) - it LOSES 1.21x. It is now declined by
+            // PY_NATIVE_GEMM_MIN_OUTPUT_DIM, and this assertion is inverted to match the
+            // measurement rather than the old profile (`franken_numpy-ixs5y`).
             let medium_a =
                 UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
             let medium_b =
                 UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
             assert!(
-                python_native_gemm_f64_2d_eligible(&medium_a, &medium_b),
-                "profiled 320^3 f64 GEMM should take the native gate"
+                !python_native_gemm_f64_2d_eligible(&medium_a, &medium_b),
+                "320^3 f64 GEMM is a MEASURED regression (0.825322) and must delegate"
+            );
+            // The smallest output dimension measured to win decidably (1.314727 at
+            // k=1024). This is the boundary the constant encodes, so it is pinned.
+            let win_dim = super::PY_NATIVE_GEMM_MIN_OUTPUT_DIM;
+            let at_min_a =
+                UFuncArray::new(vec![win_dim, 1024], vec![1.0; win_dim * 1024], DType::F64)
+                    .unwrap();
+            let at_min_b =
+                UFuncArray::new(vec![1024, win_dim], vec![1.0; 1024 * win_dim], DType::F64)
+                    .unwrap();
+            assert!(
+                python_native_gemm_f64_2d_eligible(&at_min_a, &at_min_b),
+                "min(m,n)={win_dim} is the smallest MEASURED win and must take the native gate"
+            );
+            // One below the boundary must decline, so the constant is load-bearing rather
+            // than decorative.
+            let below_a = UFuncArray::new(
+                vec![win_dim - 1, 1024],
+                vec![1.0; (win_dim - 1) * 1024],
+                DType::F64,
+            )
+            .unwrap();
+            let below_b = UFuncArray::new(
+                vec![1024, win_dim - 1],
+                vec![1.0; 1024 * (win_dim - 1)],
+                DType::F64,
+            )
+            .unwrap();
+            assert!(
+                !python_native_gemm_f64_2d_eligible(&below_a, &below_b),
+                "min(m,n) below {win_dim} must delegate"
+            );
+            // A LONG k MUST NOT BUY ADMISSION. This is the whole point of the condition:
+            // 256x4096x256 clears the FLOPS floor eight times over, yet its packing can
+            // never repay - m*n/(m+n) is 128 regardless of k, and every measured k at
+            // m=n=256 lost.
+            let long_k_a =
+                UFuncArray::new(vec![256, 4096], vec![1.0; 256 * 4096], DType::F64).unwrap();
+            let long_k_b =
+                UFuncArray::new(vec![4096, 256], vec![1.0; 4096 * 256], DType::F64).unwrap();
+            assert!(
+                !python_native_gemm_f64_2d_eligible(&long_k_a, &long_k_b),
+                "a long k must not buy admission for a small output - that is the shape \
+                 class the FLOPS floor alone admitted and the packing cannot repay"
             );
 
             let small_a =
@@ -121275,24 +121365,29 @@ mod tests {
             // A dimension above PY_NATIVE_GEMM_MAX_DIM (1024 since e6468d9c raised the
             // crossover from 896) must stay on the numpy fallback. 1024 itself is now
             // at the cap and eligible, so test one genuinely above it.
+            // These cases exercise the CAP, so their other dimensions are kept at or above
+            // PY_NATIVE_GEMM_MIN_OUTPUT_DIM - otherwise the min-output condition would
+            // decline them first and the cap would never be reached, leaving the
+            // assertions passing for the wrong reason.
             let cap = super::PY_NATIVE_GEMM_MAX_DIM;
+            let wide = win_dim.max(512);
             let too_large_a =
-                UFuncArray::new(vec![1280, 320], vec![1.0; 1280 * 320], DType::F64).unwrap();
+                UFuncArray::new(vec![1280, wide], vec![1.0; 1280 * wide], DType::F64).unwrap();
             let too_large_b =
-                UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
+                UFuncArray::new(vec![wide, wide], vec![1.0; wide * wide], DType::F64).unwrap();
             assert!(
                 !python_native_gemm_f64_2d_eligible(&too_large_a, &too_large_b),
                 "dimension above the {cap} cap should stay on numpy fallback"
             );
             // And the cap boundary itself is eligible under the raised crossover.
             let at_cap_a =
-                UFuncArray::new(vec![cap, 320], vec![1.0; cap * 320], DType::F64).unwrap();
+                UFuncArray::new(vec![cap, wide], vec![1.0; cap * wide], DType::F64).unwrap();
             assert!(
                 python_native_gemm_f64_2d_eligible(&at_cap_a, &too_large_b),
                 "dimension at the {cap} cap should take the native gate"
             );
             let matmul_wide =
-                UFuncArray::new(vec![1536, 320], vec![1.0; 1536 * 320], DType::F64).unwrap();
+                UFuncArray::new(vec![1536, wide], vec![1.0; 1536 * wide], DType::F64).unwrap();
             assert!(
                 !python_native_gemm_f64_2d_eligible(&matmul_wide, &too_large_b),
                 "dot should keep the shared {cap} cap"

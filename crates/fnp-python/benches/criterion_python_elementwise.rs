@@ -4934,6 +4934,33 @@ fn bench_shipped_gemm_vs_numpy(_c: &mut Criterion) {
             ("oversize_2048", 2048, 2048, 2048, "float64"),
             // f32 has NO native GEMM route at all - the predicate is f64-only.
             ("f32_1024", 1024, 1024, 1024, "float32"),
+            // ---------------------------------------------------------------------
+            // PROFILING THE narrow_256x1024x256 LOSS. That cell engages (67.1M flops
+            // clears the 32.8M floor) and loses 1.131x. Two competing explanations, and
+            // they are separable by measurement rather than by argument:
+            //
+            //   (i)  OUTPUT SIZE. Packing writes O(m*k + k*n) and compute is O(m*k*n),
+            //        so the packing amortises over the output. Under this reading the
+            //        gate should key on m*n.
+            //   (ii) MIN DIMENSION. Work over packing is m*k*n / (m*k + k*n) = mn/(m+n),
+            //        which for m == n is m/2 and does NOT depend on k at all. Under this
+            //        reading the gate should key on mn/(m+n), and k is irrelevant.
+            //
+            // These predict different things, which is what makes the sweep worth
+            // running: hold k at 1024 and walk m == n, then hold m == n at 256 and walk
+            // k. If (ii) is right the second sweep stays flat and loses at every k.
+            ("sweep_mn256_k1024", 256, 1024, 256, "float64"),
+            ("sweep_mn384_k1024", 384, 1024, 384, "float64"),
+            ("sweep_mn512_k1024", 512, 1024, 512, "float64"),
+            ("sweep_mn768_k1024", 768, 1024, 768, "float64"),
+            ("sweep_mn256_k512", 256, 512, 256, "float64"),
+            ("sweep_mn256_k1536", 256, 1536, 256, "float64"),
+            // 320 is the disputed point: it sits in the untested gap between 256 (loses)
+            // and 384 (wins), AND an existing test asserts a 320^3 GEMM "should take the
+            // native gate" on the strength of an earlier profile. A threshold cannot be
+            // set over the top of that claim without measuring the exact shape it names.
+            ("sweep_mn320_k320", 320, 320, 320, "float64"),
+            ("sweep_mn320_k1024", 320, 1024, 320, "float64"),
         ];
 
         for (label, m, k, n, dtype) in cases.iter().copied() {
