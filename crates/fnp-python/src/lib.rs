@@ -35771,15 +35771,49 @@ fn searchsorted(
     // (int / float / bool). Lists, tuples, and other sequences fail that
     // extraction and correctly fall through to the array branch.
     let v_bound = v.bind(py);
-    let v_is_scalar = match v_bound
-        .getattr(intern!(py, "ndim"))
-        .and_then(|n| n.extract::<i64>())
+    // TYPE CHECK BEFORE THE getattr THAT RAISES (`deadlock-audit-v46rn`).
+    //
+    // A plain Python `float` or `int` needle has no `ndim` attribute, so the `getattr`
+    // below RAISES AttributeError and we immediately discard it. CPython materialises a
+    // real exception for that - object, args, traceback plumbing - and this sits on the
+    // scalar-needle path, which is a MEASURED regression: `ss_scalar_needle` reads
+    // 0.697544 / 0.701455 across two runs, i.e. ~1.43x slower than live NumPy, and its
+    // native arm is a single binary search that cannot itself account for that.
+    //
+    // `is_instance_of` is a C-level type check that raises nothing.
+    //
+    // SEMANTICS ARE PRESERVED EXACTLY, case by case, because this predicate decides
+    // whether the result is a NumPy scalar or an array:
+    //   * Python float / int / bool - previously: no `ndim`, then `extract` succeeds ->
+    //     scalar. Now: type check -> scalar. Same.
+    //   * `np.float64` - it SUBCLASSES Python `float`, so it takes the new fast path;
+    //     previously it had `ndim == 0` -> scalar. Same answer either way.
+    //   * `np.int64` - does NOT subclass Python `int`, so it still falls through to the
+    //     `ndim == 0` branch. Unchanged.
+    //   * 0-d ndarray - not a float/int, falls through, `ndim == 0` -> scalar. Unchanged.
+    //   * 1-d ndarray - falls through, `ndim == 1` -> not scalar. Unchanged.
+    //   * list / tuple - falls through, `ndim` raises, every `extract` fails -> not
+    //     scalar. Unchanged, and still pays the raise, which is correct: that case has to
+    //     ask.
+    //
+    // `PyBool` is checked first only for clarity; `bool` subclasses `int` in Python, so
+    // either arm would answer scalar.
+    let v_is_scalar = if v_bound.is_instance_of::<PyBool>()
+        || v_bound.is_instance_of::<PyInt>()
+        || v_bound.is_instance_of::<pyo3::types::PyFloat>()
     {
-        Ok(ndim_val) => ndim_val == 0,
-        Err(_) => {
-            v_bound.extract::<i64>().is_ok()
-                || v_bound.extract::<f64>().is_ok()
-                || v_bound.extract::<bool>().is_ok()
+        true
+    } else {
+        match v_bound
+            .getattr(intern!(py, "ndim"))
+            .and_then(|n| n.extract::<i64>())
+        {
+            Ok(ndim_val) => ndim_val == 0,
+            Err(_) => {
+                v_bound.extract::<i64>().is_ok()
+                    || v_bound.extract::<f64>().is_ok()
+                    || v_bound.extract::<bool>().is_ok()
+            }
         }
     };
     // Zero-copy scalar-query fast path: a single binary search over the haystack
