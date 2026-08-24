@@ -867,8 +867,9 @@ impl BinaryOp {
             // maximum(0.0, -0.0) is -0.0 and maximum(-0.0, 0.0) is +0.0, both measured.
             // `f64::max` would answer +0.0 for both.
             Self::Minimum => {
-                // Mirror of `Maximum` below; see the note there. `-0.0 < 0.0` is false, so
-                // a tie again yields `rhs`, matching NumPy.
+                // Mirror of `Maximum` below; see the note there, including why splitting it
+                // for a `vminpd` does not work. `-0.0 < 0.0` is false, so a tie again
+                // yields `rhs`, matching NumPy.
                 if lhs.is_nan() || lhs < rhs { lhs } else { rhs }
             }
             Self::Maximum => {
@@ -878,6 +879,13 @@ impl BinaryOp {
                 // false whenever `rhs` is NaN, so the rhs-NaN case falls out for free. Only
                 // an lhs NaN needs asking about, because a NaN compares false against
                 // everything. Same bits as the four-branch form on all 12 measured pairs.
+                //
+                // DO NOT SPLIT THIS INTO `let m = if lhs > rhs {..}; if lhs.is_nan() {..}`
+                // hoping for a `vmaxpd`. Tried and measured: LLVM canonicalises both forms
+                // to the SAME 31-instruction loop (vcmpunordpd + vcmpltpd + vorpd +
+                // vblendvpd per vector), because folding a float `a > b ? a : b` into
+                // `maxpd` is only legal under fast-math - `maxpd` and the ternary differ on
+                // NaN and signed zero, which is exactly what this op must preserve.
                 if lhs.is_nan() || lhs > rhs { lhs } else { rhs }
             }
             Self::Arctan2 => lhs.atan2(rhs),
