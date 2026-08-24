@@ -4277,6 +4277,82 @@ fn bench_allocation_symmetry_planted_negative(_c: &mut Criterion) {
                 candidate_null.ratio_median,
             );
         }
+
+        // ROW 3: the SAME asymmetry with the fresh buffers RETAINED, which is what
+        // decides its magnitude.
+        //
+        // Row 2 drops each fresh buffer at the end of the iteration that made it, so the
+        // allocator hands the SAME mapping back on the next call and the first-touch
+        // faults are already paid. That is why row 2 reads ~1.02 rather than the 2.8x
+        // mmap churn and 26.1x retained-output figures this ledger already carries: the
+        // floor on this effect is object LIFETIME, not byte count.
+        //
+        // Holding a ring of live buffers defeats that reuse - the allocator cannot return
+        // a mapping that is still referenced, so every call takes fresh pages and pays
+        // real faults. Arm B is unchanged, so the fill still cancels and the ratio is
+        // still allocation-plus-faults; only the allocator's freedom to recycle differs.
+        //
+        // THE RING IS BOUNDED ON PURPOSE. Retaining every observation would grow without
+        // limit across the contract's rounds; a fixed window is enough to stop immediate
+        // reuse while keeping the footprint at RING x n x 8 bytes. The retain happens
+        // AFTER `elapsed` is taken, so bookkeeping is never inside the timed region.
+        {
+            const RING: usize = 16;
+            let mut ring: Vec<Bound<'_, PyAny>> = Vec::with_capacity(RING);
+            let mut slot = 0_usize;
+            let retaining_arm = || {
+                let started = Instant::now();
+                let fresh = numpy
+                    .call_method1("empty_like", (&a_obj,))
+                    .expect("fresh numpy output");
+                fresh
+                    .call_method1("fill", (1.0_f64,))
+                    .expect("first-touch every page");
+                let elapsed = started.elapsed();
+                if ring.len() < RING {
+                    ring.push(fresh);
+                } else {
+                    ring[slot] = fresh;
+                    slot = (slot + 1) % RING;
+                }
+                common::ContractObservation {
+                    elapsed,
+                    checksum: 0x0a11_0c00,
+                }
+            };
+            let preallocated_arm = || {
+                let started = Instant::now();
+                held.call_method1("fill", (1.0_f64,))
+                    .expect("same fill, into the buffer allocated once");
+                let elapsed = started.elapsed();
+                common::ContractObservation {
+                    elapsed,
+                    checksum: 0x0a11_0c00,
+                }
+            };
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                "allocation_retained_planted_positive",
+                retaining_arm,
+                preallocated_arm,
+            );
+            println!(
+                "ALLOCATION_PLANTED_NEGATIVE row=retained n={n} numpy_version={numpy_version} \
+                 worker={} harness=common::run_dual_null_median_ci_contract \
+                 arm_a_allocates_and_RETAINS=true retained_ring={RING} \
+                 arm_b_writes_preallocated=true is_instrument_row_not_a_perf_claim=true \
+                 meaning=upper_bound_on_the_48by6_defect_when_the_output_outlives_the_call \
+                 ratio={:.6} ratio_ci95=[{:.6},{:.6}] arm_a_ns={:.1} arm_b_ns={:.1} \
+                 incumbent_null={:.6} candidate_null={:.6}",
+                measurement_worker(),
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
     });
 }
 
