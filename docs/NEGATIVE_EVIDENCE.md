@@ -59338,3 +59338,91 @@ pure `#[pyfunction]` entry plus one delegating call, which makes it the cleanest
 for what the `(*args, **kwargs)` wrapper itself costs. `correlate 256x256 valid` at ~1.80x is the
 family's standing worst and its residual ~630 ns is the two surviving gates plus delegation.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `np.sort` WALKED FIFTEEN DTYPE-SPECIFIC GATES TO DELEGATE, EACH RE-DERIVING THE SAME FACTS: f64 flat 2.862x -> 1.630x, i32 3.134x -> 1.589x, and the excess drops ~1700 ns at EVERY size (`deadlock-audit-gxmih`)
+
+`TanBridge`. Shipped `91680fbd`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3
+in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** candidate-win on fourteen cells (all still losses to numpy and reported
+as such), no-change on the three cells where fnp already wins, one adverse cell disclosed below.
+
+`np.sort` dispatches through two structured-dtype gates, seven flat gates and thirteen axis gates.
+Every one of them opens by re-deriving the SAME facts for itself - exact ndarray, dtype kind,
+itemsize, rank, C-contiguity - before it can decline, and most then acquire a `PyBuffer` too. They
+PARTITION on dtype, so **at most one can ever accept a given operand**. An `np.sort` of a small f64
+array therefore walked the whole chain and delegated.
+
+One `numeric_operand_facts` read now selects the family. Each guard is a NECESSARY condition
+lifted from the gate it protects - `float_of(8)`, `complex_of(16)`, `kind_is('U')`, `temporal`, and
+TWO integer predicates, because the flat integer gate only routes 4- and 8-byte widths while the
+axis ones are byte-exact for any width. A non-exact-ndarray operand classifies as unknown and walks
+the chain exactly as before.
+
+```
+SORT_GATE_DISPATCH worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=4303999be9ca  after_elf=43e8d326ca45
+
+  case                    BEFORE                      AFTER              excess ns
+  f64 flat 2^8      2.862x [2.197,2.947] -> 1.630x [1.555,1.687]     2582 ->  897
+  f64 flat 2^10     1.672x [1.367,1.700] -> 1.200x [1.168,1.246]     3396 ->  963
+  f64 flat 2^13     1.075x [1.030,1.108] -> 1.020x [1.007,1.025]     3175 ->  949
+  f64 flat 2^16     1.007x [0.999,1.013] -> 1.006x [1.001,1.011]     8418 -> 4793
+  i32 flat 2^8      3.134x [3.093,3.269] -> 1.589x [1.520,1.689]     2166 ->  631
+  f32 flat 2^8      2.935x [2.758,2.990] -> 1.320x [1.215,1.423]     2174 ->  375
+  bool flat 2^8     2.607x [2.478,2.780] -> 1.272x [1.180,1.357]     2151 ->  372
+  c128 flat 2^8     1.965x [1.870,2.058] -> 1.346x [1.296,1.396]     2650 ->  954
+  U6 flat 2^8       1.369x [1.309,1.457] -> 1.231x [1.164,1.271]     2637 -> 1551
+  f64 2-D lastaxis  1.322x [1.293,1.353] -> 1.119x [1.081,1.159]     2654 ->  983
+  f64 2-D axis=0    1.260x [1.106,1.405] -> 1.127x [1.081,1.135]     3094 -> 1214
+  f64 2-D axis=None 1.187x [1.101,1.228] -> 1.078x [1.044,1.102]     3738 -> 1356
+  i64 2-D lastaxis  1.471x [1.406,1.509] -> 1.253x [1.203,1.295]     3644 -> 1959
+  f64 kind=stable   1.774x [1.659,1.899] -> 1.298x [1.250,1.335]     2837 -> 1112
+
+  ENGAGEMENT (the kernels that DO win must still be reached):
+  structured 2^8    0.133x WIN          -> 0.137x WIN                still native
+  f64 flat 2^21     0.486x WIN          -> 0.460x WIN                still native
+  i64 flat 2^21     0.427x WIN          -> 0.441x WIN                still native
+```
+
+**THE EXCESS COLUMN IS THE COUNTED MECHANISM.** It falls by ~1700-1800 ns on every flat cell
+regardless of size or dtype - 2582/2166/2174/2151/2650 all land near 900/630/375/372/954 - which is
+what removing a FIXED chain of ~12 declining gates looks like. It is flat in n, which is what
+separated it from the sorting in the first place.
+
+**A/A NULL CONTROLS (same invocation, every cell):** 32 of 36 pass. **DISCLOSED:** four read
+BIASED - `f64 flat 2^10` BEFORE (1.0562), `i64 flat 2^8` AFTER (0.9683) and `f64 kind=stable` AFTER
+(0.9776), plus one borderline - so those three rows are "about". Every other BEFORE/AFTER pair of
+ranges is DISJOINT.
+
+**THE ONE ADVERSE CELL:** `i64 flat 2^8` reads 1.125x -> 1.172x. It is the operand for which the
+classifier is pure overhead - the integer flat gate still has to run, so the facts read is added
+work with nothing skipped in front of it. It is NOT decidable ([1.111,1.167] vs [1.088,1.184]
+overlap and the AFTER null is biased), but the sign is what the mechanism predicts, so it is
+recorded rather than explained away. The trade is ~45 ns on i64 against 1200-2500 ns on every other
+dtype.
+
+**REGIME, DISCLOSED:** loadavg 165-170, recovering from a build storm on this shared box that had
+peaked near 900. Every arm is interleaved and 32 of 36 nulls pass, but these are not
+quiet-host numbers and the three biased rows above should be re-measured before anyone quotes them
+to three digits.
+
+PARITY: 18 dtypes (incl. longdouble, clongdouble, datetime64, timedelta64, `<U6`, `<S6`) x 7 shapes
+x 4 axis forms {default, -1, 0, None}, plus middle-axis 3-D at axis 1/-2/0/2, all five `kind=`
+values on f64 and i64, nan/inf/-0.0/all-nan payloads, NaT, strided, transposed, F-order, list,
+object, and three structured cases including `order=`. Plus six LARGE engagement cells above the
+native floors. Compared on dtype, shape and RAW BYTES. **BEFORE 0 divergences, AFTER 0.**
+654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^21 f64 = 16 MB, one live at a time, freed between cells.
+
+RETRY PREDICATE: the chain is classified; do NOT re-attack the gate ORDER or add another
+classifier here. What is left at `f64 flat 2^8` (1.630x, 897 ns) is the `(*args, **kwargs)` entry,
+the kwargs scan, the ONE surviving gate and the delegation. The kwargs scan is the next visible
+item and is NOT taken here: it calls `k.extract::<String>()` up to THREE times per key, allocating
+a Rust `String` each time, where matching on the interned key object would not allocate at all -
+but it only runs when kwargs are present, so it cannot be what these no-kwarg cells are paying.
+`i64 flat 2^8` should not be attacked from this direction; it is the one dtype the classifier
+cannot help.
+AGENT_NAME=TanBridge.
