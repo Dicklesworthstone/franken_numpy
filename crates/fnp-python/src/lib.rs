@@ -57524,6 +57524,22 @@ fn try_native_full_parallel(
         return Ok(None);
     };
     let total: usize = dims.iter().product();
+    // DECLINE ON SIZE BEFORE RESOLVING THE DTYPE (`deadlock-audit-vq4tz`).
+    //
+    // The size gate below needs `itemsize`, and `itemsize` was only known after a REAL
+    // one-element `numpy.full` had been constructed to replicate numpy's inference. That
+    // probe is 753.0 ns on this host (`timeit`, installed interpreter) - against a
+    // `np.zeros_like(256)` that numpy finishes in 989.0 ns ENTIRELY. Every small
+    // `full`/`full_like`/`ones_like`/`zeros_like` call built that array, read three
+    // attributes off it, and then declined on size, having learnt nothing it used.
+    //
+    // The bound is EXACT, not a heuristic: the gate below accepts only itemsize
+    // 1|2|4|8, so no dtype that can reach the floor has an itemsize above 8. If
+    // `total * 8` is under the floor, the later check cannot possibly pass.
+    const FULL_PARALLEL_MAX_ITEMSIZE: usize = 8;
+    if total.saturating_mul(FULL_PARALLEL_MAX_ITEMSIZE) < FULL_PARALLEL_MIN_BYTES {
+        return Ok(None);
+    }
     // Resolve dtype + fill pattern via a 1-element full (cheap; replicates numpy's inference/cast exactly).
     let kw = PyDict::new(py);
     if let Some(dt) = dtype
