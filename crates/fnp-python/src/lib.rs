@@ -8745,13 +8745,17 @@ fn zerocopy_f64_transcendental(
             input,
             output,
             |x| UnaryOp::Arcsin.apply(x),
-            |value, _| value.is_finite() && value.abs() > 1.0,
+            // NumPy's invalid set here is |v| > 1 and it does NOT exclude the infinities:
+            // arcsin(+-inf) raises invalid. IEEE already excludes NaN, since every comparison
+            // against NaN is false (`deadlock-audit-2qjj3`).
+            |value, _| value.abs() > 1.0,
         ),
         UnaryOp::Arccos => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Arccos.apply(x),
-            |value, _| value.is_finite() && value.abs() > 1.0,
+            // Same invalid set as arcsin, infinities included (`deadlock-audit-2qjj3`).
+            |value, _| value.abs() > 1.0,
         ),
         UnaryOp::Arctanh => transcendental_map_f64(
             input,
@@ -8763,7 +8767,9 @@ fn zerocopy_f64_transcendental(
             input,
             output,
             |x| UnaryOp::Arccosh.apply(x),
-            |value, _| value.is_finite() && value < 1.0,
+            // arccosh(-inf) raises invalid, so `v < 1.0` must include it. It excludes NaN by
+            // IEEE and correctly does NOT flag arccosh(+inf) = +inf (`deadlock-audit-2qjj3`).
+            |value, _| value < 1.0,
         ),
         // Guarded by the caller's transcendental match arm; keep a correct
         // (serial, event-free) default anyway.
@@ -9003,7 +9009,42 @@ fn zerocopy_f64_unary_flat<'py>(
                 | UnaryOp::Log2
                 | UnaryOp::Log10 => {
                     if !zerocopy_f64_transcendental(input, output, op) {
-                        return Ok(None);
+                        // KEEP THE BUFFER, BORROW ONLY THE EVENT - but ONLY where a single
+                        // witness is COMPLETE (`deadlock-audit-2qjj3`; the pattern is
+                        // `deadlock-audit-f1mj2`, sqrt).
+                        //
+                        // The buffer computed above is already bit-identical. The deferral
+                        // existed solely so a fallback could record NumPy's FP event, and it
+                        // threw a finished buffer away to do it - so ONE out-of-domain element
+                        // in 65536 turned arccosh from an 11x WIN (0.09x) into a 1.53x LOSS.
+                        //
+                        // THE SPLIT BELOW IS NOT COSMETIC. A one-element witness reproduces
+                        // exactly ONE errstate category, so it is faithful only for ops whose
+                        // event predicate has one. Probed against numpy 2.4.3 across each
+                        // op's whole domain:
+                        //
+                        //     arccosh / arcsin / arccos   {invalid}           one category
+                        //     arctanh                     {invalid, divide}   both, from [1, 2]
+                        //     log / log2 / log10          {invalid, divide}   both, from [0, -1]
+                        //     exp / exp2                  {over, under}       both, from [1e3, -1e3]
+                        //
+                        // The multi-category ops would UNDER-REPORT one of their two events, so
+                        // they keep deferring exactly as before.
+                        let witness = match op {
+                            UnaryOp::Arccosh => Some(("arccosh", 0.0_f64)),
+                            UnaryOp::Arcsin => Some(("arcsin", 2.0_f64)),
+                            UnaryOp::Arccos => Some(("arccos", 2.0_f64)),
+                            _ => None,
+                        };
+                        // Each op raises through its OWN callable: the event message names the
+                        // ufunc ("invalid value encountered in arccosh"), so arccos may not
+                        // borrow arcsin's even though they share a domain.
+                        match witness {
+                            Some((name, value)) => {
+                                numpy.getattr(name)?.call1((value,))?;
+                            }
+                            None => return Ok(None),
+                        }
                     }
                 }
                 // The guard at the top of this fn restricts `op` to the arms above;
@@ -160124,6 +160165,89 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let theirs_object = numpy_asanyarray.call1((object_source.clone(),))?;
             assert_array_matches_numpy(&ours_object, &theirs_object)?;
 
+            Ok(())
+        });
+    }
+
+    /// The single-category transcendentals reproduce NumPy's FP event; the multi-category ones
+    /// must keep deferring.
+    ///
+    /// `arccosh`/`arcsin`/`arccos` raise only `invalid`, so one witness is complete and they can
+    /// keep their computed buffer. `arctanh`/`log`/`exp` raise TWO categories from a single call,
+    /// where one witness would under-report - this pins that they still agree with NumPy, which
+    /// is what proves the split was drawn in the right place (`deadlock-audit-2qjj3`).
+    #[test]
+    fn transcendental_domain_events_match_numpy_including_the_infinities() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array = numpy.getattr("array")?;
+
+            // (op, an in-domain anchor, the operands to pair it with)
+            let cases: [(&str, f64, Vec<f64>); 6] = [
+                // Single-category: fixed here.
+                ("arccosh", 1.5, vec![0.5, -5.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN, 1.0]),
+                ("arcsin", 0.5, vec![2.0, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0]),
+                ("arccos", 0.5, vec![2.0, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0]),
+                // Multi-category: must be UNCHANGED, still deferring.
+                ("arctanh", 0.5, vec![1.0, -1.0, 2.0, f64::NAN]),
+                ("log", 2.0, vec![0.0, -1.0, f64::NAN]),
+                ("exp", 1.0, vec![1000.0, -1000.0, f64::NAN]),
+            ];
+            for (name, anchor, operands) in cases.iter() {
+                let ours = module.getattr(*name)?;
+                let theirs = numpy.getattr(*name)?;
+                for operand in operands.iter() {
+                    let data = array.call1((vec![*anchor, *operand],))?;
+                    for mode in ["warn", "raise", "ignore"] {
+                        let enter = || -> PyResult<Bound<'_, PyAny>> {
+                            let kwargs = PyDict::new(py);
+                            kwargs.set_item("invalid", mode)?;
+                            kwargs.set_item("divide", mode)?;
+                            kwargs.set_item("over", mode)?;
+                            kwargs.set_item("under", mode)?;
+                            let guard = numpy.getattr("errstate")?.call((), Some(&kwargs))?;
+                            guard.call_method0("__enter__")?;
+                            Ok(guard)
+                        };
+                        let guard = enter()?;
+                        let expected = theirs.call1((data.clone(),));
+                        guard.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+                        let guard = enter()?;
+                        let actual = ours.call1((data.clone(),));
+                        guard.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+                        match (expected, actual) {
+                            (Ok(expected_value), Ok(actual_value)) => {
+                                let same = numpy
+                                    .getattr("array_equal")?
+                                    .call1((&expected_value, &actual_value, true))?
+                                    .extract::<bool>()?;
+                                assert!(
+                                    same,
+                                    "{name}([{anchor}, {operand}]) under all-{mode}: values diverged"
+                                );
+                            }
+                            (Err(expected_err), Err(actual_err)) => assert_eq!(
+                                expected_err.get_type(py).name()?.to_string(),
+                                actual_err.get_type(py).name()?.to_string(),
+                                "{name}([{anchor}, {operand}]) under all-{mode}: different error type"
+                            ),
+                            (expected_other, actual_other) => panic!(
+                                "{name}([{anchor}, {operand}]) under all-{mode}: one arm raised \
+                                 and the other did not - numpy_ok={} fnp_ok={}",
+                                expected_other.is_ok(),
+                                actual_other.is_ok()
+                            ),
+                        }
+                    }
+                }
+            }
             Ok(())
         });
     }
