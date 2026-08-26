@@ -85943,6 +85943,17 @@ fn cached_bool_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .bind(py))
 }
 
+/// `numpy.float64`, on the same terms - the output dtype every f64 zero-copy route allocates
+/// with, and another `PyString` per call when it is passed as `dtype="float64"`.
+fn cached_float64_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static FLOAT64_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(FLOAT64_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "float64"))?.unbind())
+        })?
+        .bind(py))
+}
+
 // `isdtype`'s kind classes. These are the FIVE partitions numpy's `sctypes` draws plus a sixth
 // "none of them" - `bytes_`, `str_`, `void`, `object_`, `datetime64`, `timedelta64` and every
 // ABSTRACT type are accepted inputs that no kind string can ever match, which is why they are
@@ -112366,21 +112377,21 @@ fn try_zerocopy_conv_corr_f64(
     if la == 0 || lv == 0 {
         return Ok(None); // numpy raises on empty: defer for exact error parity.
     }
-    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; under the GIL these
-    // input buffers are not mutated for the duration of the call. Zero-copy view.
-    let a_vals: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), la) };
-    let v_vals: &[f64] = unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<f64>(), lv) };
-    let (sig, kr): (&[f64], Vec<f64>) = if is_correlate {
-        if la < lv {
-            return Ok(None); // correlate not commutative; La<Lv has distinct centering — defer.
-        }
-        (a_vals, v_vals.to_vec())
-    } else if la >= lv {
-        (a_vals, v_vals.iter().rev().copied().collect())
+    // DECIDE FROM THE LENGTHS, THEN COPY (`deadlock-audit-jhq6f`). The kernel Vec used to
+    // be materialised HERE, above every gate below, so each declined call built a full
+    // copy of the kernel and threw it away: 2 KB for the 256-tap `correlate(a, v)` that
+    // lands in the mid-kernel delegation, 32 KB at the `GATHER_MAX_M` cap. Roles and
+    // lengths are decidable without touching the data, so the gates run first and the
+    // copy happens only on the path that uses it.
+    if is_correlate && la < lv {
+        return Ok(None); // correlate not commutative; La<Lv has distinct centering — defer.
+    }
+    // Signal is the longer operand (for correlate, always `a`); kernel is the other.
+    let (ns, mk) = if is_correlate || la >= lv {
+        (la, lv)
     } else {
-        (v_vals, a_vals.iter().rev().copied().collect())
+        (lv, la)
     };
-    let (ns, mk) = (sig.len(), kr.len());
     if mk > GATHER_MAX_M || ns < MIN_SIGNAL || mk > ns {
         return Ok(None); // long kernel (convolve_mode wins) / tiny signal: defer.
     }
@@ -112405,9 +112416,23 @@ fn try_zerocopy_conv_corr_f64(
     if mk > 128 && out_len < (1 << 19) {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let out_arr = numpy.call_method(intern!(py, "empty"), (out_len,), Some(&kwargs))?;
+    // Past every gate: NOW take the zero-copy views and build the kernel.
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; under the GIL these
+    // input buffers are not mutated for the duration of the call. Zero-copy view.
+    let a_vals: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), la) };
+    let v_vals: &[f64] = unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<f64>(), lv) };
+    let (sig, kr): (&[f64], Vec<f64>) = if is_correlate {
+        (a_vals, v_vals.to_vec())
+    } else if la >= lv {
+        (a_vals, v_vals.iter().rev().copied().collect())
+    } else {
+        (v_vals, a_vals.iter().rev().copied().collect())
+    };
+    debug_assert_eq!((sig.len(), kr.len()), (ns, mk));
+    let out_arr = numpy.call_method1(
+        intern!(py, "empty"),
+        (out_len, cached_float64_type(py)?),
+    )?;
     {
         let out_buf = PyBuffer::<f64>::get(&out_arr)?;
         let Some(out_cells) = out_buf.as_mut_slice(py) else {
@@ -112695,17 +112720,20 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
 #[pyo3(signature = (a, v, mode="valid"))]
 fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let correlate_fn = numpy.getattr(intern!(py, "correlate"))?;
     let a_for_fallback = a.clone_ref(py);
     let v_for_fallback = v.clone_ref(py);
+    // The handle is fetched INSIDE the closure and `mode` goes positionally: it is
+    // numpy's third positional parameter, so the kwargs dict (and the `PyString` the
+    // non-interned `mode` key built inside it) were both avoidable, and the native
+    // paths below return without ever delegating.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "mode"), mode)?;
-        Ok(correlate_fn
-            .call(
-                (a_for_fallback.bind(py), v_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
+        Ok(numpy
+            .getattr(intern!(py, "correlate"))?
+            .call1((
+                a_for_fallback.bind(py),
+                v_for_fallback.bind(py),
+                mode,
+            ))?
             .unbind())
     };
 
