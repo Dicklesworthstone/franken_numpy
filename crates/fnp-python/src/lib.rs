@@ -97277,6 +97277,20 @@ fn try_native_int_inner(
     }
     let m: usize = a_shape[..a_shape.len() - 1].iter().product();
     let n: usize = b_shape[..b_shape.len() - 1].iter().product();
+    // DECLINE BEFORE THE COPY (`deadlock-audit-usmva`). The work gate lives
+    // in `try_native_int_matmul` at the BOTTOM of this function, and reaching it costs
+    // two reshapes, a transpose and a full `ascontiguousarray` COPY of b - O(n*k) work
+    // done only to be thrown away. On an 8x8 int operand that copy IS the call:
+    // `np.inner` measured 3.377x there against numpy. The floor is a property of the
+    // shapes, which are already in hand, so it can be applied here - the same
+    // predicate, just before the work instead of after it. `try_native_int_tensordot_
+    // tuple_axes` already does exactly this.
+    const INT_MATMUL_MIN_WORK: usize = 1 << 18;
+    if m.saturating_mul(k).saturating_mul(n) < INT_MATMUL_MIN_WORK
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
     let a2 = a.call_method1(intern!(py, "reshape"), ((m, k),))?;
     let b2 = b.call_method1(intern!(py, "reshape"), ((n, k),))?;
     // Contiguous (k, n) transpose of b2 so the GEMM contracts the shared last axis.
@@ -97401,6 +97415,15 @@ fn try_native_f16_inner(
     }
     let m: usize = a_shape[..a_shape.len() - 1].iter().product();
     let n: usize = b_shape[..b_shape.len() - 1].iter().product();
+    // Same early decline as the integer sibling: the floor that `try_native_f16_matmul`
+    // applies at the bottom is a property of the shapes, and reaching it otherwise costs
+    // a transpose plus a full `ascontiguousarray` copy of b.
+    const F16_MATMUL_MIN_WORK: usize = 1 << 18;
+    if m.saturating_mul(k).saturating_mul(n) < F16_MATMUL_MIN_WORK
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
     let a2 = a.call_method1(intern!(py, "reshape"), ((m, k),))?;
     let b2 = b.call_method1(intern!(py, "reshape"), ((n, k),))?;
     let b2t = numpy.call_method1(
