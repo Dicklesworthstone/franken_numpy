@@ -112307,33 +112307,46 @@ fn unique_values(
 // operand (the kernel) is in (128, 2048]. The zero-copy gather caps at 128; above it fnp's native
 // FFT/scatter convolve loses 1.2-1.7x to numpy's direct O(n*m) loop (which fnp's FFT never beats up
 // to k~4096), so this band is fastest delegated to numpy. Long kernels (>2048) keep the native path.
-fn conv_corr_should_delegate_midkernel(
+// THE ONE CLASSIFICATION BOTH conv/corr GATES ASKED FOR SEPARATELY (`deadlock-audit-jhq6f`).
+//
+// `try_zerocopy_conv_corr_f64` and `conv_corr_should_delegate_midkernel` run back to back on
+// every `correlate`/`convolve` call, and each opened by re-reading BOTH operands' dtype (with
+// an `extract::<String>()` of the kind, which allocates), rank and length for itself. The
+// answer is the same both times and neither could act without it, so it is read once here and
+// passed down.
+//
+// `None` for anything that is not a pair of exact 1-D f64 ndarrays - the shape both gates
+// require, and the shape the rest of each function assumes.
+fn conv_corr_f64_1d_lens(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     v: &Bound<'_, PyAny>,
-) -> PyResult<bool> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+) -> PyResult<Option<(usize, usize)>> {
+    let ndarray_type = cached_ndarray_type(py)?;
     let f64_1d_len = |o: &Bound<'_, PyAny>| -> PyResult<Option<usize>> {
-        if !o.is_exact_instance(&ndarray_type) {
+        if !o.is_exact_instance(ndarray_type) {
             return Ok(None);
         }
         let dt = o.getattr(intern!(py, "dtype"))?;
-        if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+        if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
             || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+            || o.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         {
             return Ok(None);
         }
-        let shape: Vec<usize> = o.getattr(intern!(py, "shape"))?.extract()?;
-        if shape.len() != 1 {
-            return Ok(None);
-        }
-        Ok(Some(shape[0]))
+        Ok(Some(o.len()?))
     };
     let (Some(la), Some(lv)) = (f64_1d_len(a)?, f64_1d_len(v)?) else {
-        return Ok(false);
+        return Ok(None);
     };
-    Ok((129..=2048).contains(&la.min(lv)))
+    Ok(Some((la, lv)))
+}
+
+fn conv_corr_should_delegate_midkernel(lens: Option<(usize, usize)>) -> bool {
+    let Some((la, lv)) = lens else {
+        return false;
+    };
+    (129..=2048).contains(&la.min(lv))
 }
 
 fn try_zerocopy_conv_corr_f64(
@@ -112342,6 +112355,7 @@ fn try_zerocopy_conv_corr_f64(
     v: &Bound<'_, PyAny>,
     mode: &str,
     is_correlate: bool,
+    lens: Option<(usize, usize)>,
 ) -> PyResult<Option<Py<PyAny>>> {
     use rayon::prelude::*;
     // convolve_gather_fill is a PARALLEL SIMD DIRECT convolve (O(out*m), 4-wide over outputs, per-output
@@ -112353,36 +112367,18 @@ fn try_zerocopy_conv_corr_f64(
     if !matches!(mode, "full" | "same" | "valid") {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    let is_f64_1d = |o: &Bound<'_, PyAny>| -> PyResult<bool> {
-        if !o.is_exact_instance(&ndarray_type) {
-            return Ok(false);
-        }
-        let dt = o.getattr(intern!(py, "dtype"))?;
-        Ok(dt.getattr(intern!(py, "kind"))?.extract::<String>()? == "f"
-            && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 8
-            && o.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 1)
-    };
-    if !is_f64_1d(a)? || !is_f64_1d(v)? {
-        return Ok(None);
-    }
-    let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(v)) else {
+    let Some((la, lv)) = lens else {
         return Ok(None);
     };
-    let (Some(a_cells), Some(v_cells)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
-        return Ok(None); // non-contiguous
-    };
-    let (la, lv) = (a_cells.len(), v_cells.len());
     if la == 0 || lv == 0 {
         return Ok(None); // numpy raises on empty: defer for exact error parity.
     }
-    // DECIDE FROM THE LENGTHS, THEN COPY (`deadlock-audit-jhq6f`). The kernel Vec used to
-    // be materialised HERE, above every gate below, so each declined call built a full
-    // copy of the kernel and threw it away: 2 KB for the 256-tap `correlate(a, v)` that
-    // lands in the mid-kernel delegation, 32 KB at the `GATHER_MAX_M` cap. Roles and
-    // lengths are decidable without touching the data, so the gates run first and the
-    // copy happens only on the path that uses it.
+    // DECIDE FROM THE LENGTHS, THEN TOUCH THE DATA (`deadlock-audit-jhq6f`). Both the
+    // buffer acquisition and the kernel Vec used to happen HERE, above every gate below,
+    // so each declined call acquired two Python buffers and built a full copy of the
+    // kernel only to throw both away: 2 KB for the 256-tap `correlate(a, v)` that lands
+    // in the mid-kernel delegation, 32 KB at the `GATHER_MAX_M` cap. Roles and lengths
+    // are decidable without touching the data at all.
     if is_correlate && la < lv {
         return Ok(None); // correlate not commutative; La<Lv has distinct centering — defer.
     }
@@ -112416,7 +112412,19 @@ fn try_zerocopy_conv_corr_f64(
     if mk > 128 && out_len < (1 << 19) {
         return Ok(None);
     }
-    // Past every gate: NOW take the zero-copy views and build the kernel.
+    // Past every gate: NOW acquire the buffers and build the kernel. A non-contiguous
+    // operand still declines here - `as_slice` is what detects that - which is why the
+    // gates above are written to be safe on lengths alone.
+    let numpy = cached_numpy(py)?;
+    let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(v)) else {
+        return Ok(None);
+    };
+    let (Some(a_cells), Some(v_cells)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
+        return Ok(None); // non-contiguous
+    };
+    if (a_cells.len(), v_cells.len()) != (la, lv) {
+        return Ok(None); // buffer disagrees with the metadata: defer rather than guess.
+    }
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; under the GIL these
     // input buffers are not mutated for the duration of the call. Zero-copy view.
     let a_vals: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), la) };
@@ -112429,10 +112437,7 @@ fn try_zerocopy_conv_corr_f64(
         (v_vals, a_vals.iter().rev().copied().collect())
     };
     debug_assert_eq!((sig.len(), kr.len()), (ns, mk));
-    let out_arr = numpy.call_method1(
-        intern!(py, "empty"),
-        (out_len, cached_float64_type(py)?),
-    )?;
+    let out_arr = numpy.call_method1(intern!(py, "empty"), (out_len, cached_float64_type(py)?))?;
     {
         let out_buf = PyBuffer::<f64>::get(&out_arr)?;
         let Some(out_cells) = out_buf.as_mut_slice(py) else {
@@ -112658,16 +112663,19 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
         return Ok(out);
     }
 
+    // One classification for both gates below (`deadlock-audit-jhq6f`).
+    let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;
+
     // Zero-copy short-kernel direct path: reads buffers + writes the numpy output
     // in place, skipping the extract+build copies. Closes the 9-15x short-kernel
     // loss to parity. Falls through for long kernels / non-f64 / non-contiguous.
-    if let Some(out) = try_zerocopy_conv_corr_f64(py, a.bind(py), v.bind(py), mode, false)? {
+    if let Some(out) = try_zerocopy_conv_corr_f64(py, a.bind(py), v.bind(py), mode, false, lens)? {
         return Ok(out);
     }
     // Mid-kernel band (128 < k <= 2048): the gather caps at 128 and fnp's native FFT/scatter path
     // loses 1.2-1.7x to numpy's direct O(n*m) convolve (which fnp's FFT never beats up to k~4096).
     // Delegate this band to numpy. (bead 1nzxt, BlackThrush 2026-06-22.)
-    if conv_corr_should_delegate_midkernel(py, a.bind(py), v.bind(py))? {
+    if conv_corr_should_delegate_midkernel(lens) {
         return fallback();
     }
 
@@ -112729,11 +112737,7 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr(intern!(py, "correlate"))?
-            .call1((
-                a_for_fallback.bind(py),
-                v_for_fallback.bind(py),
-                mode,
-            ))?
+            .call1((a_for_fallback.bind(py), v_for_fallback.bind(py), mode))?
             .unbind())
     };
 
@@ -112743,14 +112747,17 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
         return Ok(out);
     }
 
+    // One classification for both gates below (`deadlock-audit-jhq6f`).
+    let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;
+
     // Zero-copy short-kernel direct path (defers when len(a)<len(v): correlate is
     // not commutative). Closes the 9-15x short-kernel loss to parity.
-    if let Some(out) = try_zerocopy_conv_corr_f64(py, a.bind(py), v.bind(py), mode, true)? {
+    if let Some(out) = try_zerocopy_conv_corr_f64(py, a.bind(py), v.bind(py), mode, true, lens)? {
         return Ok(out);
     }
     // Mid-kernel band (128 < k <= 2048): native FFT/scatter loses 1.2-1.7x to numpy's direct
     // correlate; delegate. (bead 1nzxt, BlackThrush 2026-06-22.)
-    if conv_corr_should_delegate_midkernel(py, a.bind(py), v.bind(py))? {
+    if conv_corr_should_delegate_midkernel(lens) {
         return fallback();
     }
 
