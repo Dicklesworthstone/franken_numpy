@@ -32293,6 +32293,27 @@ fn native_angle_conversion(
     if !numpy_dtype_is_f64(py, x) {
         return Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind());
     }
+    // A NON-CONTIGUOUS f64 OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+    //
+    // `try_zerocopy_f64_unary` above needs a contiguous buffer, so a strided view declines it -
+    // and then the dtype check just above PASSES (it really is f64), dropping the call into
+    // `extract_precise_numeric_array`, which copies the whole operand. Measured at n=2^16
+    // against numpy 2.4.3, the same VALUES either way:
+    //
+    //     operand        numpy_ns     fnp_ns    ratio
+    //     contiguous        77547      11632    0.15x   WIN
+    //     strided a[::2]    77547     549052    7.08x   LOSS
+    //
+    // A 47x swing on CONTIGUITY ALONE. The Rust loss sweep's operand ladder is entirely
+    // C-contiguous, so it scores this cell as a win and never sees the other side; a strided
+    // view (`a[::2]`, a column, any stepped slice) is entirely ordinary caller code.
+    //
+    // Same guard, same reason, as `take` (`deadlock-audit-yphwc`) and nanargmax/nanargmin
+    // (`deadlock-audit-0e1q5`): where the zero-copy path declines for LAYOUT rather than dtype,
+    // NumPy's strided loop beats copying the operand to get a contiguous one.
+    if noncontiguous_ndarray(cached_numpy(py)?, x)? {
+        return Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind());
+    }
     let x = extract_precise_numeric_array(py, x, extract_label)?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(op))
 }
