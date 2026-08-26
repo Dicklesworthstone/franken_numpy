@@ -11,7 +11,7 @@ use common::ensure_numpy_available;
 use criterion::Criterion;
 use fnp_python::fnp_python;
 use pyo3::Python;
-use pyo3::types::{PyAnyMethods, PyDict, PyModule};
+use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyModuleMethods};
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -460,6 +460,10 @@ fn main() {
             (
                 "bench_flat_i64_sort_256_entry_decomposition",
                 bench_flat_i64_sort_256_entry_decomposition,
+            ),
+            (
+                "bench_pyfunction_call_shape_price",
+                bench_pyfunction_call_shape_price,
             ),
         ],
     );
@@ -1936,5 +1940,131 @@ empty = np.empty\n",
                  min_ns={min} p25_ns={p25} median_ns={median} p75_ns={p75}"
             );
         }
+    });
+}
+
+/// What a `(*args, **kwargs)` signature costs per call, against a typed one.
+///
+/// Two `#[pyfunction]`s with IDENTICAL bodies - both return their first argument
+/// untouched - differing only in the declared signature.  PyO3 gives a typed
+/// signature `METH_FASTCALL | METH_KEYWORDS`, where CPython hands the callee a
+/// C array of borrowed argument pointers; it gives `(*args, **kwargs)` plain
+/// `METH_VARARGS | METH_KEYWORDS`, where CPython must BUILD a tuple (and, when
+/// keywords are present, a dict) on every call before the callee sees anything.
+/// NumPy's own `np.sort` is on the fast path.
+///
+/// This is the shared wrapper floor the ufunc-method family converged onto and
+/// the same residual the `int64` n=256 sort route is left holding, so it is
+/// worth ONE number rather than another guess.  The bodies do no work, so the
+/// difference between the two arms is the calling convention and nothing else.
+#[pyo3::pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn call_shape_varargs<'py>(
+    args: &pyo3::Bound<'py, pyo3::types::PyTuple>,
+    kwargs: Option<&pyo3::Bound<'py, pyo3::types::PyDict>>,
+) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let _ = kwargs;
+    args.get_item(0)
+}
+
+/// The same function with `numpy.sort`'s own parameter list spelled out.
+#[pyo3::pyfunction]
+#[pyo3(signature = (a, axis=None, kind=None, order=None, stable=None))]
+fn call_shape_typed<'py>(
+    a: pyo3::Bound<'py, pyo3::types::PyAny>,
+    axis: Option<pyo3::Bound<'py, pyo3::types::PyAny>>,
+    kind: Option<pyo3::Bound<'py, pyo3::types::PyAny>>,
+    order: Option<pyo3::Bound<'py, pyo3::types::PyAny>>,
+    stable: Option<pyo3::Bound<'py, pyo3::types::PyAny>>,
+) -> pyo3::Bound<'py, pyo3::types::PyAny> {
+    let _ = (axis, kind, order, stable);
+    a
+}
+
+fn bench_pyfunction_call_shape_price(_c: &mut criterion::Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let numpy = py.import("numpy").expect("numpy");
+        let module = PyModule::new(py, "fnp_python_call_shape").expect("bench module");
+        module
+            .add_function(pyo3::wrap_pyfunction!(call_shape_varargs, &module).unwrap())
+            .expect("bind varargs arm");
+        module
+            .add_function(pyo3::wrap_pyfunction!(call_shape_typed, &module).unwrap())
+            .expect("bind typed arm");
+        let varargs = module.getattr("call_shape_varargs").expect("varargs");
+        let typed = module.getattr("call_shape_typed").expect("typed");
+
+        let ns = PyDict::new(py);
+        ns.set_item("np", &numpy).expect("bind numpy");
+        py.run(
+            std::ffi::CString::new(
+                "rng = np.random.default_rng(20260824)\n\
+a = rng.integers(-(1 << 62), 1 << 62, 256, dtype=np.int64)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("corpus");
+        let input = ns.get_item("a").expect("corpus");
+
+        // Both arms must genuinely return the operand, or one of them is being
+        // timed doing less work than the other.
+        assert!(
+            varargs.call1((&input,)).unwrap().is(&input),
+            "varargs arm did not return its operand"
+        );
+        assert!(
+            typed.call1((&input,)).unwrap().is(&input),
+            "typed arm did not return its operand"
+        );
+
+        let mut observe_typed = || {
+            let started = std::time::Instant::now();
+            let result = typed.call1((black_box(&input),)).expect("typed arm");
+            common::ContractObservation {
+                elapsed: started.elapsed(),
+                checksum: result.is_none() as u64,
+            }
+        };
+        let mut observe_varargs = || {
+            let started = std::time::Instant::now();
+            let result = varargs.call1((black_box(&input),)).expect("varargs arm");
+            common::ContractObservation {
+                elapsed: started.elapsed(),
+                checksum: result.is_none() as u64,
+            }
+        };
+        let (effect, typed_null, varargs_null) = common::run_dual_null_median_ci_contract(
+            "pyfunction_call_shape_typed_over_varargs",
+            &mut observe_typed,
+            &mut observe_varargs,
+        );
+        let verdict = common::dual_null_contract_verdict(effect, typed_null, varargs_null);
+        println!(
+            "CALL_SHAPE_PRICE verdict={verdict} \\
+             typed_median_ns={:.3} varargs_median_ns={:.3} \\
+             varargs_minus_typed_ns={:.3} \\
+             typed_over_varargs={:.6} ci95=[{:.6},{:.6}] \\
+             typed_null={:.6} typed_null_ci95=[{:.6},{:.6}] \\
+             varargs_null={:.6} varargs_null_ci95=[{:.6},{:.6}] \\
+             bodies_identical=true same_binary=true \\
+             scope=calling_convention_only_no_work_in_either_body",
+            effect.arm_a_median_ns,
+            effect.arm_b_median_ns,
+            effect.arm_b_median_ns - effect.arm_a_median_ns,
+            effect.ratio_median,
+            effect.ratio_ci_low,
+            effect.ratio_ci_high,
+            typed_null.ratio_median,
+            typed_null.ratio_ci_low,
+            typed_null.ratio_ci_high,
+            varargs_null.ratio_median,
+            varargs_null.ratio_ci_low,
+            varargs_null.ratio_ci_high,
+        );
     });
 }

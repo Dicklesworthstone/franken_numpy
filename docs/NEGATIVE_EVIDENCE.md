@@ -56748,3 +56748,93 @@ UNMEASURED, DISCLOSED: the newly-admitted non-contiguous 1-D operands have no vs
 route should still beat declining for them - a decline pays our full entry AND all of NumPy - but
 that is an argument, not a measurement.
 AGENT_NAME=CalmMoose.
+
+## 2026-08-26 — THE `(*args, **kwargs)` CALLING CONVENTION IS PRICED AND IT IS ~25 ns: the small-n entry floor is NOT the call shape, and every remaining entry lever is below this harness's decidability threshold (`deadlock-audit-call-shape-priced-25ns-lk8zb`)
+
+**Result class:** a measured REJECT of the lever two standing ledger rows name as next, plus a
+methodological finding about what can and cannot be certified on this cell. Host `thinkstation1`,
+numpy 2.4.3 live in the same invocation, stock `release`, bench ELF sha256
+`2bbe6cc6ad799c1fbc9e238fe8ac072dc9e3258d68803e1bb2e9e8529c440c82`, group
+`bench_pyfunction_call_shape_price`, harness `common::run_dual_null_median_ci_contract`.
+
+### The lever, and who named it
+
+Two rows point at the same thing. `deadlock-audit-v46rn` (`RedLynx`): "`reduce` is the last method
+off the vectorcall path and its excess (231 ns) is now second-worst — converting it means
+restructuring `(*args, **kwargs)` into a typed signature, which changes the Python-visible calling
+convention and needs its own parity argument before any perf claim." And this campaign's own
+2026-08-26 sort row, candidate (a): "`fnp.sort`'s `#[pyo3(signature = (*args, **kwargs))]`, which
+forces a per-call args-tuple and kwargs-dict build where NumPy uses `METH_FASTCALL` — unpriced."
+
+### Priced
+
+Two `#[pyfunction]`s with IDENTICAL bodies — both return their first argument untouched — differing
+only in the declared signature. PyO3 compiles a typed signature to `METH_FASTCALL | METH_KEYWORDS`,
+where CPython hands the callee a C array of borrowed pointers, and `(*args, **kwargs)` to plain
+`METH_VARARGS | METH_KEYWORDS`, where CPython must BUILD a tuple per call. The typed arm carries
+`numpy.sort`'s own parameter list `(a, axis=None, kind=None, order=None, stable=None)`. Both arms
+assert they returned the operand before timing, so neither is timed doing less work than the other.
+
+| run | typed ns | varargs ns | varargs − typed | typed/varargs | typed A/A null ci95 | varargs A/A null ci95 |
+|---|---|---|---|---|---|---|
+| 1 | 40 | 65 | **25 ns** | 0.615385 | [1.000000,1.000000] | [1.000000,1.000000] |
+| 2 | 40 | 60 | **20 ns** | 0.666667 | [1.000000,1.000000] | [1.000000,1.000000] |
+| 3 | 40 | 71 | **31 ns** | 0.563380 | [1.000000,1.000000] | [1.000000,1.000000] |
+| 4 | 50 | 75 | **25 ns** | 0.655738 | [1.000000,1.000000] | [1.000000,1.000000] |
+| 5 | 40 | 65 | **25 ns** | 0.615385 | [1.000000,1.000000] | [0.938462,1.000000] |
+| 6 | 40 | 70 | **30 ns** | 0.615385 | [1.000000,1.000000] | [1.000000,1.000000] |
+| 7 | 40 | 60 | **20 ns** | 0.666667 | [1.000000,1.000000] | [1.000000,1.000000] |
+| 8 | 40 | 70 | **30 ns** | 0.615385 | [1.000000,1.000000] | [1.000000,1.000000] |
+
+Sign replicates **8/8**; the difference is 20-31 ns with a median of 25. **Quote this as "about 25 ns", not to the nanosecond** — the timer's granularity
+is 10 ns and these are 40-70 ns quantities, which is exactly the regime this campaign has been
+burned in before.
+
+### Why ~25 ns settles it
+
+The `int64` n=256 sort route's remaining deficit is 326 ns (route 1909 vs NumPy 1583, the
+2026-08-26 row). **The calling convention is under 8% of it**, and buying it costs a Python-visible
+signature change on `fnp.sort` with a real parity surface: positional-vs-keyword-only, arity error
+messages, `stable=` semantics. That is a bad trade for this cell and should not be attempted. For
+`reduce` the same 25 ns is ~11% of its 231 ns excess. **The lever is real, and it is too small to be
+worth its parity surface at either site.**
+
+### And this is why the rest of the entry cannot be certified lever-by-lever
+
+Decomposed after `4787bb48`: route 1909 = `a.copy()` 221 + output `PyBuffer` ~85 + kernel 1092 +
+entry ~511; NumPy 1583 = copy 221 + kernel 1108 + entry ~254. The kernel is at PARITY. Identified
+entry pieces: calling convention ~25, `dtype.char` chain ~60, two structured-dtype probes ~40 each,
+`len()` ~10, exact-type gate ~10 — about 185 ns of ~511, with the remainder unattributed. The two
+struct probes were checked by reading them (lib.rs:74863 and lib.rs:99930): both decline after an
+`is_exact_instance` plus two interned getattrs, so they are NOT hiding the remainder.
+
+Every one of those pieces is **1.3%-4.2%** of a ~1900 ns route. The measured six-run envelope for
+this cell is **3.1% / 3.2%**. A sub-5% effect is not decidable in one dual-null run here
+(`single-run-dual-null-cannot-decide-sub-5pct`), and several of these sit below the envelope
+outright. **So they must not be attacked one at a time, and no row should be banked per lever.**
+Land the batch behind ONE measurement — all identified pieces together are ~185 ns = 9.7%, which is
+decidable — or leave the family alone.
+
+COUNTED_MECHANISM: 2 arms, 1 identical body (each returns its first argument untouched), differing
+only in the `#[pyo3(signature = ...)]` attribute; measured difference 25 ns/call (median over 8
+runs, range 20-31). The entire difference is therefore the calling convention CPython selects -
+`METH_FASTCALL | METH_KEYWORDS`, a C array of borrowed argument pointers, against
+`METH_VARARGS | METH_KEYWORDS`, a per-call `PyTuple` build. No other work exists in either arm to
+attribute it to.
+A/A NULL CONTROLS: 16 A/A nulls over 8 runs, both arms, all admissible - 15 read 1.000000
+ci95=[1.000000,1.000000] and 1 varargs A/A null read 1.000000 ci95=[0.938462,1.000000]; all straddle
+unity, and each run is tabulated above.
+NULL DEGENERACY, STATED HONESTLY: at 10 ns timer granularity on a 40-70 ns arm the A/A null is
+quantised onto unity, so these nulls confirm the arms are not drifting but they do NOT certify a
+sub-10 ns effect. That is a further reason the 25 ns figure is quoted as "about 25 ns" and is used
+only to REJECT a lever, never to claim one.
+VERIFICATION: bench-only change; `rustfmt --check` clean; the group asserts both arms return their
+operand before timing.
+RETRY PREDICATE: do NOT re-price the calling convention — it is 25 ns and that number is stable
+across three runs. The open question is the ~326 ns unattributed remainder, and the instrument for it
+is a counted-attribution `perf` per-symbol instruction diff on two matched single-arm probes, which
+is what resolved `add.accumulate`'s residual where wall-clock CIs could not
+(`counted-attribution-by-instruction-diff`). Do NOT re-attack the comparison kernel: it is at parity
+and the AVX2 rewrite is a measured reject in the 2026-08-26 row, and `crates/fnp-ufunc` is
+`#![forbid(unsafe_code)]` regardless.
+AGENT_NAME=CalmMoose.
