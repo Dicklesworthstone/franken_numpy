@@ -58737,3 +58737,86 @@ RETRY PREDICATE: the residual 1.253x at 2^13 is the small-n ENTRY floor shared b
 transcendental family - the in-domain control is 1.008x at the same size - not the event path. Do
 NOT re-attack log1p's event path. `arctanh`, `exp`, `exp2` still defer deliberately.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - SEVENTEEN GATES, NO SHARED FACTS: `matmul`/`dot` re-read shape and dtype once per gate, and the 1-D dot product - the pair NO gate accepts - paid all of it. 4.474x -> 1.434x, 8x8 f64 4.561x -> 1.790x (`deadlock-audit-z1gjs`)
+
+`TanBridge`. Shipped `3eec9440`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3
+in the SAME invocation, ABBAABBA, 25 rounds, dual A/A null per cell, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** candidate-win on all thirteen cells; nine of them remain a LOSS to numpy
+in absolute terms and are reported as losses.
+
+`matmul` is a chain of ELEVEN `try_*` gates, `dot` is SIX. Each opens by re-reading `shape` - a
+FRESH `Vec<usize>` per operand per gate - plus its own dtype (several `extract::<String>()` the
+kind, which allocates) and its own `flags.c_contiguous`, before it can decline. Nothing was cached
+between them, and each gate re-ran its own `kwargs.is_empty()`/`out is None` check. An operand pair
+that NO gate can accept paid the entire chain, and two 1-D operands - the plain dot product - are
+exactly that pair, because every gate needs at least one operand of rank >= 2.
+
+**The excess is FLAT in n. That is what identifies it as the chain rather than the arithmetic:**
+`matmul` 1-D f64 read +2540.8 ns at 2^8, +2740.7 ns at 2^13 and +3287.8 ns at 2^16.
+
+```
+MATMUL_GATE_DISPATCH worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 25 rounds, median of round ratios, dual A/A null
+  before_elf=6426b4c8a40a  after_elf=096aaf7cfaf3
+
+  case                     BEFORE                      AFTER
+  matmul 1-D 2^8    4.474x [4.340,4.492]  ->  1.434x [1.362,1.489]
+  matmul 1-D 2^10   4.396x [4.031,4.444]  ->  1.437x [1.377,1.482]
+  matmul 1-D 2^13   2.648x [2.470,2.691]  ->  1.222x [1.140,1.247]
+  matmul 1-D 2^16   1.378x [1.304,1.388]  ->  1.052x [0.998,1.145]
+  dot    1-D 2^8    3.775x [3.713,3.867]  ->  1.590x [1.435,1.664]
+  dot    1-D 2^10   3.642x [3.327,3.746]  ->  1.577x [1.464,1.649]
+  dot    1-D 2^13   2.006x [1.907,2.041]  ->  1.224x [1.148,1.263]
+  matmul 8x8   f64  4.561x [4.319,4.621]  ->  1.790x [1.703,1.849]
+  matmul 32x32 f64  2.341x [2.307,2.390]  ->  1.329x [1.264,1.353]
+  matmul 64x64 f64  1.337x [1.328,1.346]  ->  1.077x [0.968,1.102]
+  matmul 8x8   i64  3.780x [3.551,3.848]  ->  1.904x [1.747,1.937]
+  matmul 4x256@256x4 3.350x [3.157,3.464] ->  1.559x [1.512,1.581]
+  matmul 70x70 i64  0.881x WIN (BIASED)   ->  0.811x WIN [0.704,0.898]
+```
+
+**A/A NULL CONTROLS (same invocation, every cell):** AFTER incumbent-null 0.9910-1.0062, AFTER
+candidate-null 0.9768-1.0195. All PASS except `matmul 8x8 i64`, whose candidate null read 0.9768 -
+**disclosed, not dropped**; its 1.904x is therefore "about", while the other twelve are decidable.
+The `70x70 i64` cell's BEFORE null was BIASED (1.0266), so only its AFTER figure is quotable.
+Every BEFORE/AFTER pair of ranges is DISJOINT.
+
+### THE MECHANISM, AND THE ONE THING THAT MAKES A BLANKET SHORTCUT UNSAFE
+
+One read of `(rank, dtype kind, itemsize)` per operand, up front - the question every gate asks
+first - then a plan of six NECESSARY conditions lifted straight from the gates themselves:
+`{f64, int, f16} x {flat, batched}`. `_flat` gates all require both ranks <= 2 (the lowest-rank of
+them is the integer vecmat, 1-D @ 2-D); `_batched` gates all require one operand of rank >= 3. The
+gates are otherwise UNCHANGED: the plan only decides which are worth calling, and a gate that IS
+called still decides everything for itself.
+
+**The f64 GEMM gate admits ndarray SUBCLASSES through `is_instance`, where every other gate uses
+`is_exact_instance`.** So an operand that is not an exact `ndarray` classifies as UNKNOWN and still
+walks the whole chain. Without that asymmetry a blanket rank shortcut would silently change what
+`np.matrix` operands route to.
+
+STAGED, and the stages separate cleanly: a first build carrying only the three dtype-family
+booleans (elf `548eb928a6f2`) read 8x8 f64 at 2.209x; adding the flat/batched rank split took the
+same cell to 1.790x and 8x8 i64 from 2.460x to 1.904x. **The rank split is worth about as much as
+the dtype split on small 2-D shapes** - a family-only classifier would have banked half the lever
+and looked finished.
+
+PARITY: 10 dtypes x 10 shape pairs x {matmul, dot}, plus mixed dtypes, strided, F-order,
+transposed, lists, 0-d scalars, `np.matrix`, nan/inf payloads, empty k=0 and m=0, shape mismatch,
+`out=` at three shapes and a `casting=` kwarg - compared on dtype, shape and RAW BYTES, and on
+exception type+message where numpy raises. BEFORE 4 divergences, AFTER 4, all four the same
+pre-existing `longdouble` padding-byte artifact of the probe's own `tobytes()`. 0 INTRODUCED.
+
+MEMORY: largest operand 512 KB (2^16 f64); host `used` 57 GB of 215 throughout.
+VERIFICATION: 654 lib tests pass; `cargo clippy -p fnp-python --lib --tests` clean; `cargo fmt -p
+fnp-python` a no-op on the result.
+
+RETRY PREDICATE: do NOT re-attack the gate ORDER or the per-gate kwargs/`out=` checks - both are
+gone. What is left and NOT attempted here: (1) `matmul 8x8 f64` at 1.790x still runs the f64 GEMM
+metadata gate, which re-reads shape and `extract::<String>()`s both dtype kinds - threading
+`MatmulOperandFacts` INTO that gate is the obvious next lever; (2) `np.inner` has the same shape of
+loss (2.670x at 2^8, +986 ns flat) and was not touched; (3) `np.vdot` is already 1.019-1.196x and
+should be left alone.
+AGENT_NAME=TanBridge.

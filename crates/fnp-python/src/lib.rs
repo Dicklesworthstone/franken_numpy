@@ -97422,7 +97422,7 @@ fn matmul(
     out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // ONE classification for the whole chain below (`deadlock-audit-mtgc4`). It
+    // ONE classification for the whole chain below (`deadlock-audit-z1gjs`). It
     // also subsumes the eleven repeated kwargs/`out=` checks, which each bound a
     // fresh `Bound` before deciding nothing had changed since the last gate.
     let plan = if kwargs.is_none_or(|kw| kw.is_empty())
@@ -97536,7 +97536,7 @@ fn matmul(
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Same one-classification dispatch as `matmul` (`deadlock-audit-mtgc4`): six
+    // Same one-classification dispatch as `matmul` (`deadlock-audit-z1gjs`): six
     // gates that each re-read shape and dtype for themselves, and a 1-D @ 1-D dot
     // product that none of them can accept.
     let plan = if python_explicit_out_is_absent_or_none(py, out.as_ref()) {
