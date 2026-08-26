@@ -8640,7 +8640,40 @@ where
         unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
     if n >= TRANSCENDENTAL_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        // FLOOR THE WORK PER TASK (`deadlock-audit-w9po3`).
+        //
+        // This was a bare `n.div_ceil(current_num_threads())`, i.e. EXACTLY `num_threads`
+        // tasks whatever n is. On a 64-thread box at n=2^16 that is 64 tasks of 1024 elements,
+        // and rayon has to WAKE FROM SLEEP for every one of them on every call - which is the
+        // shape real callers and the bench contract produce, not the tight loop a naive probe
+        // measures (ledger amendment 062e58d8).
+        //
+        // Interleaved fnp/numpy for `np.log`, varying RAYON_NUM_THREADS (which varies the task
+        // count directly, so the curve is measurable without a rebuild):
+        //
+        //     threads   n=2^14    n=2^16    n=2^18
+        //           1    0.76x     0.95x     0.98x
+        //           2    0.77x     0.65x     0.63x
+        //           4    0.77x     0.39x     0.43x
+        //           8    0.80x     0.28x <-  0.33x
+        //          16    0.79x     0.33x     0.26x
+        //          32    0.76x     0.38x     0.23x <-
+        //          64    0.73x     0.65x     0.33x
+        //
+        // (n=2^14 is flat because it sits below the gate above and is always serial.)
+        //
+        // BOTH OPTIMA ARE ~8192 ELEMENTS PER TASK - n=2^16 peaks at 8 tasks, n=2^18 at 32, and
+        // 65536/8 = 262144/32 = 8192. That is a size-independent rule rather than a fitted
+        // constant, so it is the floor. It yields 8 tasks at n=2^16, 32 at n=2^18, and all 64
+        // threads from n=2^19 up; below that it spends FEWER tasks rather than more, which is
+        // the direction the curve says is safe.
+        //
+        // Chunk boundaries do not change per-element results and nothing is reassociated, so
+        // this cannot move a value; the contract's `exact_bytes` check covers that anyway.
+        const TRANSCENDENTAL_MIN_CHUNK: usize = 8192;
+        let chunk = n
+            .div_ceil(rayon::current_num_threads())
+            .max(TRANSCENDENTAL_MIN_CHUNK);
         out_data
             .par_chunks_mut(chunk)
             .zip(in_data.par_chunks(chunk))
