@@ -15,11 +15,30 @@ description = "NumPy-parity RNG: PCG64DXSM, distributions, oracle-verified deter
 # variants (standard_normal_shaped, permutation_shaped, etc.). The non-shaped
 # variants don't depend on ndarray, but the shaped variants need the SCE
 # contracts to build correctly-strided output arrays.
-fnp-ndarray = { version = "0.2.0", path = "../fnp-ndarray" }
-getrandom.workspace = true
+# All three runtime dependencies are OPTIONAL (default-on for upstream
+# non-breaking-ness). Downstream consumers that need only the generator /
+# SeedSequence core — PCG64DXSM + SeedSequence bit-parity, seeded
+# construction, snapshot/restore — consume with `default-features = false`
+# and pull none of them (the franken_manim certified-render shape: no
+# ndarray surface, no OS entropy, no data-parallel fills).
+fnp-ndarray = { version = "0.2.0", path = "../fnp-ndarray", optional = true }
+getrandom = { workspace = true, optional = true }
 # rayon: data-parallel jump-ahead fills for PCG/PCG-DXSM uniform generation
 # (bit-identical stream via per-chunk advance; NumPy's RNG is single-threaded).
-rayon = { workspace = true }
+rayon = { workspace = true, optional = true }
+
+[features]
+default = ["ndarray", "getrandom", "rayon"]
+# Shaped-distribution variants (standard_normal_shaped, permutation_shaped,
+# ...) over fnp-ndarray's stride scaffolding.
+ndarray = ["dep:fnp-ndarray"]
+# OS-entropy unseeded construction (SeedSequence from system randomness).
+# Without it, the unseeded constructors do not exist and every entry point
+# takes explicit entropy words — the named-refusal shape, never a fallback.
+getrandom = ["dep:getrandom"]
+# Data-parallel jump-ahead fills. Without it the same chunked jump-ahead
+# runs serially: identical bytes, longer wall-clock.
+rayon = ["dep:rayon"]
 
 [dev-dependencies]
 criterion.workspace = true
