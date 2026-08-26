@@ -27635,7 +27635,37 @@ fn try_zerocopy_append_flat(
         let a_raw: &[u8] = unsafe { std::slice::from_raw_parts(a_in.as_ptr() as *const u8, na) };
         let v_raw: &[u8] = unsafe { std::slice::from_raw_parts(v_in.as_ptr() as *const u8, nv) };
         use rayon::prelude::*;
-        const APPEND_PAR_MIN: usize = 1 << 16;
+        // MEASURED CROSSOVER, IN OUTPUT BYTES (`deadlock-audit-dc6mz`).
+        //
+        // This was `1 << 16`, i.e. 64 KiB, while the comment below describes the design target as
+        // "numpy.append is a single-threaded ~64MB copy". The gate fired a THOUSAND times too
+        // early, so a 1 MB memcpy was split into 16 chunks and thrown at a 64-thread pool. A byte
+        // concat is memory-bandwidth-bound, so that is pure fork/join and contention: same build,
+        // same operands, n=2^16, varying only RAYON_NUM_THREADS, against a flat numpy ~23 us:
+        //
+        //     threads   fnp_ns    vs numpy
+        //           1  23538.2      1.03x     <- serial branch, parity
+        //           2  35676.5      1.58x
+        //           8  47291.9      2.07x
+        //          32  78962.8      3.50x
+        //          64 243353.6     10.04x     <- parallel branch on this box
+        //
+        // The crossover is between 8 and 16 MiB of output and it does NOT move with the allocator
+        // regime - par/ser measured under the default allocator and again under
+        // MALLOC_MMAP_THRESHOLD_=1GiB, so large-buffer mmap churn cannot be what is being read:
+        //
+        //     out_MB    default    mmap_ctl
+        //          4   3.16x LOSE  4.37x LOSE
+        //          8   1.31x LOSE  1.28x LOSE
+        //         16   0.26x WIN   0.28x WIN
+        //
+        // 16 MiB it is. This is a THRESHOLD CORRECTION AND NOT A REMOVAL: at and above it the
+        // parallel copy is worth 3.6x over serial and 2.4x over numpy, which is the win the
+        // original author was aiming at and which deleting the branch would forfeit.
+        //
+        // A PINNED PROBE CANNOT SEE THIS BUG. Under `taskset -c 40` rayon reports one CPU, the
+        // serial branch is taken, and the cell reads 1.05x. Thread count is the axis; do not pin.
+        const APPEND_PAR_MIN: usize = 1 << 24;
         const COPY_CHUNK: usize = 1 << 16;
         let par_copy = |dst: &mut [u8], src: &[u8]| {
             dst.par_chunks_mut(COPY_CHUNK)
