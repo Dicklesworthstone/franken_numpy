@@ -58159,3 +58159,97 @@ not copy it to a kernel with a different per-element cost — `w9po3` needed 819
 8x difference. Re-measure with an INTERLEAVED A/B of two builds differing only in the constant; a
 tight loop points at the wrong optimum and would have said this fix was unnecessary.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — REJECT: removing `fmod`'s O(n) divisor pre-scan buys NOTHING MEASURABLE; three variants (`deadlock-audit-5o4lp`)
+
+**NOTHING SHIPPED. The tree is at `abdf2d33` and the experiment is reverted.** This row exists so the
+design is not re-attempted.
+
+### THE CELL AND THE HYPOTHESIS
+
+`fmod[f64_f64]` is the worst remaining sweep cell by absolute headroom: 64001 ns delta, 1.45x (numpy
+142610, fnp 206611). Decomposed serially it is a constant ~350-400 ns entry plus ~0.67 ns/element
+(fnp 2.86 ns/elem against numpy 2.20):
+
+```
+       n   numpy_ns     fnp_ns   delta_ns   ratio   delta/elem
+      16      403.8      763.7      359.9   1.89x     22.4964
+    2048     4904.6     6462.6     1558.0   1.32x      0.7607
+   16384    36030.1    46896.9    10866.8   1.30x      0.6633
+```
+
+`fn fmod` runs `b_raw.contains(&0.0)` — a full COLD read pass over the divisor — on every call,
+purely to decide whether to defer so NumPy emits the `invalid` event. NumPy reads `a` and `b` once
+each, so we read `b`, then `a` and `b` again: **three array reads against two**. On a memory-bound
+op that predicts ~1.5x, and 1.30-1.67x was measured. A 512 KB scan at n=2^16 is ~26 us against a
+~27-95 us delta. It lined up on every axis.
+
+### THE VERDICT: NO MEASURABLE BENEFIT — and no measurable regression either
+
+Replaced the pre-scan with a post-hoc gate: compute natively, detect the event from the OUTPUT (one
+pass over freshly-written memory instead of one cold pass over the divisor), raise one witness. Same
+pass count, warmer data. Three variants were built and measured:
+
+```
+  v1  output gate read through a ReadOnlyCell closure
+  v2  gate read through a raw &[f64] so it autovectorises, matching the scan it displaces
+  v3  v2 plus the operand buffers acquired BEHIND the gate (three PyBuffer::get calls,
+      about 800 ns, were removed from the common path)
+```
+
+DUAL-NULL A/B at n=2^12 — the quietest point — alternating builds, `RAYON_NUM_THREADS=1`, three
+phases per build (incumbent null, candidate null, effect):
+
+```
+  build      sha           numpy_ns    fnp_ns   effect  ci95            nulls          verdict
+  PRE-SCAN   984a2dc0cfd8    9325.5   15187.6   1.317x  [1.022,1.636]   1.0033/1.0025  PASS
+  NO-SCAN    814c037c081d   12490.6   12783.9   1.408x  [1.071,1.612]   1.0000/1.0002  PASS
+  PRE-SCAN   984a2dc0cfd8    9211.9   12780.7   1.514x  [1.229,1.627]   1.0011/1.0009  PASS
+  NO-SCAN    814c037c081d    9204.9   13576.1   1.546x  [1.387,1.592]   0.9997/0.9999  PASS
+```
+
+All four nulls pass within 0.33%, so the instrument can see a real effect — and **the effect CIs of
+the two builds overlap almost completely**. The predicted ~1.5x improvement is absent; the
+difference between the builds is below what this harness can decide.
+
+**A CORRECTION TO MY OWN FIRST READING.** Before measuring nulls I ran min-of-median A/Bs and wrote
+that the change was a "stable 7-9% regression". With nulls, that is not supportable either — the
+builds are indistinguishable, not ordered. The reject stands on NO BENEFIT, not on harm. The ledger
+preflight gate refused the first draft of this row for exactly this reason (`REJECT lacks measured
+A/A null or COUNTED_MECHANISM`), and it was right to.
+
+**THE HYPOTHESIS IS REFUTED: the pre-scan is not the dominant cost.** Whatever the ~0.67 ns/element
+deficit is, it is not the extra read pass. The only remaining candidate is fusing event detection
+into `zerocopy_f64_binary_flat_with_out` so it rides the loads the kernel already performs — a
+shared 200-line helper serving many binary ops, which needs its own bead and its own care.
+
+### WHAT THE EXPERIMENT DID ESTABLISH, AND WHY IT WAS STILL REVERTED
+
+`fmod`'s zero-divisor scan is INCOMPLETE. NumPy's invalid set is
+`!a.is_nan() && !b.is_nan() && (a.is_infinite() || b == 0.0)`, verified over inf%nan, nan%0.0,
+-inf%2, inf%0.0, nan%nan, inf%inf, 2%-0.0 and -0.0%2. **`inf % 2.0` raises invalid and has no zero
+divisor**, so the scan cannot see it — NumPy warns, fnp is silent. That divergence is live on the
+shipped build and remains OPEN.
+
+A SECOND divergence surfaces the instant the deferral is removed, and any future fix will meet it:
+**Rust's `%` returns POSITIVE quiet NaN (0x7ff8000000000000) for a zero divisor where NumPy returns
+NEGATIVE (0xfff8000000000000).** 1%0, 1%-0, -1%0 and 0%0 all differ; the infinite-dividend cases
+already agree at 0xfff8. NumPy writes 0xfff8 for every invalid element, so canonicalising the whole
+predicate is uniform. This is the THIRD route this session whose deferral was hiding a NaN-sign
+mismatch (`log`/`log2` were the first two) — it is now a standing expectation, not a surprise.
+
+The reverted branch passed an exhaustive 10x10 operand grid (100 cases) on values, uint64 BITS and
+events, across errstate raise/ignore/warn. **The correctness fix is known-good**; it was reverted
+only because it rides on a perf design that buys nothing, and a warning-only divergence does not
+justify carrying an unmeasurable-but-not-free change on a hot route. Fix it with the fused design.
+
+A/A NULL CONTROLS: four, tabulated above, all PASS within 0.33%. Between-RUN spread is large on this
+host (numpy 9325 vs 12490 ns for the same build), which is why the overlapping CIs are read as
+"indistinguishable" rather than as an ordering.
+VERIFICATION: tree reverted to `abdf2d33`; `cargo check -p fnp-python --lib --tests` clean.
+RETRY PREDICATE: do NOT re-attempt a post-hoc or relocated scan for `fmod` — three shapes were
+measured and none beat the incumbent. Only fused-into-the-kernel detection may be tried, measured
+with a dual-null A/B at n=2^12 before any wider claim.
+AGENT_NAME=TanBridge.
