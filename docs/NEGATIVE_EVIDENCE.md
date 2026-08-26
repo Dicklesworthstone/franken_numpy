@@ -57186,7 +57186,9 @@ nulls, all within 0.0104 of unity.
 VERIFICATION: `cargo check -p fnp-python --lib --tests` clean. Three new tests —
 `iscomplexobj_matches_numpy_on_extended_precision_complex`,
 `ascontiguousarray_promotes_zero_d_to_one_d_like_numpy`,
-`as_array_family_preserves_numpy_object_identity_including_unparseable_dtypes`. NOT RUN as a suite:
-`cargo test -p fnp-python` does not fit the ceiling on this tree; the three are compile-verified and
-their assertions are mirrored by the 624-case Python probe, which passed against the shipped `.so`.
+`as_array_family_preserves_numpy_object_identity_including_unparseable_dtypes` - all three RUN AND
+PASSING (`cargo test -p fnp-python --lib -- --test-threads=1 <the three names>`: `3 passed; 0 failed;
+652 filtered out`). The full suite was NOT run - `cargo test -p fnp-python` does not fit the ceiling
+on this tree - but these three are not merely compile-verified, and their assertions are independently
+mirrored by the 624-case Python probe against the shipped `.so`.
 AGENT_NAME=TanBridge.
