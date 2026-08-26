@@ -58357,3 +58357,105 @@ RETRY PREDICATE: the residual still WINS below 2^15 and the parallel kernel stil
 overhead on a delegating route and is not worth a shared-kernel change. **And do not rank off the
 loss sweep without re-measuring — 12 of its top 20 losses are not losses.**
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP + NEW VEIN: the loss sweep's operand ladder is ALL C-CONTIGUOUS, and a strided sweep finds losses it structurally cannot see (`deadlock-audit-0iwez`)
+
+### THE INSTRUMENT HAD A BLIND AXIS
+
+`bench_vs_numpy_loss_sweep`'s ladder is entirely C-contiguous. `deadlock-audit-0e1q5` was the first
+crack — nanarg read 1.37x contiguous and 7.365x on a strided view. So the ladder, not the ops, was
+the limit. A Python-side sweep over `dir(fnp) & dir(np)` with a STRIDED ladder (`a[::2]`, a strided
+pair, a transposed 2-D), each cell timed against its own CONTIGUOUS control of the same values:
+
+```
+  strided   contig   numpy_ns      fnp_ns   case
+    7.08x    0.15x      77547      549052  deg2rad[strided]      <- 47x swing on LAYOUT alone
+    7.06x    0.16x      77507      547318  rad2deg[strided]
+    5.90x    0.18x     124827      735897  modf[strided]
+    4.44x    0.82x     809957     3599301  concatenate[transposed]
+    3.11x    0.47x     249333      774770  extract[strided_2]
+    2.68x    0.08x     184580      494258  spacing[strided]
+    2.23x    0.00x     166276      371455  trim_zeros[strided]
+```
+
+**220 comparable cells, 39 strided losses above 1.15x**, and the top ones are STRIDED-ONLY: the
+contiguous control is a win or parity, so the existing instrument scores them healthy.
+
+### MECHANISM — one shape, and `extract_precise_numeric_array` sits at 116 sites
+
+Every top cell has the same structure: a zero-copy fast path needing a contiguous buffer, a dtype
+guard that PASSES (the operand really is f64), and then `extract_precise_numeric_array` copying the
+whole operand to get a contiguous one. NumPy's strided loop beats that copy comfortably. This is the
+same cold-extract residual already fixed in `take` (`deadlock-audit-yphwc`), `meshgrid`
+(`deadlock-audit-bvihx`) and `nanargmax`/`nanargmin` (`deadlock-audit-0e1q5`) — but reached through
+LAYOUT rather than dtype or arity.
+
+### SHIPPED: `native_angle_conversion` only — `deg2rad`, `rad2deg`, `degrees`, `radians`
+
+One guard, the proven shape: where the zero-copy path declined for layout, delegate.
+
+Same-session A/B, dual nulls, all PASS:
+
+```
+  case                       BEFORE     AFTER
+  deg2rad strided           10.979x     1.008x
+  deg2rad contiguous         0.100x     0.108x   WIN preserved
+  deg2rad 2-D transposed     7.720x     1.003x
+  rad2deg strided            5.745x     1.004x
+  rad2deg contiguous         0.105x     0.102x   WIN preserved
+  rad2deg 2-D transposed     8.182x     1.002x
+```
+
+**The contiguous control is the load-bearing row** — the guard must not cost the existing ~10x win,
+and it does not. Confirmed by contract, bench elf
+`ffca1e85613a25c87e9199aa9616015888e39cefbad0482961bbc8505353c318`:
+
+```
+  deg2rad[f64]  DECIDABLE_WIN  ratio 4.030984 [3.873075,4.186619]
+                incumbent 113233.0 ns   candidate 26555.0 ns   exact_bytes=passed
+```
+
+NOTE WHAT THAT CONTRACT CAN AND CANNOT DO: its operand is contiguous, so it certifies only that the
+existing win survived. **The 10.979x cell this row is about is not reachable by the contract at
+all**, which is precisely the gap this bead names.
+
+PARITY: zero divergences across 8 dtypes (f64/f32/f16/i8/i16/i64/u8/bool) x 3 layouts (contiguous,
+strided, 2-D transposed) x all four public names, plus scalar, 0-d, empty, list and nan/inf
+operands, compared on dtype, shape AND raw bytes.
+
+### THE VEIN IS DEEPER THAN THE FIRST LOOK SHOWED
+
+Re-running the strided sweep after the ship — with `deg2rad`/`rad2deg` gone from the list — surfaces
+cells the first run's top entries had masked:
+
+```
+  strided   contig   case
+   20.78x    0.88x   corrcoef[strided]
+   13.26x    0.45x   isneginf[strided]
+   12.51x    0.42x   isposinf[strided]
+   11.16x    1.02x   ediff1d[strided]
+   10.77x    0.27x   logical_not[strided]
+   10.72x    0.79x   all[strided]
+    9.98x    0.07x   any[strided]
+    8.32x    0.94x   sort_complex[strided]
+    7.36x    0.50x   frexp[strided]
+    5.89x    0.23x   modf[strided]
+```
+
+**Ten cells above 5x, every one strided-only.** `any[strided]` is 9.98x while its contiguous control
+is 0.07x — a 140x swing on layout. This is now the largest known lever in the suite by a wide
+margin, and it is filed rather than swept: each site needs its own inspection, the guard is only
+correct where a delegation path exists and the decline really is about layout, and AGENTS.md forbids
+script-driven edits.
+
+A/A NULL CONTROLS: six pinned A/B cells with their own dual nulls, all PASS within 0.015; contract
+incumbent null 1.000000. The strided sweep itself is interleaved min-of-7 TRIAGE with no null and is
+quoted only as a ranking, exactly as the Rust sweep is.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+RETRY PREDICATE: when taking another cell from this vein, ALWAYS time the contiguous control in the
+same A/B. Several of these cells are large contiguous WINS (`any` 0.07x, `logical_not` 0.27x) and a
+careless guard would trade a 14x win for a 10x loss avoided. And do not expect the Rust contract to
+certify these — it cannot reach a strided operand; the A/B is the evidence.
+AGENT_NAME=TanBridge.
