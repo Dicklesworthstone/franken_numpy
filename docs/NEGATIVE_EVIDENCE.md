@@ -58971,3 +58971,78 @@ plus a view is the only way in), and the two `PyBuffer::get` calls plus the shap
 rest. The 2-D cells are still ~2.6x because numpy's own 3x4 call is only ~290 ns - there is about
 480 ns of fnp entry left against it, and no single item in it is now above ~160 ns.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `np.inner`'s int/f16 gates paid a full `ascontiguousarray` COPY of b before the work floor at the BOTTOM of the function could decline: 3.198x -> 1.999x on 8x8 i64 (`deadlock-audit-usmva`)
+
+`TanBridge`. Shipped `a3c01680`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 25 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** candidate-win on the six below-floor cells; all six are still a LOSS to
+numpy and are reported as losses. No-change on the three control/engagement cells.
+
+`try_native_int_inner` and `try_native_f16_inner` reshape both operands, transpose b and push it
+through `ascontiguousarray` - a real O(n*k) COPY - and only THEN call
+`try_native_{int,f16}_matmul`, whose work floor rejects everything below ~64^3. On a small operand
+that copy IS the call. This is the same defect class as the dispatch chain in
+`deadlock-audit-z1gjs`, one step further in: not a predicate that re-READS metadata, but a
+predicate that does O(operand) WORK before a gate that was always going to say no.
+
+The floor is a property of the SHAPES, which are already in hand at that point, so it applies
+before the work instead of after it. Identical predicate, identical outcome, no copy.
+`try_native_int_tensordot_tuple_axes` already did exactly this - the two `inner` gates were the
+outliers, and an `awk` pass for functions holding both an `ascontiguousarray` and a call to a
+gated kernel found only these two plus `try_native_intbool_broadcast_matmul`, which already guards
+its copy correctly.
+
+```
+INNER_EARLY_DECLINE worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 25 rounds, median of round ratios, dual A/A null
+  before_elf=1de8929900dc  after_elf=87578fef3d92
+
+  case                 BEFORE                      AFTER                excess
+  i64 8x8   (below)   3.198x [2.960,3.235]  ->  1.999x [1.928,2.031]   2435 -> 1124 ns
+  i64 16x16 (below)   1.843x [1.830,1.900]  ->  1.384x [1.310,1.392]   2656 -> 1111 ns
+  i64 32x32 (below)   1.174x [1.078,1.297]  ->  1.073x [1.024,1.078]   7431 -> 1172 ns
+  i32 8x8   (below)   3.024x [2.408,3.146]  ->  1.980x [1.882,2.029]   2395 -> 1124 ns
+  bool 8x8  (below)   3.171x [3.022,3.245]  ->  2.007x [1.879,2.086]   2344 -> 1112 ns
+  f16 8x8   (below)   2.013x [1.945,2.064]  ->  1.417x [1.286,1.433]   3007 -> 1170 ns
+
+  ENGAGEMENT (an early decline can silently disengage the kernel it guards):
+  i64 70x70 (ABOVE)   1.540x                ->  1.584x                 native path still taken
+  f16 70x70 (ABOVE)   0.235x WIN            ->  0.258x WIN             4x numpy, still ours
+  f64 8x8  (control)  1.881x                ->  1.873x                 untouched path, unmoved
+```
+
+**The excess column is the mechanism, counted.** It collapses to a flat ~1120 ns on EVERY
+below-floor cell regardless of size - 2435, 2656 and 7431 ns all become ~1120 - which is exactly
+what removing an O(n*k) copy from a fixed-cost decline looks like. The 32x32 cell is the clearest:
+7431 ns of excess for a call numpy finishes in 16.9 us, now 1172 ns.
+
+**A/A NULL CONTROLS (same invocation, every cell):** 16 of 18 pass. **DISCLOSED:** both
+ABOVE-floor cells read a BIASED candidate null in the AFTER run (0.9546 for i64 70x70, 1.0264 for
+f16 70x70), so their numbers are "about" - what they establish is ENGAGEMENT, not a ratio. That is
+all they are there for: the risk of an early decline is that it disengages the kernel, and a 0.258x
+WIN cannot happen without the native f16 GEMM running.
+
+**DISCLOSED REGIME:** a ~21-minute triage sweep of my own was running on another core throughout
+BOTH runs (loadavg 19.89/22.46/21.09). The interleaved ABBAABBA design and the 16 passing nulls are
+what make the below-floor rows readable under that load; I would not bank the two biased rows as
+ratios under it, and have not.
+
+PARITY: the `inner` and `matmul`/`dot` probes (10 dtypes x 11 shape pairs plus 15 edge cases each -
+mixed dtypes, strided, F-order, transposed, lists, 0-d scalars, `np.matrix`, nan/inf, empty k=0 and
+m=0, batched - compared on dtype, shape, RAW BYTES and exception text). 4 divergences before, 4
+after, all four the same pre-existing `longdouble` padding-byte artifact of the probes' own
+`tobytes()`. 0 INTRODUCED. 654 lib tests pass; clippy clean; `cargo fmt` a no-op.
+
+MEMORY: largest operand 70x70 f16/i64 (< 40 KB); host `used` 57 GB of 215.
+
+RETRY PREDICATE: do NOT re-attack the copy - it is gone. The residual ~1120 ns on the below-floor
+cells is `np.inner`'s ordinary entry: the facts read, the two gates' shape/dtype reads, and the
+delegation. PRICED AND DECLINED in the same window: replacing the facts' `kind`+`itemsize` reads
+with a `dtype is np.dtype(np.float64)` IDENTITY compare (numpy's builtin dtype objects are
+singletons) is 21.9 ns vs 59.1 ns per operand at the Python level - about 75 ns on a ~950 ns call,
+below what this harness can decide on one call site. Do not spend a cycle on it without counted
+attribution.
+AGENT_NAME=TanBridge.
