@@ -112535,11 +112535,12 @@ fn histogramdd(
         //
         // `column_objects` is what the edge derivation reads; for the array form that is a
         // strided column view, for the sequence form the caller's own array.
-        let is_array_form = sample.is_exact_instance(cached_ndarray_type(py)?)
-            && sample
-                .getattr(intern!(py, "ndim"))
-                .and_then(|n| n.extract::<usize>())
-                .is_ok_and(|n| n == 2);
+        let sample_is_ndarray = sample.is_exact_instance(cached_ndarray_type(py)?);
+        let sample_ndim = sample
+            .getattr(intern!(py, "ndim"))
+            .and_then(|n| n.extract::<usize>())
+            .ok();
+        let is_array_form = sample_is_ndarray && sample_ndim == Some(2);
         let mut column_objects: Vec<Bound<'_, PyAny>> = Vec::new();
         if is_array_form {
             if let Ok(shape) = sample
@@ -112556,6 +112557,31 @@ fn histogramdd(
                         }
                     }
                 }
+            }
+        } else if sample_is_ndarray {
+            // AN ndarray IS NEVER THE SEQUENCE SPELLING, and letting one reach the
+            // `try_iter` branch below was a 1332x loss (`deadlock-audit-9tk4m`).
+            //
+            // NumPy has exactly two conventions here. An ndarray is `(N, D)` - it unpacks
+            // `sample.shape` into two names, and when that fails it normalises with
+            // `np.atleast_2d(sample).T`, which turns a 1-D `(N,)` array into `(N, 1)`,
+            // i.e. ONE axis of N samples. A LIST or tuple of D arrays is the other
+            // spelling. The `else if` below accepts anything iterable, and a 1-D ndarray
+            // is iterable - so a plain `np.histogramdd(x)` on a 65536-element array was
+            // read as SIXTY-FIVE THOUSAND axes of one sample each, and the loop that
+            // follows called `numpy.histogram_bin_edges` once per element before the
+            // whole attempt failed and delegated to NumPy anyway. Measured at N = 65536:
+            // 1.338 SECONDS of wasted work in front of a 1.0 ms NumPy call, for a result
+            // that came from NumPy either way.
+            //
+            // A 1-D ndarray is therefore bound as the single column NumPy's own
+            // normalisation produces, which both removes the pathological loop and lets
+            // the counting kernel serve the case natively. Any other ndim leaves
+            // `column_objects` empty and declines: NumPy itself raises for a 3-D sample
+            // (the `atleast_2d(...).T` retry still cannot unpack three axes into two), so
+            // declining reproduces its error exactly instead of inventing an answer.
+            if sample_ndim == Some(1) {
+                column_objects.push(sample.clone());
             }
         } else if !sample.is_instance_of::<pyo3::types::PyString>()
             && let Ok(items) = sample.try_iter()

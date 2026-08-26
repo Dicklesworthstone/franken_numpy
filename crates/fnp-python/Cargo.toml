@@ -161,3 +161,7 @@ harness = false
 [[bench]]
 name = "criterion_python_gradnorm"
 harness = false
+
+[[bench]]
+name = "criterion_python_loss_sweep"
+harness = false
