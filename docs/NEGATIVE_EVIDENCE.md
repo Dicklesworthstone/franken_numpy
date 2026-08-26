@@ -57907,3 +57907,75 @@ category split first. Do not re-measure these cells at 64 threads on a shared ho
 `array_equal(equal_nan=True)` to certify a route that produces its own NaNs — it cannot see a sign
 bit, and that is exactly what went wrong on the first attempt here.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — AMENDMENT to the log-family row above: MY THREAD-COUNT JUSTIFICATION WAS WRONG, and the win is regime-dependent
+
+I quoted the log family as three DECIDABLE_WINs from contracts run at `RAYON_NUM_THREADS=16`, and
+justified excluding the default (64) with "this box is noise-dominated at 64, per
+`deadlock-audit-2qjj3`". **That justification does not hold for this cell.** Re-running the same
+contract at the default thread count, twice:
+
+```
+  log[f64] RAYON unset (=64), run 1  DECIDABLE_REGRESSION ratio 0.711032 [0.702866,0.740301]
+                                     incumbent 585688.0 ns   candidate 783823.0 ns
+  log[f64] RAYON unset (=64), run 2  DECIDABLE_REGRESSION ratio 0.743074 [0.716772,0.780539]
+                                     incumbent 546870.0 ns   candidate 780251.0 ns
+```
+
+Two runs, 0.711 and 0.743, candidate 783823 and 780251 — **stable and reproducible, not noise.**
+That is the opposite of the arccosh cell, where the candidate arm swung 444774 -> 1041912 between
+runs. I reused that cell's disclosure without re-testing whether it applied here. It did not.
+
+### WHAT IS ACTUALLY GOING ON — rayon wake-up latency, paid PER CALL, scaling with thread count
+
+TIGHT = many back-to-back fnp calls, the pool never sleeps. INTERLEAVED = one call per slot
+alternating with numpy, so the pool sleeps through every numpy slot and must wake for every fnp
+slot. The contract's ABBAABBA schedule is the interleaved shape, with deeper sleeps than this probe:
+
+```
+  threads  shape         numpy_ns    fnp_ns   fnp/numpy
+       16  tight           549382    162422      0.30x
+       16  interleaved     653472    224665      0.34x
+       64  tight           521927    143126      0.27x
+       64  interleaved     661261    460862      0.70x    <- fnp pays 3.2x for interleaving
+```
+
+numpy is single-threaded and barely moves. Our 64-way fan-out pays ~318 us of wake-up per call at
+64 threads against ~62 us at 16. **A parallel kernel measured in a tight loop is measured in the
+regime it will never see in production.**
+
+### THE HONEST STATE OF THE LOG FAMILY, ALL REGIMES
+
+```
+  regime                                        log      log2     log10
+  plain process, tight loop, 64 threads        0.27x     0.33x    0.29x    WIN
+  plain process, interleaved, 64 threads       0.70x     0.54x    0.53x    WIN
+  bench contract, 16 threads                   1.236x    1.275x   1.371x   WIN (contract convention)
+  bench contract, 64 threads (default)         0.711x    —        —        LOSS, stable over 2 runs
+  sweep triage, 64 threads, BEFORE the fix     1.86x     1.98x    1.82x    LOSS
+  sweep triage, 64 threads, AFTER the fix      1.77x     1.45x    1.39x    LOSS
+```
+
+**In the bench process at its default 64 threads the fix is close to neutral** (sweep 1.86x -> 1.77x
+for log), while in a plain interpreter it is a 1.9x-loss-to-3x-win swing. Both are real; they are
+different regimes and the row above should have said so.
+
+WHAT STANDS from the original row, unchanged: the mechanism (pay-twice deferral), the category
+resolution and the divide-first ordering, the `is_finite()` fix, the NaN-sign regression and its
+repair, and `exact_bytes=passed` on all three contracts. What is AMENDED is the performance claim's
+scope: **it is a win in a plain process at every thread count, and at <=32 threads in the bench; it
+is NOT a win in the bench at 64 threads, and that result is stable rather than noisy.**
+
+RETRY PREDICATE, corrected: the open lever on this route is no longer the deferral — it is
+`TRANSCENDENTAL_PARALLEL_MIN = 1 << 15` combined with `chunk = n.div_ceil(current_num_threads())`,
+which at n=2^16 and 64 threads makes 64 tasks of 1024 elements each. That is too fine for a
+wake-from-sleep pool. The `APPEND_PAR_MIN` treatment applies (`deadlock-audit-dc6mz`): measure
+par/ser across thread counts AND across tight-vs-interleaved call shapes, then set the threshold and
+the chunk size from the interleaved numbers, because that is the shape real callers produce. Do NOT
+tune it against a tight loop.
+GENERAL RULE THIS SESSION EARNED THE HARD WAY: before reusing another row's regime disclosure,
+re-run the thing it disclosed. "Noise-dominated at 64" was true for arccosh and false here, and I
+carried it across without checking.
+AGENT_NAME=TanBridge.
