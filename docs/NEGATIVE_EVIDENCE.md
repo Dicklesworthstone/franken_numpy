@@ -56953,3 +56953,61 @@ standalone batched harness BEFORE any route-level claim, and (c) be measured und
 `bench_flat_i64_sort_256_dual_null` with interleaved arms. Do not quote the 2.04x instruction ratio
 as a time ratio: the arms are at time parity and that is measured twice.
 AGENT_NAME=CalmMoose.
+
+## 2026-08-26 — THE i64 n=256 KERNEL IS CLOSED FOR TIME BY NUMPY'S OWN BEST EFFORT: its tuned AVX2 x86-simd-sort is 1108 ns against our scalar 1092, so matching it would make the route WORSE, and only BEATING the reference implementation of the idea can help (`deadlock-audit-call-shape-priced-25ns-lk8zb`)
+
+**Result class:** a closure argument that follows from two numbers already banked today, recorded so
+that the headroom finding earlier in this file is not read as an invitation. No new measurement.
+Host `thinkstation1`, numpy 2.4.3, bench ELF sha256
+`39a72071eda934aeddcb59ae135346b6af49df1387398adff2ebc38374027cb0`.
+
+### The argument
+
+The correction row above established that our comparison kernel spends 15426 instructions per call
+against NumPy's 7567 — 2.04x — and that 82.8% of the route's excess WORK is the kernel. Read alone,
+that says "halve the kernel's instructions and win". It does not, and the reason is the other number
+in the same row.
+
+```
+  our route today                          1909 ns
+  our scalar pdqsort kernel                1092 ns
+  NumPy's AVX2 x86-simd-sort kernel        1108 ns
+  our route with NumPy's EXACT kernel      1925 ns   (1909 - 1092 + 1108)
+  NumPy's route                            1583 ns
+```
+
+**Swapping in NumPy's own kernel, instruction-for-instruction, makes our route 16 ns SLOWER.**
+NumPy's vectorized kernel retires half the instructions in the same wall time, because at n=256 the
+AVX2 path's shuffles, blends and unpredictable branches sustain ~6.8 insns/ns against the scalar
+path's ~14.1. The instruction gap is real and it is not convertible into time at this size.
+
+So the target for any kernel attempt is not "match NumPy". It is "beat the tuned reference
+implementation of vectorized sorting, on the ISA it was tuned for, at a size where it already fails
+to beat scalar pdqsort". **That is closed for practical purposes**, and it is closed by the strongest
+evidence available: the incumbent's own best effort at exactly this idea is at parity with the code
+we already ship.
+
+### What this does and does not close
+
+CLOSED: the comparison kernel as a route-level TIME lever at n=256 on an AVX2 host. This subsumes
+the hand-written AVX2 quicksort reject (1395 ns against `sort_unstable`'s 1062) — that attempt was
+not merely undertuned, it was chasing a target that is worth +16 ns even if hit perfectly.
+
+NOT CLOSED: larger n, where the vector path's instruction advantage does start to pay and where this
+campaign already ships parallel arms; and any host with AVX-512, where `vpcompressq` and
+`_mm256_min_epi64`'s AVX-512 equivalents change the per-element cost that made the AVX2 attempt
+uncompetitive. Neither is this cell.
+
+COUNTED_MECHANISM: 2 kernels, same operand, same size — ours 15426 insns/call at ~14.1 insns/ns,
+NumPy's 7567 at ~6.8, both landing within 16 ns of each other in wall time (1092 vs 1108). The
+route arithmetic 1909 - 1092 + 1108 = 1925 uses only medians already banked today.
+A/A NULL CONTROLS: none taken and none claimed — this row introduces no new measurement. Its inputs
+are the wall-clock kernel isolations and the counted attribution above, each of which carries its
+own controls.
+VERIFICATION: arithmetic only; the two kernel figures are quoted from the rows above.
+RETRY PREDICATE: do not attempt a kernel lever for this cell on an AVX2 host unless the attempt
+BEATS 1092 ns at n=256 in a standalone batched harness first — matching NumPy is worth -16 ns and is
+not a goal. Re-open on an AVX-512 host, or at n well above 256, where the instruction advantage
+converts. `crates/fnp-ufunc` remains `#![forbid(unsafe_code)]`, so `std::simd` is the only door in
+any case.
+AGENT_NAME=CalmMoose.
