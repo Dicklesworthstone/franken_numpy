@@ -465,6 +465,10 @@ fn main() {
                 "bench_pyfunction_call_shape_price",
                 bench_pyfunction_call_shape_price,
             ),
+            (
+                "bench_flat_i64_sort_256_single_arm",
+                bench_flat_i64_sort_256_single_arm,
+            ),
         ],
     );
 }
@@ -2065,6 +2069,114 @@ a = rng.integers(-(1 << 62), 1 << 62, 256, dtype=np.int64)\n",
             varargs_null.ratio_median,
             varargs_null.ratio_ci_low,
             varargs_null.ratio_ci_high,
+        );
+    });
+}
+
+/// ONE arm, N calls, no timing - a target for `perf stat`.
+///
+/// The `int64` n=256 sort cell's remaining deficit is ~326 ns spread over many
+/// pieces of Python entry, each of them 1-4% of the route. That is below what
+/// this harness can decide from wall clock in any reasonable number of runs, and
+/// it is exactly the situation counted attribution is for: instructions retired
+/// do not move with machine load, so a counter diff stays valid on a host that a
+/// wall-clock contract could not be run on at all.
+///
+/// `FNP_SORT_ARM` selects `fnp`, `numpy`, or `none`. The `none` arm does
+/// everything except the calls, so subtracting it removes interpreter startup,
+/// the numpy import and the corpus build - all of which are large and identical
+/// across arms - and leaves N times the per-call cost.
+fn bench_flat_i64_sort_256_single_arm(_c: &mut criterion::Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_sort_single_arm").expect("bench module");
+        fnp_python(&module).expect("initialize fnp module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let ns = PyDict::new(py);
+        ns.set_item("np", &numpy).expect("bind numpy");
+        py.run(
+            std::ffi::CString::new(
+                "rng = np.random.default_rng(20260824)\n\
+a = rng.integers(-(1 << 62), 1 << 62, 256, dtype=np.int64)\n\
+a[:16] = np.array([np.iinfo(np.int64).min, np.iinfo(np.int64).max, -1, 0, 1, -1, 0, 1, -7, 7, -7, 7, 13, 13, -13, -13], dtype=np.int64)\n\
+rng.shuffle(a)\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int64 corpus setup");
+        let input = ns.get_item("a").expect("corpus");
+        let arm = std::env::var("FNP_SORT_ARM").unwrap_or_else(|_| "none".to_owned());
+        let calls: usize = std::env::var("FNP_SORT_CALLS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(400_000);
+        let np_sort = numpy.getattr("sort").expect("numpy.sort");
+        let fnp_sort = module.getattr("sort").expect("fnp.sort");
+        assert!(
+            !fnp_sort.is(&np_sort),
+            "dispatch trap: fnp.sort resolved to the NumPy callable"
+        );
+        // Prove the native route is engaged BEFORE the counted loop, so a counter
+        // diff can never be a delegation in disguise.
+        //
+        // RAW STRING, DELIBERATELY: a `\n\` continuation inside a normal Rust
+        // string literal STRIPS the leading whitespace of the next line, which
+        // turns an indented Python block into an `IndentationError`. That is not
+        // hypothetical - it is how this probe first shipped, and because the
+        // panic happened before the counted loop, `perf` dutifully measured six
+        // runs of a process that never made a single call.
+        ns.set_item("fnp", &module).expect("bind fnp module");
+        py.run(
+            std::ffi::CString::new(
+                r#"
+original_sort = np.sort
+calls_seen = []
+def spy(*args, **kwargs):
+    calls_seen.append(1)
+    return original_sort(*args, **kwargs)
+np.sort = spy
+try:
+    probe = fnp.sort(a)
+finally:
+    np.sort = original_sort
+"#,
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("engagement probe");
+        let numpy_sort_calls = ns
+            .get_item("calls_seen")
+            .expect("probe calls")
+            .len()
+            .expect("probe call count");
+        assert_eq!(
+            numpy_sort_calls, 0,
+            "fnp.sort delegated to numpy.sort; a counter diff would be meaningless"
+        );
+        match arm.as_str() {
+            "fnp" => {
+                for _ in 0..calls {
+                    black_box(fnp_sort.call1((black_box(&input),)).expect("fnp.sort"));
+                }
+            }
+            "numpy" => {
+                for _ in 0..calls {
+                    black_box(np_sort.call1((black_box(&input),)).expect("numpy.sort"));
+                }
+            }
+            _ => {}
+        }
+        println!(
+            "SINGLE_ARM arm={arm} calls={calls} n=256 dtype=int64 \
+             candidate_numpy_sort_calls_preflight={numpy_sort_calls} \
+             statistic=none_timing_is_external"
         );
     });
 }

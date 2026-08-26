@@ -56838,3 +56838,118 @@ is what resolved `add.accumulate`'s residual where wall-clock CIs could not
 and the AVX2 rewrite is a measured reject in the 2026-08-26 row, and `crates/fnp-ufunc` is
 `#![forbid(unsafe_code)]` regardless.
 AGENT_NAME=CalmMoose.
+
+## 2026-08-26 — CORRECTION, from counted attribution: NumPy IS running x86-simd-sort on this cell (the AVX2 variant), and our sort kernel is 2.04x its INSTRUCTIONS while being at parity in TIME — 82.8% of the route's excess work is the kernel, not the entry (`deadlock-audit-call-shape-priced-25ns-lk8zb`)
+
+**Result class:** a correction to two claims this campaign banked earlier today, established in the
+counter domain. Host `thinkstation1`, numpy 2.4.3, bench ELF sha256
+`39a72071eda934aeddcb59ae135346b6af49df1387398adff2ebc38374027cb0`, group
+`bench_flat_i64_sort_256_single_arm`, `RAYON_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1`,
+`taskset -c 63`, `perf stat -e instructions`. **No wall-clock claim is made here and none should be
+read into it** — the pinned core was an SMT sibling of a busy machine, so the cycle counts below are
+contaminated and only the instruction counts are used.
+
+### Why the counter domain at all
+
+The route's remaining deficit is ~326 ns spread over pieces each worth 1-4% of a ~1900 ns route,
+which is under this harness's wall-clock decidability threshold. Instructions retired do not move
+with machine load, so a counter diff stays valid on a host a contract could not be run on — this is
+the `counted-attribution-by-instruction-diff` instrument, used exactly as its own bead prescribed.
+
+### The counts, three reps, netted against a no-call arm
+
+Three arms — `none`, `numpy`, `fnp` — differing only in which callable the 400000-iteration loop
+invokes; the `none` arm does interpreter startup, the numpy import, the corpus build and the
+engagement probe but makes no calls, so subtracting it removes everything the arms share. Spread
+across three reps is under 0.2%.
+
+```
+  arm     total instructions (mean of 3)     netted, per call
+  none          1,049,823,812                        -
+  numpy         8,030,329,613                    17,451
+  fnp          11,826,172,782                    26,941
+                                        EXCESS   +9,490  (1.544x)
+```
+
+The loop asserts `candidate_numpy_sort_calls_preflight=0` before counting, so this is the native
+route and not a delegation in disguise.
+
+### THE FIRST CORRECTION: NumPy IS running x86-simd-sort here
+
+`perf record -e instructions` per-symbol, same arms. NumPy's profile:
+
+```
+  17.34%  sort_n_vec<avx2_vector<long>, Comparator<...>, 16, __vector(4)>
+   7.97%  partition_unrolled<avx2_vector<long>, Comparator<...>, 8, long>
+   2.98%  get_pivot_smart<avx2_vector<long>, Comparator<...>, long>
+   2.66%  qsort_<avx2_vector<long>, Comparator<...>, long>
+   8.67%  _PyEval_EvalFrameDefault
+```
+
+ours:
+
+```
+  23.82%  core::slice::sort::shared::smallsort::small_sort_network::<i64, ..>
+  19.25%  core::slice::sort::unstable::quicksort::quicksort::<i64, ..>
+   2.38%  core::slice::sort::shared::pivot::median3_rec::<i64, ..>
+   3.05%  _PyEval_EvalFrameDefault
+```
+
+**This morning's row said "This host has no AVX-512, so NumPy is not running an AVX-512
+x86-simd-sort on this cell", and then used that to argue the kernel had no headroom. The first half
+is true and the inference from it was wrong.** x86-simd-sort ships an **AVX2** 64-bit path and NumPy
+is running it. "No AVX-512" does not imply "no vectorized sort", and that leap should not have been
+made from an ISA baseline line without a dispatch check — the same lesson as
+`numpy-divide-loop-census-and-dispatch-check`, which says confirm the live loop, never assume.
+
+### THE SECOND CORRECTION: the kernel is at parity in TIME and 2.04x in WORK
+
+Applying the instruction shares to the netted per-call counts (the sort symbols occur only during
+the calls, so the share applies to the whole process):
+
+```
+  numpy AVX2 simd-sort kernel     7,567 insns/call   (30.95% of 3.667e9, N=150000)
+  fnp   scalar pdqsort kernel    15,426 insns/call   (45.45% of 5.091e9, N=150000)
+  kernel excess                  +7,858 insns/call   = 2.04x
+  route excess                   +9,490 insns/call
+  KERNEL SHARE OF THE EXCESS         82.8%
+```
+
+**So the time-parity finding (ours 1092 ns, NumPy's 1108 ns, banked twice today from independent
+wall-clock isolations) is not wrong — but it is not the whole truth.** The two kernels take the same
+TIME while ours does 2.04x the WORK, because the scalar arm sustains ~14.1 insns/ns against the
+vector arm's ~6.8. Vector code with shuffles, blends and unpredictable branches retires fewer, wider
+instructions per cycle. Parity in time was read as "no headroom"; what it actually shows is a kernel
+whose instruction count NumPy has already demonstrated can be halved.
+
+The corollary matters for how the cell is described: the ~326 ns TIME deficit is entry-dominated, but
+the WORK deficit is kernel-dominated. Both statements are true and they are about different
+quantities. The earlier row's "the entire 591 ns deficit is overhead, and none of it is the sort" is
+correct about time and wrong as a statement about where the route's work is.
+
+### What does NOT change
+
+The AVX2 quicksort written this morning is still a REJECT on its own measurement (1395 ns against
+`sort_unstable`'s 1062 at n=256, 0 mismatches over lengths 0..=256 x 8 shapes x 3 seeds). Headroom
+existing is not the same as that attempt capturing it — NumPy's x86-simd-sort is a mature tuned
+implementation and a first-cut hand-written network is not competitive with it. And
+`crates/fnp-ufunc` is `#![forbid(unsafe_code)]`, so intrinsics remain barred there regardless; the
+crate carries `#![feature(portable_simd)]`, so `std::simd` is the only admissible door.
+
+COUNTED_MECHANISM: 3 arms x 3 reps, spread under 0.2%; netted per-call instructions numpy 17451, fnp
+26941, excess 9490; per-symbol instruction shares attribute 7858 of those 9490 (82.8%) to the
+comparison kernel — ours 15426 insns/call against NumPy's AVX2 simd-sort at 7567.
+A/A NULL CONTROLS: not applicable and deliberately not claimed — this is a counter diff, not a
+timing contract; the control here is the `none` arm, which nets out 1.050e9 instructions of shared
+startup and reproduces to 0.2% across 3 reps.
+VERIFICATION: the counted loop asserts `candidate_numpy_sort_calls_preflight=0` before counting, so
+a delegating route cannot be mistaken for a native one. Bench-only change.
+RETRY PREDICATE: the kernel is NOT closed on headroom grounds and this row withdraws the earlier
+"do not re-attack the kernel, it is at parity" framing to that extent — NumPy demonstrates 7567
+insns/call where we spend 15426. It IS closed for hand-written AVX2 intrinsics in `fnp-ufunc`
+(`forbid(unsafe_code)`) and for the specific network measured this morning (a reject with numbers).
+A next attempt must (a) use `std::simd`, (b) beat `sort_unstable`'s 1062 ns at n=256 in the
+standalone batched harness BEFORE any route-level claim, and (c) be measured under
+`bench_flat_i64_sort_256_dual_null` with interleaved arms. Do not quote the 2.04x instruction ratio
+as a time ratio: the arms are at time parity and that is measured twice.
+AGENT_NAME=CalmMoose.
