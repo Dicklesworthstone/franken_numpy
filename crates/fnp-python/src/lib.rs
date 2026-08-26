@@ -8900,12 +8900,36 @@ fn zerocopy_f64_unary_flat<'py>(
             return Ok(None);
         };
         if matches!(op, UnaryOp::Sqrt) {
-            // Fused single-pass sqrt + finite-negative detection, parallel for large n.
+            // Fused single-pass sqrt + negative detection, parallel for large n.
             // numpy.sqrt is single-threaded; a parallel sqrt over the buffer wins, and
             // fusing the neg-check (vs the old separate any()-scan) removes the extra read
-            // pass that made sqrt the lone unary loss. If any finite-negative is present we
-            // defer (Ok(None)) so the numpy fallback records the invalid-value warning;
-            // the value sqrt(neg)=nan is itself correct, so the discarded `flat` is fine.
+            // pass that made sqrt the lone unary loss.
+            //
+            // ON DETECTION WE KEEP THE RESULT AND BORROW ONLY THE EVENT (`deadlock-audit-f1mj2`).
+            // This used to `return Ok(None)` so a fallback would record NumPy's invalid-value
+            // event. That threw away a completed correct buffer and cost 12.69x against
+            // numpy at n=2^16 (877080 ns vs 69125), triggered by as few as SIX negative
+            // elements in 65536 - the penalty is binary, not proportional. And it did not buy
+            // the parity it was paying for: measured against numpy 2.4.3, that path
+            // 1. did NOT raise under `errstate(invalid='raise')` (numpy raises
+            //    FloatingPointError; we returned an array and merely warned),
+            // 2. warned anyway under `errstate(invalid='ignore')` (numpy is silent), and
+            // 3. missed `-inf` entirely, because the detector below read `is_finite() && < 0`
+            //    while NumPy's invalid set for sqrt is exactly `v < 0.0` (which by IEEE
+            //    already excludes NaN and -0.0, and correctly includes -inf).
+            // Three FP-event divergences, bought at 12.69x.
+            //
+            // `numpy.sqrt(-1.0)` is one element of the SAME ufunc, so it reproduces the event
+            // through NumPy's own machinery: verified to match the array call exactly under
+            // invalid = warn / raise / ignore / print, and NumPy emits one event per call
+            // rather than per element, so a single probe is the right count. It costs 179.6 ns
+            // against 67925.8 ns to re-run the whole array through numpy. The values we
+            // computed are already bit-identical (sqrt(-x)=NaN, sqrt(-inf)=NaN), so there is
+            // nothing to recompute - only the event to raise.
+            //
+            // Checked and not a hazard: the native NaN-producing loop does not leave MXCSR
+            // dirty for later numpy calls (an innocent `np.sqrt`/`np.add` afterwards stays
+            // silent), so this does not smuggle a spurious event into an unrelated op.
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicBool, Ordering};
             // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
@@ -8918,7 +8942,9 @@ fn zerocopy_f64_unary_flat<'py>(
             let run = |o: &mut [f64], i: &[f64]| {
                 let mut neg = false;
                 for (s, &v) in o.iter_mut().zip(i.iter()) {
-                    neg |= v.is_finite() && v < 0.0;
+                    // Exactly NumPy's invalid set for sqrt. IEEE gives this for free:
+                    // NaN < 0.0 is false, -0.0 < 0.0 is false, -inf < 0.0 is true.
+                    neg |= v < 0.0;
                     *s = v.sqrt();
                 }
                 if neg {
@@ -8936,7 +8962,10 @@ fn zerocopy_f64_unary_flat<'py>(
                 run(out_data, in_data);
             }
             if saw_neg.load(Ordering::Relaxed) {
-                return Ok(None);
+                // Raise NumPy's invalid event through NumPy itself, then keep our buffer.
+                // If the caller is under `errstate(invalid='raise')` this propagates the
+                // FloatingPointError, which is precisely what numpy.sqrt would have done.
+                numpy.getattr(intern!(py, "sqrt"))?.call1((-1.0_f64,))?;
             }
         } else {
             // Dispatch on `op` ONCE, then run a monomorphic (autovectorizable) loop.
@@ -160098,6 +160127,86 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let theirs_object = numpy_asanyarray.call1((object_source.clone(),))?;
             assert_array_matches_numpy(&ours_object, &theirs_object)?;
 
+            Ok(())
+        });
+    }
+
+    /// `sqrt` on negative input must reproduce NumPy's `invalid` FP EVENT, not just its values.
+    ///
+    /// The values were never in doubt (sqrt(-x) is NaN either way). What this pins is the
+    /// event, under every `errstate` mode, plus the `-inf` member of the invalid set that the
+    /// old `is_finite() && < 0.0` detector silently dropped (`deadlock-audit-f1mj2`).
+    #[test]
+    fn sqrt_reproduces_numpy_invalid_event_under_every_errstate() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("sqrt")?;
+            let theirs = numpy.getattr("sqrt")?;
+            let array = numpy.getattr("array")?;
+
+            // Each operand is a member (or non-member) of NumPy's invalid set for sqrt.
+            let operands = [
+                ("finite_negative", vec![4.0_f64, -1.0, 9.0]),
+                ("neg_infinity", vec![1.0, f64::NEG_INFINITY]),
+                ("subnormal_negative", vec![1.0, -1e-320]),
+                ("quiet_nan_only", vec![1.0, f64::NAN]),
+                ("negative_zero_only", vec![1.0, -0.0]),
+                ("all_nonnegative", vec![0.0, 1.0, 4.0]),
+            ];
+            for mode in ["warn", "raise", "ignore"] {
+                for (label, values) in operands.iter() {
+                    let operand = array.call1((values.clone(),))?;
+                    // A fresh `errstate` per use: NumPy refuses to re-enter one
+                    // ("Cannot enter `np.errstate` twice.").
+                    let enter_errstate = || -> PyResult<Bound<'_, PyAny>> {
+                        let kwargs = PyDict::new(py);
+                        kwargs.set_item("invalid", mode)?;
+                        let guard = numpy.getattr("errstate")?.call((), Some(&kwargs))?;
+                        guard.call_method0("__enter__")?;
+                        Ok(guard)
+                    };
+
+                    // NumPy first, under its own errstate, to establish the truth.
+                    let guard = enter_errstate()?;
+                    let expected = theirs.call1((operand.clone(),));
+                    guard.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+                    let guard = enter_errstate()?;
+                    let actual = ours.call1((operand.clone(),));
+                    guard.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+
+                    match (expected, actual) {
+                        (Ok(expected_value), Ok(actual_value)) => {
+                            let same = numpy
+                                .getattr("array_equal")?
+                                .call1((&expected_value, &actual_value, true))?
+                                .extract::<bool>()?;
+                            assert!(
+                                same,
+                                "sqrt({label}) under invalid={mode}: values diverged"
+                            );
+                        }
+                        (Err(expected_err), Err(actual_err)) => {
+                            assert_eq!(
+                                expected_err.get_type(py).name()?.to_string(),
+                                actual_err.get_type(py).name()?.to_string(),
+                                "sqrt({label}) under invalid={mode}: raised a DIFFERENT type"
+                            );
+                        }
+                        (expected_other, actual_other) => panic!(
+                            "sqrt({label}) under invalid={mode}: one arm raised and the other \
+                             did not - numpy={:?} fnp={:?}",
+                            expected_other.is_ok(),
+                            actual_other.is_ok()
+                        ),
+                    }
+                }
+            }
             Ok(())
         });
     }
