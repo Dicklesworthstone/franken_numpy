@@ -75011,106 +75011,106 @@ fn sort(
                 axis_spec,
                 None | Some(None) | Some(Some(-1)) | Some(Some(0))
             ) {
-                if let Some(out) = try_zerocopy_f64_sort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_zerocopy_f64_sort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // 4-/8-byte integer flat sort (numpy simd-sort single-threaded; par 1.44-2.35x).
                 // (f32 flat sort gives only ~1.07x — numpy's AVX simd-sort already saturates — so
                 // it is NOT routed here; it stays on the numpy passthrough.)
-                if let Some(out) = try_native_int_sort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_native_int_sort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // datetime64/timedelta64 flat value sort (int64-backed; numpy non-simd introsort;
                 // NaT defer, byte-exact via int64 tick order).
-                if let Some(out) = try_native_datetime_sort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_native_datetime_sort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // complex128 flat value sort (numpy lexicographic introsort, no simd for complex);
                 // NaN/-0.0 defer, byte-exact (equal values = equal bytes).
-                if let Some(out) = try_zerocopy_c128_sort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_zerocopy_c128_sort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // complex64 flat value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-                if let Some(out) = try_zerocopy_c64_sort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_zerocopy_c64_sort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // fixed-width unicode string flat sort (Latin-1 memcmp == codepoint order; wide
                 // codepoints >= 0x100 defer). numpy's per-record string comparator is ~10x slower.
-                if let Some(out) = try_native_string_sort_flat(py, &numpy, &a)? {
+                if let Some(out) = try_native_string_sort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // float16 flat sort via exact f32 widening (numpy has NO f16 simd sort - its
                 // generic path measured 173-260 ms @4M on two workers vs 26-38 ms widened;
                 // ledger 2026-07-10, bead deadlock-audit-98chw). NaN/-0.0 defer via bit pre-scan.
-                if let Some(out) = try_native_f16_sort(py, &numpy, &a, axis_spec)? {
+                if let Some(out) = try_native_f16_sort(py, numpy, &a, axis_spec)? {
                     return Ok(out);
                 }
             }
             if let Some(out) =
-                try_zerocopy_f64_sort_lastaxis(py, &numpy, &a, axis_spec, require_distinct)?
+                try_zerocopy_f64_sort_lastaxis(py, numpy, &a, axis_spec, require_distinct)?
             {
                 return Ok(out);
             }
             // complex128 per-lane last-axis value sort (lexicographic; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_sort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c128_sort_lastaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex64 per-lane last-axis value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_sort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c64_sort_lastaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // float16 >=2-D LAST-AXIS sort via the same widening composition (per-lane value
             // sorts are independent; identical byte-exactness argument per lane).
-            if let Some(out) = try_native_f16_sort(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_f16_sort(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // integer per-lane last-axis sort (byte-exact for any kind; numpy sorts lanes serially).
-            if let Some(out) = try_native_int_sort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_int_sort_lastaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // fixed-width string per-lane last-axis sort (Latin-1 memcmp == codepoint
             // order; numpy's per-record comparator runs lanes serially).
-            if let Some(out) = try_native_string_sort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_string_sort_lastaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_sort_axis0(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f64_sort_axis0(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // integer axis-0 (column) sort (byte-exact any kind; numpy sorts columns serially).
-            if let Some(out) = try_native_int_sort_axis0(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_int_sort_axis0(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex128 per-column axis-0 value sort (lexicographic; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_sort_axis0(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c128_sort_axis0(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex64 per-column axis-0 value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_sort_axis0(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c64_sort_axis0(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_sort_midaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f64_sort_midaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // integer per-lane middle-axis sort (byte-exact any kind; numpy sorts strided lanes serially).
-            if let Some(out) = try_native_int_sort_midaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_int_sort_midaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // fixed-width string non-last-axis sort (strided lane gather; Latin-1
             // memcmp == codepoint order; numpy's strided per-record path is serial).
-            if let Some(out) = try_native_string_sort_nonlast(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_string_sort_nonlast(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex128 per-lane middle-axis value sort (lexicographic; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_sort_midaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c128_sort_midaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // complex64 per-lane middle-axis value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_sort_midaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_c64_sort_midaxis(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
             // datetime64/timedelta64 per-lane last-axis + per-column axis-0 value sort (int64 view,
             // datetime-dtyped output; NaT defer, byte-exact since equal ticks are equal bytes).
-            if let Some(out) = try_native_datetime_sort_axes(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_native_datetime_sort_axes(py, numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }

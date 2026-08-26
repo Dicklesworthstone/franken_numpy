@@ -2080,3 +2080,46 @@ print(all(checks))
     );
     Ok(())
 }
+
+#[test]
+fn small_int64_sort_shape_gate_matches_numpy_on_non_flat_operands() -> Result<(), String> {
+    // GUARDS THE BUFFER SHAPE GATE (`franken_numpy-ixs5y.409`). The small-int64 route no
+    // longer reads `ndim` and `flags.c_contiguous` from Python before it engages - it
+    // reads dimension count and contiguity off the `PyBuffer` it acquires anyway. The
+    // trap that makes the dimension test load-bearing is a C-contiguous `(4, 1)` array:
+    // `len(a)` is 4 AND it holds four items, so an element-count check alone would let it
+    // through and return a FLAT result where NumPy returns a `(4, 1)` one. A `(1, 4)`
+    // array, a non-contiguous slice and a 0-d array cover the other ways in.
+    let script = fnp_script(
+        r#"
+cases = []
+cases.append(np.array([[9], [3], [7], [1]], dtype=np.int64))          # (4, 1) C-contiguous
+cases.append(np.array([[9, 3, 7, 1]], dtype=np.int64))                # (1, 4)
+cases.append(np.arange(0, 32, dtype=np.int64)[::-1][::2])             # strided, not contiguous
+cases.append(np.arange(24, dtype=np.int64).reshape(2, 3, 4)[:, ::-1]) # 3-D, non-contiguous
+cases.append(np.array(5, dtype=np.int64))                             # 0-d
+checks = []
+for a in cases:
+    try:
+        expected = np.sort(a)
+        expected_repr = (expected.dtype.str, expected.shape, expected.tobytes())
+    except Exception as exc:
+        expected_repr = ("raise", type(exc).__name__)
+    try:
+        actual = fnp.sort(a)
+        actual_repr = (actual.dtype.str, actual.shape, actual.tobytes())
+    except Exception as exc:
+        actual_repr = ("raise", type(exc).__name__)
+    checks.append(expected_repr == actual_repr)
+print(all(checks))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "non-flat small int64 operands must match numpy in dtype, shape and bytes: {result}"
+    );
+    Ok(())
+}
