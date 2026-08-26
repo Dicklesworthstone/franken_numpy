@@ -57979,3 +57979,104 @@ GENERAL RULE THIS SESSION EARNED THE HARD WAY: before reusing another row's regi
 re-run the thing it disclosed. "Noise-dominated at 64" was true for arccosh and false here, and I
 carried it across without checking.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP: the transcendental chunker spawned `num_threads` tasks regardless of n; flooring work-per-task at the measured 8192 turns the default-thread log loss into parity/win (`deadlock-audit-w9po3`)
+
+Taken directly from the corrected retry predicate of amendment `062e58d8`.
+
+### THE DEFECT
+
+`transcendental_map_f64` split work as a bare `n.div_ceil(rayon::current_num_threads())` — **exactly
+`num_threads` tasks whatever n is**. On this 64-thread box at n=2^16 that is 64 tasks of 1024
+elements, and rayon must WAKE FROM SLEEP for each on every call, which is the shape real callers and
+the bench contract produce (`062e58d8`).
+
+### THE MEASUREMENT THAT SET THE CONSTANT
+
+Varying `RAYON_NUM_THREADS` varies the task count directly, so the curve is measurable without a
+rebuild. INTERLEAVED fnp/numpy for `np.log`:
+
+```
+  threads   n=2^14    n=2^16    n=2^18
+        1    0.76x     0.95x     0.98x
+        2    0.77x     0.65x     0.63x
+        4    0.77x     0.39x     0.43x
+        8    0.80x     0.28x <-  0.33x
+       16    0.79x     0.33x     0.26x
+       32    0.76x     0.38x     0.23x <-
+       64    0.73x     0.65x     0.33x
+```
+
+(n=2^14 is flat because it is below `TRANSCENDENTAL_PARALLEL_MIN` and always serial.)
+
+**BOTH OPTIMA ARE ~8192 ELEMENTS PER TASK**: n=2^16 peaks at 8 tasks, n=2^18 at 32, and
+65536/8 = 262144/32 = 8192. A size-independent rule rather than a fitted constant, so that is the
+floor: 8 tasks at n=2^16, 32 at n=2^18, all 64 threads from n=2^19 up.
+
+### A SAME-SESSION A/B, BECAUSE MY FIRST BEFORE/AFTER WAS INVALID
+
+My first attempt compared the new build against a curve taken in an earlier session and concluded
+the change made things 1.5x WORSE. That comparison was junk: the `RAYON=1` rows, which exercise the
+SERIAL path that a chunk constant cannot touch, also moved (0.76x -> 1.17x). Identical code cannot
+change, so the delta was host drift between sessions.
+
+Redone properly — two builds differing ONLY in the constant (`1`, a no-op `max`, vs `8192`), run
+alternately in one session:
+
+```
+  threads   n        FLOOR=1    FLOOR=8192
+        8   2^14      1.16x       1.16x      <- serial, identical: the A/B is clean
+        8   2^16      0.94x       0.97x
+        8   2^18      0.82x       0.87x
+       64   2^14      1.19x       1.17x      <- serial, identical
+       64   2^16      1.69x       0.93x      <- THE TARGET CASE, 1.82x better
+       64   2^18      0.98x       0.98x
+```
+
+The serial rows matching between builds is what licenses reading the rest.
+
+### RESULT — dual-null contract at the DEFAULT thread count, which is the regime this targets
+
+bench elf `e279ce8cfd086a9597258c66673f90724a87cd8291608ab232f7a773dea0ebb6`; the BEFORE pair is from
+`c207ae13…6f77` and is the pair banked in amendment `062e58d8`.
+
+```
+  BEFORE  DECIDABLE_REGRESSION  ratio 0.711032 [0.702866,0.740301]  numpy 585688  fnp 783823
+  BEFORE  DECIDABLE_REGRESSION  ratio 0.743074 [0.716772,0.780539]  numpy 546870  fnp 780251
+  AFTER   UNDECIDED             ratio 1.051006 [1.035441,1.076926]  numpy 574464  fnp 554069
+  AFTER   DECIDABLE_WIN         ratio 1.064607 [1.032279,1.103165]  numpy 601429  fnp 569379
+```
+
+**fnp 783823/780251 -> 554069/569379 while numpy held ~575-600k.** A stable default-thread LOSS
+becomes parity-to-win, reproducibly. Quoted as PARITY-TO-SLIGHT-WIN, not as a clean win: one of the
+two runs is UNDECIDED, and 5-6% is close to the null width.
+
+`exact_bytes=passed` with checksum `325120bb84441d38` — **identical to the pre-floor contract**, so
+no value moved. Expected: chunk boundaries do not change per-element results and nothing is
+reassociated.
+
+### SCOPE AND A DISCLOSED SMALL COST
+
+`transcendental_map_f64` is shared by ~15 ops — log/log2/log10/log1p, exp/exp2/expm1, sin/cos/tan
+and the arc and hyperbolic families — all of which spawned `num_threads` tasks regardless of n, so
+all benefit. The `sqrt` arm and `zerocopy_f64_unary_flat`'s own parallel branch use separate
+constants and are NOT touched.
+
+At 8 threads the floor is slightly WORSE (0.94 -> 0.97 at n=2^16, 0.82 -> 0.87 at n=2^18) because it
+can only ever spend FEWER tasks than the thread count. Those are single samples and inside the
+run-to-run spread seen elsewhere in this row, so they are disclosed but not claimed. If a
+small-thread-count host matters, re-measure there before tuning further.
+
+A/A NULL CONTROLS: contract dual nulls straddle unity in both AFTER runs (incumbent 1.0033 /
+1.0035). The interleaved A/B is min-of-median triage and is quoted as supporting shape, not as a
+decidable effect; the decidable claim is the contract pair.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean. No new test: the change cannot move a
+value, and the contract's `exact_bytes` check (unchanged checksum) covers that.
+RETRY PREDICATE: the 8192 floor is measured on THIS host at 64 threads. Before changing it, re-run
+the interleaved task-count curve — and only the interleaved one. A tight-loop curve will point at a
+different and wrong optimum, which is exactly the trap `062e58d8` documents. `n=2^14` sits below
+`TRANSCENDENTAL_PARALLEL_MIN = 1 << 15` and is serial in every configuration measured here; whether
+that gate is itself well-placed is NOT settled by this row.
+AGENT_NAME=TanBridge.
