@@ -57192,3 +57192,134 @@ PASSING (`cargo test -p fnp-python --lib -- --test-threads=1 <the three names>`:
 on this tree - but these three are not merely compile-verified, and their assertions are independently
 mirrored by the 624-case Python probe against the shipped `.so`.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP: a SCALAR index made `fnp.take` copy the WHOLE source; 191.87x slower than NumPy at n=2^20 becomes 7.2x FASTER (`deadlock-audit-yphwc`)
+
+The `as*array` ship earlier today left `take[f64_scalar]` as `bench_vs_numpy_loss_sweep`'s worst
+cell at 21.1050x. That figure UNDERSTATES it, because the sweep measures one size. NumPy's cost
+here is FLAT in n and ours was LINEAR:
+
+```
+      N   numpy_ns      fnp_ns    slower
+     64      972.1      8039.7     8.27x
+   1024      962.7      8301.1     8.62x
+  16384      957.6     11363.2    11.87x
+  65536      949.9     20662.1    21.75x   <- the only size the sweep sees
+ 262144      955.6     50888.2    53.25x
+1048576      939.3    180230.3   191.87x   <- the actual worst cell
+```
+
+Nor was it the float-scalar oddity the ladder happened to pick. Pinned dual-null survey at n=2^16,
+all nulls PASS: `take(a,2.0)` 23.609x, **`take(a,2)` 23.496x**, `take(a,np.int64(2))` 23.222x,
+`take(a,[0..9])` 19.079x, `take(a,i64[1024])` 2.060x.
+
+### MECHANISM
+
+Every gather helper gates on the INDEX operand — `try_zerocopy_f64_take` and
+`try_zerocopy_int_take` both require `indices.is_exact_instance(ndarray)` and then an int64 dtype.
+A Python `int` is none of those, so all three fast paths declined and control reached the residual,
+which calls `extract_numeric_array(py, a, "take(a)")` — A FULL COPY OF THE SOURCE — to return one
+element. 8 MB materialised to read 8 bytes.
+
+**The tiny operand decided the route and the huge one paid for it.** That is the transferable
+shape: a dispatch predicate that reads operand A and a fallback whose cost is O(operand B).
+
+### THE LEVER, AND WHY IT IS NOT DELEGATION
+
+`np.take(x, i)` with `axis=None` is BY DEFINITION a gather from the C-order flattening of `x`, so
+for an integer scalar it IS `x[i]` on that flattening — same value, same dtype, same numpy-SCALAR
+return type. Priced against the installed numpy 2.4.3 at n=2^20:
+
+```
+  np.take(a,2)      937.0 ns   <- incumbent
+  a[2]               56.9 ns   <- 16.5x faster than numpy's own take
+  a.reshape(-1)[2]  185.8 ns
+  a.item(2)          48.2 ns   <- NOT equivalent: returns a Python float, not np.float64
+```
+
+So this is not parity-by-delegation. It beats `numpy.take` by routing to numpy's O(1) indexing
+instead of its general take machinery, and the routing decision is ours.
+
+### RESULT — pinned `taskset -c 40`, ABBA balanced square, dual A/A nulls, 12/12 PASS
+
+`.so` sha256 `fc2f43d47e1ae4c035a13e3c1a130361a7356e8f024ca0b234ded88a9044070c` (at `9acbe632`);
+pre-change `.so` `3e2d03f8b7bc3e025e76c8d71124a005633f3a048c5eec525eb1e679963a7c95`.
+
+```
+cell                  numpy_ns    fnp_ns   ratio    verdict          nulls
+scalar_int N=2^6         910.3     128.7   0.141x   WIN  7.1x    0.9937/1.0018
+scalar_int N=2^10        916.6     124.2   0.139x   WIN  7.2x    1.0016/1.0030
+scalar_int N=2^14        918.4     127.1   0.139x   WIN  7.2x    0.9922/1.0059
+scalar_int N=2^16        925.9     124.8   0.137x   WIN  7.3x    1.0011/1.0114
+scalar_int N=2^18        927.3     125.0   0.137x   WIN  7.3x    0.9925/1.0151
+scalar_int N=2^20        931.5     125.1   0.140x   WIN  7.2x    0.9933/1.0132
+scalar_np_int64          935.1     229.3   0.246x   WIN  4.1x    0.9927/1.0001
+scalar_0d_array          839.0     203.6   0.241x   WIN  4.1x    0.9902/1.0097
+scalar_neg               923.7     129.8   0.142x   WIN  7.0x    0.9904/1.0030
+scalar_float             923.7     126.1   0.135x   WIN  7.4x    0.9918/1.0003
+2d_C_scalar              988.6     393.5   0.395x   WIN  2.5x    0.9979/1.0005
+2d_T_scalar           109922.9  111015.6   1.013x   parity       1.0000/1.0000
+```
+
+**FLAT IN N NOW** — 128.7 ns at n=2^6 and 125.1 ns at n=2^20, where it was 8040 -> 180230. At the
+worst cell fnp's own time falls 1440x, and the vs-NumPy ratio goes 191.87x SLOWER to 7.2x FASTER.
+
+### THE GATE IS NARROW ON PURPOSE — every clause is a verified divergence
+
+  - BOOL is accepted with its VALUE SUBSTITUTED, not forwarded. NumPy indexes a bool as 0/1
+    (`take(a,True)` is `a[1]`; even a bool ARRAY is an index list of 0/1, NOT a mask), while
+    `a[True]` would add an axis.
+  - FLOAT is accepted TRUNCATED TOWARD ZERO, which is not `floor`: 2.7->a[2], -2.7->a[-2],
+    -0.5->a[0], -10.5->a[-10], and NumPy emits no warning for any of them. Non-finite and
+    beyond-2^53 floats decline so NumPy keeps its own distinct errors — NaN raises ValueError,
+    +-inf and 1e30 raise OverflowError, three different messages.
+  - `mode="raise"` only. clip clamps with no negative-from-end; wrap is rem_euclid.
+  - ndim>=1, and n-D additionally needs C-contiguity, because `reshape(-1)` is a free view on a
+    C-contiguous source but COPIES on a transposed one — which would reintroduce the very O(n)
+    this removes. `2d_T_scalar` above is that decline, sitting at parity.
+  - OUT-OF-RANGE FALLS THROUGH to NumPy rather than letting `__getitem__` raise: take says
+    "index 5 is out of bounds for size 4", indexing says "...for axis 0 with size 4".
+
+### PARITY: 2300 CASES, 18 FIXED, ZERO INTRODUCED
+
+25 sources (every dtype kind incl. str/bytes/datetime/timedelta/void/object/longdouble/complex,
+plus 2-D C/F/transposed, strided, 0-d, empty, 3-D, an ndarray subclass and a Python list) x 23
+index spellings x 4 kwarg sets, recording exception TYPE AND MESSAGE, value, dtype, shape and
+concrete return type.
+
+```
+  BEFORE divergences=152     AFTER divergences=134     fixed=18     introduced=0
+```
+
+The 18 are every bool spelling — `True`, `False`, `np.bool_`, 0-d bool array — which previously
+raised `TypeError: take(indices): expected an integer index array, got dtype bool` where NumPy
+returns the element.
+
+### WHAT REMAINS ON `take`, and one design already killed (`deadlock-audit-g0dfm`)
+
+`list10` 19.443x and `idx1k_i64` 2.250x are the same defect for CONTAINER indices. The obvious fix
+is a MEASURED REJECT: `np.asarray(l10, dtype=np.int64)` alone costs 470.0 ns against NumPy's
+1169.2 ns budget for the whole call, and `np.take(a, np.asarray(l10,np.int64))` is 1354.8 ns —
+SLOWER than `np.take(a, l10)` at 1169.2. NumPy absorbs the conversion more cheaply than a separate
+`asarray` can, so normalise-and-retry cannot pay for itself. Only a native small-index gather that
+never materialises an int64 index array can win.
+
+### A PRE-EXISTING WRONG-VALUE BUG FOUND IN PASSING — NOT FIXED, NOT MINE
+
+`mode='clip'` WITH A NEGATIVE INDEX RETURNS THE WRONG ELEMENT: `np.take(np.arange(10), -1,
+mode='clip')` is 0.0 (clip clamps, and is defined NOT to do negative-from-end); fnp returns 9.0.
+Silent wrong answer, 6+ cases in the probe. Recorded on `deadlock-audit-g0dfm` for its own bead.
+`subclass` sources account for 37 of the surviving 134.
+
+A/A NULL CONTROLS: dual nulls on every cell above, all within 0.0151 of unity, all PASS. An
+earlier build measured the n=2^20 cell with an incumbent null of 1.0335 (BIASED) and is superseded
+by the run banked here. Host shared throughout; `maximum_observed_busy_fraction` not bounded.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+`take_scalar_index_matches_numpy_and_refuses_the_lookalikes` RUN AND PASSING — integer scalars
+including negative, bool both ways, float truncation, out-of-range both signs with MESSAGE
+equality, 2-D C and transposed, and mode=clip/wrap.
+RETRY PREDICATE: do not attack `2d_T_scalar` — it declines by design and NumPy itself spends
+109.9 us there, so the ceiling is ~1.0x. Do not re-attempt normalise-and-retry for containers.
+AGENT_NAME=TanBridge.
