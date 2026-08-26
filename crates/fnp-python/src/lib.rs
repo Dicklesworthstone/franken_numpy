@@ -8703,19 +8703,34 @@ fn zerocopy_f64_transcendental(
             input,
             output,
             |x| UnaryOp::Log.apply(x),
-            |value, _| value == 0.0 || (value.is_finite() && value < 0.0),
+            // NumPy's event set for log/log2/log10 is exactly `v <= 0`, and IEEE gives the
+            // whole union for free: -0.0 and 0.0 both compare equal (divide-by-zero), every
+            // negative including -inf compares less (invalid), while NaN and +inf compare
+            // false. The old form's `is_finite()` dropped -inf, which NumPy DOES report as
+            // invalid (`deadlock-audit-7kcz8`).
+            |value, _| value <= 0.0,
         ),
         UnaryOp::Log2 => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Log2.apply(x),
-            |value, _| value == 0.0 || (value.is_finite() && value < 0.0),
+            // NumPy's event set for log/log2/log10 is exactly `v <= 0`, and IEEE gives the
+            // whole union for free: -0.0 and 0.0 both compare equal (divide-by-zero), every
+            // negative including -inf compares less (invalid), while NaN and +inf compare
+            // false. The old form's `is_finite()` dropped -inf, which NumPy DOES report as
+            // invalid (`deadlock-audit-7kcz8`).
+            |value, _| value <= 0.0,
         ),
         UnaryOp::Log10 => transcendental_map_f64(
             input,
             output,
             |x| UnaryOp::Log10.apply(x),
-            |value, _| value == 0.0 || (value.is_finite() && value < 0.0),
+            // NumPy's event set for log/log2/log10 is exactly `v <= 0`, and IEEE gives the
+            // whole union for free: -0.0 and 0.0 both compare equal (divide-by-zero), every
+            // negative including -inf compares less (invalid), while NaN and +inf compare
+            // false. The old form's `is_finite()` dropped -inf, which NumPy DOES report as
+            // invalid (`deadlock-audit-7kcz8`).
+            |value, _| value <= 0.0,
         ),
         UnaryOp::Expm1 => transcendental_map_f64(
             input,
@@ -9028,22 +9043,61 @@ fn zerocopy_f64_unary_flat<'py>(
                         //     log / log2 / log10          {invalid, divide}   both, from [0, -1]
                         //     exp / exp2                  {over, under}       both, from [1e3, -1e3]
                         //
-                        // The multi-category ops would UNDER-REPORT one of their two events, so
-                        // they keep deferring exactly as before.
+                        // log/log2/log10 are now handled too, by RESOLVING the category with one
+                        // read pass instead of guessing it (`deadlock-audit-7kcz8`). arctanh and
+                        // exp/exp2 still defer: a single witness would under-report, and neither
+                        // has had its category split measured yet.
                         let witness = match op {
                             UnaryOp::Arccosh => Some(("arccosh", 0.0_f64)),
                             UnaryOp::Arcsin => Some(("arcsin", 2.0_f64)),
                             UnaryOp::Arccos => Some(("arccos", 2.0_f64)),
                             _ => None,
                         };
-                        // Each op raises through its OWN callable: the event message names the
-                        // ufunc ("invalid value encountered in arccosh"), so arccos may not
-                        // borrow arcsin's even though they share a domain.
-                        match witness {
-                            Some((name, value)) => {
-                                numpy.getattr(name)?.call1((value,))?;
+                        // log/log2/log10 raise TWO categories, so they need the category
+                        // RESOLVED before a witness can be chosen (`deadlock-audit-7kcz8`).
+                        // Their predicate above fuses `v == 0` (divide-by-zero) and `v < 0`
+                        // (invalid) into one bool; one read pass over the input separates them,
+                        // and it runs ONLY on the event path, where it replaces a full numpy
+                        // recompute of the whole array.
+                        let log_name = match op {
+                            UnaryOp::Log => Some("log"),
+                            UnaryOp::Log2 => Some("log2"),
+                            UnaryOp::Log10 => Some("log10"),
+                            _ => None,
+                        };
+                        if let Some(log_name) = log_name {
+                            let mut saw_divide = false;
+                            let mut saw_invalid = false;
+                            for cell in input.iter() {
+                                let value = cell.get();
+                                saw_divide |= value == 0.0;
+                                saw_invalid |= value < 0.0;
+                                if saw_divide && saw_invalid {
+                                    break;
+                                }
                             }
-                            None => return Ok(None),
+                            let callable = numpy.getattr(log_name)?;
+                            // DIVIDE FIRST, and the order is not arbitrary. NumPy reports from
+                            // the FP status word in a fixed category order, not in element
+                            // order: `log([0.0, -1.0])` and `log([-1.0, 0.0])` both raise
+                            // "divide by zero encountered in log" under `errstate(all='raise')`.
+                            // Issuing invalid first would raise the wrong one.
+                            if saw_divide {
+                                callable.call1((0.0_f64,))?;
+                            }
+                            if saw_invalid {
+                                callable.call1((-1.0_f64,))?;
+                            }
+                        } else {
+                            // Each single-category op raises through its OWN callable: the event
+                            // message names the ufunc ("invalid value encountered in arccosh"),
+                            // so arccos may not borrow arcsin's even though they share a domain.
+                            match witness {
+                                Some((name, value)) => {
+                                    numpy.getattr(name)?.call1((value,))?;
+                                }
+                                None => return Ok(None),
+                            }
                         }
                     }
                 }
@@ -160188,14 +160242,19 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let array = numpy.getattr("array")?;
 
             // (op, an in-domain anchor, the operands to pair it with)
-            let cases: [(&str, f64, Vec<f64>); 6] = [
-                // Single-category: fixed here.
+            let cases: [(&str, f64, Vec<f64>); 8] = [
+                // Single-category, one witness.
                 ("arccosh", 1.5, vec![0.5, -5.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN, 1.0]),
                 ("arcsin", 0.5, vec![2.0, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0]),
                 ("arccos", 0.5, vec![2.0, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0]),
-                // Multi-category: must be UNCHANGED, still deferring.
+                // Two categories, resolved by a scan: `v == 0` is divide, `v < 0` is invalid.
+                // -0.0 must read as divide and -inf as invalid, and NumPy reports divide FIRST
+                // regardless of element order, so both orderings are exercised below.
+                ("log", 2.0, vec![0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN, 1.0]),
+                ("log2", 2.0, vec![0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN]),
+                ("log10", 2.0, vec![0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN]),
+                // Still deferring, and must stay correct.
                 ("arctanh", 0.5, vec![1.0, -1.0, 2.0, f64::NAN]),
-                ("log", 2.0, vec![0.0, -1.0, f64::NAN]),
                 ("exp", 1.0, vec![1000.0, -1000.0, f64::NAN]),
             ];
             for (name, anchor, operands) in cases.iter() {
@@ -160246,6 +160305,41 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                             ),
                         }
                     }
+                }
+            }
+
+            // BOTH categories in ONE call, in both element orders. NumPy raises "divide by
+            // zero" for each under `errstate(all='raise')` - it reports from the FP status word
+            // in category order, not element order - so this pins that the witnesses are issued
+            // divide-first (`deadlock-audit-7kcz8`).
+            for name in ["log", "log2", "log10"] {
+                let ours = module.getattr(name)?;
+                let theirs = numpy.getattr(name)?;
+                for operands in [vec![2.0_f64, 0.0, -1.0], vec![2.0, -1.0, 0.0]] {
+                    let data = array.call1((operands.clone(),))?;
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("all", "raise")?;
+                    let mut messages = Vec::new();
+                    for callable in [&theirs, &ours] {
+                        let guard = numpy.getattr("errstate")?.call((), Some(&kwargs))?;
+                        guard.call_method0("__enter__")?;
+                        let outcome = callable.call1((data.clone(),));
+                        guard.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                        messages.push(match outcome {
+                            Ok(_) => "no-raise".to_owned(),
+                            Err(err) => err.value(py).to_string(),
+                        });
+                    }
+                    assert_eq!(
+                        messages[0], messages[1],
+                        "{name}({operands:?}) under all-raise: NumPy and fnp raised DIFFERENT                          categories - numpy={:?} fnp={:?}",
+                        messages[0], messages[1]
+                    );
+                    assert!(
+                        messages[0].contains("divide by zero"),
+                        "fixture is wrong: NumPy should report divide first, got {:?}",
+                        messages[0]
+                    );
                 }
             }
             Ok(())
