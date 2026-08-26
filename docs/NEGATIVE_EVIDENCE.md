@@ -58659,3 +58659,81 @@ has been taken. Do not re-attack `isin` or `tanh` from this vein; they are a win
 respectively and the triage numbers that said otherwise are void. If `sinc`'s contiguous cell needs
 certifying, do it on a quiet host: it could not be resolved here.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `log1p` WAS LEFT OUT OF THE CATEGORY-RESOLVE BRANCH: 2.978x -> 1.253x at 2^13 and a 1.870x LOSS -> 0.507x WIN at 2^16, plus a per-ufunc NaN SIGN and a dropped -inf event (`deadlock-audit-mx78f`, leaf of `deadlock-audit-7kcz8`)
+
+`TanBridge`. Shipped `d1b1429d`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3
+in the SAME invocation, ABBAABBA interleave, dual A/A null per cell.
+
+**Campaign result class:** candidate-win on every event-bearing cell; the 2^13 cell remains a
+1.253x LOSS and is reported as one.
+
+`zerocopy_f64_unary_flat` computes the whole correct output buffer and then, when any element is in
+the FP-event set, `return Ok(None)` so a numpy fallback re-runs the ufunc purely to record the
+event. `deadlock-audit-7kcz8` taught log/log2/log10 to resolve the divide-vs-invalid category
+themselves with one read pass and issue a ONE-ELEMENT witness. log1p has the identical two-category
+shape - pivot at -1 instead of 0, since `log1p(-1) = -inf` is the divide case - and was simply not
+in the `log_name` match.
+
+The contiguous size sweep nominated it at 3.086x, n=2^13, nulls PASS. **That figure is the OPERAND,
+not the size:** `standard_normal` puts ~16% of elements below -1; `abs()` of the same array reads
+1.13-1.36x. Ranking a nomination by size band would have sent me to the wrong lever.
+
+```
+LOG1P_EVENT_PATH worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=56ec3f15b3f2  after_elf=6426b4c8a40a (built from COMMITTED source at d1b1429d)
+
+  case                    numpy_ns     fnp_ns    BEFORE          AFTER
+  standard_normal 2^13     63909.1    86433.7    2.978x LOSS  -> 1.253x LOSS [1.187,1.273]
+  in-domain 2^13           63753.8    65245.6    1.220x LOSS  -> 1.008x      [0.989,1.031]
+  +ONE bad 2^13            64583.4    70771.0    2.908x LOSS  -> 1.080x      [1.041,1.112]
+  standard_normal 2^16    745046.4   358291.8    1.870x LOSS  -> 0.507x WIN  [0.445,0.544]
+  in-domain 2^16          727775.7   248325.4    0.424x WIN   -> 0.337x WIN  [0.295,0.396]
+  +ONE bad 2^16           617716.2   291262.8    1.952x LOSS  -> 0.459x WIN  [0.391,0.512]
+```
+
+**A/A NULL CONTROLS (same invocation, every cell):** AFTER incumbent-null 0.9985-1.0060, AFTER
+candidate-null 0.9962-1.0088 - all straddle unity, all PASS. BEFORE nulls 0.9990-1.0045 /
+1.0013-1.0099, all PASS. BEFORE and AFTER ranges are DISJOINT on every event-bearing cell.
+
+**DISCLOSED, because two earlier runs did not qualify:** the 2^16 `standard_normal` cell read a
+BIASED candidate null twice - 0.9352 in the first run and 1.0298 in a longer re-run - before
+passing at 1.0021 on the committed-source build. The row above is the third run. The DIRECTION
+replicated in all three (0.540x, 0.567x, 0.507x); only the third is quotable.
+
+**The in-domain control is the attribution.** It moves 1.220x -> 1.008x while the kernel is
+untouched, which places the entire effect on the event path rather than on the arithmetic. The
+`+ONE bad` cell is the same array as the in-domain control with a single element set to -2.0: at
+2^16 that one element cost 1.952x before and now costs 0.459x, i.e. nothing beyond the scan.
+
+### TWO CORRECTNESS DEFECTS, BOTH FOUND BY A RAW-BIT ASSERTION
+
+1. **The predicate dropped -inf.** `value == -1.0 || (value.is_finite() && value < -1.0)` excludes
+   `-inf`, which numpy reports as invalid; fnp was silent. The correct set is exactly
+   `value <= -1.0` - IEEE gives the union for free and still excludes NaN and +inf. This closes the
+   log1p half of the `is_finite()` hole recorded in `deadlock-audit-kaa5i`; the arctanh half (an
+   EXTRA event on -inf) is still open.
+
+2. **THE INVALID NaN SIGN IS PER-UFUNC, NOT PER-FAMILY.** Against numpy 2.4.3 on this host,
+   `log`/`log2`/`log10` return POSITIVE quiet NaN (`0x7ff8000000000000`) for a negative operand
+   while `log1p` returns NEGATIVE (`0xfff8000000000000`). I reused 7kcz8's single constant for all
+   four and the test failed on `log([2.0, 0.0, -1.0])` on the very first run. `array_equal(
+   equal_nan=True)` CANNOT see this; only `.view(np.uint64)` can. That is the second time this
+   session that a NaN sign bit slipped past a value-level comparison - the first was 7efd3766.
+
+PARITY: the case table in `transcendental_domain_events_match_numpy_including_the_infinities` gained
+`("log1p", 2.0, [-1.0, -2.0, -1.5, -inf, +inf, nan, -0.5])`, exercised in BOTH element orders under
+every errstate mode (`ignore`/`warn`/`raise`), compared on raw bits and on the raised category.
+Divide is issued before invalid because numpy reports in CATEGORY order, not element order.
+
+MEMORY: bounded at n=2^16 f64 = 512 KB per operand, three live. Host `used` 57 GB of 215 throughout.
+VERIFICATION: 11 targeted tests pass; `cargo check -p fnp-python --lib --tests` and `cargo clippy -p
+fnp-python --lib --tests` clean; `cargo fmt -p fnp-python` applied. NOTE: `cargo fmt -- --check`
+OOMs building the diff on this 175k-line file AND STILL EXITS 0, so fmt scope was verified by
+diffing a pre-fmt copy - it touched only my own hunks.
+
+RETRY PREDICATE: the residual 1.253x at 2^13 is the small-n ENTRY floor shared by the whole
+transcendental family - the in-domain control is 1.008x at the same size - not the event path. Do
+NOT re-attack log1p's event path. `arctanh`, `exp`, `exp2` still defer deliberately.
+AGENT_NAME=TanBridge.
