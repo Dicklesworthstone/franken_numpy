@@ -27886,6 +27886,19 @@ fn append(
         }
     };
 
+    // A NON-CONTIGUOUS OPERAND MUST DELEGATE (`deadlock-audit-0iwez`).
+    //
+    // This one differs from the other sites in the vein: `try_zerocopy_append_flat` does NOT
+    // check contiguity, so a strided view is ACCEPTED and then `ravel()`ed - which copies.
+    // Declining it instead would drop the call into the cold extract below, which is worse, so
+    // the guard has to sit above the fast path and delegate outright. Dual-null at n=2^16:
+    // strided 1.233x LOSS against 1.035x contiguous.
+    if noncontiguous_ndarray(numpy, arr.bind(py))?
+        || noncontiguous_ndarray(numpy, values.bind(py))?
+    {
+        return fallback();
+    }
+
     // Zero-copy byte concat for the axis=None case (ravel + concatenate), the common
     // form; covers all dtypes and skips the cold extract. Bit-identical; promoting
     // values and per-axis appends fall through.
@@ -34242,16 +34255,28 @@ fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // extract_numeric_array canonicalizes narrow widths to f64, so the native sinc
     // kernel returns float64 for float32/float16 input where numpy preserves the
     // narrow float. Defer all non-float64 inputs to numpy.sinc for exact dtype parity.
+    let numpy = cached_numpy(py)?;
     if !numpy_dtype_is_f64(py, x.bind(py)) {
-        return Ok(py
-            .import("numpy")?
+        // `cached_numpy`, not `py.import("numpy")`: the import is 382.5 ns per call on this
+        // host and this line runs on every non-f64 sinc.
+        return Ok(numpy
             .getattr(intern!(py, "sinc"))?
             .call1((x.bind(py),))?
             .unbind());
     }
-    let numpy = cached_numpy(py)?;
     if let Some(out) = try_zerocopy_f64_sinc(py, numpy, x.bind(py))? {
         return Ok(out);
+    }
+    // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+    //
+    // `try_zerocopy_f64_sinc` needs a contiguous buffer, so a strided view declines it and the
+    // call drops into `extract_numeric_array`, which copies the whole operand. Dual-null at
+    // n=2^16: strided 1.349x LOSS against a 0.374x contiguous WIN.
+    if noncontiguous_ndarray(numpy, x.bind(py))? {
+        return Ok(numpy
+            .getattr(intern!(py, "sinc"))?
+            .call1((x.bind(py),))?
+            .unbind());
     }
     let x = extract_numeric_array(py, x.bind(py), "sinc(x)")?;
     build_numpy_scalar_or_array(py, &x.sinc())
