@@ -83181,19 +83181,38 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyo3(signature = (a, b))]
 fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let inner_fn = numpy.getattr(intern!(py, "inner"))?;
-    let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(inner_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
+    // The `numpy.inner` handle is looked up INSIDE the closure: the native paths
+    // below return without ever delegating, and a non-interned-free getattr on
+    // the way in is pure loss for them.
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr(intern!(py, "inner"))?
+            .call1((a.bind(py), b.bind(py)))?
+            .unbind())
+    };
+
+    // Same one-classification dispatch as `matmul`/`dot` (`deadlock-audit-z1gjs`).
+    // Both gates below re-read shape AND `extract::<String>()` the dtype kind
+    // before declining, and `np.inner` of two 1-D f64 vectors - the commonest
+    // call there is - can be accepted by neither.
+    let plan = MatmulGatePlan::for_operands(
+        matmul_operand_facts(py, a.bind(py))?,
+        matmul_operand_facts(py, b.bind(py))?,
+    );
 
     // Integer inner: numpy has no BLAS for ints. Route to the native parallel int GEMM
     // (reshape + contiguous b^T). Bit-exact; floats fall through to the f64 window below.
-    if let Some(result) = try_native_int_inner(py, numpy, a.bind(py), b.bind(py))? {
+    if plan.int_any_rank()
+        && let Some(result) = try_native_int_inner(py, numpy, a.bind(py), b.bind(py))?
+    {
         return Ok(result);
     }
 
     // FLOAT16 inner: numpy has no f16 BLAS -> slow naive widen matmul. Route to the native
     // parallel f16 GEMM (reshape + contiguous b^T). Bit-exact (inner == matmul(a, ascontig(b.T))).
-    if let Some(result) = try_native_f16_inner(py, numpy, a.bind(py), b.bind(py))? {
+    if plan.f16_any_rank()
+        && let Some(result) = try_native_f16_inner(py, numpy, a.bind(py), b.bind(py))?
+    {
         return Ok(result);
     }
 
@@ -97406,6 +97425,16 @@ impl MatmulGatePlan {
             f16_flat: is_f16 && flat,
             f16_batched: is_f16 && batched,
         }
+    }
+
+    // `np.inner`'s two native gates draw the line in one place only - they defer
+    // when BOTH operands are 1-D - so they take either rank half.
+    fn int_any_rank(self) -> bool {
+        self.int_flat || self.int_batched
+    }
+
+    fn f16_any_rank(self) -> bool {
+        self.f16_flat || self.f16_batched
     }
 }
 
