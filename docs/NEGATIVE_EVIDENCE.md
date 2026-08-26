@@ -58588,3 +58588,74 @@ RETRY PREDICATE: the layout axis is closed for anything above 1.5x. Before takin
 note their contiguous controls are 0.22x and 0.31x — large wins — so the same care applies. Do NOT
 read the sub-1.5x entries whose strided and contiguous ratios AGREE as layout defects; they are not.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1.011x; and the triage misled a THIRD time (`deadlock-audit-0iwez`)
+
+### THE TRIAGE RANKING FAILED AGAIN — half the candidate list was not real
+
+Dual nulls on the four remaining strided candidates:
+
+```
+  cell        strided triage   dual-null                verdict
+  isin         1.47x LOSS      0.821x / 0.963x WIN      NOT a loss
+  tanh         1.20x LOSS      1.000x / 1.003x          parity
+  sinc         1.35x           1.351x LOSS              real
+  append       1.27x           1.246x LOSS              real
+```
+
+**Third time the strided triage's ranking has not survived a null** (`corrcoef`'s 20.78x was the
+first, `histogramdd`/`histogram` on the Rust sweep the second). Only `sinc` and `append` were taken.
+The standing rule — rank off triage, then re-measure with dual nulls before writing code — earned
+its keep again.
+
+### MECHANISM, and one site that needed a DIFFERENT placement
+
+`sinc` is the ordinary case: `try_zerocopy_f64_sinc` needs a contiguous buffer, a strided view
+declines it, the call drops into `extract_numeric_array`. Eighth site to take the guard.
+
+**`append` is not.** `try_zerocopy_append_flat` does NOT check contiguity — it ACCEPTS a strided
+view and then `ravel()`s it, which copies. Declining it would drop the call into the cold extract,
+which is worse, so the guard has to sit ABOVE the fast path and delegate outright. **A guard that
+works at one site can be wrong at another in the same vein; read what the fast path actually does
+with a strided operand before placing it.**
+
+### RESULT — same-session A/B, dual nulls
+
+```
+  case                BEFORE     AFTER
+  sinc strided        1.351x     1.001x
+  append strided      1.246x     1.011x
+```
+
+### THE CONTROL ROWS — DISCLOSED, NOT CLAIMED
+
+**`sinc` contiguous is NOT MEASURABLE on this host at present.** Candidate nulls read BIASED in all
+four runs (0.9191 to 1.0511) and the effect CI spans 3x — [0.301,0.899], [0.322,0.772],
+[0.303,0.995], [0.368,2.348]. fnp's own time swung 307272 -> 2109171 ns WITHIN the before build.
+**I cannot certify from measurement that the contiguous path did not move**, and say so rather than
+quote the flattering half of a spread that wide. What is defensible is the construction: the guard
+fires only when `noncontiguous_ndarray` is true, so a contiguous f64 operand pays one extra flags
+read — about 60 ns against a ~300000 ns call, 0.02%.
+
+`append` contiguous reads 1.038x/1.041x before and 1.057x/1.056x after with nulls PASSing, but the
+CIs overlap ([0.971,1.107] vs [1.013,1.102]), so the ~1.6% is NOT decidable. The guard adds two
+flags reads, ~120 ns on a ~22000 ns call, 0.5%.
+
+Also replaced `sinc`'s `py.import("numpy")` on the non-f64 delegate with `cached_numpy` — the same
+handle the next line already takes, and the import is 382.5 ns per call on this host.
+
+PARITY: 8 dtypes x 3 layouts x 2 ops with 0.0/inf/-inf/nan seeded through the float arrays, both a
+contiguous and a strided second operand for `append`, axis=0/1 on a strided 2-D, and
+scalar/0-d/empty/list/zero operands — compared on dtype, shape AND raw bytes. BEFORE 0, AFTER 0.
+
+MEMORY: bounded at n=2^16 f64 (512 KB) per operand with 2n strided sources (1 MB); the parity probe
+caps at n=4096. No full-array temporaries. Host `used` stayed at 57-58 GB of 215 throughout.
+A/A NULL CONTROLS: tabulated per row above, including the four that failed.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+RETRY PREDICATE: the strided axis is now CLOSED — every cell above 1.15x that survives a dual null
+has been taken. Do not re-attack `isin` or `tanh` from this vein; they are a win and parity
+respectively and the triage numbers that said otherwise are void. If `sinc`'s contiguous cell needs
+certifying, do it on a quiet host: it could not be resolved here.
+AGENT_NAME=TanBridge.
