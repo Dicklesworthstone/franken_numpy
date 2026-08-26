@@ -51664,6 +51664,41 @@ fn nanargmax(
             }
         }
     }
+    // GUARD THE COLD-EXTRACT RESIDUAL (`deadlock-audit-0e1q5`).
+    //
+    // Everything below copies the whole operand through `extract_numeric_array` and then scans
+    // the copy. That is the `take`/`meshgrid` residual shape, and like those it is far slower
+    // than simply asking NumPy - which is itself a copy (`_replace_nan`) plus argmax:
+    //
+    //     operand, n=2^16              numpy_ns    fnp_ns   ratio
+    //     C-contiguous                    37848     51890    1.37x
+    //     NON-contiguous a[::2]           48748    753376   15.45x
+    //
+    // (1) A STRIDED VIEW is ordinary - `a[::2]`, a column, any stepped slice - and the sweep's
+    //     ladder is all contiguous, so it never sees the 15.45x at all. `take` already carries
+    //     this exact guard for this exact reason.
+    //
+    // (2) THE RESIDUAL IS NOT ALWAYS WRONG, so this is a gate and not a deletion. Measured
+    //     contiguous, axis=None:
+    //
+    //         n     2^11   2^12   2^13   2^14  |  2^15   2^16
+    //         ratio 0.82x  0.87x  0.81x  0.75x |  1.24x  1.37x
+    //
+    //     A sharp crossover between 2^14 and 2^15. Below it the residual WINS and is kept;
+    //     from 2^15 up to `NANARG_PARALLEL_MIN` (1<<19) nothing here beats NumPy, so delegate
+    //     that band; at and above 1<<19 the parallel kernel already returned.
+    const NANARG_RESIDUAL_MAX: usize = 1 << 15;
+    if noncontiguous_ndarray(numpy, a.bind(py))? {
+        return fallback();
+    }
+    if axis.as_ref().is_none_or(|value| value.bind(py).is_none())
+        && a.bind(py)
+            .getattr(intern!(py, "size"))
+            .and_then(|value| value.extract::<usize>())
+            .is_ok_and(|size| size >= NANARG_RESIDUAL_MAX)
+    {
+        return fallback();
+    }
     let orig_ndim = a
         .bind(py)
         .getattr(intern!(py, "ndim"))
@@ -51794,6 +51829,41 @@ fn nanargmin(
                 return Ok(result);
             }
         }
+    }
+    // GUARD THE COLD-EXTRACT RESIDUAL (`deadlock-audit-0e1q5`).
+    //
+    // Everything below copies the whole operand through `extract_numeric_array` and then scans
+    // the copy. That is the `take`/`meshgrid` residual shape, and like those it is far slower
+    // than simply asking NumPy - which is itself a copy (`_replace_nan`) plus argmax:
+    //
+    //     operand, n=2^16              numpy_ns    fnp_ns   ratio
+    //     C-contiguous                    37848     51890    1.37x
+    //     NON-contiguous a[::2]           48748    753376   15.45x
+    //
+    // (1) A STRIDED VIEW is ordinary - `a[::2]`, a column, any stepped slice - and the sweep's
+    //     ladder is all contiguous, so it never sees the 15.45x at all. `take` already carries
+    //     this exact guard for this exact reason.
+    //
+    // (2) THE RESIDUAL IS NOT ALWAYS WRONG, so this is a gate and not a deletion. Measured
+    //     contiguous, axis=None:
+    //
+    //         n     2^11   2^12   2^13   2^14  |  2^15   2^16
+    //         ratio 0.82x  0.87x  0.81x  0.75x |  1.24x  1.37x
+    //
+    //     A sharp crossover between 2^14 and 2^15. Below it the residual WINS and is kept;
+    //     from 2^15 up to `NANARG_PARALLEL_MIN` (1<<19) nothing here beats NumPy, so delegate
+    //     that band; at and above 1<<19 the parallel kernel already returned.
+    const NANARG_RESIDUAL_MAX: usize = 1 << 15;
+    if noncontiguous_ndarray(numpy, a.bind(py))? {
+        return fallback();
+    }
+    if axis.as_ref().is_none_or(|value| value.bind(py).is_none())
+        && a.bind(py)
+            .getattr(intern!(py, "size"))
+            .and_then(|value| value.extract::<usize>())
+            .is_ok_and(|size| size >= NANARG_RESIDUAL_MAX)
+    {
+        return fallback();
     }
     let orig_ndim = a
         .bind(py)
