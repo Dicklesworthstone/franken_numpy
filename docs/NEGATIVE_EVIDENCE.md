@@ -58253,3 +58253,107 @@ RETRY PREDICATE: do NOT re-attempt a post-hoc or relocated scan for `fmod` — t
 measured and none beat the incumbent. Only fused-into-the-kernel detection may be tried, measured
 with a dual-null A/B at n=2^12 before any wider claim.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP: `nanargmax`/`nanargmin`'s cold-extract residual, 7.365x on a STRIDED operand the sweep cannot see (`deadlock-audit-0e1q5`)
+
+### FIRST, A CORRECTION TO THE INSTRUMENT: MOST OF THE SWEEP'S REMAINING "LOSSES" ARE NOT REAL
+
+Before attacking anything, the sweep's top 20 losing cells were re-measured with a dual-null
+interleaved harness. `bench_vs_numpy_loss_sweep` is min-of-25 triage with no null, and it says so
+itself; this quantifies how much that matters now that the board is flat.
+
+```
+  of the top 20 sweep losses, 8 survive a dual-null measurement
+    histogramdd[f64]   sweep 1.15x  ->  0.923x   ACTUALLY A WIN
+    histogram[f64]     sweep 1.16x  ->  0.359x   ACTUALLY A WIN
+    cbrt / setdiff1d / vecmat / setxor1d / union1d / unique_counts /
+    unique_inverse / intersect1d / quantile / unique     -> straddle unity
+    fmod 1.481x, isclose 1.157x, nanargmin 1.270x, nanargmax 1.260x,
+    triu 1.095x, tril 1.081x, matmul 1.358x, lcm 1.002x  -> REAL
+```
+
+**Two cells the sweep ranks as losses are wins, and ten are parity.** Any future ranking off this
+instrument must re-measure before acting. The genuine remainder is small: the largest real loss is
+`fmod` at ~81 us, and that is already a measured REJECT (`bc57caaa`).
+
+### THE CELL, AND WHY THE SWEEP UNDERSTATES IT
+
+`nanargmax`/`nanargmin` survive at 1.260x/1.270x, ~13 us each. Scaling in n and varying the
+operand's CONTIGUITY finds something far larger, because the sweep's ladder is entirely
+C-contiguous:
+
+```
+  operand (n=2^16)                 numpy_ns      fnp_ns   ratio
+  C-contiguous (what the sweep uses)  37848       51890    1.37x
+  NON-contiguous a[::2]               48748      753376   15.45x
+```
+
+A strided view — `a[::2]`, a column, any stepped slice — is entirely ordinary.
+
+### MECHANISM — the cold-extract residual, THIRD time this session
+
+Once the zero-copy gates decline, control reaches
+`extract_numeric_array(py, a, "nanargmax(a)")`, which copies the whole operand, then scans the copy.
+Same shape as `take`'s residual (`deadlock-audit-yphwc`) and `meshgrid`'s cold branch
+(`deadlock-audit-bvihx`). NumPy's own nanargmax is `_replace_nan` (also a copy) plus argmax and still
+beat it 15x on a strided operand.
+
+**BOTH observed losses share this one cause**: at n=2^16 the operand is below
+`NANARG_PARALLEL_MIN = 1 << 19`, so the parallel kernel declines and the contiguous case falls into
+the same extract.
+
+### IT IS A GATE PROBLEM, NOT A DELETION
+
+```
+  n     2^11   2^12   2^13   2^14  |  2^15   2^16
+  ratio 0.82x  0.87x  0.81x  0.75x |  1.24x  1.37x
+```
+
+Sharp crossover between 2^14 and 2^15. Two guards before the residual, in both functions:
+non-contiguous delegates (`noncontiguous_ndarray` already existed and `take` carries this exact
+guard for this exact reason), and contiguous `axis=None` with `size >= 1<<15` delegates, because
+from 2^15 up to 1<<19 nothing here beats NumPy.
+
+### RESULT
+
+Same-session A/B, dual nulls, all PASS:
+
+```
+  case              BEFORE     AFTER
+  contig n=2^12     0.893x     0.941x   WIN preserved
+  contig n=2^15     1.258x     1.088x
+  contig n=2^16     1.333x     1.045x
+  contig n=2^18     1.479x     1.019x
+  contig n=2^20     0.262x     0.247x   WIN preserved
+  strided n=2^15    6.402x     1.040x
+  strided n=2^16    7.365x     1.022x
+```
+
+Dual-null contract, bench elf `4d7dc759fbbced944361aec778d0cb3858f7906a59300870cc90a04a0e4064b4`:
+
+```
+  nanargmax  DECIDABLE_REGRESSION  0.944235 [0.940218,0.949695]  numpy 44610.0  fnp 47355.0
+  nanargmin  DECIDABLE_REGRESSION  0.941209 [0.924384,0.946812]  numpy 66210.0  fnp 69798.0
+```
+
+**QUOTED HONESTLY: still a DECIDABLE_REGRESSION at ~1.06x, down from 1.34x. Not parity.** The
+contract's operand is the contiguous n=2^16 one; the strided case it never exercises is where the
+7.365x lived. `exact_bytes=passed` on both.
+
+Note the strided ratio reads 15.45x in a single min-of-repeat probe and 6.402-7.365x under the
+dual-null harness. The dual-null figures are the quotable ones.
+
+PARITY: zero divergences across contiguity x size (100 to 2^19) x axis (0/1/None) x dtype
+(f64/f32/f16/i64/i32/u8) x the all-NaN slice, which must raise NumPy's exact
+`ValueError("All-NaN slice encountered")` — the guards do not change which arm raises it. Results
+are indices, so bit-exactness is trivial and the contract confirms it.
+A/A NULL CONTROLS: 14 pinned A/B cells with their own dual nulls, all PASS within 0.008; contract
+dual nulls straddle unity on both cells.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+RETRY PREDICATE: the residual still WINS below 2^15 and the parallel kernel still wins at and above
+1<<19; do not widen either guard without re-running the size curve. The remaining ~1.06x is entry
+overhead on a delegating route and is not worth a shared-kernel change. **And do not rank off the
+loss sweep without re-measuring — 12 of its top 20 losses are not losses.**
+AGENT_NAME=TanBridge.
