@@ -112307,7 +112307,7 @@ fn unique_values(
 // operand (the kernel) is in (128, 2048]. The zero-copy gather caps at 128; above it fnp's native
 // FFT/scatter convolve loses 1.2-1.7x to numpy's direct O(n*m) loop (which fnp's FFT never beats up
 // to k~4096), so this band is fastest delegated to numpy. Long kernels (>2048) keep the native path.
-// THE ONE CLASSIFICATION BOTH conv/corr GATES ASKED FOR SEPARATELY (`deadlock-audit-jhq6f`).
+// THE ONE CLASSIFICATION BOTH conv/corr GATES ASKED FOR SEPARATELY (`deadlock-audit-6kn1k`).
 //
 // `try_zerocopy_conv_corr_f64` and `conv_corr_should_delegate_midkernel` run back to back on
 // every `correlate`/`convolve` call, and each opened by re-reading BOTH operands' dtype (with
@@ -112373,7 +112373,7 @@ fn try_zerocopy_conv_corr_f64(
     if la == 0 || lv == 0 {
         return Ok(None); // numpy raises on empty: defer for exact error parity.
     }
-    // DECIDE FROM THE LENGTHS, THEN TOUCH THE DATA (`deadlock-audit-jhq6f`). Both the
+    // DECIDE FROM THE LENGTHS, THEN TOUCH THE DATA (`deadlock-audit-6kn1k`). Both the
     // buffer acquisition and the kernel Vec used to happen HERE, above every gate below,
     // so each declined call acquired two Python buffers and built a full copy of the
     // kernel only to throw both away: 2 KB for the 256-tap `correlate(a, v)` that lands
@@ -112663,7 +112663,7 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
         return Ok(out);
     }
 
-    // One classification for both gates below (`deadlock-audit-jhq6f`).
+    // One classification for both gates below (`deadlock-audit-6kn1k`).
     let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;
 
     // Zero-copy short-kernel direct path: reads buffers + writes the numpy output
@@ -112747,7 +112747,7 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
         return Ok(out);
     }
 
-    // One classification for both gates below (`deadlock-audit-jhq6f`).
+    // One classification for both gates below (`deadlock-audit-6kn1k`).
     let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;
 
     // Zero-copy short-kernel direct path (defers when len(a)<len(v): correlate is
