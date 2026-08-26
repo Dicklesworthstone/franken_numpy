@@ -59426,3 +59426,82 @@ but it only runs when kwargs are present, so it cannot be what these no-kwarg ce
 `i64 flat 2^8` should not be attacked from this direction; it is the one dtype the classifier
 cannot help.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `np.argsort` HAD THE SAME TWENTY-TWO-GATE CHAIN AS `sort`: bool 1.907x -> 1.187x, i32 1.785x -> 1.299x, f64 flat 1.702x -> 1.316x (`deadlock-audit-11si6`)
+
+`TanBridge`. Shipped `a4133e7d`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3
+in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell, OPENBLAS_NUM_THREADS=1, on a
+QUIET host (loadavg 12-15).
+
+**Campaign result class:** candidate-win on fifteen cells, all still losses to numpy and reported
+as such; two engagement cells discussed below.
+
+Immediate follow-on to `deadlock-audit-gxmih` one function over: six `kind='stable'` gates, seven
+flat gates and sixteen axis gates, each re-deriving exactness, dtype kind, itemsize, rank and
+contiguity for itself before declining. They PARTITION on dtype, so at most one can ever accept.
+
+Ten predicates, each lifted from the gates it guards. Two pairs are NOT interchangeable and that is
+the part worth writing down: the flat integer gates take only 4- and 8-byte widths while the axis
+ones are byte-exact at any width (`integral_radix` vs `integral_any`), and the stable
+(value, orig-index) gate serves int/uint AND float, unlike every other gate in the chain
+(`stable_numeric`). A single "is it integral" predicate would have silently disabled the 1- and
+2-byte axis paths.
+
+```
+ARGSORT_GATE_DISPATCH worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=43e8d326ca45  after_elf=c39d430faed8      loadavg 15.27 at start
+
+  case                    BEFORE                      AFTER              excess ns
+  bool flat 2^8     1.907x [1.831,2.069] -> 1.187x [1.118,1.255]     1697 ->  310
+  i32 flat 2^8      1.785x [1.556,2.006] -> 1.299x [1.262,1.333]     2328 ->  899
+  f64 kind=stable   1.764x [1.540,1.813] -> 1.284x [1.251,1.338]     3666 -> 1466
+  f64 flat 2^8      1.702x [1.614,1.725] -> 1.316x [1.267,1.366]     2211 ->  959
+  c128 flat 2^8     1.628x [1.469,1.772] -> 1.188x [1.145,1.226]     2195 ->  569
+  f32 flat 2^8      1.610x [1.490,1.709] -> 1.305x [1.244,1.330]     2245 ->  950
+  i64 flat 2^8      1.584x [1.395,1.710] -> 1.247x [0.993,1.382]     1101 -> 1066
+  U6 flat 2^8       1.276x [1.149,1.507] -> 1.047x [1.014,1.095]     1785 ->  270
+  f64 flat 2^10     1.151x [1.130,1.173] -> 1.075x [1.046,1.108]     2042 -> 1242
+  f64 2-D axis=0    1.090x [1.044,1.240] -> 1.030x [1.014,1.061]     3440 ->  957
+  f64 2-D lastaxis  1.067x [0.965,1.085] -> 1.029x [1.006,1.057]     1682 ->  653
+  f64 2-D axisNone  1.057x [1.051,1.081] -> 1.032x [1.023,1.072]     3272 -> 1756
+  i64 2-D lastaxis  1.054x [0.965,1.132] -> 1.033x [1.023,1.057]     2022 ->  896
+  f64 flat 2^13     1.024x [0.937,1.219] -> 1.011x [1.008,1.018]
+  f64 flat 2^16     1.007x [0.935,1.064] -> 1.003x [0.946,1.010]
+  structured 2^8    1.045x [0.958,1.063] -> 1.021x [0.988,1.148]
+
+  ENGAGEMENT:
+  f64 flat 2^21     0.548x WIN          -> 0.504x WIN         native path still taken
+  i64 flat 2^21     0.973x              -> 1.011x             see below
+```
+
+**A/A NULL CONTROLS:** 30 of 36 pass. **DISCLOSED:** six read BIASED - four in the BEFORE arm
+(`i32 flat` 0.9623, `f32 flat` 1.0602/1.0516, `c128 flat` 0.9760, `i64 2^21` 0.9643) and two in the
+AFTER (`f64 flat 2^8` 1.0260, `f64 2^21` 1.0341, `i64 2^21` 1.0109/0.9772). The eight cells with
+clean nulls on BOTH sides are DISJOINT.
+
+**THE i64 2^21 CELL IS NOT AN ENGAGEMENT PROOF and is not offered as one.** It reads 0.973x before
+and 1.011x after with biased nulls on both sides and CIs spanning [0.876,1.202] / [0.813,1.207] -
+i.e. parity, which is what DELEGATION looks like. Random i64 over +-10^6 at 2^21 has ties, and the
+integer argsort gates defer on ties by design, so that cell was almost certainly delegating before
+this change as well. What proves the classifier did not disengage anything is the `f64 flat 2^21`
+cell (0.504x, a 2x win that cannot happen without the native radix) plus the parity probe's six
+LARGE cells.
+
+PARITY: 18 dtypes (incl. longdouble, clongdouble, datetime64, timedelta64, `<U6`, `<S6`) x 7 shapes
+x 4 axis forms, middle-axis 3-D at axis 1/-2/0/2, all five `kind=` values on f64 and i64,
+nan/inf/-0.0/all-nan, NaT, strided, transposed, F-order, list, object, three structured cases
+including `order=`, and six LARGE engagement cells. Compared on dtype, shape and RAW BYTES -
+which for argsort means the exact PERMUTATION, so any tie-order drift would show. **BEFORE 0
+divergences, AFTER 0.** 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^21 f64 = 16 MB, one live at a time.
+
+RETRY PREDICATE: `sort` and `argsort` are both classified; do not add a third classifier to either.
+The residual at `f64 flat 2^8` (1.316x, 959 ns) is the `(*args, **kwargs)` entry, the kwargs scan,
+the one surviving gate and the delegation - the same floor `sort` now sits on. The kwargs scan is
+still unattacked in both: it calls `k.extract::<String>()` up to THREE times per key, allocating a
+Rust `String` each time, where matching the interned key object would not allocate - but it only
+runs when kwargs are present, so it is invisible to every no-kwarg cell above and needs its own
+`kind=`/`axis=` measurement to justify.
+AGENT_NAME=TanBridge.
