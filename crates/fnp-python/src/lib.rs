@@ -25022,6 +25022,101 @@ fn take(
         return fallback();
     }
 
+    // O(1) SCALAR TAKE (`deadlock-audit-yphwc`).
+    //
+    // THE DEFECT THIS REMOVES: every gather helper below gates on the INDEX operand - each one
+    // requires `indices` to be an exact int64 ndarray - so a plain `take(a, 2)` declined all of
+    // them and control reached the residual, which calls `extract_numeric_array` and COPIES THE
+    // ENTIRE SOURCE in order to return one element. The tiny operand decided the route and the
+    // huge one paid for it. Measured against numpy 2.4.3, pinned: numpy is FLAT in n (972 ns at
+    // n=64, 939 ns at n=2^20) while this route was LINEAR in n - 8040 ns at n=64 rising to
+    // 180230 ns at n=2^20, i.e. 8.27x to 191.87x slower.
+    //
+    // WHY `__getitem__` IS THE RIGHT ANSWER AND NOT A DODGE: `np.take(x, i)` with `axis=None` is
+    // BY DEFINITION a gather from the C-order flattening of `x`, so for an integer scalar index it
+    // IS `x[i]` on that flattening - same value, same dtype, same numpy-scalar return type.
+    // Priced at n=2^20: `np.take(a,2)` 937.0 ns, `a[2]` 56.9 ns, `a.reshape(-1)[2]` 185.8 ns. So
+    // this is not parity-by-delegation, it beats `numpy.take` outright by routing to numpy's own
+    // O(1) indexing instead of its general take machinery.
+    //
+    // THE GATE IS NARROW ON PURPOSE. Each clause is a divergence that a looser gate would ship,
+    // and every one was checked against the installed numpy 2.4.3:
+    //   - BOOL IS ACCEPTED BUT ITS VALUE IS SUBSTITUTED, NOT FORWARDED. numpy indexes with a
+    //     bool as 0/1 - `take(a, True)` is `a[1]`, and even a bool ARRAY is an index list of 0/1
+    //     rather than a mask - while `a[True]` would add an axis. Forwarding the object would be
+    //     wrong; resolving it to an i64 is right. (This also CORRECTS a standing divergence:
+    //     every bool spelling previously raised `TypeError: take(indices): expected an integer
+    //     index array, got dtype bool` where numpy returns the element.)
+    //   - No floats. `np.take(a, 2.0)` and even `np.take(a, 2.7)` SUCCEED (truncating) where
+    //     `a[2.0]` raises IndexError.
+    //   - `mode="raise"` only. clip (clamp, no negative-from-end) and wrap (rem_euclid) are not
+    //     `__getitem__` semantics.
+    //   - ndim >= 1, and n-D additionally needs C-contiguity: `reshape(-1)` is a free view on a
+    //     C-contiguous source but COPIES on a transposed one, which would reintroduce the very
+    //     O(n) this path exists to remove.
+    //   - An out-of-range index FALLS THROUGH to numpy instead of letting `__getitem__` raise,
+    //     because the two messages differ - take says "index 5 is out of bounds for size 4",
+    //     indexing says "...for axis 0 with size 4" - and this crate pins exception text.
+    //
+    // `a.item(i)` is cheaper still (48.2 ns) and is NOT equivalent: it returns a Python `float`
+    // where numpy returns `np.float64`.
+    if axis.is_none() && mode == "raise" {
+        let indices_bound = indices.bind(py);
+        // Resolve the index to an i64 VALUE rather than forwarding the caller's object, because
+        // for bool the two differ: numpy indexes with `True` as 1 (`take(a, True)` is `a[1]`, and
+        // a bool ARRAY is an index list of 0/1, not a mask), whereas handing a Python bool to
+        // `__getitem__` would add an axis. Resolving also lets the numpy-scalar and 0-d-array
+        // spellings share one path. A value too large for i64 fails extraction and declines,
+        // which is correct: it is out of range for any array numpy can address.
+        let scalar_index: Option<i64> = if indices_bound.is_exact_instance_of::<PyInt>() {
+            indices_bound.extract::<i64>().ok()
+        } else if indices_bound.is_exact_instance_of::<PyBool>() {
+            indices_bound.is_truthy().ok().map(i64::from)
+        } else {
+            match dtype_kind_of(indices_bound) {
+                Some(kind @ ('i' | 'u' | 'b'))
+                    if indices_bound
+                        .getattr(intern!(py, "ndim"))
+                        .and_then(|value| value.extract::<usize>())
+                        .is_ok_and(|ndim| ndim == 0) =>
+                {
+                    if kind == 'b' {
+                        indices_bound.is_truthy().ok().map(i64::from)
+                    } else {
+                        indices_bound.extract::<i64>().ok()
+                    }
+                }
+                _ => None,
+            }
+        };
+        if let Some(scalar_index) = scalar_index {
+            let a_bound = a.bind(py);
+            let ndarray_type = cached_ndarray_type(py)?.clone();
+            if a_bound.is_exact_instance(&ndarray_type) {
+                let ndim = a_bound.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+                let flattened = if ndim == 1 {
+                    Some(a_bound.clone())
+                } else if ndim >= 2
+                    && a_bound
+                        .getattr(intern!(py, "flags"))?
+                        .get_item(intern!(py, "C_CONTIGUOUS"))?
+                        .extract::<bool>()?
+                {
+                    Some(a_bound.call_method1(intern!(py, "reshape"), (-1_isize,))?)
+                } else {
+                    // 0-d source: `take` has its own shape rules there. Keep the old path.
+                    None
+                };
+                if let Some(flattened) = flattened
+                    && let Ok(value) = flattened.get_item(scalar_index)
+                {
+                    return Ok(value.unbind());
+                }
+                // Out of range, or any other refusal: fall through so numpy owns the error.
+            }
+        }
+    }
+
     // numpy.take is a pure gather that preserves the input dtype exactly. The zero-copy flat/axis
     // helpers below do a value-agnostic byte gather (view as the matching-width uint, gather, view
     // back), so they reproduce numpy's dtype for EVERY 1/2/4/8-byte fixed-width dtype (int/uint/
@@ -159954,6 +160049,120 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let theirs_object = numpy_asanyarray.call1((object_source.clone(),))?;
             assert_array_matches_numpy(&ours_object, &theirs_object)?;
 
+            Ok(())
+        });
+    }
+
+    /// The O(1) scalar-index `take` path and, more importantly, every input it must REFUSE.
+    ///
+    /// `np.take(x, i)` with `axis=None` is a gather from the C-order flattening, so for an
+    /// integer scalar it is `x[i]` on that flattening. The gate that routes there has to exclude
+    /// four families that `__getitem__` treats differently from `take`, and each assertion below
+    /// is one of them (`deadlock-audit-yphwc`).
+    #[test]
+    fn take_scalar_index_matches_numpy_and_refuses_the_lookalikes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours = module.getattr("take")?;
+            let theirs = numpy.getattr("take")?;
+            let arange = numpy.getattr("arange")?;
+            let flat = arange.call1((10.0_f64,))?;
+
+            // Integer scalars, including negative-from-end, take the fast path.
+            for index in [0_isize, 2, 9, -1, -10] {
+                let mine = ours.call1((flat.clone(), index))?;
+                let theirs_value = theirs.call1((flat.clone(), index))?;
+                assert!(
+                    mine.eq(&theirs_value)?,
+                    "take(a, {index}) value diverged from numpy"
+                );
+                // take(scalar) yields a numpy SCALAR, not a 0-d array. `__getitem__` agrees, but
+                // a future rewrite through the gather helpers would not, so pin it.
+                assert!(
+                    mine.get_type().eq(theirs_value.get_type())?,
+                    "take(a, {index}) return TYPE diverged: {} vs {}",
+                    mine.get_type(),
+                    theirs_value.get_type()
+                );
+            }
+
+            // BOOL. Python `bool` subclasses `int`; numpy takes it as index 1, while `a[True]`
+            // would return an ARRAY with a new axis. Must match numpy, not `__getitem__`.
+            for flag in [true, false] {
+                let mine = ours.call1((flat.clone(), flag))?;
+                let theirs_value = theirs.call1((flat.clone(), flag))?;
+                assert!(mine.eq(&theirs_value)?, "take(a, {flag}) diverged");
+                assert!(
+                    mine.get_type().eq(theirs_value.get_type())?,
+                    "take(a, {flag}) return type diverged - bool must not index as a mask"
+                );
+            }
+
+            // FLOAT. numpy accepts and truncates; `a[2.0]` raises IndexError. Must match numpy.
+            for index in [2.0_f64, 2.7] {
+                let mine = ours.call1((flat.clone(), index))?;
+                let theirs_value = theirs.call1((flat.clone(), index))?;
+                assert!(mine.eq(&theirs_value)?, "take(a, {index}) diverged");
+            }
+
+            // OUT OF RANGE, both signs: numpy's own IndexError text, not `__getitem__`'s.
+            for index in [10_isize, -11, 999] {
+                let mine = ours.call1((flat.clone(), index));
+                let theirs_value = theirs.call1((flat.clone(), index));
+                match (mine, theirs_value) {
+                    (Err(mine_err), Err(their_err)) => {
+                        assert_eq!(
+                            mine_err.to_string(),
+                            their_err.to_string(),
+                            "take(a, {index}) raised a DIFFERENT message than numpy"
+                        );
+                    }
+                    (mine_other, their_other) => panic!(
+                        "take(a, {index}) should raise on both arms, got {mine_other:?} / {their_other:?}"
+                    ),
+                }
+            }
+
+            // n-D with axis=None flattens in C order; a TRANSPOSED source must not be routed
+            // through `reshape(-1)`, which would copy.
+            let two_d = arange.call1((12.0_f64,))?.call_method1("reshape", ((3, 4),))?;
+            let transposed = two_d.call_method0("transpose")?;
+            for source in [two_d.clone(), transposed] {
+                for index in [0_isize, 5, -1] {
+                    let mine = ours.call1((source.clone(), index))?;
+                    let theirs_value = theirs.call1((source.clone(), index))?;
+                    assert!(
+                        mine.eq(&theirs_value)?,
+                        "take(2-D, {index}) diverged - axis=None must flatten in C order"
+                    );
+                }
+            }
+
+            // mode= is NOT `__getitem__` semantics: clip clamps (no negative-from-end).
+            for mode in ["clip", "wrap"] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("mode", mode)?;
+                for index in [2_isize, 12] {
+                    let mine = ours.call((flat.clone(), index), Some(&kwargs));
+                    let theirs_value = theirs.call((flat.clone(), index), Some(&kwargs));
+                    match (mine, theirs_value) {
+                        (Ok(mine_value), Ok(their_value)) => assert!(
+                            mine_value.eq(&their_value)?,
+                            "take(a, {index}, mode={mode}) diverged"
+                        ),
+                        (Err(_), Err(_)) => {}
+                        (mine_other, their_other) => panic!(
+                            "take(a, {index}, mode={mode}) arms disagree on raising: \
+                             {mine_other:?} / {their_other:?}"
+                        ),
+                    }
+                }
+            }
             Ok(())
         });
     }
