@@ -70757,6 +70757,17 @@ fn int64_sort_flat_small(
     let Ok(buffer) = PyBuffer::<i64>::get(a) else {
         return Ok(None);
     };
+    // THE SHAPE GATE LIVES HERE, NOT ON THE PYTHON ATTRIBUTE PATH
+    // (`franken_numpy-ixs5y.409`). The caller no longer reads `ndim` and
+    // `flags.c_contiguous` before routing here, so this buffer - which the path acquires
+    // anyway - carries the gate instead. `dimensions() == 1` is load-bearing on its own:
+    // `as_slice` returns `None` for a non-contiguous buffer and `cells.len() != n` catches
+    // most wrong shapes, but a C-contiguous `(4, 1)` array has `len(a) == 4` AND four
+    // items, so without the dimension test it would be flattened into a 1-D result where
+    // NumPy returns a `(4, 1)` one.
+    if buffer.dimensions() != 1 {
+        return Ok(None);
+    }
     let Some(cells) = buffer.as_slice(py) else {
         return Ok(None);
     };
@@ -70939,6 +70950,33 @@ fn bool_sort_flat_counting(
     Ok(Some(out.unbind()))
 }
 
+/// `(kind, itemsize)` for the integer/bool dtypes, from a NumPy `dtype.char` alone.
+///
+/// WHY A CHAR TABLE IS EXACTLY EQUIVALENT TO READING `kind` AND `itemsize`
+/// (`franken_numpy-ixs5y.409`): the typechar determines both. Enumerated against the
+/// INSTALLED numpy 2.4.3 over all 22 distinct scalar dtypes, the char -> (kind, itemsize)
+/// map has ZERO collisions, and every dtype whose kind is `'i'`, `'u'` or `'b'` has a char
+/// in this table - `b B h H i I l L q Q ?`. Both `int64` and `longlong` are 8-byte kind
+/// `'i'` and appear here as `'l'` and `'q'`; `intp`/`uintp` report `'l'`/`'L'` on this
+/// platform and so are already covered. Returning `None` for any other char therefore
+/// declines exactly the operands the `kind`/`itemsize` pair declined, one attribute entry
+/// sooner - which matters because this probe runs on every `fnp.sort` call and declines on
+/// most of them.
+const fn int_typechar_kind_itemsize(typechar: char) -> Option<(char, usize)> {
+    Some(match typechar {
+        'b' => ('i', 1),
+        'B' => ('u', 1),
+        'h' => ('i', 2),
+        'H' => ('u', 2),
+        'i' => ('i', 4),
+        'I' => ('u', 4),
+        'l' | 'q' => ('i', 8),
+        'L' | 'Q' => ('u', 8),
+        '?' => ('b', 1),
+        _ => return None,
+    })
+}
+
 // Route a 1-D C-contiguous integer ndarray to the native parallel flat sort. Other dtypes /
 // shapes / below the crossover defer to numpy.
 fn try_native_int_sort_flat(
@@ -70951,19 +70989,18 @@ fn try_native_int_sort_flat(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
-        || !a
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
-        return Ok(None);
-    }
+    // ONE dtype read, answered from `dtype.char` (`franken_numpy-ixs5y.409`).
+    //
+    // The typechar carries kind AND itemsize together, so the pair below replaces two
+    // attribute entries (`kind`, `itemsize`) with one, and it answers the DECLINE for
+    // every non-integer dtype after a single read instead of two. See
+    // `int_typechar_kind_itemsize` for why declining on an unknown char is exactly
+    // equivalent to declining on the kind/itemsize pair.
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if !matches!(kind, 'i' | 'u' | 'b') {
+    let typechar = dt.getattr(intern!(py, "char"))?.extract::<char>()?;
+    let Some((kind, itemsize)) = int_typechar_kind_itemsize(typechar) else {
         return Ok(None);
-    }
+    };
     // `len()`, NOT `shape` -> `Vec<usize>` -> product (`franken_numpy-ixs5y.409`).
     //
     // `ndim == 1` is already established above, so the shape tuple has exactly one entry
@@ -70976,10 +71013,31 @@ fn try_native_int_sort_flat(
     // 1092 (30.6%) and the Python entry residual is 2074 (58.2%). Work on the sort is
     // capped - with a FREE sort the route still floors at 2474 ns against NumPy's 1552 -
     // so the residual is the only lever that can reach this cell.
-    let n: usize = a.len()?;
-    let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // `len()` can raise on a 0-d array ("len() of unsized object"), which the old
+    // `ndim == 1` gate used to reach first. Mapping that to a DECLINE reproduces the old
+    // outcome exactly: a 0-d array failed `ndim == 1` and returned `Ok(None)` then too.
+    let Ok(n) = a.len() else {
+        return Ok(None);
+    };
+    // THE SMALL int64 CELL SKIPS THE PYTHON SHAPE PROBE ENTIRELY
+    // (`franken_numpy-ixs5y.409`). `int64_sort_flat_small` acquires a `PyBuffer` on the
+    // way in regardless, and that buffer already carries dimension count, C-contiguity
+    // and element count - the three facts `ndim`, `flags.c_contiguous` and `len` were
+    // being fetched for. It now checks them there, off the Python attribute path and
+    // without constructing a numpy flagsobj. Profiled, this cell's time is its Python
+    // entry: 3566 ns route against a 1092 ns comparison sort, so entries are the lever.
     if kind == 'i' && itemsize == std::mem::size_of::<i64>() && n <= I64_SMALL_SORT_MAX {
         return int64_sort_flat_small(py, numpy, a, n);
+    }
+    // Every remaining branch below reads the operand as a flat 1-D buffer, so the shape
+    // probe stays for them, unchanged.
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
+        || !a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
+    {
+        return Ok(None);
     }
     if n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
@@ -74896,17 +74954,31 @@ fn sort(
         // (byte-exact regardless: equal-on-all-fields records are byte-identical). Only `order` beyond
         // axis/kind is accepted; any truly unknown kwarg still defers.
         if !other_kwarg {
-            let numpy = py.import("numpy")?;
+            // `cached_numpy`, NOT `py.import` (`franken_numpy-ixs5y.409`). `fnp.sort`
+            // imported the module TWICE per call, and `PyImport_ImportModule` is not a
+            // `sys.modules` lookup: it builds a `PyUnicode` for the name, then
+            // `PyImport_Import` fetches `__import__` out of builtins, constructs a globals
+            // dict and CALLS it. Timed on this host against the installed interpreter,
+            // `__import__("numpy")` on an already-imported numpy costs 382.5 ns/call
+            // against a 28.4 ns `sys.modules` lookup - and against a whole
+            // `np.sort(int64, n=256)` call of 1903.5 ns. Two of those sat in front of the
+            // campaign's worst measured cell.
+            //
+            // Monkeypatching still works, which is the property that makes this safe here:
+            // the cell holds the MODULE, and every caller below still does its own
+            // `getattr` through it, so a test that rebinds `numpy.sort` is honoured. The
+            // bench group's own engagement spy does exactly that.
+            let numpy = cached_numpy(py)?;
             let a = args.get_item(0)?;
             // Float-field structured sort via the byte-transform (numpy.lexsort is a slow K-pass sort for
             // float keys); all-integer records fall through to the fast numpy.lexsort radix path below.
             if order_spec.is_none()
-                && let Some(out) = try_native_struct_sort_valuelex(py, &numpy, &a, axis_spec)?
+                && let Some(out) = try_native_struct_sort_valuelex(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             if let Some(out) =
-                try_native_struct_sort(py, &numpy, &a, axis_spec, order_spec.as_ref())?
+                try_native_struct_sort(py, numpy, &a, axis_spec, order_spec.as_ref())?
             {
                 return Ok(out);
             }
@@ -74915,7 +74987,7 @@ fn sort(
             && order_spec.is_none()
             && let Some(require_distinct) = sort_kind_fast_path(kind_spec.as_deref())
         {
-            let numpy = py.import("numpy")?;
+            let numpy = cached_numpy(py)?;
             let a = args.get_item(0)?;
             // np.sort(a, axis=None) sorts the FLATTENED array. For a C-contiguous
             // ndarray the ravel is a ZERO-COPY reshape view, so normalize the N-D
@@ -99836,24 +99908,34 @@ fn try_native_struct_sort_valuelex(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
-        || !a
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
-        return Ok(None);
-    }
-    // 1-D: axis missing / None / -1 / 0 all collapse to the single axis.
+    // 1-D: axis missing / None / -1 / 0 all collapse to the single axis. Free (no
+    // interpreter entry), so it is tested before anything that costs one.
     if !matches!(
         axis_spec,
         None | Some(None) | Some(Some(-1)) | Some(Some(0))
     ) {
         return Ok(None);
     }
+    // STRUCTURED-DTYPE TEST FIRST (`franken_numpy-ixs5y.409`). This probe runs on EVERY
+    // `fnp.sort` call and declines on all of them that are not structured - which is
+    // nearly all of them. It used to learn "no" only AFTER `ndim`, `flags` and
+    // `flags.c_contiguous`, and `.flags` CONSTRUCTS A FRESH numpy flagsobj per call, so a
+    // plain `np.sort(int64_array)` paid an object allocation plus three attribute entries
+    // to reach a question `dtype.names` answers on its own. The sibling probe
+    // `try_native_struct_sort` already tests `names` first; this makes the pair agree.
+    // Both conditions are required to engage, so testing them in the other order cannot
+    // change which calls this function accepts.
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let names_obj = dtype.getattr(intern!(py, "names"))?;
     if names_obj.is_none() {
+        return Ok(None);
+    }
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
+        || !a
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
+            .extract::<bool>()?
+    {
         return Ok(None);
     }
     let names: Vec<String> = names_obj.extract()?;
