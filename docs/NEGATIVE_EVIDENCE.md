@@ -59046,3 +59046,92 @@ singletons) is 21.9 ns vs 59.1 ns per operand at the Python level - about 75 ns 
 below what this harness can decide on one call site. Do not spend a cycle on it without counted
 attribution.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - THE CONST-CREATION HELPER BUILT A ONE-ELEMENT `numpy.full` TO LEARN THE DTYPE, THEN DECLINED ON A SIZE GATE THE SHAPE ALONE COULD HAVE DECIDED: `zeros_like` 2.786x -> 1.522x (`deadlock-audit-t06ys`)
+
+`TanBridge`. Code shipped in `8e721a92`, measurement record and bead id in `d731dfa3` - **see the
+PROVENANCE note at the bottom, the split is not what it looks like.** Measured on `thinkstation1`
+against the LIVE installed numpy 2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null
+per cell, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** candidate-win on ten cells, no-change on the control; every cell is
+still a LOSS to numpy and is reported as one.
+
+`try_native_full_parallel` only engages above an 8 MB output. Applying that floor needs `itemsize`,
+and it learned `itemsize` by CONSTRUCTING a real one-element `numpy.full` - the correct way to
+replicate numpy's dtype inference, and the wrong question to be asking at that point. Every small
+`full` / `full_like` / `ones_like` / `zeros_like` call built that array, read three attributes off
+it, and then declined on size, having used none of it.
+
+**PRICED FIRST, IN PYTHON** (`timeit`, installed interpreter, this host): `np.full((1,), 3.0)` is
+**753.0 ns** - against a whole `np.zeros_like(256)` that numpy finishes in **989.0 ns**. The probe
+alone was three quarters of the incumbent's entire call.
+
+The bound added is EXACT, not a heuristic: the gate accepts only itemsize 1|2|4|8, so if
+`total * 8` is under the floor, no dtype can make the later check pass.
+
+```
+CONST_CREATION_SIZE_GATE worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=87578fef3d92  after_elf=27d051518198
+
+  case                BEFORE                      AFTER                 excess
+  zeros_like 2^8     2.786x [2.507,2.925]  ->  1.522x [1.150,1.647]   1697 -> 614 ns
+  ones_like  2^8     2.580x [2.286,2.722]  ->  1.469x [1.313,1.571]   1642 -> 473 ns
+  full_like  2^8     2.640x [2.386,2.748]  ->  1.568x [1.388,1.672]   1427 -> 478 ns
+  full       2^8     2.503x [2.262,2.613]  ->  1.396x [1.147,1.568]   1255 -> 402 ns
+  zeros_like 2^12    2.159x [2.033,2.231]  ->  1.340x [1.256,1.404]   1692 -> 497 ns
+  ones_like  2^12    2.048x [1.956,2.116]  ->  1.315x [1.218,1.418]   1630 -> 490 ns
+  full_like  2^12    2.038x [1.856,2.134]  ->  1.347x [1.337,1.431]   1453 -> 492 ns
+  full       2^12    1.947x [1.938,2.032]  ->  1.245x [1.120,1.396]   1290 -> 326 ns
+  zeros_like 2^16    1.216x [1.175,1.255]  ->  1.071x [1.009,1.149]   1951 -> 525 ns
+  full       2^16    1.163x [1.093,1.203]  ->  1.050x [0.968,1.182]   1467 -> 461 ns
+
+  CONTROL:
+  empty_like 2^8     2.204x [2.191,2.221]  ->  2.207x [2.172,2.575]    260 ->  260 ns
+```
+
+**`empty_like` is the control and it does not move.** It does not route through this helper, which
+is what places the effect in the helper rather than in the entry all four ops share - and it leaves
+`empty_like` at 2.2x as the family's standing loss, entirely in that shared entry.
+
+**A/A NULL CONTROLS (same invocation, every cell):** all 22 nulls on the sub-floor cells pass
+(0.9839-1.0044). Every BEFORE/AFTER pair above is DISJOINT.
+
+**ENGAGEMENT IS ESTABLISHED BY PARITY, NOT BY TIMING.** Above the floor the three 2^21 cells have
+CIs spanning 0.55-2.05 with three biased nulls; no ratio there is quotable and none is quoted. What
+is checked instead is content: a 16 MB `zeros_like` is all zeros, a 16 MB `full_like` all 2.5, and
+`full` byte-identical to numpy's - i.e. the parallel fill still runs. An early decline's whole risk
+is disengaging the kernel it guards, and that is a correctness question, so it gets a correctness
+answer.
+
+PARITY: 11 dtypes x 7 shapes x {zeros_like, ones_like, empty_like, full_like}; `np.full` over 11
+dtypes x 8 fill values x both sides of the floor, plus the inferred-dtype path the probe existed
+for; every steering kwarg (dtype override, dtype=None, order C/F/K/A, subok=False, shape override,
+shape+dtype) at n=1024 AND n=2^21; and four layouts (F-order, transposed, strided, `np.matrix`).
+Compared on dtype, shape, python `type()`, four flags and RAW BYTES - `empty_like` on everything
+but content, which is undefined. BEFORE 4 divergences, AFTER 4, all four the same pre-existing
+`longdouble` padding-byte artifact. 0 INTRODUCED. 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest array 2^21 f64 = 16 MB, two live; host `used` 57 GB of 215.
+
+### PROVENANCE - A PEER'S COMMIT SWEPT THIS EDIT WHILE I WAS MEASURING IT
+
+The code block landed in `8e721a92`, authored by a peer, about three minutes before I committed.
+My working-tree edit was uncommitted while the A/B ran, and their commit picked it up verbatim -
+my comment text, my measured 753.0 ns figure and my PLACEHOLDER bead id (`vq4tz`, which never
+existed) are all in their commit. `d731dfa3` is mine and corrects the id to `t06ys` plus carries
+the measurement record. **This is the second time this exact trap has fired on this tree** (the
+first is recorded against `44b736fd`). The rule stands and I broke it: COMMIT SOURCE BEFORE
+STARTING A LONG MEASUREMENT. Verified after the fact that HEAD's version of the function is
+byte-identical to the source the measured ELF was built from, comments aside - `git show
+HEAD:...lib.rs` diffed against the pre-build snapshot shows exactly this block and the two bead-id
+lines, nothing foreign.
+
+RETRY PREDICATE: do NOT re-attack the one-element `full` probe - it no longer runs below the floor,
+and above the floor it is load-bearing (it is what makes the fill bit-exact with numpy's own dtype
+inference and casting). The residual ~400-620 ns is the four ops' shared entry: the `(*args,
+**kwargs)` shape, the flags/dtype/shape reads in `try_native_full_like_parallel`, and the fallback
+kwargs dict each op rebuilds. `empty_like` at 2.2x is the clean way to attack THAT, since it is
+nothing but entry.
+AGENT_NAME=TanBridge.
