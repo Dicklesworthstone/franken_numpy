@@ -7167,13 +7167,22 @@ fn storage_from_numeric_text_tokens(
 }
 
 fn python_is_complex_obj(value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    if let Ok(dtype) = value.getattr("dtype")
-        && let Ok(name) = dtype.getattr("name")?.extract::<String>()
-    {
-        return Ok(matches!(
-            DType::parse(&name),
-            Some(DType::Complex64) | Some(DType::Complex128)
-        ));
+    // ASK THE DTYPE FOR ITS KIND, NOT ITS NAME. This read is the entire cost of
+    // `iscomplexobj`/`isrealobj` on any operand that has a dtype, and it was routed through
+    // `dtype.name` -> heap `String` -> `DType::parse` -> enum compare, to answer a
+    // one-character question. `numpy.dtype.name` is a pure-Python property (`_name_get` in
+    // `numpy/_core/_dtype.py`); measured against the installed numpy 2.4.3 it is 1213.5 ns
+    // against 30.8 ns for `.kind`, and the two non-interned `getattr`s built a fresh
+    // `PyString` key apiece on top of that.
+    //
+    // IT ALSO CORRECTS THE ANSWER. NumPy's own `iscomplexobj` is
+    // `issubclass(dtype.type, complexfloating)`, which `kind == 'c'` reproduces exactly.
+    // The name round-trip could not: `DType::parse` knows `complex64`/`complex128` and
+    // nothing wider, so `complex256` (`np.clongdouble`) parsed to `None` and fnp answered
+    // `iscomplexobj -> False` / `isrealobj -> True` where NumPy answers `True` / `False`.
+    // Pinned by `iscomplexobj_matches_numpy_on_extended_precision_complex`.
+    if let Some(kind) = dtype_kind_of(value) {
+        return Ok(kind == 'c');
     }
 
     if value.is_instance_of::<PyComplex>() {
@@ -57451,23 +57460,37 @@ fn native_asarray_like(
         input_is_exact_ndarray
     };
     if subclass_ok && !matches!(copy_mode, CopyMode::Always) {
-        let source_dtype_name = a
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "name"))?
-            .extract::<String>()?;
-        let source_dtype = DType::parse(&source_dtype_name);
+        // `numpy.dtype.name` IS NOT A C GETSET, and that is the whole cost of this route.
+        // It dispatches to the pure-Python `_name_get` in `numpy/_core/_dtype.py`, which
+        // runs an `isbuiltin` test, a `type(dtype)._legacy` test, an `issubclass`, a
+        // `_kind_name` call, an f-string bit-width concatenation and a datetime-metadata
+        // check. Timed against the INSTALLED numpy 2.4.3 on this host it is 1213.5 ns per
+        // read, next to 28.2 ns for `.dtype` alone and 30.7 ns for `.dtype.char`.
+        //
+        // Both reads below were UNCONDITIONAL and both are dead on the common call. The
+        // dtype name is discarded whole on the `None` arm - i.e. on every `asarray(a)` that
+        // names no dtype - and the two `flags` lookups are discarded whenever no order is
+        // requested, because those arms answer `true` without consulting them. Measured on
+        // the identity path that was 1213 of ~1540 ns for the dtype and ~127 ns more for
+        // the flags. Each read now happens only on the arm that consumes it.
         let dtype_match = match requested_dtype {
             None => true,
-            Some(want) => source_dtype == Some(want),
+            Some(want) => {
+                let source_dtype_name = a
+                    .getattr(intern!(py, "dtype"))?
+                    .getattr(intern!(py, "name"))?
+                    .extract::<String>()?;
+                DType::parse(&source_dtype_name) == Some(want)
+            }
         };
         if dtype_match {
-            let flags = a.getattr(intern!(py, "flags"))?;
-            let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
-            let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
+            let contiguity = |key: &Bound<'_, PyString>| -> PyResult<bool> {
+                a.getattr(intern!(py, "flags"))?.get_item(key)?.extract()
+            };
             let layout_match = match requested_order {
                 None | Some("K") | Some("A") => true,
-                Some("C") => c_contig,
-                Some("F") => f_contig,
+                Some("C") => contiguity(intern!(py, "C_CONTIGUOUS"))?,
+                Some("F") => contiguity(intern!(py, "F_CONTIGUOUS"))?,
                 _ => false,
             };
             if layout_match {
@@ -57673,7 +57696,14 @@ fn ascontiguousarray(
     }
     let a_bound = a.bind(py);
     let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    let source_array = numpy.call_method1(intern!(py, "asarray"), (a_bound,))?;
+    // `np.asarray` is the identity on an exact ndarray, so when the caller already handed
+    // us one there is nothing for the round trip to do; skip it and test the caller's own
+    // object. Only a non-ndarray operand needs the conversion.
+    let source_array = if a_bound.is_exact_instance(&ndarray_type) {
+        a_bound.clone()
+    } else {
+        numpy.call_method1(intern!(py, "asarray"), (a_bound,))?
+    };
     let dtype_requested = match dtype.as_ref() {
         Some(dtype_val) if !dtype_val.bind(py).is_none() => Some({
             let parsed = numpy
@@ -57688,26 +57718,43 @@ fn ascontiguousarray(
         _ => None,
     };
 
-    // Fast path: already an ndarray, C-contiguous, 1-D (or higher but
-    // C-contig) with matching dtype → return unchanged like numpy does.
-    let source_dtype_name = source_array
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "name"))?
-        .extract::<String>()?;
-    let source_dtype = match DType::parse(&source_dtype_name) {
-        Some(value) => value,
-        None => return fallback(py),
-    };
-    if !dtype_supported_by_numpy_export_bridge(source_dtype) {
-        return fallback(py);
-    }
-    let target_dtype = dtype_requested.unwrap_or(source_dtype);
-
-    let flags = source_array.getattr(intern!(py, "flags"))?;
-    let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
-    if c_contig && target_dtype == source_dtype && source_array.is_exact_instance(&ndarray_type) {
-        // np.ascontiguousarray returns the input unchanged in this case.
-        // Preserve that identity so `is` comparisons still hold.
+    // Fast path: an exact ndarray with ndim >= 1 that is already C-contiguous, whose dtype
+    // matches any explicitly requested one → numpy returns the input unchanged, so return
+    // it unchanged and preserve the `is` contract.
+    //
+    // THE DTYPE READ IS NOW CONDITIONAL, AND THE TWO GATES IT FED ARE GONE. `numpy.dtype
+    // .name` is not a C getset - it is the pure-Python `_name_get` in `numpy/_core/
+    // _dtype.py` - and against the installed numpy 2.4.3 on this host it costs 1213.5 ns,
+    // next to 28.2 ns for `.dtype` and 28.8 ns for `.ndim`. It was read on EVERY call and,
+    // with no `dtype=` given, then compared only against itself. The `DType::parse` and
+    // `dtype_supported_by_numpy_export_bridge` gates it fed are vestigial here: this path
+    // returns the caller's own object and never touches the export bridge. Verified
+    // against numpy 2.4.3 across f2/f4/f8/i4/c16/clongdouble/longdouble/bool/U5/S5/M8/m8/
+    // void/object - an exact C-contiguous ndarray with ndim >= 1 comes back unchanged for
+    // EVERY dtype - so those gates were only sending back to numpy the inputs numpy hands
+    // straight back anyway.
+    //
+    // THE `ndim >= 1` GATE IS NEW AND FIXES A DIVERGENCE. `np.ascontiguousarray` carries an
+    // implicit `ndmin=1`: given a 0-d array it returns a NEW shape-`(1,)` array and never
+    // the input. This returned the 0-d input itself. Pinned by
+    // `ascontiguousarray_promotes_zero_d_to_one_d_like_numpy`.
+    let identity_ok = source_array.is_exact_instance(&ndarray_type)
+        && source_array.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1
+        && source_array
+            .getattr(intern!(py, "flags"))?
+            .get_item(intern!(py, "C_CONTIGUOUS"))?
+            .extract::<bool>()?
+        && match dtype_requested {
+            None => true,
+            Some(want) => {
+                let source_dtype_name = source_array
+                    .getattr(intern!(py, "dtype"))?
+                    .getattr(intern!(py, "name"))?
+                    .extract::<String>()?;
+                DType::parse(&source_dtype_name) == Some(want)
+            }
+        };
+    if identity_ok {
         if a_bound.is_exact_instance(&ndarray_type) {
             return Ok(a_bound.clone().unbind());
         }
@@ -57717,7 +57764,6 @@ fn ascontiguousarray(
     // Otherwise a fresh C-contiguous copy is needed. The native extract ->
     // UFuncArray -> export-bridge rebuild was 8-17x slower than numpy's typed
     // memcpy (e.g. ascontiguousarray(M.T) on a 2000x2000 array); delegate the copy.
-    let _ = target_dtype;
     fallback(py)
 }
 
@@ -67273,7 +67319,13 @@ fn asfortranarray(
     // Fast path: already an F-contig ndarray with the right dtype → numpy
     // returns the same object. Preserve that identity contract.
     let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    let source_array = numpy.call_method1(intern!(py, "asarray"), (a_bound,))?;
+    // `np.asarray` is the identity on an exact ndarray; skip the round trip when the
+    // caller already handed us one.
+    let source_array = if a_bound.is_exact_instance(&ndarray_type) {
+        a_bound.clone()
+    } else {
+        numpy.call_method1(intern!(py, "asarray"), (a_bound,))?
+    };
     let requested_dtype = match dtype.as_ref() {
         Some(dtype_val) if !dtype_val.bind(py).is_none() => Some({
             let parsed = numpy
@@ -67287,34 +67339,40 @@ fn asfortranarray(
         }),
         _ => None,
     };
-    let source_dtype_name = source_array
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "name"))?
-        .extract::<String>()?;
-    let source_dtype = match DType::parse(&source_dtype_name) {
-        Some(value) => value,
-        None => return fallback(py),
-    };
-    if !dtype_supported_by_numpy_export_bridge(source_dtype) {
-        return fallback(py);
-    }
-    let target_dtype = requested_dtype.unwrap_or(source_dtype);
-
-    if target_dtype == source_dtype && source_array.is_exact_instance(&ndarray_type) {
-        let flags = source_array.getattr(intern!(py, "flags"))?;
-        let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
-        if f_contig {
-            if a_bound.is_exact_instance(&ndarray_type) {
-                return Ok(a_bound.clone().unbind());
+    // Same shape of fix as `ascontiguousarray`, for the same measured reason: the
+    // `dtype.name` read is the pure-Python `_name_get` at 1213.5 ns against the installed
+    // numpy 2.4.3, it ran on EVERY call, and with no `dtype=` given it was compared only
+    // against itself. The `DType::parse` / export-bridge gates it fed are vestigial on a
+    // path that hands back the caller's own object, and were verified against numpy 2.4.3
+    // to reject only inputs numpy itself returns unchanged. `ndim >= 1` is new and fixes
+    // the 0-d divergence (`np.asfortranarray` has an implicit `ndmin=1`); pinned by
+    // `asfortranarray_promotes_zero_d_to_one_d_like_numpy`.
+    let identity_ok = source_array.is_exact_instance(&ndarray_type)
+        && source_array.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1
+        && source_array
+            .getattr(intern!(py, "flags"))?
+            .get_item(intern!(py, "F_CONTIGUOUS"))?
+            .extract::<bool>()?
+        && match requested_dtype {
+            None => true,
+            Some(want) => {
+                let source_dtype_name = source_array
+                    .getattr(intern!(py, "dtype"))?
+                    .getattr(intern!(py, "name"))?
+                    .extract::<String>()?;
+                DType::parse(&source_dtype_name) == Some(want)
             }
-            return Ok(source_array.unbind());
+        };
+    if identity_ok {
+        if a_bound.is_exact_instance(&ndarray_type) {
+            return Ok(a_bound.clone().unbind());
         }
+        return Ok(source_array.unbind());
     }
 
     // A fresh F-contig copy is needed. The native extract -> UFuncArray ->
     // export-bridge rebuild was ~10-17x slower than numpy's typed memcpy; delegate
     // the copy (the F-contig identity fast path above is kept).
-    let _ = target_dtype;
     fallback(py)
 }
 
@@ -159896,6 +159954,136 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let theirs_object = numpy_asanyarray.call1((object_source.clone(),))?;
             assert_array_matches_numpy(&ours_object, &theirs_object)?;
 
+            Ok(())
+        });
+    }
+
+    /// `iscomplexobj`/`isrealobj` on a dtype WIDER than complex128.
+    ///
+    /// NumPy answers `issubclass(dtype.type, complexfloating)`, which is true for
+    /// `np.clongdouble`. fnp used to route the question through `dtype.name` ->
+    /// `DType::parse`, and `DType::parse` knows `complex64`/`complex128` and nothing
+    /// wider, so `complex256` fell to `None` and the answers came back INVERTED. Reading
+    /// `dtype.kind` reproduces NumPy's own predicate exactly, and is also ~40x cheaper.
+    #[test]
+    fn iscomplexobj_matches_numpy_on_extended_precision_complex() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let zeros = numpy.getattr("zeros")?;
+
+            for dtype_name in ["clongdouble", "complex128", "complex64", "longdouble", "float64"] {
+                let Ok(scalar_type) = numpy.getattr(dtype_name) else {
+                    // A platform without extended precision simply has no such dtype.
+                    continue;
+                };
+                let array = zeros.call1((3, scalar_type))?;
+                for predicate in ["iscomplexobj", "isrealobj"] {
+                    let ours: bool = module
+                        .getattr(predicate)?
+                        .call1((array.clone(),))?
+                        .extract()?;
+                    let theirs: bool = numpy
+                        .getattr(predicate)?
+                        .call1((array.clone(),))?
+                        .extract()?;
+                    assert_eq!(
+                        ours, theirs,
+                        "{predicate}({dtype_name}) disagreed with numpy: fnp={ours} numpy={theirs}"
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+
+    /// The implicit `ndmin=1` in `ascontiguousarray`/`asfortranarray`.
+    ///
+    /// Both promote a 0-d input to shape `(1,)` and therefore CANNOT return the input
+    /// object. fnp's identity fast path had no rank gate and handed the 0-d array back,
+    /// so `fnp.ascontiguousarray(np.array(3.0)).shape` was `()` where numpy's is `(1,)`.
+    #[test]
+    fn ascontiguousarray_promotes_zero_d_to_one_d_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let zero_d = numpy.getattr("array")?.call1((3.0_f64,))?;
+            let ndim: usize = zero_d.getattr("ndim")?.extract()?;
+            assert_eq!(ndim, 0, "fixture must be 0-d");
+
+            for name in ["ascontiguousarray", "asfortranarray"] {
+                let ours = module.getattr(name)?.call1((zero_d.clone(),))?;
+                let theirs = numpy.getattr(name)?.call1((zero_d.clone(),))?;
+                assert_array_matches_numpy(&ours, &theirs)?;
+                let ours_shape: Vec<usize> = ours.getattr("shape")?.extract()?;
+                let theirs_shape: Vec<usize> = theirs.getattr("shape")?.extract()?;
+                assert_eq!(
+                    ours_shape, theirs_shape,
+                    "{name}(0-d) shape mismatch: fnp={ours_shape:?} numpy={theirs_shape:?}"
+                );
+                assert!(
+                    !ours.is(&zero_d),
+                    "{name}(0-d) must not return the input object; numpy promotes to (1,)"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    /// The identity contract the four `as*array` fast paths exist to preserve.
+    ///
+    /// Each must return the CALLER'S OBJECT - not an equal copy - whenever numpy does,
+    /// and that has to keep holding for dtypes `DType::parse` cannot name, because the
+    /// gates that used to reject those were removed along with the 1213.5 ns
+    /// `dtype.name` read that fed them.
+    #[test]
+    fn as_array_family_preserves_numpy_object_identity_including_unparseable_dtypes() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array = numpy.getattr("array")?;
+
+            // 1-D is both C- and F-contiguous, so all four functions return identity.
+            let samples = [
+                ("float64", array.call1((vec![1.0_f64, 2.0, 3.0],))?),
+                ("int64", array.call1((vec![1_i64, 2, 3],))?),
+                ("bool", array.call1((vec![true, false],))?),
+                ("unicode", array.call1((vec!["ab", "cd"],))?),
+                (
+                    "datetime64",
+                    array.call1((vec!["2020-01-01"], "datetime64[D]"))?,
+                ),
+            ];
+            for (label, sample) in samples.iter() {
+                for name in [
+                    "asarray",
+                    "asanyarray",
+                    "ascontiguousarray",
+                    "asfortranarray",
+                ] {
+                    let ours = module.getattr(name)?.call1((sample.clone(),))?;
+                    let theirs = numpy.getattr(name)?.call1((sample.clone(),))?;
+                    assert_eq!(
+                        theirs.is(sample),
+                        ours.is(sample),
+                        "{name}({label}): identity contract diverged - numpy is_input={}, fnp is_input={}",
+                        theirs.is(sample),
+                        ours.is(sample)
+                    );
+                }
+            }
             Ok(())
         });
     }
