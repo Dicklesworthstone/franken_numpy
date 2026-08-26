@@ -57661,3 +57661,109 @@ n-ary broadcast-and-copy that does not round-trip through Python. Do not re-intr
 extract path here: it was 11.85-53.80x slower than the composition it was shadowing, measured
 route-against-route in the same build.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP: ONE out-of-domain element flipped `arccosh` from an 11x WIN to a loss; the sqrt pay-twice deferral again, in the shared transcendental helper (`deadlock-audit-2qjj3`)
+
+### THE CELL
+
+`acosh`/`arccosh` were sweep ranks 6-7 at 2.12x/2.09x — the largest ABSOLUTE headroom left (~480 us).
+As with sqrt, the ratio is an operand artifact and the sweep's operand is the pathological one: its
+`f64` ladder entry is `standard_normal`, only **15.7%** of which is inside acosh's domain (x >= 1).
+
+```
+  operand                        numpy_ns       fnp_ns   ratio
+  in-domain x>=1                  957596.3      87078.1   0.09x   <- an 11x WIN
+  in-domain + ONE bad element     981251.8    1498837.4   1.53x   LOSS
+  standard_normal (84% NaN)       420954.8    1270799.4   3.02x   LOSS
+```
+
+**ONE out-of-domain element in 65536 flipped an 11x win into a loss — a 17x swing**, binary trigger,
+exactly sqrt's shape: `transcendental_map_f64` computes the whole correct output while tracking an
+event predicate, and the caller then `return Ok(None)`, discarding a finished buffer so a fallback
+can record NumPy's FP event.
+
+### WHY THIS IS NOT A WHOLE-FAMILY FIX — the split is measured, not assumed
+
+The helper serves ~15 ops, and a one-element witness reproduces exactly ONE errstate category.
+Probed against numpy 2.4.3 across each op's whole domain:
+
+```
+  arccosh / arcsin / arccos   {invalid}           one category   -> fixable with one witness
+  arctanh                     {invalid, divide}   BOTH, from [1.0, 2.0]
+  log / log2 / log10          {invalid, divide}   BOTH, from [0.0, -1.0]
+  exp / exp2                  {over, under}       BOTH, from [1e3, -1e3]
+```
+
+The multi-category ops would UNDER-REPORT one of their two events, so they keep deferring untouched.
+Each fixed op raises through its OWN callable, because the event message names the ufunc and
+`arccos` may not borrow `arcsin`'s despite sharing a domain.
+
+### AND THE PREDICATES CARRIED sqrt's `is_finite()` HOLE — 5 live divergences, all closed
+
+```
+  arccosh(-inf)   numpy warns, fnp silent
+  arcsin(-inf)    numpy warns, fnp silent
+  arcsin(+inf)    numpy warns, fnp silent
+  arccos(-inf)    numpy warns, fnp silent
+  arccos(+inf)    numpy warns, fnp silent
+```
+
+Predicates are now `v < 1.0` (arccosh) and `v.abs() > 1.0` (arcsin/arccos). IEEE excludes NaN for
+free, and `v < 1.0` correctly does not flag `arccosh(+inf) = +inf`.
+
+### RESULT — AND IT IS THREAD-COUNT DEPENDENT, WHICH IS DISCLOSED RATHER THAN AVERAGED AWAY
+
+Dual-null contract, incumbent = numpy live in the same invocation, bench elf
+`8b2871e0364d0acb4a92bd39c35795836b84e4d5bdc8010cc61682ea41054267`, on the SWEEP's operand:
+
+```
+  RAYON_NUM_THREADS=16   verdict=DECIDABLE_WIN  ratio 2.537597 ci95=[2.270379,2.682593]
+                         incumbent 470047.000 ns   candidate  192956.000 ns
+  RAYON_NUM_THREADS=64   verdict=UNDECIDED      ratio 1.003784 ci95=[0.968603,1.084395]
+                         incumbent 456661.000 ns   candidate  444774.000 ns
+  RAYON unset (=64), earlier run
+                         verdict=DECIDABLE_REGRESSION ratio 0.463467 ci95=[0.411843,0.492012]
+                         incumbent 454062.000 ns   candidate 1041912.000 ns
+```
+
+**The candidate arm swings 444774 -> 1041912 ns between two 64-thread runs while numpy holds
+~455000.** This cell is NOISE-DOMINATED at 64 threads on this contended shared host and is decidable
+at 16. Quote it as: a DECIDABLE_WIN of 2.54x at 16 threads, UNDECIDED at 64. Do NOT quote the
+64-thread regression — it does not replicate, and the 16-thread win does.
+
+In a plain interpreter (no criterion, same host), the thread sweep is monotone and consistent:
+
+```
+  threads   in-domain   +ONE bad   sweep operand
+        1     1.04x       1.04x       1.16x
+        4     0.29x       0.35x       0.39x
+       16     0.11x       0.09x       0.16x
+       64     0.09x       0.10x       0.19x
+```
+
+**The headline is the `+ONE bad` column: 1.53x LOSS before, 0.09-0.35x WIN after, at every thread
+count above 1.** That is the defect this bead names and it is fixed unambiguously.
+
+A/A NULL CONTROLS: contract dual nulls straddle unity in all three runs (incumbent bias 0.0010,
+candidate 0.0006 on the first). A pinned 16-CPU Python A/B gave clean nulls (1.0001/1.0011 and
+1.0003/0.9980) for the in-domain and +ONE-bad cells: 0.194x and 0.210x. Two other pinned rows read
+BIASED (candidate null 0.89-0.93) and are NOT quoted.
+A DISCARDED MEASUREMENT, recorded so it is not repeated: an "all out-of-domain" cell built from
+`np.full(N, 0.5)` read 0.458x. A CONSTANT array is branch-predictable and cache-trivial and is not
+representative of a mixed out-of-domain operand; the sweep's `standard_normal` is. That row is void.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+`transcendental_domain_events_match_numpy_including_the_infinities` RUN AND PASSING — six ops x
+domain edges (finite out-of-domain, +-inf, NaN, boundary, in-domain) x errstate warn/raise/ignore
+with ALL FOUR categories set. It covers the three FIXED ops and the three MULTI-CATEGORY ops, so it
+pins that the split was drawn in the right place.
+RETRY PREDICATE: do not extend the witness trick to arctanh/log/log2/log10/exp/exp2 without a
+per-category witness set — the category table above is the measurement that forbids it. And do not
+re-measure this cell at 64 threads on a shared host; it is not decidable there.
+FOUND IN PASSING, NOT FIXED, FILED AS `deadlock-audit-kaa5i`: `arctanh(-inf)` emits TWO FP events
+where numpy emits one, and `log(-inf)` emits NONE where numpy emits one. Values agree in both.
+Attribution to this change is REFUTED BY DIFF (the functional change is three predicate lines for
+Arcsin/Arccos/Arccosh plus a match whose default arm is the old `return Ok(None)`; no arm shares
+state) but a rebuild A/B was NOT run, and the bead says so and asks the next agent to do it first.
+AGENT_NAME=TanBridge.
