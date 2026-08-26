@@ -31647,6 +31647,27 @@ fn isposinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     if let Some(out) = try_const_bool_integral(py, x, false)? {
         return Ok(out); // integer/bool can't be +inf -> all False
     }
+    // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+    //
+    // The zero-copy path above needs a contiguous buffer, so a strided view declines it and the
+    // call drops into `extract_numeric_array`, which copies the whole operand to get one.
+    // NumPy's strided loop beats that copy by a wide margin, and the loss sweep cannot see it
+    // because its operand ladder is entirely C-contiguous. Dual-null measured at n=2^16:
+    //
+    //     op            strided     contiguous
+    //     isneginf      32.485x       0.465x WIN
+    //     isposinf      21.429x       0.417x WIN
+    //     logical_not   20.085x       0.267x WIN
+    //
+    // Fifth site to take this guard, after take, meshgrid, nanargmax/nanargmin and the angle
+    // conversions. The contiguous win is untouched: this only fires where the fast path had
+    // already declined for LAYOUT.
+    if noncontiguous_ndarray(cached_numpy(py)?, x)? {
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "isposinf"))?
+            .call1((x,))?
+            .unbind());
+    }
     let x = extract_numeric_array(py, x, "isposinf(x)")?;
     let result = ufunc_isposinf(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
@@ -31674,6 +31695,27 @@ fn isneginf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     }
     if let Some(out) = try_const_bool_integral(py, x, false)? {
         return Ok(out); // integer/bool can't be -inf -> all False
+    }
+    // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+    //
+    // The zero-copy path above needs a contiguous buffer, so a strided view declines it and the
+    // call drops into `extract_numeric_array`, which copies the whole operand to get one.
+    // NumPy's strided loop beats that copy by a wide margin, and the loss sweep cannot see it
+    // because its operand ladder is entirely C-contiguous. Dual-null measured at n=2^16:
+    //
+    //     op            strided     contiguous
+    //     isneginf      32.485x       0.465x WIN
+    //     isposinf      21.429x       0.417x WIN
+    //     logical_not   20.085x       0.267x WIN
+    //
+    // Fifth site to take this guard, after take, meshgrid, nanargmax/nanargmin and the angle
+    // conversions. The contiguous win is untouched: this only fires where the fast path had
+    // already declined for LAYOUT.
+    if noncontiguous_ndarray(cached_numpy(py)?, x)? {
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "isneginf"))?
+            .call1((x,))?
+            .unbind());
     }
     let x = extract_numeric_array(py, x, "isneginf(x)")?;
     let result = ufunc_isneginf(&x).map_err(map_ufunc_error)?;
@@ -59950,6 +59992,24 @@ fn native_unary_logical_not_or_passthrough(
         // Same for an exact bool ndarray: logical_not is byte == 0.
         if let Some(out) = try_zerocopy_bool_logical_not(py, &arg)? {
             return Ok(out);
+        }
+        // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+        //
+        // The zero-copy path above needs a contiguous buffer, so a strided view declines it and the
+        // call drops into `extract_numeric_array`, which copies the whole operand to get one.
+        // NumPy's strided loop beats that copy by a wide margin, and the loss sweep cannot see it
+        // because its operand ladder is entirely C-contiguous. Dual-null measured at n=2^16:
+        //
+        //     op            strided     contiguous
+        //     isneginf      32.485x       0.465x WIN
+        //     isposinf      21.429x       0.417x WIN
+        //     logical_not   20.085x       0.267x WIN
+        //
+        // Fifth site to take this guard, after take, meshgrid, nanargmax/nanargmin and the angle
+        // conversions. The contiguous win is untouched: this only fires where the fast path had
+        // already declined for LAYOUT.
+        if noncontiguous_ndarray(cached_numpy(py)?, &arg)? {
+            return core_numpy_passthrough_interned(py, intern!(py, "logical_not"), args, kwargs);
         }
         let x = extract_numeric_array(py, &arg, "logical_not(x)")?;
         let result = ufunc_logical_not(&x).map_err(map_ufunc_error)?;
