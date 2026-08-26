@@ -75741,13 +75741,19 @@ fn sort(
             let a = args.get_item(0)?;
             // Float-field structured sort via the byte-transform (numpy.lexsort is a slow K-pass sort for
             // float keys); all-integer records fall through to the fast numpy.lexsort radix path below.
-            if order_spec.is_none()
+            // Both struct gates require a STRUCTURED dtype (kind 'V'); one classification
+            // keeps a plain numeric operand out of them (`deadlock-audit-gxmih`).
+            let struct_possible =
+                numeric_operand_facts(py, &a)?.is_none_or(|facts| facts.kind == 'V');
+            if struct_possible
+                && order_spec.is_none()
                 && let Some(out) = try_native_struct_sort_valuelex(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
-            if let Some(out) =
-                try_native_struct_sort(py, numpy, &a, axis_spec, order_spec.as_ref())?
+            if struct_possible
+                && let Some(out) =
+                    try_native_struct_sort(py, numpy, &a, axis_spec, order_spec.as_ref())?
             {
                 return Ok(out);
             }
@@ -75775,111 +75781,177 @@ fn sort(
             } else {
                 a
             };
+            // ONE CLASSIFICATION FOR FIFTEEN DTYPE-SPECIFIC GATES (`deadlock-audit-gxmih`).
+            //
+            // Every gate below opens by re-deriving the SAME facts for itself - exact
+            // ndarray, dtype kind, itemsize, rank, C-contiguity - before it can decline,
+            // and most of them then acquire a `PyBuffer` too. At most ONE of them can ever
+            // accept a given operand, because they partition on dtype. So an `np.sort` of
+            // a small f64 array walked the whole chain and delegated: 2649 ns of excess
+            // over numpy at n=256, and FLAT in n, which is what marks it as the chain
+            // rather than the sorting.
+            //
+            // `None` means "not an exact ndarray" - every gate declines those anyway, but
+            // the classifier cannot prove it, so those operands walk the chain unchanged.
+            let facts = numeric_operand_facts(py, &a)?;
+            let kind_is = |k: char| facts.is_none_or(|f| f.kind == k);
+            let float_of = |size: usize| facts.is_none_or(|f| f.kind == 'f' && f.itemsize == size);
+            let complex_of =
+                |size: usize| facts.is_none_or(|f| f.kind == 'c' && f.itemsize == size);
+            let integral_sortable =
+                facts.is_none_or(|f| matches!(f.kind, 'i' | 'u') && matches!(f.itemsize, 4 | 8));
+            let temporal = facts.is_none_or(|f| matches!(f.kind, 'M' | 'm'));
+
             // 1-D: axis missing/None/-1/0 all collapse to the single axis.
             if matches!(
                 axis_spec,
                 None | Some(None) | Some(Some(-1)) | Some(Some(0))
             ) {
-                if let Some(out) = try_zerocopy_f64_sort_flat(py, numpy, &a)? {
+                if float_of(8)
+                    && let Some(out) = try_zerocopy_f64_sort_flat(py, numpy, &a)?
+                {
                     return Ok(out);
                 }
                 // 4-/8-byte integer flat sort (numpy simd-sort single-threaded; par 1.44-2.35x).
                 // (f32 flat sort gives only ~1.07x — numpy's AVX simd-sort already saturates — so
                 // it is NOT routed here; it stays on the numpy passthrough.)
-                if let Some(out) = try_native_int_sort_flat(py, numpy, &a)? {
+                if integral_sortable && let Some(out) = try_native_int_sort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // datetime64/timedelta64 flat value sort (int64-backed; numpy non-simd introsort;
                 // NaT defer, byte-exact via int64 tick order).
-                if let Some(out) = try_native_datetime_sort_flat(py, numpy, &a)? {
+                if temporal && let Some(out) = try_native_datetime_sort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // complex128 flat value sort (numpy lexicographic introsort, no simd for complex);
                 // NaN/-0.0 defer, byte-exact (equal values = equal bytes).
-                if let Some(out) = try_zerocopy_c128_sort_flat(py, numpy, &a)? {
+                if complex_of(16)
+                    && let Some(out) = try_zerocopy_c128_sort_flat(py, numpy, &a)?
+                {
                     return Ok(out);
                 }
                 // complex64 flat value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-                if let Some(out) = try_zerocopy_c64_sort_flat(py, numpy, &a)? {
+                if complex_of(8)
+                    && let Some(out) = try_zerocopy_c64_sort_flat(py, numpy, &a)?
+                {
                     return Ok(out);
                 }
                 // fixed-width unicode string flat sort (Latin-1 memcmp == codepoint order; wide
                 // codepoints >= 0x100 defer). numpy's per-record string comparator is ~10x slower.
-                if let Some(out) = try_native_string_sort_flat(py, numpy, &a)? {
+                if kind_is('U')
+                    && let Some(out) = try_native_string_sort_flat(py, numpy, &a)?
+                {
                     return Ok(out);
                 }
                 // float16 flat sort via exact f32 widening (numpy has NO f16 simd sort - its
                 // generic path measured 173-260 ms @4M on two workers vs 26-38 ms widened;
                 // ledger 2026-07-10, bead deadlock-audit-98chw). NaN/-0.0 defer via bit pre-scan.
-                if let Some(out) = try_native_f16_sort(py, numpy, &a, axis_spec)? {
+                if float_of(2)
+                    && let Some(out) = try_native_f16_sort(py, numpy, &a, axis_spec)?
+                {
                     return Ok(out);
                 }
             }
-            if let Some(out) =
-                try_zerocopy_f64_sort_lastaxis(py, numpy, &a, axis_spec, require_distinct)?
+            if float_of(8)
+                && let Some(out) =
+                    try_zerocopy_f64_sort_lastaxis(py, numpy, &a, axis_spec, require_distinct)?
             {
                 return Ok(out);
             }
             // complex128 per-lane last-axis value sort (lexicographic; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_sort_lastaxis(py, numpy, &a, axis_spec)? {
+            if complex_of(16)
+                && let Some(out) = try_zerocopy_c128_sort_lastaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex64 per-lane last-axis value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_sort_lastaxis(py, numpy, &a, axis_spec)? {
+            if complex_of(8)
+                && let Some(out) = try_zerocopy_c64_sort_lastaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
+            // The thirteen axis gates below partition on dtype exactly as the flat ones do,
+            // so the same classification serves them. `integral_any` rather than
+            // `integral_sortable`: these are byte-exact for any integer width, unlike the
+            // flat int gate which only routes 4- and 8-byte.
+            let integral_any = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u'));
+
             // float16 >=2-D LAST-AXIS sort via the same widening composition (per-lane value
             // sorts are independent; identical byte-exactness argument per lane).
-            if let Some(out) = try_native_f16_sort(py, numpy, &a, axis_spec)? {
+            if float_of(2)
+                && let Some(out) = try_native_f16_sort(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // integer per-lane last-axis sort (byte-exact for any kind; numpy sorts lanes serially).
-            if let Some(out) = try_native_int_sort_lastaxis(py, numpy, &a, axis_spec)? {
+            if integral_any
+                && let Some(out) = try_native_int_sort_lastaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // fixed-width string per-lane last-axis sort (Latin-1 memcmp == codepoint
             // order; numpy's per-record comparator runs lanes serially).
-            if let Some(out) = try_native_string_sort_lastaxis(py, numpy, &a, axis_spec)? {
+            if kind_is('U')
+                && let Some(out) = try_native_string_sort_lastaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_sort_axis0(py, numpy, &a, axis_spec)? {
+            if float_of(8)
+                && let Some(out) = try_zerocopy_f64_sort_axis0(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // integer axis-0 (column) sort (byte-exact any kind; numpy sorts columns serially).
-            if let Some(out) = try_native_int_sort_axis0(py, numpy, &a, axis_spec)? {
+            if integral_any && let Some(out) = try_native_int_sort_axis0(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex128 per-column axis-0 value sort (lexicographic; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_sort_axis0(py, numpy, &a, axis_spec)? {
+            if complex_of(16)
+                && let Some(out) = try_zerocopy_c128_sort_axis0(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex64 per-column axis-0 value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_sort_axis0(py, numpy, &a, axis_spec)? {
+            if complex_of(8)
+                && let Some(out) = try_zerocopy_c64_sort_axis0(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_sort_midaxis(py, numpy, &a, axis_spec)? {
+            if float_of(8)
+                && let Some(out) = try_zerocopy_f64_sort_midaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // integer per-lane middle-axis sort (byte-exact any kind; numpy sorts strided lanes serially).
-            if let Some(out) = try_native_int_sort_midaxis(py, numpy, &a, axis_spec)? {
+            if integral_any
+                && let Some(out) = try_native_int_sort_midaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // fixed-width string non-last-axis sort (strided lane gather; Latin-1
             // memcmp == codepoint order; numpy's strided per-record path is serial).
-            if let Some(out) = try_native_string_sort_nonlast(py, numpy, &a, axis_spec)? {
+            if kind_is('U')
+                && let Some(out) = try_native_string_sort_nonlast(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex128 per-lane middle-axis value sort (lexicographic; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_sort_midaxis(py, numpy, &a, axis_spec)? {
+            if complex_of(16)
+                && let Some(out) = try_zerocopy_c128_sort_midaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex64 per-lane middle-axis value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_sort_midaxis(py, numpy, &a, axis_spec)? {
+            if complex_of(8)
+                && let Some(out) = try_zerocopy_c64_sort_midaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // datetime64/timedelta64 per-lane last-axis + per-column axis-0 value sort (int64 view,
             // datetime-dtyped output; NaT defer, byte-exact since equal ticks are equal bytes).
-            if let Some(out) = try_native_datetime_sort_axes(py, numpy, &a, axis_spec)? {
+            if temporal && let Some(out) = try_native_datetime_sort_axes(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
         }
@@ -83301,8 +83373,8 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // before declining, and `np.inner` of two 1-D f64 vectors - the commonest
     // call there is - can be accepted by neither.
     let plan = MatmulGatePlan::for_operands(
-        matmul_operand_facts(py, a.bind(py))?,
-        matmul_operand_facts(py, b.bind(py))?,
+        numeric_operand_facts(py, a.bind(py))?,
+        numeric_operand_facts(py, b.bind(py))?,
     );
 
     // Integer inner: numpy has no BLAS for ints. Route to the native parallel int GEMM
@@ -97503,8 +97575,10 @@ fn try_native_f16_inner(
 // One read of (rank, dtype kind, itemsize) per operand answers, for free, the
 // question every gate asks first. The gates themselves are UNCHANGED; this only
 // decides which of them are worth calling.
+// Not matmul-specific: `sort` uses the same three facts to pick among twelve
+// dtype-specific gates (`deadlock-audit-gxmih`).
 #[derive(Clone, Copy)]
-struct MatmulOperandFacts {
+struct NumericOperandFacts {
     rank: usize,
     kind: char,
     itemsize: usize,
@@ -97513,10 +97587,10 @@ struct MatmulOperandFacts {
 // `None` for anything that is not an EXACT `ndarray`. The f64 GEMM gate admits
 // ndarray SUBCLASSES through `is_instance`, so an operand we cannot classify has
 // to walk the chain exactly as it did before.
-fn matmul_operand_facts(
+fn numeric_operand_facts(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
-) -> PyResult<Option<MatmulOperandFacts>> {
+) -> PyResult<Option<NumericOperandFacts>> {
     if !value.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -97524,7 +97598,7 @@ fn matmul_operand_facts(
     let dtype = value.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    Ok(Some(MatmulOperandFacts {
+    Ok(Some(NumericOperandFacts {
         rank,
         kind,
         itemsize,
@@ -97571,7 +97645,7 @@ impl MatmulGatePlan {
         f16_batched: true,
     };
 
-    fn for_operands(a: Option<MatmulOperandFacts>, b: Option<MatmulOperandFacts>) -> Self {
+    fn for_operands(a: Option<NumericOperandFacts>, b: Option<NumericOperandFacts>) -> Self {
         let (Some(a), Some(b)) = (a, b) else {
             return Self::EVERYTHING;
         };
@@ -97582,10 +97656,10 @@ impl MatmulGatePlan {
         let flat = a.rank <= 2 && b.rank <= 2;
         let batched = a.rank >= 3 || b.rank >= 3;
         let float_of_size =
-            |f: MatmulOperandFacts, itemsize: usize| f.kind == 'f' && f.itemsize == itemsize;
+            |f: NumericOperandFacts, itemsize: usize| f.kind == 'f' && f.itemsize == itemsize;
         // A SUPERSET of what the integer gates take: they additionally require
         // the two dtypes to match, which stays their own business.
-        let integral = |f: MatmulOperandFacts| matches!(f.kind, 'i' | 'u' | 'b');
+        let integral = |f: NumericOperandFacts| matches!(f.kind, 'i' | 'u' | 'b');
         let is_f64 = float_of_size(a, 8) && float_of_size(b, 8);
         let is_int = integral(a) && integral(b);
         let is_f16 = float_of_size(a, 2) && float_of_size(b, 2);
@@ -97630,8 +97704,8 @@ fn matmul(
         && python_explicit_out_is_absent_or_none(py, out.as_ref())
     {
         MatmulGatePlan::for_operands(
-            matmul_operand_facts(py, x1.bind(py))?,
-            matmul_operand_facts(py, x2.bind(py))?,
+            numeric_operand_facts(py, x1.bind(py))?,
+            numeric_operand_facts(py, x2.bind(py))?,
         )
     } else {
         MatmulGatePlan::NOTHING
@@ -97742,8 +97816,8 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
     // product that none of them can accept.
     let plan = if python_explicit_out_is_absent_or_none(py, out.as_ref()) {
         MatmulGatePlan::for_operands(
-            matmul_operand_facts(py, a.bind(py))?,
-            matmul_operand_facts(py, b.bind(py))?,
+            numeric_operand_facts(py, a.bind(py))?,
+            numeric_operand_facts(py, b.bind(py))?,
         )
     } else {
         MatmulGatePlan::NOTHING
