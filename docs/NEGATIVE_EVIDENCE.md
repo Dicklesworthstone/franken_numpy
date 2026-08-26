@@ -58820,3 +58820,65 @@ metadata gate, which re-reads shape and `extract::<String>()`s both dtype kinds 
 loss (2.670x at 2^8, +986 ns flat) and was not touched; (3) `np.vdot` is already 1.019-1.196x and
 should be left alone.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `np.inner` takes the same one-classification dispatch: 2.463x -> 2.157x at 2^10, 2.449x -> 1.892x on 8x8 f64 - and the FIRST run of the pair had to be thrown away for a contaminated baseline (`deadlock-audit-z1gjs`, follow-on)
+
+`TanBridge`. Shipped `36279719`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3
+in the SAME invocation, ABBAABBA, 25 rounds, dual A/A null per cell, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** candidate-win on four cells, no-change on four; every cell is still a
+LOSS to numpy in absolute terms and is reported as one.
+
+`np.inner`'s two native gates (int, f16) each re-read `shape` and `extract::<String>()` the dtype
+kind before declining, and two 1-D f64 vectors - the commonest `inner` call there is - can be
+accepted by neither. The `MatmulGatePlan` built for `matmul`/`dot` answers that for both from one
+read. The `numpy.inner` handle also moved INSIDE the fallback closure: the native paths return
+without ever delegating, so looking it up on the way in was pure loss for them.
+
+```
+INNER_GATE_DISPATCH worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 25 rounds, median of round ratios, dual A/A null
+  before_elf=096aaf7cfaf3  after_elf=87bc9e6c16d1
+
+  case              BEFORE                      AFTER
+  inner 1-D 2^10   2.463x [2.192,2.574]  ->  2.157x [1.989,2.236]   DISJOINT
+  inner 1-D 2^13   1.672x [1.590,1.727]  ->  1.524x [1.442,1.546]   DISJOINT
+  inner 8x8   f64  2.449x [2.290,2.970]  ->  1.892x [1.774,1.967]   DISJOINT
+  inner 64x64 f64  1.113x [1.105,1.120]  ->  1.069x [1.046,1.080]   DISJOINT
+  inner 1-D 2^8    2.396x [2.173,2.657]  ->  2.142x [1.963,2.212]   edges touch
+  inner 1-D 2^16   1.120x [1.086,1.168]  ->  1.122x [1.066,1.156]   unchanged
+  inner 8x8   i64  3.498x [3.302,3.512]  ->  3.377x [3.093,3.404]   unchanged
+  inner 70x70 i64  1.285x (null BIASED)  ->  1.289x [1.145,1.446]   unchanged
+```
+
+**A/A NULL CONTROLS (same invocation, every cell):** incumbent-null 0.9975-1.0049, candidate-null
+0.9786-1.0223. Two cells read BIASED and are marked in the table (`inner 1-D 2^13` candidate 0.9786
+in the discarded first run, `inner 70x70 i64` BEFORE candidate 1.0223).
+
+**A RUN I THREW AWAY, AND WHY IT MATTERS.** The first BEFORE/AFTER pair ran under contention that
+put numpy's OWN 2^8 time at 1302.2 ns against 603.6 ns in the second pair - a 2.16x swing in the
+INCUMBENT arm between two runs an hour apart. Its ratios cross builds are therefore uninterpretable
+and are NOT quoted here; the table above is the second pair, where the two baselines agree to 3%.
+The SIGNS replicate across both runs, which is what the sign-based rule in
+`single-run-dual-null-cannot-decide-sub-5pct` exists for. **A per-run A/A null does not detect
+this**: every null in the discarded run passed. What detected it was carrying the incumbent's
+ABSOLUTE ns in the table and reading the two BEFORE columns against each other.
+
+The integer cells are unchanged BY CONSTRUCTION - their gate still runs - and `inner 8x8 i64` at
+3.4x is now the standing worst cell of the family.
+
+PARITY: 10 dtypes x 11 shape pairs plus 15 edge cases (mixed dtypes, strided, F-order, transposed,
+lists, 0-d scalars, `np.matrix`, nan/inf, empty k=0 and m=0, batched), compared on dtype, shape and
+RAW BYTES and on exception text where numpy raises. BEFORE 4 divergences, AFTER 4, all four the
+same pre-existing `longdouble` padding-byte artifact of the probe's own `tobytes()`. 0 INTRODUCED.
+
+MEMORY: largest operand 512 KB; host `used` 57 GB of 215, loadavg 13.75-15.40 (disclosed - this is
+a SHARED host and the discarded run above is what that costs).
+VERIFICATION: 654 lib tests pass; clippy clean; `cargo fmt -p fnp-python` a no-op.
+
+RETRY PREDICATE: `inner 1-D 2^16` (1.12x) is NOT entry-bound - the dispatch cannot move it, and it
+was not moved. The open cell is `inner 8x8 i64` at 3.377x: the int gate reads both shapes, compares
+both dtypes and allocates a kind `String` before declining on its own work floor, and a rank/dtype
+plan cannot skip it because the operands ARE integers. That needs the work floor checked from the
+shapes the gate has already read, or the facts threaded in - not another classifier.
+AGENT_NAME=TanBridge.
