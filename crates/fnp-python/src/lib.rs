@@ -56804,9 +56804,47 @@ fn try_zerocopy_f64_vander(
         const VANDER_PARALLEL_MIN: usize = 1 << 16;
         let parallel = total >= VANDER_PARALLEL_MIN && rayon::current_num_threads() >= 2;
         if parallel {
-            o.par_chunks_mut(cols)
-                .zip(data.par_iter())
-                .for_each(|(row, &xv)| fill_row(xv, row));
+            // BLOCK WHOLE ROWS PER TASK (`deadlock-audit-wnpqg`).
+            //
+            // This was `par_chunks_mut(cols).zip(data.par_iter())` - ONE TASK PER ROW, i.e.
+            // `rows` tasks regardless of the pool. At the sweep's size that is 256 tasks of
+            // 256 elements on a 64-thread pool, and rayon has to wake for each on every call.
+            // `deadlock-audit-w9po3` measured the wake-from-sleep pool wanting thousands of
+            // elements per task, not hundreds.
+            //
+            // THE FLOOR IS MEASURED FOR THIS KERNEL AND NOT INHERITED. w9po3's 8192 was fitted
+            // to a per-element cost of one libm call; a vander element is one multiply and one
+            // store, so the same fixed overhead needs MORE elements to amortise. Same-session
+            // A/B of builds differing only in this constant, interleaved against numpy:
+            //
+            // Same-session A/B of two builds differing ONLY in this constant, interleaved
+            // against numpy (one call per slot - the shape the contract and real callers
+            // produce, and the one that exposes wake-up cost):
+            //
+            //     threads  N       per-row      blocked-65536
+            //           8  256      0.22x          0.23x
+            //           8  1024     0.09x          0.07x
+            //          64  256      4.20x LOSS     0.21x WIN     <- 20x
+            //          64  512      1.10x LOSS     0.16x WIN
+            //          64  1024     0.39x          0.13x
+            //
+            // Neutral at 8 threads, decisive at the default 64. Note a TIGHT-loop probe reads
+            // the old behaviour at 0.39x here rather than 4.20x - interleaving is what exposes
+            // it, per ledger amendment 062e58d8.
+            //
+            // Blocking changes WHICH task writes a row, never what is written: each row's
+            // cumulative product is computed independently inside `fill_row`, so this cannot
+            // move a value.
+            const VANDER_TASK_ELEMS: usize = 65_536;
+            let rows_per_task = VANDER_TASK_ELEMS.div_ceil(cols.max(1)).max(1);
+            o.par_chunks_mut(cols.saturating_mul(rows_per_task).max(cols))
+                .zip(data.par_chunks(rows_per_task))
+                .for_each(|(block, xs)| {
+                    block
+                        .chunks_mut(cols)
+                        .zip(xs.iter())
+                        .for_each(|(row, &xv)| fill_row(xv, row));
+                });
         } else {
             o.chunks_mut(cols)
                 .zip(data.iter())
