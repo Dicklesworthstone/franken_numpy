@@ -9793,9 +9793,20 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    // `dtype` is numpy's SECOND POSITIONAL parameter, so the kwargs dict this used to
+    // build - and the `PyString` for "uint8" inside it - were both avoidable
+    // (`deadlock-audit-c0g2r`).
+    //
+    // ALLOCATE IN THE OUTPUT'S OWN SHAPE when there is one: `.view(bool_)` preserves
+    // shape, so an n-D result then needs no reshape either. 1-D stays an int argument
+    // (`np.empty(n, u8)` 166.7 ns vs `np.empty((n,), u8)` 202.9 ns) and 0-d allocates
+    // one element, because a 0-d buffer yields NO slice to write through.
+    let bytes = if shape.len() >= 2 {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+    } else {
+        numpy.call_method1(intern!(py, "empty"), (n, cached_uint8_type(py)?))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
             return Ok(None);
@@ -9807,7 +9818,7 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
             slot.set(u8::from(pred(cell.get())));
         }
     }
-    let flat = bytes.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
+    let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
     Ok(Some((flat, shape)))
 }
 
@@ -9857,10 +9868,19 @@ fn try_zerocopy_f64_predicate<F: Fn(f64) -> bool>(
     x: &Bound<'_, PyAny>,
     pred: F,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some((flat, shape)) = zerocopy_f64_predicate_flat(py, &numpy, x, pred)? else {
+    // `py.import("numpy")` is 382.5 ns/call on this host, not a `sys.modules` lookup
+    // (`numpy-import-per-call-is-382ns`), and this is the FIRST gate `isnan`/`isinf`/
+    // `isfinite`/`signbit` reach on their commonest operand.
+    let numpy = cached_numpy(py)?;
+    let Some((flat, shape)) = zerocopy_f64_predicate_flat(py, numpy, x, pred)? else {
         return Ok(None);
     };
+    // The output is allocated in its own shape, so ONLY the 0-d case still needs the
+    // reshape - it is the one that has to come back as a numpy SCALAR. The reshape was
+    // 116.9 ns of pure ceremony on every other shape (`timeit`, installed interpreter).
+    if !shape.is_empty() {
+        return Ok(Some(flat.unbind()));
+    }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
     let output = flat
         .call_method1(intern!(py, "reshape"), (&output_shape,))?
@@ -9894,9 +9914,14 @@ fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    // Positional dtype, held type objects and shape-preserving allocation, same as the
+    // f64 sibling above.
+    let bytes = if shape.len() >= 2 {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+    } else {
+        numpy.call_method1(intern!(py, "empty"), (n, cached_uint8_type(py)?))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
             return Ok(None);
@@ -9908,7 +9933,7 @@ fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
             slot.set(u8::from(pred(cell.get())));
         }
     }
-    let flat = bytes.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
+    let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
     Ok(Some((flat, shape)))
 }
 
@@ -9918,10 +9943,14 @@ fn try_zerocopy_f32_predicate<F: Fn(f32) -> bool>(
     x: &Bound<'_, PyAny>,
     pred: F,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let Some((flat, shape)) = zerocopy_f32_predicate_flat(py, &numpy, x, pred)? else {
+    // Held module handle and the reshape skip, same as the f64 wrapper.
+    let numpy = cached_numpy(py)?;
+    let Some((flat, shape)) = zerocopy_f32_predicate_flat(py, numpy, x, pred)? else {
         return Ok(None);
     };
+    if !shape.is_empty() {
+        return Ok(Some(flat.unbind()));
+    }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
     let output = flat
         .call_method1(intern!(py, "reshape"), (&output_shape,))?
@@ -31540,6 +31569,20 @@ fn solve_triangular(
 // build) = 16-628x slower. Fast-path an integral/bool ndarray to
 // np.full(shape, value, dtype=bool). Float / complex / non-ndarray -> Ok(None)
 // (those must actually evaluate the predicate per element).
+// An ndarray SUBCLASS keeps its own type through a numpy ufunc - `np.isnan(np.matrix(a))`
+// is a `matrix`, not an `ndarray` - but every fast path in the predicate family gates on
+// `is_exact_instance`, so a subclass fell all the way through to `extract_numeric_array`
+// and came back a plain `ndarray`. Values and dtype matched, which is why a value-level
+// probe never saw it; `type()` is what tells them apart. numpy is the oracle for what a
+// subclass result should be, so hand those operands back to it.
+//
+// Costs nothing on the hot path: an exact ndarray has already returned from a fast path
+// long before this is reached, and for anything else the first test is a pointer compare.
+fn ndarray_subclass_needs_numpy(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let ndarray = cached_ndarray_type(py)?;
+    Ok(!x.is_exact_instance(ndarray) && x.is_instance(ndarray)?)
+}
+
 fn try_const_bool_integral(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
@@ -31557,13 +31600,24 @@ fn try_const_bool_integral(
         return Ok(None);
     }
     let shape = x.getattr(intern!(py, "shape"))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "bool")?;
     // np.zeros (calloc) / np.ones beat np.full(value) for the constant bool fill.
-    let ctor = if value { "ones" } else { "zeros" };
-    Ok(Some(
-        numpy.call_method(ctor, (shape,), Some(&kwargs))?.unbind(),
-    ))
+    // Positional dtype and the held `bool_` type, on the terms of the predicate fast
+    // paths above: the kwargs dict and the "bool" `PyString` were both per-call, and
+    // the constructor name was a NON-INTERNED key, which allocates another.
+    let bool_type = cached_bool_type(py)?;
+    let filled = if value {
+        numpy.call_method1(intern!(py, "ones"), (&shape, bool_type))?
+    } else {
+        numpy.call_method1(intern!(py, "zeros"), (&shape, bool_type))?
+    };
+    // A 0-d OPERAND MAKES NUMPY RETURN A SCALAR, not a 0-d array: `np.isnan(np.array(5))`
+    // is `np.False_`, and `type()` tells them apart even though the bytes match. The
+    // float fast paths already do this through their `get_item(())`; this one returned
+    // `array(False)` and was the one place in the family that disagreed with numpy.
+    if shape.len()? == 0 {
+        return Ok(Some(filled.get_item(())?.unbind()));
+    }
+    Ok(Some(filled.unbind()))
 }
 
 // Zero-copy np.isposinf / np.isneginf for a float (f32/f64) c-contiguous ndarray.
@@ -31822,6 +31876,12 @@ fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             }
         }
     }
+    if ndarray_subclass_needs_numpy(py, x)? {
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "signbit"))?
+            .call1((x,))?
+            .unbind());
+    }
     let x = extract_numeric_array(py, x, "signbit(x)")?;
     let result = ufunc_signbit(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
@@ -31864,13 +31924,18 @@ fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // extract_numeric_array can't push a complex array through the real-valued Isnan
     // kernel and raises TypeError, so delegate complex inputs to numpy (the oracle).
     if numpy_dtype_is_complex(x) {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         return Ok(numpy.getattr(intern!(py, "isnan"))?.call1((x,))?.unbind());
     }
     // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
     // predicate fast paths into the cold extract → rebuild (transpose-copy, ~100x
     // slower than numpy's strided isnan). Delegate them to numpy.
-    let numpy = py.import("numpy")?;
+    // (`isinf_native` and `isfinite_native` already hold the module here; this one
+    // re-imported it twice, at 382.5 ns apiece.)
+    let numpy = cached_numpy(py)?;
+    if ndarray_subclass_needs_numpy(py, x)? {
+        return Ok(numpy.getattr(intern!(py, "isnan"))?.call1((x,))?.unbind());
+    }
     if x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
             .getattr(intern!(py, "flags"))?
@@ -31923,6 +31988,9 @@ fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     }
     // Non-contiguous (transposed/strided) ndarrays bail the predicate fast paths into
     // the cold extract → rebuild (transpose-copy, ~100x slower). Delegate to numpy.
+    if ndarray_subclass_needs_numpy(py, x)? {
+        return Ok(numpy.getattr(intern!(py, "isinf"))?.call1((x,))?.unbind());
+    }
     if x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
             .getattr(intern!(py, "flags"))?
@@ -31976,6 +32044,12 @@ fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     }
     // Non-contiguous (transposed/strided) ndarrays bail the predicate fast paths into
     // the cold extract → rebuild (transpose-copy, ~100x slower). Delegate to numpy.
+    if ndarray_subclass_needs_numpy(py, x)? {
+        return Ok(numpy
+            .getattr(intern!(py, "isfinite"))?
+            .call1((x,))?
+            .unbind());
+    }
     if x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
             .getattr(intern!(py, "flags"))?
@@ -85816,6 +85890,39 @@ fn cached_dtype_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     Ok(DTYPE_TYPE
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
             Ok(cached_numpy(py)?.getattr(intern!(py, "dtype"))?.unbind())
+        })?
+        .bind(py))
+}
+
+/// `numpy.uint8` and `numpy.bool_`, on exactly the terms of `cached_ndarray_type`.
+///
+/// WHY THESE TWO: the IEEE-predicate fast path (`isnan`/`isinf`/`isfinite`/`signbit`) allocates
+/// its output as `numpy.empty(n, dtype="uint8")` and then `.view(numpy.bool_)` - numpy's bool
+/// dtype is format `'?'`, which `PyBuffer::<u8>` rejects, so the uint8 buffer plus a zero-copy
+/// view is the only way in. Written that way it paid, EVERY CALL, a fresh `PyString` for the
+/// dtype name, numpy's own parse of it, a `PyDict` for the kwarg, and a module getattr for
+/// `bool_`. Priced with `timeit` against the installed interpreter on this host:
+///
+/// ```text
+///   np.empty(n, "uint8")   217.3 ns      np.empty(n, u8)   166.7 ns   (dtype POSITIONAL)
+/// ```
+///
+/// Both are TYPE objects, not functions, so holding them does not defeat monkeypatching the way
+/// holding a bound callable would - see the note on `cached_numpy`.
+fn cached_uint8_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static UINT8_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(UINT8_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "uint8"))?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_bool_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static BOOL_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(BOOL_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "bool_"))?.unbind())
         })?
         .bind(py))
 }
