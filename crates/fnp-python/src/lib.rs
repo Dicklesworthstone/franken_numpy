@@ -79663,34 +79663,61 @@ fn argsort(
             } else {
                 a
             };
+            // ONE CLASSIFICATION FOR TWENTY-TWO DTYPE-SPECIFIC GATES (`deadlock-audit-11si6`),
+            // exactly as in `sort`. The gates partition on dtype, so at most one can accept
+            // any given operand, yet each re-derived exactness, kind, itemsize, rank and
+            // contiguity for itself before declining - 2058 ns of excess over numpy at
+            // n=256, flat in n.
+            let facts = numeric_operand_facts(py, &a)?;
+            let float_of = |size: usize| facts.is_none_or(|f| f.kind == 'f' && f.itemsize == size);
+            let complex_of =
+                |size: usize| facts.is_none_or(|f| f.kind == 'c' && f.itemsize == size);
+            let any_float = facts.is_none_or(|f| f.kind == 'f');
+            let any_complex = facts.is_none_or(|f| f.kind == 'c');
+            // The radix flat gates take 4- and 8-byte integers; the axis ones any width.
+            let integral_radix =
+                facts.is_none_or(|f| matches!(f.kind, 'i' | 'u') && matches!(f.itemsize, 4 | 8));
+            let integral_any = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u'));
+            let temporal = facts.is_none_or(|f| matches!(f.kind, 'M' | 'm'));
+            let structured = facts.is_none_or(|f| f.kind == 'V');
+            // The stable (value, orig-index) gate serves int/uint AND float.
+            let stable_numeric = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u' | 'f'));
+
             if matches!(
                 axis_spec,
                 None | Some(None) | Some(Some(-1)) | Some(Some(0))
             ) {
                 // kind='stable'/'mergesort' int/uint/float: (value, orig-index) stable argsort handles TIES
                 // byte-exactly (the default-kind paths below defer on ties). numpy ~0.9-1.2s @8M with repeats.
-                if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
+                if stable_numeric
+                    && matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                     && let Some(out) = try_native_argsort_stable_flat(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
                 // kind='stable'/'mergesort' datetime/timedelta: int64-view stable argsort handles
                 // ties by original index; NaT still defers to NumPy's special ordering.
-                if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
+                if temporal
+                    && matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                     && let Some(out) = try_native_datetime_argsort_stable(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
                 // kind='stable'/'mergesort' complex: lexicographic (re, im, original-index)
                 // permutation. NaN components still defer to NumPy's special ordering.
-                if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
+                if any_complex
+                    && matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                     && let Some(out) = try_native_complex_argsort_stable(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
                 // Float flat argsort, DISTINCT data: gather-free radix on IEEE-linearized keys (numpy default
                 // introsort ~1.3s @16M; the gather-bound comparison paths below are far slower than radix).
-                match try_native_float_argsort_default_radix(py, numpy, &a)? {
+                match if any_float {
+                    try_native_float_argsort_default_radix(py, numpy, &a)?
+                } else {
+                    FloatArgsortRadixOutcome::NotApplicable
+                } {
                     FloatArgsortRadixOutcome::Done(out) => return Ok(out),
                     // NaN or ties proven on this buffer: the comparison candidates below would
                     // re-run the identical NaN scan + sampled tie oracle (dense ties: the
@@ -79698,56 +79725,69 @@ fn argsort(
                     // pay-twice sort) and defer to the same numpy delegate. Skip them.
                     FloatArgsortRadixOutcome::DeferData => {}
                     FloatArgsortRadixOutcome::NotApplicable => {
-                        if let Some(out) = try_zerocopy_f64_argsort_flat(py, numpy, &a)? {
+                        if float_of(8)
+                            && let Some(out) = try_zerocopy_f64_argsort_flat(py, numpy, &a)?
+                        {
                             return Ok(out);
                         }
                         // f32 flat argsort (numpy index-introsort single-threaded, NaN/tie defer, byte-exact).
-                        if let Some(out) = try_zerocopy_f32_argsort_flat(py, numpy, &a)? {
+                        if float_of(4)
+                            && let Some(out) = try_zerocopy_f32_argsort_flat(py, numpy, &a)?
+                        {
                             return Ok(out);
                         }
                     }
                 }
                 // 4-/8-byte integer flat argsort, DISTINCT data: gather-free parallel LSD radix (numpy's default
                 // introsort is ~1.3s @16M; the gather-bound comparison path below is far slower than radix).
-                if let Some(out) = try_native_int_argsort_default_radix(py, numpy, &a)? {
+                if integral_radix
+                    && let Some(out) = try_native_int_argsort_default_radix(py, numpy, &a)?
+                {
                     return Ok(out);
                 }
                 // 4-/8-byte integer flat argsort (numpy introsort single-threaded ~1354ms@16M i64);
                 // defers on ties (distinct -> unique perm, byte-exact).
-                if let Some(out) = try_native_int_argsort_flat(py, numpy, &a)? {
+                if integral_radix && let Some(out) = try_native_int_argsort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // datetime64/timedelta64 flat argsort (int64-backed; numpy non-simd introsort; NaT/tie
                 // defer, byte-exact via int64 value order).
-                if let Some(out) = try_native_datetime_argsort_flat(py, numpy, &a)? {
+                if temporal && let Some(out) = try_native_datetime_argsort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
                 // complex128 flat argsort (numpy lexicographic comparison introsort, no simd-sort for
                 // complex); NaN/tie defer, byte-exact for distinct (re, im).
-                if let Some(out) = try_zerocopy_c128_argsort_flat(py, numpy, &a)? {
+                if complex_of(16)
+                    && let Some(out) = try_zerocopy_c128_argsort_flat(py, numpy, &a)?
+                {
                     return Ok(out);
                 }
                 // complex64 flat argsort (f32 mirror; NaN/tie defer, byte-exact for distinct (re,im)).
-                if let Some(out) = try_zerocopy_c64_argsort_flat(py, numpy, &a)? {
+                if complex_of(8)
+                    && let Some(out) = try_zerocopy_c64_argsort_flat(py, numpy, &a)?
+                {
                     return Ok(out);
                 }
                 // structured records, kind='stable'/'mergesort' only: byte-transform stable value-lex argsort
                 // (numpy ~3.4s @2M i8+f8). The default quicksort tie order is unmatchable, so gate to stable.
                 if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
+                    && structured
                     && let Some(out) = try_native_argsort_struct_stable(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
                 // Latin-1 'U'/'S' strings, kind='stable'/'mergesort' only: memcmp stable argsort (numpy per-
                 // record codepoint comparator ~1.3s @2M U6). Default quicksort tie order unmatchable -> stable only.
-                if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
+                if facts.is_none_or(|f| matches!(f.kind, 'U' | 'S'))
+                    && matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                     && let Some(out) = try_native_string_argsort_stable(py, numpy, &a)?
                 {
                     return Ok(out);
                 }
                 // structured default/quicksort/heapsort: byte-transform value-lex argsort for distinct records.
                 // Tie order is algorithm-specific, so this path detects adjacent equal keys and defers.
-                if !matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
+                if structured
+                    && !matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                     && let Some(out) = try_native_struct_argsort_valuelex(py, numpy, &a, axis_spec)?
                 {
                     return Ok(out);
@@ -79755,78 +79795,112 @@ fn argsort(
             }
             // kind='stable'/'mergesort' per-lane int/float last-axis argsort handles TIES byte-exactly (the
             // default-kind last-axis paths below defer on ties). numpy per-lane stable sort (~0.3-0.4s @8M dense).
-            if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
+            if stable_numeric
+                && matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                 && let Some(out) = try_native_argsort_stable_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // fixed-width string non-last-axis STABLE argsort (strided lane gather;
             // ties keep ascending in-lane index == numpy's stable contract).
-            if matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
+            if facts.is_none_or(|f| matches!(f.kind, 'U' | 'S'))
+                && matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                 && let Some(out) =
                     try_native_string_argsort_stable_nonlast(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_argsort_lastaxis(py, numpy, &a, axis_spec)? {
+            if float_of(8)
+                && let Some(out) = try_zerocopy_f64_argsort_lastaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // integer per-lane last-axis argsort (numpy introsort per lane; defer on ties).
-            if let Some(out) = try_native_int_argsort_lastaxis(py, numpy, &a, axis_spec)? {
+            if integral_any
+                && let Some(out) = try_native_int_argsort_lastaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // f32 per-lane last-axis argsort (numpy index-introsort; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_f32_argsort_lastaxis(py, numpy, &a, axis_spec)? {
+            if float_of(4)
+                && let Some(out) = try_zerocopy_f32_argsort_lastaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex128 per-lane last-axis argsort (lexicographic; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_argsort_lastaxis(py, numpy, &a, axis_spec)? {
+            if complex_of(16)
+                && let Some(out) = try_zerocopy_c128_argsort_lastaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex64 per-lane last-axis argsort (f32 mirror; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_argsort_lastaxis(py, numpy, &a, axis_spec)? {
+            if complex_of(8)
+                && let Some(out) = try_zerocopy_c64_argsort_lastaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_argsort_axis0(py, numpy, &a, axis_spec)? {
+            if float_of(8)
+                && let Some(out) = try_zerocopy_f64_argsort_axis0(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // integer per-column axis-0 argsort (numpy introsort per column; defer on ties).
-            if let Some(out) = try_native_int_argsort_axis0(py, numpy, &a, axis_spec)? {
+            if integral_any
+                && let Some(out) = try_native_int_argsort_axis0(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // f32 per-column axis-0 argsort (numpy index-introsort; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_f32_argsort_axis0(py, numpy, &a, axis_spec)? {
+            if float_of(4)
+                && let Some(out) = try_zerocopy_f32_argsort_axis0(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex128 per-column axis-0 argsort (lexicographic; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_argsort_axis0(py, numpy, &a, axis_spec)? {
+            if complex_of(16)
+                && let Some(out) = try_zerocopy_c128_argsort_axis0(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex64 per-column axis-0 argsort (f32 mirror; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_argsort_axis0(py, numpy, &a, axis_spec)? {
+            if complex_of(8)
+                && let Some(out) = try_zerocopy_c64_argsort_axis0(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_argsort_midaxis(py, numpy, &a, axis_spec)? {
+            if float_of(8)
+                && let Some(out) = try_zerocopy_f64_argsort_midaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // integer per-lane middle-axis argsort (numpy introsort per lane; defer on ties).
-            if let Some(out) = try_native_int_argsort_midaxis(py, numpy, &a, axis_spec)? {
+            if integral_any
+                && let Some(out) = try_native_int_argsort_midaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // f32 per-lane middle-axis argsort (numpy index-introsort; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_f32_argsort_midaxis(py, numpy, &a, axis_spec)? {
+            if float_of(4)
+                && let Some(out) = try_zerocopy_f32_argsort_midaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex128 per-lane middle-axis argsort (lexicographic; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c128_argsort_midaxis(py, numpy, &a, axis_spec)? {
+            if complex_of(16)
+                && let Some(out) = try_zerocopy_c128_argsort_midaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // complex64 per-lane middle-axis argsort (f32 mirror; NaN/tie defer, byte-exact).
-            if let Some(out) = try_zerocopy_c64_argsort_midaxis(py, numpy, &a, axis_spec)? {
+            if complex_of(8)
+                && let Some(out) = try_zerocopy_c64_argsort_midaxis(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
             // datetime64/timedelta64 per-lane argsort along last/axis0/middle (int64 view; NaT/tie defer).
-            if let Some(out) = try_native_datetime_argsort_axes(py, numpy, &a, axis_spec)? {
+            if temporal
+                && let Some(out) = try_native_datetime_argsort_axes(py, numpy, &a, axis_spec)?
+            {
                 return Ok(out);
             }
         }
