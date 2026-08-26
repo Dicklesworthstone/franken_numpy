@@ -59135,3 +59135,101 @@ inference and casting). The residual ~400-620 ns is the four ops' shared entry: 
 kwargs dict each op rebuilds. `empty_like` at 2.2x is the clean way to attack THAT, since it is
 nothing but entry.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `correlate`/`convolve` TOUCHED BOTH OPERANDS' DATA BEFORE THE GATES THAT DECLINED, AND THE NEXT GATE RE-READ EVERY FACT: 4.542x -> 2.870x, and the ENGAGED paths got faster too (`deadlock-audit-6kn1k`)
+
+`TanBridge`. Shipped `d158af56` + `ca680806` + `a70b9573`. Measured on `thinkstation1` against the
+LIVE installed numpy 2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1, on a QUIET host (loadavg 2.58 at start).
+
+**Campaign result class:** candidate-win on nine cells (six of them still losses to numpy and
+reported as such, three of them wins that grow); one adverse-sign cell that is NOT decidable and is
+disclosed in full below.
+
+Two defects, one function apart:
+
+1. `try_zerocopy_conv_corr_f64` acquired BOTH `PyBuffer`s and materialised the kernel `Vec` ABOVE
+   every size gate. A declined call therefore touched both operands' data and built a full copy of
+   the kernel only to throw it away - 2 KB for the 256-tap `correlate(a, v)` that lands in the
+   mid-kernel delegation, 32 KB at the `GATHER_MAX_M` cap. Roles and lengths are decidable from
+   metadata alone.
+2. `conv_corr_should_delegate_midkernel` ran immediately afterwards and re-read both operands'
+   dtype (with an `extract::<String>()` of the kind, which allocates), rank and length - the same
+   answer the function above had just derived. It is now pure arithmetic on one shared
+   `conv_corr_f64_1d_lens` read.
+
+Plus `numpy.float64` held like `uint8`/`bool_` instead of a per-call `dtype="float64"` `PyString`
+inside a kwargs dict, and `correlate`'s numpy handle moved inside the fallback closure with `mode`
+passed positionally (it is numpy's third positional parameter).
+
+```
+CONV_CORR_GATE_ORDER worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=27d051518198  after_elf=c4d47519d184   loadavg 2.58 at start
+
+  case                        BEFORE                      AFTER            excess ns
+  correlate 256x256 valid    4.542x [4.426,4.838] -> 2.870x [2.832,3.135]  1651 -> 1091
+  convolve  256x256 valid    2.639x [2.275,2.892] -> 1.864x [1.702,1.881]  1744 -> 1213
+  correlate 256x256 full     1.156x [1.057,1.184] -> 1.081x [1.052,1.132]  1739 -> 1212
+  convolve  256x256 full     1.172x [1.097,1.396] -> 1.092x [1.027,1.121]  2184 -> 1156
+  correlate 1024x256 valid   1.075x [1.068,1.088] -> 1.040x [1.027,1.055]  1825 -> 1083
+  convolve  1024x256 valid   1.076x [1.041,1.123] -> 1.045x [0.953,1.071]  1957 -> 1516
+  correlate 1024x1024 same   1.021x [0.997,1.062] -> 1.017x [0.923,1.093]  1687 -> (win)
+  convolve  1024x1024 same   1.021x [1.015,1.025] -> 1.011x [1.004,1.017]  1691 ->  967
+  correlate 256x8 (gather)   2.115x [1.880,2.247] -> 1.722x [1.545,1.796]   969 ->  625
+  convolve  256x8 (gather)   1.284x [1.176,1.380] -> 1.057x [1.005,1.120]   398 ->  114
+  correlate 4096x64 full     0.792x [0.776,0.838] -> 0.686x [0.665,0.691]   WIN grows
+  convolve  4096x64 full     0.778x [0.769,0.789] -> 0.670x [0.592,0.679]   WIN grows
+  correlate 2^20x4096 (PAR)  0.071x [0.067,0.076] -> 0.057x [0.055,0.068]   WIN grows
+```
+
+**A/A NULL CONTROLS (same invocation, every cell):** all pass (0.9966-1.0095 / 0.9978-1.0072)
+except the two `5000x4096` cells. Nine pairs of ranges are DISJOINT.
+
+**THE ENGAGED PATHS GOT FASTER, not only the declines.** `4096x64 full` and the 2^20 parallel
+gather are cells where the native kernel RUNS, and their wins grow (0.792 -> 0.686, 0.071 ->
+0.057). That is the same kernel copy: on the engaged path it was built above the gates and then
+built again in the form the kernel needs.
+
+### THE ADVERSE CELL, IN FULL
+
+`convolve 5000x4096 valid` reads **1.768x -> 2.008x**, the wrong direction. It is NOT decidable -
+the CIs overlap heavily ([1.626,2.231] vs [1.593,2.450]) and the AFTER candidate null is 1.0456 -
+but the SIGN replicated 3/3 across separate runs, and a sign that replicates is exactly what the
+standing rule says to register. On that path the new code does STRICTLY LESS work (it declines
+without acquiring a buffer or copying a kernel), so if the effect is real it is an ALLOCATOR-REGIME
+side effect of no longer churning a 32 KB `Vec` per call - the documented "the control is not
+side-effect-free either" phenomenon - not a code cost.
+
+**A RUN DISCARDED ENTIRELY:** an earlier pass of this same table ran at loadavg 27.9 with a peer
+active and read this cell at **8.733x**, with `correlate 5000x4096` at 3.523x. Both nulls were
+biased. Re-measured on the quiet host they are 2.008x and 1.746x. **Nothing from the loaded run is
+quoted here**, and the 8.7x figure should not be repeated - it is the largest single measurement
+artifact this campaign has recorded.
+
+PARITY: 14 length pairs x 3 modes x {correlate, convolve}, chosen to straddle EVERY gate the
+reordering touches (mk<=128 vs >128, ns<MIN_SIGNAL vs >=, mk>ns, mk>GATHER_MAX_M, out_len below and
+above PAR_MIN), plus nan/inf payloads, 8 dtypes, strided operands, lists, empty inputs, 2-D inputs,
+mixed dtypes, and the 2^20 parallel-gather cell. Compared on dtype, shape, RAW BYTES and exception
+text. **45 divergences before, 45 after; exact multiset diff says 0 INTRODUCED and 0 fixed.**
+654 lib tests pass; clippy and fmt clean.
+
+### A SEPARATE FINDING THE PROBE TURNED UP: THE "bit-exact" CLAIM IS FALSE
+
+Those 45 pre-existing divergences are a last-bit gap against numpy 2.4.3 (max|delta| 2.220e-16 to
+1.137e-12) on routes whose source comments assert bit-exactness as the JUSTIFICATION for engaging.
+The smallest reproducer is `convolve[3x8]` at 2.220e-16 - three taps, no parallel reduction, no
+FFT - so it is a summation-order or FMA-contraction difference in the innermost loop, not a
+tree-order artifact of size. Filed as `deadlock-audit-6t4fl` with the caution that NEITHER side has
+been compared against a higher-precision reference, so which one is more accurate is unknown and
+"fix it by matching numpy" is not yet justified.
+
+MEMORY: largest operand 2^20 f64 = 8 MB (the parallel-gather cell); host `used` well inside budget.
+
+RETRY PREDICATE: do NOT re-attack the buffer acquisition, the kernel copy or the duplicated
+metadata read - all three are gone. `correlate 256x256 valid` at 2.870x is the family's standing
+worst and its residual 1091 ns is now the THREE-gate chain itself (`try_native_int_convolve` still
+reads shape and contiguity for both operands before declining on dtype) plus the delegation. That
+gate is the next lever and takes the same treatment as the matmul chain. Do not re-measure
+`convolve 5000x4096 valid` under load: it needs a quiet host and >=5 runs to decide 15%.
+AGENT_NAME=TanBridge.
