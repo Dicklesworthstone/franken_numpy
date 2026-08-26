@@ -8930,11 +8930,22 @@ fn zerocopy_f64_unary_flat<'py>(
     // restoring the reshape.
     //
     // Rank 1 passes a bare int, skipping a one-element tuple.
+    //
+    // THE DTYPE IS THE HELD TYPE OBJECT, NOT THE STRING `"float64"`
+    // (`deadlock-audit-cfivt`). A `&str` here builds a fresh `PyString` on every call
+    // AND makes numpy parse it into a dtype on every call; the cached
+    // `numpy.float64` skips both. Priced with `timeit` against the installed
+    // interpreter: `np.empty(n, "uint8")` 217.3 ns vs `np.empty(n, u8)` 166.7 ns with
+    // the type object held. This is the allocation for the ENTIRE f64 unary family -
+    // square/negative/abs/floor/ceil/trunc/rint/sign/reciprocal/sqrt and every
+    // transcendental - all of which measured 1.9-2.3x against numpy at n=256, where
+    // numpy's whole call is ~350 ns.
+    let float64_type = cached_float64_type(py)?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, "float64"))?
+        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, "float64"))?
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -59198,16 +59209,32 @@ fn native_unary_elementwise(
     // parallel widen path in native_rounding_unary / rint_native — they never reach here.)
     // f16 square is compute-bound (numpy widens) and bit-exact via the native parallel widen
     // path; it defers internally when any |x| >= 256 would overflow (numpy's warning surface).
-    if let Some(out) = try_zerocopy_f16_unary_widen(py, x, op)? {
-        return Ok(out);
-    }
-    if numpy_dtype_is_f16(x) {
-        return fallback(py);
+    //
+    // ONE dtype read decides both f16 branches AND every dtype gate below
+    // (`deadlock-audit-cfivt`). These two f16 probes sat AHEAD of the f64 gate - the one
+    // that actually engages for the commonest operand there is - and each re-derived the
+    // operand's dtype for itself, so an `np.square(f64)` paid two full f16 classifications
+    // before reaching its own path. `None` (not an exact ndarray) keeps every gate live,
+    // exactly as before.
+    let facts = numeric_operand_facts(py, x)?;
+    let float_of = |size: usize| facts.is_none_or(|f| f.kind == 'f' && f.itemsize == size);
+    let int_of = |size: usize| facts.is_none_or(|f| f.kind == 'i' && f.itemsize == size);
+    let narrow_integral =
+        facts.is_none_or(|f| matches!(f.kind, 'u') || (f.kind == 'i' && f.itemsize <= 2));
+    if float_of(2) {
+        if let Some(out) = try_zerocopy_f16_unary_widen(py, x, op)? {
+            return Ok(out);
+        }
+        if numpy_dtype_is_f16(x) {
+            return fallback(py);
+        }
     }
     // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Bit-identical to
     // the direct output path below; all other inputs fall through unchanged.
-    if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)? {
+    if float_of(8)
+        && let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)?
+    {
         // No reshape: the helper allocates at the final shape (`deadlock-audit-ei9jz`).
         let output = flat.unbind();
         if shape.is_empty() {
@@ -59218,7 +59245,9 @@ fn native_unary_elementwise(
     // int64 zero-copy fast path (negative/positive/abs/square). Without it int64
     // input ran the cold extract Vec and then fell straight back to numpy below,
     // ~180-200x slower than numpy for a discarded result.
-    if let Some((flat, shape)) = zerocopy_i64_unary_flat(py, numpy, x, op)? {
+    if int_of(8)
+        && let Some((flat, shape)) = zerocopy_i64_unary_flat(py, numpy, x, op)?
+    {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat
             .call_method1(intern!(py, "reshape"), (&output_shape,))?
@@ -59231,7 +59260,9 @@ fn native_unary_elementwise(
     // int32 zero-copy fast path. Same extract-then-discard cost as int64, plus
     // the f64 round-trip mis-wrapped square (saturating cast); this keeps int32
     // in int32 with wrapping ops, bit-identical to numpy.
-    if let Some((flat, shape)) = zerocopy_i32_unary_flat(py, numpy, x, op)? {
+    if int_of(4)
+        && let Some((flat, shape)) = zerocopy_i32_unary_flat(py, numpy, x, op)?
+    {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat
             .call_method1(intern!(py, "reshape"), (&output_shape,))?
@@ -59244,7 +59275,9 @@ fn native_unary_elementwise(
     // Narrow signed / all unsigned integer widths (int8/int16, uint8/16/32/64):
     // same extract-then-discard cost as int64, plus the f64 round-trip mis-wraps
     // square. Keeps each width native with wrapping ops, bit-identical to numpy.
-    if let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, numpy, x, op)? {
+    if narrow_integral
+        && let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, numpy, x, op)?
+    {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat
             .call_method1(intern!(py, "reshape"), (&output_shape,))?
@@ -59257,7 +59290,9 @@ fn native_unary_elementwise(
     // float32 zero-copy fast path. float32 input otherwise extracted to an f64
     // Vec and rebuilt (~60-360x slower), and `sign` returned float64; this keeps
     // float32 in float32 throughout, bit-identical to numpy.
-    if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)? {
+    if float_of(4)
+        && let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)?
+    {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat
             .call_method1(intern!(py, "reshape"), (&output_shape,))?
