@@ -58080,3 +58080,82 @@ different and wrong optimum, which is exactly the trap `062e58d8` documents. `n=
 `TRANSCENDENTAL_PARALLEL_MIN = 1 << 15` and is serial in every configuration measured here; whether
 that gate is itself well-placed is NOT settled by this row.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP: `vander` spawned one rayon task PER ROW; blocking rows into 65536-element tasks turns a 1.86x loss into a 4.6x WIN (`deadlock-audit-wnpqg`)
+
+### THE CELL
+
+`vander[f64@tiny]` was the last sweep cell above 150 us: 175363 ns delta, 1.86x (numpy 205038, fnp
+380401). `@tiny` means a 256-element operand, so a 256x256 output.
+
+### MECHANISM — same class as `deadlock-audit-w9po3`, different shape
+
+`try_zerocopy_f64_vander` parallelised as `o.par_chunks_mut(cols).zip(data.par_iter())` — **one task
+per ROW**, i.e. `rows` tasks regardless of the pool. At the sweep's size that is 256 tasks of 256
+elements on a 64-thread pool, against a wake-from-sleep floor that `w9po3` measured in the
+thousands.
+
+The two shapes are worth naming side by side, because a grep for one will not find the other:
+
+```
+  deadlock-audit-w9po3   chunk = n.div_ceil(num_threads)   -> num_threads tasks, ignores n
+  deadlock-audit-wnpqg   par_chunks_mut(cols)              -> rows tasks, ignores the pool
+```
+
+### THE FLOOR IS MEASURED FOR THIS KERNEL, NOT INHERITED
+
+`w9po3`'s 8192 was fitted to a per-element cost of one libm call. A vander element is one multiply
+and one store, so the same fixed overhead needs MORE elements to amortise — hence 65536. Same-session
+A/B of two builds differing ONLY in this constant, interleaved against numpy:
+
+```
+  threads  N       per-row      blocked-65536
+        8  256      0.22x          0.23x
+        8  1024     0.09x          0.07x
+       64  256      4.20x LOSS     0.21x WIN     <- 20x
+       64  512      1.10x LOSS     0.16x WIN
+       64  1024     0.39x          0.13x
+```
+
+Neutral at 8 threads, decisive at the default 64.
+
+**A TIGHT-LOOP PROBE READS THE OLD BEHAVIOUR AT 0.39x RATHER THAN 4.20x** at N=256/64 threads. This
+is the third cell this session where a tight loop would have hidden the defect entirely
+(`append`, the log family, now `vander`). Interleaving is what exposes wake-up cost.
+
+### RESULT — dual-null contract at the DEFAULT thread count
+
+bench elf `9a63ceaecdf6f115798862aa98df5851f2dcb3a87339db90d7b47178d3481e65`:
+
+```
+  run 1  DECIDABLE_WIN  ratio 4.605964 [4.594179,4.613354]  incumbent 203219.0  candidate 44279.0
+  run 2  DECIDABLE_WIN  ratio 4.648663 [4.643210,4.654736]  incumbent 200835.0  candidate 43222.0
+```
+
+**1.86x LOSS -> 4.6x WIN**, fnp 380401 -> 43222 ns, reproducible across two runs with CIs ~0.2% wide
+and both nulls straddling unity (incumbent 0.9997 / 1.0002). `exact_bytes=passed`, checksum
+`c64592cbd230eb91`.
+
+Blocking changes WHICH task writes a row, never what is written — each row's cumulative product is
+computed independently inside `fill_row` — so no value can move.
+
+### THE SYSTEMATIC FINDING THIS EXPOSES, FILED SEPARATELY
+
+`grep -c 'div_ceil(rayon::current_num_threads())'` over `crates/fnp-python/src/lib.rs` returns
+**95**. Every one of those spawns exactly `num_threads` tasks regardless of n, which is the `w9po3`
+defect; `vander`'s per-row form is a second shape the same grep does NOT find. Two cells from this
+family have now been measured and both were badly mistuned at the default thread count. The
+remaining 94 are UNMEASURED — that is a vein, not a claim, and it is filed as its own bead rather
+than swept blind.
+
+A/A NULL CONTROLS: contract dual nulls straddle unity in both runs. The interleaved A/B is
+median-of-31 triage quoted as supporting shape; the decidable claim is the contract pair.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean. No new test: the change cannot move a
+value and the contract's unchanged `exact_bytes` checksum covers it.
+RETRY PREDICATE: 65536 is measured on THIS host at 64 threads for a multiply-and-store kernel. Do
+not copy it to a kernel with a different per-element cost — `w9po3` needed 8192 for a libm call, an
+8x difference. Re-measure with an INTERLEAVED A/B of two builds differing only in the constant; a
+tight loop points at the wrong optimum and would have said this fix was unnecessary.
+AGENT_NAME=TanBridge.
