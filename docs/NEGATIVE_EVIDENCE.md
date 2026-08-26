@@ -57323,3 +57323,105 @@ equality, 2-D C and transposed, and mode=clip/wrap.
 RETRY PREDICATE: do not attack `2d_T_scalar` — it declines by design and NumPy itself spends
 109.9 us there, so the ceiling is ~1.0x. Do not re-attempt normalise-and-retry for containers.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP: `append`'s parallel byte-copy gate fired at 64 KiB where its own comment targets 64 MB; 8.97x DECIDABLE_REGRESSION becomes UNDECIDED parity (`deadlock-audit-dc6mz`)
+
+Worst substantive cell left after `deadlock-audit-yphwc`. `bench_vs_numpy_loss_sweep` ranked
+`append[f64_f64]` at 7.2808x; the dual-null contract on the same instrument confirmed it.
+
+```
+BEFORE  bench_elf_sha256=9708838cf43d14c2270fa32f0ec8bb7e8f60d34427346afb79b4fd27e0e1b248
+        verdict=DECIDABLE_REGRESSION ratio_median=0.111478 ci95=[0.105726,0.122300]
+        incumbent 34701.000 ns   candidate 315810.000 ns      -> 8.97x slower
+        incumbent_null 0.992649 [0.978116,1.013165]  straddles
+        candidate_null 0.978836 [0.961858,1.021496]  straddles
+
+AFTER   bench_elf_sha256=5bca2114bf56da9fa90aa17d5b4f179f58ec1dc78393d7613f3a58819ca04da7
+        verdict=UNDECIDED             ratio_median=0.984660 ci95=[0.947701,1.007747]
+        incumbent 43076.000 ns   candidate  43968.000 ns      -> 1.02x, CI STRADDLES UNITY
+        incumbent_null 1.008124 [0.976213,1.037591]  straddles
+        candidate_null 1.007797 [0.962373,1.054536]  straddles
+```
+
+PARITY, NOT A WIN, and the harness says so itself by refusing to decide. `exact_bytes=passed
+checksum=615a0449996656d0` on both runs — the branch chosen never changed what is written.
+
+### MECHANISM
+
+`try_zerocopy_append_flat` ends in a chunked rayon byte copy gated on `APPEND_PAR_MIN`, which
+counts OUTPUT BYTES and was `1 << 16` = 64 KiB. The comment two lines above it describes the design
+target as "numpy.append is a single-threaded ~64MB copy". **The gate fired a thousand times too
+early**, so a 1 MB memcpy was split into 16 chunks of 64 KiB and thrown at a 64-thread pool. A byte
+concat is memory-bandwidth-bound; that is fork/join and contention and nothing else.
+
+### THE LOSS IS ENTIRELY THREAD COUNT — same build, same operands, n=2^16
+
+```
+  threads   numpy_ns     fnp_ns   slower        AFTER the fix
+        1    22782.0    23538.2    1.03x          1.04x
+        2    22632.2    35676.5    1.58x          1.04x
+        8    22886.5    47291.9    2.07x          1.03x
+       32    22574.9    78962.8    3.50x          1.03x
+       64    24245.9   243353.6   10.04x          1.01x
+```
+
+numpy is flat throughout. Afterwards so are we — **the cell is now flat in thread count**, which is
+the property that was actually broken.
+
+### THE THRESHOLD IS MEASURED AND THE CROSSOVER IS REGIME-INDEPENDENT
+
+par/ser for the same build (`RAYON_NUM_THREADS=1` forces the serial branch), taken under the
+default allocator and again under `MALLOC_MMAP_THRESHOLD_`/`MALLOC_TRIM_THRESHOLD_` = 1 GiB, so the
+large-buffer mmap-churn regime cannot be what is being read:
+
+```
+  out_MB   par/ser default   par/ser mmap_ctl
+       4        3.16x LOSE        4.37x LOSE
+       8        1.31x LOSE        1.28x LOSE
+      16        0.26x WIN         0.28x WIN
+```
+
+Both regimes agree, so `1 << 24` (16 MiB). A wider earlier scan had 64 KiB losing 1.04x, 256 KiB
+10.51x and 1 MiB 10.62x: the parallel branch lost at EVERY size the old gate admitted.
+
+**THRESHOLD CORRECTION, NOT REMOVAL.** At and above 16 MiB the parallel copy is worth 3.6x over
+serial and 2.4x over numpy, verified to survive the change: n=2^20 (16 MB out) reads numpy
+1273716.3 ns vs fnp 367730.9 ns = **0.29x, a 3.4x win**. Deleting the branch would have forfeited
+exactly the win its author was aiming at. (Cf. the divide-classifier row: "removing the classifier
+is a REGRESSION" — a mistuned gate is not a useless gate.)
+
+### METHOD FINDING, WORTH MORE THAN THE FIX: PINNING GIVES FALSE PARITY
+
+A `taskset -c 40` pinned probe reads this cell at **1.05x** and hides the bug completely, because
+rayon then reports one CPU and takes the serial branch. I measured exactly that and nearly wrote
+the cell off as a non-lever before varying the thread count instead. This is the mirror of the
+known "serial `RAYON_NUM_THREADS=1` gives FALSE LOSSES" trap: on a thread-count-sensitive cell,
+**pinning gives false PARITY**. Vary the thread count; do not pin. The allocator control was also
+checked and is NOT the explanation here — under `MALLOC_MMAP_THRESHOLD_` the loss persisted at
+7.38x.
+
+### NEXT CELL, ALREADY FILED AND LARGER (`deadlock-audit-f1mj2`)
+
+Following the same "register the operand, not just the op" discipline: **`fnp.sqrt` on f64 is a
+1.8x WIN when every element is positive and a 16.67x LOSS when the input contains negatives** — a
+30x swing on SIGN alone, n=2^16, numpy 69195.0 ns vs fnp 1153755.7 ns (negative) against 37982.2 ns
+(positive). The sweep's `f64` ladder entry is `rng.standard_normal(N)`, 50.1% negative, so
+`sqrt[f64]` at rank 5.9024x has been measuring the negative branch all along; anyone re-measuring
+with the natural positive operand sees a win and would wrongly dismiss it. Mechanism NOT yet
+attributed — 30x is far more than decline-and-delegate would cost (that would land near numpy's
+69195 ns), so it is not simply handing off. Attribution before fix.
+
+A/A NULL CONTROLS: dual nulls both phases both runs, all four straddle unity (biases 0.0078-0.0081
+after, 0.0074-0.0212 before). Thread-count and size sweeps are min-of-k triage and are quoted as
+supporting shape, not as decidable effects; the decidable claim is the contract pair above.
+Host shared throughout; `maximum_observed_busy_fraction` not bounded.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean. No parity probe applies — the gate
+selects between two branches that write identical bytes, and the contract's `exact_bytes=passed`
+checksum is unchanged across the change.
+RETRY PREDICATE: do not lower `APPEND_PAR_MIN` again without re-running the par/ser crossover under
+BOTH allocator regimes; and do not "simplify" by deleting the parallel branch, which is worth 3.4x
+at 16 MB. The n=2^21 (32 MB) cell reads 1.26x in the default regime and 0.43x under the mmap
+control — that residual is mmap churn, not this gate, and is out of scope here.
+AGENT_NAME=TanBridge.
