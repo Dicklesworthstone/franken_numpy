@@ -57011,3 +57011,182 @@ not a goal. Re-open on an AVX-512 host, or at n well above 256, where the instru
 converts. `crates/fnp-ufunc` remains `#![forbid(unsafe_code)]`, so `std::simd` is the only door in
 any case.
 AGENT_NAME=CalmMoose.
+
+---
+
+## 2026-08-26 — SHIP: `numpy.dtype.name` is a PURE-PYTHON property at 1213.5 ns, and four hot routes read it unconditionally then discarded it (`asarray` 57.65x -> 1.83x)
+
+WORST CELL RE-DERIVED FIRST, because the standing one was about ordering and ordering was owned.
+`bench_vs_numpy_loss_sweep` (BlackThrush's discovery sweep), 269 comparable cases against LIVE numpy
+2.4.3, interleaved min-of-25, worker `thinkstation1`, ELF
+`5ec5c4ab551441d8a4ec145f327b373f1f6c495967b650789b35f839b277fb8e`. The worst cells were not sort,
+argsort or searchsorted — they were the four `as*array` entry points:
+
+```
+SWEEP_RANK 0 asarray[f64]            numpy    50 ns  fnp 4548 ns   90.96x
+SWEEP_RANK 1 asfortranarray[f64]     numpy    50 ns  fnp 4378 ns   87.56x
+SWEEP_RANK 2 asanyarray[f64]         numpy    50 ns  fnp 4278 ns   85.56x
+SWEEP_RANK 3 ascontiguousarray[f64]  numpy    60 ns  fnp 4248 ns   70.80x
+SWEEP_RANK 5 iscomplexobj[f64]       numpy   230 ns  fnp 2624 ns   11.41x
+SWEEP_RANK 7 isrealobj[f64]          numpy   341 ns  fnp 2575 ns    7.55x
+```
+
+### DECIDED, dual-null median-CI contract, incumbent = numpy LIVE in the SAME INVOCATION
+
+`common::run_dual_null_median_ci_contract`, row `python_loss_sweep_asarray_vs_numpy`,
+`bench_file_source_sha256=4dcf6fa10331d704cc7317e6bfd1e9c5e3309d9a6feb5e19766b46a2508cd3b4`,
+`harness_source_matches_disk=true`, `exact_bytes=passed checksum=3b5ea26e780f624a`.
+
+```
+BEFORE  bench_elf_sha256=5ec5c4ab551441d8a4ec145f327b373f1f6c495967b650789b35f839b277fb8e
+        verdict=DECIDABLE_REGRESSION ratio_median=0.017345 ci95=[0.016539,0.017532]
+        incumbent 75.000 ns   candidate 4323.000 ns          -> 57.65x slower
+        incumbent_null 1.000000 [1.000000,1.000000]
+        candidate_null 1.007238 [1.000232,1.014208]   <- did NOT straddle unity (bias 0.0072)
+
+AFTER   bench_elf_sha256=6ecc1c650fcad554edfbe5a1f80274b0ece6a7742504c3cd73028ef582554fa7
+        verdict=DECIDABLE_REGRESSION ratio_median=0.545455 ci95=[0.520000,0.590909]
+        incumbent 70.000 ns   candidate  121.000 ns          -> 1.83x slower
+        incumbent_null 1.000000 [0.947368,1.000000]
+        candidate_null 1.000000 [0.990099,1.000000]   <- BOTH straddle unity
+```
+
+The two effect CIs are disjoint by more than an order of magnitude. Still a REGRESSION — fnp remains
+1.83x behind numpy on this cell — but 31.4x less of one, and the AFTER reading is the cleaner of the
+two because its candidate null straddles unity where the BEFORE one did not.
+
+### MECHANISM, priced against the INSTALLED interpreter before any Rust was written
+
+`numpy.dtype.name` is not a C getset. It dispatches to the pure-Python `_name_get` in
+`numpy/_core/_dtype.py`, which runs an `isbuiltin` test, a `type(dtype)._legacy` test, an
+`issubclass`, a `_kind_name` call, an f-string bit-width concatenation and a datetime-metadata
+check. `timeit` against numpy 2.4.3 / CPython 3.13.7 on `thinkstation1`:
+
+```
+a.dtype.name   1213.5 ns      a.dtype        28.2 ns      d.num       28.7 ns
+a.flags          42.3 ns      a.dtype.char   30.7 ns      d.char      30.7 ns
+flags['C_CONTIGUOUS'] 42.4 ns a.dtype.kind   30.8 ns      d.itemsize  28.8 ns
+```
+
+`.name` is ~40x `.char`. The tell that it was ENTRY overhead and not a copy: fnp's cost was CONSTANT
+IN N — 1535.4 ns at n=1024, 1552.5 ns at n=2^16, 1536.8 ns at n=2^20 — and `fnp.asarray(a) is a`
+was ALREADY True. The identity fast paths were already returning the caller's object; they were
+paying 1213 ns to decide it.
+
+Four sites, each reading the name and then throwing it away:
+
+  `native_asarray_like`     read it unconditionally, then compared it against nothing on the
+                            `requested_dtype: None` arm — every `asarray(a)` naming no dtype. The two
+                            `flags` `get_item`s were dead the same way whenever no `order=` was given.
+  `ascontiguousarray`       read it to feed a `DType::parse` gate and a
+  `asfortranarray`          `dtype_supported_by_numpy_export_bridge` gate that are VESTIGIAL on a path
+                            that returns the caller's own object and never touches the bridge.
+  `python_is_complex_obj`   name -> heap `String` -> `DType::parse` -> enum compare, through two
+                            NON-interned getattrs, to answer a one-character question.
+
+Each read now happens only on the arm that consumes it; both `as*array` functions also stop calling
+`np.asarray` on an operand that is already an exact ndarray, where it is the identity.
+
+### MATCHED BEFORE/AFTER, same pinned harness, 12/12 A/A NULLS PASS
+
+`taskset -c 40`, `OPENBLAS_NUM_THREADS=1`, ABBA balanced square, 41 rounds x 4000 inner, median of
+per-round ratios, three phases per op (incumbent null, candidate null, effect). `.so`
+`b7f0f362e766ca6dc1f2d1053c16c4fc9d7ffa791cdfc34ab5d2fcbe09137e5a` (pre) vs
+`3e2d03f8b7bc3e025e76c8d71124a005633f3a048c5eec525eb1e679963a7c95` (post), both markers verified.
+
+```
+op                  BEFORE fnp   AFTER fnp   BEFORE      AFTER       worst null deviation
+asarray               1518.1 ns     56.4 ns  82.360x     2.762x      0.0009
+asanyarray            1564.2 ns     49.8 ns  83.662x     2.496x      0.0009
+ascontiguousarray     1549.5 ns    115.7 ns  82.699x     5.768x      0.0021
+asfortranarray        1533.9 ns    124.0 ns  81.536x     6.248x      0.0012
+iscomplexobj          1438.2 ns     67.9 ns  11.885x     0.614x WIN  0.0063
+isrealobj             1435.8 ns     68.9 ns   7.640x     0.379x WIN  0.0104
+```
+
+DISCLOSED LIMIT: this pair is necessarily CROSS-INVOCATION — a `.so` cannot be hot-swapped inside one
+interpreter — so it rests on both nulls passing in both runs rather than on interleaving. The
+same-invocation claim is carried by the dual-null contract above, which agrees. A first, UNPINNED
+version of this same harness read A/A nulls of 0.9480 and 1.0448 and gave `asarray` as 1.80x rather
+than 2.762x; that run is NOT quotable and the pinned one supersedes it. Host was shared throughout
+(load average 8.8-9.3, peers benching); `maximum_observed_busy_fraction` not bounded.
+
+### TWO CORRECTNESS DIVERGENCES FIXED, ZERO INTRODUCED
+
+A 624-case probe over 24 input shapes x 9 kwarg sets recording exception, value, dtype, shape, type,
+`is`-identity and `shares_memory` for all six functions, run against both `.so`s and diffed:
+
+```
+BEFORE divergences=24     AFTER divergences=10     fixed=14     introduced=0
+```
+
+  `iscomplexobj(complex256)` returned False and `isrealobj(complex256)` True — INVERTED from numpy.
+  numpy's predicate is `issubclass(dtype.type, complexfloating)`; the name round-trip could not
+  reproduce it because `DType::parse` knows `complex64`/`complex128` and nothing wider, so
+  `clongdouble` parsed to `None`. `kind == 'c'` IS numpy's predicate.
+
+  `ascontiguousarray`/`asfortranarray` returned the INPUT OBJECT for a 0-d array (12 cases). Both
+  carry an implicit `ndmin=1` and return a new shape-`(1,)` array. The identity path had no rank gate.
+
+Dropping the `DType::parse` / export-bridge gates was VERIFIED, not assumed: across
+f2/f4/f8/i4/c16/clongdouble/longdouble/bool/U5/S5/M8/m8/void/object, numpy 2.4.3 returns an exact
+C-contiguous ndarray of ndim>=1 unchanged for EVERY dtype — those gates only bounced back to numpy
+the inputs numpy hands straight back.
+
+The 10 surviving divergences are PRE-EXISTING and untouched here: `asarray(F-order, copy=True)`
+returns C-order where numpy preserves F (4 cases), and `asarray(subclass)` copies where numpy returns
+a base-class VIEW that shares memory (6 cases). Separate rows; not papered over.
+
+### WHAT THIS OPENS
+
+`.name` is read at ~45 sites in `crates/fnp-python/src/lib.rs` (21 interned, 24 not). Most are on
+`np.dtype(<requested>)` objects and are already conditional, so this is a VEIN and not a sweep — but
+the price is now a counted number, 1213.5 ns per read, and any site on an unconditional path is worth
+exactly that. Grep `getattr(intern!(py, "name"))` and check whether the arm that consumes it can be
+reached without the read.
+
+### NEW WORST CELL, re-derived on the same instrument after the change
+
+```
+SWEEP_RANK 0 take[f64_scalar]        numpy  1372 ns  fnp 28956 ns  21.1050x
+SWEEP_RANK 1 ascontiguousarray[f64]  numpy    40 ns  fnp   360 ns   9.0000x
+SWEEP_RANK 2 append[f64_f64]         numpy 28435 ns  fnp239629 ns   8.4273x
+SWEEP_RANK 3 asfortranarray[f64]     numpy    50 ns  fnp   350 ns   7.0000x
+SWEEP_RANK 4 sqrt[f64]               numpy 68100 ns  fnp310896 ns   4.5653x
+```
+
+TRIAGE ONLY — no null, no CI, and at ~40 ns the min-of-25 is timer-quantised on a shared host, which
+is why the sweep calls `ascontiguousarray` 9.00x where the pinned dual-null contract above calls it
+5.768x. Believe the pinned number. `take[f64_scalar]` is untouched by this change and was already
+rank 4 before it; it is the next target.
+
+RETRY PREDICATE for the residual: `ascontiguousarray`/`asfortranarray` carry ~60 ns that `asarray`
+does not — a `ndim` read they need for the `ndmin=1` rule plus a `flags` lookup they cannot skip
+because their order is implicitly C/F. Do not re-attack below ~100 ns without first pricing a
+contiguity channel cheaper than `flags` + `get_item` (measured 63.2 ns together); `flags.c_contiguous`
+at 51.0 ns is the only cheaper one found and is worth ~12 ns.
+
+### A DEFECT IN THE INSTRUMENT, REPORTED NOT PATCHED
+
+`bench_vs_numpy_loss_sweep`'s `MAX_EXPANSION` guard measures the size of the tiny OUTPUT, which is
+blind to a quadratic INTERMEDIATE. `np.roots` returns `n-1` roots (expansion 1.00) but builds an
+`n-1 x n-1` companion matrix, so it was promoted to N=65536 and tried to allocate 34.4 GB; the first
+run of this sweep reached 24,648,264 KB RSS on a shared host with `SWEEP_DISCOVERY` still unprinted
+and had to be killed. `np.poly` passes the same gate. `SWEEP_COST_CAP_NS` cannot help — it is checked
+after the full-size call returns, and that call does not return. WORKAROUND used for every run banked
+here: `ulimit -v 20000000`, which turns the allocation into a `MemoryError` that discovery's existing
+`except Exception` already catches and records as `skipped`. That fixes memory but NOT the O(n^3)
+time hang, so the real fix is a two-point cost probe rather than a size gate. The file is
+BlackThrush's and was not edited.
+
+A/A NULL CONTROLS: dual-null contract, both phases, both runs — BEFORE incumbent [1.000000,1.000000]
+candidate [1.000232,1.014208] (candidate does not straddle, disclosed above); AFTER incumbent
+[0.947368,1.000000] candidate [0.990099,1.000000], both straddle. Plus 12 pinned Python-side A/A
+nulls, all within 0.0104 of unity.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean. Three new tests —
+`iscomplexobj_matches_numpy_on_extended_precision_complex`,
+`ascontiguousarray_promotes_zero_d_to_one_d_like_numpy`,
+`as_array_family_preserves_numpy_object_identity_including_unparseable_dtypes`. NOT RUN as a suite:
+`cargo test -p fnp-python` does not fit the ceiling on this tree; the three are compile-verified and
+their assertions are mirrored by the 624-case Python probe, which passed against the shipped `.so`.
+AGENT_NAME=TanBridge.
