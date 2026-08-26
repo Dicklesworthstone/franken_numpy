@@ -58517,3 +58517,74 @@ guard needs the contiguous control measured in the same A/B before it lands. Do 
 strided triage ranking without a dual-null check first; `corrcoef` topped it at 20.78x and is not a
 loss at all.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 19.793x becomes 1.047x (`deadlock-audit-0iwez`)
+
+Third and final ship from the operand axis opened in `b47125ed`, taking the remaining cells worst
+ratio first. Same mechanism in all five: the zero-copy path needs a contiguous buffer, a strided
+view declines it, and the call drops into the extract, which copies the whole operand. NumPy's
+strided loop beats that copy by 6-20x, and the loss sweep sees none of it — on its C-contiguous
+ladder all five are WINS.
+
+### RESULT — same-session A/B, dual nulls
+
+```
+  case                       BEFORE      AFTER
+  all strided               19.439x     1.060x     (AFTER null BIASED, disclosed below)
+  all contiguous             0.807x     0.817x     WIN preserved
+  any strided               19.793x     1.047x
+  any contiguous             0.064x     0.064x     WIN preserved EXACTLY
+  ediff1d strided           13.638x     1.046x
+  ediff1d contiguous         0.972x     0.953x
+  frexp strided              8.215x     1.011x
+  frexp contiguous           0.491x     0.505x     WIN preserved
+  modf strided               5.929x     1.016x
+  modf contiguous            0.154x     0.157x     WIN preserved
+```
+
+**`any`'s contiguous cell is the largest win in the vein (15.6x) and was the specific risk named in
+the `9373a772` retry predicate** — a careless guard would have traded it away to avoid the strided
+loss. It is unchanged to three decimals. Nine of ten nulls PASS; `all strided` AFTER reads a
+candidate null of 0.9788 and is disclosed rather than dropped, its effect being three orders of
+magnitude larger than that bias.
+
+### THREE PRE-EXISTING CORRECTNESS BUGS CLOSED, AND ONE SELF-INFLICTED BUG AVOIDED
+
+`np.ediff1d` on a boolean array RAISES — it is literally `ary[1:] - ary[:-1]` and NumPy rejects
+boolean subtract — while every fnp path subtracted the bytes and returned an array.
+
+The non-contiguous guard ALONE would have made the strided and transposed cases start raising
+correctly while the contiguous case did not, **leaving the behaviour dependent on LAYOUT, which is
+worse than a consistent bug**. Caught by running the parity probe on both builds and reading the
+before column: 3 divergences before, 1 after the guard alone. So bool now delegates in every layout
+and NumPy raises for all three. Final: **BEFORE 3 divergences, AFTER 0.**
+
+PARITY: 7 dtypes x 3 layouts x 5 ops with inf/-inf/nan/0.0 seeded through the float arrays, plus
+axis/keepdims/where for the reductions on a strided 2-D, `ediff1d`'s to_begin/to_end, and
+scalar/0-d/empty/list/single operands — compared on dtype, shape AND raw bytes.
+
+### THE VEIN IS DRAINED
+
+Re-running the strided sweep after this ship:
+
+```
+  before the vein was worked:  39 losses above 1.15x, TEN above 5x, worst 32.485x
+  after three ships:           27 losses above 1.15x, NONE above 1.47x
+```
+
+Top remaining: `isin[strided_2]` 1.47x (0.22x contiguous), `sinc` 1.35x (0.31x), `append` 1.27x,
+`tanh` 1.20x. The rest are sub-microsecond entry cells where the strided and contiguous ratios agree
+(`squeeze` 1.44x/1.67x, `result_type` 1.41x/1.30x) — those are not layout defects at all, just small
+entry overheads that show up on both sides.
+
+MEMORY: bounded throughout at n=2^16 f64 (512 KB) with a 2n strided source (1 MB); no full-array
+temporaries. Host RSS never approached the 24 GB cap.
+A/A NULL CONTROLS: ten pinned A/B cells with their own dual nulls, nine PASS within 0.013, one
+disclosed at 0.9788.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+RETRY PREDICATE: the layout axis is closed for anything above 1.5x. Before taking `isin` or `sinc`,
+note their contiguous controls are 0.22x and 0.31x — large wins — so the same care applies. Do NOT
+read the sub-1.5x entries whose strided and contiguous ratios AGREE as layout defects; they are not.
+AGENT_NAME=TanBridge.
