@@ -9066,14 +9066,33 @@ fn zerocopy_f64_unary_flat<'py>(
                             _ => None,
                         };
                         if let Some(log_name) = log_name {
+                            // One pass, event path only, doing two jobs.
+                            //
+                            // (1) RESOLVE THE CATEGORY. The predicate fused `v == 0` (divide)
+                            //     and `v < 0` (invalid) into one bool; separate them so the
+                            //     right witnesses can be raised.
+                            //
+                            // (2) CANONICALISE THE NaN SIGN, which is why there is no early
+                            //     break. Rust's `ln()`/`log2()` return NEGATIVE quiet NaN
+                            //     (0xfff8000000000000) for a negative or -inf operand, while
+                            //     NumPy returns POSITIVE quiet NaN (0x7ff8000000000000). The
+                            //     old deferral hid this because NumPy produced the whole
+                            //     buffer; keeping our own exposes it, and the harness's
+                            //     `structural_checksum` compares raw bits, so it is a real
+                            //     divergence and not a cosmetic one. (`log10` already agrees on
+                            //     this host, but it is normalised alongside the others so the
+                            //     route does not depend on which way a given libm happens to
+                            //     sign its NaN.) A NaN INPUT is left untouched - `v < 0.0` is
+                            //     false for NaN - because NumPy propagates the input's own NaN
+                            //     payload there, and that already matches.
                             let mut saw_divide = false;
                             let mut saw_invalid = false;
-                            for cell in input.iter() {
+                            for (cell, slot) in input.iter().zip(output.iter()) {
                                 let value = cell.get();
                                 saw_divide |= value == 0.0;
-                                saw_invalid |= value < 0.0;
-                                if saw_divide && saw_invalid {
-                                    break;
+                                if value < 0.0 {
+                                    saw_invalid = true;
+                                    slot.set(f64::NAN);
                                 }
                             }
                             let callable = numpy.getattr(log_name)?;
@@ -160339,6 +160358,31 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                         messages[0].contains("divide by zero"),
                         "fixture is wrong: NumPy should report divide first, got {:?}",
                         messages[0]
+                    );
+
+                    // BIT-LEVEL, not `array_equal(equal_nan=True)`. Rust's ln()/log2() sign
+                    // their quiet NaN NEGATIVE where NumPy signs it POSITIVE, and an
+                    // equal_nan comparison cannot see that. The bench harness checksums raw
+                    // bits and caught it; this pins it (`deadlock-audit-7kcz8`).
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("all", "ignore")?;
+                    let guard = numpy.getattr("errstate")?.call((), Some(&kwargs))?;
+                    guard.call_method0("__enter__")?;
+                    let expected_bits = theirs
+                        .call1((data.clone(),))?
+                        .call_method1("view", (numpy.getattr("uint64")?,))?;
+                    let actual_bits = ours
+                        .call1((data.clone(),))?
+                        .call_method1("view", (numpy.getattr("uint64")?,))?;
+                    guard.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                    let bit_equal = numpy
+                        .getattr("array_equal")?
+                        .call1((&expected_bits, &actual_bits))?
+                        .extract::<bool>()?;
+                    assert!(
+                        bit_equal,
+                        "{name}({operands:?}): output BITS differ from NumPy - numpy={} fnp={}",
+                        expected_bits, actual_bits
                     );
                 }
             }
