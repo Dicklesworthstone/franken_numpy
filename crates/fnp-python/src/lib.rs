@@ -70745,49 +70745,78 @@ fn int_sort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send>(
 
 // Small 1-D int64 value sorts are dispatch-bound: taking the NumPy fallback
 // costs an extra Python call that dominates its short C qsort.  The output is
-// still a fresh `numpy.empty` allocation, matching the public NumPy result
+// still a fresh per-call allocation, matching the public NumPy result
 // lifecycle.  Integers have neither NaNs nor signed zeros; equal values have
 // identical bytes, so the serial value order is bit-exact for every kind.
+//
+// THE OUTPUT IS `a.copy()`, NOT `numpy.empty` + A COPY LOOP (`franken_numpy-ixs5y.409`).
+// Decomposed in the MEDIAN domain the contract reports - not the min-of-N the
+// earlier stage profile used - this route's 2284 ns broke down as 391 ns of
+// `numpy.empty(n, "int64")`, 90 ns of `PyBuffer` on the operand, 100 ns of
+// output buffer plus the 2 KiB copy, 1092 ns of comparison sort and 611 ns of
+// Python entry.  One `a.copy()` costs 221 ns and does the FIRST THREE of those
+// at once: it allocates, it fills, and it leaves only one buffer acquisition on
+// the route instead of two.
+//
+// It is also what NumPy itself does - `np.sort` is `asanyarray(a).copy(order="K")`
+// followed by an in-place `.sort()` - so this spelling moves the route TOWARDS
+// the incumbent's own shape rather than away from it, and along the way it drops
+// a latent divergence: `numpy.empty` returned a base `ndarray` where `np.sort`
+// returns the operand's own type.
+//
+// WHAT THIS CHANGES ABOUT THE ADMITTED SET, stated exactly, because "it got
+// faster" is not a licence to quietly sort different operands:
+//   - NARROWER for subclasses.  The old spelling would take a `MaskedArray`
+//     (it satisfies the buffer protocol) and hand back a base `ndarray` holding
+//     mask-oblivious order.  `.copy()` would instead hand back a `MaskedArray`
+//     holding mask-oblivious order, which is a different wrong answer, so the
+//     exact-type gate below declines every subclass outright and lets NumPy have
+//     them.
+//   - WIDER for non-contiguous 1-D base arrays.  The old spelling declined them
+//     because `as_slice` refuses a strided buffer; `.copy()` materializes them
+//     C-contiguous in logical order first, which is exactly what `np.sort`
+//     returns for such an operand.  `int64_sort_flat_small_matches_numpy_on_a_strided_operand`
+//     pins that against the live incumbent.
 fn int64_sort_flat_small(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     n: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let Ok(buffer) = PyBuffer::<i64>::get(a) else {
-        return Ok(None);
-    };
-    // THE SHAPE GATE LIVES HERE, NOT ON THE PYTHON ATTRIBUTE PATH
-    // (`franken_numpy-ixs5y.409`). The caller no longer reads `ndim` and
-    // `flags.c_contiguous` before routing here, so this buffer - which the path acquires
-    // anyway - carries the gate instead. `dimensions() == 1` is load-bearing on its own:
-    // `as_slice` returns `None` for a non-contiguous buffer and `cells.len() != n` catches
-    // most wrong shapes, but a C-contiguous `(4, 1)` array has `len(a) == 4` AND four
-    // items, so without the dimension test it would be flattened into a 1-D result where
-    // NumPy returns a `(4, 1)` one.
-    if buffer.dimensions() != 1 {
+    // EXACT type, not `isinstance`: see the subclass note above.  A pointer
+    // comparison against a once-initialized singleton, so it costs nothing
+    // measurable next to the call it guards.
+    if !a.get_type().is(cached_ndarray_type(py)?) {
         return Ok(None);
     }
-    let Some(cells) = buffer.as_slice(py) else {
+    // DECLINE, don't raise, if `copy` is missing or fails - the operand then
+    // takes the NumPy fallback, which is where it would have gone anyway.
+    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
         return Ok(None);
     };
-    if cells.len() != n {
+    let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
+        return Ok(None);
+    };
+    // THE SHAPE GATE LIVES HERE, ON THE BUFFER THE ROUTE ACQUIRES ANYWAY
+    // (`franken_numpy-ixs5y.409`).  The caller does not read `ndim` or
+    // `flags.c_contiguous`, so this buffer carries the gate instead.
+    // `dimensions() == 1` is load-bearing on its own: a C-contiguous `(4, 1)`
+    // array has `len(a) == 4` AND four items, so an element-count check alone
+    // would flatten it into a 1-D result where NumPy returns a `(4, 1)` one.
+    // The copy preserves shape, so testing it on the copy tests the operand.
+    if out_buffer.dimensions() != 1 {
         return Ok(None);
     }
-    // SAFETY: ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL.
-    let src: &[i64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<i64>(), n) };
-    // `numpy.empty` takes dtype as its second positional argument.  Keeping it
-    // out of a kwargs dict removes a reached Python allocation from this
-    // dispatch-bound path without changing the result's dtype or layout.
-    let out = numpy.call_method1(intern!(py, "empty"), (n, "int64"))?;
-    let out_buffer = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
         return Ok(None);
     };
-    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+    if out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: `ReadOnlyCell<i64>` is repr(transparent) over `i64`; this buffer
+    // belongs to the fresh array `copy` just returned, so nothing else aliases
+    // it, and it is held under the GIL.
     let dst: &mut [i64] =
         unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
-    dst.copy_from_slice(src);
     fnp_ufunc::sort_small::sort_i64(dst);
     Ok(Some(out.unbind()))
 }
@@ -71027,7 +71056,7 @@ fn try_native_int_sort_flat(
     // without constructing a numpy flagsobj. Profiled, this cell's time is its Python
     // entry: 3566 ns route against a 1092 ns comparison sort, so entries are the lever.
     if kind == 'i' && itemsize == std::mem::size_of::<i64>() && n <= I64_SMALL_SORT_MAX {
-        return int64_sort_flat_small(py, numpy, a, n);
+        return int64_sort_flat_small(py, a, n);
     }
     // Every remaining branch below reads the operand as a flat 1-D buffer, so the shape
     // probe stays for them, unchanged.

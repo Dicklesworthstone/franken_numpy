@@ -453,6 +453,14 @@ fn main() {
                 "bench_flat_i64_sort_256_allocation_control",
                 bench_flat_i64_sort_256_allocation_control,
             ),
+            (
+                "bench_flat_i64_sort_256_median_decomposition",
+                bench_flat_i64_sort_256_median_decomposition,
+            ),
+            (
+                "bench_flat_i64_sort_256_entry_decomposition",
+                bench_flat_i64_sort_256_entry_decomposition,
+            ),
         ],
     );
 }
@@ -1573,6 +1581,359 @@ ties_16m = rng.integers(0, 64, 16_000_000).astype(np.float64)\n";
                  verdict={verdict} incumbent=numpy_live_same_invocation \
                  measured_scope={elements}_c_contiguous_float64_elements_at_{threads}_pinned_threads_avx2_no_avx512 \
                  outside_scope=run_same_contract_before_choosing"
+            );
+        }
+    });
+}
+
+/// MEDIAN-DOMAIN decomposition of the `int64` n=256 sort route.
+///
+/// `bench_flat_i64_sort_256_stage_profile` reports min-of-N, and min-of-N said the
+/// route was only 1.10x behind NumPy while the dual-null median contract on the same
+/// host said 1.37x.  A min and a median are not the same statistic and the gap between
+/// them is exactly the thing that has to be attributed, so this group re-decomposes the
+/// route with the median that the contract actually reports, sampling every stage
+/// ROUND-ROBIN in one loop so that machine drift lands on all stages alike instead of
+/// on whichever one happened to be timed last.
+fn bench_flat_i64_sort_256_median_decomposition(_c: &mut criterion::Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_sort_median_decomp").expect("bench module");
+        fnp_python(&module).expect("initialize fnp module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let ns = PyDict::new(py);
+        ns.set_item("np", &numpy).expect("bind numpy");
+        py.run(
+            std::ffi::CString::new(
+                "rng = np.random.default_rng(20260824)\n\
+a = rng.integers(-(1 << 62), 1 << 62, 256, dtype=np.int64)\n\
+a[:16] = np.array([np.iinfo(np.int64).min, np.iinfo(np.int64).max, -1, 0, 1, -1, 0, 1, -7, 7, -7, 7, 13, 13, -13, -13], dtype=np.int64)\n\
+rng.shuffle(a)\n\
+dt = np.dtype('int64')\n\
+empty = np.empty\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int64 corpus setup");
+        let input = ns.get_item("a").expect("corpus");
+        let cached_dtype = ns.get_item("dt").expect("cached dtype object");
+        let cached_empty = ns.get_item("empty").expect("cached numpy.empty callable");
+        let np_sort = numpy.getattr("sort").expect("numpy.sort");
+        let fnp_sort = module.getattr("sort").expect("fnp.sort");
+        assert!(
+            !fnp_sort.is(&np_sort),
+            "dispatch trap: fnp.sort resolved to the NumPy callable"
+        );
+        let n = 256usize;
+
+        // A numpy-allocated scratch buffer AND a Rust Vec holding the same bytes, so the
+        // kernel is timed on both provenances.  A Rust `Vec` arm is known to carry a
+        // buffer-provenance tax against numpy-allocated memory, and the shipped route
+        // sorts a numpy buffer, so the Rust-Vec number alone would misprice the kernel.
+        let src_buffer = pyo3::buffer::PyBuffer::<i64>::get(&input).expect("src buffer");
+        let src_cells = src_buffer.as_slice(py).expect("src slice");
+        let src: &[i64] =
+            unsafe { std::slice::from_raw_parts(src_cells.as_ptr().cast::<i64>(), n) };
+        let scratch = numpy
+            .call_method1(pyo3::intern!(py, "empty"), (n, "int64"))
+            .expect("scratch");
+        let scratch_buffer = pyo3::buffer::PyBuffer::<i64>::get(&scratch).expect("scratch buffer");
+        let scratch_cells = scratch_buffer.as_mut_slice(py).expect("scratch slice");
+        let np_work: &mut [i64] =
+            unsafe { std::slice::from_raw_parts_mut(scratch_cells.as_ptr() as *mut i64, n) };
+        let mut rust_work = vec![0i64; n];
+
+        const REPS: usize = 6000;
+        const STAGES: usize = 8;
+        let labels = [
+            "numpy_sort_whole_call",
+            "fnp_sort_whole_route",
+            "alloc_empty_n_str_int64",
+            "alloc_cached_empty_cached_dtype",
+            "sort_kernel_on_numpy_buffer",
+            "sort_kernel_on_rust_vec",
+            "buffer_get_plus_2kib_copy",
+            "empty_loop_timer_overhead",
+        ];
+        let mut samples: Vec<Vec<u64>> = vec![Vec::with_capacity(REPS); STAGES];
+
+        for _ in 0..REPS {
+            // 0: the incumbent, whole public call.
+            let started = std::time::Instant::now();
+            let out = np_sort.call1((black_box(&input),)).expect("numpy.sort");
+            samples[0].push(started.elapsed().as_nanos() as u64);
+            drop(black_box(out));
+
+            // 1: our whole public route.
+            let started = std::time::Instant::now();
+            let out = fnp_sort.call1((black_box(&input),)).expect("fnp.sort");
+            samples[1].push(started.elapsed().as_nanos() as u64);
+            drop(black_box(out));
+
+            // 2: the allocation the route performs today.
+            let started = std::time::Instant::now();
+            let out = numpy
+                .call_method1(pyo3::intern!(py, "empty"), (n, "int64"))
+                .expect("numpy.empty positional str dtype");
+            samples[2].push(started.elapsed().as_nanos() as u64);
+            drop(black_box(out));
+
+            // 3: the same allocation off a cached callable and a cached dtype OBJECT,
+            //    which is the candidate replacement for stage 2.
+            let started = std::time::Instant::now();
+            let out = cached_empty
+                .call1((n, &cached_dtype))
+                .expect("cached numpy.empty");
+            samples[3].push(started.elapsed().as_nanos() as u64);
+            drop(black_box(out));
+
+            // 4: the comparison kernel alone, on the numpy-allocated buffer the route
+            //    actually sorts, refilled from the unsorted corpus each rep.
+            np_work.copy_from_slice(src);
+            let started = std::time::Instant::now();
+            fnp_ufunc::sort_small::sort_i64(np_work);
+            samples[4].push(started.elapsed().as_nanos() as u64);
+            black_box(np_work.as_ptr());
+
+            // 5: the same kernel on Rust-owned memory.
+            rust_work.copy_from_slice(src);
+            let started = std::time::Instant::now();
+            fnp_ufunc::sort_small::sort_i64(&mut rust_work);
+            samples[5].push(started.elapsed().as_nanos() as u64);
+            black_box(rust_work.as_ptr());
+
+            // 6: buffer acquisition + the 2 KiB copy, on an already-allocated output.
+            let started = std::time::Instant::now();
+            let out_buffer = pyo3::buffer::PyBuffer::<i64>::get(&scratch).expect("out buffer");
+            let out_cells = out_buffer.as_mut_slice(py).expect("out slice");
+            let dst: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+            dst.copy_from_slice(src);
+            samples[6].push(started.elapsed().as_nanos() as u64);
+            black_box(dst.as_ptr());
+
+            // 7: the timing harness measuring nothing, so every number above can be read
+            //    net of the `Instant` pair itself.
+            let started = std::time::Instant::now();
+            samples[7].push(started.elapsed().as_nanos() as u64);
+        }
+
+        let stat = |v: &mut Vec<u64>, q: f64| -> u64 {
+            v.sort_unstable();
+            v[((v.len() - 1) as f64 * q) as usize]
+        };
+        for (index, label) in labels.iter().enumerate() {
+            let min = *samples[index].iter().min().expect("samples");
+            let p25 = stat(&mut samples[index], 0.25);
+            let median = stat(&mut samples[index], 0.50);
+            let p75 = stat(&mut samples[index], 0.75);
+            println!(
+                "I64_SORT_MEDIAN_DECOMP stage={label} reps={REPS} \\
+                 min_ns={min} p25_ns={p25} median_ns={median} p75_ns={p75} \\
+                 median_over_min={:.4}",
+                median as f64 / min.max(1) as f64,
+            );
+        }
+    });
+}
+
+/// MEDIAN-DOMAIN decomposition of the `int64` n=256 route's ENTRY, and a price
+/// list for the candidates that could replace it.
+///
+/// The stage decomposition put 591 ns of the route's 2174 ns median outside the
+/// allocation, the copy and the comparison kernel.  That residual is the Python
+/// entry, and this group takes it apart into the individual reached operations
+/// so a lever can be chosen against measured numbers instead of a guess about
+/// which attribute lookup is expensive.  Sampled ROUND-ROBIN in one loop, same
+/// as the stage decomposition, so drift lands on every stage alike.
+fn bench_flat_i64_sort_256_entry_decomposition(_c: &mut criterion::Criterion) {
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_sort_entry_decomp").expect("bench module");
+        fnp_python(&module).expect("initialize fnp module");
+        let numpy = py.import("numpy").expect("numpy incumbent");
+        let ns = PyDict::new(py);
+        ns.set_item("np", &numpy).expect("bind numpy");
+        py.run(
+            std::ffi::CString::new(
+                "rng = np.random.default_rng(20260824)\n\
+a = rng.integers(-(1 << 62), 1 << 62, 256, dtype=np.int64)\n\
+dt = np.dtype('int64')\n\
+empty = np.empty\n",
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("int64 corpus setup");
+        let input = ns.get_item("a").expect("corpus");
+        let cached_dtype = ns.get_item("dt").expect("cached dtype object");
+        let cached_empty = ns.get_item("empty").expect("cached numpy.empty callable");
+        let np_sort = numpy.getattr("sort").expect("numpy.sort");
+        let fnp_sort = module.getattr("sort").expect("fnp.sort");
+        assert!(
+            !fnp_sort.is(&np_sort),
+            "dispatch trap: fnp.sort resolved to the NumPy callable"
+        );
+        let n = 256usize;
+
+        // Parity check for the `a.copy()` candidate BEFORE it is timed: it has
+        // to reproduce numpy.sort's result lifecycle, i.e. a fresh, writable,
+        // C-contiguous int64 array of the same shape - and, unlike the
+        // `numpy.empty` spelling it would replace, it also has to carry the
+        // operand's own bytes so the kernel can sort in place.
+        {
+            let copied = input.call_method0("copy").expect("ndarray.copy");
+            let allocated = numpy
+                .call_method1(pyo3::intern!(py, "empty"), (n, "int64"))
+                .expect("numpy.empty");
+            assert!(copied.get_type().is(&allocated.get_type()), "copy type");
+            assert_eq!(
+                copied.getattr("dtype").unwrap().str().unwrap().to_string(),
+                "int64",
+                "copy dtype"
+            );
+            assert_eq!(
+                copied
+                    .getattr("shape")
+                    .unwrap()
+                    .extract::<Vec<usize>>()
+                    .unwrap(),
+                vec![n],
+                "copy shape"
+            );
+            assert!(
+                copied
+                    .getattr("flags")
+                    .unwrap()
+                    .getattr("c_contiguous")
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap(),
+                "copy layout"
+            );
+            assert_eq!(
+                copied
+                    .call_method0("tobytes")
+                    .unwrap()
+                    .extract::<Vec<u8>>()
+                    .unwrap(),
+                input
+                    .call_method0("tobytes")
+                    .unwrap()
+                    .extract::<Vec<u8>>()
+                    .unwrap(),
+                "copy must carry the operand's bytes"
+            );
+        }
+
+        const REPS: usize = 6000;
+        const STAGES: usize = 10;
+        let labels = [
+            "numpy_sort_whole_call",
+            "fnp_sort_whole_route",
+            "alloc_empty_n_str_int64",
+            "alloc_cached_empty_cached_dtype",
+            "input_copy_method",
+            "pybuffer_get_input_plus_as_slice",
+            "dtype_char_getattr_chain",
+            "python_len",
+            "dtype_names_probe",
+            "empty_loop_timer_overhead",
+        ];
+        let mut samples: Vec<Vec<u64>> = vec![Vec::with_capacity(REPS); STAGES];
+
+        for _ in 0..REPS {
+            let started = std::time::Instant::now();
+            let out = np_sort.call1((black_box(&input),)).expect("numpy.sort");
+            samples[0].push(started.elapsed().as_nanos() as u64);
+            drop(black_box(out));
+
+            let started = std::time::Instant::now();
+            let out = fnp_sort.call1((black_box(&input),)).expect("fnp.sort");
+            samples[1].push(started.elapsed().as_nanos() as u64);
+            drop(black_box(out));
+
+            let started = std::time::Instant::now();
+            let out = numpy
+                .call_method1(pyo3::intern!(py, "empty"), (n, "int64"))
+                .expect("numpy.empty positional str dtype");
+            samples[2].push(started.elapsed().as_nanos() as u64);
+            drop(black_box(out));
+
+            let started = std::time::Instant::now();
+            let out = cached_empty
+                .call1((n, &cached_dtype))
+                .expect("cached numpy.empty");
+            samples[3].push(started.elapsed().as_nanos() as u64);
+            drop(black_box(out));
+
+            // THE STRUCTURAL CANDIDATE: one call that allocates AND fills,
+            // replacing `numpy.empty` + a `PyBuffer` on the input + a 2 KiB
+            // copy loop, and removing one of the route's two buffer
+            // acquisitions with it.
+            let started = std::time::Instant::now();
+            let out = input
+                .call_method0(pyo3::intern!(py, "copy"))
+                .expect("ndarray.copy");
+            samples[4].push(started.elapsed().as_nanos() as u64);
+            drop(black_box(out));
+
+            let started = std::time::Instant::now();
+            let buffer = pyo3::buffer::PyBuffer::<i64>::get(&input).expect("input buffer");
+            let cells = buffer.as_slice(py).expect("input slice");
+            samples[5].push(started.elapsed().as_nanos() as u64);
+            black_box(cells.as_ptr());
+            drop(buffer);
+
+            let started = std::time::Instant::now();
+            let typechar = input
+                .getattr(pyo3::intern!(py, "dtype"))
+                .expect("dtype")
+                .getattr(pyo3::intern!(py, "char"))
+                .expect("char")
+                .extract::<char>()
+                .expect("char extract");
+            samples[6].push(started.elapsed().as_nanos() as u64);
+            black_box(typechar);
+
+            let started = std::time::Instant::now();
+            let len = input.len().expect("len");
+            samples[7].push(started.elapsed().as_nanos() as u64);
+            black_box(len);
+
+            // What the two structured-sort probes reach before declining.
+            let started = std::time::Instant::now();
+            let names = input
+                .getattr(pyo3::intern!(py, "dtype"))
+                .expect("dtype")
+                .getattr(pyo3::intern!(py, "names"))
+                .expect("names");
+            samples[8].push(started.elapsed().as_nanos() as u64);
+            black_box(names.is_none());
+
+            let started = std::time::Instant::now();
+            samples[9].push(started.elapsed().as_nanos() as u64);
+        }
+
+        let stat = |v: &mut Vec<u64>, q: f64| -> u64 {
+            v.sort_unstable();
+            v[((v.len() - 1) as f64 * q) as usize]
+        };
+        for (index, label) in labels.iter().enumerate() {
+            let min = *samples[index].iter().min().expect("samples");
+            let p25 = stat(&mut samples[index], 0.25);
+            let median = stat(&mut samples[index], 0.50);
+            let p75 = stat(&mut samples[index], 0.75);
+            println!(
+                "I64_SORT_ENTRY_DECOMP stage={label} reps={REPS} \\
+                 min_ns={min} p25_ns={p25} median_ns={median} p75_ns={p75}"
             );
         }
     });

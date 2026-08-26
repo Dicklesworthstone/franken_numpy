@@ -2123,3 +2123,73 @@ print(all(checks))
     );
     Ok(())
 }
+
+#[test]
+fn small_int64_sort_admitted_set_after_the_copy_spelling_matches_numpy() -> Result<(), String> {
+    // PINS BOTH EDGES THE `a.copy()` OUTPUT SPELLING MOVED (`franken_numpy-ixs5y.409`).
+    //
+    // The small-int64 route used to build its result with `numpy.empty` and copy the
+    // operand in through a `PyBuffer`. It now takes `a.copy()`, which allocates and
+    // fills in one call - the same thing `np.sort` itself does internally. That moved
+    // the admitted set in two directions AT ONCE, and neither is safe to leave
+    // unpinned just because the cell got faster:
+    //
+    //   WIDER: a non-contiguous 1-D operand used to be declined, because `as_slice`
+    //   refuses a strided buffer. `.copy()` materializes it C-contiguous in logical
+    //   order first, so the route now handles it - and must return exactly what NumPy
+    //   returns for it.
+    //
+    //   NARROWER: an `ndarray` SUBCLASS satisfies the buffer protocol, so the old
+    //   spelling engaged on one and handed back a base `ndarray` where `np.sort`
+    //   returns the subclass. `.copy()` would return the subclass but still sort it
+    //   mask-obliviously, which for a `MaskedArray` is a different wrong answer. The
+    //   route therefore declines every non-exact `ndarray` outright. The masked case
+    //   is the one that would be silently WRONG rather than merely mistyped: NumPy
+    //   orders masked entries last regardless of the bytes underneath them.
+    let script = fnp_script(
+        r#"
+checks = []
+
+# WIDER: strided 1-D operands, now handled natively, must match numpy exactly.
+strided = []
+strided.append(np.arange(0, 64, dtype=np.int64)[::-1][::2])
+strided.append(np.arange(0, 64, dtype=np.int64)[::3])
+strided.append(np.arange(0, 512, dtype=np.int64)[::2][:256])
+for a in strided:
+    expected = np.sort(a)
+    actual = fnp.sort(a)
+    checks.append(type(actual) is type(expected))
+    checks.append(actual.dtype.str == expected.dtype.str)
+    checks.append(actual.shape == expected.shape)
+    checks.append(actual.tobytes() == expected.tobytes())
+
+# NARROWER: subclasses must come back from numpy, with numpy's own type AND order.
+class Sub(np.ndarray):
+    pass
+
+sub = np.array([9, 3, 7, 1, -5], dtype=np.int64).view(Sub)
+expected = np.sort(sub)
+actual = fnp.sort(sub)
+checks.append(type(actual) is type(expected) is Sub)
+checks.append(actual.tobytes() == expected.tobytes())
+
+# The masked case: numpy sorts masked entries to the END, whatever their bytes are.
+masked = np.ma.array([9, 3, 7, 1, -5], mask=[0, 1, 0, 1, 0], dtype=np.int64)
+expected = np.sort(masked)
+actual = fnp.sort(masked)
+checks.append(type(actual) is type(expected))
+checks.append(np.array_equal(actual.filled(0), expected.filled(0)))
+checks.append(np.array_equal(np.ma.getmaskarray(actual), np.ma.getmaskarray(expected)))
+
+print(all(checks))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "the copy-spelling admitted set must match numpy on strided, subclass and masked operands: {result}"
+    );
+    Ok(())
+}

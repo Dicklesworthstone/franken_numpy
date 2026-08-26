@@ -56548,3 +56548,203 @@ own: it takes `let numpy = cached_numpy(py)?` while 23 call sites below still pa
 This is at least the fifth occurrence of this hazard (`364a4933`, `44b736fd`, `b742665f`,
 `8c77b99c`, this one). The standing rule stands and is not enough on its own: an uncommitted edit
 is not safe on this tree, in EITHER direction.
+
+## 2026-08-26 — THE WORST CELL'S NAMED LEVER WAS NAMED BY THE WRONG STATISTIC: the i64 kernel is already at PARITY with NumPy's, the AVX2 kernel rewrite is a measured REJECT (and is barred by `forbid(unsafe_code)`), and the whole loss is ENTRY — `a.copy()` takes `sort(int64,n=256)` from 1.3812x to 1.2016x with DISJOINT six-run ranges (`franken_numpy-ixs5y.409`)
+
+**Result class:** one measured, decidable improvement on the campaign's worst vs-incumbent cell, one
+measured REJECT of the lever the previous entry named, and a correction to the *statistic* that named
+it. Host `thinkstation1` (Threadripper PRO 5975WX, 32P/64L, **AVX2, no AVX-512**), worker=local,
+numpy 2.4.3 live in the same invocation, stock `release` (triage-grade absolutes; ratios fair within
+each binary). Loadavg 15.9-25.4 across the window; the host was shared throughout with peer agents'
+`callgrind`, `rustc` and `fp-bench` processes, and every row below carries its nulls.
+
+### 1. THE PREVIOUS ENTRY'S LEVER WAS SELECTED ON A MIN, AND THE CONTRACT REPORTS A MEDIAN
+
+The 08-25 row closed by naming `fnp_ufunc::sort_small::sort_i64` "the ONLY lever left", against a
+`route_floor_if_sort_were_free` of 792 ns and a 1533 ns NumPy target. That floor came from
+`bench_flat_i64_sort_256_stage_profile`, which is **min-of-2000**. The dual-null contract that
+decides the cell reports a **median**. Those are not the same statistic, and the gap between them is
+exactly what was being attributed: re-run today, the min profile said our route was 1.10x behind
+(2044 vs 1863) while the contract on the same host said 1.37x. A stage sum of separately-taken minima
+subtracted from a median invents a floor.
+
+New group `bench_flat_i64_sort_256_median_decomposition` re-decomposes the route in the median
+domain, sampling every stage ROUND-ROBIN in one loop so drift lands on all stages alike. Timer
+overhead (20 ns, measured as its own stage) netted out:
+
+| stage | median ns | share of route |
+|---|---|---|
+| `numpy.sort` whole call | **1583** | (the target) |
+| `fnp.sort` whole route | **2174** | |
+| alloc `numpy.empty(n, "int64")` | 391 | 18.0% |
+| output buffer + 2 KiB copy | 100 | 4.6% |
+| **comparison kernel (`sort_unstable`)** | **1092** | **50.2%** |
+| **Python entry residual** | **591** | 27.2% |
+
+`sort_kernel_on_numpy_buffer` and `sort_kernel_on_rust_vec` both read 1092 ns, i.e. this cell shows
+NO buffer-provenance tax; the kernel number is the same on either allocation.
+
+### 2. AND NUMPY'S OWN KERNEL IS NOT FASTER THAN OURS - WHICH KILLS THE LEVER OUTRIGHT
+
+Timed against the INSTALLED interpreter on this host:
+
+```
+  b = a.copy(); b.sort()   (int64, n=256)   1320.2 ns/call
+  a.copy()                                   211.7 ns/call
+  => NumPy's int64 sort kernel               1108.5 ns/call
+```
+
+**Our kernel is 1092 ns against NumPy's 1108 ns: parity.** This host has no AVX-512, so NumPy is not
+running an AVX-512 x86-simd-sort on this cell - a fact worth pinning, because the 08-25 row's closing
+line ("NumPy is running x86-simd-sort on this cell") is what made the kernel look like headroom.
+Decomposed the same way, the two arms are: NumPy 1583 = 1108 kernel + 475 overhead; ours 2174 = 1092
+kernel + 1082 overhead. **The entire 591 ns deficit is overhead, and none of it is the sort.**
+
+### 3. THE KERNEL WAS ATTACKED ANYWAY. REJECT, WITH NUMBERS.
+
+Written and verified: a full AVX2 vectorized quicksort - compress-partition through a 16-row
+`_mm256_permutevar8x32_epi32` LUT, recursing to a register-resident bitonic network base case, with
+an introsort depth budget and an equal-element peel for the empty-low-group case. Correctness is not
+the issue: **0 mismatches over lengths 0..=256 x 8 input shapes (dense random, 4-way ties, constant,
+ascending, descending, all-`i64::MAX`, all-`i64::MIN`, extrema interleaved) x 3 seeds.** Batched
+standalone harness (64 sorts per timer pair, refill loop measured separately and subtracted, because
+a single `Instant` pair costs 20 ns with 10 ns granularity and that IS the measurement at these sizes):
+
+| n | `sort_unstable` | AVX2 quicksort | ratio |
+|---|---|---|---|
+| 16 | 40 ns | 36 ns | 1.11x |
+| 32 | 80 ns | 119 ns | 0.67x |
+| 64 | 190 ns | 338 ns | 0.56x |
+| 128 | 521 ns | 646 ns | 0.81x |
+| 256 | **1062 ns** | **1395 ns** | **0.76x** |
+
+It loses at every length that matters, and that is the number AFTER fixing four separate real defects
+found by disassembly, each of which is worth recording because none of them is specific to sorting:
+
+- **A `[0i64; 260]` scratch array zero-fills 2 KiB of stack on every call.** It is live across the
+  recursion, so the compiler cannot sink the memset into the branches that use it. Measured cost: an
+  8-element sort took 29 ns against the scalar kernel's 6. `MaybeUninit` + an early return for runs
+  that never partition removed it.
+- **`#[target_feature]` functions do not inline without an explicit `#[inline]`**, and
+  `#[inline(always)]` with `#[target_feature]` is a hard compile error (rust#145574).
+- **Staging a short run through a padded `[i64; 16]` stalls store-forwarding**: scalar-width stores
+  filling the buffer, immediately followed by 32-byte vector loads of the same addresses, is the one
+  shape store-to-load forwarding cannot satisfy. Masked loads that build the padded vector in a
+  register instead were worth 50 ns -> 36 ns at n=16.
+- **A `if count >= 4` fast path inside the per-register load defeated SROA**: the branch between the
+  four loads made the compiler spill all four vectors to the stack (`vmovaps %ymm0,(%rsp)` in the
+  disassembly) so the "register-resident" network ran out of memory. Going fully branchless - a
+  masked load with an all-ones mask is just a load - restored register residency.
+
+The mechanism for the reject is architectural: **AVX2 has neither `vpcompressq` nor
+`_mm256_min_epi64`** (both AVX-512). The signed 64-bit compare-exchange costs a `cmpgt` plus two
+`blendv` instead of one instruction, and the compress costs a LUT load plus a `permutevar` round
+trip. Against pdqsort at ~2.2 cycles per comparison there is no headroom left to pay for that.
+
+**IT COULD NOT HAVE SHIPPED IN ANY CASE, AND THIS IS THE PART TO READ BEFORE RE-ATTACKING:**
+`crates/fnp-ufunc` is `#![forbid(unsafe_code)]`. An intrinsics kernel there is barred at the crate
+level, not by review. The crate does carry `#![feature(portable_simd)]`, so `std::simd` is the only
+admissible door - but the table above says do not bother on an AVX2 host.
+`crates/fnp-ufunc/src/sort_small.rs` is unchanged at HEAD.
+
+### 4. THE LEVER THAT DOES WORK, PRICED BEFORE IT WAS WRITTEN
+
+`bench_flat_i64_sort_256_entry_decomposition`, medians, timer netted:
+
+```
+  numpy.empty(256, "int64")                391 ns   <- what the route paid
+  cached empty callable + cached dtype OBJ 141 ns
+  a.copy()                                 221 ns   <- what it pays now
+  PyBuffer(input) + as_slice                90 ns
+  dtype.char getattr chain                  60 ns
+  dtype.names probe (x2 reached)            40 ns
+  len()                                     10 ns
+```
+
+**One `a.copy()` at 221 ns does what `numpy.empty` (391) + a `PyBuffer` on the operand (90) + the
+2 KiB copy loop did, and removes one of the route's two buffer acquisitions with it.** It is also
+what `np.sort` itself is - `asanyarray(a).copy(order="K")` then an in-place `.sort()` - so this moves
+the route TOWARDS the incumbent's own shape.
+
+**THE ADMITTED SET MOVED IN BOTH DIRECTIONS AND BOTH ARE PINNED.** A speedup is not a licence to
+sort a different set of operands:
+
+- **NARROWER for subclasses.** A `MaskedArray` satisfies the buffer protocol, so the old spelling
+  engaged on one and returned a base `ndarray` holding mask-oblivious order - NumPy orders masked
+  entries last regardless of the bytes underneath. An exact-type gate (a pointer compare against the
+  cached `numpy.ndarray` singleton) now declines every subclass.
+- **WIDER for non-contiguous 1-D base arrays.** `as_slice` refused a strided buffer; `.copy()`
+  materializes it C-contiguous in logical order, which is exactly what `np.sort` returns for it.
+
+### 5. THE RESULT: SIX INTERLEAVED PAIRS, TWO ELFs, ONE HOST, ONE COMMAND
+
+Command (exact):
+
+```
+FNP_BENCH_GROUPS=bench_flat_i64_sort_256_dual_null FNP_BENCH_BUILD_ROUTE=local_release_stock \
+  target/release/deps/criterion_python_sortmisc-079c6655f3b5bc98 --test
+```
+
+BEFORE ELF sha256 `52aab4165ce11b4d93b00f077b5df29df97edf557b698b630d37378fadab8d4b` (built from HEAD
+`d151c660`, preserved before the edit so the arms could be INTERLEAVED rather than compared across
+windows). AFTER ELF sha256 `b40b41c6bfd746f2515f796e974488ce2897e5bb1f579835c922064190302c9a`.
+
+| pair | BEFORE ratio_median | AFTER ratio_median |
+|---|---|---|
+| 1 | 0.712712 | 0.823992 |
+| 2 | 0.713384 | 0.836608 |
+| 3 | 0.725045 | 0.843717 |
+| 4 | 0.732908 | 0.836670 |
+| 5 | 0.735187 | 0.817518 |
+| 6 | 0.724817 | 0.834951 |
+
+BEFORE mean 0.724009, range [0.712712, 0.735187] — **1.3812x slower than live NumPy**.
+AFTER mean 0.832243, range [0.817518, 0.843717] — **1.2016x slower than live NumPy**.
+
+**THE TWO RANGES ARE DISJOINT: max(BEFORE) = 0.735187 < min(AFTER) = 0.817518.** Every one of the
+twelve runs is `DECIDABLE_REGRESSION` with both A/A nulls straddling unity. The arms were interleaved
+BEFORE/AFTER/BEFORE/AFTER in one loop on one host, which is what makes this comparison admissible;
+the effect is 14.9% of the ratio against a six-run envelope of 3.1% (BEFORE) and 3.2% (AFTER).
+**It is still a LOSS - 1.2016x - and is reported as one.**
+
+Re-confirmed on a third ELF built from the FORMATTED, committed source, sha256
+`50bbe8d7685dba1e8ee3a7a007533540b828adc5bba2e3974a7fdb3f28bbe8c6`: 0.833601, 0.838519, 0.849445.
+
+A representative full row: `incumbent_median_ns=1583.000 candidate_median_ns=1909.000
+ratio_median=0.831401 ratio_ci95=[0.826245,0.834036]`, `candidate_route=native_int64_small_sort`,
+`candidate_numpy_sort_calls_preflight=0`, `exact_bytes=passed exact_dtype=passed`,
+`ALLOCATION_PARITY incumbent_output_allocation=per_call candidate_output_allocation=per_call`,
+`INCUMBENT_IDENTITY artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48
+dispatch_assert=passed`, incumbent A/A `0.996841 ci95=[0.993099,1.003159]`, candidate A/A
+`0.997909 ci95=[0.992304,1.002095]`, `CPU_WITNESS same_core=true arm_mhz_spread=1.0000`.
+
+**THE OUTPUT CHECKSUM IS IDENTICAL ACROSS BOTH ELFs: `34ef53e2544dd0e3`.** The route still engages
+natively (`candidate_numpy_sort_calls_preflight=0`), which is the check that matters here: an
+exact-type gate is exactly the kind of edit that can silently disengage a route and make the
+delegation look like a speedup.
+
+COUNTED_MECHANISM: `numpy.empty(n, "int64")` (391 ns) + `PyBuffer` on the operand (90 ns) + the
+2 KiB copy replaced by one `a.copy()` (221 ns), all medians measured in-process on this host in the
+same statistic the contract reports. Predicted saving ~275 ns; observed candidate median 2199 -> 1909,
+i.e. ~290 ns.
+A/A NULL CONTROLS: 12 interleaved contract runs plus 3 confirmations, both nulls straddle unity in
+every one. `cv_is_provenance_only=true`.
+VERIFICATION: `cargo test --release -p fnp-python --test conformance_sort_search` **56 passed 0
+failed**, including the new `small_int64_sort_admitted_set_after_the_copy_spelling_matches_numpy`
+which pins strided, `ndarray`-subclass and `MaskedArray` operands against the live oracle, and the
+pre-existing `small_int64_sort_shape_gate_matches_numpy_on_non_flat_operands`.
+`cargo clippy --release -p fnp-python --lib` exit 0, no warnings. `rustfmt --check` clean on all three
+touched files.
+RETRY PREDICATE: the cell is still a **1.2016x DECIDABLE_REGRESSION**. The remaining gap is ~326 ns
+and it is ALL entry: decomposed, ours is ~511 ns of Python entry against NumPy's ~254 ns. Do NOT
+re-attack the comparison kernel on an AVX2 host - section 3 is the reject and section 2 is why. The
+next candidates, in the order their price justifies, are (a) `fnp.sort`'s
+`#[pyo3(signature = (*args, **kwargs))]`, which forces a per-call args-tuple and kwargs-dict build
+where NumPy uses `METH_FASTCALL` - unpriced, and it touches every sort caller, so it needs its own
+row; (b) the two `dtype.names` probes (40 ns each) that `try_native_struct_sort_valuelex` and
+`try_native_struct_sort` reach BEFORE the int64 branch, worth ~80 ns if the int64 gate is hoisted
+above them. Neither was attempted here.
+UNMEASURED, DISCLOSED: the newly-admitted non-contiguous 1-D operands have no vs-NumPy row. The
+route should still beat declining for them - a decline pays our full entry AND all of NumPy - but
+that is an argument, not a measurement.
+AGENT_NAME=CalmMoose.
