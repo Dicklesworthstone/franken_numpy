@@ -59233,3 +59233,108 @@ reads shape and contiguity for both operands before declining on dtype) plus the
 gate is the next lever and takes the same treatment as the matmul chain. Do not re-measure
 `convolve 5000x4096 valid` under load: it needs a quiet host and >=5 runs to decide 15%.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `asarray_chkfinite` CLASSIFIED BY PARSING THE 1213.5 ns `dtype.name` AND FAILED OPEN ON longdouble: 11.151x -> 0.889x on the integer cell, and it was RETURNING arrays full of NaN where numpy raises (`deadlock-audit-niiy0`)
+
+`TanBridge`. Shipped `9dfd0a5d`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3
+in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell, OPENBLAS_NUM_THREADS=1.
+**RUN TWICE, WITH THE ARM ORDER REVERSED - see the regime disclosure at the bottom.**
+
+**Campaign result class:** one CORRECTNESS defect fixed (fail-open on two dtypes), plus
+candidate-win on fifteen cells, two of which cross into wins over numpy.
+
+### 1. THE CORRECTNESS DEFECT - A CHECK FUNCTION THAT FAILED OPEN
+
+`asarray_chkfinite` decided whether to sweep for non-finite values with
+`DType::parse(dtype.name)`. `parse` has no arm for `float128`/`complex256`, so `needs_check` came
+out FALSE for longdouble and clongdouble and the sweep was skipped ENTIRELY:
+
+```
+  np.asarray_chkfinite(np.array([1.0, nan], dtype=np.longdouble))
+    numpy -> ValueError: array must not contain infs or NaNs
+    fnp   -> RETURNED THE ARRAY (array([ 1., nan,  3.], dtype=float128))
+```
+
+The one job this function has is to reject non-finite input, and it failed OPEN on two dtypes -
+silently, with no exception and no warning. Eight probe cells (longdouble/clongdouble x
+nan/+inf/-inf/all-nan) hit it.
+
+numpy's own test is `a.dtype.char in typecodes['AllFloat']`, i.e. `efdgFDG` - which is EXACTLY
+kinds `'f'` and `'c'`. So the kind IS the predicate, and there is no dtype table left that can fall
+behind numpy's.
+
+### 2. THE SAME FIX IS THE PERFORMANCE LEVER
+
+`numpy.dtype.name` is PURE PYTHON and 1213.5 ns on this host, ~40x `.kind`. It was read
+UNCONDITIONALLY. On the integer cell - where the answer is "no sweep needed" - that read was the
+ENTIRE call.
+
+Two more of the same class rode along: `empty_like` is pure delegation and built a per-call kwargs
+dict (with a non-interned `order` `&str`, another `PyString`) for parameters numpy takes
+POSITIONALLY; and `correlate`/`convolve`'s integer gate was the last of the three still charging
+the f64 operand pair two shape `Vec`s, two contiguity flags and both dtypes before declining -
+`conv_corr_f64_1d_lens` already proves the pair is f64, and an f64 pair can never be integral.
+
+```
+DTYPE_NAME_AND_KWARGS_CEREMONY worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=c4d47519d184  after_elf=4303999be9ca      run1 / run2 (arm order reversed)
+
+  case                      BEFORE            AFTER          excess ns (run1)
+  chkfinite int 2^8      11.214 / 11.151 -> 0.868 / 0.889 WIN   1240 ->  -15
+  chkfinite 2^8           2.038 /  2.120 -> 1.105 / 1.108       2343 ->  160
+  chkfinite 2^12          1.733 /  1.779 -> 1.066 / 1.065       1624 ->  138
+  chkfinite 2^16          1.200 /  1.220 -> 1.018 / 0.994       2512 ->    4
+  empty_like 2^8          2.185 /  2.176 -> 1.708 / 1.653        260 ->  157
+  empty_like 2^12         2.227 /  2.197 -> 1.735 / 1.724        256 ->  192
+  empty_like 2^16         2.092 /  2.074 -> 1.671 / 1.662        257 ->  191
+  empty_like int 2^8      2.179 /  2.187 -> 1.660 / 1.676        260 ->  181
+  empty_like 2-D 64^2     2.240 /  2.208 -> 1.709 / 1.731        261 ->  198
+  correlate 256x256 val   3.007 /  2.967 -> 1.811 / 1.797        916 ->  634
+  convolve  256x256 val   1.922 /  1.948 -> 1.384 / 1.375       1027 ->  454
+  correlate 256x8 valid   1.895 /  1.787 -> 1.219 / 1.228       1087 ->  186
+  convolve  256x8 valid   1.116 /  1.109 -> 0.755 / 0.758 WIN     269 -> -358
+  correlate 1024x256      1.038 /  1.078 -> 1.037 / 1.024         468 ->  337
+  convolve  1024x256      1.032 /  1.085 -> 1.019 / 1.019         695 -> -4329
+
+  ENGAGEMENT (the int gate must still be REACHED for integer operands):
+  correlate int 4096x64   1.613 /  1.628 -> 1.483 / 1.494    native path still taken
+```
+
+**`chkfinite int 2^8` is the counted proof.** numpy does 117 ns; fnp did 1358 ns, of which 1213.5
+was one `dtype.name`. After: 103 ns, a 0.868x/0.889x WIN. The excess goes 1240 ns -> -15 ns.
+
+**A/A NULL CONTROLS:** 62 of 64 nulls pass across both runs (0.9651-1.0546 overall; the two BIASED
+are `chkfinite 2^8` BEFORE in run 1 and `correlate int 4096x64` BEFORE in run 2). BEFORE/AFTER
+ranges are DISJOINT on every cell except `correlate 1024x256`, which barely moves.
+
+### REGIME - DISCLOSED, AND THE REASON THERE ARE TWO RUNS
+
+**Both runs were taken at loadavg 896-924.** A different project on this box (`franken_networkx`)
+launched a very large pytest fan-out mid-session. That is far outside any regime I would normally
+bank, so instead of quoting one run I ran the whole table TWICE with the BEFORE/AFTER arm order
+REVERSED. The two runs agree to 1-3% on every cell, and every null but two passes.
+
+That is worth recording as a positive result about the instrument: the interleaved ABBAABBA design
+survives extreme load when both arms take the SAME code path. Contrast the artifact recorded one
+row above in this ledger - `convolve 5000x4096` read 8.733x at loadavg 27.9 - where the two arms
+take DIFFERENT paths with very different memory behaviour. **The design protects against load; it
+does not protect against two arms with different allocation profiles.**
+
+PARITY: 7 float dtypes x 5 payloads (finite/nan/+inf/-inf/all-nan) plus 5 integer dtypes for
+`asarray_chkfinite`, with dtype=/order= kwargs, lists, 0-d, empty, 2-D, strided and an invalid
+dtype; `empty_like` over 12 dtypes x 6 shapes x 13 kwarg combinations x 4 layouts (C/F/transposed/
+`np.matrix`) compared on dtype, shape, `type()` and four flags (content is undefined); and
+`correlate`/`convolve` over 4 integer dtypes x 3 modes to prove the skipped gate still engages.
+**BEFORE 8 divergences - all of them the longdouble fail-open - AFTER 0.**
+654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^16 f64 = 512 KB.
+
+RETRY PREDICATE: the `dtype.name` read is gone from this route; do not look for it here again.
+**GREP THE REST OF THE FILE FOR `getattr("name")` ON A DTYPE** - the earlier sweep that fixed the
+four `as*array` routes missed this one, so assume it missed others. `empty_like` at ~1.67x is now
+pure `#[pyfunction]` entry plus one delegating call, which makes it the cleanest available probe
+for what the `(*args, **kwargs)` wrapper itself costs. `correlate 256x256 valid` at ~1.80x is the
+family's standing worst and its residual ~630 ns is the two surviving gates plus delegation.
+AGENT_NAME=TanBridge.
