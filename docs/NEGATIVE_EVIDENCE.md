@@ -57767,3 +57767,143 @@ Attribution to this change is REFUTED BY DIFF (the functional change is three pr
 Arcsin/Arccos/Arccosh plus a match whose default arm is the old `return Ok(None)`; no arm shares
 state) but a rebuild A/B was NOT run, and the bead says so and asks the next agent to do it first.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP: the log family was 56% of ALL remaining headroom, hidden by ratio-ranking; ONE bad element flipped a 3.5–5.6x WIN into a ~3x loss (`deadlock-audit-7kcz8`)
+
+### RANKING BY RATIO HID THE BIGGEST CELL ON THE BOARD
+
+After five ships the sweep is flat BY RATIO — the top ratios are sub-microsecond entry costs where
+"8.28x" is 291 ns. Ranking all 269 cells by ABSOLUTE headroom (`fnp_ns - numpy_ns`) instead:
+
+```
+  delta_ns    ratio   numpy_ns     fnp_ns   case
+    506200    1.98x    518604    1024804   log2[f64]
+    503304    1.82x    617251    1120555   log10[f64]
+    445824    1.86x    520518     966342   log[f64]
+    228504    1.23x   1009093    1237597   histogramdd[f64]
+    129246    1.64x    201722     330968   vander[f64@tiny]
+```
+
+**The log family is 1.455 ms of the 2.618 ms total across all 147 losing cells — 56% of everything
+left**, while sitting mid-table by ratio. **Once ratios are entry-dominated, rank by absolute
+delta.** That reordering is the finding; the fix followed from it.
+
+### THE DEFECT — the pay-twice deferral for the THIRD time this session
+
+```
+  op      operand                 numpy_ns      fnp_ns   ratio
+  log     all in-domain            249960.3     71025.9   0.28x   <- 3.5x WIN
+  log     + ONE negative           253040.5    765287.8   3.02x   LOSS
+  log     + ONE zero               255023.1    751848.5   2.95x   LOSS
+  log2    all in-domain            243252.7     64234.6   0.26x   <- 3.8x WIN
+  log2    + ONE negative           246262.0    716090.1   2.91x   LOSS
+  log10   all in-domain            441519.2     78838.3   0.18x   <- 5.6x WIN
+  log10   + ONE negative           443717.9    977124.1   2.20x   LOSS
+```
+
+### WHAT THE PREVIOUS BEAD COULD NOT DO, AND WHAT CHANGED
+
+`deadlock-audit-2qjj3` measured that a one-element witness reproduces exactly ONE errstate category
+and therefore left log/log2/log10 deferring: they raise TWO (`v == 0` divide, `v < 0` invalid) and
+their predicate fused both into one bool, leaving nothing to select a witness from.
+
+FIX: **RESOLVE the category instead of guessing it.** One read pass over the input, on the EVENT
+PATH ONLY, separates them; then raise only the witnesses that apply. That pass replaces a full numpy
+recompute of the whole array.
+
+**DIVIDE IS RAISED FIRST, and the order is not arbitrary.** NumPy reports from the FP status word in
+a fixed CATEGORY order, not element order: `log([0.0,-1.0])` and `log([-1.0,0.0])` BOTH raise
+"divide by zero encountered in log" under `errstate(all='raise')`. Issuing invalid first would raise
+the wrong one. Verified, along with every other claim the fix rests on:
+
+```
+  log(-1.0) invalid   log(0.0) divide   log(-0.0) divide
+  log(-inf) invalid   log(+inf) none    log(nan)  none
+  witnesses log(0.0) then log(-1.0) produce the SAME warning set as the real two-category array
+```
+
+The `is_finite()` hole is fixed in passing (the `log` half of `deadlock-audit-kaa5i`): the predicate
+is now `value <= 0.0`, which IEEE makes exactly the union — both zeros compare equal, every negative
+including -inf compares less, NaN and +inf compare false.
+
+### A REGRESSION I INTRODUCED AND THE HARNESS CAUGHT — RECORDED, NOT BURIED
+
+The first version of this ship (`7efd3766`) failed the contract's parity assert BEFORE timing:
+
+```
+  assertion `left == right` failed: log2[f64]: arms disagree before timing
+    left: 16112145999228738862   right: 10975701088631882926
+```
+
+**My own probe could not see it.** I used `np.array_equal(..., equal_nan=True)`, which treats every
+NaN as equal. The harness checksums RAW BITS:
+
+```
+  op      operand    numpy                 fnp
+  log     negative   0x7ff8000000000000    0xfff8000000000000
+  log     -inf       0x7ff8000000000000    0xfff8000000000000
+  log2    negative   0x7ff8000000000000    0xfff8000000000000
+  log10 / sqrt / arccosh / arcsin / arccos    all bit-identical
+```
+
+Rust's `ln()`/`log2()` sign their quiet NaN NEGATIVE where NumPy signs it POSITIVE. The old deferral
+hid it because NumPy produced the whole buffer; keeping our own exposed it. Fixed in `22d4cb64` by
+canonicalising the sign inside the category-resolve pass that already runs — zero cost on the common
+path — and the test now asserts BIT equality through a `uint64` view rather than `equal_nan`.
+**`equal_nan=True` IS NOT A PARITY CHECK for a route that produces its own NaNs.**
+
+### RESULT — dual-null contract, incumbent = numpy LIVE in the same invocation
+
+bench elf `c207ae1348369ac1c2adf4c76b33f6ccf158244bf6897d343c7334e356776f77`, `RAYON_NUM_THREADS=16`
+(this box is noise-dominated at 64, per `deadlock-audit-2qjj3`):
+
+```
+  case         verdict         ratio_median  ci95                 numpy_ns    fnp_ns    exact_bytes
+  log2[f64]    DECIDABLE_WIN   1.274533      [1.248493,1.306033]   548479.0  457573.0   passed
+  log[f64]     DECIDABLE_WIN   1.235516      [1.190309,1.282411]   596291.0  480596.0   passed
+  log10[f64]   DECIDABLE_WIN   1.370682      [1.345910,1.382103]   614786.0  461325.0   passed
+```
+
+**All three flipped from ~1.9x LOSS to ~1.3x WIN**, and all three now pass the bit-exact check that
+the first attempt failed.
+
+Pinned dual-null at 16 threads, 11/12 nulls PASS:
+
+```
+  op      operand                numpy_ns     fnp_ns    ratio    (before)
+  log     in-domain              249037.9    54440.6   0.219x    0.28x
+  log     + ONE negative         256870.4   186744.1   0.663x    3.02x LOSS
+  log     + BOTH categories      257289.2    56667.4   0.225x    —
+  log     standard_normal        535578.2   169105.3   0.353x    1.97x LOSS
+  log2    + ONE negative         247481.6   154430.8   0.723x    2.91x LOSS
+  log2    standard_normal        522209.9   147707.8   0.317x    2.16x LOSS
+  log10   + ONE negative         444988.5   217681.8   0.404x    2.20x LOSS
+  log10   standard_normal        671760.5   184321.2   0.319x    2.15x LOSS
+```
+
+MEASURED HEADROOM LEFT IN THIS ROUTE, disclosed rather than left implicit: the `+ ONE negative`
+cells (0.404-0.723x) are markedly worse than `+ BOTH categories` (0.185-0.225x) because the resolve
+pass no longer early-breaks — a single-category operand walks the whole input. That is ~130 us on
+`log` at n=2^16 (186744 vs 56667). The break was removed deliberately, since every offending slot
+needs its NaN sign canonicalised, not just the first two categories found. A vectorised resolve pass
+would recover most of it and is NOT attempted here.
+
+STILL DEFERRING, DELIBERATELY: `arctanh` ({invalid, divide}) and `exp`/`exp2` ({over, under}). Their
+splits are unmeasured, and exp's over/under boundary is value-dependent in a way `v <= 0` is not.
+The `arctanh` half of `deadlock-audit-kaa5i` is untouched.
+
+A/A NULL CONTROLS: contract dual nulls straddle unity on all three cells (incumbent 1.0023 / 1.0051
+/ 0.9983). Twelve pinned cells with their own dual nulls, eleven PASS within 0.016; the one BIASED
+row (`log + ONE negative`, candidate null 0.9659) is quoted with that disclosed.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+`transcendental_domain_events_match_numpy_including_the_infinities` RUN AND PASSING — eight ops x
+domain edges (incl. -0.0 and both infinities) x errstate warn/raise/ignore, plus a
+both-categories-in-one-call case in BOTH element orders asserting the raised CATEGORY matches and
+that the output BITS match.
+RETRY PREDICATE: do not extend the witness pattern to arctanh/exp/exp2 without measuring their
+category split first. Do not re-measure these cells at 64 threads on a shared host. And do not use
+`array_equal(equal_nan=True)` to certify a route that produces its own NaNs — it cannot see a sign
+bit, and that is exactly what went wrong on the first attempt here.
+AGENT_NAME=TanBridge.
