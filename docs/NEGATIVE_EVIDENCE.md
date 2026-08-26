@@ -57544,3 +57544,120 @@ that equivalence is the whole argument. `SQRT_PARALLEL_MIN = 1 << 17` was NOT to
 open: on positive input the win degrades from 0.21x at 8 threads to 0.50x at 64 at n=2^18, which is
 the `APPEND_PAR_MIN` shape (`deadlock-audit-dc6mz`) in miniature — a lost win, not a loss.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP: `meshgrid`'s cold Rust branch captured the ORDINARY dtypes and shadowed the good path directly beneath it; 19.76x–78.22x on every arity except 2, now parity (`deadlock-audit-bvihx`)
+
+### THE CELL, AND THE SWEEP UNDERSTATED IT ~20x AGAIN
+
+`bench_vs_numpy_loss_sweep` ranked `meshgrid[f64]` at 2.5484x — the last cell with real absolute
+headroom. Same failure as `take`: the sweep measures ONE operand shape at ONE size, and numpy is
+near-flat here while we were not.
+
+```
+  1-arg, scaled in N      numpy_ns      fnp_ns    slower
+    N=2^10                 2477.6      7018.0     2.83x
+    N=2^14                 4708.4     45504.4     9.66x
+    N=2^16                13432.6    756586.6    56.32x
+    N=2^18                44377.1   3203989.6    72.20x
+    N=2^20               152147.6  11901652.5    78.22x
+```
+
+And it was never confined to the degenerate 1-arg spelling — **it was every arity except two**:
+
+```
+  args            out shape        numpy_ns      fnp_ns    slower
+  1 (n=65536)     (65536,)          13307.6    774597.8    58.21x
+  2 (256x256)     (256,256)        401747.8    386388.1     0.96x   <- the only covered case
+  3 (40^3)        (40,40,40)        65271.4   1615867.7    24.76x
+  4 (12^4)        (12,12,12,12)     42551.3    840888.4    19.76x
+```
+
+### MECHANISM — THE FAST PATH WAS ALREADY THERE, REACHABLE ONLY BY ACCIDENT OF DTYPE
+
+`try_zerocopy_meshgrid_2d` opens with `xi.len() != 2`, so it covers exactly two exact-1-D-ndarray
+inputs. Everything else — one input, three, four, or two given as LISTS — fell into a branch running
+`extract_precise_numeric_array` per operand, then `UFuncArray::meshgrid_advanced`, then
+`build_numpy_tuple_from_ufuncs`: three allocations and three copies where numpy does one.
+
+That branch was gated on `meshgrid_rust_compatible`, true for kinds b/i/u/f. **It captured the
+ORDINARY dtypes and let only the exotic ones through to `build_meshgrid_numpy_outputs`** — the good
+path, sitting directly underneath, composing exactly what numpy composes (reshape to the per-axis
+shape, `broadcast_arrays`, `.copy()` when copy is set) at one allocation per output.
+
+Proven by forcing the good path with a complex operand (kind `'c'` fails the gate) and running the
+SAME shapes through BOTH routes in the same build:
+
+```
+  shape          cold Rust path      numpy-composed path
+  1 arg 2^16     11.85x LOSS         1.00x
+  3 arg 40^3     53.80x LOSS         0.96x
+  4 arg 12^4     22.15x LOSS         0.99x
+```
+
+FIX: delete the cold branch and its now-dead `meshgrid_rust_compatible` gate; always fall through.
+
+### RESULT — dual-null contract, incumbent = numpy LIVE in the SAME INVOCATION
+
+```
+AFTER   bench_elf_sha256=44827831a1d88b93f62640c105d51900a8e769234a093cae02898f99e910976d
+        verdict=UNDECIDED  ratio_median=1.041259 ci95=[1.021171,1.058630]
+        incumbent 19217.000 ns   candidate 18420.000 ns
+        incumbent_null 0.984315 [0.968819,1.009979]  straddles
+        candidate_null 0.999197 [0.979141,1.018960]  straddles
+        exact_bytes=passed checksum=3b5ea26e780f624a
+```
+
+UNDECIDED is the correct verdict and is quoted as such: the effect CI excludes unity, but 4.1% is
+below `required_2x_delta` = 0.062363 against a controlling null half-width of 0.031181, so the
+harness refuses to decide. **Parity, not a win.**
+
+Pinned dual-null across arities, all nulls PASS:
+
+```
+  cell              numpy_ns      fnp_ns    ratio
+  1 arg n=2^16       13294.4     13423.1   0.990x   (was 58.21x LOSS)
+  1 arg n=2^20      171215.1    171277.8   1.000x   (was 78.22x LOSS)
+  2 arg 256x256      29041.5     21835.3   0.743x   (native zero-copy path, untouched)
+  2 arg as LISTS     40285.3     39650.0   0.984x
+  3 arg 40^3         48127.1     47441.8   0.986x   (was 24.76x LOSS)
+  4 arg 12^4         45918.4     45138.7   0.981x   (was 19.76x LOSS)
+```
+
+**DISCLOSED DELEGATION for arity != 2.** This is parity via numpy composition, not a native win.
+The only native win in meshgrid is the 2-arg ndarray path at 0.743x, which this does not touch and
+does not claim.
+
+### PARITY: 304 CASES, 112 FIXED, 0 INTRODUCED
+
+13 operand families (f64/f32/f16/i32/i64/u8/bool/c128/str/pylist/scalar/2-D-input/empty) x arity
+1/2/3 x indexing xy/ij x sparse x copy.
+
+```
+  BEFORE divergences=128     AFTER divergences=16     fixed=112     introduced=0
+```
+
+The 16 that remain are the 2-arg zero-copy path and are the `.base is not None` provenance field
+ONLY. **Verified not an aliasing bug on BOTH builds**: `shares_memory` with the inputs is False, and
+mutating the inputs after a `copy=True` call leaves the outputs unchanged. Provenance, not
+semantics.
+
+### A MEASUREMENT-METHOD CORRECTION THAT APPLIES TO THE EARLIER ROWS TOO
+
+The first pass of this diff used `comm -13 <(sort BEFORE) <(sort AFTER)` and reported TWO
+introduced divergences. They were spurious — the lines were byte-identical in both files, and
+`comm` mis-ordered under process substitution with the default locale. Re-run as an exact multiset
+diff (`collections.Counter` difference) it is 112 fixed / 0 introduced. **The same exact method was
+re-applied to the `take` row banked earlier today and reproduces its 18 fixed / 0 introduced**, so
+that claim stands. Use the multiset diff, not `comm`, for these probes.
+
+A/A NULL CONTROLS: contract dual nulls both straddle unity (biases 0.0157 / 0.0008); six pinned
+arity cells each with their own dual nulls, all within 0.0060 of unity.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+RETRY PREDICATE: the remaining meshgrid headroom is the 2-arg native path (0.743x) and nothing
+else — every other arity is now numpy's own composition and cannot be beaten without a native
+n-ary broadcast-and-copy that does not round-trip through Python. Do not re-introduce a Rust
+extract path here: it was 11.85-53.80x slower than the composition it was shadowing, measured
+route-against-route in the same build.
+AGENT_NAME=TanBridge.
