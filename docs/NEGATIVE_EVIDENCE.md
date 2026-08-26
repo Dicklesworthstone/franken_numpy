@@ -58459,3 +58459,61 @@ same A/B. Several of these cells are large contiguous WINS (`any` 0.07x, `logica
 careless guard would trade a 14x win for a 10x loss avoided. And do not expect the Rust contract to
 certify these — it cannot reach a strided operand; the A/B is the evidence.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP (2nd from the strided vein): `isposinf`/`isneginf`/`logical_not`, 35.343x strided becomes 1.032x (`deadlock-audit-0iwez`)
+
+Second ship from the operand axis opened in `b47125ed`. These are the three largest remaining cells
+on it.
+
+### MECHANISM — identical in all three, and the sweep scores all three as WINS
+
+The zero-copy path needs a contiguous buffer, so a strided view declines it and the call drops into
+`extract_numeric_array`, which copies the whole operand to get one. NumPy's strided loop beats that
+copy by 20-35x. The Rust loss sweep's ladder is entirely C-contiguous, so on its operands all three
+are wins and it reports them healthy.
+
+Fifth, sixth and seventh sites to take the guard, after `take` (`deadlock-audit-yphwc`), `meshgrid`
+(`deadlock-audit-bvihx`), `nanargmax`/`nanargmin` (`deadlock-audit-0e1q5`) and the angle conversions
+(`0ecf6f44`).
+
+### RESULT — same-session A/B, dual nulls, all PASS
+
+```
+  case                          BEFORE      AFTER
+  isneginf strided             35.343x     1.032x
+  isneginf contiguous           0.453x     0.455x   WIN preserved
+  isposinf strided             26.976x     1.035x
+  isposinf contiguous           0.415x     0.441x   WIN preserved
+  logical_not strided          29.972x     1.025x
+  logical_not contiguous        0.269x     0.263x   WIN preserved
+```
+
+The contiguous control is the load-bearing row in each pair. The guard fires only where the fast
+path had already declined for LAYOUT, so it must not cost the existing win — and does not.
+
+### A TRIAGE ENTRY CHECKED AND DROPPED
+
+`corrcoef` ranked **20.78x** on the strided triage and was the top of the list. Dual-null on a
+realistic 2-D strided operand reads **1.015x strided / 1.012x contiguous — not a real loss**. The
+triage cell was 1-D input, which is degenerate for `corrcoef`. Not touched, and the vein's ranking
+should be read with that in mind: **the strided sweep is triage exactly like the Rust one, and its
+top entry was an artifact.**
+
+PARITY: 8 dtypes (f64/f32/f16/i64/i32/u8/bool/c128) x 3 layouts x 3 ops, with inf/-inf/nan/0.0
+seeded through the float arrays, plus scalar, 0-d, empty, list and signed-zero operands — compared
+on dtype, shape AND raw bytes. **One divergence found and confirmed PRE-EXISTING**:
+`logical_not(complex128)` returns an array in NumPy and raises `TypeError: logical_not(x): expected
+a bool/int/uint/float array, got dtype complex128` in fnp. Verified byte-identical before and after
+this change by running both builds; it is out of scope here and remains open.
+
+A/A NULL CONTROLS: six pinned A/B cells with their own dual nulls, all PASS within 0.016.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+RETRY PREDICATE: the remaining strided cells worth taking are `ediff1d` (12.438x / 0.970x),
+`frexp` (7.359x / 0.495x), `modf` (5.886x / 0.160x), `all` (19.267x / 0.815x) and `any`
+(19.163x / **0.063x**). `any` carries the largest contiguous win in the vein — a 15.8x — so its
+guard needs the contiguous control measured in the same A/B before it lands. Do NOT trust the
+strided triage ranking without a dual-null check first; `corrcoef` topped it at 20.78x and is not a
+loss at all.
+AGENT_NAME=TanBridge.
