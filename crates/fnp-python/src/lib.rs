@@ -97293,6 +97293,122 @@ fn try_native_f16_inner(
     Ok(Some(result))
 }
 
+// THE FACTS EVERY GATE IN THE `matmul`/`dot` CHAINS RE-DERIVES FOR ITSELF.
+//
+// `matmul` is eleven `try_*` gates and `dot` is six. Each one opens by re-reading
+// `shape` - a FRESH `Vec<usize>` per operand per gate - and its own dtype before
+// it can decline. Nothing is cached between them, so an operand pair that NO gate
+// can accept still pays the entire chain. Measured against the live numpy on
+// thinkstation1 (median of 9 x 200 calls, OPENBLAS_NUM_THREADS=1):
+//
+//   matmul 1-D @ 1-D f64   2^8    750.4 ->  3291.1 ns   +2540.8   4.386x
+//   matmul 1-D @ 1-D f64   2^13  1857.8 ->  4598.6 ns   +2740.7   2.475x
+//   matmul 2-D @ 2-D f64   8^2   1215.0 ->  5564.6 ns   +4349.6   4.580x
+//   dot    1-D @ 1-D f64   2^10   558.9 ->  2155.7 ns   +1596.8   3.857x
+//
+// The excess is FLAT in n, which is what identifies it as the chain rather than
+// the arithmetic.
+//
+// One read of (rank, dtype kind, itemsize) per operand answers, for free, the
+// question every gate asks first. The gates themselves are UNCHANGED; this only
+// decides which of them are worth calling.
+#[derive(Clone, Copy)]
+struct MatmulOperandFacts {
+    rank: usize,
+    kind: char,
+    itemsize: usize,
+}
+
+// `None` for anything that is not an EXACT `ndarray`. The f64 GEMM gate admits
+// ndarray SUBCLASSES through `is_instance`, so an operand we cannot classify has
+// to walk the chain exactly as it did before.
+fn matmul_operand_facts(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<MatmulOperandFacts>> {
+    if !value.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let rank = value.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+    let dtype = value.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    Ok(Some(MatmulOperandFacts {
+        rank,
+        kind,
+        itemsize,
+    }))
+}
+
+// Which FAMILIES of gate can possibly accept this operand pair. Each field is a
+// NECESSARY condition taken straight from the gates it guards, never a
+// sufficient one - a gate that is called still decides everything for itself.
+//
+// Two axes: dtype family, and whether any operand carries a batch. The `_flat`
+// gates all require both ranks <= 2 (the lowest-rank of them is the integer
+// vecmat, 1-D @ 2-D); the `_batched` gates all require at least one operand of
+// rank >= 3, either as an equal batch or as a matrix broadcast.
+#[derive(Clone, Copy)]
+struct MatmulGatePlan {
+    f64_flat: bool,
+    f64_batched: bool,
+    int_flat: bool,
+    int_batched: bool,
+    f16_flat: bool,
+    f16_batched: bool,
+}
+
+impl MatmulGatePlan {
+    // `out=` or any ufunc kwarg: every gate declines already.
+    const NOTHING: Self = Self {
+        f64_flat: false,
+        f64_batched: false,
+        int_flat: false,
+        int_batched: false,
+        f16_flat: false,
+        f16_batched: false,
+    };
+
+    // Unclassifiable operand: try everything, which is the pre-existing
+    // behaviour.
+    const EVERYTHING: Self = Self {
+        f64_flat: true,
+        f64_batched: true,
+        int_flat: true,
+        int_batched: true,
+        f16_flat: true,
+        f16_batched: true,
+    };
+
+    fn for_operands(a: Option<MatmulOperandFacts>, b: Option<MatmulOperandFacts>) -> Self {
+        let (Some(a), Some(b)) = (a, b) else {
+            return Self::EVERYTHING;
+        };
+        // The dot product - two 1-D operands - is the rank pair NO gate accepts.
+        if a.rank < 2 && b.rank < 2 {
+            return Self::NOTHING;
+        }
+        let flat = a.rank <= 2 && b.rank <= 2;
+        let batched = a.rank >= 3 || b.rank >= 3;
+        let float_of_size =
+            |f: MatmulOperandFacts, itemsize: usize| f.kind == 'f' && f.itemsize == itemsize;
+        // A SUPERSET of what the integer gates take: they additionally require
+        // the two dtypes to match, which stays their own business.
+        let integral = |f: MatmulOperandFacts| matches!(f.kind, 'i' | 'u' | 'b');
+        let is_f64 = float_of_size(a, 8) && float_of_size(b, 8);
+        let is_int = integral(a) && integral(b);
+        let is_f16 = float_of_size(a, 2) && float_of_size(b, 2);
+        Self {
+            f64_flat: is_f64 && flat,
+            f64_batched: is_f64 && batched,
+            int_flat: is_int && flat,
+            int_batched: is_int && batched,
+            f16_flat: is_f16 && flat,
+            f16_batched: is_f16 && batched,
+        }
+    }
+}
+
 // Medium-large float64 GEMM-shaped calls route to the native Rust kernel; the
 // rest pass through to NumPy so small matrices, out=, dtype/ufunc kwargs,
 // integer/complex dtypes, non-finite payloads, and unprofiled sizes retain the
@@ -97306,8 +97422,21 @@ fn matmul(
     out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kw| kw.is_empty())
+    // ONE classification for the whole chain below (`deadlock-audit-mtgc4`). It
+    // also subsumes the eleven repeated kwargs/`out=` checks, which each bound a
+    // fresh `Bound` before deciding nothing had changed since the last gate.
+    let plan = if kwargs.is_none_or(|kw| kw.is_empty())
         && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    {
+        MatmulGatePlan::for_operands(
+            matmul_operand_facts(py, x1.bind(py))?,
+            matmul_operand_facts(py, x2.bind(py))?,
+        )
+    } else {
+        MatmulGatePlan::NOTHING
+    };
+
+    if plan.f64_flat
         && let Some(result) = python_native_gemm_f64_2d(
             py,
             x1.bind(py),
@@ -97319,11 +97448,9 @@ fn matmul(
         return Ok(result);
     }
 
-    if kwargs.is_none_or(|kw| kw.is_empty())
-        && python_explicit_out_is_absent_or_none(py, out.as_ref())
-    {
-        let numpy = py.import("numpy")?;
-        if let Some(result) = try_zerocopy_f64_batched_matmul(py, &numpy, x1.bind(py), x2.bind(py))?
+    if plan.f64_batched {
+        let numpy = cached_numpy(py)?;
+        if let Some(result) = try_zerocopy_f64_batched_matmul(py, numpy, x1.bind(py), x2.bind(py))?
         {
             return Ok(result);
         }
@@ -97331,8 +97458,7 @@ fn matmul(
 
     // Native parallel integer 2-D @ 2-D matmul (numpy has no BLAS for ints -> slow
     // naive loop). Bit-exact wrapping GEMM; defers everything else to numpy.
-    if kwargs.is_none_or(|kw| kw.is_empty())
-        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.int_flat
         && let Some(result) = try_native_int_matmul(py, x1.bind(py), x2.bind(py))?
     {
         return Ok(result);
@@ -97340,8 +97466,7 @@ fn matmul(
 
     // Integer vecmat (1-D v @ 2-D A): numpy's strided column walk is ~7x its
     // own matvec; row-major block accumulation is byte-exact and parallel.
-    if kwargs.is_none_or(|kw| kw.is_empty())
-        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.int_flat
         && let Some(result) = try_native_int_vecmat(py, x1.bind(py), x2.bind(py))?
     {
         return Ok(result);
@@ -97349,8 +97474,7 @@ fn matmul(
 
     // Native parallel FLOAT16 2-D @ 2-D matmul (numpy has no f16 BLAS -> naive widen loop,
     // ~245x slower than f32 BLAS). Bit-exact (sequential-k f32 accumulation, narrow once).
-    if kwargs.is_none_or(|kw| kw.is_empty())
-        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.f16_flat
         && let Some(result) = try_native_f16_matmul(py, x1.bind(py), x2.bind(py))?
     {
         return Ok(result);
@@ -97358,8 +97482,7 @@ fn matmul(
 
     // Native parallel BATCHED integer matmul (>=3-D, matching batch dims). numpy's
     // integer batched matmul is a naive per-slice serial loop (~53x slower than float).
-    if kwargs.is_none_or(|kw| kw.is_empty())
-        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.int_batched
         && let Some(result) = try_native_int_batched_matmul(py, x1.bind(py), x2.bind(py))?
     {
         return Ok(result);
@@ -97367,8 +97490,7 @@ fn matmul(
 
     // Broadcast-batch (>=3-D @ shared 2-D) integer/bool matmul: numpy's no-BLAS
     // loop is serial per slice; a zero-copy (B*m, k) reshape routes the 2-D kernels.
-    if kwargs.is_none_or(|kw| kw.is_empty())
-        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.int_batched
         && let Some(result) = try_native_intbool_broadcast_matmul(py, x1.bind(py), x2.bind(py))?
     {
         return Ok(result);
@@ -97377,8 +97499,7 @@ fn matmul(
     // Mirror direction (shared 2-D @ >=3-D) integer/bool matmul: shared-a
     // batched kernels (a_batch_stride=0). matmul-only - dot's 2-D @ N-D
     // contraction has a different output layout.
-    if kwargs.is_none_or(|kw| kw.is_empty())
-        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.int_batched
         && let Some(result) =
             try_native_intbool_shared_a_batched_matmul(py, x1.bind(py), x2.bind(py))?
     {
@@ -97387,8 +97508,7 @@ fn matmul(
 
     // Native parallel BATCHED float16 matmul (>=3-D, matching batch dims). numpy has no f16
     // BLAS -> naive per-slice widen loop (~54x slower than batched f32 BLAS). Bit-exact.
-    if kwargs.is_none_or(|kw| kw.is_empty())
-        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.f16_batched
         && let Some(result) = try_native_f16_batched_matmul(py, x1.bind(py), x2.bind(py))?
     {
         return Ok(result);
@@ -97396,8 +97516,7 @@ fn matmul(
 
     // Native parallel BROADCAST float16 matmul (one operand >=3-D, the other 2-D shared across the
     // batch). numpy has no f16 BLAS -> naive widen loop (~105x slower than f32 BLAS). Bit-exact.
-    if kwargs.is_none_or(|kw| kw.is_empty())
-        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.f16_batched
         && let Some(result) = try_native_f16_broadcast_matmul(py, x1.bind(py), x2.bind(py))?
     {
         return Ok(result);
@@ -97417,7 +97536,19 @@ fn matmul(
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    if python_explicit_out_is_absent_or_none(py, out.as_ref())
+    // Same one-classification dispatch as `matmul` (`deadlock-audit-mtgc4`): six
+    // gates that each re-read shape and dtype for themselves, and a 1-D @ 1-D dot
+    // product that none of them can accept.
+    let plan = if python_explicit_out_is_absent_or_none(py, out.as_ref()) {
+        MatmulGatePlan::for_operands(
+            matmul_operand_facts(py, a.bind(py))?,
+            matmul_operand_facts(py, b.bind(py))?,
+        )
+    } else {
+        MatmulGatePlan::NOTHING
+    };
+
+    if plan.f64_flat
         && let Some(result) =
             python_native_gemm_f64_2d(py, a.bind(py), b.bind(py), PythonNativeGemmOp::Dot, true)?
     {
@@ -97426,14 +97557,14 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
 
     // Native parallel integer 2-D @ 2-D dot (np.dot(2d,2d) == matmul; numpy has no BLAS
     // for ints -> slow naive loop). Bit-exact wrapping GEMM; everything else defers.
-    if python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.int_flat
         && let Some(result) = try_native_int_matmul(py, a.bind(py), b.bind(py))?
     {
         return Ok(result);
     }
 
     // Integer dot(v 1-D, A 2-D) contracts v with A's first axis == vecmat.
-    if python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.int_flat
         && let Some(result) = try_native_int_vecmat(py, a.bind(py), b.bind(py))?
     {
         return Ok(result);
@@ -97442,7 +97573,7 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
     // np.dot((B.., m, k), (k, n)) contracts a's last axis with b's first - the
     // same element math as broadcast matmul - so the zero-copy reshape arm
     // (int/bool) applies verbatim.
-    if python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.int_batched
         && let Some(result) = try_native_intbool_broadcast_matmul(py, a.bind(py), b.bind(py))?
     {
         return Ok(result);
@@ -97450,7 +97581,7 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
 
     // np.dot(a >=2-D, b >=3-D) int/bool: shared-A kernel values, one
     // transpose-copy into dot's (Ma, B.., n) layout.
-    if python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.int_batched
         && let Some(result) = try_native_intbool_dot_a2d_bnd(py, a.bind(py), b.bind(py))?
     {
         return Ok(result);
@@ -97458,7 +97589,7 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
 
     // Native parallel FLOAT16 2-D @ 2-D dot (numpy has no f16 BLAS -> naive widen loop).
     // np.dot(2d,2d) == matmul; bit-exact (sequential-k f32 accumulation, narrow once).
-    if python_explicit_out_is_absent_or_none(py, out.as_ref())
+    if plan.f16_flat
         && let Some(result) = try_native_f16_matmul(py, a.bind(py), b.bind(py))?
     {
         return Ok(result);
