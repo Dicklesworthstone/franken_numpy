@@ -59505,3 +59505,93 @@ Rust `String` each time, where matching the interned key object would not alloca
 runs when kwargs are present, so it is invisible to every no-kwarg cell above and needs its own
 `kind=`/`axis=` measurement to justify.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - THE UNARY ELEMENTWISE FAMILY PUT TWO f16 PROBES AHEAD OF THE f64 GATE AND ALLOCATED WITH THE STRING `"float64"`: `degrees` 1.230x -> 1.036x, `square` 2.308x -> 1.829x, `f32` 4.362x -> 3.032x (`deadlock-audit-cfivt`)
+
+`TanBridge`. Shipped `d3401040`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3
+in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell, OPENBLAS_NUM_THREADS=1, on a
+QUIET host (loadavg 5.60).
+
+**Campaign result class:** candidate-win on seventeen cells, all still losses to numpy and reported
+as such; one adverse cell disclosed; three engagement cells unchanged.
+
+`native_unary_elementwise` serves square/negative/positive/absolute/fabs/floor/ceil/trunc/rint/
+sign/reciprocal/sqrt/degrees/radians and every transcendental. Two defects:
+
+1. **Its first two statements were f16 probes.** `try_zerocopy_f16_unary_widen` and
+   `numpy_dtype_is_f16`, each re-deriving the operand's dtype for itself, sat AHEAD of the f64 gate
+   - the one that actually engages for the commonest operand there is. Five more dtype-partitioned
+   gates follow. One `numeric_operand_facts` read now selects the family, on the same terms as
+   `sort`/`argsort`/`matmul`.
+2. **The output was allocated as `numpy.empty(n, "float64")`.** The dtype was already POSITIONAL,
+   but a Rust `&str` builds a fresh `PyString` per call AND makes numpy re-parse it into a dtype
+   every time. It now passes the held `numpy.float64`. Priced with `timeit` first:
+   `np.empty(n, "uint8")` 217.3 ns vs `np.empty(n, u8)` 166.7 ns with the type object held.
+
+```
+UNARY_FAMILY_ENTRY worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=c39d430faed8  after_elf=1afd71f5c6a2      loadavg 5.60
+
+  case                 BEFORE                      AFTER              excess ns
+  square f64 2^8   2.308x [2.277,2.473] -> 1.829x [1.712,2.019]     468 -> 299
+  rint f64 2^8     2.353x [2.329,2.557] -> 1.974x [1.717,2.221]     472 -> 344
+  ceil f64 2^8     2.300x [1.977,2.485] -> 1.948x [1.718,2.080]     466 -> 345
+  floor f64 2^8    2.296x [2.277,2.489] -> 1.969x [1.946,2.075]     463 -> 355
+  trunc f64 2^8    2.293x [1.996,2.482] -> 1.933x [1.865,2.073]     470 -> 338
+  reciprocal 2^8   2.066x [1.782,2.202] -> 1.691x [1.670,1.784]     483 -> 318
+  negative f64 2^8 2.065x [1.800,2.195] -> 1.863x [1.639,2.005]     380 -> 308
+  absolute f64 2^8 2.041x [1.996,2.283] -> 1.845x [1.799,1.943]     378 -> 306
+  sqrt f64 2^8     1.492x [1.425,1.521] -> 1.344x [1.165,1.843]     587 -> 385
+  degrees f64 2^8  1.230x [1.167,1.281] -> 1.036x [0.982,1.093]     340 ->  26
+  square f64 2^12  1.502x [1.380,1.584] -> 1.333x [1.222,1.344]     438 -> 290
+  negative f64 2^12 1.407x [1.385,1.500] -> 1.326x [1.195,1.337]    646 -> 289
+  square f32 2^8   4.362x [3.343,4.562] -> 3.032x [2.546,3.284]    1027 -> 618
+  negative u8 2^8  4.824x [4.627,5.016] -> 3.923x [3.526,4.137]    1041 -> 793
+  square i32 2^8   4.740x [4.222,4.954] -> 3.951x [3.413,4.094]    1057 -> 1043
+  square i64 2^8   3.791x [3.739,3.915] -> 3.277x [3.162,3.392]    1012 -> 812
+
+  ENGAGEMENT:
+  sqrt f64 2^20    0.344x WIN          -> 0.364x WIN         native path still taken
+  square i64 2^20  0.959x WIN          -> 0.948x WIN         native path still taken
+  square f64 2^20  1.033x              -> 1.041x             unchanged (bandwidth regime)
+```
+
+**`degrees` is the cleanest reading of the mechanism:** 340 ns of excess becomes 26 ns, i.e. it
+lands on numpy. Nothing about its arithmetic changed - what was removed was two f16
+classifications and a dtype-string parse standing in front of a multiply.
+
+**A/A NULL CONTROLS:** every AFTER null passes (0.9931-1.0169). Three BEFORE cells read BIASED
+(`sqrt f64 2^8` 1.0394, `square f64 2^20` 0.9769, `sqrt f64 2^20` 0.8740) and those three rows are
+"about"; the other fourteen pairs of ranges are DISJOINT or touch at one edge.
+
+**THE ONE ADVERSE CELL:** `square f16 2^8` reads 1.382x -> 1.481x. f16 is the dtype for which
+`float_of(2)` is TRUE, so both f16 probes still run AND the facts read is added in front of them -
+pure overhead, exactly as `i64` was for `sort`. Not decidable (CIs overlap), but it is what the
+mechanism predicts and it is the price of the other sixteen rows.
+
+PARITY: 29 ops x 16 dtypes x 5 shapes, plus a 9-value non-finite seed (nan/+-inf/+-0.0/1e308/
+1e-320) through every op at f64/f32/f16, four layouts, list/python-scalar/numpy-scalar/0-d inputs,
+and eighteen LARGE engagement cells across six dtypes. Compared on dtype, shape, python `type()`
+and RAW BYTES - the last matters here because this family produces NaNs and a value comparison
+cannot see a NaN sign bit. **131 divergences before, 131 after; exact multiset diff says 0
+INTRODUCED and 0 fixed.** 125 of the 131 are my probe's own `longdouble`/`clongdouble`
+padding-byte artifact (80-bit values stored in 16 bytes, so `tobytes()` compares uninitialised
+padding). 654 lib tests pass; clippy and fmt clean.
+
+**A REAL PRE-EXISTING DEFECT THE PROBE FOUND, NOT FIXED HERE:** the remaining 6 divergences are
+`np.matrix` operands coming back as plain `ndarray` from square/negative/absolute/floor/sqrt. It is
+the same defect class fixed for `isnan`/`isinf`/`isfinite`/`signbit` in `deadlock-audit-c0g2r`, and
+the same one-line remedy applies (`ndarray_subclass_needs_numpy` before the extract path). Left for
+its own cycle so it gets its own parity run rather than riding a perf ship.
+
+MEMORY: largest operand 2^20 f64 = 8 MB, one live at a time.
+
+RETRY PREDICATE: do NOT re-attack the f16 probe order or the `"float64"` string on this route -
+both are gone. `square i32 2^8` barely moved (1057 -> 1043 ns of excess) and is now the family's
+worst cell: the i32 gate runs, so the classifier cannot help it, and its cost is inside
+`zerocopy_i32_unary_flat` (which still reshapes - it does NOT allocate at the final shape the way
+the f64 helper does). **That reshape is the next lever for the four integer/f32 gates**, and it is
+the same one already taken for f64 in `deadlock-audit-ei9jz`. There are 71 more
+`set_item(dtype, "float64")` kwargs-dict sites in this file; only the two on this route were taken.
+AGENT_NAME=TanBridge.
