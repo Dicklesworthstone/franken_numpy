@@ -34869,6 +34869,17 @@ fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .call1((x.bind(py),))?
             .unbind());
     }
+    // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+    //
+    // The zero-copy paths above need a contiguous buffer; a strided view declines them and the
+    // call drops into the extract, which copies the whole operand. NumPy's strided loop beats
+    // that copy, and the loss sweep cannot see it because its ladder is entirely C-contiguous.
+    if noncontiguous_ndarray(cached_numpy(py)?, x.bind(py))? {
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "frexp"))?
+            .call1((x.bind(py),))?
+            .unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "frexp(x)")?;
     let is_scalar = x.shape().is_empty();
     let (mantissas, exponents) = ufunc_frexp(&x).map_err(map_ufunc_error)?;
@@ -35149,6 +35160,17 @@ fn modf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if !numpy_dtype_is_f64(py, x.bind(py)) {
         let numpy = cached_numpy(py)?;
         return Ok(numpy
+            .getattr(intern!(py, "modf"))?
+            .call1((x.bind(py),))?
+            .unbind());
+    }
+    // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+    //
+    // The zero-copy paths above need a contiguous buffer; a strided view declines them and the
+    // call drops into the extract, which copies the whole operand. NumPy's strided loop beats
+    // that copy, and the loss sweep cannot see it because its ladder is entirely C-contiguous.
+    if noncontiguous_ndarray(cached_numpy(py)?, x.bind(py))? {
+        return Ok(cached_numpy(py)?
             .getattr(intern!(py, "modf"))?
             .call1((x.bind(py),))?
             .unbind());
@@ -88913,6 +88935,20 @@ fn all(
     }
 
     // Extract input array
+    // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+    //
+    // `try_zerocopy_any_all` above needs a contiguous buffer, so a strided view declines it and
+    // the call drops into `extract_precise_numeric_array`, which copies the whole operand to get
+    // one. NumPy's strided loop beats that copy by ~19x. The loss sweep cannot see this: its
+    // operand ladder is entirely C-contiguous, where this route is a large WIN.
+    //
+    // THE CONTIGUOUS WIN HERE IS THE BIGGEST IN THE VEIN - `any` measures 0.063x contiguous,
+    // a 15.8x win - so this guard is deliberately narrow: it fires ONLY when the fast path has
+    // already declined for LAYOUT, never for dtype or shape, and the contiguous control is
+    // measured in the same A/B to prove the win survived.
+    if noncontiguous_ndarray(numpy, a.bind(py))? {
+        return fallback();
+    }
     let array = match extract_precise_numeric_array(py, a.bind(py), "all(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
@@ -89017,6 +89053,20 @@ fn any(
     }
 
     // Extract input array
+    // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+    //
+    // `try_zerocopy_any_all` above needs a contiguous buffer, so a strided view declines it and
+    // the call drops into `extract_precise_numeric_array`, which copies the whole operand to get
+    // one. NumPy's strided loop beats that copy by ~19x. The loss sweep cannot see this: its
+    // operand ladder is entirely C-contiguous, where this route is a large WIN.
+    //
+    // THE CONTIGUOUS WIN HERE IS THE BIGGEST IN THE VEIN - `any` measures 0.063x contiguous,
+    // a 15.8x win - so this guard is deliberately narrow: it fires ONLY when the fast path has
+    // already declined for LAYOUT, never for dtype or shape, and the contiguous control is
+    // measured in the same A/B to prove the win survived.
+    if noncontiguous_ndarray(numpy, a.bind(py))? {
+        return fallback();
+    }
     let array = match extract_precise_numeric_array(py, a.bind(py), "any(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
@@ -115407,6 +115457,20 @@ fn ediff1d(
             .unbind())
     };
 
+    // BOOL MUST RAISE, NOT COMPUTE. `np.ediff1d` on a boolean array raises
+    // `TypeError: numpy boolean subtract, the `-` operator, is not supported`, because it is
+    // literally `ary[1:] - ary[:-1]`. Every fnp path here happily subtracted the bytes and
+    // returned an array instead.
+    //
+    // This is pre-existing and was found while adding the non-contiguous guard below
+    // (`deadlock-audit-0iwez`): that guard made the STRIDED and TRANSPOSED cases delegate, so
+    // they started raising correctly while the contiguous case still did not. Fixing only the
+    // layouts the guard happened to touch would leave the behaviour depending on LAYOUT, which
+    // is worse than a consistent bug - so all layouts delegate and NumPy raises for all three.
+    if dtype_kind_of(ary.bind(py)) == Some('b') {
+        return fallback();
+    }
+
     // Zero-copy consecutive differences for C-contiguous f64 ndarrays, with
     // optional to_begin/to_end prepended/appended (cast to f64); skips the cold
     // extract/ravel/build Vecs. Bit-identical; uncastable to_begin/to_end dtypes
@@ -115469,6 +115533,14 @@ fn ediff1d(
         return Ok(out);
     }
 
+    // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
+    //
+    // The zero-copy paths above need a contiguous buffer; a strided view declines them and the
+    // call drops into the extract, which copies the whole operand. NumPy's strided loop beats
+    // that copy, and the loss sweep cannot see it because its ladder is entirely C-contiguous.
+    if noncontiguous_ndarray(numpy, ary.bind(py))? {
+        return fallback();
+    }
     let array = match extract_precise_numeric_array(py, ary.bind(py), "ediff1d(ary)") {
         Ok(array) => array,
         Err(_) => return fallback(),
