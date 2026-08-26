@@ -58882,3 +58882,92 @@ both dtypes and allocates a kind `String` before declining on its own work floor
 plan cannot skip it because the operands ARE integers. That needs the work floor checked from the
 shapes the gate has already read, or the facts threaded in - not another classifier.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - THE IEEE-PREDICATE FAST PATH PAID ~600 ns OF CEREMONY ON ITS FIRST GATE: 4.579x -> 2.458x on `isnan`, and EIGHTEEN parity defects fell out of the probe written to guard it (`deadlock-audit-c0g2r`)
+
+`TanBridge`. Shipped `61ab4140`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** candidate-win on all 24 cells; every one is still a LOSS to numpy in
+absolute terms and is reported as one.
+
+`isnan`/`isinf`/`isfinite`/`signbit` reach their f64/f32 fast path on the FIRST gate, so whatever
+that path pays is on the hot path for the commonest operand there is. Per call it was paying:
+
+```
+  py.import("numpy")            382.5 ns   (NOT a sys.modules lookup - see the standing note)
+  PyDict + "uint8" PyString      ~50 ns    (dtype is numpy's SECOND POSITIONAL parameter)
+  numpy.getattr("bool_")         ~21 ns    (a module-level TYPE object, cacheable)
+  reshape + its shape tuple     116.9 ns   (the output can be allocated in its own shape)
+```
+
+**PRICED FIRST, IN PYTHON, BEFORE ANY RUST WAS WRITTEN** (`timeit`, installed interpreter, this
+host): `np.empty(n, "uint8")` 217.3 ns vs `np.empty(n, u8)` 166.7 ns with the type object held;
+`arr.reshape((n,))` 116.9 ns; `np.empty((n,), u8)` 202.9 ns, which is why 1-D still allocates with
+an int argument and only ndim >= 2 pays for a shape tuple.
+
+```
+IEEE_PREDICATE_ENTRY worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=87bc9e6c16d1  after_elf=1de8929900dc
+
+  op         2^8      2^10     2^13     2^16     2^13 f32   3x4 (2-D)
+  isnan    4.579 ->  3.440 -> 1.913 -> 1.315 ->  2.756 ->   4.798 ->
+           2.458     1.927    1.431    1.212     1.695      2.644
+  isinf    4.320 ->  3.186 -> 1.660 -> 1.150 ->  2.491 ->   4.676 ->
+           2.314     1.795    1.262    1.050     1.611      2.619
+  isfinite 4.387 ->  3.307 -> 1.814 -> 1.247 ->  2.513 ->   4.739 ->
+           2.318     1.840    1.364    1.147     1.605      2.600
+  signbit  4.609 ->  3.423 -> 1.753 -> 1.223 ->  2.675 ->   4.875 ->
+           2.463     1.925    1.317    1.087     1.638      2.695
+```
+
+**A/A NULL CONTROLS (same invocation, every cell):** AFTER incumbent-null 0.9799-1.0145,
+candidate-null 0.9816-1.0021. One cell reads BIASED - `isfinite 2^16`, candidate 0.9799 - and is
+disclosed rather than dropped. All 24 BEFORE/AFTER pairs of ranges are DISJOINT. The measured
+excess (`fnp_ns - numpy_ns`) drops from ~1030-1090 ns to ~370-500 ns on the small cells, which is
+the ceremony above, counted.
+
+### EIGHTEEN PARITY DEFECTS, ALL PRE-EXISTING, ALL FOUND BY THE PROBE WRITTEN FOR THIS SHIP
+
+1. **A 0-d INTEGER OR BOOL OPERAND returned a 0-d ARRAY where numpy returns a SCALAR.**
+   `np.isnan(np.array(5))` is `np.False_`; fnp gave `array(False)`. The float fast paths already
+   got this right through their `get_item(())` - the constant-bool path for integral dtypes was
+   the ONE place in the family that disagreed. 14 cells (4 ops x int64/int32/uint8/bool, less
+   signbit's signed ints, which delegate).
+2. **An ndarray SUBCLASS came back a plain ndarray.** `np.isnan(np.matrix(a))` is a `matrix`.
+   Every fast path gates on `is_exact_instance`, so a subclass fell all the way through to
+   `extract_numeric_array` and lost its type. 4 cells. Now delegated to numpy - the oracle for what
+   a subclass result should be - at zero hot-path cost, since an exact ndarray has already returned
+   from a fast path before that test is reached.
+
+**BOTH ARE INVISIBLE TO A VALUE-LEVEL COMPARISON.** The bytes match, the dtype matches, the shape
+matches; only `type()` separates them. This is the same family of blind spot as
+`array_equal(equal_nan=True)` not seeing a NaN sign bit, and it is the second time this session
+that a probe comparing the obvious things passed a real divergence.
+
+**AND THE PROBE ITSELF WAS WRONG FIRST.** Its first version required the result to be
+C-contiguous instead of comparing flags against numpy's, which manufactured EIGHT phantom
+divergences on transposed and F-order operands - numpy propagates `order='K'`, so an F-order
+operand legitimately yields an F-contiguous result. I read those eight as real before checking
+what the incumbent actually returns. Compare a flag to the ORACLE'S flag, never to a constant.
+
+PARITY (final form): 4 ops x 9 dtypes x 8 shapes, plus 10 layout/subclass/non-array cases
+(strided, transposed, F-order, list, python float, python nan, numpy scalar, f32 scalar,
+`np.matrix`, empty 2-D) - compared on dtype, shape, RAW BYTES, python `type()`, and the
+writeable/c_contiguous/f_contiguous/aligned flags, plus three independence checks per op (writing
+the result must not touch the operand, must not share memory with it, must be writeable).
+**BEFORE 18 divergences, AFTER 0.**
+
+MEMORY: largest operand 512 KB (2^16 f64); host `used` 57 GB of 215.
+VERIFICATION: 654 lib tests pass; `cargo clippy -p fnp-python --lib --tests` clean; `cargo fmt -p
+fnp-python` a no-op on the result.
+
+RETRY PREDICATE: do NOT re-attack the import, the dtype kwarg, the `bool_` getattr or the reshape -
+all four are gone. What remains on this path and was NOT taken: the `.view(bool_)` at ~157 ns is
+structural (numpy's bool dtype is format `'?'`, which `PyBuffer::<u8>` rejects, so the uint8 buffer
+plus a view is the only way in), and the two `PyBuffer::get` calls plus the shape `Vec` are the
+rest. The 2-D cells are still ~2.6x because numpy's own 3x4 call is only ~290 ns - there is about
+480 ns of fnp entry left against it, and no single item in it is now above ~160 ns.
+AGENT_NAME=TanBridge.
