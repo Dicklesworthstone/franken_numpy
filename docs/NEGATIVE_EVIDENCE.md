@@ -57425,3 +57425,122 @@ BOTH allocator regimes; and do not "simplify" by deleting the parallel branch, w
 at 16 MB. The n=2^21 (32 MB) cell reads 1.26x in the default regime and 0.43x under the mmap
 control — that residual is mmap churn, not this gate, and is out of scope here.
 AGENT_NAME=TanBridge.
+
+---
+
+## 2026-08-26 — SHIP: `sqrt` threw away a COMPLETED CORRECT BUFFER to buy FP-event parity it never delivered; rank-3 LOSS becomes a DECIDABLE_WIN (`deadlock-audit-f1mj2`)
+
+### THE CELL, AND WHY A RE-MEASURE WOULD HAVE DISMISSED IT
+
+`fnp.sqrt` on f64 was a 1.8x WIN when every element was positive and a 12.69x LOSS the moment one
+was negative. Same size, same dtype, same call; numpy flat either way. n=2^16:
+
+```
+  input                              numpy_ns      fnp_ns    ratio
+  standard_normal (50.1% negative)    69124.9   1153755.7   16.67x   (first probe)
+  abs(...)+0.5     (all positive)     67617.5     37982.2    0.56x
+```
+
+**A 30x swing on SIGN ALONE.** And the penalty is BINARY, not proportional — six negative elements
+in 65536 pay it in full:
+
+```
+  frac_neg   numpy_ns      fnp_ns    ratio
+   0.00000    67638.7     37680.3    0.56x
+   0.00001    67843.1     37573.8    0.55x   (rounds to 0 negatives)
+   0.00010    69097.9    866325.0   12.54x   (6 negatives)
+   0.01000    70189.9    951799.1   13.56x
+   1.00000    69124.9    877080.1   12.69x
+```
+
+The sweep's `f64` ladder entry is `rng.standard_normal(N)`, 50.1% negative, so `sqrt[f64]` at rank
+5.9024x had been measuring the negative branch all along. **Anyone reaching for the natural
+positive operand when benchmarking sqrt sees a WIN and dismisses the cell.** REGISTER THE OPERAND,
+NOT JUST THE OP — a cell label naming only op and dtype is under-specified when the operand's value
+distribution selects the branch.
+
+### MECHANISM
+
+The fused sqrt loop computes the WHOLE output while tracking a negative flag, then on detection did
+`return Ok(None)` — **discarding a completed, correct buffer** so a fallback could record numpy's
+invalid-value event. Every negative-containing call paid the native pass AND the fallback.
+
+### AND IT DID NOT BUY THE PARITY IT WAS PAYING FOR — three divergences, at 12.69x
+
+Measured against numpy 2.4.3 on the pre-change build:
+
+```
+  invalid=raise    numpy FloatingPointError   fnp returned an array and warned   DIVERGENCE
+  invalid=ignore   numpy silent               fnp warned anyway                  DIVERGENCE
+  -inf operand     numpy warns                fnp silent                         DIVERGENCE
+```
+
+The third because the detector read `is_finite() && v < 0.0`, while NumPy's invalid set for sqrt is
+exactly `v < 0.0` — which by IEEE already excludes NaN and -0.0 and correctly INCLUDES -inf.
+
+### FIX: KEEP THE BUFFER, BORROW ONLY THE EVENT
+
+`numpy.sqrt(-1.0)` is one element of the SAME ufunc, so it reproduces the event through NumPy's own
+machinery. Verified identical to the array call under invalid = warn / raise / ignore / print, and
+NumPy emits ONE event per CALL rather than per element, so a single probe is the right count.
+
+```
+  np.sqrt(-1.0)          one-element event probe    179.6 ns
+  np.sqrt(a)  n=2^16     re-run the whole array   67925.8 ns
+```
+
+The values were already bit-identical (`sqrt(-x)`=NaN, `sqrt(-inf)`=NaN); only the event was
+missing. Detector widened to `v < 0.0`, closing the -inf divergence.
+
+CHECKED AND NOT A HAZARD: the native NaN-producing loop does not leave MXCSR dirty for later numpy
+calls — an innocent `np.sqrt`/`np.add` afterwards stays silent — so this does not smuggle a
+spurious event into an unrelated op.
+
+### RESULT — dual-null contract, incumbent = numpy LIVE in the SAME INVOCATION
+
+```
+AFTER   bench_elf_sha256=54f17ccd8be4ae539b9d196448f69515fe10c3ae84a909bb787db0be050103c9
+        verdict=DECIDABLE_WIN  ratio_median=1.794117 ci95=[1.785108,1.800244]
+        incumbent 68228.000 ns   candidate 37836.000 ns
+        incumbent_null 0.998617 [0.996534,1.003780]  straddles
+        candidate_null 0.998786 [0.995134,1.001330]  straddles
+        exact_bytes=passed checksum=06157e9cecb5e255
+```
+
+Sweep rank 5.9024x LOSS becomes a **1.79x WIN** — a 10.6x swing on the cell, effect CI nowhere near
+unity, null half-widths 0.0038 / 0.0049.
+
+Pinned dual-null across operand classes, all nulls PASS — **the ratio is now FLAT in operand sign**,
+which is the property that was broken:
+
+```
+  operand                    numpy_ns    fnp_ns    ratio
+  standard_normal 50% neg     69051.8   37970.8   0.548x  WIN   (was 16.67x LOSS)
+  6 negatives in 65536        70079.2   38712.4   0.552x  WIN   (was 12.54x LOSS)
+  one -inf                    69191.8   47068.1   0.547x  WIN
+  all positive                67838.5   36737.5   0.541x  WIN   (unchanged)
+```
+
+### PARITY
+
+All three FP-event divergences closed on the shipped `.so`, and the NON-members of the invalid set
+verified to stay silent (quiet NaN, -0.0, +inf, 0.0 — event and values both matching):
+
+```
+  invalid=warn/raise/ignore/print   numpy == fnp   OK
+  -inf operand                      numpy == fnp   OK
+```
+
+A/A NULL CONTROLS: contract dual nulls both straddle unity (biases 0.0012-0.0014); four pinned
+operand-class cells each with their own dual nulls, all within 0.0032 of unity.
+VERIFICATION: `cargo check -p fnp-python --lib --tests` clean.
+`sqrt_reproduces_numpy_invalid_event_under_every_errstate` RUN AND PASSING — six operand classes
+(finite negative, -inf, subnormal negative, quiet NaN, -0.0, all non-negative) x invalid =
+warn/raise/ignore, asserting values AND raise-vs-return agreement.
+RETRY PREDICATE: do not "restore" the deferral. It cost 12.69x and delivered none of the three
+parities it existed for. If a future FP event needs reproducing, the one-element same-ufunc probe
+is the pattern — but re-verify it against the array call under all four errstate modes first, since
+that equivalence is the whole argument. `SQRT_PARALLEL_MIN = 1 << 17` was NOT touched and remains
+open: on positive input the win degrades from 0.21x at 8 threads to 0.50x at 64 at n=2^18, which is
+the `APPEND_PAR_MIN` shape (`deadlock-audit-dc6mz`) in miniature — a lost win, not a loss.
+AGENT_NAME=TanBridge.
