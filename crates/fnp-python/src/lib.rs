@@ -58001,6 +58001,17 @@ fn empty_like(
     // Delegate.
     let numpy = cached_numpy(py)?;
     let empty_like_fn = numpy.getattr(intern!(py, "empty_like"))?;
+    // `dtype`, `order`, `subok` and `shape` are POSITIONAL-or-keyword in numpy's
+    // signature - only `device` is keyword-only - so the common call needs no dict at
+    // all. It was building one and filling it every time, and `order` went in as a
+    // non-interned `&str`, which allocates a fresh `PyString` per call. `empty_like` is
+    // pure delegation, so that dict WAS the whole of fnp's cost over numpy
+    // (`deadlock-audit-niiy0`).
+    if device_bound.is_none_or(|value| value.is_none()) {
+        return Ok(empty_like_fn
+            .call1((prototype_bound, dtype_bound, order, subok, shape_bound))?
+            .unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
@@ -63901,19 +63912,23 @@ fn asarray_chkfinite(
     // own error text for non-finite input is "array must not contain
     // infs or NaNs"; emit the same message directly.
     let array = asarray_fn.call((a.bind(py),), Some(&kwargs))?;
-    let array_dtype_name = array
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "name"))?
-        .extract::<String>()?;
-    let parsed = DType::parse(&array_dtype_name);
-    let needs_check = matches!(
-        parsed,
-        Some(DType::F16)
-            | Some(DType::F32)
-            | Some(DType::F64)
-            | Some(DType::Complex64)
-            | Some(DType::Complex128)
-    );
+    // CLASSIFY BY `kind`, NOT BY PARSING `dtype.name` (`deadlock-audit-niiy0`).
+    //
+    // Two things were wrong with the old `DType::parse(dtype.name)`:
+    //
+    //   * CORRECTNESS. `parse` has no arm for `float128`/`complex256`, so `needs_check`
+    //     came out FALSE for longdouble and clongdouble and the sweep was skipped
+    //     entirely - `fnp.asarray_chkfinite(np.array([1.0, nan], dtype=np.longdouble))`
+    //     RETURNED THE ARRAY where numpy raises. A function whose only job is to reject
+    //     non-finite input was failing open on two dtypes. numpy's own test is
+    //     `a.dtype.char in typecodes['AllFloat']`, i.e. `efdgFDG`, which is exactly
+    //     kinds 'f' and 'c' - so the kind IS the predicate, with no table to fall
+    //     behind.
+    //   * COST. `numpy.dtype.name` is PURE PYTHON and 1213.5 ns on this host, ~40x
+    //     `.kind` - read unconditionally, on a call whose whole excess over numpy was
+    //     ~1610 ns (`dtype-name-is-1213ns-of-pure-python`, which fixed the same read on
+    //     the four `as*array` routes and missed this one).
+    let needs_check = matches!(dtype_kind_of(&array), Some('f') | Some('c'));
     if needs_check {
         let isfinite = numpy.getattr(intern!(py, "isfinite"))?;
         let all_finite: bool = isfinite
@@ -112657,14 +112672,22 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
             .unbind())
     };
 
+    // One classification for ALL THREE gates below (`deadlock-audit-6kn1k`).
+    let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;
+
     // Native parallel integer 1-D convolve: numpy has no integer SIMD/BLAS fast path
     // (direct O(n*m) serial). Bit-exact wrapping direct kernel; everything else defers.
-    if let Some(out) = try_native_int_convolve(py, a.bind(py), v.bind(py), mode, false)? {
+    //
+    // A pair that classified as f64 above CANNOT be integral, and this gate reads two
+    // shape `Vec`s, two contiguity flags and both dtypes before it can find that out -
+    // so `lens.is_some()` skips the whole thing. It is the f64 operand pair that pays
+    // for `correlate`/`convolve`, and this was the last of the three gates still
+    // charging it.
+    if lens.is_none()
+        && let Some(out) = try_native_int_convolve(py, a.bind(py), v.bind(py), mode, false)?
+    {
         return Ok(out);
     }
-
-    // One classification for both gates below (`deadlock-audit-6kn1k`).
-    let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;
 
     // Zero-copy short-kernel direct path: reads buffers + writes the numpy output
     // in place, skipping the extract+build copies. Closes the 9-15x short-kernel
@@ -112741,14 +112764,18 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
             .unbind())
     };
 
+    // One classification for ALL THREE gates below (`deadlock-audit-6kn1k`).
+    let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;
+
     // Native parallel integer 1-D correlate (== convolve with reversed kernel): numpy
     // has no integer fast path (direct serial). Bit-exact; everything else defers.
-    if let Some(out) = try_native_int_convolve(py, a.bind(py), v.bind(py), mode, true)? {
+    // `lens.is_some()` proves an f64 pair, which this gate can never take - see the
+    // note in `convolve`.
+    if lens.is_none()
+        && let Some(out) = try_native_int_convolve(py, a.bind(py), v.bind(py), mode, true)?
+    {
         return Ok(out);
     }
-
-    // One classification for both gates below (`deadlock-audit-6kn1k`).
-    let lens = conv_corr_f64_1d_lens(py, a.bind(py), v.bind(py))?;
 
     // Zero-copy short-kernel direct path (defers when len(a)<len(v): correlate is
     // not commutative). Closes the 9-15x short-kernel loss to parity.
