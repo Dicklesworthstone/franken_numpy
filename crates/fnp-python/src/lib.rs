@@ -25047,8 +25047,10 @@ fn take(
     //     wrong; resolving it to an i64 is right. (This also CORRECTS a standing divergence:
     //     every bool spelling previously raised `TypeError: take(indices): expected an integer
     //     index array, got dtype bool` where numpy returns the element.)
-    //   - No floats. `np.take(a, 2.0)` and even `np.take(a, 2.7)` SUCCEED (truncating) where
-    //     `a[2.0]` raises IndexError.
+    //   - FLOATS ARE ACCEPTED BUT TRUNCATED TOWARD ZERO, and again the value is substituted
+    //     rather than forwarded: `np.take(a, 2.7)` succeeds and resolves to `a[2]` where
+    //     `a[2.7]` raises IndexError. Non-finite and beyond-2^53 floats decline so numpy can
+    //     raise its own distinct ValueError/OverflowError.
     //   - `mode="raise"` only. clip (clamp, no negative-from-end) and wrap (rem_euclid) are not
     //     `__getitem__` semantics.
     //   - ndim >= 1, and n-D additionally needs C-contiguity: `reshape(-1)` is a free view on a
@@ -25068,22 +25070,39 @@ fn take(
         // `__getitem__` would add an axis. Resolving also lets the numpy-scalar and 0-d-array
         // spellings share one path. A value too large for i64 fails extraction and declines,
         // which is correct: it is out of range for any array numpy can address.
+        // A float index TRUNCATES TOWARD ZERO, which is not `floor`: numpy resolves -2.7 to -2
+        // (element n-2), never -3. Verified against 2.4.3 for 2.7/2.5/-2.7/-0.5/-10.5, and it
+        // emits no warning, so nothing is lost by answering it here. Non-finite and
+        // beyond-i64 floats are DECLINED rather than resolved, because each raises its own
+        // distinct error that numpy must own: NaN -> ValueError("cannot convert float NaN to
+        // integer"), +-inf -> OverflowError("cannot convert float infinity to integer"),
+        // 1e30 -> OverflowError("Python int too large to convert to C long"). The 2^53 bound is
+        // where f64 stops representing consecutive integers; any index past it is out of range
+        // for an addressable array anyway.
+        let truncate_float = |value: f64| -> Option<i64> {
+            (value.is_finite() && value.trunc().abs() < 9_007_199_254_740_992.0)
+                .then(|| value.trunc() as i64)
+        };
         let scalar_index: Option<i64> = if indices_bound.is_exact_instance_of::<PyInt>() {
             indices_bound.extract::<i64>().ok()
         } else if indices_bound.is_exact_instance_of::<PyBool>() {
             indices_bound.is_truthy().ok().map(i64::from)
+        } else if indices_bound.is_exact_instance_of::<pyo3::types::PyFloat>() {
+            indices_bound.extract::<f64>().ok().and_then(truncate_float)
         } else {
             match dtype_kind_of(indices_bound) {
-                Some(kind @ ('i' | 'u' | 'b'))
+                Some(kind @ ('i' | 'u' | 'b' | 'f'))
                     if indices_bound
                         .getattr(intern!(py, "ndim"))
                         .and_then(|value| value.extract::<usize>())
                         .is_ok_and(|ndim| ndim == 0) =>
                 {
-                    if kind == 'b' {
-                        indices_bound.is_truthy().ok().map(i64::from)
-                    } else {
-                        indices_bound.extract::<i64>().ok()
+                    match kind {
+                        'b' => indices_bound.is_truthy().ok().map(i64::from),
+                        // Only kind 'f'. Extended precision is kind 'g' and would lose bits
+                        // through f64, so it keeps the general path.
+                        'f' => indices_bound.extract::<f64>().ok().and_then(truncate_float),
+                        _ => indices_bound.extract::<i64>().ok(),
                     }
                 }
                 _ => None,
