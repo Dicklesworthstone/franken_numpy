@@ -57524,7 +57524,7 @@ fn try_native_full_parallel(
         return Ok(None);
     };
     let total: usize = dims.iter().product();
-    // DECLINE ON SIZE BEFORE RESOLVING THE DTYPE (`deadlock-audit-vq4tz`).
+    // DECLINE ON SIZE BEFORE RESOLVING THE DTYPE (`deadlock-audit-t06ys`).
     //
     // The size gate below needs `itemsize`, and `itemsize` was only known after a REAL
     // one-element `numpy.full` had been constructed to replicate numpy's inference. That
