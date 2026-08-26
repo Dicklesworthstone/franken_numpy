@@ -8787,7 +8787,11 @@ fn zerocopy_f64_transcendental(
             input,
             output,
             |x| UnaryOp::Log1p.apply(x),
-            |value, _| value == -1.0 || (value.is_finite() && value < -1.0),
+            // NumPy's event set for log1p is exactly `v <= -1`: -1.0 itself is divide-by-zero
+            // (log1p(-1) = -inf) and everything below is invalid, -inf INCLUDED. IEEE gives the
+            // union for free and excludes NaN and +inf. The old form's `is_finite()` dropped
+            // -inf, which NumPy reports as invalid (`deadlock-audit-7kcz8`).
+            |value, _| value <= -1.0,
         ),
         UnaryOp::Arcsin => transcendental_map_f64(
             input,
@@ -9092,10 +9096,15 @@ fn zerocopy_f64_unary_flat<'py>(
                         // (invalid) into one bool; one read pass over the input separates them,
                         // and it runs ONLY on the event path, where it replaces a full numpy
                         // recompute of the whole array.
+                        // log1p joins the same treatment: two categories fused into one bool,
+                        // so the category must be RESOLVED before a witness can be chosen. Its
+                        // boundary is -1 rather than 0 (`log1p(-1) = -inf` is the divide case),
+                        // hence the per-op witness pair below rather than a shared constant.
                         let log_name = match op {
                             UnaryOp::Log => Some("log"),
                             UnaryOp::Log2 => Some("log2"),
                             UnaryOp::Log10 => Some("log10"),
+                            UnaryOp::Log1p => Some("log1p"),
                             _ => None,
                         };
                         if let Some(log_name) = log_name {
@@ -9118,14 +9127,29 @@ fn zerocopy_f64_unary_flat<'py>(
                             //     sign its NaN.) A NaN INPUT is left untouched - `v < 0.0` is
                             //     false for NaN - because NumPy propagates the input's own NaN
                             //     payload there, and that already matches.
+                            // THE INVALID NaN SIGN IS PER-UFUNC, NOT PER-FAMILY. Measured
+                            // against numpy 2.4.3: `log`/`log2`/`log10` return POSITIVE quiet
+                            // NaN (0x7ff8000000000000) for a negative operand, while `log1p`
+                            // returns NEGATIVE (0xfff8000000000000). Using one constant for both
+                            // is wrong in one direction or the other, and the bit-equality
+                            // assertion in
+                            // `transcendental_domain_events_match_numpy_including_the_infinities`
+                            // is what caught it.
+                            //
+                            // log/log2/log10 pivot on 0; log1p pivots on -1.
+                            let (pivot, invalid_nan) = if matches!(op, UnaryOp::Log1p) {
+                                (-1.0_f64, f64::from_bits(0xfff8_0000_0000_0000))
+                            } else {
+                                (0.0_f64, f64::NAN)
+                            };
                             let mut saw_divide = false;
                             let mut saw_invalid = false;
                             for (cell, slot) in input.iter().zip(output.iter()) {
                                 let value = cell.get();
-                                saw_divide |= value == 0.0;
-                                if value < 0.0 {
+                                saw_divide |= value == pivot;
+                                if value < pivot {
                                     saw_invalid = true;
-                                    slot.set(f64::NAN);
+                                    slot.set(invalid_nan);
                                 }
                             }
                             let callable = numpy.getattr(log_name)?;
@@ -9134,11 +9158,17 @@ fn zerocopy_f64_unary_flat<'py>(
                             // order: `log([0.0, -1.0])` and `log([-1.0, 0.0])` both raise
                             // "divide by zero encountered in log" under `errstate(all='raise')`.
                             // Issuing invalid first would raise the wrong one.
+                            let (divide_witness, invalid_witness) = if matches!(op, UnaryOp::Log1p)
+                            {
+                                (-1.0_f64, -2.0_f64)
+                            } else {
+                                (0.0_f64, -1.0_f64)
+                            };
                             if saw_divide {
-                                callable.call1((0.0_f64,))?;
+                                callable.call1((divide_witness,))?;
                             }
                             if saw_invalid {
-                                callable.call1((-1.0_f64,))?;
+                                callable.call1((invalid_witness,))?;
                             }
                         } else {
                             // Each single-category op raises through its OWN callable: the event
@@ -27893,8 +27923,7 @@ fn append(
     // Declining it instead would drop the call into the cold extract below, which is worse, so
     // the guard has to sit above the fast path and delegate outright. Dual-null at n=2^16:
     // strided 1.233x LOSS against 1.035x contiguous.
-    if noncontiguous_ndarray(numpy, arr.bind(py))?
-        || noncontiguous_ndarray(numpy, values.bind(py))?
+    if noncontiguous_ndarray(numpy, arr.bind(py))? || noncontiguous_ndarray(numpy, values.bind(py))?
     {
         return fallback();
     }
@@ -58263,7 +58292,10 @@ fn ascontiguousarray(
     // the input. This returned the 0-d input itself. Pinned by
     // `ascontiguousarray_promotes_zero_d_to_one_d_like_numpy`.
     let identity_ok = source_array.is_exact_instance(&ndarray_type)
-        && source_array.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1
+        && source_array
+            .getattr(intern!(py, "ndim"))?
+            .extract::<usize>()?
+            >= 1
         && source_array
             .getattr(intern!(py, "flags"))?
             .get_item(intern!(py, "C_CONTIGUOUS"))?
@@ -67890,7 +67922,10 @@ fn asfortranarray(
     // the 0-d divergence (`np.asfortranarray` has an implicit `ndmin=1`); pinned by
     // `asfortranarray_promotes_zero_d_to_one_d_like_numpy`.
     let identity_ok = source_array.is_exact_instance(&ndarray_type)
-        && source_array.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1
+        && source_array
+            .getattr(intern!(py, "ndim"))?
+            .extract::<usize>()?
+            >= 1
         && source_array
             .getattr(intern!(py, "flags"))?
             .get_item(intern!(py, "F_CONTIGUOUS"))?
@@ -160580,17 +160615,64 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let array = numpy.getattr("array")?;
 
             // (op, an in-domain anchor, the operands to pair it with)
-            let cases: [(&str, f64, Vec<f64>); 8] = [
+            let cases: [(&str, f64, Vec<f64>); 9] = [
                 // Single-category, one witness.
-                ("arccosh", 1.5, vec![0.5, -5.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN, 1.0]),
-                ("arcsin", 0.5, vec![2.0, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0]),
-                ("arccos", 0.5, vec![2.0, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0]),
+                (
+                    "arccosh",
+                    1.5,
+                    vec![0.5, -5.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN, 1.0],
+                ),
+                (
+                    "arcsin",
+                    0.5,
+                    vec![2.0, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0],
+                ),
+                (
+                    "arccos",
+                    0.5,
+                    vec![2.0, -2.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1.0],
+                ),
                 // Two categories, resolved by a scan: `v == 0` is divide, `v < 0` is invalid.
                 // -0.0 must read as divide and -inf as invalid, and NumPy reports divide FIRST
                 // regardless of element order, so both orderings are exercised below.
-                ("log", 2.0, vec![0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN, 1.0]),
-                ("log2", 2.0, vec![0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN]),
-                ("log10", 2.0, vec![0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN]),
+                (
+                    "log",
+                    2.0,
+                    vec![
+                        0.0,
+                        -0.0,
+                        -1.0,
+                        f64::NEG_INFINITY,
+                        f64::INFINITY,
+                        f64::NAN,
+                        1.0,
+                    ],
+                ),
+                (
+                    "log2",
+                    2.0,
+                    vec![0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN],
+                ),
+                (
+                    "log10",
+                    2.0,
+                    vec![0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN],
+                ),
+                // log1p pivots on -1, not 0: -1.0 is the divide case and everything below is
+                // invalid, so its boundary operands differ from the other three.
+                (
+                    "log1p",
+                    2.0,
+                    vec![
+                        -1.0,
+                        -2.0,
+                        -1.5,
+                        f64::NEG_INFINITY,
+                        f64::INFINITY,
+                        f64::NAN,
+                        -0.5,
+                    ],
+                ),
                 // Still deferring, and must stay correct.
                 ("arctanh", 0.5, vec![1.0, -1.0, 2.0, f64::NAN]),
                 ("exp", 1.0, vec![1000.0, -1000.0, f64::NAN]),
@@ -160764,10 +160846,7 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                                 .getattr("array_equal")?
                                 .call1((&expected_value, &actual_value, true))?
                                 .extract::<bool>()?;
-                            assert!(
-                                same,
-                                "sqrt({label}) under invalid={mode}: values diverged"
-                            );
+                            assert!(same, "sqrt({label}) under invalid={mode}: values diverged");
                         }
                         (Err(expected_err), Err(actual_err)) => {
                             assert_eq!(
@@ -160866,7 +160945,9 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
 
             // n-D with axis=None flattens in C order; a TRANSPOSED source must not be routed
             // through `reshape(-1)`, which would copy.
-            let two_d = arange.call1((12.0_f64,))?.call_method1("reshape", ((3, 4),))?;
+            let two_d = arange
+                .call1((12.0_f64,))?
+                .call_method1("reshape", ((3, 4),))?;
             let transposed = two_d.call_method0("transpose")?;
             for source in [two_d.clone(), transposed] {
                 for index in [0_isize, 5, -1] {
@@ -160921,7 +161002,13 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let numpy = py.import("numpy")?;
             let zeros = numpy.getattr("zeros")?;
 
-            for dtype_name in ["clongdouble", "complex128", "complex64", "longdouble", "float64"] {
+            for dtype_name in [
+                "clongdouble",
+                "complex128",
+                "complex64",
+                "longdouble",
+                "float64",
+            ] {
                 let Ok(scalar_type) = numpy.getattr(dtype_name) else {
                     // A platform without extended precision simply has no such dtype.
                     continue;
