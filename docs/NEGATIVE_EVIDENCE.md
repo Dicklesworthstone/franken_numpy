@@ -56358,3 +56358,193 @@ maximum/minimum still needs route-vs-route numbers in one binary (hzl1w's own fr
 row does not provide.
 
 AGENT_NAME=PinkWolf.
+
+## 2026-08-25 — THE WORST CELL RE-DERIVED AND THEN HALVED: `searchsorted`'s 3.172x title is STALE (that cell now WINS 1.0459x), `sort(int64,n=256)` is the real worst at 2.239x, and two `py.import("numpy")` calls per `fnp.sort` were most of it — 2.239x -> 1.386x, ranges DISJOINT over 6+6 runs (`franken_numpy-ixs5y.409`)
+
+**Result class:** a measured, decidable improvement on the campaign's worst vs-incumbent cell,
+plus a correction to which cell holds that title. Host `thinkstation1` (Threadripper PRO 5975WX,
+32P/64L, powersave), worker=local, numpy 2.4.3 live in the same invocation, stock `release`
+(triage-grade absolutes, ratios fair within each binary). Loadavg 8.7-24.9 across the window;
+the host was shared with other agents' builds throughout and every row below carries its nulls.
+
+### 1. THE STANDING WORST-CELL FIGURE WAS STALE, AND I CHECKED BEFORE ATTACKING IT
+
+The ledger's standing worst cell is `fnp.searchsorted` with an ARRAY needle at **3.172x**
+(2026-08-18, `deadlock-audit-c5ecm`'s disambiguation row). Measured today under the same
+`bench_predecline_levers_vs_numpy` contract it is a **DECIDABLE_WIN at 1.045948x**
+(`ci95=[1.041597,1.050961]`, numpy 1258 ns vs fnp 1202 ns, incumbent A/A 0.999218, candidate A/A
+1.000000). Four levers landed on that family between 08-18 and 08-24; the title moved with them
+and the ledger did not. **Do not quote 3.172x as a live figure.** The other cells in that group,
+same run: `clip_one_sided` 0.944886 (REGRESSION), `clip_two_sided` 1.453878 (WIN),
+`ss_f32_array_needle` 1.016221 (WIN), `ss_scalar_needle` 1.425026 (WIN), `ss_list_haystack`
+1.013946 (WIN).
+
+ELF sha256 `024b5c1395e872e0c2c7b3ee70fb8d844ea73d73147f1d6c9dd23d145e481ba8`; command
+`FNP_BENCH_GROUPS=bench_predecline_levers_vs_numpy target/release/deps/criterion_python_elementwise-3c8841d0d74dd730 --test`.
+
+**And the 5.228x `sort` candidate is REFUTED too**, in the other direction. `c5ecm` flagged
+`fnp.sort(int64, n=256)` at 5.228x from a counter probe with the startup floor subtracted
+arithmetically, and registered the retry predicate "measure it under a dual-null contract before
+re-ranking". Under the contract it is **2.239x**, not 5.228x. The predicate is now discharged: the
+re-ranking holds (sort IS the worst cell) but the magnitude that motivated it does not.
+
+### 2. THE BEFORE STATE, SIX RUNS, ONE ELF
+
+Command (exact):
+
+```
+FNP_BENCH_GROUPS=bench_flat_i64_sort_256_dual_null FNP_BENCH_BUILD_ROUTE=local_release_stock \
+  target/release/deps/criterion_python_sortmisc-079c6655f3b5bc98 --test
+```
+
+ELF sha256 `49c490df13dec1e9ed5b4745f95a127d4f85c5e68013a4fb53248f62a6a40a99`, built from
+`14934ba2` by `RCH_CARGO_WRAPPER_BYPASS=1 env -u CARGO_TARGET_DIR cargo test --release -p
+fnp-python --bench criterion_python_sortmisc --no-run -j 8` (RCH refuses this build fleet-wide:
+no admissible worker carries libpython, `os_gate_excluded=1`).
+
+| run | ratio_median (numpy/fnp) | effect ci95 | incumbent A/A | candidate A/A |
+|---|---|---|---|---|
+| 1 | 0.443632 | [0.441900,0.444413] | [1.000000,1.003220] | [0.998582,1.004564] |
+| 2 | 0.442389 | [0.440821,0.444413] | [0.996841,1.003149] | [0.997216,1.002803] |
+| 3 | 0.440536 | [0.438553,0.442217] | [1.000000,1.006238] | [0.994393,1.000000] |
+| 4 | 0.450296 | [0.448768,0.452066] | [0.999498,1.003139] | [0.994377,1.001414] |
+| 5 | 0.446711 | [0.445312,0.449161] | [0.997517,1.006238] | [0.995484,1.000283] |
+| 6 | 0.455912 | [0.453602,0.457926] | [0.996841,1.003119] | [0.997165,1.001134] |
+
+mean 0.446579, stdev 0.005722, range [0.440536, 0.455912] — **2.2392x slower than live NumPy**.
+SIX runs and not one run's within-run CI contains another run's median, which is the
+`single-run-dual-null-cannot-decide-sub-5pct` pattern again; the six-run envelope is the statistic
+that decides anything here, and it is 3.5% wide.
+
+### 3. WHAT WAS ACTUALLY COSTING THE TIME — and it was not the sort
+
+`ixs5y.409`'s profile row (08-24) decomposed our arm and concluded the comparison path could not
+close the cell: with an INFINITELY fast sort the route still floored at 2474 ns against NumPy's
+1552. That conclusion was correct and its premise was the **2074 ns Python entry residual**. The
+handoff named the residual as the only remaining lever and guessed it was "~7 Python attribute
+lookups". It was mostly not.
+
+**`fnp.sort` called `py.import("numpy")` TWICE per call.** `PyImport_ImportModule` is not a
+`sys.modules` lookup: it builds a `PyUnicode` for the name, then `PyImport_Import` fetches
+`__import__` out of builtins, constructs a globals dict and calls it. Timed against the INSTALLED
+interpreter on this host:
+
+```
+  __import__("numpy") on an already-imported numpy   382.5 ns/call
+  sys.modules["numpy"]                                28.4 ns/call
+  np.sort(int64, n=256)  (the whole incumbent call)  1903.5 ns/call
+  a.flags.c_contiguous                                48.5 ns/call
+  a.ndim                                              21.9 ns/call
+  a.dtype.char                                        30.7 ns/call
+```
+
+Two module imports in front of a route whose ENTIRE budget is one 1903 ns NumPy call.
+`cached_numpy` already existed for exactly this (`deadlock-audit-v8nx6`) and is used at ~180 other
+sites; the sort dispatcher was not one of them.
+
+Three smaller levers alongside it, all semantics-preserving:
+
+- `try_native_struct_sort_valuelex` learned "not a structured dtype" only AFTER `ndim`, `flags`
+  and `flags.c_contiguous` — and `.flags` CONSTRUCTS A FRESH numpy flagsobj per call. Its sibling
+  `try_native_struct_sort` already tested `dtype.names` first. Reordered to agree.
+- `try_native_int_sort_flat` read `dtype.kind` AND `dtype.itemsize`; one `dtype.char` carries both.
+  Verified against the installed numpy 2.4.3 over all 22 distinct scalar dtypes: the
+  char -> (kind, itemsize) map has ZERO collisions, and every kind `i`/`u`/`b` dtype has a char in
+  the table, so declining on an unknown char declines exactly the operands the pair declined.
+- the small int64 cell now reads dimension count, contiguity and element count off the `PyBuffer`
+  it acquires anyway, instead of `ndim` + `flags.c_contiguous` + `len` from Python — a second
+  flagsobj construction gone.
+
+**THE TRAP IN THAT LAST ONE, and it is why the new test exists.** `as_slice` already returns
+`None` for a non-contiguous buffer and `cells.len() != n` catches most wrong shapes — but a
+C-contiguous `(4, 1)` int64 array has `len(a) == 4` AND four items, so an element-count check
+alone would have flattened it into a 1-D result where NumPy returns a `(4, 1)` one. The explicit
+`buffer.dimensions() != 1` test is load-bearing.
+`small_int64_sort_shape_gate_matches_numpy_on_non_flat_operands` pins `(4,1)`, `(1,4)`, a strided
+slice, a non-contiguous 3-D case and 0-d (where NumPy raises `AxisError` and so must we).
+
+### 4. THE AFTER STATE, SIX RUNS, ONE ELF
+
+Same command, ELF sha256 `5581801403e2dd14c08aaa5678c5704fb4e6f101641e6128f4a58d33d50863f5`,
+built from committed source `9a5e7a07` (the change is split across `55994110` and `9a5e7a07`; see
+the attribution disclosure below).
+
+| run | ratio_median (numpy/fnp) | effect ci95 | incumbent A/A | candidate A/A |
+|---|---|---|---|---|
+| 1 | 0.713309 | [0.711504,0.715299] | [0.997466,1.003179] | [0.996016,1.001799] |
+| 2 | 0.729608 | [0.728073,0.732751] | [0.993723,1.003565] | [0.993633,1.004138] |
+| 3 | 0.721771 | [0.718525,0.725824] | [0.996960,1.003149] | [0.980032,1.061441] |
+| 4 | 0.683633 | [0.679650,0.686900] | [0.991294,1.050207] | [0.993375,1.004427] |
+| 5 | 0.744551 | [0.703929,0.758776] | [0.990494,1.059675] | [0.994943,1.023102] |
+| 6 | 0.735797 | [0.713333,0.750719] | [0.990584,1.015893] | [0.995483,1.030369] |
+
+mean 0.721445, range [0.683633, 0.744551] — **1.3861x slower than live NumPy**.
+
+**THE TWO RANGES ARE DISJOINT: max(before) = 0.455912 < min(after) = 0.683633.** Twelve runs, two
+ELFs, one host, same command; every run DECIDABLE_REGRESSION with both A/A nulls straddling unity.
+Cross-run comparison is normally barred here, and it is barred for sub-5% effects; this effect is
+61.6% of the ratio and clears the whole six-run envelope of each state by 50%. It is still a
+LOSS — 1.386x — and is reported as one.
+
+A representative full row: `incumbent_median_ns=1738.000 candidate_median_ns=2520.000
+ratio_median=0.716701 ratio_ci95=[0.711067,0.722527]`, `candidate_route=native_int64_small_sort`,
+`candidate_numpy_sort_calls_preflight=0`, `exact_bytes=passed exact_dtype=passed`,
+`ALLOCATION_PARITY incumbent_output_allocation=per_call candidate_output_allocation=per_call`,
+`INCUMBENT_IDENTITY artifact_sha256=2e0027bba6fda9e61d8e57aa53a1636ede5a6a9fd8ece76b08625d7da1e15d48`.
+
+### 5. THE STAGE PROFILE CORROBORATES THE MECHANISM — same host, same statistic, and NumPy's own arm barely moved
+
+`bench_flat_i64_sort_256_stage_profile`, min-of-2000, run in the same invocation as the contract:
+
+```
+                          08-24 (before)      08-25 (after)
+  numpy whole call        1552 / 1623 ns      1533 ns     <- the reference is FLAT
+  fnp whole route         3566 ns             2104 ns
+    alloc                  320 ns              410 ns     (load-sensitive)
+    buffer + 2 KiB copy     80 ns              110 ns     (load-sensitive)
+    sort_unstable         1092 ns             1312 ns     (load-sensitive)
+    ENTRY RESIDUAL        2074 ns  (58.2%)     272 ns  (12.9%)   <- 7.6x down
+  route_floor_if_sort_were_free
+                          2474 ns              792 ns
+```
+
+The three stage numbers drifted upward with loadavg (14.0 -> 24.9) and NumPy's arm moved 1552 ->
+1533, i.e. the reference did not shift in the flattering direction. The residual falling 7.6x is
+far outside that drift and is the counted mechanism for the contract row.
+
+### 6. WHAT THIS REVERSES, AND THE NEXT LEVER
+
+`ixs5y.409`'s conclusion — "a sorting network, a radix pass, or any other compare-path work is
+bounded at 3566 -> 2474 and cannot reach parity, let alone a win" — was sound on its premise and
+that premise is now gone. **`route_floor_if_sort_were_free` is 792 ns against NumPy's 1533**, and
+`sort_unstable` is now 62.4% of our route rather than 30.6%. The comparison path was the wrong
+lever when the entry cost was 2074 ns; with the entry cost at 272 ns it is the ONLY lever left,
+and for the first time it has room to reach a WIN rather than merely a smaller loss. The kernel is
+`fnp_ufunc::sort_small::sort_i64`, currently a bare `slice::sort_unstable`; NumPy is running
+x86-simd-sort on this cell.
+
+COUNTED_MECHANISM: two `PyImport_ImportModule` calls removed per `fnp.sort` at 382.5 ns each
+measured against the installed interpreter (28.4 ns for the `sys.modules` lookup they are worth),
+plus 7 attribute entries and 2 numpy flagsobj constructions. Entry residual 2074 -> 272 ns,
+measured, same host, same statistic.
+A/A NULL CONTROLS: 12 contract runs, both nulls straddle unity in every one; controlling
+half-widths 0.0032-0.0316. `cv_is_provenance_only=true`.
+VERIFICATION: `cargo test --release -p fnp-python --test conformance_sort_search` 55 passed 0
+failed (including the new shape-gate test and the pre-existing engagement/byte-exactness test that
+proves `numpy.sort` monkeypatching is still honoured through the cached module handle);
+`cargo clippy --release -p fnp-python --lib` 0 warnings, exit 0.
+RETRY PREDICATE: the cell is still a 1.386x DECIDABLE_REGRESSION. Next attempt is the i64 small
+sort kernel itself, against a 792 ns floor and a 1533 ns target — and it must be measured under
+this same contract, not against the stage profile, because the stage numbers are load-sensitive
+min-of-2000 and the contract is not.
+AGENT_NAME=fnp-perf-lead.
+
+**ATTRIBUTION DISCLOSURE:** commit `55994110` ("perf(sort): check structured dtype names before
+constructing ndarray flags...") carries 108 insertions of the work above that were NOT authored by
+its committer — it swept my uncommitted lib.rs out of the shared tree while I was mid-edit, and
+its subject describes only the first of the four levers in it. That commit does not compile on its
+own: it takes `let numpy = cached_numpy(py)?` while 23 call sites below still pass `&numpy`.
+`9a5e7a07` completes it and carries the disclosure. Not reverted, because reverting destroys work.
+This is at least the fifth occurrence of this hazard (`364a4933`, `44b736fd`, `b742665f`,
+`8c77b99c`, this one). The standing rule stands and is not enough on its own: an uncommitted edit
+is not safe on this tree, in EITHER direction.
