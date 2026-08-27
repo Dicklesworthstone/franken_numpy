@@ -95,6 +95,49 @@ print(ok)
 }
 
 #[test]
+fn take_f64_flat_integer_containers_match_numpy_without_shape_or_error_shortcuts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def take_outcome(fn, indices):
+    a = np.linspace(-7.5, 7.5, 65536, dtype=np.float64)
+    try:
+        result = np.asarray(fn(a, indices))
+        return ("ok", str(result.dtype), tuple(result.shape), result.view(np.uint64).tobytes().hex())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list", [0, 17, -1, 32768, 65535]),
+    ("tuple", (3, -4, 19, 1024, 65535)),
+    ("empty", []),
+    # A direct gather that naively flattens every container would return shape (4,),
+    # while numpy preserves the two-dimensional index shape.
+    ("nested shape", [[0, 1], [-2, 65535]]),
+    # A native path must decline instead of manufacturing its own IndexError text.
+    ("out of range", [0, 65536]),
+]
+
+ok = True
+for label, indices in cases:
+    actual = take_outcome(fnp.take, indices)
+    expected = take_outcome(np.take, indices)
+    if actual != expected:
+        print(label, actual, expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "flat integer-container take must preserve NumPy bytes, shape, and errors: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn take_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"

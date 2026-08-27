@@ -18022,6 +18022,82 @@ fn resolve_take_index(idx0: i64, n: i64, mode_code: u8) -> Option<usize> {
     }
 }
 
+// Native flat gather for the common Python-container spelling of np.take: a
+// float64 ndarray plus a flat list or tuple of Python integer indices.  The
+// ndarray-index helpers below intentionally require an int64 buffer; converting
+// a short Python list to one just to enter them costs a material fraction of
+// NumPy's whole call.  Read the existing container directly instead.  Nested
+// containers, non-integer members, non-default modes, and OOB indices decline
+// to NumPy, which owns their shape/coercion/error semantics.
+fn try_zerocopy_f64_container_take(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    indices: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    mode: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if axis.is_some() || mode != "raise" {
+        return Ok(None);
+    }
+    let numpy = cached_numpy(py)?;
+    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let list = indices.cast::<PyList>().ok();
+    let tuple = indices.cast::<PyTuple>().ok();
+    let count = match (&list, &tuple) {
+        (Some(items), _) => items.len(),
+        (_, Some(items)) => items.len(),
+        (None, None) => return Ok(None),
+    };
+    let Ok(a_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(a_in) = a_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = a_in.len() as i64;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "dtype"), "float64")?;
+    let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
+    if count > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut gather = |slot: &pyo3::buffer::ReadOnlyCell<f64>, item: Bound<'_, PyAny>| {
+            let Ok(index) = item.extract::<i64>() else {
+                return false;
+            };
+            let Some(index) = resolve_take_index(index, n, 0) else {
+                return false;
+            };
+            slot.set(a_in[index].get());
+            true
+        };
+        let complete = if let Some(items) = list {
+            output
+                .iter()
+                .zip(items.iter())
+                .all(|(slot, item)| gather(slot, item))
+        } else if let Some(items) = tuple {
+            output
+                .iter()
+                .zip(items.iter())
+                .all(|(slot, item)| gather(slot, item))
+        } else {
+            false
+        };
+        if !complete {
+            return Ok(None);
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 fn try_zerocopy_f64_take(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -25674,6 +25750,12 @@ fn take(
     // and per-axis paths still gate clip/wrap to numpy — only the flat gather resolves the index per mode.)
     if !matches!(mode, "raise" | "clip" | "wrap") {
         return fallback();
+    }
+    // A flat Python list/tuple is an ordinary np.take index spelling.  It cannot
+    // enter the ndarray-buffer gathers below without first allocating an int64
+    // ndarray, so consume its existing integer objects directly.
+    if let Some(out) = try_zerocopy_f64_container_take(py, a.bind(py), indices.bind(py), axis, mode)? {
+        return Ok(out);
     }
     // Zero-copy flat gather for the common case (axis=None, mode="raise", f64 a +
     // int64 indices); skips the cold extract/build Vecs. Bit-identical; per-axis

@@ -307,6 +307,29 @@ def discover(fnp_module):
 
             cases.append((chosen_label, name, chosen_args))
             break
+
+    # `take` needs an index operand, so it cannot enter the one-operand generic
+    # ladder above.  These are runtime-built public-call cases, not a special
+    # value table: container form (list and tuple) and length both vary while
+    # the source is the same ordinary f64 array.  The 1024-index row prevents a
+    # list10-only implementation from qualifying as a general container route.
+    take_source = np.linspace(-7.5, 7.5, N, dtype=np.float64)
+    take_cases = [
+        ("take[list10]", [0, 17, 1024, N // 2, -1, 7, N - 2, 91, 4096, 33]),
+        ("take[tuple10]", (0, 17, 1024, N // 2, -1, 7, N - 2, 91, 4096, 33)),
+        ("take[list1024]", list(range(0, N, N // 1024))),
+    ]
+    for label, indices in take_cases:
+        try:
+            expected = np.take(take_source, indices)
+            actual = fnp_module.take(take_source, indices)
+        except Exception:
+            skipped.append(("take", label, "raised"))
+            continue
+        if not _agree(expected, actual):
+            disagree.append(("take", label))
+            continue
+        cases.append((label, "take", (take_source, indices)))
     return cases, disagree, skipped
 "#;
 
