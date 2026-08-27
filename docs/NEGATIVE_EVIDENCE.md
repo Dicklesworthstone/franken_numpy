@@ -59672,3 +59672,116 @@ shared `(*args, **kwargs)` entry plus one gate plus the allocation itself. There
 `set_item(dtype, <name>)` kwargs-dict sites elsewhere in this file; each needs its own measurement,
 and the ones on cold paths are not worth a cycle.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `np.append`'s NATIVE AXIS PATH WAS WRONG *AND* 7.6x-14.1x SLOWER THAN NUMPY: deleting it takes axis=0 i64 from 14.069x to 1.406x, and the flat path from 2.035x to 1.785x (`deadlock-audit-1zl3e`)
+
+`TanBridge`. Shipped `4272b805` + `dc87ec7c` + `c6ac3f62` + `b786c226`. Measured on
+`thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME invocation, ABBAABBA, 21
+rounds, dual A/A null per cell, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** one correctness defect class fixed on two families, plus candidate-win
+on twelve cells; every cell is still a LOSS to numpy and is reported as one.
+
+### THE ORDER MATTERS: A PERF PROBE FOUND THE CORRECTNESS DEFECT, WHICH THEN FOUND THE REAL PERF DEFECT
+
+I started on `append` because it was the largest absolute verified loss left (2.064x, 1216 ns
+excess). The parity probe written to guard that work compared DTYPES, not just values, and failed:
+
+```
+  np.append(x, y, axis=0), 2-D operand, numpy 2.4.3 vs fnp
+    float32    -> numpy float32     fnp float64        <<< SILENT
+    float16    -> numpy float16     fnp float64        <<< SILENT
+    int32      -> numpy int32       fnp int64          <<< SILENT
+    int8       -> numpy int8        fnp int64          <<< SILENT
+    uint8      -> numpy uint8       fnp uint64         <<< SILENT
+    longdouble -> numpy float128    fnp float64        <<< SILENT
+  np.append(uint8, int8)  -> numpy int16      fnp float64
+  np.append(np.matrix(a), y) -> numpy raises ValueError, fnp returned an array
+```
+
+`extract_numeric_array` canonicalises to f64/i64 and `build_numpy_array_from_ufunc` rebuilt with
+THAT dtype. Six dtypes returned a silently different dtype from numpy - no error, no warning, and
+invisible to any probe that compares values rather than dtypes.
+
+Gating the path to the two dtypes it DID preserve made the corrupted cases delegate - and that
+made them measurable side by side with the ones that had been "working":
+
+```
+APPEND_AXIS_PATH worker=thinkstation1 numpy_version=2.4.3   64x16 2-D, axis=0, nulls PASS
+    axis=0 f64, NATIVE path      7.577x LOSS   [6.198,7.764]
+    axis=0 i64, NATIVE path     14.069x LOSS  [11.165,14.226]
+    axis=0 f32, DELEGATED        1.578x LOSS   [1.298,1.807]
+    axis=0 i32, DELEGATED        1.596x LOSS   [1.561,1.761]
+```
+
+**Delegating is 4-9x FASTER than the native path it replaced.** `UFuncArray::concatenate` here
+means a full extract of both operands into owned Vecs, a concatenate, and a rebuild across the
+export bridge - three copies where numpy does one. There is no dtype and no shape for which that
+was worth taking, so the answer was not a narrower gate but NO PATH: every `axis=` form delegates.
+
+### FINAL, AFTER THE DELETION
+
+```
+APPEND_ENTRY worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=884f9679e6b4  after_elf=0e71f269c88f
+
+  case                      BEFORE                      AFTER              excess ns
+  axis=0 i64          14.069x [11.165,14.226] -> 1.406x [1.234,1.425]   15852 -> 441
+  axis=0 f64           7.459x [6.164,7.716]   -> 1.414x [1.247,1.426]    7676 -> 464
+  axis=0 f32           WRONG DTYPE            -> 1.410x [1.406,1.550]    (now correct)
+  axis=0 i32           WRONG DTYPE            -> 1.408x [1.396,1.421]    (now correct)
+  flat f64 + list      1.739x [1.570,1.910]   -> 1.588x [1.506,1.666]    3112 -> 845
+  flat f64 2^8         2.035x [1.849,2.157]   -> 1.785x [1.402,2.031]    1267 -> 926
+  flat u8              2.035x [1.710,2.239]   -> 1.791x [1.673,1.866]    1206 -> 838
+  flat i64             2.015x [1.612,2.179]   -> 1.787x [1.524,2.004]    1255 -> 913
+  flat f64 + scalar    1.762x [1.655,1.962]   -> 1.623x [1.444,1.694]    1116 -> 816
+  flat f64 2^12        1.576x [1.514,1.701]   -> 1.442x [1.145,1.669]    1163 -> 1676 (BIASED null)
+  flat f64 2^16        1.124x [1.055,1.200]   -> 1.110x [1.096,1.120]    1563 -> 1112
+  flat f64 <- f32      2.149x [1.698,2.752]   -> 2.086x [1.936,2.180]    1600 -> 1351
+```
+
+**THE BEFORE BUILD COULD NOT BE MEASURED ON TWO OF THESE CELLS.** The A/B script asserts dtype
+parity before timing, and it ABORTED on `axis=0 f32` in the BEFORE arm with `float32 vs float64`.
+That is the correctness defect stopping its own measurement, and it is why those two rows read
+"WRONG DTYPE" rather than a ratio.
+
+The flat-path levers are separate and additive: `numpy.asarray(values)` is an identity on an exact
+ndarray (append's commonest form passes two arrays); `asarray(v_arr, dtype=arr_dtype)` is a no-op
+when v_arr already HAS that dtype - `result_type(arr, v_arr) == arr_dtype` does NOT imply it, so
+the test is on v_arr's own dtype and numpy's builtin dtypes are singletons, making it a pointer
+compare; `numpy.getattr("uint8")` became the held type; and two `PyDict`s went positional. The
+`+ list` cell is the clearest: 3112 ns of excess to 845.
+
+**A/A NULL CONTROLS:** 23 of 24 pass; `flat f64 2^12` AFTER reads 0.9543 and that row is "about"
+(its excess column disagrees with its ratio, which is what a biased null looks like).
+
+### THE SECOND CORRECTNESS FIX, AND WHY IT TOOK TWO COMMITS
+
+`np.square(np.matrix(a))` is a `matrix`; fnp returned a plain `ndarray`. Same class as
+`deadlock-audit-c0g2r` fixed for the predicates, recorded as OWED in the `deadlock-audit-cfivt`
+row. Putting the guard in `native_unary_elementwise` took the unary probe from 131 divergences to
+**128, not the 126 expected**. The two survivors were `sqrt`, which reaches the family through
+`native_unary_promoting`, and `floor`, which reaches it through `native_rounding_unary`. **Three
+functions serve one user-visible family, and a guard in one of them is not a guard on the family.**
+Fixing all three gives 126 - and those 126 are entirely my probe's own `longdouble` padding-byte
+artifact.
+
+PARITY: `append` over 14 dtypes x 6 shape/axis forms, 14 mixed-dtype promotion pairs at two axis
+forms, and 20 edge cases (list/tuple/scalar/0-d/nested-list values, `np.matrix` as either operand,
+strided, transposed, F-order, nan/inf, object dtype, shape mismatch, bad axis) - compared on dtype,
+shape, `type()` and RAW BYTES. **9 divergences before, 0 after.** Unary family: **131 before, 126
+after.** 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^16 f64 = 512 KB.
+
+RETRY PREDICATE: do NOT restore a native `append(axis=)` path on `UFuncArray::concatenate` - it is
+three copies against numpy's one and lost by 7.6-14.1x at every dtype it did not also corrupt. A
+future native axis path would have to write bytes into a preallocated output the way the axis=None
+path does, and would need to beat 1.41x to be worth anything. The remaining ~440 ns on the axis
+cells and ~840-930 ns on the flat cells is the shared `#[pyfunction]` entry plus the two
+`noncontiguous_ndarray` guards plus the delegation - the same floor the rest of this file now sits
+on. **AND: grep for other users of `extract_numeric_array` whose result is rebuilt with
+`build_numpy_array_from_ufunc` - that pairing is what silently widens, and `append` is unlikely to
+be the only one.**
+AGENT_NAME=TanBridge.
