@@ -60570,3 +60570,83 @@ for the unary ops and four for `sort`-like dispatch. The remaining 35 are the ax
 and `count_nonzero(axis=)`; all but `ravel` are extract-and-rebuild and take the delegation
 remedy - `ravel` returns a reshape VIEW and takes the cheap one.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `ravel`: THE BUILD-MECHANISM RULE IS NECESSARY BUT NOT SUFFICIENT - `np.matrix` OVERRIDES `ravel`, and a first fix that delegated too broadly cost lists a decidable 0.851x -> 1.142x (`deadlock-audit-3ou6y`)
+
+`TanBridge`. Shipped `ca584ab7` + `86fa51a0`. Measured on `thinkstation1` against the LIVE
+installed numpy 2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1, loadavg 9.00-12.52.
+
+This row makes no campaign result class claim: it is a CORRECTNESS fix that also happens to speed
+the array path up, and both are shown.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=a8d128e11767bb4729e4ee3a29c22462c18ff4ac02f98045040b70e0ff1a9ed2
+executing elf sha256 (AFTER)  bench_elf_sha256=6aa981502995c3874473adf189eeb89eb4d563d2ac81636515ef6f302b5596fe
+```
+
+### THE RULE FAILED ITS FIRST TEST, AND CHECKING IT BEFOREHAND IS WHY THAT COST NOTHING
+
+`deadlock-audit-h79ek`'s rule says: classify an op by how it BUILDS its result - indexing and views
+preserve a subclass for free, extract-and-rebuild needs delegation. `ravel` returns a view, so the
+rule says "cheap no-conversion fix: call the operand's own `.ravel()`". Checked against numpy
+BEFORE writing it:
+
+```
+  np.ravel(np.matrix(a))   -> ndarray, shape (12,)
+  np.matrix(a).ravel()     -> matrix,  shape (1, 12)
+```
+
+`np.matrix` REIMPLEMENTS `ravel`, so the method and the function disagree in BOTH type and shape.
+The cheap fix would have traded one divergence for another. **The rule reasons about how OUR code
+builds the result; it says nothing about a subclass that reimplements the operation.** Delegating
+to the FUNCTION reproduces numpy for every subclass by construction, so `ravel` takes the
+delegation remedy despite being a view op.
+
+### AND THEN THE FIRST DELEGATION WAS TOO BROAD
+
+`ca584ab7` gated delegation on "not an exact ndarray", which also caught lists, tuples and scalars.
+Those have no subclass to preserve, and routing them through `numpy.ravel` makes the function
+re-do the conversion behind a dispatch:
+
+```
+  ravel(from list)   0.851x WIN [0.794,0.898]  ->  1.142x LOSS [1.135,1.199]
+```
+
+DISJOINT CIs, nulls passing both sides - a real regression. Its own A/B caught it before the row
+was banked, and `86fa51a0` narrowed the gate to `ndarray_subclass_needs_numpy`. **Delegation is the
+remedy for the case that needs it, not a default.**
+
+```
+RAVEL_SUBCLASS worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  all 24 nulls PASS
+
+  case               BEFORE                      AFTER (final)
+  ravel 1-D 2^8     0.640x WIN [0.556,0.651] -> 0.517x WIN [0.450,0.521]   DISJOINT
+  ravel 2-D 64^2    0.643x WIN [0.555,0.771] -> 0.516x WIN [0.511,0.527]   DISJOINT
+  ravel 1-D 2^16    0.646x WIN [0.580,0.750] -> 0.517x WIN [0.457,0.521]   DISJOINT
+  ravel 2-D order=F 0.943x WIN [0.892,1.003] -> 0.939x WIN [0.880,0.971]
+  ravel transposed  0.948x WIN [0.909,1.174] -> 0.939x WIN [0.913,0.962]
+  ravel from list   0.835x WIN [0.750,0.894] -> 0.902x WIN [0.811,0.953]
+```
+
+The three array cells improve DECIDABLY - 0.64x -> 0.52x - because the exact-ndarray path no
+longer calls `numpy.asarray` on an object that IS already an array, the same identity skip the flip
+family took. `from list` ends where it started (both wins, CIs overlap); the point of that row is
+that it is no longer the 1.142x LOSS the intermediate commit made it.
+
+PARITY: 10 dtypes x 6 shapes x 5 order forms, plus 10 operand kinds (matrix, ndarray subclass, 1-D
+subclass, strided, transposed, F-order, list, tuple, scalar, 0-d) x 4 orders and an invalid order -
+compared on dtype, shape, `type()`, RAW BYTES and the `np.shares_memory` aliasing relation, which
+matters because `ravel` must return a VIEW when it can. **8 divergences before, 0 after.**
+Whole-repo subclass audit **35 -> 34 of 198.** 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^16 f64 = 512 KB.
+
+RETRY PREDICATE: `ravel` is done. **Before applying the build-mechanism rule to the remaining 34,
+check whether `np.matrix` OVERRIDES the operation** - `np.matrix` reimplements `ravel`, `sum`,
+`mean`, `std`, `var`, `argmax`, `argmin`, `any`, `all`, `max`, `min`, `prod` and `ptp`, and for
+every one of those the method and the function can disagree. The safe default for that list is the
+FUNCTION, gated on `ndarray_subclass_needs_numpy` so non-array operands keep their existing path.
+AGENT_NAME=TanBridge.
