@@ -59595,3 +59595,80 @@ the f64 helper does). **That reshape is the next lever for the four integer/f32 
 the same one already taken for f64 in `deadlock-audit-ei9jz`. There are 71 more
 `set_item(dtype, "float64")` kwargs-dict sites in this file; only the two on this route were taken.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - THE UNARY int/f32 HELPERS ALLOCATED FLAT THROUGH A KWARGS DICT AND A DTYPE-NAME STRING, THEN THE CALLER RESHAPED: `negative u8` 4.021x -> 2.338x, `square i32` 3.877x -> 2.336x, and the f64 CONTROL DOES NOT MOVE (`deadlock-audit-tsyfb`)
+
+`TanBridge`. Shipped `27154f1a`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3
+in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell, OPENBLAS_NUM_THREADS=1,
+loadavg 10.75.
+
+**Campaign result class:** candidate-win on the four targeted cells, all still losses to numpy and
+reported as such; no-change on the eleven f64 control cells and the three engagement cells.
+
+This is the lever `deadlock-audit-cfivt` named on its way out: `square i32` barely moved there
+(1057 -> 1043 ns of excess) and was left the unary family's worst cell.
+
+`zerocopy_i64_unary_flat`, `zerocopy_i32_unary_flat` and `zerocopy_int_unary_typed` each built a
+per-call `PyDict`, put a dtype NAME string in it, allocated FLAT, and left
+`native_unary_elementwise` to `reshape` the result. Those are three costs the f64 sibling shed in
+`7c04bef0` and `d16ee71a` and that these three never took. They now allocate at the FINAL shape
+with the OPERAND'S OWN dtype object - cheaper than a name, and exactly numpy's own dtype - and the
+three caller reshapes are gone.
+
+**`zerocopy_f32_unary_flat` was a DIFFERENT bug, and the more interesting one.** It has allocated
+at the final shape since `deadlock-audit-ei9jz`, but its caller kept reshaping the result to the
+shape it ALREADY HAD - a no-op `reshape` plus its tuple on every f32 unary, ~117 ns, invisible to
+anyone reading either the helper or the caller alone. A helper that fixes its contract and a caller
+that never learns of it is a defect neither file shows.
+
+```
+UNARY_NARROW_HELPERS worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=1afd71f5c6a2  after_elf=884f9679e6b4      loadavg 10.75
+
+  TARGETED:
+  square i64 2^8   3.311x [3.287,3.455] -> 2.105x [2.067,2.255]   excess 830 -> 394 ns
+  square i32 2^8   3.877x [3.242,4.074] -> 2.336x [1.994,2.480]   excess 827 -> 382 ns
+  negative u8 2^8  4.021x [3.969,4.218] -> 2.338x [2.221,2.512]   excess 829 -> 363 ns
+  square f32 2^8   3.076x [2.498,3.106] -> 1.931x [1.873,2.085]   excess 634 -> 280 ns
+
+  f64 CONTROL (path untouched by this ship):
+  square f64 2^8   1.805x -> 1.858x     floor f64 2^8   1.928x -> 1.963x
+  negative f64     1.845x -> 1.863x     ceil  f64 2^8   1.915x -> 1.973x
+  absolute f64     1.799x -> 1.822x     trunc f64 2^8   1.904x -> 1.962x
+  reciprocal f64   1.686x -> 1.701x     rint  f64 2^8   1.957x -> 2.011x
+  degrees f64 2^8  1.023x -> 1.049x     square f64 2^12 1.276x -> 1.344x
+
+  ENGAGEMENT:
+  sqrt f64 2^20    0.326x WIN -> 0.400x WIN      square i64 2^20  0.953x -> 0.947x WIN
+```
+
+**THE f64 CONTROL IS THE ATTRIBUTION.** Eleven f64 cells sit on a path this ship did not touch and
+none of them moves outside its CI, while all four targeted dtypes move by 1.0-1.7x with DISJOINT
+ranges. No profiler was needed to place the effect: the cells that share the entry but not the
+helper stayed still.
+
+**A/A NULL CONTROLS:** 37 of 40 pass. Three read BIASED (`sqrt f64 2^8` AFTER 0.9701,
+`square f16` AFTER 1.0326, `sqrt f64 2^20` AFTER 0.9522) and those rows are "about"; all four
+TARGETED cells have clean nulls on both sides and DISJOINT ranges.
+
+**`zerocopy_int_unary_typed`'s `dtype_name: &str` parameter is REMOVED, not left unused.** The
+width is already fixed by the `T` the caller instantiates, so naming it again bought nothing;
+leaving it as a `let _ = dtype_name;` would have been debt. Six call sites updated.
+
+PARITY: the same probe as `deadlock-audit-cfivt` - 29 ops x 16 dtypes x 5 shapes, a 9-value
+non-finite seed through every op at f64/f32/f16, four layouts, list/scalar/0-d inputs, and eighteen
+LARGE engagement cells across six dtypes, compared on dtype, shape, `type()` and RAW BYTES.
+**131 divergences before, 131 after; exact multiset diff says 0 INTRODUCED and 0 fixed.** (125 are
+the probe's own `longdouble` padding artifact; 6 are the `np.matrix` subclass defect recorded one
+row above and still open.) 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^20 f64 = 8 MB, one live at a time.
+
+RETRY PREDICATE: these four helpers are done - do not re-attack their allocation or the caller
+reshapes. The four targeted cells now sit at 1.9-2.3x with ~280-395 ns of excess, which is the
+SAME floor the f64 cells sit on, so they are no longer dtype-specific problems: what remains is the
+shared `(*args, **kwargs)` entry plus one gate plus the allocation itself. There are still ~70
+`set_item(dtype, <name>)` kwargs-dict sites elsewhere in this file; each needs its own measurement,
+and the ones on cold paths are not worth a cycle.
+AGENT_NAME=TanBridge.
