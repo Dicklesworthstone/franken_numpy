@@ -43358,13 +43358,22 @@ const INT_ORDER_STAT_HIST_MIN_N: usize = 1 << 20;
 // this gate was added).
 const ARGSORT_NATIVE_MIN_N: usize = 1 << 20;
 
-// True when a 1-D contiguous buffer is already in ascending order. Returns `None` when the
+// True when a 1-D contiguous buffer is already in ASCENDING order. Returns `None` when the
 // operand cannot be read as `T` (non-contiguous, wrong dtype), which callers treat as "unknown"
 // and route exactly as they did before.
 //
 // SHORT-CIRCUITS AT THE FIRST INVERSION, which is what makes it affordable on the hot path:
 // random data answers after ~2 element reads. NaN makes every comparison false, so a
 // NaN-bearing float array reports "not ascending" and keeps its existing route.
+//
+// DESCENDING IS DELIBERATELY NOT DETECTED HERE, and it was tried and REJECTED. The premise for
+// extending it - "numpy shortcuts a descending run too" - is FALSE: at 2^20 float64, numpy's
+// argsort takes 21.63 ms on descending input against 2.00 ms on ascending, i.e. it shortcuts
+// ascending ONLY and treats descending as ordinary data. Descending is therefore a normal
+// size-dependent win/loss for the native route, not a missed O(n) detection, and delegating it
+// wholesale FORFEITS a real win: measured on the pre-change build, descending float64 reads
+// 2.580x/1.485x at 2^20 but 0.767x/0.800x at 2^22 and 0.638x/0.627x at 2^23. Any future attempt
+// belongs behind a SIZE gate and belongs to `deadlock-audit-e56rk`, not to this ascending guard.
 fn flat_buffer_is_ascending<T: pyo3::buffer::Element + Copy + PartialOrd>(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -43377,11 +43386,16 @@ fn flat_buffer_is_ascending<T: pyo3::buffer::Element + Copy + PartialOrd>(
     Some(data.windows(2).all(|w| w[0] <= w[1]))
 }
 
-// NUMPY'S `argsort` DETECTS AN ASCENDING RUN AND FINISHES IN O(n). Every native argsort route
-// here is a radix or comparison pass whose cost does not depend on the input order, so an
-// already-sorted operand is exactly where they lose worst - measured at 2^20 against live numpy:
-// int32 31.398x, uint32 28.483x, float32 27.791x, float64 22.770x, int64 20.292x. `sort` does not
-// share the defect (0.054x-1.03x on the same inputs), which is what isolates it to argsort.
+// NUMPY'S `argsort` DETECTS AN ASCENDING RUN AND FINISHES IN O(n) - and ONLY an ascending one.
+// Every native argsort route here is a radix or comparison pass whose cost does not depend on the
+// input order, so an already-ascending operand is exactly where they lose worst - measured at
+// 2^20 against live numpy: int32 31.398x, uint32 28.483x, float32 27.791x, float64 22.770x,
+// int64 20.292x. `sort` does not share the defect (0.054x-1.03x on the same inputs), which is
+// what isolates it to argsort.
+//
+// THE ASYMMETRY IS REAL AND WAS MEASURED, not assumed: at 2^20 float64, numpy's argsort costs
+// 2.00 ms on ascending input and 21.63 ms on descending. Extending this guard to descending was
+// tried and REJECTED - see `flat_buffer_is_ascending`.
 //
 // Only rank 1 is answered here: that is the shape the native flat routes serve, and a per-lane
 // answer for an axis form would cost a full pass and defeat the point.
@@ -80371,7 +80385,8 @@ fn argsort(
             // finishes such an argsort in O(n); every native route below pays its full radix or
             // comparison cost regardless, and measured 20.292x to 31.398x SLOWER at 2^20 for it.
             // The probe short-circuits at the first inversion, so unsorted data - the overwhelming
-            // majority - pays about two element reads to skip this.
+            // majority - pays about two element reads to skip this. DESCENDING is deliberately
+            // excluded and the rejection is recorded at the helper.
             if flat_ndarray_is_ascending(py, &a, facts) {
                 return core_numpy_passthrough_interned(py, intern!(py, "argsort"), args, kwargs);
             }
