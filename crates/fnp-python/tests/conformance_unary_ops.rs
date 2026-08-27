@@ -76,6 +76,37 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
+fn negative_uint64_zero_dimensional_matches_numpy_without_losing_ranked_fast_path()
+-> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def capture(f, x):
+    try:
+        result = f(x)
+        array = np.asarray(result)
+        return ("ok", type(result).__name__, array.dtype.str, array.shape, array.tobytes())
+    except Exception as error:
+        return ("err", type(error).__name__, str(error))
+
+inputs = [
+    np.array(np.uint64(44)),
+    np.array([np.uint64(44)]),
+    np.array([[np.uint64(44), np.uint64(0)], [np.uint64(1), np.uint64(2)]]),
+]
+print(all(capture(fnp.negative, x) == capture(np.negative, x) for x in inputs))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "negative must wrap rank-0 uint64 exactly like NumPy while preserving ranked behavior"
+    );
+    Ok(())
+}
+
+#[test]
 fn sign_unary_out_keyword_surfaces_match_numpy() -> Result<(), String> {
     // -0.0 sits in the input on purpose: negative(-0.0) is +0.0, and the shared probe's
     // signbit tuple is what makes that observable at all.
