@@ -73817,13 +73817,25 @@ fn f16_dtype_ok(arr: &Bound<'_, PyAny>, nd: &Bound<'_, PyAny>) -> PyResult<bool>
     dtype_is_f16(arr)
 }
 
+/// Element count that is SAFE ON A 0-d ARRAY (`deadlock-audit-gmfbf`).
+///
+/// `Bound::len()` calls Python's `len()`, which RAISES `TypeError: len() of unsized object` on a
+/// 0-d ndarray. Four f16 size gates used it inside a `?`, so the TypeError propagated out of the
+/// PUBLIC function instead of declining to numpy: `fnp.unique`, `fnp.isin`, `fnp.searchsorted`,
+/// `fnp.intersect1d`, `fnp.union1d` and `fnp.setdiff1d` all raised on a 0-d float16 operand where
+/// numpy returns a result. `ndarray.size` is defined for every rank and is 1 for 0-d, which is
+/// what these `< 1 << 14` comparisons wanted all along.
+fn ndarray_element_count(arr: &Bound<'_, PyAny>) -> PyResult<usize> {
+    arr.getattr(intern!(arr.py(), "size"))?.extract::<usize>()
+}
+
 fn try_native_f16_unique(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let nd = cached_ndarray_type(numpy.py())?.clone();
-    if !f16_dtype_ok(item, &nd)? || item.len()? < (1 << 14) {
+    if !f16_dtype_ok(item, &nd)? || ndarray_element_count(item)? < (1 << 14) {
         return Ok(None);
     }
     // Widen exact -> f32 unique (fnp fast path or numpy) -> narrow the sorted-unique result back to f16.
@@ -73844,7 +73856,10 @@ fn try_native_f16_isin(
     invert: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let nd = cached_ndarray_type(py)?.clone();
-    if !f16_dtype_ok(element, &nd)? || !f16_dtype_ok(test, &nd)? || element.len()? < (1 << 14) {
+    if !f16_dtype_ok(element, &nd)?
+        || !f16_dtype_ok(test, &nd)?
+        || ndarray_element_count(element)? < (1 << 14)
+    {
         return Ok(None);
     }
     // 65536-slot PRESENCE BITMAP (8 KiB, L1-resident): the f16 unique table
@@ -73945,7 +73960,8 @@ fn try_native_f16_searchsorted(
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
     let nd = cached_ndarray_type(py)?.clone();
-    if !f16_dtype_ok(a_arr, &nd)? || !f16_dtype_ok(v, &nd)? || v.len()? < (1 << 14) {
+    if !f16_dtype_ok(a_arr, &nd)? || !f16_dtype_ok(v, &nd)? || ndarray_element_count(v)? < (1 << 14)
+    {
         return Ok(None);
     }
     if let Some(output) = try_native_f16_searchsorted_table(py, numpy, a_arr, v, side)? {
@@ -74113,7 +74129,10 @@ fn try_native_f16_setop(
     op: DtSetOp,
 ) -> PyResult<Option<Py<PyAny>>> {
     let nd = cached_ndarray_type(numpy.py())?.clone();
-    if !f16_dtype_ok(ar1, &nd)? || !f16_dtype_ok(ar2, &nd)? || ar1.len()? < (1 << 14) {
+    if !f16_dtype_ok(ar1, &nd)?
+        || !f16_dtype_ok(ar2, &nd)?
+        || ndarray_element_count(ar1)? < (1 << 14)
+    {
         return Ok(None);
     }
     let a32 = ar1
