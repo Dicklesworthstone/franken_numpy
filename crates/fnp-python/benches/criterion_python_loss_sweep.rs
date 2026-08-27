@@ -374,6 +374,40 @@ fn discover_cases<'py>(
     )
 }
 
+/// Rebuild one of the public `take` container cases without first discovering
+/// every unrelated NumPy operation.  The generic discovery corpus deliberately
+/// contains expensive numerical operators; using it merely to retrieve a
+/// runtime-selected `take[...]` row can evaluate an unrelated quadratic call
+/// before the contract even starts.  These labels are also emitted by
+/// `discover`, and the inputs retain the list/tuple and length variation that
+/// prevents a list10-only route from qualifying.
+fn take_contract_case<'py>(
+    py: Python<'py>,
+    wanted: &str,
+) -> Option<(String, String, pyo3::Bound<'py, PyTuple>)> {
+    let indices = match wanted {
+        "take[list10]" => "[0, 17, 1024, N // 2, -1, 7, N - 2, 91, 4096, 33]",
+        "take[tuple10]" => "(0, 17, 1024, N // 2, -1, 7, N - 2, 91, 4096, 33)",
+        "take[list1024]" => "list(range(0, N, N // 1024))",
+        _ => return None,
+    };
+    let ns = PyDict::new(py);
+    py.run(
+        std::ffi::CString::new(format!(
+            "import numpy as np\nN = 1 << 16\ntake_source = np.linspace(-7.5, 7.5, N, dtype=np.float64)\ntake_indices = {indices}\n"
+        ))
+        .expect("take contract setup CString")
+        .as_c_str(),
+        Some(&ns),
+        Some(&ns),
+    )
+    .expect("take contract setup");
+    let source = ns.get_item("take_source").expect("take source");
+    let indices = ns.get_item("take_indices").expect("take indices");
+    let args = PyTuple::new(py, [&source, &indices]).expect("take contract arguments");
+    Some((wanted.to_owned(), "take".to_owned(), args))
+}
+
 /// Structural checksum that survives tuples, bools and non-summable dtypes.
 ///
 /// `.sum()` is the usual idiom in this crate and it does NOT generalise: it raises on a
@@ -580,24 +614,28 @@ fn bench_vs_numpy_worst_contract(_c: &mut Criterion) {
             .extract()
             .expect("numpy version string");
 
-        let (cases, _, _) = discover_cases(py, &module);
-        let mut chosen = None;
-        for case in cases.iter() {
-            let label: String = case.get_item(0).expect("label").extract().expect("label");
-            if label == wanted {
-                let name: String = case.get_item(1).expect("name").extract().expect("name");
-                let args = case
-                    .get_item(2)
-                    .expect("args")
-                    .cast_into::<PyTuple>()
-                    .expect("args tuple");
-                chosen = Some((label, name, args));
-                break;
+        let (label, name, args) = if let Some(case) = take_contract_case(py, &wanted) {
+            case
+        } else {
+            let (cases, _, _) = discover_cases(py, &module);
+            let mut chosen = None;
+            for case in cases.iter() {
+                let label: String = case.get_item(0).expect("label").extract().expect("label");
+                if label == wanted {
+                    let name: String = case.get_item(1).expect("name").extract().expect("name");
+                    let args = case
+                        .get_item(2)
+                        .expect("args")
+                        .cast_into::<PyTuple>()
+                        .expect("args tuple");
+                    chosen = Some((label, name, args));
+                    break;
+                }
             }
-        }
-        let (label, name, args) = chosen.unwrap_or_else(|| {
-            panic!("FNP_SWEEP_CASE={wanted:?} matched no discovered case; run the sweep group")
-        });
+            chosen.unwrap_or_else(|| {
+                panic!("FNP_SWEEP_CASE={wanted:?} matched no discovered case; run the sweep group")
+            })
+        };
 
         let ours = module.getattr(name.as_str()).expect("fnp callable");
         let theirs = numpy.getattr(name.as_str()).expect("numpy callable");
