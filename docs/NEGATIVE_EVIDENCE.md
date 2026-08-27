@@ -64558,3 +64558,107 @@ question is the opposite one: the parallel arm wins 0.684x-0.892x from 8 MB up, 
 too HIGH, and the band below 8 MB has never been measured against a parallel arm at all. Test
 LOWERING it. And `crossbeam_epoch::with_handle` at 21.78% of the parallel profile is a genuine
 rayon-entry cost worth attacking directly for every fan-out site in this file, not just this one.
+
+## 2026-08-27 - WIN (SHIP): `take`'s gather called an out-of-line `resolve_take_index` PER ELEMENT and re-dispatched the loop-invariant mode inside the loop - 2.454x -> 1.307x counted, 2.288x -> 1.312x on wall clock (`deadlock-audit-yphwc` family)
+
+`TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1,
+interleaved ABBAABBA with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=7b11850d12d2076d873ad9e34a9241e8ebcd7e9c8bb7395d071ed33564388c17
+executing elf sha256 (AFTER)   bench_elf_sha256=68cab82806a43c3a3bc3d9225b842a3a74ac7756aa91da10c7dca43b32850eb9
+```
+
+### THE ONE CELL THAT SURVIVED THE PINNED RE-COUNT
+
+Re-counting the whole two-operand audit with OPENBLAS pinned cleared the board - `insert` 1.000x,
+`delete` 1.000x, `repeat` 0.408x (the win shipped in `a103b894`), `concatenate` 32.962x (the
+documented REJECT, its instruction cost buys wall time) - and left exactly one real target:
+
+```
+  take   numpy 4,004,918 insn/call   fnp 9,829,918   2.454x   excess 5,825,000
+```
+
+Unlike `concatenate`, here the wall clock AGREES: 2.288x and 2.238x on decidable dual-null cells.
+
+### THREE WRONG GUESSES, THEN THE DISASSEMBLY
+
+Worth recording because each looked convincing and cost a build:
+
+1. **"`resolve_take_index` shows as its own symbol at 37.39%, so it is not inlined."** Adding
+   `#[inline(always)]` measured 2.454x -> 2.450x. `perf` attributes INLINED frames through debug
+   info, so a symbol in a profile is not evidence of a call.
+2. **"The `Cell::get`/`set` serial loop is the cost"** (it had been, three times this week). Raw
+   slices moved it 2.454x -> 2.376x. Real, but 3%.
+3. **"The per-element `return` blocks unrolling of a latency-bound gather."** Replacing the early
+   exit with the parallel arm's set-a-flag form measured WORSE, 2.376x -> 2.606x - every element
+   then pays the flag update. Rejected and reverted.
+
+The disassembly settled it in one look. The gather loop really was:
+
+```
+  mov 0x10(%rsp),%rax / mov (%rax,%r15,8),%rdi   <- index base reloaded from STACK each iteration
+  mov 0x108(%rsp),%rsi / movzbl 0xf(%rsp),%edx   <- n and mode_code reloaded from STACK
+  call resolve_take_index                         <- A REAL CALL, for ~4 instructions of arithmetic
+  cmp $0x1,%rax / jne ... / cmp %r12,%rdx / jae ...
+  vmovsd 0x0(%r13,%rdx,8),%xmm0 / vmovsd %xmm0,0x0(%rbp,%r15,8)
+```
+
+**`#[inline]` is only a HINT and LLVM declined it.** Guess (1) was right about the defect and wrong
+about the evidence - and it measured nothing because `#[inline(always)]` ADDED next to an existing
+`#[inline]` is a "unused attribute / also specified here" warning and is DROPPED. It has to REPLACE
+the hint. Doing that: 2.454x -> 1.685x, and the symbol disappears from `nm` entirely.
+
+The loop then still reloaded `mode_code` from the stack and re-dispatched it every element, with
+`Ord::clamp` and `rem_euclid` left as out-of-line calls on the two never-taken branches. Lifting
+mode to a **const generic** (`take_gather_mode::<T, MODE>`, dispatched once outside the loop)
+folds the match: **1.685x -> 1.307x**, and the raise-mode loop is now 17 instructions with no
+calls and no mode test.
+
+COUNTED_MECHANISM: baseline-subtracted instructions per call over 300 calls, 262144 f64 gathered by
+262144 int64 indices, OPENBLAS pinned. numpy 4,007,458; fnp 9,829,918 -> 6,764,780 (force-inline)
+-> 5,237,086 (const-generic mode). Excess per call 5,825,000 -> 1,229,629, a **4.7x reduction**,
+and per gathered element 37.5 -> 20.0 against NumPy's 15.3.
+
+### THE MEASUREMENT (paired, decidable cells only)
+
+```
+                        BEFORE (7b11850d)              AFTER (68cab828)
+   src      idx     numpy_ns     fnp_ns  ratio      numpy_ns     fnp_ns  ratio   nulls(after)
+ 65536    65536      64551.5   147693.4  2.288x      63569.5    83378.1  1.312x   0.999/0.993
+1048576     1024       1582.3     3541.4  2.238x       1584.2     2406.1  1.519x   0.986/0.996
+```
+
+Both runs were interleaved on the same host minutes apart; loadavg rose to 55 during the AFTER
+run, which is why the other three cells are VOID in both and are not quoted. 4194304 indices
+(0.211x -> 0.235x) is the only size that reaches the raw-slice PARALLEL arm and is VOID in both.
+
+PARITY: 943 cells - 11 dtypes x 4 source sizes x all three modes (`raise`/`clip`/`wrap`) x
+{the boundary index set where the three modes DISAGREE (0,-1,n-1,-n,n,-n-1,3n,-3n,+-2^31), random
+in-range-and-negative, empty index array, scalar index, negative scalar, 2-D index array, 20000
+random} plus the 2^21 parallel gate straddled from both sides, an out-of-range index planted
+INSIDE the parallel arm (positive and negative), empty source, every `axis`, non-contiguous
+source, float and bool index arrays, 0-D source and a big-endian source: **13 divergences,
+IDENTICAL in count and shape on the pre-change build - 0 introduced.**
+`cargo test -p fnp-python --lib --release`: 656 passed, 0 failed.
+
+PRE-EXISTING, NOT FIXED, three classes (all 13 cells, all present before this change):
+  * `mode="clip"` with a NEGATIVE SCALAR index - numpy clamps to 0 because clip is defined not to
+    do negative-from-end; fnp returns the from-the-end element. The scalar fast path is correctly
+    gated on `mode == "raise"`, so this is downstream of it and wants its own investigation. This
+    is the same defect recorded when the scalar path shipped.
+  * a BOOL index array raises `TypeError` in fnp where numpy indexes with it as 0/1.
+  * a big-endian source returns `>f8` where numpy returns native `float64` - the byte-order class,
+    same shape as the `concatenate` one fixed in `6b1c05dc`.
+
+MEMORY: largest source 2^20 f64 = 8 MB; the parallel-gate parity cases allocate 2^21 int64 = 16 MB.
+
+RETRY PREDICATE: the raise-mode loop is now 17 instructions and what remains is **two stack
+reloads per element and one redundant bounds check** - `resolve_take_index` already proves
+`idx < n`, and the slice index then re-tests it against `a_raw.len()`. Slicing the source to
+exactly `n` before the loop should let LLVM fold the second test into the first; that is ~2 of 20
+instructions per element, so do not expect more than ~10%. The PARALLEL arm above 2^21 still has
+the per-element mode dispatch this row removed from the serial one and was never re-counted - it
+wins on wall clock, so it is not urgent, but it is the same one-line change.

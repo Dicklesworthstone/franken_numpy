@@ -18037,7 +18037,66 @@ fn try_zerocopy_any_compact(
 // non-int64 index array, or any non-f64 / non-contiguous / non-ndarray input.
 // Resolve one take index into [0,n) per numpy's `mode` (0=raise, 1=clip, 2=wrap). Returns None only for
 // raise-mode out-of-range (caller reproduces numpy's IndexError). Requires n>0 for clip/wrap (guarded upstream).
-#[inline]
+// `#[inline]` IS ONLY A HINT AND LLVM DECLINED IT HERE. The gather loop disassembled to a real
+// `call` plus three stack reloads per element, because the call clobbers the registers holding
+// the index base, `n` and `mode_code`:
+//
+//   mov 0x10(%rsp),%rax  / mov (%rax,%r15,8),%rdi   <- index base reloaded from stack
+//   mov 0x108(%rsp),%rsi / movzbl 0xf(%rsp),%edx    <- n and mode_code reloaded from stack
+//   call resolve_take_index                          <- for ~4 instructions of arithmetic
+//   cmp %r12,%rdx / jae ... / vmovsd (%r13,%rdx,8),%xmm0
+//
+// That is the whole of `take`'s loss. Note `#[inline(always)]` must REPLACE the hint, not join
+// it: adding a second attribute is a "unused attribute / also specified here" warning and the new
+// one is DROPPED, which is why a first attempt measured 2.454x -> 2.450x and looked like proof
+// that the function was already inlined.
+/// The flat gather loop with `mode` lifted to a CONST GENERIC, so the mode match folds away.
+/// Returns false on an out-of-range index in raise mode, leaving the partial output to be dropped.
+///
+/// `mode_code` is loop-invariant but the compiler kept it in the loop: even with
+/// `resolve_take_index` force-inlined, the body still reloaded it from the stack and re-tested it
+/// once per element, and left `Ord::clamp` and `rem_euclid` as out-of-line calls for the two
+/// branches never taken:
+///
+///   movzbl 0xf(%rsp),%eax / mov 0x108(%rsp),%rsi   <- mode_code and n, reloaded EVERY iteration
+///   cmp $0x2,%eax / je ... / cmp $0x1,%eax / jne   <- mode re-dispatched EVERY iteration
+///   call <core::cmp::impls::Ord::clamp>            <- and these never inlined
+///
+/// Dispatching once outside the loop makes MODE a compile-time constant, which folds the match,
+/// specialises the arithmetic, and frees the registers holding `n` and the base pointers.
+#[inline(always)]
+fn take_gather_mode<T: Copy, const MODE: u8>(
+    out_data: &mut [T],
+    idx_raw: &[i64],
+    a_raw: &[T],
+    n: i64,
+) -> bool {
+    for (slot, &idx0) in out_data.iter_mut().zip(idx_raw.iter()) {
+        match resolve_take_index(idx0, n, MODE) {
+            Some(i) => *slot = a_raw[i],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Dispatch `take_gather_mode` once on the runtime mode, so the loop itself sees a constant.
+#[inline(always)]
+fn take_gather<T: Copy>(
+    out_data: &mut [T],
+    idx_raw: &[i64],
+    a_raw: &[T],
+    n: i64,
+    mode_code: u8,
+) -> bool {
+    match mode_code {
+        1 => take_gather_mode::<T, 1>(out_data, idx_raw, a_raw, n),
+        2 => take_gather_mode::<T, 2>(out_data, idx_raw, a_raw, n),
+        _ => take_gather_mode::<T, 0>(out_data, idx_raw, a_raw, n),
+    }
+}
+
+#[inline(always)]
 fn resolve_take_index(idx0: i64, n: i64, mode_code: u8) -> Option<usize> {
     match mode_code {
         1 => Some(idx0.clamp(0, n - 1) as usize), // clip: no negative-from-end
@@ -18226,11 +18285,31 @@ fn try_zerocopy_f64_take(
                 return Ok(None);
             }
         } else {
-            for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
-                match resolve_take_index(idx_cell.get(), n, mode_code) {
-                    Some(i) => slot.set(a_in[i].get()),
-                    None => return Ok(None),
-                }
+            // SCAN RAW SLICES HERE TOO, exactly as the parallel arm above already does. This
+            // serial arm reads every index and every gathered value through `Cell::get` and
+            // writes through `Cell::set`, and it serves EVERY call below the 2^21 gate - which
+            // is where the whole loss lived. Counted, `take` ran 37.5 instructions per gathered
+            // element against NumPy's 15.3 (2.454x), and the wall clock agreed for once:
+            // 2.327x / 2.192x / 2.356x on decidable dual-null cells at 262144, 1M-into-1M and
+            // 65536, while 2^22 - the only size that reached the raw-slice parallel arm - won at
+            // 0.199x.
+            //
+            // SAFETY: identical to the parallel arm's - `ReadOnlyCell<f64>`/`<i64>` and
+            // `Cell<f64>` are `repr(transparent)` over their value, source and indices are
+            // read-only under the GIL, and `flat` is a fresh `numpy.empty` we own so it cannot
+            // alias them.
+            let a_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), a_in.len()) };
+            let idx_raw: &[i64] =
+                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, count) };
+            // KEEP THE EARLY EXIT. Replacing it with the parallel arm's set-a-flag-and-check-once
+            // form - on the theory that a branch-to-return on the critical path blocks unrolling
+            // of a latency-bound gather - measured WORSE, 2.376x -> 2.606x, because every element
+            // then pays the flag update unconditionally. Rejected.
+            if !take_gather(out_data, idx_raw, a_raw, n, mode_code) {
+                return Ok(None);
             }
         }
     }
@@ -18316,11 +18395,19 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
                 return Ok(None);
             }
         } else {
-            for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
-                match resolve_take_index(idx_cell.get(), n, mode_code) {
-                    Some(i) => slot.set(a_in[i].get()),
-                    None => return Ok(None),
-                }
+            // Same raw-slice scan as the parallel arm above, for the same reason the f64 twin
+            // carries: below the 2^21 gate this served every call through `Cell::get`/`set`.
+            // SAFETY: identical to the parallel arm's - `ReadOnlyCell<T>`/`<i64>` and `Cell<T>`
+            // are `repr(transparent)` over their value, source and indices are read-only under
+            // the GIL, and `flat` is a fresh `numpy.empty` we own so it cannot alias them.
+            let a_raw: &[T] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), a_in.len()) };
+            let idx_raw: &[i64] =
+                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
+            let out_data: &mut [T] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, count) };
+            if !take_gather(out_data, idx_raw, a_raw, n, mode_code) {
+                return Ok(None);
             }
         }
     }
