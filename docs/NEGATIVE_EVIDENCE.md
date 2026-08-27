@@ -61027,3 +61027,111 @@ per-path analysis instead. **And before ANY cell in a paired run is reported as 
 this host, check the INCUMBENT's absolute nanoseconds across the two runs**: at loadavg > 30 the
 numpy arm alone moved 27% here, which is larger than every effect this campaign is currently
 chasing. AGENT_NAME=TanBridge.
+
+## 2026-08-27 - `min`/`max` PAID FOUR dtype/kind READS AND FOUR `String` ALLOCATIONS TO REACH THE GATE THAT SERVES THEM: one (rank, kind, itemsize) read takes i64 n=256 from 1.615x to 1.325x, replicated on two runs (`franken_numpy-minmax-gateplan`)
+
+`TanBridge`. Shipped `4afbade3`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1. Class: `maintenance-self-speedup` - every cell here is still a LOSS to
+numpy; this shrinks the loss and claims nothing more.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=e162fff1f747da8224ab7e700ceacd4516d619dc75d6efd8a875a2ad44dd2444
+executing elf sha256 (AFTER)  bench_elf_sha256=22e86e7c25ca4cd9b9a24a426410262107dfd4f6298bd011a3eab0198151a492
+```
+
+**HOST DISCLOSURE, and why there are TWO runs.** The first pair ran at loadavg 72.45 / 53.85,
+maximum_observed_busy_fraction ~1.13, and four cells went BIASED. Rather than quote it, the pair
+was re-run at loadavg 12.93 / 12.69 (busy fraction ~0.20). **The quiet run is what is quoted
+below**; the loud run is reported only as a replication check on the SIGNS, which is the part
+this ledger has already established survives a noisy host when magnitudes do not.
+
+### THE MECHANISM
+
+`fnp.min` on i64 measured 1.641x numpy at n=256 with ~1050 ns of excess that is FLAT from n=256
+to n=131072 - entry cost, not kernel cost. An integer operand walked, in order:
+
+```
+  the non-contiguous check      is_exact_instance + flags + c_contiguous
+  try_zerocopy_f64_extremum_flat   dtype + kind -> String   declines: kind is 'i', not 'f'
+  the temporal (M/m) block         dtype + kind -> String   declines: kind is 'i'
+  try_zerocopy_f64_minmax          dtype                    declines: not f64
+  try_zerocopy_int_minmax          dtype + kind -> String + itemsize + size   <- SERVES IT
+```
+
+Four `dtype` reads, three of them followed by `dtype.kind` extracted into a **freshly allocated
+`String` for a ONE-CHARACTER value**, to answer a question the first read already answered.
+
+`numeric_operand_facts` - already used by `matmul` and `sort` for exactly this - reads
+(rank, kind, itemsize) once and extracts kind as a `char`, allocating nothing. Each flag it
+feeds is a NECESSARY condition copied from the gate it guards, never a sufficient one: a gate
+that IS entered still decides everything for itself, and `None` facts (not an exact ndarray)
+leave every gate running exactly as before. `facts.is_some()` also subsumes the separate
+exact-ndarray test the non-contiguous check was making.
+
+`is_temporal` is `is_some_and`, NOT `is_none_or`, and that asymmetry is load-bearing: the
+temporal branch is the only gate here that already REQUIRED an exact ndarray, so an
+unclassifiable operand must SKIP it rather than enter it. Getting that one backwards would have
+sent lists into an `isnat` call.
+
+Two further fixes on the integer delegate, which is the LIVE route for every integer min/max
+below 2^23 elements - nearly all of them:
+- `numpy.getattr(op)` took a bare `&str`, building a fresh PyString every call, counted at ~795
+  instructions per site in this campaign. Now interned.
+- it set `keepdims` in the kwargs dict unconditionally; now only when true.
+
+### MEASURED, QUIET RUN (loadavg 12.93 / 12.69)
+
+```
+MINMAX_GATE_PLAN worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+
+  cell               BEFORE                   AFTER                    verdict
+  min i64 n=256      1.615x [1.541,1.752]     1.325x [1.261,1.333]     DISJOINT
+  max i64 n=256      1.610x [1.398,1.659]     1.324x [1.256,1.337]     DISJOINT
+  min i64 n=4096     1.503x [1.490,1.525]     1.271x [1.209,1.279]     DISJOINT
+  max i64 n=4096     1.498x [1.477,1.516]     1.272x [1.216,1.281]     DISJOINT
+  min i64 n=65536    1.189x [1.173,1.212]     1.113x [0.995,1.143]     DISJOINT
+  max i64 n=65536    1.176x [1.160,1.182]     1.111x [1.091,1.128]     DISJOINT
+  min i32 n=65536    1.334x [1.307,1.372]     1.169x [1.147,1.317]     overlap by 0.010
+  min u8  n=65536    1.455x [1.443,1.473]     1.272x [1.170,1.412]     AFTER null BIASED
+  -- CONTROLS: f64 was already served by the FIRST gate it reached, so it has nothing to skip --
+  min f64 n=4096     1.446x [1.384,1.538]     1.433x [1.301,1.507]     overlap
+  min list n=256     1.386x [1.352,1.439]     1.346x [1.330,1.375]     overlap
+```
+
+Six DISJOINT improvements. The excess on `min i64 n=256` goes 1019.8 ns -> 533.0 ns, which is
+the size the mechanism predicts for three dtype/kind/String triples plus one non-interned
+getattr.
+
+**The controls are the argument that this went where it was aimed.** f64 reaches a gate that
+serves it immediately and therefore skips nothing, and a list is unclassifiable so every gate
+still runs for it. Both measure unchanged. A version of this change that had accidentally
+reordered or skipped a live route would have moved them.
+
+**REPLICATION:** the loud run (loadavg 72/54) gives the same SIGN on all ten cells, with
+`max i64 n=256` 1.620x -> 1.363x, `min i64 n=4096` 1.528x -> 1.284x, `max i64 n=65536` 1.192x ->
+1.100x and `min u8` 1.472x -> 1.263x all DISJOINT there too. Magnitudes differ by up to 0.06;
+signs are 10/10.
+
+**A/A NULL CONTROLS:** quiet run 19 of 20 PASS, worst passing 0.9810 / 1.0172 against a 2% band;
+the single BIASED cell (`min u8` AFTER, 0.9794) is flagged in the table and not read as a delta.
+
+PARITY: 15 dtypes x 7 shapes x 8 axis/keepdims/initial/out forms, plus NaN, all-NaN, -0.0,
+mixed-zero, inf, NaT, f16-NaN and f32-NaN, plus strided, transposed, F-order, matrix, subclass,
+list, tuple, scalar, 0-d, and the integer delegate boundary at 65535 / 65536 / 131072 for six
+integer dtypes - compared on dtype, shape, python `type()` and RAW BYTES. **0 divergences of
+3720 on BOTH builds** (`scratchpad/minmax_parity.py`). 654 lib tests pass; clippy, fmt clean.
+
+MEMORY: largest operand 2^17 f64 = 1 MB.
+
+RETRY PREDICATE: the gate plan is DONE for `min`/`max`; do not re-derive it. **What it did NOT
+fix is the remaining ~530 ns of flat excess** - integer min/max below 2^23 elements is a pure
+delegate to numpy, so that residual is the delegate itself (a `PyDict`, a `getattr`, a `call`)
+plus whatever `py_min` still reads before reaching it, and the next attack on it should be a
+COUNTED instruction diff, not another wall-clock sweep. `min f64 n=4096` is UNTOUCHED at 1.44x
+and is now the worst cell in this family: it is served by `try_zerocopy_f64_minmax`, which
+delegates for everything past a few KiB, so it pays a full buffer acquisition and shape read
+before deciding to delegate - that is a DIFFERENT defect from this one and worth its own row.
+The same `numeric_operand_facts` plan is untried on `prod`, `any`, `all` and `argmin`/`argmax`.
+AGENT_NAME=TanBridge.
