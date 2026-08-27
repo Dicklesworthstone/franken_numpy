@@ -26044,6 +26044,12 @@ fn axis_any_all_fold<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
         flat_u8.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat_bool.call_method1(intern!(py, "reshape"), (&output_shape,))?;
+    // Reducing a 1-D operand along its ONLY axis leaves `out_shape` empty, and `reshape(())`
+    // builds a 0-d ARRAY. numpy returns a `numpy.bool_` SCALAR there, exactly as it does for
+    // `axis=None` - so unwrap it (`deadlock-audit-30d18`).
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
     Ok(Some(reshaped.unbind()))
 }
 
@@ -26357,10 +26363,14 @@ fn finish_any_all<F: Fn(usize) -> bool>(
                 }
             }
             let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-            let output = flat
-                .call_method1(intern!(py, "reshape"), (&output_shape,))?
-                .unbind();
-            Ok(Some(output))
+            let output = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
+            // A 1-D operand reduced along its only axis gives a 0-d ARRAY here; numpy gives a
+            // `numpy.bool_` SCALAR - see the twin in `axis_any_all_fold`
+            // (`deadlock-audit-30d18`).
+            if out_shape.is_empty() {
+                return Ok(Some(output.get_item(())?.unbind()));
+            }
+            Ok(Some(output.unbind()))
         }
     }
 }
@@ -47227,7 +47237,7 @@ fn nansum(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=None, initial=None, r#where=WhereArg::Absent))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, r#where=WhereArg::Absent))]
 #[allow(clippy::too_many_arguments)]
 fn nanprod(
     py: Python<'_>,
@@ -47235,7 +47245,7 @@ fn nanprod(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: Option<bool>,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
@@ -47253,9 +47263,7 @@ fn nanprod(
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        if let Some(keepdims_val) = keepdims {
-            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
-        }
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         if let Some(initial_val) = initial.as_ref() {
             kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
         }
@@ -47271,9 +47279,18 @@ fn nanprod(
             .as_ref()
             .is_some_and(|value| !value.bind(py).is_none())
         || r#where.is_supplied()
+        // An ndarray SUBCLASS must go through numpy - see `nanmax` (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret has no native meaning - see `nanmax`
+    // (`deadlock-audit-30d18`).
+    let keepdims = match keepdims.native() {
+        Some(value) => Some(value),
+        None => return fallback(),
+    };
 
     // Native parallel complex128/complex64 nanprod along the LAST (contiguous) axis, ABOVE the
     // f64-dtype guard below (which delegates all complex to single-threaded numpy). numpy.nanprod
@@ -50553,13 +50570,13 @@ fn try_zerocopy_f64_matrix_norm_lastaxes(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=None, initial=None, r#where=WhereArg::Absent))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, r#where=WhereArg::Absent))]
 fn nanmax(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: Option<bool>,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
@@ -50574,9 +50591,7 @@ fn nanmax(
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        if let Some(keepdims_val) = keepdims {
-            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
-        }
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         if let Some(initial_val) = initial.as_ref() {
             kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
         }
@@ -50591,9 +50606,22 @@ fn nanmax(
             .as_ref()
             .is_some_and(|value| !value.bind(py).is_none())
         || r#where.is_supplied()
+        // An ndarray SUBCLASS must go through numpy, which preserves it here
+        // (`np.nanmax(MyArray)` is a `MyArray`, `np.nanmax(matrix, axis=0)` is a `matrix`)
+        // while the native path returns a base-class result (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret - an explicit `None`, a numpy bool, an int - has no
+    // native meaning, so hand the raw object back. Shadowing to `Option<bool>` (not `bool`) keeps
+    // every native site below reading `keepdims.unwrap_or(false)` as it already did; the closure
+    // above still holds the original three-state value (`deadlock-audit-30d18`).
+    let keepdims = match keepdims.native() {
+        Some(value) => Some(value),
+        None => return fallback(),
+    };
 
     // f16 FLAT nanmax (axis=None): numpy widens f16->f32 skip-NaN (~31ms@16M, ~5x f64); native
     // uint16-view reduce is bit-exact (all-NaN / zero-extremum defer). MUST sit ABOVE the
@@ -50738,13 +50766,13 @@ fn nanmax(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=None, initial=None, r#where=WhereArg::Absent))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, r#where=WhereArg::Absent))]
 fn nanmin(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: Option<bool>,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
@@ -50759,9 +50787,7 @@ fn nanmin(
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        if let Some(keepdims_val) = keepdims {
-            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
-        }
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         if let Some(initial_val) = initial.as_ref() {
             kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
         }
@@ -50776,9 +50802,18 @@ fn nanmin(
         .is_some_and(|value| !value.bind(py).is_none())
         || r#where.is_supplied()
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        // An ndarray SUBCLASS must go through numpy - see `nanmax` (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret has no native meaning - see `nanmax`
+    // (`deadlock-audit-30d18`).
+    let keepdims = match keepdims.native() {
+        Some(value) => Some(value),
+        None => return fallback(),
+    };
 
     // f16 FLAT nanmin (axis=None): numpy widens f16->f32 skip-NaN (~32ms@16M, ~5x f64); native
     // uint16-view reduce is bit-exact (all-NaN / zero-extremum defer). MUST sit ABOVE the
@@ -50922,7 +50957,7 @@ fn nanmin(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=None, r#where=WhereArg::Absent, mean=None, correction=None))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent, mean=None, correction=None))]
 #[allow(clippy::too_many_arguments)]
 fn nanstd(
     py: Python<'_>,
@@ -50931,7 +50966,7 @@ fn nanstd(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     ddof: Option<Py<PyAny>>,
-    keepdims: Option<bool>,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     r#where: WhereArg,
     mean: Option<Py<PyAny>>,
     correction: Option<Py<PyAny>>,
@@ -50953,9 +50988,7 @@ fn nanstd(
         if let Some(ddof_val) = ddof.as_ref() {
             kwargs.set_item(intern!(py, "ddof"), ddof_val.bind(py))?;
         }
-        if let Some(keepdims_val) = keepdims {
-            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
-        }
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         r#where.apply(py, &kwargs)?;
         if let Some(mean_val) = mean.as_ref() {
             kwargs.set_item(intern!(py, "mean"), mean_val.bind(py))?;
@@ -50985,9 +51018,9 @@ fn nanstd(
             None => DdofArg::Native(0),
             Some(v) => parse_ddof_arg(v.bind(py))?,
         };
-        // Pass the `Option` STRAIGHT THROUGH, not `unwrap_or(false)`: `nanstd`'s own
-        // `keepdims` is already the sentinel-preserving `Option<bool>`, and collapsing it
-        // here would re-introduce the defect `deadlock-audit-30d18` fixes one call deeper.
+        // Pass the ARG STRAIGHT THROUGH, not `unwrap_or(false)`: `nanstd`'s own `keepdims` is
+        // already the sentinel-preserving `KeepdimsArg`, and collapsing it here would
+        // re-introduce the defect `deadlock-audit-30d18` fixes one call deeper.
         return py_std(py, a, axis, None, None, ddof_arg, keepdims, None);
     }
 
@@ -50996,9 +51029,21 @@ fn nanstd(
         || r#where.is_supplied()
         || mean.is_some()
         || correction.is_some()
+        // An ndarray SUBCLASS must go through numpy - see `nanmax`. The `py_std` reroute above
+        // is already subclass-safe: it is gated on `is_exact_instance` (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret has no native meaning - see `nanmax`. This sits BELOW
+    // the `py_std` reroute above on purpose: that call takes the three-state arg itself, and
+    // collapsing it before the reroute is precisely the one-call-deeper defect
+    // (`deadlock-audit-30d18`).
+    let keepdims = match keepdims.native() {
+        Some(value) => Some(value),
+        None => return fallback(),
+    };
 
     // Native FLOAT16 LAST-axis two-pass nanstd (per-lane f32-pairwise mean + sqr-dev). take_sqrt=true.
     if let Some(axis_val) = axis.as_ref()
@@ -51207,7 +51252,7 @@ fn nanstd(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=None, r#where=WhereArg::Absent, mean=None, correction=None))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=None, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent, mean=None, correction=None))]
 #[allow(clippy::too_many_arguments)]
 fn nanvar(
     py: Python<'_>,
@@ -51216,7 +51261,7 @@ fn nanvar(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     ddof: Option<Py<PyAny>>,
-    keepdims: Option<bool>,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     r#where: WhereArg,
     mean: Option<Py<PyAny>>,
     correction: Option<Py<PyAny>>,
@@ -51238,9 +51283,7 @@ fn nanvar(
         if let Some(ddof_val) = ddof.as_ref() {
             kwargs.set_item(intern!(py, "ddof"), ddof_val.bind(py))?;
         }
-        if let Some(keepdims_val) = keepdims {
-            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
-        }
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         r#where.apply(py, &kwargs)?;
         if let Some(mean_val) = mean.as_ref() {
             kwargs.set_item(intern!(py, "mean"), mean_val.bind(py))?;
@@ -51273,7 +51316,7 @@ fn nanvar(
             None => DdofArg::Native(0),
             Some(v) => parse_ddof_arg(v.bind(py))?,
         };
-        // Pass the `Option` straight through - see the note on the `nanstd` twin above.
+        // Pass the ARG straight through - see the note on the `nanstd` twin above.
         return var(py, a, axis, None, None, ddof_arg, keepdims, None);
     }
 
@@ -51282,9 +51325,19 @@ fn nanvar(
         || r#where.is_supplied()
         || mean.is_some()
         || correction.is_some()
+        // An ndarray SUBCLASS must go through numpy - see the `nanstd` twin
+        // (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret has no native meaning - see the `nanstd` twin, which
+    // also explains why this sits BELOW the `var` reroute (`deadlock-audit-30d18`).
+    let keepdims = match keepdims.native() {
+        Some(value) => Some(value),
+        None => return fallback(),
+    };
 
     // Native FLOAT16 LAST-axis two-pass nanvar (per-lane f32-pairwise mean + sqr-dev). take_sqrt=false.
     if let Some(axis_val) = axis.as_ref()
@@ -87312,7 +87365,7 @@ fn try_zerocopy_integer_sum_flat(
 // calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
 // See perf bead franken_numpy-c6t1m.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=None, initial=None, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn sum(
     py: Python<'_>,
@@ -87320,11 +87373,12 @@ fn sum(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    // `Option<bool>`, NOT `bool`: numpy's own default is the `np._NoValue` sentinel, and
-    // "not passed" is OBSERVABLY DIFFERENT from "passed False" (`deadlock-audit-30d18`).
-    // `np.sum` forwards `keepdims` to the operand's METHOD, and `np.matrix.sum` does not
-    // accept that parameter - so numpy raises `TypeError: matrix.sum() got an unexpected
-    // keyword argument 'keepdims'` when it is passed at all, and succeeds when it is not:
+    // `KeepdimsArg`, NOT `bool` and NOT `Option<bool>`: numpy's own default is the
+    // `np._NoValue` sentinel, and "not passed" is OBSERVABLY DIFFERENT from "passed False"
+    // (`deadlock-audit-30d18`). `np.sum` forwards `keepdims` to the operand's METHOD, and
+    // `np.matrix.sum` does not accept that parameter - so numpy raises `TypeError:
+    // matrix.sum() got an unexpected keyword argument 'keepdims'` when it is passed at all,
+    // and succeeds when it is not:
     //
     //     np.sum(m, axis=0)                  -> matrix([[24., 28., 32., 36.]])
     //     np.sum(m, axis=0, keepdims=False)  -> TypeError
@@ -87332,13 +87386,17 @@ fn sum(
     //
     // Defaulting to `false` and forwarding it unconditionally collapsed those three cases
     // into the raising one, so `fnp.sum(np.matrix(a), axis=0)` FAILED where numpy works.
-    keepdims: Option<bool>,
+    // `Option<bool>` was the first repair and was ALSO wrong: pyo3 maps an explicit
+    // `keepdims=None` onto the same `None` as an absent argument, so `fnp.sum(a,
+    // keepdims=None)` returned a value where numpy raises. Three states, not two.
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    // The native paths below only ever need the effective value.
-    let keepdims_effective = keepdims.unwrap_or(false);
+    // The native paths below only ever need the effective value; a `keepdims` only numpy can
+    // interpret has none, and every one of them below is guarded by this being `Some`.
+    let keepdims_effective = keepdims.native();
     // Large flat float32/float64 sum: evaluate NumPy's exact pairwise tree on
     // Rayon.  The incumbent pays one serial DOUBLE/FLOAT_pairwise_sum; every
     // candidate subtree is independent and preserves the same combine edges.
@@ -87347,7 +87405,8 @@ fn sum(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_float_sum_flat(py, a.bind(py), keepdims_effective)?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_zerocopy_float_sum_flat(py, a.bind(py), kd)?
     {
         return Ok(o);
     }
@@ -87359,7 +87418,8 @@ fn sum(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_integer_sum_flat(py, a.bind(py), keepdims_effective)?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_zerocopy_integer_sum_flat(py, a.bind(py), kd)?
     {
         return Ok(o);
     }
@@ -87371,8 +87431,8 @@ fn sum(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) =
-            try_zerocopy_f64_sum_lastaxis(py, a.bind(py), ax.bind(py), keepdims_effective)?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_zerocopy_f64_sum_lastaxis(py, a.bind(py), ax.bind(py), kd)?
     {
         return Ok(o);
     }
@@ -87384,7 +87444,7 @@ fn sum(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims_effective
+        && keepdims_effective == Some(false)
         && let Some(o) = try_zerocopy_f16_sum_flat(py, a.bind(py))?
     {
         return Ok(o);
@@ -87400,13 +87460,8 @@ fn sum(
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Ok(ax_i) = ax.bind(py).extract::<isize>()
-        && let Some(o) = try_zerocopy_f16_sum_nonlast_axis(
-            py,
-            a.bind(py),
-            Some(ax_i),
-            keepdims_effective,
-            false,
-        )?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_zerocopy_f16_sum_nonlast_axis(py, a.bind(py), Some(ax_i), kd, false)?
     {
         return Ok(o);
     }
@@ -87425,9 +87480,7 @@ fn sum(
     // ONLY FORWARD `keepdims` IF THE CALLER SUPPLIED IT (`deadlock-audit-30d18`). numpy's
     // default is the `np._NoValue` sentinel, and forwarding an explicit `False` is not the
     // same thing - see the note on the parameter.
-    if let Some(k) = keepdims {
-        kw.set_item(intern!(py, "keepdims"), k)?;
-    }
+    keepdims.set_numpy_kwarg(py, &kw)?;
     if let Some(init) = initial.as_ref() {
         kw.set_item(intern!(py, "initial"), init.bind(py))?;
     }
@@ -88255,7 +88308,7 @@ fn try_zerocopy_int_minmax(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn prod(
     py: Python<'_>,
@@ -88263,7 +88316,7 @@ fn prod(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
@@ -88289,7 +88342,7 @@ fn prod(
         if let Some(o) = out_for_fallback.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kw)?;
         if let Some(init) = initial_for_fallback.as_ref() {
             kw.set_item(intern!(py, "initial"), init.bind(py))?;
         }
@@ -88306,6 +88359,9 @@ fn prod(
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        // An ndarray SUBCLASS must go through numpy: `np.prod` dispatches to the operand's own
+        // `.prod()`, which `np.matrix` reimplements (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
         // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
         // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
         // any -> False, all -> the identity True, max/min -> ValueError because
@@ -88316,6 +88372,13 @@ fn prod(
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret - an explicit `None`, a numpy bool, an int - has no
+    // native meaning, so hand the raw object back rather than guessing at it. Shadowing here
+    // keeps every kernel below on a plain `bool`; the closure above still holds the original.
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
+    };
 
     // Parse axis: None, integer, or tuple → fallback for tuple
     let axis_val: Option<isize> = match &axis {
@@ -88404,7 +88467,7 @@ fn prod(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=None, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn mean(
     py: Python<'_>,
@@ -88412,16 +88475,14 @@ fn mean(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    // `Option<bool>`, NOT `bool` - numpy's default is the `np._NoValue` sentinel and
-    // "not passed" is observably different from "passed False" (`deadlock-audit-30d18`).
-    // See the full note on `sum`; `np.mean(np.matrix(a), axis=0)` is a `matrix` and
-    // `np.mean(m, axis=0, keepdims=False)` is a `TypeError`, so forwarding the default
-    // unconditionally made fnp raise where numpy works.
-    keepdims: Option<bool>,
+    // `KeepdimsArg`, NOT `bool` and NOT `Option<bool>` - numpy's default is the `np._NoValue`
+    // sentinel and "not passed" is observably different from BOTH "passed False" and "passed
+    // None" (`deadlock-audit-30d18`). See the full note on `sum`.
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let keepdims_effective = keepdims.unwrap_or(false);
+    let keepdims_effective = keepdims.native();
     // Native exact-tree parallel flat float32/float64 mean.  The incumbent's
     // scalar division is negligible; its single-threaded pairwise reduction is
     // the whole-job hotspot, so schedule those independent tree nodes on Rayon.
@@ -88429,7 +88490,8 @@ fn mean(
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_float_mean_flat(py, a.bind(py), keepdims_effective)?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_zerocopy_float_mean_flat(py, a.bind(py), kd)?
     {
         return Ok(o);
     }
@@ -88439,7 +88501,7 @@ fn mean(
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims_effective
+        && keepdims_effective == Some(false)
         && let Some(o) = try_zerocopy_f16_mean_flat(py, a.bind(py))?
     {
         return Ok(o);
@@ -88457,10 +88519,56 @@ fn mean(
         kw.set_item(intern!(py, "out"), o.bind(py))?;
     }
     // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
-    if let Some(k) = keepdims {
-        kw.set_item(intern!(py, "keepdims"), k)?;
-    }
+    keepdims.set_numpy_kwarg(py, &kw)?;
     Ok(mean_fn.call((a.bind(py),), Some(&kw))?.unbind())
+}
+
+// numpy defaults `keepdims` to the `np._NoValue` sentinel, and NOT PASSED is not the same as
+// PASSED FALSE: `np.any(np.matrix(a))` returns a bool, while `np.any(np.matrix(a),
+// keepdims=False)` raises TypeError - `matrix.any()` has no `keepdims` parameter at all, so the
+// only correct thing to forward is nothing.
+//
+// An `Option<bool>` cannot carry the distinction either, and using one is how this file grew a
+// SECOND defect while fixing the first: pyo3 maps BOTH an absent argument and an explicit
+// `keepdims=None` to `None`, so `fnp.sum(a, keepdims=None)` returned a value where numpy raises.
+// Three states are needed, not two (`deadlock-audit-30d18`).
+enum KeepdimsArg {
+    NotGiven,
+    Native(bool),
+    Delegate(Py<PyAny>),
+}
+
+impl KeepdimsArg {
+    // The value the native kernels should use, or `None` when the argument is one only numpy can
+    // interpret (an explicit `None`, a numpy bool, an int) and the call must delegate.
+    fn native(&self) -> Option<bool> {
+        match self {
+            Self::NotGiven => Some(false),
+            Self::Native(value) => Some(*value),
+            Self::Delegate(_) => None,
+        }
+    }
+
+    fn set_numpy_kwarg(&self, py: Python<'_>, kw: &Bound<'_, PyDict>) -> PyResult<()> {
+        match self {
+            Self::NotGiven => Ok(()),
+            Self::Native(value) => kw.set_item(intern!(py, "keepdims"), *value),
+            Self::Delegate(value) => kw.set_item(intern!(py, "keepdims"), value.bind(py)),
+        }
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn parse_keepdims_arg(value: &Bound<'_, PyAny>) -> PyResult<KeepdimsArg> {
+    // STRICTLY an exact Python `bool`, which is why this is `downcast_exact` and not
+    // `extract::<bool>()`: that also accepts `np.True_` and anything else with `__bool__`, while
+    // numpy does NOT - `np.sum(a, keepdims=np.True_)` raises TypeError. Extracting it as a native
+    // `true` silently ANSWERED 285 calls numpy rejects. Anything that is not exactly `True` or
+    // `False` goes back to numpy to interpret or refuse (`deadlock-audit-30d18`).
+    match value.cast_exact::<PyBool>() {
+        Ok(value) => Ok(KeepdimsArg::Native(value.is_true())),
+        Err(_) => Ok(KeepdimsArg::Delegate(value.clone().unbind())),
+    }
 }
 
 enum DdofArg {
@@ -88537,7 +88645,7 @@ fn var_std_int_input_to_f64(
 
 // std: passthrough to NumPy - see sum() comment
 #[pyfunction]
-#[pyo3(name = "std", signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=None, **kwargs))]
+#[pyo3(name = "std", signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=KeepdimsArg::NotGiven, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn py_std(
     py: Python<'_>,
@@ -88546,15 +88654,15 @@ fn py_std(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = parse_ddof_arg)] ddof: DdofArg,
-    // `Option<bool>` for the `np._NoValue` sentinel - see the full note on `sum`
+    // `KeepdimsArg` for the `np._NoValue` sentinel - see the full note on `sum`
     // (`deadlock-audit-30d18`). `np.std(np.matrix(a))` is a float64 and
     // `np.std(m, keepdims=False)` is a TypeError, so forwarding the default
     // unconditionally made fnp raise where numpy works.
-    keepdims: Option<bool>,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let keepdims_effective = keepdims.unwrap_or(false);
+    let keepdims_effective = keepdims.native();
     // Conversion is gated to AXIS forms: the flat kernel's scalar composition
     // differs from numpy's flat int chain at sub-ULP level (gate-measured),
     // so flat int inputs keep the byte-exact numpy delegate.
@@ -88573,7 +88681,7 @@ fn py_std(
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims_effective
+        && keepdims_effective == Some(false)
         && let DdofArg::Native(d) = &ddof
         && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
     {
@@ -88590,8 +88698,8 @@ fn py_std(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) =
-            try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, true, keepdims_effective)?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
         return Ok(o);
     }
@@ -88602,8 +88710,8 @@ fn py_std(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) =
-            try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, true, keepdims_effective)?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
         return Ok(o);
     }
@@ -88613,14 +88721,9 @@ fn py_std(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_f64_var_nonlast_axis(
-            py,
-            a.bind(py),
-            ax.bind(py),
-            *d,
-            true,
-            keepdims_effective,
-        )?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) =
+            try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
         return Ok(o);
     }
@@ -88630,14 +88733,9 @@ fn py_std(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_f32_var_nonlast_axis(
-            py,
-            a.bind(py),
-            ax.bind(py),
-            *d,
-            true,
-            keepdims_effective,
-        )?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) =
+            try_zerocopy_f32_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
         return Ok(o);
     }
@@ -88648,15 +88746,9 @@ fn py_std(
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Ok(ax_i) = ax.bind(py).extract::<isize>()
-        && let Some(o) = try_zerocopy_f16_nanvar_lastaxis(
-            py,
-            a.bind(py),
-            Some(ax_i),
-            *d,
-            true,
-            keepdims_effective,
-            false,
-        )?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) =
+            try_zerocopy_f16_nanvar_lastaxis(py, a.bind(py), Some(ax_i), *d, true, kd, false)?
     {
         return Ok(o);
     }
@@ -88668,15 +88760,9 @@ fn py_std(
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Ok(ax_i) = ax.bind(py).extract::<isize>()
-        && let Some(o) = try_zerocopy_f16_nanvar_nonlast_axis(
-            py,
-            a.bind(py),
-            Some(ax_i),
-            *d,
-            true,
-            keepdims_effective,
-            false,
-        )?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) =
+            try_zerocopy_f16_nanvar_nonlast_axis(py, a.bind(py), Some(ax_i), *d, true, kd, false)?
     {
         return Ok(o);
     }
@@ -88693,15 +88779,13 @@ fn py_std(
     }
     ddof.set_numpy_kwarg(py, &kw)?;
     // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
-    if let Some(k) = keepdims {
-        kw.set_item(intern!(py, "keepdims"), k)?;
-    }
+    keepdims.set_numpy_kwarg(py, &kw)?;
     Ok(std_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
 // Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=None, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=KeepdimsArg::NotGiven, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn var(
     py: Python<'_>,
@@ -88710,13 +88794,13 @@ fn var(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = parse_ddof_arg)] ddof: DdofArg,
-    // `Option<bool>` for the `np._NoValue` sentinel - see the full note on `sum`
+    // `KeepdimsArg` for the `np._NoValue` sentinel - see the full note on `sum`
     // (`deadlock-audit-30d18`).
-    keepdims: Option<bool>,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let keepdims_effective = keepdims.unwrap_or(false);
+    let keepdims_effective = keepdims.native();
     // Conversion is gated to AXIS forms: the flat kernel's scalar composition
     // differs from numpy's flat int chain at sub-ULP level (gate-measured),
     // so flat int inputs keep the byte-exact numpy delegate.
@@ -88735,7 +88819,7 @@ fn var(
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims_effective
+        && keepdims_effective == Some(false)
         && let DdofArg::Native(d) = &ddof
         && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
     {
@@ -88747,8 +88831,8 @@ fn var(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) =
-            try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, false, keepdims_effective)?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
         return Ok(o);
     }
@@ -88758,8 +88842,8 @@ fn var(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) =
-            try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, false, keepdims_effective)?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
         return Ok(o);
     }
@@ -88769,14 +88853,9 @@ fn var(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_f64_var_nonlast_axis(
-            py,
-            a.bind(py),
-            ax.bind(py),
-            *d,
-            false,
-            keepdims_effective,
-        )?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) =
+            try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
         return Ok(o);
     }
@@ -88786,14 +88865,9 @@ fn var(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_f32_var_nonlast_axis(
-            py,
-            a.bind(py),
-            ax.bind(py),
-            *d,
-            false,
-            keepdims_effective,
-        )?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) =
+            try_zerocopy_f32_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
         return Ok(o);
     }
@@ -88804,15 +88878,9 @@ fn var(
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Ok(ax_i) = ax.bind(py).extract::<isize>()
-        && let Some(o) = try_zerocopy_f16_nanvar_lastaxis(
-            py,
-            a.bind(py),
-            Some(ax_i),
-            *d,
-            false,
-            keepdims_effective,
-            false,
-        )?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) =
+            try_zerocopy_f16_nanvar_lastaxis(py, a.bind(py), Some(ax_i), *d, false, kd, false)?
     {
         return Ok(o);
     }
@@ -88824,15 +88892,9 @@ fn var(
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Ok(ax_i) = ax.bind(py).extract::<isize>()
-        && let Some(o) = try_zerocopy_f16_nanvar_nonlast_axis(
-            py,
-            a.bind(py),
-            Some(ax_i),
-            *d,
-            false,
-            keepdims_effective,
-            false,
-        )?
+        && let Some(kd) = keepdims_effective
+        && let Some(o) =
+            try_zerocopy_f16_nanvar_nonlast_axis(py, a.bind(py), Some(ax_i), *d, false, kd, false)?
     {
         return Ok(o);
     }
@@ -88849,9 +88911,7 @@ fn var(
     }
     ddof.set_numpy_kwarg(py, &kw)?;
     // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
-    if let Some(k) = keepdims {
-        kw.set_item(intern!(py, "keepdims"), k)?;
-    }
+    keepdims.set_numpy_kwarg(py, &kw)?;
     Ok(var_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
@@ -89275,14 +89335,14 @@ fn try_zerocopy_f64_extremum_flat(
 
 // Native Rust min with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(name = "min", signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[pyo3(name = "min", signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn py_min(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
@@ -89304,7 +89364,7 @@ fn py_min(
         if let Some(o) = out_for_fallback.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kw)?;
         if let Some(init) = initial_for_fallback.as_ref() {
             kw.set_item(intern!(py, "initial"), init.bind(py))?;
         }
@@ -89318,6 +89378,9 @@ fn py_min(
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        // An ndarray SUBCLASS must go through numpy: `np.min` dispatches to the operand's own
+        // `.min()`, which `np.matrix` reimplements (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
         // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
         // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
         // any -> False, all -> the identity True, max/min -> ValueError because
@@ -89328,6 +89391,13 @@ fn py_min(
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret - an explicit `None`, a numpy bool, an int - has no
+    // native meaning, so hand the raw object back rather than guessing at it. Shadowing here
+    // keeps every kernel below on a plain `bool`; the closure above still holds the original.
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
+    };
 
     // Non-contiguous (transposed/strided) ndarrays can't use the zero-copy fold and
     // make the cold extract → native scan ~19-32x slower than numpy's cache-blocked
@@ -89457,14 +89527,14 @@ fn py_min(
 
 // Native Rust max with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(name = "max", signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[pyo3(name = "max", signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn py_max(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
@@ -89486,7 +89556,7 @@ fn py_max(
         if let Some(o) = out_for_fallback.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kw)?;
         if let Some(init) = initial_for_fallback.as_ref() {
             kw.set_item(intern!(py, "initial"), init.bind(py))?;
         }
@@ -89500,6 +89570,9 @@ fn py_max(
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        // An ndarray SUBCLASS must go through numpy: `np.max` dispatches to the operand's own
+        // `.max()`, which `np.matrix` reimplements (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
         // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
         // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
         // any -> False, all -> the identity True, max/min -> ValueError because
@@ -89510,6 +89583,13 @@ fn py_max(
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret - an explicit `None`, a numpy bool, an int - has no
+    // native meaning, so hand the raw object back rather than guessing at it. Shadowing here
+    // keeps every kernel below on a plain `bool`; the closure above still holds the original.
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
+    };
 
     // Non-contiguous (transposed/strided) ndarrays can't use the zero-copy fold and
     // make the cold extract → native scan ~19-32x slower than numpy's cache-blocked
@@ -89638,14 +89718,16 @@ fn py_max(
 
 // amax is an alias for max
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn amax(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    // Straight through, never collapsed: `np.amax` IS `np.max`, so it inherits the
+    // `np._NoValue` sentinel too (`deadlock-audit-30d18`).
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
@@ -89654,14 +89736,15 @@ fn amax(
 
 // amin is an alias for min
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn amin(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    // Straight through, never collapsed - see `amax` (`deadlock-audit-30d18`).
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
@@ -89670,13 +89753,13 @@ fn amin(
 
 // Native Rust all with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=false, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, **kwargs))]
 fn all(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
@@ -89696,7 +89779,7 @@ fn all(
         if let Some(o) = out_for_fallback.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kw)?;
         if let Some(w) = where_for_fallback.as_ref() {
             kw.set_item(intern!(py, "where"), w.bind(py))?;
         }
@@ -89706,7 +89789,10 @@ fn all(
     // Fallback for out, keepdims, or where parameters
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || keepdims
+        || keepdims.native() != Some(false)
+        // An ndarray SUBCLASS must go through numpy: `np.all` dispatches to the operand's own
+        // `.all()`, which `np.matrix` reimplements (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
         // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
         // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
         // any -> False, all -> the identity True, max/min -> ValueError because
@@ -89788,13 +89874,13 @@ fn all(
 
 // Native Rust any with fallback for unsupported parameters.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=false, **kwargs))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven, **kwargs))]
 fn any(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
@@ -89814,7 +89900,7 @@ fn any(
         if let Some(o) = out_for_fallback.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kw.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kw)?;
         if let Some(w) = where_for_fallback.as_ref() {
             kw.set_item(intern!(py, "where"), w.bind(py))?;
         }
@@ -89824,7 +89910,13 @@ fn any(
     // Fallback for out, keepdims, or where parameters
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || keepdims
+        || keepdims.native() != Some(false)
+        // An ndarray SUBCLASS must go through numpy: `np.any` dispatches to the operand's own
+        // `.any()`, and `np.matrix` reimplements it - the native path returns a base-class
+        // ndarray where numpy returns a matrix, and silently succeeds where `matrix.any()`
+        // raises. Cheap on the hot path: an exact ndarray settles it on the first pointer
+        // compare (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
         // Gate on the KEY BEING PRESENT, not on the value being non-None: numpy
         // reads an explicit where=None as a mask that selects nothing (prod -> 1.0,
         // any -> False, all -> the identity True, max/min -> ValueError because
