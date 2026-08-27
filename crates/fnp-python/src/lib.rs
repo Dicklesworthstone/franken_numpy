@@ -25747,12 +25747,10 @@ fn try_zerocopy_count_nonzero(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    // NOTE: this still extracts the one-character kind as a `String`, which allocates
-    // per call. Converting it to `char` is a two-line change HERE but rewrites eight
-    // `match` arms whose text is not unique in this file, so it was left for a cycle
-    // that can give it its own diff review (`deadlock-audit-54arr`). Priced at ~50 ns
-    // of the ~425 ns this route spends over numpy.
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    // `char`, not a heap `String` - the debt `deadlock-audit-54arr` registered here and
+    // deferred because it rewrites eight `match` arms. Discharged in this cycle, together
+    // with the much larger `view` cost below.
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     // THE SHAPE VEC IS ONLY BUILT WHEN AN AXIS NEEDS IT (`deadlock-audit-54arr`).
     //
@@ -25777,10 +25775,24 @@ fn try_zerocopy_count_nonzero(
     // are counted through a uintN bit-view chosen by itemsize (covering all 8 widths
     // with 4 movers). Floats must compare by VALUE — x != 0 excludes +-0.0 (whose
     // sign bit is set) and includes NaN — matching numpy.
-    match (kind.as_str(), itemsize) {
-        ("b", _) => {
+    // NO `.view()` ON THE INTEGER ARMS. Each of them used to reinterpret the operand through
+    // `a.view(numpy.uintN)` so that four unsigned movers could cover all eight widths. That is a
+    // numpy METHOD CALL plus a module `getattr` on every invocation, priced by `timeit` on the
+    // installed interpreter at **171.9 ns for `a.view(uint8)` against 175.9 ns for numpy's
+    // ENTIRE `np.count_nonzero(a)`** - we were spending numpy's whole budget on a reinterpretation
+    // before counting anything. Reading each width's own buffer costs nothing extra at runtime
+    // (it is the same pointer) and only adds four monomorphisations of one generic.
+    //
+    // `v != 0` is the same predicate signed or unsigned, and it is BYTE-ORDER INDEPENDENT: a
+    // value is nonzero iff some byte is nonzero, whichever end it is read from. So these arms
+    // need no native-order guard, and a `>i8` operand is counted correctly here - which is why
+    // integer `count_nonzero` never appeared in the byte-order oracle's wrong list.
+    match (kind, itemsize) {
+        ('b', _) => {
+            // bool_ exports buffer format '?', which `PyBuffer::<u8>` refuses, so this ONE arm
+            // still needs the uint8 view. The type object is the cached one.
             let a_u8: Bound<'_, PyAny> =
-                a.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+                a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
             let Ok(buffer) = PyBuffer::<u8>::get(&a_u8) else {
                 return Ok(None);
             };
@@ -25793,15 +25805,16 @@ fn try_zerocopy_count_nonzero(
                 && let Some(count) = swar_count_nonzero_byte(py, numpy, &a_u8, input)?
             {
                 return Ok(Some(
-                    numpy
-                        .getattr(intern!(py, "int64"))?
-                        .call1((count as i64,))?
-                        .unbind(),
+                    cached_int64_type(py)?.call1((count as i64,))?.unbind(),
                 ));
             }
             count_nonzero_typed(py, numpy, input, &shape, axis, |v: u8| v != 0)
         }
-        ("f", 8) => {
+        // The FLOAT arms compare by VALUE, so unlike the integer arms they are NOT byte-order
+        // independent: reading `>f8` bytes as native doubles gives the wrong answer, and
+        // `>f4`/`>f8` `count_nonzero` are two of the cells the byte-order oracle still reports
+        // wrong. A native-order operand is required here; anything else goes to numpy.
+        ('f', 8) if dtype_is_native_order(&dtype) => {
             let Ok(buffer) = PyBuffer::<f64>::get(a) else {
                 return Ok(None);
             };
@@ -25810,7 +25823,7 @@ fn try_zerocopy_count_nonzero(
             };
             count_nonzero_typed(py, numpy, input, &shape, axis, |v: f64| v != 0.0)
         }
-        ("f", 4) => {
+        ('f', 4) if dtype_is_native_order(&dtype) => {
             let Ok(buffer) = PyBuffer::<f32>::get(a) else {
                 return Ok(None);
             };
@@ -25819,10 +25832,8 @@ fn try_zerocopy_count_nonzero(
             };
             count_nonzero_typed(py, numpy, input, &shape, axis, |v: f32| v != 0.0)
         }
-        ("i" | "u", 1) => {
-            let view =
-                a.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
-            let Ok(buffer) = PyBuffer::<u8>::get(&view) else {
+        ('u', 1) => {
+            let Ok(buffer) = PyBuffer::<u8>::get(a) else {
                 return Ok(None);
             };
             let Some(input) = buffer.as_slice(py) else {
@@ -25831,23 +25842,25 @@ fn try_zerocopy_count_nonzero(
             const SWAR_MIN: usize = 1 << 16;
             if axis.is_none()
                 && input.len() >= SWAR_MIN
-                && let Some(count) = swar_count_nonzero_byte(py, numpy, &view, input)?
+                && let Some(count) = swar_count_nonzero_byte(py, numpy, a, input)?
             {
                 return Ok(Some(
-                    numpy
-                        .getattr(intern!(py, "int64"))?
-                        .call1((count as i64,))?
-                        .unbind(),
+                    cached_int64_type(py)?.call1((count as i64,))?.unbind(),
                 ));
             }
             count_nonzero_typed(py, numpy, input, &shape, axis, |v: u8| v != 0)
         }
-        ("i" | "u", 2) => {
-            let view = a.call_method1(
-                intern!(py, "view"),
-                (numpy.getattr(intern!(py, "uint16"))?,),
-            )?;
-            let Ok(buffer) = PyBuffer::<u16>::get(&view) else {
+        ('i', 1) => {
+            let Ok(buffer) = PyBuffer::<i8>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: i8| v != 0)
+        }
+        ('u', 2) => {
+            let Ok(buffer) = PyBuffer::<u16>::get(a) else {
                 return Ok(None);
             };
             let Some(input) = buffer.as_slice(py) else {
@@ -25855,12 +25868,17 @@ fn try_zerocopy_count_nonzero(
             };
             count_nonzero_typed(py, numpy, input, &shape, axis, |v: u16| v != 0)
         }
-        ("i" | "u", 4) => {
-            let view = a.call_method1(
-                intern!(py, "view"),
-                (numpy.getattr(intern!(py, "uint32"))?,),
-            )?;
-            let Ok(buffer) = PyBuffer::<u32>::get(&view) else {
+        ('i', 2) => {
+            let Ok(buffer) = PyBuffer::<i16>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: i16| v != 0)
+        }
+        ('u', 4) => {
+            let Ok(buffer) = PyBuffer::<u32>::get(a) else {
                 return Ok(None);
             };
             let Some(input) = buffer.as_slice(py) else {
@@ -25868,18 +25886,32 @@ fn try_zerocopy_count_nonzero(
             };
             count_nonzero_typed(py, numpy, input, &shape, axis, |v: u32| v != 0)
         }
-        ("i" | "u", 8) => {
-            let view = a.call_method1(
-                intern!(py, "view"),
-                (numpy.getattr(intern!(py, "uint64"))?,),
-            )?;
-            let Ok(buffer) = PyBuffer::<u64>::get(&view) else {
+        ('i', 4) => {
+            let Ok(buffer) = PyBuffer::<i32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: i32| v != 0)
+        }
+        ('u', 8) => {
+            let Ok(buffer) = PyBuffer::<u64>::get(a) else {
                 return Ok(None);
             };
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
             count_nonzero_typed(py, numpy, input, &shape, axis, |v: u64| v != 0)
+        }
+        ('i', 8) => {
+            let Ok(buffer) = PyBuffer::<i64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: i64| v != 0)
         }
         _ => Ok(None),
     }

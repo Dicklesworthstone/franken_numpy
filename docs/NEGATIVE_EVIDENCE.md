@@ -62725,3 +62725,106 @@ the three tells - `PyDict::new` feeding a `dtype=` kwarg, a `dtype_name: &str` p
 `call_method1(reshape)` on a freshly allocated output - and each hit is a candidate worth ~400 ns
 at small n. `sign_typed` was found only because its RATIO diverged from its siblings' by 1.7x;
 the others will not announce themselves that way if their whole family is uniformly unmodernised.
+
+## 2026-08-27 - WIN (SHIP): `count_nonzero` reinterpreted every integer operand through `a.view(uintN)` - a numpy method call costing as much as numpy's ENTIRE count - worth 1.55x-1.67x, and my harness was silently dropping the cells that proved it (`franken_numpy-count-nonzero-view`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell, plus an
+independent COUNTED instruction diff.
+
+**Campaign result class:** maintenance-self-speedup
+
+Every integer cell below remains a LOSS to numpy.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=b3dde56914b8a66ee45af17585502255aa4553219a627ae1ca037ae8cd10b51d
+executing elf sha256 (AFTER)   bench_elf_sha256=b28cd9fb64d283ac57b90f7a7375d5f4ffe31373a4adbecedade2ef5f5ff18df
+```
+
+### THE DEFECT
+
+Every integer arm of `try_zerocopy_count_nonzero` reinterpreted the operand as
+`a.view(numpy.uintN)` so that four unsigned movers could cover all eight widths. Priced by
+`timeit` on the installed interpreter at n=16:
+
+```
+  a.view(uint8)              171.9 ns
+  np.count_nonzero(a)        175.9 ns    <-- numpy's ENTIRE call
+  a.dtype.kind                27.7 ns
+  cached-type scalar build   192.7 ns    (np.intp(3) is 221.4 with the module getattr)
+```
+
+**The reinterpretation alone cost what numpy spends on the whole operation**, plus a module
+`getattr` for the type object. Reading each width's own buffer costs nothing extra at runtime -
+it is the same pointer - and only adds four monomorphisations of one generic.
+
+`v != 0` is the same predicate signed or unsigned, and it is BYTE-ORDER INDEPENDENT (a value is
+nonzero iff some byte is nonzero, whichever end it is read from), so these arms need no
+native-order guard. That is also why integer `count_nonzero` never appeared in the byte-order
+oracle's wrong list.
+
+Also discharged here: `deadlock-audit-54arr`'s registered debt, the `kind` extracted as a heap
+`String`, which that row priced at ~50 ns and deferred because it rewrites eight `match` arms.
+
+COUNTED_MECHANISM: baseline-subtracted instructions per call at n=16 over 1500000 calls, every
+arm importing fnp_python - int64 8354.1 -> 5870.2 against numpy's ~3200 (2.65x -> 1.79x, 2484
+removed); uint8 8181.3 -> 4081.3 (2.79x -> 1.29x, 4100 removed); **bool 7996.2 -> 8716.4,
+UNCHANGED**, because bool_ exports buffer format '?' which `PyBuffer::<u8>` refuses, so that one
+arm still needs the view - it is the control that shows only the edited arms moved.
+
+### THE MEASUREMENT
+
+Both arms at IDENTICAL loadavg 6.52. 27 of 32 cells readable, 5 BIASED:
+
+```
+  count_nonzero int32     16   5.696x -> 3.412x   (158.2 np, 840.6 -> 539.8 ns)   1.67x
+  count_nonzero uint64    16   5.681x -> 3.454x   (147.5 np, 841.6 -> 509.5)      1.64x
+  count_nonzero int16    256   5.545x -> 3.418x   (155.5 np, 858.6 -> 531.3)      1.62x
+  count_nonzero int64     16   5.624x -> 3.511x   (147.8 np, 851.5 -> 519.0)      1.60x
+  count_nonzero uint8    256   5.076x -> 3.258x   (164.5 np, 842.0 -> 536.1)      1.56x
+  count_nonzero int64   4096   1.642x -> 1.155x   (719.4 np, 1159.4 -> 830.9)     1.42x
+  count_nonzero uint8  70000   1.131x -> 1.004x   (2437.6 np, 2737.9 -> 2447.6)   1.13x
+
+  bool      16/256/4096/70000  5.521x -> 5.190x etc.        1.03x-1.07x   NOT EDITED
+  float64        4096/70000    0.480x -> 0.488x             0.98x-1.04x   already a WIN
+  sum / any int64 (controls)                                1.00x-1.03x
+```
+
+**-301 to -333 ns per call at small n.** `bool` is now the worst cell of the family at 5.190x
+precisely because it is the one arm that still pays the view. `count_nonzero int32 70000` is NOT
+quoted: its ratio improves while its absolute fnp time rises, because the numpy arm itself moved
+between runs at that size - the cell is unstable, not a win.
+
+The float arms gained a native-order guard, which they need and the integer arms do not: they
+compare by VALUE, so `>f4`/`>f8` were being read as native and answered wrongly. The byte-order
+oracle moved **28 -> 26 wrong cells**; the integer oracle is unchanged at 1. Counted cost of that
+guard: +388 instructions on the float64 path, invisible in wall clock (0.98x).
+
+### A HARNESS DEFECT OF MINE, AND IT NEARLY COST THE ROW
+
+`ab3.py` dies partway through `signbit`, so `count_nonzero` - which it lists AFTER `signbit` -
+never ran. Its rows were ABSENT, and my join reported them as "biased-skipped". I read three
+successive runs as "all count_nonzero cells BIASED" and started blaming host load, which was
+genuinely at 58-70 and made the misreading plausible. **A join that cannot distinguish a MISSING
+row from a SKIPPED one will report a clean sweep over cells that never executed.** The replacement
+harness asserts every op up front and prints `cells attempted` against `cells printed`.
+
+PARITY: a dedicated `count_nonzero` sweep - 21 dtypes (including `>i8`/`<i8`/`>i4`/`>u8`/`>i2`/
+`>f8`/`>f4`, complex128, float16) x 7 shapes (0-d, empty, 3-D, and 70000 to exercise the SWAR
+byte path) x 5 kwarg forms (bare, axis=0, axis=-1, keepdims, axis+keepdims) comparing type,
+dtype, shape and raw bytes: **567 cells, 0 divergences**. General parity 5320 cells -> 1
+divergence, identical on the pre-change build (pre-existing `deadlock-audit-neu7z`). 660
+error/edge cells identical. 655 lib tests pass. clippy `-D warnings` and `cargo fmt --check` exit
+0, unpiped.
+
+MEMORY: largest operand 70000 elements.
+
+RETRY PREDICATE: **the remaining `count_nonzero` floor is the RESULT SCALAR, and it is not
+removable from Rust.** numpy returns `np.int64`, and the cheapest construction available here is
+a cached type object call at **192.7 ns** - against numpy's 175.9 ns for the whole operation, so
+this route can never reach parity at small n while it builds its answer through a Python-level
+type call. numpy does it in C with `PyArrayScalar_New`. Do not re-attack the buffer path; it is
+now one `PyBuffer::get` and a loop. **The one arm still worth work is `bool` at 5.190x**: it needs
+the uint8 view only because pyo3's `PyBuffer::<u8>` rejects format `'?'`, so the question is
+whether the bytes can be reached without a numpy `.view()` call at all - unmeasured, and the
+answer decides a 5.2x cell.
