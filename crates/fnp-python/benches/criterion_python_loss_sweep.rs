@@ -408,6 +408,38 @@ fn take_contract_case<'py>(
     Some((wanted.to_owned(), "take".to_owned(), args))
 }
 
+/// Build finite same-shape f64 `fmod` calls directly for the dual-null contract.
+///
+/// `fmod` needs two operands and therefore cannot enter the generic one-operand
+/// sweep ladder.  These two sizes use different dividend/divisor distributions;
+/// they exercise the public ufunc rather than a private kernel and keep the
+/// divisor non-zero so the finite hot path, not NumPy's warning fallback, is timed.
+fn fmod_contract_case<'py>(
+    py: Python<'py>,
+    wanted: &str,
+) -> Option<(String, String, pyo3::Bound<'py, PyTuple>)> {
+    let n = match wanted {
+        "fmod[finite-mixed4096]" => 4_096,
+        "fmod[finite-mixed65536]" => 65_536,
+        _ => return None,
+    };
+    let ns = PyDict::new(py);
+    py.run(
+        std::ffi::CString::new(format!(
+            "import numpy as np\nN = {n}\ni = np.arange(N, dtype=np.float64)\nfmod_lhs = (i * 1.61803398875) - (N * 0.75)\nfmod_rhs = 0.125 + np.mod(i * 17.0 + 3.0, 101.0) / 7.0\n"
+        ))
+        .expect("fmod contract setup CString")
+        .as_c_str(),
+        Some(&ns),
+        Some(&ns),
+    )
+    .expect("fmod contract setup");
+    let lhs = ns.get_item("fmod_lhs").expect("fmod lhs");
+    let rhs = ns.get_item("fmod_rhs").expect("fmod rhs");
+    let args = PyTuple::new(py, [&lhs, &rhs]).expect("fmod contract arguments");
+    Some((wanted.to_owned(), "fmod".to_owned(), args))
+}
+
 /// Structural checksum that survives tuples, bools and non-summable dtypes.
 ///
 /// `.sum()` is the usual idiom in this crate and it does NOT generalise: it raises on a
@@ -615,6 +647,8 @@ fn bench_vs_numpy_worst_contract(_c: &mut Criterion) {
             .expect("numpy version string");
 
         let (label, name, args) = if let Some(case) = take_contract_case(py, &wanted) {
+            case
+        } else if let Some(case) = fmod_contract_case(py, &wanted) {
             case
         } else {
             let (cases, _, _) = discover_cases(py, &module);
