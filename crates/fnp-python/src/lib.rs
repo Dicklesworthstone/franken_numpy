@@ -32404,6 +32404,11 @@ fn native_rounding_unary(
     // cold extract → rebuild (transpose-copy, ~6x slower than numpy's strided ufunc).
     // Delegate them to numpy.
     let numpy = cached_numpy(py)?;
+    // An ndarray SUBCLASS keeps its type through a numpy ufunc; `floor`/`ceil`/`trunc`/
+    // `rint` reach the family through THIS function (`deadlock-audit-1zl3e`).
+    if ndarray_subclass_needs_numpy(py, x)? {
+        return Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind());
+    }
     if x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
             .getattr(intern!(py, "flags"))?
@@ -59549,6 +59554,13 @@ fn native_unary_promoting(
             return Ok(output.bind(py).get_item(())?.unbind());
         }
         return Ok(output);
+    }
+    // An ndarray SUBCLASS keeps its type through a numpy ufunc, and every fast path
+    // above gates on `is_exact_instance` (`deadlock-audit-1zl3e`). Same guard as
+    // `native_unary_elementwise`; `sqrt` reaches the family through THIS function, which
+    // is why fixing only the other one left `sqrt(np.matrix(a))` returning an ndarray.
+    if ndarray_subclass_needs_numpy(py, x)? {
+        return fallback(py);
     }
     // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
     // zero-copy fast paths into the cold extract → rebuild (transpose-copy, ~4-5x
