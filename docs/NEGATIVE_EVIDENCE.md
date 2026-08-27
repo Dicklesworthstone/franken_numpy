@@ -61564,3 +61564,100 @@ measured at n=256..65536 and show only entry-scale losses (~40 us), so they are 
 and need no change. The two cells still above unity - `median i32 2^20 r~n/1` at 1.228x and
 `2^22 r~n/1` at 1.137x - now DELEGATE, so that residual is `median`'s ordinary entry overhead
 and belongs to the entry-cost vein, not here. AGENT_NAME=TanBridge.
+
+## 2026-08-27 - ONE PREDICATE THAT MATCHES 'i' AND 'u' BUT NOT 'b' COST THE WHOLE `nan*` FAMILY: bool passed the guard meant to catch it and fell into the f64 widening path, 329x on `nanmin` and 53.67x on `nansum` (`franken_numpy-nan-bool-gap`)
+
+`TanBridge`. Shipped `6417473f` (nanmin/nanmax) and `57ae36d2` (nansum/nanmean/nanprod).
+Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME invocation,
+median of 7-9, OPENBLAS_NUM_THREADS=1. Class: `maintenance-self-speedup`, and three cells cross
+into wins over numpy. Perf figures are PRICING grade, not a dual-null contract - the effects are
+9x to 390x and every dtype but one is an unchanged control.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=32c99318d3942df7ce51ce27cadb24067c563b435033a884d84d1d19be0cb94b
+executing elf sha256 (MIDDLE)  bench_elf_sha256=bc7b44a07c25e9f48fca9bc1fa91ecf373fb887c23e34b928834b0ff90c60c6f
+executing elf sha256 (AFTER)   bench_elf_sha256=f09ab39878c283ec0923ed1724838a7a28863b2b5ff5410e51f267381195a815
+```
+
+### THE DEFECT IS ONE MISSING DTYPE KIND
+
+Five `nan*` entries share a guard whose comment states the reasoning exactly:
+
+```
+  // Integer input cannot contain NaN, so nanX == the plain reduction; route to
+  // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+  if numpy_dtype_is_integer(py, a.bind(py))? { return fallback(); }
+```
+
+**The argument is equally true of bool, and `numpy_dtype_is_integer` matches dtype kinds 'i' and
+'u' only.** For `nanmin`/`nanmax` the guard immediately above it,
+`native_minmax_preserves_dtype`, deliberately ADMITS bool - so a bool array passed BOTH and fell
+into the generic f64 path, which widens 1 byte to 8 and scans.
+
+```
+NAN_BOOL_GAP worker=thinkstation1 numpy_version=2.4.3 profile=release, n = 2^20
+  harness=same-invocation, median of 7-9
+
+  nanmin  bool  1216.5us ->   4.9us   329.06x -> 1.36x
+  nanmax  bool   691.6us ->   3.9us   203.67x -> 1.15x
+  nansum  bool 12160.9us -> 253.2us    46.73x -> 0.80x  WIN
+  nanprod bool 12003.8us -> 658.5us    17.89x -> 0.80x  WIN
+  nanmean bool  3473.3us -> 354.3us     9.28x -> 1.00x
+```
+
+**THE CONTROLS ARE THE ISOLATION.** Every other dtype was already at parity or winning and none
+of them moves: int8 1.03x, int16 1.05x, int32 1.00x, int64 0.78x, uint8 1.04x, uint32 0.95x,
+uint64 0.41x, float32 0.74x, float64 0.79x. A defect confined to exactly the one dtype kind
+neither predicate covered is as clean an attribution as this campaign gets.
+
+### THE ADVERSARIAL-INPUT CHECK THAT HAD TO COME FIRST
+
+numpy's bool `min` can EARLY-EXIT on the first `False`, and with random data that is immediate -
+which would make a 329x ratio an artifact of the input rather than a defect. The bead that filed
+this required the check before any code was written. It is not an artifact:
+
+```
+  nanmin bool all-True   33.02x     nanmax bool all-True   199.83x
+  nanmin bool all-False 390.02x     nanmax bool all-False   38.10x
+```
+
+Content-independent, so the ratio is a property of the ROUTE. Worth keeping as a habit: when the
+incumbent's time is FLAT IN N (numpy's was 3.7-5.8 us from 4096 to 1048576), suspect an early
+exit and construct the input that defeats it before believing the headline.
+
+### CLOSING IT EXPOSED THE keepdims SENTINEL ONE CALL DEEPER
+
+Once bool started delegating, `fnp.nansum(np.matrix(bool))` RAISED where numpy returns int64:
+`nansum` and `nanmean` still took `keepdims: bool` and forwarded it unconditionally. My own
+earlier row listed exactly these two as still-open and required PER-OP verification before
+applying the fix, because `np.median(a, keepdims=None)` succeeds where `np.sum` raises. Verified:
+`np.nansum(np.matrix(a))` is an int64 while `np.nansum(np.matrix(a), keepdims=False)` is a
+TypeError - same polarity as `sum`. Converted to `KeepdimsArg`. `nanprod`, `nanmin` and `nanmax`
+already had it and were CONFIRMED correct rather than assumed.
+
+**A ROUTING CHANGE CAN PUBLISH A LATENT DEFECT ON THE PATH IT NEWLY TAKES.** The sentinel bug was
+already there; it only became reachable for bool operands once bool started delegating.
+
+A second, PRE-EXISTING defect surfaced the same way - `np.nansum(matrix, axis=0)` is a `matrix`
+and fnp returned an ndarray. Verified pre-existing by running THREE builds (pre-change, bool-fix,
+current): all three diverge identically, so it was not introduced here. `nanmin`/`nanmax`/
+`nanprod`/`nanstd`/`nanvar` already carried `ndarray_subclass_needs_numpy`; `nansum` and
+`nanmean` were the two the earlier sweep missed. Added.
+
+PARITY: 5 ops x 10 dtypes x 6 shapes x 6 axis/keepdims forms, plus bool all-True / all-False /
+empty / 2-D / subclass / matrix / list / strided, f64 matrix, f64 subclass, f64 with NaN and
+all-NaN, each against keepdims absent / True / None / `np.True_` - on dtype, shape, python
+`type()` and RAW BYTES. **0 divergences of 2100**, from 4 then 5 before. Standing audits
+unchanged: keepdims grid 3 of 3536, subclass 21 of 198, dtype promotion 0 of 1800. 654 lib tests
+pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^20 bool = 1 MB.
+
+RETRY PREDICATE: the bool gap is CLOSED for `nanmin`, `nanmax`, `nansum`, `nanmean`, `nanprod`.
+**`nanmedian` on bool is STILL 3.60x and was NOT fixed here** - it has no guard at this point in
+its flow, so it needs its own analysis rather than the same one-line edit. **The general audit is
+`grep -n 'numpy_dtype_is_integer' lib.rs` and, at each site, asking whether the sentence in its
+comment is also true of BOOL** - the comment says "integer input cannot contain NaN", and bool
+cannot either. That predicate has other callers this row did not touch. The same question
+applies to any predicate named for one dtype family that guards a claim about a WIDER property.
+AGENT_NAME=TanBridge.
