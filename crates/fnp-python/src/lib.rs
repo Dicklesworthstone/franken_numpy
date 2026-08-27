@@ -29421,21 +29421,31 @@ fn trim_zeros(
     if !filt.bind(py).is_instance(&ndarray_type)? {
         return fallback();
     }
-    // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
-    // (`deadlock-audit-qdp30`): `np.trim_zeros(float16)` is float16 and came back float64,
-    // `longdouble` came back float64. `trim_zeros` only ever SELECTS a sub-range of its
-    // input, so a widened result is doubly wrong - nothing was computed to justify it.
-    if float_dtype_needs_numpy_precision(py, filt.bind(py))? {
-        return fallback();
-    }
     let trim_mode = match normalize_trim_zeros_mode(trim) {
         Ok(mode) => mode,
         Err(_) => return fallback(),
     };
     // Zero-copy slice-view for 1-D int/float ndarrays; skips the cold extract + copy
     // and returns a view like numpy. Other dtypes / shapes fall through.
+    //
+    // THIS PATH IS DTYPE-EXACT BY CONSTRUCTION and the dtype guard below must stay
+    // BELOW it (`deadlock-audit-qdp30`). It finds the trim bounds and returns a SLICE of
+    // the caller's own array, so the dtype is whatever the input had - there is nothing
+    // to widen. Putting the guard above it (as the first version of this fix did) sent
+    // f32/f16/longdouble to numpy and surrendered a measured 15x WIN
+    // (`trim_zeros f32` 0.066x -> 1.099x) for a defect this path never had. The widening
+    // is in the EXTRACT residual further down, and that is the only thing that needs
+    // guarding.
     if let Some(out) = try_zerocopy_trim_zeros(py, filt.bind(py), trim_mode.as_str())? {
         return Ok(out);
+    }
+    // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened by the
+    // extract residual below (`deadlock-audit-qdp30`): `np.trim_zeros(float16)` is
+    // float16 and came back float64, `longdouble` came back float64. `trim_zeros` only
+    // ever SELECTS a sub-range of its input, so a widened result is doubly wrong -
+    // nothing was computed that could justify it.
+    if float_dtype_needs_numpy_precision(py, filt.bind(py))? {
+        return fallback();
     }
     // NON-1-D MUST DELEGATE. The zero-copy path above is 1-D only, and the
     // extract residual below flattens to a 1-D Vec and canonicalises the dtype -
