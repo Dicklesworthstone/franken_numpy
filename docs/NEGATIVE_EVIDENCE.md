@@ -64348,3 +64348,104 @@ on a descending array is a prefix - i.e. a direct branchless lower bound with `p
 (`right_probe=false`) or `probe > key` (`right_probe=true`), needing no reversed buffer. NaN falls
 out correctly (count 0, matching `n - n`). Also note 2^21 reads 0.98x against 0.59x at 2^20: that
 is the 16 MB allocator band this campaign has repeatedly seen, not this gate.
+
+## 2026-08-27 - WIN (SHIP): `repeat`'s parallel arm burned 64.59 INSTRUCTIONS PER OUTPUT ELEMENT against NumPy's 3.47 - a million 8-byte memcpys plus rayon fan-out on a BANDWIDTH-BOUND fill - 18.61x -> 0.43x counted (`deadlock-audit-hzl1w` rule, `deadlock-audit-sfgg3` audit)
+
+`TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** maintenance-self-speedup
+
+**THE DECISION IS COUNTED, NOT TIMED.** This host sat at loadavg 71 -> 101 -> 202 across the
+session, so every wall-clock cell is VOID by the standing rule and is reported as such below.
+Instructions retired are per-process and load-independent, which is why they carry this row.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=c4b3611748fe239e061b8d4950ae8c6d976233bc8366dbe8fd6b7c0ceb6b38b8
+executing elf sha256 (AFTER)   bench_elf_sha256=77ed721418067a752e10cb2bb1c6323173afbbd0942f0d79988bfeaa6eff213c
+```
+
+### THE INSTRUMENT WAS WRONG FIRST, AND THE FIRST RANKING IS VOID
+
+The two-operand audit's follow-up counted `concatenate` at 44.8x and `repeat` at 14.7x. **Those
+numbers are void.** A profile of the fnp arm showed **57.64% of samples in
+`blas_thread_server`** - idle scipy-OpenBLAS threads spinning. `perf stat` was being run without
+`OPENBLAS_NUM_THREADS=1`, and that spin scales with WALL TIME, so it inflated whichever arm ran
+longer - here the fnp arm, which fans out with rayon. **Pin OPENBLAS before counting
+instructions, not just before timing.** Re-counted with it pinned, `repeat` at 2^20 is 18.61x,
+not 14.7x.
+
+### THREE COSTS, EACH FOUND BY PROFILING THE PREVIOUS FIX
+
+`try_native_repeat_scalar`, flat/`axis=None` form, 1024 elements repeated 1024x (2^20 output):
+
+```
+  build                          insn/elt   vs numpy's 3.47
+  original                          64.59   18.61x
+  + doubling fill                   28.19    8.14x
+  + one job per THREAD              17.12    4.94x
+  + serial fill, no rayon            1.51    0.43x   <- SHIPPED, and now BELOW numpy
+```
+
+**(1) A million 8-byte memcpys.** For `axis=None`, `unit_bytes` is ONE ELEMENT, and the fill was
+`for j in 0..k { block[j*u..(j+1)*u].copy_from_slice(src) }` - k separate 8-byte `copy_from_slice`
+calls. Replaced by doubling the filled prefix: write the unit once, then repeatedly copy the
+already-filled prefix onto the remainder, moving the same bytes in log2(k) copies that grow to
+block size.
+
+**(2) One rayon job per UNIT.** `par_chunks_mut(k * unit_bytes)` sized the job by the natural unit
+- 8192 bytes - so an 8 MB output was split into **1024 jobs**. A pinned profile of that build
+spent 23.27% in `__memmove_avx_unaligned_erms` and ~40% in coordination
+(`crossbeam_epoch::with_handle` 14.04%, `Stealer::steal` 6.43%, `try_advance` 6.13%,
+`join_context` 2.66%, spin-lock 3.33%, TLS 3.21%). Rechunked to one job per thread.
+
+**(3) THE FAN-OUT ITSELF, on a bandwidth-bound op.** Even at one job per thread the profile still
+showed ~31% coordination against 35.85% memmove. Filling memory is bandwidth-bound, and
+`deadlock-audit-hzl1w` already wrote the rule: *a parallel arm cannot beat memory bandwidth, it
+can only pay to discover that.* The fill now runs on the calling thread below a 64 MB output, with
+the fan-out kept above it.
+
+COUNTED_MECHANISM: baseline-subtracted instructions per call over 200 calls, `OPENBLAS_NUM_THREADS=1`,
+2^20 output: numpy 3,697,530 and fnp 1,606,724 (1.51/elt against 3.47/elt) where the same
+measurement on the pre-change build read fnp 68,786,709 (64.59/elt). At 2^21: numpy 7,347,491,
+fnp 2,568,995 (1.21 vs 3.45/elt), pre-change 107,231,006 (50.35/elt). **A 42.8x reduction in
+instructions executed per call, and 2.3x fewer than the incumbent.**
+
+### WALL CLOCK IS VOID HERE AND IS NOT CLAIMED
+
+```
+   n_out      numpy_ns        fnp_ns    ratio   nullNP  nullFNP     loadavg 202.5
+ 1048576      359982.1      369325.0   1.026x    0.901    0.748  VOID
+ 4194304     3608317.8     3536363.7   0.980x    1.026    0.993  VOID
+16777216    14400523.8    11232480.8   0.780x    0.988    0.994   <- decidable, and ABOVE the
+                                                                     64 MB gate (parallel branch)
+```
+
+Only the 134 MB cell had both nulls inside 2%, and it is a 0.780x win on the arm that still fans
+out. **The serial branch's wall behaviour is NOT established**: at 2^20 the (void) reading is
+1.026x, which is exactly what a bandwidth-bound fill should look like - the same time for 43x
+fewer instructions. That is still worth having on a shared 20-agent box, where the old arm was
+spending 10 cores' worth of coordination to finish no sooner, but it is NOT a claim that the op
+got faster at 2^20 and this row does not make one.
+
+PARITY: 658 cells - 9 dtypes spanning every itemsize the byte-unit path can see (bool, int8/16/32/64,
+uint64, float32/64, complex128) x 4 input sizes x 6 repeat counts including k=1 and odd k, each
+under `axis=None`, `axis=0` and `axis=-1`; 2-D and 3-D inputs across every axis; a per-element
+repeats ARRAY (which must still defer); k=0, k=-1, empty input, out-of-range axis, scalar and 0-D
+sources, non-contiguous, Fortran-ordered, big-endian; and a 67.1 MB output that is the only way to
+reach the surviving parallel branch: **0 divergences**. `cargo test -p fnp-python --lib --release`:
+656 passed, 0 failed.
+
+MEMORY: the parity probe caps `n * k` at 2^22 elements; the single deliberate exception is the
+67.1 MB parallel-branch case.
+
+RETRY PREDICATE: **the 64 MB fan-out threshold is fitted to INSTRUCTIONS, not to wall clock, and
+that is the one thing owed here.** Multiple cores can pull more aggregate memory bandwidth than
+one, so the crossover where fan-out starts to pay cannot be settled by instruction counts at all -
+it needs an fnp-vs-fnp A/B of the serial and parallel branches on a host under loadavg 5, sweeping
+output size across 8/16/32/64/128 MB. Until that runs, do not lower the threshold. Do NOT re-attack
+the fill itself: it is memmove-bound at 1.21-1.51 insn/elt against numpy's 3.44-3.47.
+
+STILL OPEN from the same audit, unattacked and re-void until re-counted with OPENBLAS pinned:
+`concatenate` (its serial block copy is `dst.set(src.get())` over cells, with a comment claiming it
+"autovectorizes into a memcpy" - the same claim that was false for bool min/max and for digitize's
+`partial_cmp` scan) and `take`.

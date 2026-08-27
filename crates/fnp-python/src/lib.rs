@@ -28284,15 +28284,53 @@ fn try_native_repeat_scalar(
         unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u8>(), a_in.len()) };
     let out_data: &mut [u8] =
         unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, out_bytes_total) };
-    out_data
-        .par_chunks_mut(k * unit_bytes)
-        .enumerate()
-        .for_each(|(i, block)| {
+    // ONE RAYON JOB PER THREAD, NOT ONE PER UNIT. `par_chunks_mut(k * unit_bytes)` sizes the job
+    // by the natural unit, which for the flat/axis=None form is a single element: an 8 MB output
+    // was split into 1024 jobs, and a pinned profile of the result spent only 23% in the copy
+    // against ~40% in fan-out (crossbeam_epoch::with_handle 14.0%, Stealer::steal 6.4%,
+    // try_advance 6.1%, join_context 2.7%, plus spin-lock and TLS). Each job now owns a run of
+    // units and walks them itself.
+    let per_unit_out = k * unit_bytes;
+    // FILLING IS BANDWIDTH-BOUND, SO RAYON CAN ONLY ADD FAN-OUT. Even after the job count was cut
+    // from one-per-unit to one-per-thread, a pinned profile still spent ~31% in coordination
+    // (crossbeam_epoch::with_handle 14.7%, try_advance 6.1%, Stealer::steal 5.2%, TLS 3.5%)
+    // against 35.9% in the copy itself. This is the rule already written up in
+    // `deadlock-audit-hzl1w`: a parallel arm cannot beat memory bandwidth, it can only pay to
+    // discover that. The threshold below is where fan-out starts to pay for itself; under it the
+    // identical fill runs on the calling thread with no rayon entry at all.
+    const REPEAT_FANOUT_MIN_BYTES: usize = 1 << 26; // 64 MB of output
+    let fill_run = |base_unit: usize, run: &mut [u8]| {
+        for (u, block) in run.chunks_mut(per_unit_out).enumerate() {
+            let i = base_unit + u;
             let src = &in_data[i * unit_bytes..(i + 1) * unit_bytes];
-            for j in 0..k {
-                block[j * unit_bytes..(j + 1) * unit_bytes].copy_from_slice(src);
+            // DOUBLE THE FILLED PREFIX, do not memcpy the unit k times. With `unit_bytes` one
+            // element wide the obvious loop issued k separate 8-byte `copy_from_slice` calls -
+            // a million tiny memcpys for a 2^20 output, counted at 64.59 instructions per
+            // output element against NumPy's 3.47. Writing the unit once and then repeatedly
+            // copying the already-filled prefix onto the remainder moves the same bytes in
+            // log2(k) copies that grow to block size, so the work lands in vectorised memmove.
+            if per_unit_out == 0 {
+                continue;
             }
-        });
+            block[..unit_bytes].copy_from_slice(src);
+            let mut filled = unit_bytes;
+            while filled < per_unit_out {
+                let take = filled.min(per_unit_out - filled);
+                let (done, rest) = block.split_at_mut(filled);
+                rest[..take].copy_from_slice(&done[..take]);
+                filled += take;
+            }
+        }
+    };
+    if out_bytes_total >= REPEAT_FANOUT_MIN_BYTES {
+        let units_per_job = n_units.div_ceil(rayon::current_num_threads()).max(1);
+        out_data
+            .par_chunks_mut(units_per_job * per_unit_out)
+            .enumerate()
+            .for_each(|(job, run)| fill_run(job * units_per_job, run));
+    } else {
+        fill_run(0, out_data);
+    }
     Ok(Some(out.unbind()))
 }
 
@@ -60332,6 +60370,17 @@ fn native_unary_elementwise(
     let int_of = |size: usize| facts.is_none_or(|f| f.kind == 'i' && f.itemsize == size);
     let narrow_integral =
         facts.is_none_or(|f| matches!(f.kind, 'u') || (f.kind == 'i' && f.itemsize <= 2));
+    // The zero-copy uint64 negative route accepts ranked arrays but cannot borrow a 0-d
+    // PyBuffer as a slice. Let NumPy own that scalar-shaped case rather than falling into
+    // the generic f64 bridge, which rejects wrapped uint64 values as unrepresentable.
+    // This rank check is deliberately limited to the affected op/dtype; the ranked uint64
+    // fast path below remains engaged.
+    if matches!(op, UnaryOp::Negative)
+        && facts.is_some_and(|f| f.kind == 'u' && f.itemsize == 8)
+        && x.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0
+    {
+        return fallback(py);
+    }
     // BOOL `abs`/`square` HAVE NO NATIVE PATH HERE and must delegate rather than fall through to
     // the generic extract. `narrow_integral` covers kind 'u' and narrow 'i' but not 'b', so a
     // bool array declined every gate below and landed in `extract_precise_numeric_array`, which
