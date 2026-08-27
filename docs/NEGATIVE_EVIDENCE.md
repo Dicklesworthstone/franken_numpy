@@ -61135,3 +61135,84 @@ delegates for everything past a few KiB, so it pays a full buffer acquisition an
 before deciding to delegate - that is a DIFFERENT defect from this one and worth its own row.
 The same `numeric_operand_facts` plan is untried on `prod`, `any`, `all` and `argmin`/`argmax`.
 AGENT_NAME=TanBridge.
+
+## 2026-08-27 - REJECT: short-circuiting the f64 min/max delegate on one `size` read is a TRADE, not a win - the read is paid by EVERY call below the crossover and only calls above it can collect (`franken_numpy-minmax-gateplan`)
+
+`TanBridge`. Reverted in `ab580a95`; the rejected build is kept as an ELF for anyone re-testing.
+Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME invocation,
+OPENBLAS_NUM_THREADS=1. Class: REJECT.
+
+```
+executing elf sha256 (BEFORE)   bench_elf_sha256=22e86e7c25ca4cd9b9a24a426410262107dfd4f6298bd011a3eab0198151a492
+executing elf sha256 (REJECTED) bench_elf_sha256=13a0bb6c6d78e298ef22b09b641ac70f29772dbeb6a6c62b03d3c342e044bd16
+executing elf sha256 (REVERTED) bench_elf_sha256=3280291ae3438c3a2e3487911a64f20357a15f932dfdacf9f29f8040904605b4
+```
+
+### THE HYPOTHESIS, WHICH IS STILL CORRECT
+
+`min f64 n=4096` was the worst cell left in this family at 1.44x. Inside
+`try_zerocopy_f64_minmax`, a FLAT reduction cannot reach the parallel branch - that branch
+requires `inner >= 2` and flat gives `inner == 1` - so a flat f64 operand at or above
+`ZEROCOPY_MINMAX_NUMPY_MIN_LEN` (4096) ALWAYS lands on `DelegateToNumpy`, which the caller turns
+into `fallback()`. Reaching that verdict through the helper costs a `PyBuffer` acquisition and
+two `Vec` allocations (`shape`, then `out_shape`). One `size` read gets to the same answer.
+
+Every part of that is true. The change still loses.
+
+### WHY IT LOSES ANYWAY
+
+The read is unconditional on the flat f64 path, but only operands >= 4096 can collect on it.
+Two runs in the same window on the same host:
+
+```
+MINMAX_SIZE_SHORTCIRCUIT worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation median-of-15 slot medians, 200 inner reps, both arms interleaved
+
+  size     run 1 BEFORE -> AFTER    run 2 BEFORE -> AFTER    sign
+  n=256    0.929x -> 0.997x         0.717x -> 0.590x         inconsistent
+  n=1024   1.029x -> 1.136x         -                        worse
+  n=2048   1.186x -> 1.356x         1.113x -> 1.209x         WORSE, replicated
+  n=4095   1.449x -> 1.726x         1.420x -> 1.674x         WORSE, replicated
+  n=4096   1.485x -> 1.417x         -                        better
+  n=8192   1.422x -> 1.340x         1.367x -> 0.965x         better, replicated
+```
+
+The crossover is visible in the data itself: n=4095 (does not fire) gets worse, n=4096 (fires)
+gets better, and they differ by one element. That is the cleanest possible confirmation that the
+short-circuit did exactly what it was written to do - and that doing it is not worth it.
+
+COUNTED_MECHANISM: the sub-crossover tax is +300 to +500 ns, against 24.2 ns for the single
+interned attribute read it adds - a factor of 12 to 20, measured on 2 replicated sizes.
+
+That gap is the finding: the added branch did not merely add a read - it changed codegen, most
+likely by defeating an optimisation the way this campaign has already recorded a branch defeating
+SROA. That was NOT chased further, because the verdict does not depend on which of the two it is:
+either way the sub-crossover path pays and the above-crossover path does not repay it.
+
+### THE A/A NULL ROUND OF THIS SAME LEVER, FOR CONTRAST
+
+The dual-null run of the same pair reported `min f64 n=256` as 0.926x [0.891,0.961] -> 1.026x
+[1.008,1.050], NON-OVERLAPPING with all four nulls PASSING - a textbook decidable regression.
+The focused sweep above then read that same cell as 0.929 -> 0.997 in one run and 0.717 -> 0.590
+in the next. **n=256 is the one size in the sweep whose sign does NOT replicate**, and the
+dual-null run had no way to say so from a single pair. The replicated cells are n=2048 and
+n=4095, and those are what this rejection rests on.
+
+### THE REVERT WAS VERIFIED, NOT ASSUMED
+
+A revert can land somewhere new rather than back where it started. Against the pre-change build
+in the same window: n=2048 1.225x vs 1.188x, n=4095 1.461x vs 1.470x, n=8192 1.415x vs 1.444x -
+all within the run-to-run spread of this host. Parity 0 divergences of 3720; 654 lib tests pass.
+
+MEMORY: largest operand 8192 f64 = 64 KB.
+
+RETRY PREDICATE: do NOT re-add a `size`/`nbytes` read in `py_min`/`py_max` to pre-decide the f64
+delegate - that exact design is what this row rejects, and the rejection is duplicated as a
+comment at both call sites. **It becomes retryable only if the size arrives for FREE**, and there
+is one plausible source: `try_zerocopy_f64_extremum_flat` runs immediately before and already
+reads `nbytes` for its own 16 MiB check, but discards it. Threading that value out of the gate
+that already paid for it - rather than reading it again - is untested and is the only version of
+this lever worth building. A second, independent route is to move the delegate verdict INSIDE
+`try_zerocopy_f64_minmax` to just after `as_slice` (using `input.len()`, which costs nothing),
+which skips the `out_shape` Vec without taxing anyone; that is also untested.
+AGENT_NAME=TanBridge.
