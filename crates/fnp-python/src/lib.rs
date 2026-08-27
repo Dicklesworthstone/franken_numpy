@@ -36659,8 +36659,37 @@ fn searchsorted(
     {
         return Ok(out);
     }
+    // A NEEDLE DTYPE THE NATIVE PATH CANNOT REPRESENT IS NOT AN ERROR. Every dispatch above
+    // keys on the HAYSTACK's kind, so COMPLEX needles against a real haystack picked a real
+    // route and then died here with `TypeError: searchsorted(v): expected a bool/int/uint/float
+    // array` - where numpy promotes both sides to the common complex type, searches
+    // lexicographically and returns ordinary int64 indices. Found by a dtype-only audit; the
+    // mirrored case (complex haystack, real needles) already worked.
+    //
+    // DELEGATING FROM THE FAILURE COSTS NOTHING ON ANY CALL THAT SUCCEEDS, which is the whole
+    // reason it is here and not at the top of the function. An up-front `dtype.kind` probe was
+    // written first and measured, by counted instruction diff, at +432 instructions per call on
+    // the hot path (11,576 -> 12,008 for an ndarray needle) - a permanent tax on every call to
+    // serve the one that raises. This form pays only on the path that was already failing, and
+    // lets numpy own the wording of any error that is genuinely an error.
+    //
+    // `v` is extracted BEFORE `a` because the `a` binding below shadows the Python object this
+    // delegate needs.
+    let v = match extract_numeric_array(py, v_bound, "searchsorted(v)") {
+        Ok(value) => value,
+        Err(_) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "side"), side)?;
+            if let Some(sorter) = sorter.as_ref() {
+                kwargs.set_item(intern!(py, "sorter"), sorter.bind(py))?;
+            }
+            return Ok(numpy
+                .getattr(intern!(py, "searchsorted"))?
+                .call((a.bind(py), v_bound), Some(&kwargs))?
+                .unbind());
+        }
+    };
     let a = extract_numeric_array(py, a.bind(py), "searchsorted(a)")?;
-    let v = extract_numeric_array(py, v_bound, "searchsorted(v)")?;
     let sorter = sorter
         .map(|sorter| extract_index_vector(py, sorter.bind(py), "searchsorted(sorter)"))
         .transpose()?;
