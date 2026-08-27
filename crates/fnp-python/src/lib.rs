@@ -87830,6 +87830,17 @@ fn try_zerocopy_f64_minmax(
         }
         return Ok(F64MinMaxFastPath::NotApplicable);
     };
+    // DO NOT add an early `axis.is_none() && input.len() >= ZEROCOPY_MINMAX_NUMPY_MIN_LEN ->
+    // DelegateToNumpy` here. It is logically free - `input.len()` is a field read on a slice
+    // already held, and a flat reduction cannot reach the parallel branch below anyway - and it
+    // was still MEASURED A LOSS, twice over.
+    //
+    // BOTH placements of this idea have now been tested and both lose the same way: the
+    // caller-side version (a fresh `size` getattr in `py_min`/`py_max`) and this one. At loadavg
+    // 10.2, replicated 2/2, the sizes that DO NOT FIRE the branch got worse - n=2048 1.19x ->
+    // 1.30x and n=4095 1.43x -> 1.65x - while the gain above the crossover never replicated.
+    // Degradation confined to non-firing sizes is not extra work; it is CODEGEN. The lever is
+    // closed, not pending.
     // numpy's SIMD min/max beats this scalar cell-by-cell fold at EVERY size past a
     // few KiB (measured fnp-native/numpy 1.5x@1k → 2.5x@8k → 4x@64k → 5x@1M, and the
     // axis paths 3.9-4.8x); it is genuinely SIMD-bound (a NaN-propagating,
