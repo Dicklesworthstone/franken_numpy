@@ -64221,3 +64221,130 @@ every dtype that declines every fast path** - f16 is simply the dtype that had n
 beneath it, so it hit the tail on every small-query call. Auditing which other declines land there
 is the open work, and the same `Ok(None)`-means-the-route-underneath question applies to every
 `try_native_*` gate in this file.
+
+## 2026-08-27 - WIN (SHIP): `digitize` paid O(bins) TWICE - a scalar `partial_cmp` monotonicity scan and an 8 MB bins copy justified by "typically <100" - 4.03x -> 0.572x, and the DECREASING arm is still a LOSS (`deadlock-audit-sfgg3` follow-up)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell and an
+out-of-family `np.sum` f64 control.
+
+**Campaign result class:** maintenance-self-speedup
+
+The conservative class: no numpy artifact sha / shared invocation id / isolation marker. Ratios
+below are as measured against the live incumbent in the same invocation.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=a3fbd7e91f5201b7fac6b8bbf51a2317d46b857df550ac0133622d909cc7ee83
+executing elf sha256 (AFTER)   bench_elf_sha256=c4b3611748fe239e061b8d4950ae8c6d976233bc8366dbe8fd6b7c0ceb6b38b8
+```
+
+### FOUND BY AUDITING THE TWO-OPERAND AXIS THE STANDING SWEEP CANNOT SEE
+
+The loss sweep varies ONE operand size. A gate reading operand A while the cost is O(operand B) is
+invisible to it - that is how a 721.70x hid in f16 `searchsorted` (row above). Sweeping the RATIO
+of the two operands across every two-operand op (searchsorted, digitize, isin, interp, take,
+delete, insert, append, concatenate, the four setops, repeat, bincount, choose, cross) put
+`digitize` on top by BOTH ratio and absolute excess:
+
+```
+        bins  queries     numpy_ns          fnp_ns    ratio
+     1048576       64     300042.0       1169614.0   3.898x   <- ~870 us of excess, the largest
+     1048576     1024     443036.6       1461404.2   3.299x
+      262144       64      82641.5        303299.1   3.670x
+```
+
+fnp is nearly FLAT in the query count, so the cost is O(bins). Pricing numpy's own parts at 2^20
+bins / 64 queries shows where its 300 us goes and how little of it is the search:
+
+```
+  numpy digitize TOTAL          303626.3 ns
+  np.all(b[1:] >= b[:-1])       131858.5 ns   <- numpy's _monotonicity, C and vectorised
+  np.searchsorted(b, x)           2259.6 ns   <- the actual work is 0.7% of the call
+  fnp digitize TOTAL           1224779.6 ns
+```
+
+### TWO O(bins) COSTS IN ONE FUNCTION, AND THE SECOND ONE HAD A FALSE PREMISE IN ITS COMMENT
+
+**(1) The direction scan was scalar.** It walked the pairs matching on `partial_cmp`, which returns
+an `Option` and forces a per-element branch. Replaced by two branch-free flags - `non_decreasing &=
+a <= b` and `non_increasing &= a >= b` - over a raw `&[T]` rather than `Cell::get` per element,
+with the early exit moved to a 256-element block so wildly unsorted bins still reject at once.
+NaN keeps its old verdict for free: it makes both comparisons false, so both flags clear and the
+call defers exactly as the `None` arm did.
+
+**(2) The bins were COPIED on every call.** The snapshot's own comment read "the (tiny, typically
+<100) bins", and it existed only so the search sees a plain `Send+Sync` slice. The raw slice from
+(1) already is one, so for INCREASING bins it is now borrowed. At 2^20 bins that removed an 8 MB
+allocation and copy made to answer as few as 64 queries.
+
+COUNTED_MECHANISM, host-free, over the whole of `fnp_python::digitize_typed::<f64>` (`objdump`
+across the symbol's true extent from `nm -S`): the BEFORE build contains **0** vector compares -
+the `partial_cmp` loop is entirely scalar - and the AFTER build contains **4 `vcmplepd`**. That is
+the claimed mechanism decided by instruction counts rather than wall clock, which matters because
+this host moved an out-of-family control between 1.170x and 1.571x across the two A/B runs.
+
+### THE MEASUREMENT
+
+Min-of-3 sweep at 64 queries, both builds, same invocation each:
+
+```
+       bins    BEFORE     AFTER
+      16384     2.72x     0.67x
+      65536     3.45x     0.63x
+     262144     3.78x     0.65x
+    1048576     4.03x     0.59x
+    2097152     5.12x     0.98x
+  DECREASING    3.80x     1.18x   <- improved 3.2x but STILL A LOSS
+```
+
+Dual-null, the quieter of two runs (control 1.170x), 3/6 decidable:
+
+```
+case      bins  queries     numpy_ns       fnp_ns    ratio   nullNP  nullFNP
+inc      65536       64      23094.3      14761.2   0.639x    1.003    0.995
+inc     262144       64      80750.3      47901.3   0.593x    0.997    0.992
+inc    1048576     1024     468140.9     351749.8   0.751x    1.008    1.006
+inc    1048576       64     323125.4     184985.0   0.572x    1.021    1.008  BIASED
+inc    1048576    65536   14526072.5   13730659.2   0.945x    1.017    0.969  BIASED
+dec    1048576       64     338557.5     520807.1   1.538x    1.000    1.054  BIASED
+```
+
+The signs replicate across both runs (the first, control 1.571x, read 0.528x/0.495x/0.469x/0.554x/
+0.933x and dec 1.434x); the magnitudes do not, and the BIASED cells are named rather than dropped.
+
+### NOT FIXED, AND STATED: THE DECREASING ARM IS STILL BEHIND
+
+`dec` still allocates the reversed copy, because `digitize_index` lower-bounds an ASCENDING slice.
+It went 3.80x -> 1.18x/1.43x/1.54x across three measurements - a real improvement and still a
+LOSS. It is reported here rather than left for the next sweep to rediscover.
+
+PARITY: 1366 cells - 5 dtypes (f64/f32/i64/i32/u32) x 9 bin counts (0,1,2,3,17,256,4096,65536,
+2^20) x 4 query counts x {increasing, decreasing, all-equal} x `right` both ways, plus unsorted
+bins (numpy RAISES and so must we), NaN in bins at the middle AND in the last block only, a
+direction conflict placed at index 600 to exercise the 256-block early exit, the +-0/+-inf/
+subnormal query set, 2-D / scalar / 0-D queries, non-contiguous on each operand, big-endian bins
+and a mixed-dtype pair. **48 divergences, IDENTICAL in count and shape on the pre-change build -
+0 introduced.** `cargo test -p fnp-python --lib --release`: 655 passed, 0 failed.
+
+PRE-EXISTING DEFECT FOUND IN PASSING, NOT FIXED (it is a behaviour change and wants its own
+evidence): **numpy's `_monotonicity` does NOT treat a NaN bin as breaking monotonicity.**
+
+```
+  bins [0., 1., nan, 3., 4.]   np._monotonicity -> 1     np.digitize([0.5,2.5,3.5]) -> [1 2 4]
+                                                          fnp.digitize            -> ValueError
+```
+
+numpy's answer is exactly `searchsorted(bins, x, 'right')`, which is the same predicate
+`digitize_index` already runs - so the fix is to let a NaN bin keep the direction verdict instead
+of deferring. 48 cells, f32 and f64, all bin counts >= 3.
+
+MEMORY: largest bins 2^21 f64 = 16 MB, one live at a time.
+
+RETRY PREDICATE: **do not re-attack the increasing arm - it WINS 0.57x-0.75x and the scan is
+vectorised (4 `vcmplepd`, counted).** The open work is the DECREASING arm's copy, and the formula
+that removes it is already derived: with `rev[j] = b[n-1-j]`, `searchsorted(rev, key, left)` counts
+`b[i] < key`, so numpy's `n - searchsorted(rev, x, side)` equals the count of `b[i] >= key`, which
+on a descending array is a prefix - i.e. a direct branchless lower bound with `probe >= key`
+(`right_probe=false`) or `probe > key` (`right_probe=true`), needing no reversed buffer. NaN falls
+out correctly (count 0, matching `n - n`). Also note 2^21 reads 0.98x against 0.59x at 2^20: that
+is the 16 MB allocator band this campaign has repeatedly seen, not this gate.
