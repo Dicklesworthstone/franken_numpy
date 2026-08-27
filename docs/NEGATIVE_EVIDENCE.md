@@ -61452,3 +61452,115 @@ axis forms, or 0-d/empty inputs, and those are where the next instance of this c
 try to place the inspection ON THE FAILURE PATH rather than ahead of it** - here that was the
 difference between +432 and +23 instructions per call, and the two versions are otherwise
 identical in behaviour. AGENT_NAME=TanBridge.
+
+## 2026-08-27 - THE INTEGER HISTOGRAM WAS O(chunks x range) IN BOTH TIME AND MEMORY WHILE GATED ONLY ON RANGE: `np.median` of a 4 MB array cost 2.5 s and 3.1 GB of RSS, and is now 1.137x (`franken_numpy-hist-chunkcap`)
+
+`TanBridge`. Shipped `4530deae`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 9 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1. Class: `maintenance-self-speedup` for the cells that were losing;
+several cross into wins over numpy and are marked.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=91178b6c7d32d4188661315dcd1cda9a1dce45c6e86be1298723338a6cab2b62
+executing elf sha256 (AFTER)  bench_elf_sha256=f10d576025f223f5582fe89b04bcd915e40c72113850daec18babf90363d564e
+```
+
+**HOST DISCLOSURE:** BEFORE at loadavg 58.99, AFTER at 5.28. That gap would normally void the
+comparison. It does not here, and the reason is stated as evidence rather than asserted: **the
+f64 CONTROL - a dtype with no integer-histogram path at all - reads 0.366x in the loud run and
+0.371x in the quiet one, with nulls passing in both.** These median cells are parallel on both
+arms and their RATIO is nearly load-invariant. Every effect below is between 4x and 149x, orders
+of magnitude past anything load could contribute.
+
+### HOW IT WAS FOUND
+
+Not by following a standing figure: by a fresh contiguous triage sweep over 1376 cells, which
+put `median int32 2^20` at the top of BOTH the ratio table and the absolute-headroom table. The
+standing worst-cell list did not contain it.
+
+### THE MECHANISM
+
+`median_hist_typed` and its `linear_quantile_hist_typed` twin build ONE FULL r-cell histogram
+PER CHUNK, with `target_chunks = num_threads * 4`, then merge them SERIALLY. On a 64-core host
+that is 256 histograms of r cells. The only gate was `r <= RANGE_MAX` with RANGE_MAX = 1 << 22,
+which never compared r to n - so r = 4.19M meant ~1.6 GB of partial histograms and a
+~1.07-billion-operation serial merge to reduce a 4 MB array. A third site, the counting argsort,
+had the same shape and its own comment already claimed to "cap at n" while the code never did.
+
+Two changes, each measured separately:
+1. **Cap the chunk count by range** (`min((n / r).max(1))`), so the partials can never hold more
+   cells than the input. Bounds the merge AND the peak memory by O(n). This alone took
+   n=2^20 r=n from 80.9x to 2.09x and peak RSS from 1661 MB to 0, and it IMPROVED the
+   small-range wins it was not aimed at (r~n/64 at 2^20: 0.908x -> 0.405x).
+2. **RANGE_MAX 1 << 22 -> 1 << 20.** Even capped, a range that large drives the chunk count to 1
+   and the whole histogram goes serial over r cells. At n = 2^22: r = n/4 is 0.595x (keep) while
+   r = n/2 is 1.840x and r = n is 3.564x (hand to numpy). Every range that still wins is kept.
+
+### MEASURED, cells with PASSING nulls in BOTH runs
+
+```
+HIST_CHUNK_CAP worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 9 rounds, median of round ratios, dual A/A null,
+  each slot sized to ~120 ms of work
+
+  cell                        BEFORE                      AFTER
+  median i32 2^20 r~n/8        6.659x [6.489,6.962]       0.559x [0.524,0.629]   WIN
+  median i32 2^20 r~n/2       27.886x [25.658,34.107]     0.910x [0.761,1.010]   WIN
+  median i32 2^20 r~n/1       64.780x [61.932,68.687]     1.228x [1.119,1.301]
+  median i32 2^22 r~n/64       0.874x [0.869,0.886]       0.297x [0.287,0.309]   WIN
+  median i32 2^22 r~n/1      149.622x [141.945,151.524]   1.137x [1.079,1.210]
+  quantile i32 2^20 r~n/8      4.382x [4.098,4.691]       0.356x [0.330,0.389]   WIN
+  percentile i32 2^20 r~n/1   41.710x [40.667,42.335]     0.675x [0.643,0.783]   WIN
+  -- CONTROL: f64 has no integer histogram path, so it must not move --
+  median f64 2^20              0.366x [0.343,0.380]       0.371x [0.355,0.382]   UNCHANGED
+```
+
+Every one of those is DISJOINT by orders of magnitude, and the control is flat.
+
+PEAK RSS, same cells, measured with `ru_maxrss` around a single call:
+
+```
+  n=2^20 r~n/8   286.0 MB ->   1.7 MB       n=2^22 r~n/2  2066.4 MB -> 0.0 MB
+  n=2^20 r~n/2   683.6 MB ->   4.5 MB       n=2^22 r~n/1  3083.9 MB -> 0.0 MB
+  n=2^20 r~n/1  1006.6 MB ->   5.2 MB
+```
+
+**A single `np.median` call on a 4 MB array peaked at 3.1 GB.** That is the part of this row
+that matters most for a library with a bounded-memory contract: the blow-up is invisible to any
+timing harness and silent until an allocation fails.
+
+**A/A NULL CONTROLS:** BEFORE 11 of 15 PASS at loadavg 59; AFTER 7 of 15 PASS at loadavg 5.3.
+Only cells passing in BOTH are quoted above. The BIASED cells are all small-range cells whose
+absolute times are a few ms.
+
+### A HARNESS BUG OF MINE, AND WHY IT MATTERS HERE
+
+The first AFTER run reported the f64 control at 0.370x against a BEFORE of 0.953x - a 2.6x move
+on a path the change cannot touch. The cause was the harness, not the code: with a fixed
+`inner = 3`, these RAYON-PARALLEL kernels paid pool wake-up on every slot of the ABBAABBA
+schedule, and fnp's own A/A null failed in 13 of 15 cells. Sizing each slot to ~120 ms of work
+fixed it.
+
+Then the fix had its own bug: I sized `inner` by `min(fnp_time, numpy_time)`. With fnp at 2.7 s
+and numpy at 17 ms that picks inner = 7, so every fnp slot ran 19 s and ONE cell needed 34
+minutes; the run had to be killed after 50 minutes having printed nothing. **Size a slot by the
+SLOWER arm.** Both bugs are now comments in the harness.
+
+PARITY: 449 cases over 7 integer dtypes x sizes either side of MIN_N x ranges either side of
+RANGE_MAX (including exactly AT both gates), plus all-equal, two-valued, negative spans, int32
+min/max extremes, dense-low-plus-one-high, even/odd n, uint64 above 2^40, descending, 2-D, and
+argsort either side of its own ceiling - on dtype, shape and RAW BYTES. **0 divergences BEFORE
+and 0 AFTER.** 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^22 int32 = 16 MB, one live.
+
+RETRY PREDICATE: the chunk cap and the range ceiling are DONE for `median`, `percentile`,
+`quantile` and the counting `argsort`; do not re-derive them. **The general defect is "a
+per-chunk accumulator sized by RANGE while the gate only checks RANGE"**, and the audit for it
+is `grep 'vec!\[0u' lib.rs` then asking, for each hit, whether it sits inside a `par_chunks`
+map. That sweep found exactly these three sites; the other range-sized allocations
+(`c128` setops' `DOMAIN_MAX`, lexsort's `LEXSORT_COUNT_MAX`) are SINGLE allocations, and were
+measured at n=256..65536 and show only entry-scale losses (~40 us), so they are NOT this defect
+and need no change. The two cells still above unity - `median i32 2^20 r~n/1` at 1.228x and
+`2^22 r~n/1` at 1.137x - now DELEGATE, so that residual is `median`'s ordinary entry overhead
+and belongs to the entry-cost vein, not here. AGENT_NAME=TanBridge.
