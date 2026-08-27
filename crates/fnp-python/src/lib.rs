@@ -52143,13 +52143,13 @@ fn try_zerocopy_float_nanarg_nonlast_axis<T: NanArgFloat>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven))]
 fn nanargmax(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: Option<bool>,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let nanargmax_fn = numpy.getattr(intern!(py, "nanargmax"))?;
@@ -52162,15 +52162,27 @@ fn nanargmax(
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        if let Some(keepdims_val) = keepdims {
-            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
-        }
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         Ok(nanargmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        // An ndarray SUBCLASS must go through numpy, and this op needs BOTH halves of the fix.
+        // `np.nanargmax(matrix)` is an int64 while `np.nanargmax(matrix, keepdims=False)` - and
+        // even `keepdims=None` - is a `matrix`, because numpy forwards the argument to
+        // `matrix.argmax`, which accepts it. So the subclass gate alone is not enough: an
+        // `Option<bool>` collapses an explicit `None` onto "absent" and would still answer
+        // int64 where numpy answers matrix (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
+    {
         return fallback();
     }
+    // Past this point the native paths need a plain bool; a value only numpy can interpret has
+    // already been handed back above via the subclass gate or is handled here.
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
+    };
+    let keepdims = Some(keepdims);
     // keepdims-on-axis: the gate used to bail on ANY keepdims, forgoing the ~0.45x native win.
     // Skip the no-keepdims fast paths when keepdims is set; the general path re-inserts the reduced
     // axis via expand_dims (axis=None+keepdims -> all-ones reshape, delegated). (BlackThrush 2026-06-22.)
@@ -52312,13 +52324,13 @@ fn nanargmax(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven))]
 fn nanargmin(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: Option<bool>,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let nanargmin_fn = numpy.getattr(intern!(py, "nanargmin"))?;
@@ -52331,15 +52343,22 @@ fn nanargmin(
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        if let Some(keepdims_val) = keepdims {
-            kwargs.set_item(intern!(py, "keepdims"), keepdims_val)?;
-        }
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         Ok(nanargmin_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        // An ndarray SUBCLASS must go through numpy - see the `nanargmax` twin, which also
+        // explains why the three-state `keepdims` is required here and not just the gate
+        // (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
+    {
         return fallback();
     }
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
+    };
+    let keepdims = Some(keepdims);
     // keepdims-on-axis: the gate used to bail on ANY keepdims, forgoing the ~0.45x native win.
     // Skip the no-keepdims fast paths when keepdims is set; the general path re-inserts the reduced
     // axis via expand_dims (axis=None+keepdims -> all-ones reshape, delegated). (BlackThrush 2026-06-22.)
@@ -91727,6 +91746,10 @@ fn cumsum(
     // Fallback for `out` buffer or explicit dtype (conversion not native)
     if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        // An ndarray SUBCLASS must go through numpy, which preserves it: `np.cumsum(matrix)` and
+        // `np.cumsum(matrix, axis=0)` are both `matrix`, and a plain subclass stays itself. The
+        // native path returned a base-class ndarray for all four (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
@@ -91925,6 +91948,9 @@ fn cumprod(
     // Fallback for `out` buffer or explicit dtype (conversion not native)
     if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        // An ndarray SUBCLASS must go through numpy - see the `cumsum` twin
+        // (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
@@ -93067,6 +93093,9 @@ fn argmax(
     if has_unrecognized_kwargs(kwargs, &["keepdims"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || keepdims
+        // An ndarray SUBCLASS must go through numpy - see the `argmin` twin
+        // (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
@@ -93280,6 +93309,13 @@ fn argmin(
     if has_unrecognized_kwargs(kwargs, &["keepdims"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || keepdims
+        // An ndarray SUBCLASS must go through numpy. This op's polarity is its OWN, and not the
+        // one the neighbouring reductions have: `np.argmin(matrix)` is an int64, but
+        // `np.argmin(matrix, keepdims=False)` is a `matrix` - numpy forwards `keepdims` to
+        // `matrix.argmin`, which ACCEPTS it, where `matrix.sum` does not. The delegate reproduces
+        // all of it for free because `clone_py_kwargs` preserves the original `keepdims` key
+        // exactly as passed, present or absent (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
