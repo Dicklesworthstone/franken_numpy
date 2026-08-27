@@ -62112,3 +62112,117 @@ regime work as a SIZE-gated question: the native float route loses below ~2^21 a
 recorded from the same counted sweep, and NOT a defect: RANDOM float64 argsort runs 2927.84M
 instructions against numpy's 220.88M (13.26x) and still WINS on wall clock - the same
 work-for-latency trade, so do not "fix" it either.
+
+## 2026-08-27 - WIN (SHIP): the promoting unary family BUILT AND DISCARDED the whole operand on every integer/bool call - a pre-extract dtype-kind gate takes the worst cell 7.198x -> 2.463x (`franken_numpy-unary-preextract-gate`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+The class is exact and it is the honest one: **every cell in this row is STILL A LOSS to numpy**
+and is reported as such. Our own route got 1.6-2.9x faster; the gap did not close. The row also
+carries a wrong gate of my own, caught before it shipped by reading the discard list it was
+supposed to be equivalent to.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=a7397ffee32285251f0664815d01057b1b3a36a11b98ff1693c7a955a6b5db78
+executing elf sha256 (AFTER)   bench_elf_sha256=2a65751e7248a6d62fc5e52b66c22f92658bd17793b8088fe0b1cfaf0b85ef49
+```
+
+Both are the `fnp_python.so` actually imported by the measuring interpreter, sha'd in-process by
+each probe (`hashlib.sha256(open(fnp.__file__,'rb').read())`) and again on disk, not a build
+artifact assumed to be the one that ran.
+
+### THE DEFECT: PAY-THEN-DISCARD, AT THE BOTTOM OF `native_unary_promoting`
+
+```rust
+let Ok(native) = extract_precise_numeric_array(py, x, context) else { return fallback(py); };
+if native.dtype() == DType::Bool || native.has_integer_sidecar()
+    || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+    || native.dtype().is_integer()
+{ return fallback(py); }
+```
+
+An integer, bool or complex operand was materialised IN FULL and then thrown away one line later
+and delegated to numpy regardless. `extract_precise_numeric_array` is not cheap: `asarray` ->
+`.shape` -> `.reshape(-1)` -> `.dtype` -> **`.dtype.name`, which is 1213.5 ns of pure Python on
+its own** -> then a copy of every element into a native Vec. All of it discarded.
+
+The fix asks `dtype.kind` (a C-level char) BEFORE the extract, via the existing
+`numeric_operand_facts`. The four gated kinds are exactly the four conditions above: 'b' is
+`DType::Bool`, 'i'/'u' are `is_integer()`, 'c' is Complex64|Complex128. `has_integer_sidecar()`
+can only be set on a float dtype, so the original block STAYS underneath as the backstop and
+keeps deciding everything the gate passes. `numeric_operand_facts` returns None for anything that
+is not an exact ndarray, so lists, Python scalars and ndarray subclasses are untouched.
+
+COUNTED_MECHANISM: at n=16, baseline-subtracted instructions per call over 1000000 calls, every
+arm importing fnp_python so the subtracted baseline is identical across arms - int64 37295.5 ->
+13864.0 against numpy's 5927.1 (6.29x -> 2.26x, 23431 instructions removed per call); int32
+36853.1 -> 13276.6 vs 6141.3 (6.00x -> 1.98x, -23577); uint8 38657.1 -> 15156.8 vs 8373.7
+(4.62x -> 1.74x, -23500); bool 35209.7 -> 15376.4 vs 7630.2 (4.61x -> 1.96x, -19833).
+
+### THE CONTROL IS THE POINT
+
+float64 is the control: the gate names kinds b/i/u/c, so a float64 row that moves would mean the
+change is not what it claims. Counted, float64 went 7363.6 -> 7501.2 insns/call (1.82x -> 1.81x).
+Wall-clock across 11 readable float64 cells: **mean 1.571x -> 1.567x**, every individual cell
+within 3%.
+
+There is a second, unplanned control inside the table. `exp` and `log` come back at EXACTLY 1.00x
+speedup on every gated dtype - because they take the `numpy_f64_native_unary_is_byte_exact`
+deferral higher up and never reached the extract at all. The rows that moved are precisely the
+rows that were reaching the pay-then-discard, and no others.
+
+### THE MEASUREMENT
+
+59 readable cells, 21 skipped as BIASED (host at loadavg 9-13; a cell is skipped whenever EITHER
+run's dual null strays past 2%). Gated kinds b/i/u: **mean 3.848x -> 1.709x, worst 7.198x ->
+2.463x**. Selected, `HEAD -> GATE (numpy ns, gate ns)`:
+
+```
+  sqrt   int64   16   7.085x -> 2.463x   (549.0 np, 1352.2 fnp)     2.88x self-speedup
+  sqrt   int32   16   7.198x -> 2.454x   (553.3 np, 1358.1 fnp)     2.93x
+  fabs   int64   16   6.588x -> 2.341x   (592.9 np, 1388.0 fnp)     2.81x
+  sqrt   uint8   16   6.096x -> 2.241x   (661.7 np, 1482.5 fnp)     2.72x
+  sqrt   bool    16   5.740x -> 2.230x   (668.0 np, 1489.6 fnp)     2.57x
+  sqrt   int64  256   4.953x -> 1.909x   (917.3 np, 1751.4 fnp)     2.59x
+  fabs   int32  256   3.500x -> 1.603x  (1403.2 np, 2249.7 fnp)     2.18x
+  cos    int64  256   2.386x -> 1.301x  (2684.2 np, 3492.9 fnp)     1.83x
+  exp    int64   16   1.701x -> 1.700x  (614.3 np, 1044.1 fnp)      1.00x  (never reached extract)
+```
+
+**Every cell above is still a LOSS.** This closes a 3.3 us flat entry cost, not the gap.
+
+PARITY: 5320 cells (38 ops x 14 dtypes x 10 operand shapes including 0-d, empty, strided, sliced,
+list, Python scalar and `np.matrix`), raw-byte compared with dtype/type/shape, plus
+error-behaviour compared. **1 divergence, and the identical probe against the pre-change build
+returns the same 1** - `negative` on 0-d uint64, the pre-existing `deadlock-audit-neu7z`. 654 lib
+tests pass; clippy `-D warnings` and `cargo fmt --check` both exit 0 (unpiped - a piped
+`fmt --check` reports exit 0 while failing).
+
+### THE GATE I GOT WRONG, AND WHAT CAUGHT IT
+
+I first wrote this gate in the SIBLING function, `native_unary_elementwise`, with the same four
+kinds 'b'|'i'|'u'|'c'. It measured as a clean no-op on sqrt and I nearly banked it as harmless.
+It was not harmless: `sqrt` routes through `native_unary_promoting_or_passthrough` and never
+touches that function, so the no-op was hiding the change entirely. **`native_unary_elementwise`'s
+discard list has no `is_integer()`** - `has_integer_sidecar()` is about a FLOAT array carrying
+exact-int provenance, not about an integer dtype - so integer operands go on to reach a native
+integer kernel through it, and gating 'i'|'u' there would have silently delegated live wins away.
+
+The measurement could not have caught this; only reading the discard list the gate claims to be
+equivalent to could. The sibling now takes 'b'|'c' only, which its own list does justify. This is
+the same "check the route before reading the body" trap as the PyUFunc registration one, in a new
+costume: a no-op result is not evidence of safety when you have not confirmed the code ran.
+
+MEMORY: largest operand 4096 elements. Nothing in this row allocates.
+
+RETRY PREDICATE: the family is NOT closed - it is still a 1.7x mean loss and a 2.46x worst. The
+remaining excess is ~1400 ns / ~7500 instructions per call at n=16, and float64 carries ~3350 of
+the same, so **what is left is the generic entry path shared with float, not anything dtype
+specific** - attacking it dtype-by-dtype will find nothing. Do NOT re-attack the extract: it is
+gone from these routes. The next probe is the ~7500-instruction residue common to all kinds,
+against numpy's ~6000, which is a call-shape and dispatch question. Also note `exp`/`log` sit at
+1.7x on integer input purely from that residue, with no extract involved at all - they are the
+cleanest cell to profile it in.

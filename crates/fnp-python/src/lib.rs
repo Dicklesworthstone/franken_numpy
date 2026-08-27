@@ -59893,6 +59893,24 @@ fn native_unary_elementwise(
     {
         return fallback(py);
     }
+    // DECIDE BEFORE THE EXTRACT, NOT AFTER IT. The check immediately below rejects bool and
+    // complex operands unconditionally - but it only learns that AFTER
+    // `extract_precise_numeric_array` has materialised the whole array, which is then thrown
+    // away. `facts` already carries the dtype kind, so the same answer is available for free
+    // (`dtype.kind` is a C-level char; `extract_precise_numeric_array` reads `dtype.name`, which
+    // is 1213.5 ns of pure Python on its own).
+    //
+    // ONLY 'b' AND 'c'. The discard list here does NOT reject integer dtypes - `has_integer_
+    // sidecar()` is about a FLOAT array carrying exact-int provenance, not about an int dtype -
+    // so int64/uint8 operands go on to a native integer kernel through this function and adding
+    // 'i'|'u' here would delegate those live wins away. The sibling `native_unary_promoting`
+    // does list `is_integer()`, and takes the wider gate for that reason.
+    //
+    // `facts` is `None` for anything that is not an exact ndarray, and then nothing changes -
+    // those operands walk the extract exactly as before.
+    if facts.is_some_and(|f| matches!(f.kind, 'b' | 'c')) {
+        return fallback(py);
+    }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
         return fallback(py);
     };
@@ -60057,6 +60075,27 @@ fn native_unary_promoting(
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
+        return fallback(py);
+    }
+    // DECIDE BEFORE THE EXTRACT, NOT AFTER IT. The block immediately below delegates bool,
+    // integer and complex operands unconditionally - but it only learns which it is AFTER
+    // `extract_precise_numeric_array` has run `asarray` -> `.shape` -> `.reshape(-1)` ->
+    // `.dtype` -> `.dtype.name` (1213.5 ns of pure Python by itself) and then COPIED every
+    // element into a native Vec, all of which is thrown away on the next line. `dtype.kind` is
+    // a C-level char that answers the same question for a few hundred instructions.
+    //
+    // The four gated kinds are exactly the four conditions below: 'b' is `DType::Bool`, 'i'/'u'
+    // are `is_integer()`, 'c' is Complex64|Complex128. `has_integer_sidecar()` is the one
+    // condition not covered - it can only be set on a FLOAT dtype - so the original block stays
+    // in place underneath as the backstop and keeps deciding for everything this gate passes.
+    //
+    // `numeric_operand_facts` returns None for anything that is not an exact ndarray (lists,
+    // Python scalars, ndarray subclasses), and those operands walk the extract exactly as
+    // before. Sibling `native_unary_elementwise` takes only 'b'|'c': its discard list has no
+    // `is_integer()`, because integer operands reach a native integer kernel through it.
+    //
+    // This is the whole small-n cost of the promoting libm unary family on integer input.
+    if numeric_operand_facts(py, x)?.is_some_and(|f| matches!(f.kind, 'b' | 'i' | 'u' | 'c')) {
         return fallback(py);
     }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
