@@ -87837,7 +87837,8 @@ fn try_zerocopy_f64_minmax(
     // 8vdtg). Delegate large f64 reductions to numpy (which also fixes any large-array
     // signed-zero divergence: the result is now numpy's exact bits). Tiny arrays keep
     // the native path — numpy's per-call dispatch isn't worth it below the crossover.
-    const ZEROCOPY_MINMAX_NUMPY_MIN_LEN: usize = 4096;
+    // Module-level (see `ZEROCOPY_MINMAX_NUMPY_MIN_LEN`) so `py_min`/`py_max` can short-circuit
+    // on the SAME number instead of duplicating it - a threshold that lives in two places drifts.
     // Above the parallel gate we DON'T delegate: numpy's min/max is single-threaded
     // SIMD, so a native PARALLEL fold over the raw &[f64] saturates memory bandwidth and
     // beats it (same lever as the landed nanmax/nanmin axis paths). The mid-range
@@ -88978,6 +88979,17 @@ fn var(
 /// to match the sibling float-sum route.
 const FLOAT_EXTREMA_PARALLEL_MIN_BYTES: usize = 16 * 1024 * 1024;
 
+// The f64 min/max crossover: at or above this element count numpy's single-threaded SIMD
+// reduction beats the scalar cell-by-cell fold, so `try_zerocopy_f64_minmax` delegates.
+//
+// It is module-level because `py_min`/`py_max` short-circuit on it. For a FLAT reduction that
+// verdict is FINAL and needs no buffer at all: flat gives `inner == 1`, the parallel branch
+// inside the helper requires `inner >= 2`, so a flat operand at or above this length always ends
+// in `DelegateToNumpy` - which the callers turn straight into `fallback()`. Reaching that answer
+// through the helper costs a `PyBuffer` acquisition and two `Vec` allocations (`shape` and
+// `out_shape`) first, and `fnp.min` on f64 n=4096 measured 1.44x numpy because of it.
+const ZEROCOPY_MINMAX_NUMPY_MIN_LEN: usize = 4096;
+
 /// Parallel flat `float64` argmin/argmax — EXACT, with NO deferral regimes.
 ///
 /// The tie convention is the OPPOSITE of the min/max VALUE routes below and must
@@ -89542,6 +89554,12 @@ fn py_min(
         };
     }
 
+    // MEASURED AND REVERTED: short-circuiting to `fallback()` here on one `size` read, for a flat
+    // f64 operand at or above `ZEROCOPY_MINMAX_NUMPY_MIN_LEN`, is a TRADE and not a win. It pays
+    // that read on EVERY flat f64 call while only operands >= 4096 can collect, and the sizes
+    // below the crossover measured WORSE on two runs (n=2048 1.186x -> 1.356x, n=4095 1.449x ->
+    // 1.726x) against a smaller gain above it (n=8192 1.422x -> 1.340x). Do not re-add it
+    // without a cheaper source for the size than a fresh attribute read.
     if maybe_f64 {
         match try_zerocopy_f64_minmax(py, a.bind(py), axis_val, keepdims, F64MinMaxOp::Min)? {
             F64MinMaxFastPath::Output(out) => return Ok(out),
@@ -89742,6 +89760,7 @@ fn py_max(
         };
     }
 
+    // See the `py_min` twin: the one-`size`-read short-circuit here was MEASURED AND REVERTED.
     if maybe_f64 {
         match try_zerocopy_f64_minmax(py, a.bind(py), axis_val, keepdims, F64MinMaxOp::Max)? {
             F64MinMaxFastPath::Output(out) => return Ok(out),
