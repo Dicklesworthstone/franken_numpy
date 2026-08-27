@@ -87058,29 +87058,34 @@ fn float_pairwise_tree_matches_numpy(numpy: &Bound<'_, PyModule>) -> bool {
     })
 }
 
-// ONE attribute read that disqualifies EVERY flat native sum path at once.
+// ONE attribute read that disqualifies EVERY flat native sum/mean path at once.
 //
-// `sum` tries three flat fast paths in a row - float, integer, f16 - and each one re-reads
-// `dtype`, `dtype.kind` (into a freshly allocated `String`), `dtype.isnative`, `flags`,
-// `flags.c_contiguous` and `nbytes` BEFORE it reaches its own size check. A 256-element operand
-// therefore pays roughly eleven attribute reads and three String allocations only to be told
-// "too small" three times. That is the whole reason `fnp.sum` measures 1.401x numpy at 2^8 with
-// ~690 ns of excess that is CONSTANT IN N from n=1 to n=16384.
+// `sum` tries three flat fast paths in a row (float, integer, f16) and `mean` two (float, f16),
+// and each one re-reads `dtype`, `dtype.kind` (into a freshly allocated `String`),
+// `dtype.isnative`, `flags`, `flags.c_contiguous` and `nbytes` BEFORE it reaches its own size
+// check. A 256-element operand therefore pays roughly eleven attribute reads and three String
+// allocations only to be told "too small" three times. That is the whole reason `fnp.sum`
+// measured 1.401x numpy at 2^8 with ~690 ns of excess that is CONSTANT IN N from n=1 to n=16384,
+// and `fnp.mean` 1.243x with ~629 ns of the same.
 //
 // Every one of those paths has a size floor, so the smallest of them is an exact NECESSARY
-// condition for all four routes and skipping them below it cannot change a single result:
-//   f64      1_000_000 elements * 8 = 8_000_000 bytes   <- the smallest, and NOT 8 MiB
-//   integer  8 * 1024 * 1024        = 8_388_608 bytes
-//   f16      (1 << 22) elements * 2 = 8_388_608 bytes
-//   f32      16 * 1024 * 1024       = 16_777_216 bytes
+// condition for all of them and skipping them below it cannot change a single result:
+//   f64 sum/mean  1_000_000 elements * 8 = 8_000_000 bytes   <- the smallest, and NOT 8 MiB
+//   integer sum   8 * 1024 * 1024        = 8_388_608 bytes
+//   f16 sum/mean  (1 << 22) elements * 2 = 8_388_608 bytes
+//   f32 sum/mean  16 * 1024 * 1024       = 16_777_216 bytes
 // 8 MiB would be WRONG here: it is larger than the f64 floor and would block real f64 routings
-// between 8_000_000 and 8_388_608 bytes.
-fn flat_native_sum_impossible(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool> {
-    const FLAT_SUM_MIN_BYTES: usize = 8_000_000;
+// between 8_000_000 and 8_388_608 bytes - a band no parity test could see, because the delegate
+// returns byte-identical results.
+//
+// NOT usable for `min`/`max`: their integer path (`ZEROCOPY_MINMAX_PARALLEL_MIN`) engages from
+// 65536 ELEMENTS, far below this floor, so the same pre-gate there would kill a live route.
+fn flat_native_reduction_impossible(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool> {
+    const FLAT_REDUCTION_MIN_BYTES: usize = 8_000_000;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(true);
     }
-    Ok(a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLAT_SUM_MIN_BYTES)
+    Ok(a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLAT_REDUCTION_MIN_BYTES)
 }
 
 fn try_zerocopy_float_sum_flat(
@@ -87426,7 +87431,7 @@ fn sum(
     // `flat_native_sum_impossible`. Evaluated ONLY on the flat shape (`&&` short-circuits on the
     // axis test first), so an axis form never pays for it.
     let flat_blocked = axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && flat_native_sum_impossible(py, a.bind(py))?;
+        && flat_native_reduction_impossible(py, a.bind(py))?;
     // Large flat float32/float64 sum: evaluate NumPy's exact pairwise tree on
     // Rayon.  The incumbent pays one serial DOUBLE/FLOAT_pairwise_sum; every
     // candidate subtree is independent and preserves the same combine edges.
@@ -88516,10 +88521,16 @@ fn mean(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let keepdims_effective = keepdims.native();
+    // One `nbytes` read that stands in for both flat gates below - see
+    // `flat_native_reduction_impossible`. Evaluated ONLY on the flat shape (`&&` short-circuits
+    // on the axis test first), so an axis form never pays for it.
+    let flat_blocked = axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && flat_native_reduction_impossible(py, a.bind(py))?;
     // Native exact-tree parallel flat float32/float64 mean.  The incumbent's
     // scalar division is negligible; its single-threaded pairwise reduction is
     // the whole-job hotspot, so schedule those independent tree nodes on Rayon.
-    if kwargs.is_none_or(|kw| kw.is_empty())
+    if !flat_blocked
+        && kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
@@ -88534,6 +88545,7 @@ fn mean(
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && !flat_blocked
         && keepdims_effective == Some(false)
         && let Some(o) = try_zerocopy_f16_mean_flat(py, a.bind(py))?
     {
