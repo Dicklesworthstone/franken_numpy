@@ -62918,3 +62918,107 @@ in this file still calls `a.view(numpy.uint8)` before reading bytes - grep
 `view` + `uint8` - and each of those sites is now a one-type change worth ~170 ns. That sweep is
 UNMEASURED and none of those routes has been triaged, so it needs its own worst-cell ranking
 first rather than a blanket pass.
+
+## 2026-08-27 - WIN (SHIP): `np.where` returned GARBAGE on byte-swapped operands, and its typed select paid up to three `.view()` calls per invocation - 4.217x -> 2.659x (`franken_numpy-where-npbool`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell, both arms
+at matched load.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=50f4f432817954bec3859f75251c8aed049eb1a3e09f1a61a3ad65a525e25236
+executing elf sha256 (AFTER)   bench_elf_sha256=9c5b7e98efe868b93351e88124c704500599276f6575e71e80e7b6a8b7f0c8bb
+```
+
+### HOW THIS CELL WAS CHOSEN, AND A CORRECTNESS DEFECT FOUND ON THE WAY
+
+The previous row's retry predicate said to carry `NpBool` to other bool consumers but to RANK
+them first rather than sweep. A triage of the mask family (132 cells: where / compress / extract /
+select / putmask / place / nonzero / flatnonzero / any / all / argwhere) put `where` at the top by
+RATIO - **3.05x at n=16 with ~1738 ns of excess** - while `compress`/`extract` at 65536 lose
+~23900 ns for a completely different reason (their compaction kernel), where a 171.9 ns view is
+0.7% and irrelevant. That ranking is what kept this from being a blanket `NpBool` sweep.
+
+Probing `where` for byte order then found a defect no oracle had covered, because both oracles
+are UNARY:
+
+```
+  np.where([T,F,T,F], [1,2,3,4], [9,8,7,6])       numpy          fnp BEFORE
+    >i8    [1 8 3 6]     [72057594037927936 576460752303423488 216172782113783808 ...]
+    >i4    [1 8 3 6]     [16777216 134217728 50331648 100663296]
+    >f8    [1. 8. 3. 6.] [3.03865e-319 4.07901e-320 1.04347e-320 3.06716e-320]
+```
+
+`PyBuffer::<T>::get` accepts a byte-swapped array and reads its bytes in host order. The public
+`where` entry now delegates any byte-swapped operand to numpy - which is required twice over,
+because numpy also NORMALISES the output dtype there (`>i8` operands give an `int64` result) and
+the routes below now allocate with the operand's own descriptor.
+
+### THE PERFORMANCE DEFECT: UP TO THREE `.view()` CALLS PER SELECT
+
+`where_typed` took a `dtype_name: &str` and the caller pre-viewed the condition to uint8. Per
+arm, before:
+
+* every arm: `condition.view(numpy.uint8)` - 171.9 ns;
+* `bool` arm: ALSO `x.view(uint8)`, `y.view(uint8)`, and a `view(bool_)` on the result - three more;
+* `float32` arm: ALSO `x.view(uint32)`, `y.view(uint32)`, and a `view(float32)` back;
+* every arm: a `PyDict` for a `dtype=` KEYWORD that is numpy's second POSITIONAL parameter, a
+  fresh `PyString`, and numpy's dtype-from-string parse.
+
+After: the condition is read directly as `NpBool`; `f32` selects as `f32` (it IS a pyo3
+`Element` - the uint32 round trip existed only to reuse the u32 instantiation); `bool` selects as
+`NpBool` with NO views at all; and `where_typed` allocates with `x`'s own descriptor, which
+`PyBuffer::<T>::get(x)` has already proved matches `T`. float16 alone keeps its uint16 views,
+having no `Element`.
+
+COUNTED_MECHANISM: per-call numpy operations removed - 1 view on the int arms, 4 on the bool arm,
+4 on the float32 arm, plus one `PyDict` + one `PyString` + one dtype-string parse on every arm.
+The view is priced at 171.9 ns and the allocator trio at ~400 ns by the `sign_typed` row; measured
+end to end below at -420 to -1200 ns per call.
+
+### THE MEASUREMENT
+
+Matched load (5.12 / 5.46), 29 of 32 cells readable, 3 BIASED:
+
+```
+  where float32   16   4.217x -> 2.659x   (778.1 np, 3269.5 -> 2069.3 ns)   1.59x
+  where bool      16   4.068x -> 2.630x   (781.6 np, 3172.3 -> 2055.6)      1.55x
+  where float32  256   3.539x -> 2.347x   (933.9 np, 3292.7 -> 2192.0)      1.51x
+  where bool     256   3.493x -> 2.291x   (922.7 np, 3201.0 -> 2113.6)      1.52x
+  where bool    4096   1.297x -> 0.965x   (3419.7 np, 4449.9 -> 3301.2)     1.34x  LOSS -> WIN
+  where uint8   4096   1.050x -> 0.936x   (3528.9 np, 3718.1 -> 3302.7)     1.12x  LOSS -> WIN
+  where int32     16   3.300x -> 2.678x   (778.9 np, 2557.2 -> 2085.8)      1.23x
+  where int64     16   3.276x -> 2.679x   (781.8 np, 2580.1 -> 2094.1)      1.22x
+
+  CONTROLS  count_nonzero int64  1.00x / 1.01x     sum int64  0.98x / 1.00x
+```
+
+Family mean **2.000x -> 1.661x**, worst **4.217x -> 3.435x**. Two cells cross from a LOSS to a
+WIN. The rest remain losses.
+
+**THE COST, STATED:** `where` on **float64 REGRESSES 0.92x-0.97x** (1453.7 -> 1568.0 ns at n=16).
+float64 goes through `try_zerocopy_f64_where`, which this row did NOT edit - so that movement is
+entirely the new byte-order guard at the entry, three `ndarray_is_byteswapped` calls at ~40 ns
+each. It is the price of the correctness fix and it is charged to every `where` that reaches the
+typed paths, not only to the swapped ones.
+
+PARITY: a dedicated `where` sweep - 24 dtypes (including `>i8`/`<i8`/`>i4`/`>u8`/`>i2`/`>f8`/
+`>f4`/`>f2`, complex64/128, datetime64, timedelta64) x 7 shapes (0-d-ish, empty, 3-D, 65536+)
+plus mixed-dtype and array/scalar forms, comparing dtype, shape and raw bytes: **172 cells, 0
+divergences**. General parity 5320 cells -> 1 divergence, identical on the pre-change build
+(pre-existing `deadlock-audit-neu7z`). Both byte-order oracles unchanged (1 integer / 26 float).
+660 error/edge cells identical. 655 lib tests pass. clippy `-D warnings` and `cargo fmt --check`
+exit 0, unpiped.
+
+MEMORY: largest operand 65536 elements, three live.
+
+RETRY PREDICATE: **the mask family's real prize is NOT the view** - the triage that chose `where`
+also measured `compress` and `extract` at 65536 losing **~23900 ns at 1.42x-1.57x**, and
+`putmask` float64 at 65536 losing **34207 ns**, which no amount of view-removal touches. Those are
+compaction/scatter kernels and they are the next target, ranked by absolute headroom well above
+anything remaining at small n. Do NOT re-attack `where`'s entry cost: what is left there is the
+shared small-n floor plus a byte-order guard that is not optional. **And do not sweep `NpBool`
+blindly** - this row is the evidence that the lever only pays where a cell's excess is of the
+same order as 171.9 ns, which at 65536 it never is.
