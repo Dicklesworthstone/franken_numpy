@@ -102134,6 +102134,55 @@ fn try_zerocopy_f64_unique_binary_grid(
 
     const SCALE: f64 = 16.0;
     const MAX_EXACT_KEY: f64 = 4_503_599_627_370_496.0; // 2^52, comfortably exact in f64.
+
+    // A CARDINALITY FLOOR, SAMPLED BEFORE THE ADMISSION SCAN RATHER THAN AFTER IT.
+    //
+    // This route's cost is FLAT in cardinality - it is O(n + range), and range is capped below -
+    // while NumPy's `unique` cost GROWS with the number of distinct values. So the two cross.
+    // Measured at n=262144, values on the 1/16 grid, varying ONLY the distinct count, with fnp
+    // on the grid path throughout:
+    //
+    //   distinct  key_range     numpy_ns      fnp_ns    ratio
+    //          8          7     490239.8   1008084.3    2.056x   <- LOSS
+    //         32         31     668397.3    816277.6    1.221x   <- LOSS
+    //        128        127     852059.6    743404.5    0.872x   <- WIN
+    //        512        511    1050505.6    728886.2    0.694x
+    //       4096       4095    1717370.1    726371.4    0.423x
+    //      65536      65535    2868265.9    786150.6    0.274x
+    //
+    // fnp's column barely moves; numpy's rises 5.9x across it, and the crossing sits between 31
+    // and 127. That is why this route was simultaneously the 2.4x win its own 2026-06-26 row
+    // banked on a 4096-value corpus AND a 2.1x loss on eight distinct values: the two corpora
+    // are on opposite sides of a boundary the gate did not have.
+    //
+    // THE TEST MUST PRECEDE THE FULL SCAN. Placing the same floor AFTER the scan (where `range`
+    // is already known, and so looks free) was BUILT AND MEASURED and made the losing cells
+    // WORSE - 2.056x -> 2.745x at 8 distinct - because a decline there has already paid a
+    // 2 ns/element admission pass and then hands the work to the fallback anyway. Sampling a
+    // 1024-element prefix costs ~1 us and decides the same question early. A prefix that
+    // misrepresents the array can only cost throughput, never correctness: every path below
+    // still re-derives the true range, and a wrong decline lands on the fallback that measured
+    // ~1.0x here.
+    const GRID_SAMPLE: usize = 1024;
+    const GRID_MIN_KEY_RANGE: f64 = 64.0;
+    {
+        let head = &data[..n.min(GRID_SAMPLE)];
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &v in head {
+            if v < lo {
+                lo = v;
+            }
+            if v > hi {
+                hi = v;
+            }
+        }
+        // NaN/inf in the sample leave this comparison false, so the full scan below still owns
+        // the decision for those.
+        if (hi - lo) * SCALE < GRID_MIN_KEY_RANGE {
+            return Ok(None);
+        }
+    }
+
     let mut mn = 0i64;
     let mut mx = 0i64;
     for (idx, &v) in data.iter().enumerate() {
@@ -102141,7 +102190,13 @@ fn try_zerocopy_f64_unique_binary_grid(
             return Ok(None);
         }
         let key_f = v * SCALE;
-        if !key_f.is_finite() || key_f.abs() > MAX_EXACT_KEY || key_f.fract() != 0.0 {
+        // `fract() != 0.0` USED TO BE TESTED HERE TOO, and it was redundant with the round trip
+        // below: for a finite `key_f` with `|key_f| <= 2^52`, `key_f as i64 as f64 == key_f`
+        // holds exactly when `key_f` is an integer, which is what `fract() == 0.0` says. It ran
+        // on EVERY element of the admission scan, and this scan is the path's dominant cost -
+        // the whole route is two serial passes plus a range walk, and it only beats numpy when
+        // numpy is slower than those passes.
+        if key_f.abs() > MAX_EXACT_KEY {
             return Ok(None);
         }
         let key = key_f as i64;
