@@ -63517,3 +63517,103 @@ duplication is the lesson - grep for INLINE re-implementations of a helper befor
 fixing the helper fixed the family.** The remaining `1 << 16` element gates named one row back
 (`COPYTO_PAR_MIN`, `RAVEL_PAR_MIN`, `UNRAVEL_PAR_MIN`, `SCATTER_PAR_MIN`, `SELECT_PAR_MIN`) are
 still unmeasured.
+
+## 2026-08-27 - WIN (SHIP): `delete`'s array/mask route was built on a FALSE PREMISE about NumPy - `np.delete` filters with BOOLEAN FANCY INDEXING, not `np.compress`, and the two differ by 15.8x - 2.357x -> 0.992x (`franken_numpy-delete-compress-premise`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved with a DUAL A/A null per cell, both arms at
+matched load.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=d8d082252f60d50fa75093e5e00cf34e492d68effe9783bfee065bcea9f361b8
+executing elf sha256 (AFTER)   bench_elf_sha256=155a55318cbb2b7ad2b56e7d5a837fb672bf4d1ae86424d8de084ef979489966
+```
+
+### THE PREMISE IN THE SOURCE COMMENT IS FALSE
+
+`try_native_delete_via_compress` is introduced by its own comment as: *"numpy.delete builds the
+same keep-mask then runs its SLOW serial compress; routing to fnp's parallel compress wins ~3x."*
+The first half is wrong, and the whole route rests on it.
+
+**`np.delete` does not call `np.compress`. It filters with BOOLEAN FANCY INDEXING**, which is a
+different C path by an order of magnitude. Two numpy calls computing the identical answer on the
+same 131072-element f64 array and mask:
+
+```
+  np.compress(keep, a)     890319.6 ns
+  a[keep]                   56515.3 ns     <- 15.8x apart, and this is what np.delete uses
+  np.delete(a, idx)         62678.2 ns     <- a[keep] plus its own mask build
+  fnp.delete(a, idx)       141141.0 ns
+  fnp.compress(keep, a)    136082.9 ns     <- BEATS numpy's compress 6.5x, LOSES to its fancy index
+```
+
+fnp's compaction really is ~6.5x faster than `np.compress`, exactly as the row that added it
+claimed. It was simply compared against the wrong numpy function - the one `delete` never calls.
+
+### THE FIX IS A SIZE GATE, FITTED
+
+fnp compaction against `a[keep]` (the thing it must actually beat), f64, near-all-true mask:
+
+```
+     n        a[keep]    fnp.compress    ratio
+     32768     15053.7        36890.0    2.45x
+    131072     57295.5       136675.2    2.39x
+    524288    223115.2       316874.0    1.42x
+   1048576    436846.4       495380.1    1.13x
+   2097152   1369870.4       803848.3    0.59x   <- the parallel compaction finally wins
+```
+
+so the route is admitted from 2^21 and defers below it. Nothing else changed.
+
+COUNTED_MECHANISM: `np.compress` costs 890319.6 ns and `a[keep]` 56515.3 ns for the same filter at
+131072 f64 - a 15.8x spread between two numpy entry points - and fnp's compaction at 136675.2 ns
+sits between them, which is why a route benchmarked against the first one looked like a 3x win
+while measuring a 2.4x loss against the second.
+
+### THE MEASUREMENT
+
+Matched load (7.58 / 7.10):
+
+```
+  form         n        BEFORE     AFTER
+  idxarr      32768     2.141x     0.978x    LOSS -> WIN
+  idxarr     131072     2.271x     1.010x    LOSS -> parity
+  idxarr     524288     2.357x     0.992x    LOSS -> parity
+  idxarr    1048576     1.800x     0.999x    LOSS -> parity
+  boolmask    32768     2.152x     1.046x    LOSS -> parity
+  boolmask   131072     2.223x     1.011x    LOSS -> parity
+  boolmask   524288     1.773x     0.946x    LOSS -> WIN
+  boolmask  1048576     1.768x     1.030x    LOSS -> parity
+  idxarr    2097152     0.891x     0.852x    ABOVE the gate - fnp route kept, still a win
+  boolmask  2097152     0.936x     0.720x    kept
+  boolmask  4194304     0.715x     0.594x    kept
+```
+
+**Eight cells cross out of a 1.77x-2.36x loss; all four above-gate wins are preserved**, which is
+the point of a gate rather than deleting the route. `idxarr` at 4194304 stays a LOSS (1.282x ->
+1.310x, unchanged): it is above the gate, on fnp's route, in the 32 MB regime.
+
+REGRESSION CHECK of the three rows before this one, re-measured on this build: insert 0.513x /
+0.667x / 0.727x / 0.863x / 0.945x / 0.364x and delete-scalar 0.798x / 0.871x / 0.903x / 0.955x /
+0.996x across 32768..2^22 - all still wins, none disturbed.
+
+PARITY: 345 cells - 7 dtypes x 8 sizes (0, 1, 7, 32768, 131072, and both sides of the new gate at
+2097151/2097152/2097153) x seven `obj` forms: scalar index, index array, NEGATIVE indices,
+DUPLICATE indices, bool mask, strided slice, and an EMPTY index array - plus out-of-bounds indices
+(positive and negative) asserted to raise the same exception type as numpy. **0 divergences.**
+General parity 5320 cells -> 1 divergence, identical on the pre-change build (pre-existing
+`deadlock-audit-neu7z`). Both byte-order oracles unchanged (1 integer / 26 float). 660 error/edge
+cells identical. 655 lib tests pass. clippy `-D warnings` and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 2^22 float64 = 32 MB, two live.
+
+RETRY PREDICATE: **the lesson is bigger than the cell - a fast-path row that quotes a speedup
+against a numpy function the target op does not call has measured nothing.** Grep the ledger for
+routes justified against `np.compress`, `np.take` or `np.put` and check what the PUBLIC op
+actually dispatches to; boolean fancy indexing in particular is 15.8x faster than `np.compress`
+here and is what most filtering ops use. Still standing and NOT addressed: `delete` by index array
+at 2^22 (1.310x), `append` at 2^22 (1.251x) and `delete`-scalar at 2^22 (1.244x) - all above every
+gate, all in the 32 MB allocator/mmap regime, which is the one band this family has never had a
+mechanism for.

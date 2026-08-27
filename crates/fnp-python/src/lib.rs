@@ -28993,6 +28993,29 @@ fn try_native_delete_via_compress(
         }
         return try_zerocopy_any_compact(py, &keep, arr);
     }
+    // SIZE GATE, MEASURED. This route builds a keep-mask and hands it to fnp's compaction, on the
+    // premise that NumPy's `delete` runs "its SLOW serial compress". **It does not.** `np.delete`
+    // filters with BOOLEAN FANCY INDEXING, which is a tuned C path and nothing like `np.compress`:
+    // at 131072 f64, `np.compress(keep, a)` costs 890319.6 ns while `a[keep]` costs 56515.3 ns,
+    // a 15.8x spread between two numpy calls that compute the same answer. fnp's compaction beats
+    // numpy's `compress` 6.5x and still LOSES to its fancy index, which is what `delete` uses.
+    //
+    // fnp compaction vs `a[keep]`, f64, near-all-true mask:
+    //
+    //     n        a[keep]    fnp.compress    ratio
+    //     32768     15053.7        36890.0    2.45x
+    //    131072     57295.5       136675.2    2.39x
+    //    524288    223115.2       316874.0    1.42x
+    //   1048576    436846.4       495380.1    1.13x
+    //   2097152   1369870.4       803848.3    0.59x   <- fnp's parallel compaction finally wins
+    //
+    // so this route is only worth taking from 2^21 up; below it numpy's own `delete` is faster
+    // than anything reached from here, and deferring is the whole fix. Measured end to end,
+    // `fnp.delete` was 2.07x / 2.26x / 1.73x / 1.99x against `np.delete` across 32768..2^20.
+    const DELETE_VIA_COMPRESS_MIN: usize = 1 << 21;
+    if n < DELETE_VIA_COMPRESS_MIN {
+        return Ok(None);
+    }
     // Normalize obj to an ndarray; a 0-d (scalar) obj is the scalar path's job -> defer.
     let obj_arr = numpy.getattr(intern!(py, "asarray"))?.call1((obj,))?;
     if obj_arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
