@@ -63826,3 +63826,82 @@ being right on both corpora. **Do not re-place the floor after the scan** - meas
 its 13x figure is real for the numpy of its day, so the lesson is not that it was wrong but that
 **a banked ratio decays when the incumbent improves, and a route admitted on a stale ratio needs
 re-measuring, not deleting.**
+
+## 2026-08-27 - WIN (SHIP): sampled CARDINALITY closes the shape the sampled RANGE floor could not - eight distinct values spread a unit apart, 2.112x -> 1.008x (`franken_numpy-unique-grid-distinct-floor`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=9c59f9651d5cc907002192b25d4d38502a25cdd55b1493f854320ae8b60b4918
+executing elf sha256 (AFTER)   bench_elf_sha256=362436f9777e51702cfd917f05e022fbf1fc55516a410b478a1307764b7cd085
+```
+
+### THE SHAPE THE PREVIOUS ROW LEFT OPEN
+
+The row one back put a sampled RANGE floor on the f64 `unique` bucket path and closed every
+losing cell on a dense corpus, but recorded one shape it did not cover: `np.array(rng.integers(0,
+8, n), float)` - eight distinct values spaced a whole unit apart - at **2.112x**. Its key range is
+112, comfortably above the floor, so the sample admitted it. **Range is not cardinality when the
+values are spread out**, and cardinality is what NumPy's cost scales with.
+
+The fix counts DISTINCT KEYS in the same 1024-element prefix instead of measuring its width. When
+the sampled spread is narrow enough to bitmap (4096 bits = 512 bytes of stack, which covers every
+low-cardinality shape that reaches here), the count is exact for the sample and costs one pass
+over data already in L1. A wider spread is left alone: it cannot be both low-cardinality and
+widely spread within 1024 samples without being unusual, and guessing wrong there costs only
+throughput.
+
+COUNTED_MECHANISM: at n=262144 the losing corpus presents a sampled key range of 112 (which the
+range floor of 64 admits) but only 8 distinct keys (which a distinct floor of 64 rejects); the
+bitmap needs 113 of its 4096 bits to establish that, and the decline then costs the prefix scan
+alone rather than the 2 ns/element full admission pass.
+
+### THE MEASUREMENT
+
+```
+  corpus            n      BEFORE     AFTER
+  fewvals       50000      1.705x     1.053x    LOSS -> parity
+  fewvals      262144      2.112x     1.008x    LOSS -> parity
+  fewvals      512000      1.890x     1.001x    LOSS -> parity
+  grid1/16      50000      0.350x     0.348x    win preserved
+  grid1/16     262144      0.395x     0.396x    win preserved
+  grid1/16     512000      0.455x     0.448x    win preserved
+  grid_d128    262144      0.818x     0.802x    win preserved
+  grid_d512    262144      0.638x     0.626x
+  grid_d65536  262144      0.255x     0.255x
+```
+
+The `grid1/16` and `grid_d*` rows are the controls that matter: they are what the 2026-06-26 row
+banked this route for, they are high-cardinality, and the new floor must not touch them. It does
+not.
+
+PARITY: 368 cells - four sizes straddling the route's `1 << 15` gate (32767/32768/40000/262144) x
+{ten distinct counts straddling BOTH new floors, at 63/64/65 and 4095/4096/4097, integers-as-float
+at 8/64/65 distinct, standard normal}, plus every corpus the route must DEFER on (NaN, +inf, -inf,
+-0.0, 1e300, non-grid fractions), plus three deliberate adversaries for the prefix heuristic -
+`prefix_narrow` (2048 leading zeros then high-cardinality), `prefix_wide` (high-cardinality prefix
+then all zeros) and a fully SORTED array, whose prefix is maximally unrepresentative - each under
+four keyword forms, comparing dtype, shape and raw bytes: **0 divergences**. General parity 5320
+cells -> 1 divergence, identical on the pre-change build (pre-existing `deadlock-audit-neu7z`).
+Both byte-order oracles unchanged (1 integer / 26 float). 660 error/edge cells identical. 655 lib
+tests pass. clippy `-D warnings` and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 512000 float64 = 4 MB.
+
+PROVENANCE NOTE, because it affects how this row should be read: the source change reached `main`
+as commit `e16315bc` under another agent's message, which swept this working tree while the
+measurements were running - the second such sweep in two rows (`35d7f750` was the first).
+**Byte-identity was verified rather than assumed**: a fresh `--profile release` build of `HEAD`
+reproduces `362436f9777e5170...` exactly, the artifact these numbers were taken on, so the row
+measures the code that shipped.
+
+RETRY PREDICATE: **this route is now closed for the corpora that have been measured** - every
+sampled shape is at or below parity and the banked high-cardinality wins are intact. What remains
+UNMEASURED is the adversarial prefix: a sorted or block-structured array whose first 1024 elements
+misrepresent the whole is routed on bad information. That costs throughput only and the parity
+sweep pins its correctness, but no cell has been TIMED for it - if it is ever chased, time
+`np.sort`ed and block-constant corpora specifically rather than random ones. Do NOT move either
+floor after the admission scan; that placement is measured at 2.745x, worse than having no floor.
