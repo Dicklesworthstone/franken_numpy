@@ -25593,10 +25593,31 @@ fn try_zerocopy_count_nonzero(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
+    // NOTE: this still extracts the one-character kind as a `String`, which allocates
+    // per call. Converting it to `char` is a two-line change HERE but rewrites eight
+    // `match` arms whose text is not unique in this file, so it was left for a cycle
+    // that can give it its own diff review (`deadlock-audit-54arr`). Priced at ~50 ns
+    // of the ~425 ns this route spends over numpy.
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // THE SHAPE VEC IS ONLY BUILT WHEN AN AXIS NEEDS IT (`deadlock-audit-54arr`).
+    //
+    // `count_nonzero_typed` used `shape` for exactly two things: a `shape.is_empty()`
+    // 0-d guard, and the per-axis reduction geometry. The guard is a RANK question, so
+    // `ndim` answers it for one integer read instead of a tuple-to-`Vec` extraction,
+    // and the geometry is only needed on the `axis=Some` branch - which is not the
+    // branch `np.count_nonzero(a)` takes. All seven `count_nonzero_typed` call sites
+    // are in this function, so hoisting the guard here covers every one of them.
+    let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+    if ndim == 0 {
+        return Ok(None);
+    }
     // The ndarray shape (one entry per element) is correct for every dtype here.
-    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?;
+    let shape: Vec<usize> = if axis.is_some() {
+        a.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?
+    } else {
+        Vec::new()
+    };
     // Count directly from the typed buffer via a monomorphized nonzero predicate
     // (no intermediate flags Vec). Integers are nonzero iff any bit is set, so they
     // are counted through a uintN bit-view chosen by itemsize (covering all 8 widths
@@ -25722,9 +25743,10 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
     axis: Option<isize>,
     pred: F,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if shape.is_empty() {
-        return Ok(None);
-    }
+    // The 0-d guard this used to make as `shape.is_empty()` now lives in the single
+    // caller, `try_zerocopy_count_nonzero`, where it is one `ndim` read rather than a
+    // tuple-to-`Vec` extraction (`deadlock-audit-54arr`). `shape` is therefore EMPTY on
+    // the `axis=None` branch by design and must not be inspected there.
     match axis {
         None => {
             // numpy.count_nonzero(axis=None) returns a numpy.int64 scalar, not a
@@ -25733,9 +25755,7 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
             for c in input.iter() {
                 count += usize::from(pred(c.get()));
             }
-            let scalar = numpy
-                .getattr(intern!(py, "int64"))?
-                .call1((count as i64,))?;
+            let scalar = cached_int64_type(py)?.call1((count as i64,))?;
             Ok(Some(scalar.unbind()))
         }
         Some(ax) => {
@@ -86373,6 +86393,17 @@ fn cached_bool_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     Ok(BOOL_TYPE
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
             Ok(cached_numpy(py)?.getattr(intern!(py, "bool_"))?.unbind())
+        })?
+        .bind(py))
+}
+
+/// `numpy.int64`, on the same terms - the scalar type `count_nonzero` and friends wrap their
+/// result in, fetched by name on every call (`deadlock-audit-54arr`).
+fn cached_int64_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static INT64_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(INT64_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "int64"))?.unbind())
         })?
         .bind(py))
 }
