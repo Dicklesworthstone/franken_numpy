@@ -60931,3 +60931,99 @@ or below 1_000_000 when quiet, the constant is correct and this row's 1.516x is 
 artifact, which is itself the answer. The same "gates pay before they decline" shape is worth
 checking on `mean` (1.243x at 2^8, 629 ns of flat excess), `min`/`max` (1.153x/1.156x at 2^16)
 and `prod`, all of which carry the same three-gates-in-a-row entry. AGENT_NAME=TanBridge.
+
+## 2026-08-27 - `mean` TAKES THE SAME DECLINING-GATE LEVER AS `sum` (1.241x -> 1.101x at 2^8, DISJOINT), and one cell in my own run reported a DECIDABLE 0.744x -> 1.043x REGRESSION THAT DID NOT EXIST (`franken_numpy-sumgate`)
+
+`TanBridge`. Shipped `1ffd7741`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1. Class: `maintenance-self-speedup` - every cell here is still a LOSS to
+numpy; this shrinks the loss and claims nothing more.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=bf9d336888520e57c9a06293a46a856cdcb4f4d89d22622d4b4c5a4c9cce6534
+executing elf sha256 (AFTER)  bench_elf_sha256=e162fff1f747da8224ab7e700ceacd4516d619dc75d6efd8a875a2ad44dd2444
+```
+
+**HOST DISCLOSURE:** loadavg 54.81 (BEFORE) and 47.38 (AFTER) of 64 cores,
+maximum_observed_busy_fraction ~0.86. This is a LOUD window and it is why the section below
+exists. The claim cells are single-threaded on both arms and run in one invocation, and all
+their nulls pass; the one parallel cell went BIASED and is not read.
+
+### THE LEVER
+
+Identical in shape to `sum`: `mean` tries two flat fast paths in a row (float, f16), each
+re-reading `dtype`, `dtype.kind` into a freshly allocated `String`, `dtype.isnative`, `flags`,
+`flags.c_contiguous` and `nbytes` BEFORE its own size check. Same floors as sum - f64
+1_000_000*8 = 8_000_000 bytes, f16 (1<<22)*2, f32 16 MiB - so the same 8_000_000 pre-gate is an
+exact necessary condition and `flat_native_sum_impossible` became
+`flat_native_reduction_impossible`, shared by both.
+
+```
+MEAN_FLAT_PREGATE worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+
+  cell                 BEFORE                   AFTER                    verdict
+  mean f64 n=256       1.241x [1.189,1.273]     1.101x [1.033,1.116]     DISJOINT
+  mean f64 n=4096      1.198x [1.164,1.226]     1.075x [1.053,1.138]     DISJOINT
+  mean f32 n=65536     1.077x [1.069,1.091]     1.034x [1.019,1.065]     DISJOINT
+  mean f64 n=65536     1.061x [1.053,1.074]     1.023x [0.982,1.053]     touching at 1.053
+  mean f64 n=1         1.250x [1.061,1.301]     1.105x [1.075,1.257]     overlap (wide BEFORE)
+  -- controls, all untouched by construction --
+  mean i64 n=65536     1.017x [0.956,1.058]     1.019x [0.964,1.096]     overlap
+  mean 2-D axis=0      1.025x [0.917,1.038]     1.019x [1.013,1.040]     overlap
+  mean 2-D keepdims    1.027x [1.022,1.048]     1.021x [0.974,1.031]     overlap
+  mean f64 n=999999    1.005x [0.913,1.070]     1.005x [0.995,1.035]     overlap (delegates)
+```
+
+The controls matter as much as the claim: i64 has no flat native mean path, the axis forms
+short-circuit before the gate is ever evaluated, and n=999_999 delegates on both builds. All
+four measure unchanged, which is what says the gate landed where it was aimed.
+
+**A/A NULL CONTROLS:** every cell above PASSES on both builds, worst 0.9959 / 1.0068 against a
+2% band. One cell (`mean f64 n=2e6`, parallel) went BIASED on both and is not quoted.
+
+ENGAGEMENT (equality proves nothing - the native route is bit-exact by design): n=2_000_000
+reads 0.353x and n=4_000_000 0.073x on the AFTER build, both still routed.
+
+PARITY: 7 dtypes x 5 shapes x 4 axis/keepdims/dtype forms plus the f64 boundary at 999_999 /
+1_000_000 / 1_000_001 / 1_048_576 / 2_000_000, on dtype, shape and RAW BYTES - 0 divergences of
+145. Full keepdims grid still 3 of 3536, subclass audit still 21 of 198. 654 lib tests pass.
+
+### THE CELL THAT LIED, AND WHAT CAUGHT IT
+
+`mean list n=256` came out of the paired runs as **0.744x WIN -> 1.043x LOSS with
+NON-OVERLAPPING CIs ([0.735,0.765] vs [1.003,1.077]) and all four nulls PASSING.** By every rule
+this ledger normally applies, that is a decidable regression, and a list operand touching a
+lever whose gate cannot even reach it would have been a real defect worth reverting for.
+
+It was not real. The absolute nanoseconds say so:
+
+```
+                    numpy_ns        fnp_ns
+  BEFORE run        12115.1          9086.2      <- numpy arm inflated
+  AFTER run          8857.8          9099.6
+  focused re-run     8760.8          9040.1      (BEFORE build, loadavg 35)
+  focused re-run     8693.6          8980.5      (AFTER  build, loadavg 35)
+```
+
+**Our arm moved 0.1%. The INCUMBENT's arm moved 27%.** The whole "regression" was one
+contaminated numpy measurement at loadavg 55, and the re-run gives 1.032x vs 1.033x - identical,
+as construction demands, since a list is not an exact ndarray and the gate returns "impossible"
+for it either way.
+
+**A DUAL A/A NULL CANNOT SEE THIS.** Both nulls passed in both runs, because a null compares an
+arm against ITSELF within one phase and the contamination sat between the phases. The only
+instrument that caught it was carrying ABSOLUTE NANOSECONDS per arm alongside the ratio. A
+harness that prints ratios alone would have shipped this as a finding.
+
+MEMORY: largest operand 2e6 f64 = 16 MB, one live.
+
+RETRY PREDICATE: `sum` and `mean` are DONE for this lever; do not re-derive them, and do not
+"simplify" 8_000_000 to 8 MiB - 8 MiB exceeds the f64 floor and silently unroutes a 388 KB band
+that no parity test can see. **`min`/`max` may NOT take this pre-gate**: their integer path
+engages from 65_536 ELEMENTS (`ZEROCOPY_MINMAX_PARALLEL_MIN`), far below an 8_000_000-byte
+floor, so the same constant would kill a live route - their 1.153x/1.156x losses at 2^16 need a
+per-path analysis instead. **And before ANY cell in a paired run is reported as a regression on
+this host, check the INCUMBENT's absolute nanoseconds across the two runs**: at loadavg > 30 the
+numpy arm alone moved 27% here, which is larger than every effect this campaign is currently
+chasing. AGENT_NAME=TanBridge.
