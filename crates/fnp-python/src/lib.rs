@@ -105416,6 +105416,72 @@ fn try_zerocopy_int_unique(py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<
         return Ok(None);
     }
     let out = match (kind.as_str(), itemsize) {
+        // BOOL HAS AT MOST TWO DISTINCT VALUES, so `unique` on it is two flags and an early
+        // exit - it never needs a sort, a counting pass, or a second look at the data. bool was
+        // not matched by any arm here and fell through to the generic route: MEASURED at 4096
+        // elements, numpy 27512.3 ns against fnp 52130.2 ns (1.89x), the largest absolute excess
+        // of any small-n cell by an order of magnitude.
+        //
+        // WHAT NUMPY ACTUALLY DOES WITH AN INVALID BOOL, because it is not what it looks like.
+        // A `np.frombuffer` bool array can hold bytes other than 0/1, and `np.unique` dedups
+        // those by TRUTHINESS but keeps the SMALLEST byte of each group as the representative:
+        //
+        //   bytes [0,1,2,5,1,0] -> [0, 1]      bytes [2,3,4,5] -> [2]      bytes [0,2] -> [0, 2]
+        //
+        // My first version emitted a literal 1 for the true group and was caught by the
+        // `[2,3,4,5]` case, which numpy answers as `[2]`. So the true representative is the
+        // MINIMUM nonzero byte, and the early exit is only sound once that minimum is 1 - which
+        // is every genuine bool array, so real data still stops after the first two elements.
+        ("b", 1) => {
+            let Ok(buffer) = PyBuffer::<NpBool>::get(item) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            let mut has_false = false;
+            let mut min_true: Option<u8> = None;
+            for cell in input.iter() {
+                let byte = cell.get().0;
+                if byte == 0 {
+                    has_false = true;
+                } else if min_true.is_none_or(|m| byte < m) {
+                    min_true = Some(byte);
+                }
+                // Once a zero and a ONE have both been seen, nothing later can change either
+                // representative: 0 is the only false byte and 1 is the smallest possible true
+                // one. Stopping earlier - on any nonzero - would have been the bug above.
+                if has_false && min_true == Some(1) {
+                    break;
+                }
+            }
+            // Ascending, one entry per truthiness group, each carrying its representative byte.
+            let mut buf = [0u8; 2];
+            let mut len = 0usize;
+            if has_false {
+                buf[len] = 0;
+                len += 1;
+            }
+            if let Some(representative) = min_true {
+                buf[len] = representative;
+                len += 1;
+            }
+            let values = &buf[..len];
+            let out =
+                numpy.call_method1(intern!(py, "empty"), (values.len(), cached_bool_type(py)?))?;
+            if !values.is_empty() {
+                let Ok(out_buffer) = PyBuffer::<NpBool>::get(&out) else {
+                    return Ok(None);
+                };
+                let Some(slots) = out_buffer.as_mut_slice(py) else {
+                    return Ok(None);
+                };
+                for (slot, &v) in slots.iter().zip(values) {
+                    slot.set(NpBool(v));
+                }
+            }
+            Some(out)
+        }
         ("i", 1) => {
             unique_counting_typed::<i8>(py, numpy, item, "int8", |x| x as i128, |v| v as i8)?
         }

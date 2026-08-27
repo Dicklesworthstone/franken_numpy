@@ -63617,3 +63617,102 @@ here and is what most filtering ops use. Still standing and NOT addressed: `dele
 at 2^22 (1.310x), `append` at 2^22 (1.251x) and `delete`-scalar at 2^22 (1.244x) - all above every
 gate, all in the 32 MB allocator/mmap regime, which is the one band this family has never had a
 mechanism for.
+
+## 2026-08-27 - WIN (SHIP): `unique` on bool had NO ARM and fell to the generic route - a bool array has at most two distinct values, so it needs two flags and an early exit: 2.057x -> 0.026x (`franken_numpy-unique-bool-arm`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+The class is the conservative one: this row does not carry the full same-invocation incumbent-win
+contract (numpy artifact sha, shared invocation id, isolation marker). Every bool cell below
+nevertheless ends BELOW 1.0x against the live numpy in the same invocation, and the ratios are
+reported as measured.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=155a55318cbb2b7ad2b56e7d5a837fb672bf4d1ae86424d8de084ef979489966
+executing elf sha256 (AFTER)   bench_elf_sha256=9bfd9f7a58a51caaecc9d4d8a51c51c05fffa2fa653dbce78787fce5d6ec0fc6
+```
+
+### RANKING BY ABSOLUTE EXCESS FOUND IT; RANKING BY RATIO DID NOT
+
+The small-n triage's ratio table was, by this point, entirely `asfortranarray`/`ascontiguousarray`
+at 4.0x-4.7x - and those are a WALL, not a defect: `a.flags["C_CONTIGUOUS"]` alone costs 50.9 ns
+and `a.ndim` 21.3 ns, against **33.9 ns for numpy's ENTIRE `np.ascontiguousarray` call**. Two
+Python-level attribute reads already exceed numpy's whole C call, so the identity fast path cannot
+reach parity from here at any spelling. Re-sorting the same 1083 cells by ABSOLUTE excess put a
+different cell on top by an order of magnitude:
+
+```
+  unique  bool     4096   numpy 27512.3   fnp 52130.2   excess 24617.9   1.89x
+  unique  float64  4096   numpy 26017.2   fnp 29064.8   excess  3047.6   1.12x   <- next, 8x smaller
+```
+
+`try_zerocopy_int_unique` dispatches on `(kind, itemsize)` and had arms for `i` and `u` only. bool
+is kind `'b'`; it matched nothing and fell to the generic route.
+
+### THE FIX, AND THE EDGE CASE THAT ALMOST SHIPPED WRONG
+
+A bool array holds at most two distinct values, so `unique` on it is two flags and an early exit -
+no sort, no counting pass, no second look at the data.
+
+**What numpy does with an INVALID bool is not what it looks like.** A `np.frombuffer` bool array
+can hold bytes other than 0/1, and `np.unique` dedups those by TRUTHINESS but keeps the SMALLEST
+byte of each group as its representative:
+
+```
+  bytes [0,1,2,5,1,0] -> [0, 1]      bytes [2,3,4,5] -> [2]      bytes [0,2] -> [0, 2]
+```
+
+My first version emitted a literal `1` for the true group. It was caught by the `[2,3,4,5]` case,
+which numpy answers as `[2]`, not `[1]`. The true representative is the MINIMUM nonzero byte, and
+the early exit is only sound once that minimum is 1 - which is every genuine bool array, so real
+data still stops after the first two elements. Breaking on any nonzero, as the first version did,
+is precisely the bug.
+
+COUNTED_MECHANISM: the generic route sorts n elements; the bool arm reads at most 2 before it can
+answer a mixed array. Measured at 65536, fnp 736894.2 ns -> 715.4 ns, and at 1048576
+11919110.6 ns -> 1260.0 ns - flat in n, because the work no longer depends on n at all.
+
+### THE MEASUREMENT
+
+```
+  case              n        BEFORE     AFTER
+  bool_mixed       4096      2.057x     0.026x     56880.1 -> 705.0 ns
+  bool_mixed      65536      1.087x     0.001x    736894.2 -> 715.4
+  bool_mixed    1048576      0.848x     0.000x  11919110.6 -> 1260.0
+  bool_mixed         16      1.210x     0.197x
+  bool_mixed        256      1.193x     0.160x
+  bool_allfalse   65536      1.111x     0.061x    560627.3 -> 31767.0
+  bool_allfalse 1048576      1.023x     0.047x  11016581.9 -> 505290.5
+  bool_allfalse    4096      0.530x     0.105x
+
+  CONTROLS, other dtypes reach other arms and must not move:
+  int32    256/4096/65536    0.300x/0.243x/0.233x  ->  0.279x/0.243x/0.236x
+  float64  256/4096/65536    1.533x/1.138x/1.022x  ->  1.457x/1.118x/1.056x
+```
+
+`bool_allfalse` is the honest half: with no `True` present the early exit never fires and the scan
+runs to the end, so it gains 16x-21x rather than the mixed case's thousands. Both are wins.
+
+PARITY: 176 cells - 7 sizes (0, 1, 2, 3, 17, 4096, 65537) x {all-false, all-true, mixed,
+true-first, true-last}, plus EIGHT `np.frombuffer` arrays whose bytes are not 0/1
+(`[0,1,2,5,1,0]`, `[2,3,4,5]`, `[1,1,1]`, `[0,2]`, `[9,7,3,0]`, `bytes(range(256))*16`, `[2,1]`,
+`[255,0]`), plus 2-D, strided and transposed inputs - each under four keyword forms (bare,
+`return_index`, `return_counts`, `return_inverse`), comparing dtype, shape and raw bytes:
+**0 divergences**. General parity 5320 cells -> 1 divergence, identical on the pre-change build
+(pre-existing `deadlock-audit-neu7z`). Both byte-order oracles unchanged (1 integer / 26 float).
+660 error/edge cells identical. 655 lib tests pass. clippy `-D warnings` and `cargo fmt --check`
+exit 0, unpiped.
+
+MEMORY: largest operand 2^20 bool = 1 MB.
+
+RETRY PREDICATE: **`unique` on float64 is the next cell in this family** - 1.533x at 256, 1.138x
+at 4096, 1.022x at 65536, readable and untouched here; floats reach neither the integer counting
+arm nor this bool one. Do NOT try to widen the counting arm to floats by bit-pattern: `-0.0` and
+`+0.0` are distinct bit patterns that `np.unique` collapses to ONE value, and NaN payloads make
+the mapping many-to-one in the other direction, so a bitwise counting sort is wrong on both ends.
+**And do not re-attack `asfortranarray`/`ascontiguousarray`**: measured above, two attribute reads
+cost more than numpy's whole call, so the 4.0x-4.7x ratios there are the pyo3 crossing wall and
+are already at their floor.
