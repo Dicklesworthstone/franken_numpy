@@ -18068,7 +18068,7 @@ fn try_zerocopy_f64_container_take(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        let mut gather = |slot: &pyo3::buffer::ReadOnlyCell<f64>, item: Bound<'_, PyAny>| {
+        let mut gather = |slot: &std::cell::Cell<f64>, item: Bound<'_, PyAny>| {
             let Ok(index) = item.extract::<i64>() else {
                 return false;
             };
