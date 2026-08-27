@@ -62828,3 +62828,93 @@ now one `PyBuffer::get` and a loop. **The one arm still worth work is `bool` at 
 the uint8 view only because pyo3's `PyBuffer::<u8>` rejects format `'?'`, so the question is
 whether the bytes can be reached without a numpy `.view()` call at all - unmeasured, and the
 answer decides a 5.2x cell.
+
+## 2026-08-27 - WIN (SHIP): the last `.view()` in `count_nonzero` removed by implementing pyo3's `Element` for a `bool_` byte - the family's worst cell 5.110x -> 3.456x (`franken_numpy-npbool-element`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell, plus an
+independent COUNTED instruction diff taken while the host was at loadavg 60.
+
+**Campaign result class:** maintenance-self-speedup
+
+Every cell below remains a LOSS to numpy.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=b28cd9fb64d283ac57b90f7a7375d5f4ffe31373a4adbecedade2ef5f5ff18df
+executing elf sha256 (AFTER)   bench_elf_sha256=50f4f432817954bec3859f75251c8aed049eb1a3e09f1a61a3ad65a525e25236
+```
+
+### THE CONSTRAINT THAT LOOKED STRUCTURAL, AND WAS NOT
+
+The previous row removed `a.view(uintN)` from every INTEGER arm and left `bool` as the family's
+worst cell at 5.190x, with the retry predicate: bool needs the view only because pyo3's
+`PyBuffer::<u8>` rejects buffer format `'?'`, so can its bytes be reached without a numpy method
+call at all?
+
+They can. `pyo3::buffer::Element` is a PUBLIC unsafe trait whose whole contract is one function,
+`is_compatible_format`, with size and alignment checked separately by pyo3. pyo3 ships
+`impl_element!` for u8/u16/.../f64 and none for bool - not because bool buffers cannot be read,
+but because Rust's `bool` has a validity niche (only 0 and 1). A `#[repr(transparent)]` newtype
+over `u8` has NO niche, so it can accept format `'?'` soundly:
+
+```rust
+#[derive(Clone, Copy)] #[repr(transparent)] struct NpBool(u8);
+unsafe impl pyo3::buffer::Element for NpBool {
+    fn is_compatible_format(format: &std::ffi::CStr) -> bool { format.to_bytes() == b"?" }
+}
+```
+
+This is the first `unsafe impl` in the file. It accepts ONLY `'?'`, so no other buffer can be
+read through it, and a `bool_` array holding bytes other than 0/1 (constructible via
+`np.frombuffer`) is still valid - which the parity sweep exercises deliberately.
+
+The SWAR path is the one place the view survives: it needs a real uint8 ndarray to `ravel`, and
+it only runs from 65536 elements up where 171.9 ns is noise. Small n - the losing regime - never
+reaches it.
+
+COUNTED_MECHANISM: baseline-subtracted instructions per call at n=16 over 1500000 calls, taken at
+loadavg ~60 where wall clock could say nothing - **bool 8215.9 -> 5707.2 (2.47x -> 1.84x, 2509
+removed); int64 5564.9 -> 5545.2 (1.84x -> 1.82x), UNCHANGED**, which is the control: the integer
+arms were fixed in the previous commit and this change touches only bool. bool now matches int64
+to within 1% (1.84x vs 1.82x) - the family is uniform for the first time.
+
+### THE MEASUREMENT
+
+Wall clock once the host quieted (10.57 / 7.91). 22 of 32 cells readable:
+
+```
+  count_nonzero bool     16   5.110x -> 3.456x   (149.7 np, 757.4 -> 517.3 ns)   1.48x
+  count_nonzero bool    256   4.744x -> 3.314x   (163.8 np, 777.6 -> 542.7)      1.43x
+  count_nonzero bool   4096   3.618x -> 2.949x   (336.7 np, 1218.4 -> 992.9)     1.23x
+  sum / any int64 (controls)                                              0.99x-1.01x
+```
+
+**-226 to -240 ns per call.** An earlier run at loadavg 4.59/10.13 agreed (1.50x at n=256).
+
+A REGRESSION I INTRODUCED AND REMOVED BEFORE SHIPPING: the first version acquired an `NpBool`
+buffer AND then a second `PyBuffer::<u8>` inside the SWAR branch, which cost **+170 ns and took
+`bool 70000` from 1.079x to 1.168x**. `NpBool` is `repr(transparent)` over `u8` and
+`ReadOnlyCell<T>` over `UnsafeCell<T>`, so the already-mapped slice is reinterpreted by
+`transmute` instead - same length, same provenance, one buffer acquisition.
+
+PARITY: a dedicated bool sweep - 10 shapes including 0-d, empty, 3-D and the SWAR boundary at
+65535/65536/70000/131072, x 5 kwarg forms, plus strided, transposed, all-true, all-false and TWO
+arrays built with `np.frombuffer` whose bytes are NOT 0/1 (`bytes(range(16))` and
+`bytes(range(256))*400`, the latter crossing into SWAR) - comparing type, dtype, shape and raw
+bytes: **53 cells, 0 divergences**. General parity 5320 cells -> 1 divergence, identical on the
+pre-change build (pre-existing `deadlock-audit-neu7z`). Both byte-order oracles unchanged (1
+integer / 26 float). 660 error/edge cells identical. 655 lib tests pass. clippy `-D warnings` and
+`cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 131072 elements.
+
+RETRY PREDICATE: **`count_nonzero` is CLOSED for this campaign.** Every arm now reads its own
+buffer with no reinterpretation, the family is uniform at 1.8x counted, and the floor was
+measured in the previous row: numpy returns `np.int64` and the cheapest construction available
+from Rust is a cached type-object call at **192.7 ns against numpy's 175.9 ns for the whole
+operation**, so parity at small n is unreachable without building the scalar in C. Do not
+re-attack it. **What IS worth carrying elsewhere is `NpBool` itself**: every other bool consumer
+in this file still calls `a.view(numpy.uint8)` before reading bytes - grep
+`view` + `uint8` - and each of those sites is now a one-type change worth ~170 ns. That sweep is
+UNMEASURED and none of those routes has been triaged, so it needs its own worst-cell ranking
+first rather than a blanket pass.

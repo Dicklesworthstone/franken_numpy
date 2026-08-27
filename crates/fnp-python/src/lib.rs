@@ -25689,6 +25689,31 @@ fn take(
 // SIMD-popcount gap. Count is order-independent ⇒ bit-identical. `a_u8` must be the
 // contiguous uint8 view; `input` its byte slice (for the < 8 tail). Returns None to
 // fall back if the uint64 view (alignment / non-contiguity) fails.
+/// One byte of a numpy `bool_` array, readable through the buffer protocol.
+///
+/// numpy exports `bool_` with buffer format `'?'`, and pyo3 implements `Element` for `u8` only
+/// against format `'B'`, so `PyBuffer::<u8>::get` REFUSES a bool array. Every bool consumer in
+/// this file worked around that by calling `a.view(numpy.uint8)` first - a numpy METHOD CALL
+/// priced at 171.9 ns against numpy's 175.9 ns for a whole `np.count_nonzero`, i.e. the
+/// workaround cost as much as the operation. This type removes it: the buffer is read directly
+/// in the only format numpy ever exports for `bool_`.
+///
+/// SAFETY (the `Element` contract): `bool_` is exactly one byte and this type is
+/// `repr(transparent)` over `u8`, so size, alignment and validity are identical to the buffer's
+/// elements - every bit pattern is a valid `u8`, so unlike Rust's `bool` there is no
+/// niche to violate even if an array held a byte other than 0 or 1. `is_compatible_format`
+/// accepts ONLY `'?'`, so no other buffer can be read through this type, and pyo3 still checks
+/// size and alignment separately.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct NpBool(u8);
+
+unsafe impl pyo3::buffer::Element for NpBool {
+    fn is_compatible_format(format: &std::ffi::CStr) -> bool {
+        format.to_bytes() == b"?"
+    }
+}
+
 fn swar_count_nonzero_byte(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -25789,26 +25814,37 @@ fn try_zerocopy_count_nonzero(
     // integer `count_nonzero` never appeared in the byte-order oracle's wrong list.
     match (kind, itemsize) {
         ('b', _) => {
-            // bool_ exports buffer format '?', which `PyBuffer::<u8>` refuses, so this ONE arm
-            // still needs the uint8 view. The type object is the cached one.
-            let a_u8: Bound<'_, PyAny> =
-                a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-            let Ok(buffer) = PyBuffer::<u8>::get(&a_u8) else {
+            // Read the bool_ buffer DIRECTLY through `NpBool` - no `a.view(uint8)`. That view was
+            // 171.9 ns on a call where numpy's whole answer takes 175.9 ns, and it left `bool`
+            // as the family's worst cell at 5.190x while every integer width had been fixed.
+            let Ok(buffer) = PyBuffer::<NpBool>::get(a) else {
                 return Ok(None);
             };
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
+            // The SWAR path is the ONE place the view is still built: it needs a real uint8
+            // ndarray to `ravel`, and it only runs from 65536 elements up, where a 171.9 ns
+            // reinterpretation is noise against the count itself. Small n - the regime that was
+            // losing 5.19x - never reaches it.
             const SWAR_MIN: usize = 1 << 16;
-            if axis.is_none()
-                && input.len() >= SWAR_MIN
-                && let Some(count) = swar_count_nonzero_byte(py, numpy, &a_u8, input)?
-            {
-                return Ok(Some(
-                    cached_int64_type(py)?.call1((count as i64,))?.unbind(),
-                ));
+            if axis.is_none() && input.len() >= SWAR_MIN {
+                let a_u8: Bound<'_, PyAny> =
+                    a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
+                // SAFETY: reinterpret the slice ALREADY MAPPED rather than acquiring a second
+                // buffer. `NpBool` is `repr(transparent)` over `u8` and `ReadOnlyCell<T>` is
+                // `repr(transparent)` over `UnsafeCell<T>`, so the two slice types have identical
+                // layout, length and provenance; only the element type name differs. Acquiring a
+                // second `PyBuffer::<u8>` here instead measured +170 ns on this branch.
+                let bytes: &[pyo3::buffer::ReadOnlyCell<u8>] =
+                    unsafe { std::mem::transmute(input) };
+                if let Some(count) = swar_count_nonzero_byte(py, numpy, &a_u8, bytes)? {
+                    return Ok(Some(
+                        cached_int64_type(py)?.call1((count as i64,))?.unbind(),
+                    ));
+                }
             }
-            count_nonzero_typed(py, numpy, input, &shape, axis, |v: u8| v != 0)
+            count_nonzero_typed(py, numpy, input, &shape, axis, |v: NpBool| v.0 != 0)
         }
         // The FLOAT arms compare by VALUE, so unlike the integer arms they are NOT byte-order
         // independent: reading `>f8` bytes as native doubles gives the wrong answer, and
