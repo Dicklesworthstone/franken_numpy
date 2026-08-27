@@ -44939,14 +44939,16 @@ fn try_zerocopy_f64_nansum_axis(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, r#where=WhereArg::Absent))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, r#where=WhereArg::Absent))]
 fn nanmean(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    // Three-state - verified per-op: `np.nanmean(np.matrix(a))` is a float64 while
+    // `np.nanmean(np.matrix(a), keepdims=False)` raises (`deadlock-audit-30d18`).
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
@@ -44963,7 +44965,7 @@ fn nanmean(
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         r#where.apply(py, &kwargs)?;
         Ok(nanmean_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
@@ -44975,9 +44977,18 @@ fn nanmean(
         .is_some_and(|value| !value.bind(py).is_none())
         || out.as_ref().is_some_and(|value| !value.bind(py).is_none())
         || r#where.is_supplied()
+        // An ndarray SUBCLASS must go through numpy - see the `nansum` twin
+        // (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret has no native meaning - see `nanmax`
+    // (`deadlock-audit-30d18`).
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
+    };
 
     // Native FLOAT32 non-last-axis (axis 0 or middle) NaN-skip single pass — placed BEFORE
     // the f64-dtype guard below because it preserves float32 (the f64 kernels would widen).
@@ -45027,9 +45038,10 @@ fn nanmean(
     if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
-    // Integer input cannot contain NaN, so nannanmean == the plain reduction; route to
-    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
-    if numpy_dtype_is_integer(py, a.bind(py))? {
+    // Integer input cannot contain NaN, so nanmean == the plain reduction; route to numpy's fast
+    // reduction (via fallback) instead of the slow native f64 path. BOOL IS THE SAME ARGUMENT
+    // and was missing - measured 8.94x slower than numpy at 2^20 while int32 sat at 1.00x.
+    if numpy_dtype_is_integer(py, a.bind(py))? || numpy_dtype_is_bool(py, a.bind(py)) {
         return fallback();
     }
     // Bit-exact SIMD-pairwise flat fast path (axis=None): ~5x faster than the extract
@@ -47117,7 +47129,7 @@ fn compute_f64_var_flat(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, r#where=WhereArg::Absent))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=KeepdimsArg::NotGiven, initial=None, r#where=WhereArg::Absent))]
 #[allow(clippy::too_many_arguments)]
 fn nansum(
     py: Python<'_>,
@@ -47125,7 +47137,11 @@ fn nansum(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    // Three-state, because numpy's default is the `np._NoValue` sentinel - see `sum`. Verified
+    // per-op rather than assumed: `np.nansum(np.matrix(a))` is an int64 and
+    // `np.nansum(np.matrix(a), keepdims=False)` is a TypeError, the same polarity as `sum`
+    // (`deadlock-audit-30d18`).
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
     initial: Option<Py<PyAny>>,
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
@@ -47143,7 +47159,7 @@ fn nansum(
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         if let Some(initial_val) = initial.as_ref() {
             kwargs.set_item(intern!(py, "initial"), initial_val.bind(py))?;
         }
@@ -47162,9 +47178,21 @@ fn nansum(
             .as_ref()
             .is_some_and(|value| !value.bind(py).is_none())
         || r#where.is_supplied()
+        // An ndarray SUBCLASS must go through numpy, which preserves it here
+        // (`np.nansum(matrix, axis=0)` is a `matrix`) while the native path returns a base-class
+        // ndarray. `nanmin`/`nanmax`/`nanprod`/`nanstd`/`nanvar` already carry this gate;
+        // `nansum` and `nanmean` were the two the earlier sweep missed (`deadlock-audit-30d18`).
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
     {
         return fallback();
     }
+
+    // A `keepdims` only numpy can interpret has no native meaning - see `nanmax`. Shadowing to a
+    // plain `bool` leaves every native site below exactly as it was; the closure above still
+    // holds the original three-state value (`deadlock-audit-30d18`).
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
+    };
 
     // Native parallel FLAT f16 nansum (bit-exact nan-skip widen-pairwise). MUST run ABOVE the f64-
     // dtype guard below (which delegates all non-f64 floats) or it's dead code. Flat only, no keepdims.
@@ -47213,9 +47241,12 @@ fn nansum(
     if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
-    // Integer input cannot contain NaN, so nannansum == the plain reduction; route to
-    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
-    if numpy_dtype_is_integer(py, a.bind(py))? {
+    // Integer input cannot contain NaN, so nansum == the plain reduction; route to numpy's fast
+    // reduction (via fallback) instead of the slow native f64 path. BOOL IS THE SAME ARGUMENT
+    // and was missing: `numpy_dtype_is_integer` matches dtype kinds 'i' and 'u' only, so a bool
+    // array fell through to the native f64 path that widens it. Measured 53.67x slower than
+    // numpy at 2^20 (14489us vs 270us) while int32 sat at 1.01x - see the `nanmin` twin.
+    if numpy_dtype_is_integer(py, a.bind(py))? || numpy_dtype_is_bool(py, a.bind(py)) {
         return fallback();
     }
     // Bit-exact SIMD-pairwise flat fast path (axis=None): ~7x faster than the extract
@@ -47378,9 +47409,10 @@ fn nanprod(
     if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
-    // Integer input cannot contain NaN, so nannanprod == the plain reduction; route to
-    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
-    if numpy_dtype_is_integer(py, a.bind(py))? {
+    // Integer input cannot contain NaN, so nanprod == the plain reduction; route to numpy's fast
+    // reduction (via fallback) instead of the slow native f64 path. BOOL IS THE SAME ARGUMENT
+    // and was missing - measured 18.45x slower than numpy at 2^20 while int32 sat at 0.91x.
+    if numpy_dtype_is_integer(py, a.bind(py))? || numpy_dtype_is_bool(py, a.bind(py)) {
         return fallback();
     }
     // Zero-copy sequential-product flat fast path (axis=None): ~4x faster than the
