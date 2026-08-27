@@ -59939,3 +59939,88 @@ before writing another size gate, and prefer `ndarray_element_count`. The remain
 probe and the round-2 shape audit are both reusable and are the cheapest correctness instruments
 this campaign has produced: 2253 cases between them, one run, two defect classes.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - A KWARGS DICT ON A FUNCTION THAT DOES NOTHING BUT FORWARD: `frombuffer` 2.784x -> 1.924x, and an identity `asarray` on a view builder: `flipud` 2.512x -> 2.335x (`deadlock-audit-yhg7k`)
+
+`TanBridge`. Shipped `f596030c` + `2b824c70`. Measured on `thinkstation1` against the LIVE
+installed numpy 2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1, loadavg 13.95.
+
+**Campaign result class:** candidate-win on eight cells, all still losses to numpy and reported as
+such; one deliberate no-change control.
+
+**`frombuffer` is PURE DELEGATION** - its native path was removed earlier for being slower AND
+semantically wrong (numpy returns a zero-copy view; the native path copied). So the wrapper IS the
+entire fnp cost, and it was nearly twice the incumbent: numpy finishes the whole call in 174.3 ns
+and fnp took 483.6 ns to forward it. `dtype`, `count` and `offset` are all POSITIONAL-or-keyword in
+numpy's signature - only `like` is keyword-only - so the `PyDict` and its three `set_item`s were
+avoidable. numpy's own default is `dtype=float`, i.e. float64, so the held `numpy.float64` is that
+default written out.
+
+`flipud`/`fliplr` open with `numpy.asarray(m)`, which returns an EXACT ndarray UNCHANGED - a round
+trip into numpy for the object it hands straight back, on functions that are otherwise pure view
+construction against a ~240 ns incumbent.
+
+```
+FORWARDER_CEREMONY worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=095bacbd1bef  after_elf=d5e32cfd5e90      loadavg 13.95, all 36 nulls PASS
+
+  case                    BEFORE                      AFTER              excess ns
+  frombuffer default  2.784x [2.758,2.885] -> 1.924x [1.913,2.103]     309 -> 172
+  frombuffer 2^16     2.768x [2.745,2.953] -> 1.920x [1.590,2.106]     310 -> 171
+  frombuffer f32      2.194x [1.945,2.304] -> 1.512x [1.357,1.619]     314 -> 132
+  frombuffer cnt/off  1.739x [1.606,1.833] -> 1.318x [1.215,1.404]     252 -> 112
+  flipud 1-D 2^16     2.512x [2.430,2.647] -> 2.335x [1.868,2.381]     369 -> 326
+  flipud 2-D 64^2     2.560x [2.515,2.801] -> 2.402x [2.379,2.651]     390 -> 351
+  flipud 1-D 2^8      2.517x [2.269,3.158] -> 2.356x [1.929,2.535]     372 -> 337
+  fliplr 2-D 64^2     1.958x [1.764,2.050] -> 1.805x [1.783,1.994]     307 -> 259
+
+  CONTROL (non-array operand - still converts, must NOT move):
+  flipud from list    1.700x [1.552,1.795] -> 1.690x [1.506,1.808]     478 -> 393
+```
+
+**`frombuffer 2^16` reads the same as `frombuffer default`** - 2.768x vs 2.784x before, 1.920x vs
+1.924x after - because the buffer size is irrelevant to a zero-copy view. That is the cleanest
+possible statement that this op is 100% entry cost and 0% work, and it is why a forwarder is worth
+attacking at all.
+
+**The `from list` control is the attribution for the flip half.** A list operand still goes through
+`asarray` because there is nothing to skip, and it does not move (1.700x -> 1.690x) while the four
+array cells all improve. The flip gains are small - 35-45 ns, and only `flipud 1-D 2^16` is
+cleanly DISJOINT - but the sign is consistent across all four array cells and the control stays
+put, which is what separates a real 40 ns from noise at this scale.
+
+**A/A NULL CONTROLS:** all 36 pass (0.9960-1.0049).
+
+PARITY: 11 dtypes x 6 shapes x {flipud, fliplr} plus 8 layout/non-array cases, and `frombuffer`
+over 9 dtype forms x 5 count/offset combinations plus a bytearray, a positional-argument call and
+three error cases. Compared on dtype, shape, python `type()`, five flags, RAW BYTES **and the
+`np.shares_memory` aliasing relation** - the last matters because an identity-`asarray` skip or a
+positional-argument change is exactly the kind of edit that could turn a view into a copy.
+**2 divergences before, 2 after, 0 introduced.**
+654 lib tests pass; clippy and fmt clean.
+
+### A FALSE CLAIM I SHIPPED IN A COMMENT AND CORRECTED
+
+`f596030c`'s comment justified `is_exact_instance` by asserting that
+`np.asarray(np.matrix(a))` gives a base-class view "which `flipud` then flips, and numpy's own
+`flipud` does the same". **The parity probe shows numpy's `flipud` PRESERVES the subclass** -
+`np.flipud(np.matrix(a))` is a `matrix` - and fnp returns a plain `ndarray`. Both builds do, so the
+identity skip neither caused nor changed it, but the REASONING I recorded was wrong, and a false
+claim in a comment is worse than no comment: the next reader would have taken it as evidence the
+subclass case is already correct. Corrected in `2b824c70` to name it as a known open defect with
+the remedy that applies (`ndarray_subclass_needs_numpy`, as used by the predicate and unary
+families) and the note that it needs its own parity run.
+
+MEMORY: largest operand 2^16 f64 = 512 KB.
+
+RETRY PREDICATE: `frombuffer`'s residual ~170 ns against a 174 ns incumbent is the
+`#[pyfunction]` entry plus `cached_numpy` plus one interned getattr plus the call - there is
+nothing left in it but the wrapper itself, and a further lever would have to attack the
+pyo3 call shape, which was priced at ~25 ns and rejected. **The `like=` branch above still builds
+a kwargs dict and was NOT converted**: `like` is keyword-only so that dict is required, and the
+branch is rare. `flipud`/`fliplr` at ~2.35x still carry ~330 ns against a 240 ns incumbent, in
+`build_flip_view` and the `vec![false; ndim]` it takes - that Vec is a heap allocation per call for
+a mask that is at most a handful of bools.
+AGENT_NAME=TanBridge.
