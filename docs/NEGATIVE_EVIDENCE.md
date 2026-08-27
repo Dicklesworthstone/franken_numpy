@@ -60181,3 +60181,86 @@ this route still spends over numpy. Give it its own diff review. `bool`/`i64` at
 family's worst cells and their excess is ~640 ns against a ~190 ns incumbent, i.e. almost entirely
 the shared entry.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - A DEDICATED SUBCLASS AUDIT FOUND 58 DIVERGENCES IN 198 CASES, AND THE WORST ARE HARD FAILURES: `fnp.sum(np.matrix(a), axis=0)` RAISED `TypeError` where numpy works (`deadlock-audit-30d18`)
+
+`TanBridge`. Shipped `7ff307e5` (the `sum` half). Measured on `thinkstation1` against the LIVE
+installed numpy 2.4.3, same invocation, ABBAABBA, 21 rounds, dual A/A null.
+
+**Campaign result class:** correctness defect fixed on one entry; the remaining 56 divergences are
+DOCUMENTED AND LEFT OPEN, with the recipe.
+
+The ndarray-subclass defect had surfaced ONE FAMILY AT A TIME in four separate cycles - the IEEE
+predicates (`deadlock-audit-c0g2r`), the unary family (`-1zl3e`), flipud/fliplr/flip (`-yhg7k`) and
+count_nonzero (`-54arr`). Rather than wait for a fifth, this run asks the question once: 30+ ops x
+{`np.matrix`, a plain `ndarray` subclass} x {no axis, axis=0} plus two-argument and 1-D forms.
+
+**58 of 198 cases diverge.** Most are a lost subclass - numpy returns `matrix`/`MyArray`, fnp
+returns `ndarray`. Six are worse:
+
+```
+  fnp.sum(np.matrix(a))            -> TypeError   numpy -> np.float64(...)
+  fnp.sum(np.matrix(a), axis=0)    -> TypeError   numpy -> matrix([[...]])
+  fnp.mean(np.matrix(a), axis=0)   -> TypeError   numpy -> matrix([[...]])
+  fnp.std / fnp.var (both forms)   -> TypeError   numpy -> float64 / matrix
+```
+
+### THE ROOT CAUSE IS A SENTINEL, NOT A SUBCLASS
+
+`numpy`'s `keepdims` default is the `np._NoValue` SENTINEL, and "not passed" is OBSERVABLY
+DIFFERENT from "passed False", because `np.sum` forwards `keepdims` to the operand's METHOD and
+`np.matrix.sum` does not accept that parameter:
+
+```
+  np.sum(m, axis=0)                  -> matrix([[24., 28., 32., 36.]])
+  np.sum(m, axis=0, keepdims=False)  -> TypeError: matrix.sum() got an unexpected keyword ...
+  np.sum(m, axis=0, keepdims=True)   -> TypeError: (the same)
+```
+
+fnp declared `keepdims: bool` defaulting to `false` and set it on the delegate kwargs
+UNCONDITIONALLY, collapsing all three cases into the raising one. `Option<bool>` restores the
+distinction exactly: not passed -> not forwarded -> matrix works; passed either way -> forwarded ->
+the same `TypeError` numpy raises. The native paths take `keepdims.unwrap_or(false)`, which is what
+they always meant.
+
+**A Rust `bool` with a default cannot represent a Python sentinel default.** That is the general
+lesson, and it applies to every parameter numpy defaults to `np._NoValue` - `initial`, `where`,
+`dtype` on some reductions - not just `keepdims`.
+
+```
+SUM_KEEPDIMS worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=b47ea0fcb2a4  after_elf=91a1a0ff2af0
+
+  sum f64 2^8      1.478x [1.319,1.626] -> 1.376x [1.236,1.476]   excess 1002 -> 651 ns
+  sum 2-D axis=1   1.060x [1.003,1.131] -> 1.063x [0.987,1.081]
+  sum 2-D keepdims 1.124x [1.068,1.213] -> 1.107x [1.064,1.136]
+  sum f64 2^21     0.526x WIN (null BIASED 1.1524) -> 0.516x WIN (nulls PASS)
+  sum i64 2^16     1.151x [1.041,1.221] -> 1.109x [1.059,1.155]
+```
+
+Performance is unchanged to slightly better - one `set_item` fewer on the delegate path - which is
+the right outcome for a correctness fix: it should not have cost anything, and it did not.
+
+PARITY: 8 dtypes x 5 shapes x up to 13 axis/keepdims/dtype/initial forms, plus 6 operand kinds
+(matrix, ndarray subclass, list, scalar, strided, 0-d) x 5 forms, compared on dtype, shape, python
+`type()` and RAW BYTES. **2 divergences before, 0 after.** 654 lib tests pass; clippy and fmt clean.
+
+### WHAT IS LEFT OPEN, DELIBERATELY
+
+`mean`, `std` and `var` have the IDENTICAL `keepdims` defect and are NOT fixed here - each needs
+its own parity run over its own kwarg surface (`ddof` for std/var), and bundling four signature
+changes behind one probe is how a correctness fix becomes a regression. The other ~50 divergences
+are lost subclasses across `min`/`max`/`any`/`all`/`argmin`/`argmax`/`cumsum`/`take`/`round`/
+`median`/`unique`/`trim_zeros`/`flip*`, which need `ndarray_subclass_needs_numpy` at each entry.
+**The audit script is the deliverable for that work** - it turns a five-cycle drip into one list.
+
+MEMORY: every operand in the audit is <= 64 elements; the A/B tops out at 2^21 f64 = 16 MB.
+
+RETRY PREDICATE: do NOT fix the remaining subclass cases by widening
+`flip_operand_as_array`-style identity skips - the defect is downstream of the conversion, in the
+extract-and-rebuild, and the remedy is delegation. **Before adding any parameter that numpy
+defaults to `np._NoValue`, check whether "not passed" is observable**: the test is
+`np.f(np.matrix(a), param=<default>)` versus `np.f(np.matrix(a))`, and if they differ the Rust
+signature needs `Option<T>`.
+AGENT_NAME=TanBridge.
