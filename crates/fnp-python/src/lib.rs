@@ -52809,6 +52809,13 @@ fn nanpercentile(
         || method.is_some()
         || weights.is_some()
         || interpolation.is_some()
+        // BOOL MUST DELEGATE SO NUMPY CAN REFUSE IT. `np.nanpercentile` on a bool array raises
+        // `TypeError: numpy boolean subtract, the '-' operator, is not supported` - its NaN
+        // compaction subtracts - while the native path here happily returned `np.float64(0.0)`.
+        // SILENTLY ANSWERING A CALL THE INCUMBENT REJECTS is the same defect class as the
+        // `keepdims` sentinel, and only bool reaches it: `percentile`/`quantile` without the nan
+        // prefix already raise correctly, and int/float dtypes are unaffected either way.
+        || numpy_dtype_is_bool(py, a.bind(py))
     {
         return fallback();
     }
@@ -52983,6 +52990,9 @@ fn nanquantile(
         || method.is_some()
         || weights.is_some()
         || interpolation.is_some()
+        // BOOL MUST DELEGATE SO NUMPY CAN REFUSE IT - see the `nanpercentile` twin. fnp returned
+        // `np.float64(0.0)` where numpy raises TypeError on a bool array.
+        || numpy_dtype_is_bool(py, a.bind(py))
     {
         return fallback();
     }
