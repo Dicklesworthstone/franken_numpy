@@ -53798,9 +53798,14 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
 /// otherwise pure view construction - numpy's own `flipud` is 221.7 ns - so that one call was a
 /// large share of the whole wrapper.
 ///
-/// NOT applicable to an ndarray SUBCLASS: `np.asarray(np.matrix(a))` returns a base-class view,
-/// which `flipud` then flips, and numpy's own `flipud` does the same. `is_exact_instance` keeps
-/// subclasses on the conversion, so that behaviour is unchanged.
+/// `is_exact_instance`, NOT `is_instance`, and the subclass case is a KNOWN OPEN DEFECT rather
+/// than a design choice: `np.flipud(np.matrix(a))` is a `matrix` in numpy, and fnp returns a plain
+/// `ndarray` because the `asarray` below strips the subclass before the view is built. Keeping
+/// subclasses on the conversion leaves that behaviour EXACTLY as it was - this helper neither
+/// causes nor fixes it. (An earlier draft of this comment claimed numpy also returns a base-class
+/// array here; the parity probe for `deadlock-audit-yhg7k` shows it does not.) The remedy is the
+/// `ndarray_subclass_needs_numpy` delegation used by the predicate and unary families, and it
+/// needs its own parity run.
 fn flip_operand_as_array<'py>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
