@@ -64109,3 +64109,115 @@ divergences, IDENTICAL on the pre-change build - pre-existing `longdouble` paddi
 of that probe's byte comparison. `cargo test -p fnp-python --lib --release`: 655 passed, 0 failed.
 
 MEMORY: largest operand 4194304 bool = 4 MB; three live at once.
+
+## 2026-08-27 - WIN (SHIP): the f16 `searchsorted` gate read the NEEDLE count while every route beneath it cost O(HAYSTACK) - 721.70x -> 1.136x, and my first fitted replacement opened a 19.21x of its own (`deadlock-audit-sfgg3`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell and an
+out-of-family `np.sum` f64 control.
+
+**Campaign result class:** maintenance-self-speedup
+
+The conservative class: the row does not carry the full same-invocation incumbent-win contract
+(numpy artifact sha, shared invocation id, isolation marker). The ratios below are as measured
+against the live incumbent in the same invocation.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=6e3d76bb966047f402342c88216eb19da438a24bfd517e6276db32b8ddf2daf2
+executing elf sha256 (AFTER)   bench_elf_sha256=a3fbd7e91f5201b7fac6b8bbf51a2317d46b857df550ac0133622d909cc7ee83
+```
+
+### THE BEAD'S OWN CELL IS ALREADY WON; RE-MEASURING IT FOUND A 721x NEXT DOOR
+
+`sfgg3` asked for a 65536-entry cumulative table for f16 `searchsorted`, banked at 289 ms for
+1M-into-1M. That table is already implemented and that cell now reads **0.016x - a 62x WIN**. What
+the re-measurement turned up is the OPPOSITE corner of the same grid:
+
+```
+   haystack  needles     numpy_ns          fnp_ns     ratio
+    1048576      256       8542.9       6165439.4   721.70x
+    1048576     1024     112510.8       6164966.3    54.79x
+     262144     1024      72492.1       2012615.0    27.76x
+      65536     1024      54865.8        546101.8     9.95x
+```
+
+**fnp's cost there is FLAT IN THE NEEDLE COUNT and LINEAR IN THE HAYSTACK** - 103/546/2013/6165 us
+as the haystack goes 2^14/2^16/2^18/2^20 at a fixed 1024 needles, while numpy moves only
+39.6->112.5 us. That is the signature of a gate reading one operand while the cost is O(the other).
+
+The gate was `ndarray_element_count(v) < (1 << 14)` - needles only. And the decline was
+`return Ok(None)`, which does NOT mean "let numpy have it": there is no zero-copy f16 route below
+this one, so the call fell to the generic tail of `searchsorted`, where `extract_numeric_array`
+MATERIALISES THE WHOLE HAYSTACK into an owned vector. The declining path was measured at 8577 us
+against the engaging path's 1884 us on the same input - **the fallback was 4.5x more expensive
+than the route it was declining to avoid.**
+
+COUNTED_MECHANISM: at a fixed 1024 needles the declined route costs 103204.2/546101.8/2012615.0/
+6164966.3 ns for haystacks of 16384/65536/262144/1048576 - a 4.00x/3.69x/3.06x step for each 4x
+step in haystack, i.e. O(n) - against numpy's 39590.9/54865.8/72492.1/112510.8 ns, which is O(log
+n). One `astype` of the same 1M haystack costs 1491928.3 ns, so the 6.16 ms is roughly four passes
+over an operand the query never needed materialised.
+
+### MY FIRST FIX WAS WRONG, AND THE GRID SWEEP IS WHAT CAUGHT IT
+
+The first version replaced the constant with the fitted ratio alone,
+`queries * 48 >= haystack + 65536`, derived from the table build's ~1.674 ns/element against
+numpy's 38.7/53.6/70.8/110 ns per query at n=2^14/2^16/2^18/2^20. It fixed every cell above and
+**opened three losses the constant gate never had**:
+
+```
+   haystack  needles     numpy_ns       fnp_ns    ratio
+        256     2048      41394.0     795354.9   19.21x
+       4096     2048      96335.6     820354.9    8.52x
+     262144     8192     810007.2    1998138.8    2.47x
+```
+
+The ratio is necessary and NOT sufficient. The 65536-entry build does not shrink with the
+haystack, but numpy's per-query cost does (20 ns at n=256 against 110 ns at n=2^20), so at a small
+haystack the ratio is satisfied long before the fixed build is paid off. The shipped gate is both
+conditions - an absolute floor of 2^14 queries AND the ratio - which declines every cell above
+while preserving every measured win.
+
+### THE MEASUREMENT (4/7 cells decidable; the 3 BIASED are named, and the host was moving)
+
+```
+      hay  needles     numpy_ns       fnp_ns    ratio   nullNP  nullFNP
+  1048576      256       8622.2       9798.4   1.136x    0.992    0.992
+  1048576     1024     111813.4     113224.0   1.013x    0.992    0.991
+   262144     1024      72351.2      74115.0   1.024x    0.986    0.995
+    65536    32768    2545102.2     614493.1   0.241x    1.005    1.006   <- win preserved
+    65536     1024      50804.8      52187.9   1.027x    1.024    1.013   BIASED
+  1048576     8192    1583504.2    1592342.4   1.006x    0.973    1.008   BIASED
+  1048576    32768    6090777.4    5834084.0   0.958x    1.012    1.029   BIASED
+```
+
+Out-of-family control `np.sum` f64 2^20: 1.127x, so this run is not a quiet one; the three BIASED
+cells are reported, not dropped. A quieter min-of-3 sweep on the same ELF puts the same cells at
+1.09x (256 needles), 1.01x (1024), 1.00x (8192), 1.00x (16383) and 0.37x (32768).
+
+A FULL GRID of 70 cells - 5 haystacks x 7 needle counts x side left/right - has a worst cell of
+**1.678x**, and all eight of its worst are `needles=64`, where numpy itself takes 1.5-2.7 us and
+the residual is ~1.1 us of per-call entry overhead rather than anything algorithmic.
+
+PARITY: 208 cells straddling the gate at 5 haystack sizes (queries at the threshold, one below,
+one above, and 4x above), with corpora chosen for what the table's order-key bijection can get
+wrong - NaN queries AND NaN haystacks, +-0.0 (searchsorted treats -0 == 0), +-inf, subnormals,
+65504 at the f16 range edge, heavy duplicates, queries drawn exactly from haystack values so
+side=left and side=right must differ on ties - plus big-endian on each operand separately,
+non-contiguous on each, empty haystack, and scalar / 0-D / 2-D queries, both sides: **0
+divergences**. `cargo test -p fnp-python --lib --release`: 655 passed, 0 failed.
+
+No other dtype can reach the change: it lives inside `try_native_f16_searchsorted`, which the
+caller guards with `a_float_char == 'e'` and which itself requires `f16_dtype_ok` on BOTH operands.
+That is a source-level guarantee, not a sampled one.
+
+MEMORY: largest pair 2^20 f16 haystack + 2^18 f16 needles = 2.5 MB.
+
+RETRY PREDICATE: the residual 1.136x at 256 needles is the **small-n entry floor**, not this gate -
+numpy's whole call is 8.6 us and the excess is ~1.2 us, which is the same per-call cost priced at
+~25 ns for the calling convention plus the delegate's `getattr` and kwargs dict. Do not re-tune
+the gate for it. **The generic tail of `searchsorted` is still O(haystack) materialisation for
+every dtype that declines every fast path** - f16 is simply the dtype that had no zero-copy route
+beneath it, so it hit the tail on every small-query call. Auditing which other declines land there
+is the open work, and the same `Ok(None)`-means-the-route-underneath question applies to every
+`try_native_*` gate in this file.

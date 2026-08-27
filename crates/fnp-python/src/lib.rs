@@ -74956,9 +74956,47 @@ fn try_native_f16_searchsorted(
     side: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
     let nd = cached_ndarray_type(py)?.clone();
-    if !f16_dtype_ok(a_arr, &nd)? || !f16_dtype_ok(v, &nd)? || ndarray_element_count(v)? < (1 << 14)
-    {
+    if !f16_dtype_ok(a_arr, &nd)? || !f16_dtype_ok(v, &nd)? {
         return Ok(None);
+    }
+    // DECLINING HERE MUST MEAN NUMPY, NOT `Ok(None)`. There is no zero-copy f16 route below this
+    // one, so a declined f16 call fell all the way to the generic tail of `searchsorted`, where
+    // `extract_numeric_array` MATERIALISES THE WHOLE HAYSTACK into an owned vector. That is
+    // O(haystack) work to answer a handful of queries, and it is what a needle-only gate bought:
+    //
+    //   1M f16 haystack, 1024 needles   numpy    112510.8 ns   fnp   6164966.3 ns    54.79x
+    //   1M f16 haystack,  256 needles   numpy      8542.9 ns   fnp   6165439.4 ns   721.70x
+    //
+    // fnp's cost there is FLAT IN THE NEEDLE COUNT and linear in the haystack - the signature of
+    // a gate reading one operand while the cost is O(the other one).
+    //
+    // TWO CONDITIONS, AND THE RATIO ALONE IS NOT ENOUGH. The table build is O(haystack + 65536)
+    // at ~1.674 ns/element, against numpy's ~38.7/53.6/70.8/110 ns per query at
+    // n=2^14/2^16/2^18/2^20, so `queries * 48 >= haystack + 65536` tracks break-even at LARGE
+    // haystacks. It is wrong at small ones, and a grid sweep caught it opening losses the old
+    // constant gate did not have:
+    //
+    //   hay=256    needles=2048   numpy  41394.0 ns   fnp 795354.9 ns   19.21x
+    //   hay=4096   needles=2048   numpy  96335.6 ns   fnp 820354.9 ns    8.52x
+    //   hay=262144 needles=8192   numpy 810007.2 ns   fnp 1998138.8 ns   2.47x
+    //
+    // The 65536-entry build does not shrink with the haystack, but numpy's per-query cost DOES
+    // (20 ns at n=256 against 110 ns at n=2^20), so at a small haystack the ratio is satisfied
+    // long before the fixed build is paid off. The absolute floor is what covers that, and both
+    // conditions together decline every cell above while preserving every measured win
+    // (0.042x-0.480x from 32768 queries up).
+    const F16_TABLE_MIN_QUERIES: usize = 1 << 14;
+    let queries = ndarray_element_count(v)?;
+    let haystack = ndarray_element_count(a_arr)?;
+    if queries < F16_TABLE_MIN_QUERIES || queries.saturating_mul(48) < haystack + (1 << 16) {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "side"), side)?;
+        return Ok(Some(
+            numpy
+                .getattr(intern!(py, "searchsorted"))?
+                .call((a_arr, v), Some(&kwargs))?
+                .unbind(),
+        ));
     }
     if let Some(output) = try_native_f16_searchsorted_table(py, numpy, a_arr, v, side)? {
         return Ok(Some(output));
