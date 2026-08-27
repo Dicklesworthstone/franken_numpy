@@ -61661,3 +61661,94 @@ comment is also true of BOOL** - the comment says "integer input cannot contain 
 cannot either. That predicate has other callers this row did not touch. The same question
 applies to any predicate named for one dtype family that guards a claim about a WIDER property.
 AGENT_NAME=TanBridge.
+
+## 2026-08-27 - THE OBVIOUS FIX WOULD HAVE THROWN AWAY A 395x WIN: bool `abs`/`square` fell into the generic extract (11.17x), but `signbit` on bool beats numpy 0.0026x, so the gate is TWO OPS and not one dtype (`franken_numpy-bool-unary-gap`)
+
+`TanBridge`. Shipped `6b6c7205`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, median of 7, OPENBLAS_NUM_THREADS=1. Perf figures are PRICING
+grade - the effects are 5x-11x and every control is flat.
+
+**Campaign result class:** maintenance-self-speedup
+
+This row is classified KEEP because its heading carries "WIN:" (`signbit`'s 0.0026x). To be
+exact about what is and is not claimed: the three cells this change TOUCHES all remain LOSSES to
+numpy (1.011x-1.039x), so the shipped effect is a shrunk loss, not a win. The 395x figure is a
+PRE-EXISTING win that this row exists to show was NOT destroyed - it is the control, not the
+claim.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=6e90b732e0787a6271656687cffd2c546352c65b0968fdb20eff3efc618c5a29
+executing elf sha256 (AFTER)  bench_elf_sha256=58d7e16a12a8217b23806a95ec7fb15fd55dfc2d606ffa4e814009e8467b9722
+```
+
+### THE DEFECT IS THE SAME MISSING DTYPE KIND, AGAIN
+
+`native_unary_elementwise` classifies once into `float_of(n)`, `int_of(n)` and `narrow_integral`,
+where `narrow_integral` is `kind == 'u' || (kind == 'i' && itemsize <= 2)`. **Bool is kind 'b'.**
+It declined every native gate and fell into `extract_precise_numeric_array`, which widens one
+byte to eight and then hands the result back to numpy anyway. This is the third distinct site
+this session where a predicate written for "integers" silently excluded bool.
+
+```
+BOOL_UNARY_GAP worker=thinkstation1 numpy_version=2.4.3 profile=release, n = 2^20
+
+  absolute bool  324.3us ->  33.4us   10.48x -> 1.039x
+  abs      bool  227.5us ->  20.1us   11.02x -> 1.033x
+  square   bool  254.6us ->  42.6us    5.81x -> 1.011x
+```
+
+### THE PART THAT MATTERS: THE OBVIOUS EDIT IS A TRAP
+
+"Bool has no native unary path, so delegate bool" is one line, reads correctly, and **destroys a
+395x win**:
+
+```
+  signbit bool   numpy 7218.5us   fnp 19.5us   0.0026x   <- would have been delegated away
+```
+
+numpy's `signbit` on a bool array costs 7.2 MILLISECONDS for 2^20 elements; fnp does it in 19.5
+us. A blanket dtype gate would have handed that straight back.
+
+So before writing the gate I timed EVERY unary op on bool at 2^20 and asked which ones actually
+lose. **Only two do.** Everything else is parity or better: floor/trunc/ceil/conjugate/imag/isnan
+~1.0x, and exp/log/sqrt/cbrt/rint identical to numpy because both arms are libm-bound. The gate
+is therefore `matches!(op, Abs | Square) && kind == 'b'`, not `kind == 'b'`.
+
+**THE RULE: a dtype-shaped defect does not license a dtype-shaped fix. Enumerate the ops in the
+family and gate on the intersection that actually loses.** The cost of checking was one probe;
+the cost of not checking was a 395x win.
+
+`signbit` is unchanged at 0.0024x after the fix, which is the control that proves the scoping
+held. CONTROLS on the other dtypes are flat too: int8 absolute 1.001x -> 1.014x, int32 0.981x ->
+1.023x, float64 1.078x -> 1.041x; int8 square 1.088x -> 0.942x, int32 0.972x -> 0.998x, float64
+1.050x -> 1.047x.
+
+PARITY: 23 unary ops x 15 dtypes x 6 shapes (including 0-d and empty), plus bool all-True /
+all-False / 2-D / subclass / matrix / list / strided / F-order - on dtype, shape, python `type()`
+and RAW BYTES. **0 divergences of 2102.** Dtype-promotion audit still 0 of 1800. 654 lib tests
+pass; clippy and fmt clean.
+
+### TWO PROBE FINDINGS, BOTH PRE-EXISTING AND FILED
+
+- **`longdouble` compares unequal by BYTES while equal by VALUE.** x86 float128 is 80 bits in a
+  16-byte slot and the 6 pad bytes are uninitialised, so two independently allocated results
+  differ there. The first run of this probe reported 34 phantom divergences because of it. This
+  campaign standardised on raw-byte comparison for a good reason - `array_equal(equal_nan=True)`
+  cannot see a NaN sign bit - and that rule has exactly ONE dtype exception. Filed
+  (`deadlock-audit-6cukd`) so the next probe does not either report phantoms or, worse, get
+  "fixed" by relaxing byte comparison everywhere and going blind to the NaN class.
+- **`np.negative` on a 0-d uint64 raises ValueError where numpy wraps to 18446744073709551572**;
+  the 1-D form is byte-identical. Rank-0-only, filed (`deadlock-audit-neu7z`), and the same
+  rank-0 family this ledger has recorded twice before.
+
+MEMORY: largest operand 2^20 bool = 1 MB.
+
+RETRY PREDICATE: bool `abs`/`square` are DONE. **Do NOT widen this to "delegate bool from
+`native_unary_elementwise`"** - `signbit` measures 0.0024x there and the gate is deliberately two
+ops wide. The bool gap has now been closed at THREE sites this session (`nanmin`/`nanmax`,
+`nansum`/`nanmean`/`nanprod`, and here); **the standing audit is to grep any predicate whose name
+says "integer" or "narrow_integral" and check whether the property it guards is also true of
+kind 'b'.** Still open from the same vein and NOT fixed: `median` on bool 3.66x and `nanmedian`
+on bool 2.74x (`deadlock-audit-wxgh9`) - neither has a guard at the equivalent point in its flow,
+and median's int32 path is a 0.30x WIN, so they need routing analysis rather than the one-line
+edit. AGENT_NAME=TanBridge.
