@@ -60024,3 +60024,87 @@ branch is rare. `flipud`/`fliplr` at ~2.35x still carry ~330 ns against a 240 ns
 `build_flip_view` and the `vec![false; ndim]` it takes - that Vec is a heap allocation per call for
 a mask that is at most a handful of bools.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `build_flip_view` IMPORTED `builtins` AND CONSTRUCTED BOTH SLICE OBJECTS ON EVERY CALL: the whole flip family crosses from LOSS to WIN - `flipud` 2.445x -> 0.847x, `flip(axis=0)` 0.563x -> 0.272x (`deadlock-audit-lxt2l`)
+
+`TanBridge`. Shipped `42b49496`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1, loadavg 19.33. **All 56 nulls PASS.**
+
+**Campaign result class:** candidate-win on all nine flip cells, SIX of which cross from a loss to
+a win over numpy; four `frombuffer` cells act as an unchanged control.
+
+This is the lever `deadlock-audit-yhg7k` named on its way out. `slice(None)` and
+`slice(None, None, -1)` are IMMUTABLE and constant - nothing about them can differ between calls -
+yet `build_flip_view` imported `builtins`, fetched the `slice` class off it, and CONSTRUCTED both
+of them every time `flipud`/`fliplr`/`flip` ran. Priced with `timeit` against the installed
+interpreter BEFORE writing any Rust:
+
+```
+  import builtins        250.1 ns      slice(None)             32.8 ns
+  builtins.slice          16.3 ns      slice(None, None, -1)   37.5 ns
+                                       --------------------------------
+                                       ~337 ns of per-call setup
+```
+
+against `np.flipud` finishing the WHOLE call in 259.4 ns. **The setup cost more than the operation
+it was setting up for.** Both slices are now held for the life of the process.
+
+```
+FLIP_VIEW_SETUP worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=d5e32cfd5e90  after_elf=d17d303e52bf     loadavg 19.33, 56/56 nulls PASS
+
+  case                  BEFORE                      AFTER              excess ns
+  flip 2-D axis=0   0.563x WIN [0.531,0.636] -> 0.272x WIN [0.254,0.327]  -554 -> -948
+  flip 2-D axis=1   0.561x WIN [0.531,0.614] -> 0.269x WIN [0.254,0.272]  -562 -> -955
+  flip 1-D default  1.799x LOSS[1.694,1.956] -> 0.698x WIN [0.610,0.709]   268 ->  -100
+  flip 2-D default  1.773x LOSS[1.520,1.959] -> 0.695x WIN [0.595,0.707]   286 ->  -112
+  flip 1-D 2^16     1.887x LOSS[1.613,1.909] -> 0.711x WIN [0.614,0.722]   293 ->   -94
+  fliplr 2-D 64^2   1.964x LOSS[1.627,2.148] -> 0.806x WIN [0.774,0.978]   322 ->   -68
+  flipud 1-D 2^8    2.445x LOSS[2.419,2.624] -> 0.847x WIN [0.827,0.931]   360 ->   -41
+  flipud 1-D 2^16   2.460x LOSS[2.362,2.739] -> 0.846x WIN [0.832,1.083]   356 ->   -40
+  flipud 2-D 64^2   2.445x LOSS[2.413,2.667] -> 0.992x       [0.980,1.185] 370 ->    -1
+  flipud from list  1.684x LOSS[1.513,1.792] -> 1.071x LOSS [0.967,1.077]  386 ->    39
+
+  CONTROL (frombuffer - different function, shipped last cycle, must NOT move):
+  frombuffer default    2.031x -> 2.014x      frombuffer 2^16     2.033x -> 2.011x
+  frombuffer f32        1.602x -> 1.571x      frombuffer cnt/off  1.369x -> 1.369x
+```
+
+**SIX CELLS CROSS FROM LOSS TO WIN**, and the two that were already wins roughly DOUBLE them
+(0.563x -> 0.272x). `flipud 1-D` goes from paying 360 ns over numpy to beating it by 41.
+
+**THE `from list` CONTROL MOVED THIS TIME, AND THAT IS CORRECT.** In the previous cycle
+(`deadlock-audit-yhg7k`) it was stationary, because that lever was an identity-`asarray` skip which
+by construction cannot help a list operand. This lever is inside `build_flip_view`, which EVERY
+path reaches, so the list case improves too (1.684x -> 1.071x). A control is only a control against
+the specific mechanism it was chosen for - the same cell is informative in one cycle and expected
+to move in the next, and reading it the other way would have been a false alarm.
+
+**`frombuffer` is the control here instead**: a different function, untouched by this ship, and it
+does not move (2.031x -> 2.014x, 1.369x -> 1.369x).
+
+`flip` also picked up the two fixes its siblings already had: `cached_numpy` instead of `py.import`
+in the fallback, `axis` passed positionally (numpy's second positional parameter) rather than
+through a kwargs dict, and the identity-`asarray` skip.
+
+PARITY: 11 dtypes x 6 shapes x {flipud, fliplr} plus 8 layout/non-array cases; `np.flip` over 4
+dtypes x 3 shapes x up to 9 axis forms (including `axis=(0,1)`, `axis=(-1,)`, and the erroring
+`axis=99` / `axis=(0,0)`) plus 5 more operand kinds x 2 axis forms; and the `frombuffer` suite.
+Compared on dtype, shape, `type()`, five flags, RAW BYTES **and the `np.shares_memory` aliasing
+relation** - the last is essential here because every one of these ops must return a VIEW.
+**4 divergences before, 4 after, 0 introduced** - all four the known open `np.matrix` subclass
+defect. 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^16 f64 = 512 KB.
+
+RETRY PREDICATE: the flip family is DONE and is now a win at every shape measured except
+`flipud(list)` at 1.071x, where the residual is the `asarray` conversion a list genuinely needs.
+Do not re-attack `build_flip_view`. **The reusable finding is `py.import` of a NON-numpy module:
+`py.import("builtins")` costs the same as `py.import("numpy")` and the standing note only ever
+named numpy** - grep for `py.import(` with any argument, and for any construction of an immutable
+constant (a `slice`, a small tuple, a sentinel) inside a per-call path. The `np.matrix` subclass
+defect across flipud/fliplr/flip remains open and needs `ndarray_subclass_needs_numpy` plus its own
+parity run.
+AGENT_NAME=TanBridge.
