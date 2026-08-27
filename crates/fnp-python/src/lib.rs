@@ -53723,20 +53723,61 @@ fn irfftn(
 // the result is bit-identical AND shares memory like numpy (the previous native
 // path materialized a full copy, which was both ~25x slower and a behavior
 // divergence). Dtype-agnostic: works for every dtype, not just 8-byte numerics.
+/// The two slice objects every flip view is built from, held for the life of the process
+/// (`deadlock-audit-lxt2l`).
+///
+/// `slice(None)` and `slice(None, None, -1)` are IMMUTABLE and constant - there is nothing about
+/// them that can differ between calls - yet `build_flip_view` was importing `builtins`, fetching
+/// the `slice` class off it, and CONSTRUCTING both of them on every `flipud`/`fliplr`/`flip`.
+/// Priced with `timeit` against the installed interpreter on this host:
+///
+/// ```text
+///   import builtins        250.1 ns      slice(None)           32.8 ns
+///   builtins.slice          16.3 ns      slice(None, None,-1)  37.5 ns
+/// ```
+///
+/// ~337 ns of per-call setup against `np.flipud` finishing the WHOLE call in 259.4 ns. Holding
+/// them turns all four into a pointer deref. (`py.import` is the same 382.5 ns-class hazard as
+/// `py.import("numpy")`; it is not a `sys.modules` lookup.)
+fn cached_slice_full(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static SLICE_FULL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(SLICE_FULL
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(py
+                .import("builtins")?
+                .getattr(intern!(py, "slice"))?
+                .call1((py.None(),))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_slice_reversed(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static SLICE_REV: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(SLICE_REV
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(py
+                .import("builtins")?
+                .getattr(intern!(py, "slice"))?
+                .call1((py.None(), py.None(), -1i64))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
 fn build_flip_view<'py>(
     py: Python<'py>,
     arr: &Bound<'py, PyAny>,
     mask: &[bool],
 ) -> PyResult<Bound<'py, PyAny>> {
-    let builtins = py.import("builtins")?;
-    let slice_cls = builtins.getattr(intern!(py, "slice"))?;
-    let full = slice_cls.call1((py.None(),))?; // slice(None) -> whole axis
-    let rev = slice_cls.call1((py.None(), py.None(), -1i64))?; // slice(None, None, -1)
-    let items: Vec<Bound<'py, PyAny>> = mask
-        .iter()
-        .map(|&flip| if flip { rev.clone() } else { full.clone() })
-        .collect();
-    arr.get_item(PyTuple::new(py, items)?)
+    let full = cached_slice_full(py)?;
+    let rev = cached_slice_reversed(py)?;
+    arr.get_item(PyTuple::new(
+        py,
+        mask.iter()
+            .map(|&flip| if flip { rev } else { full })
+            .collect::<Vec<_>>(),
+    )?)
 }
 
 #[pyfunction]
@@ -53744,20 +53785,22 @@ fn build_flip_view<'py>(
 fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     let m_for_fallback = m.clone_ref(py);
     let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    // Held module handle, and `axis` positionally - it is numpy's second positional
+    // parameter (`deadlock-audit-lxt2l`). `py.import` is 382.5 ns/call, not a
+    // `sys.modules` lookup.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let kwargs = PyDict::new(py);
-        if let Some(ax) = &axis_for_fallback {
-            kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
+        let flip_fn = cached_numpy(py)?.getattr(intern!(py, "flip"))?;
+        match &axis_for_fallback {
+            Some(ax) => Ok(flip_fn
+                .call1((m_for_fallback.bind(py), ax.bind(py)))?
+                .unbind()),
+            None => Ok(flip_fn.call1((m_for_fallback.bind(py),))?.unbind()),
         }
-        Ok(numpy
-            .getattr(intern!(py, "flip"))?
-            .call((m_for_fallback.bind(py),), Some(&kwargs))?
-            .unbind())
     };
 
     let numpy = cached_numpy(py)?;
-    let arr = numpy.call_method1(intern!(py, "asarray"), (m.bind(py),))?;
+    // Identity skip, same as flipud/fliplr (`deadlock-audit-yhg7k`).
+    let arr = flip_operand_as_array(py, numpy, m.bind(py))?;
     let ndim = arr.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
 
     // Resolve the set of axes to reverse into a per-axis boolean mask. Any
