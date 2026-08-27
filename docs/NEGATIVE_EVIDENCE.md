@@ -63324,3 +63324,103 @@ has no fitted table next to it should be treated as unmeasured.** `par_copy_slic
 candidate - `PAR_COPY_MIN` and `COPY_CHUNK` are BOTH `1 << 16`, so [2^16, 2^17) gets one chunk and
 1M elements get only 16 chunks on a 64-thread host; it is UNMEASURED and its ops (append/insert/
 delete/resize) were never triaged.
+
+## 2026-08-27 - WIN (SHIP): a parallel memcpy gated at 65536 ELEMENTS made `roll` and `pad` lose a whole band they had been winning - 3.083x -> 0.709x, and the triage that chose the cell ruled out the lever I came for (`franken_numpy-par-copy-gate`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)     bench_elf_sha256=15878f244a2b74a854a28e01aab1aed8bb8ffbfd40836bd2d95b50a04f84d52d
+executing elf sha256 (DISCOVERY)  bench_elf_sha256=3a58f46411e5c0cf5a79089f1910b168fbd98c696782d101a6d5b295c07e043c
+executing elf sha256 (AFTER)      bench_elf_sha256=c47765d4719dd28b45dbe53246ec9e062feb2e304cb1fc0bea3d1d64592d8861
+```
+
+### THE TRIAGE REJECTED THE LEVER I CAME FOR
+
+The previous row nominated `par_copy_slice` (`PAR_COPY_MIN == COPY_CHUNK == 1 << 16`) as the next
+gate defect, and the obvious move was to fix the CHUNK the way the flatnonzero family was fixed.
+Triaging the copy family first - 36 cells over append/insert/delete/resize/concatenate/tile/
+repeat/copy/roll at 2^16..2^20, dual-null - said otherwise:
+
+```
+  copy      65536   1.101x     copy     131072  1.025x     copy   262144  1.015x
+```
+
+**`copy` itself has no room**, so chunk-splitting it would have measured nothing. What the triage
+DID surface, readable and unprompted, was `roll 262144` at **2.529x** and `delete 131072` at
+2.068x. That is the second time this session that ranking before sweeping changed the target.
+
+### THE DEFECT: AN ELEMENT COUNT WHERE BYTES WERE MEANT, AND FAR TOO LOW
+
+`roll` showed a DISCONTINUITY, not a slope: 0.674x at 65536 and **2.629x at 98304** - 4.9x worse
+fnp time for 1.5x the data. `roll` and `pad` both copy through `par_copy_slice`, whose gate fires
+at 65536 ELEMENTS with a fixed 65536 chunk. A roll of 65529 elements stays serial; 98297 goes
+parallel and collapses.
+
+Two mistakes in one line. It is an ELEMENT count on a function generic over `T` (8x wrong for the
+u8 byte-roll path relative to f64), and 65536 elements is far below where a parallel memcpy can
+pay at all - a serial `copy_from_slice` is already bandwidth-saturating there, so the rayon
+fan-out is pure overhead.
+
+COUNTED_MECHANISM: at 98304 f64 elements the serial copy costs 16139.1 ns and the parallel one
+70387.4 ns - 4.4x worse - and the two only cross at 2097152, where serial is 629958.6 and parallel
+536890.0. A discovery build that never parallelises isolates the two kernels on the same code,
+`np.roll` f64, fnp ns:
+
+```
+         n        serial     parallel
+     32768        5954.8       6168.4    (below the old gate - identical by construction)
+     98304       16139.1      70387.4    <- 4.4x WORSE parallel
+    262144       41087.0     133993.7
+   1048576      152979.6     360154.1
+   2097152      629958.6     536890.0    <- parallel finally pays
+   4194304    17230810.7     5873787.1   <- 2.9x better parallel
+```
+
+The crossover is between 2^20 and 2^21 f64 elements - between 8 MB and 16 MB of destination - so
+the gate is now **16 MB of BYTES**, which is the same threshold whatever `T` is. The chunk is
+`parallel_block_for(len, 1 << 16)` rather than a fixed 65536.
+
+### THE MEASUREMENT
+
+BEFORE -> AFTER against numpy, both ops, dual nulls:
+
+```
+  roll      98304   3.083x -> 0.709x    LOSS -> WIN
+  roll     262144   2.721x -> 0.836x    LOSS -> WIN
+  roll    1048576   1.381x -> 0.894x    LOSS -> WIN
+  roll    4194304   0.442x -> 0.406x    already a win, kept
+  pad       98304   2.197x -> 0.585x    LOSS -> WIN
+  pad      262144   2.412x -> 0.779x    LOSS -> WIN
+  pad     1048576   1.193x -> 0.896x    LOSS -> WIN
+  pad     4194304   0.428x -> 0.350x    already a win, kept
+  roll/pad  32768   0.535x / 0.348x     BELOW the gate either way - unchanged, the control
+  roll/pad  65536   0.661x / 0.492x     unchanged
+```
+
+**Six cells cross from a LOSS to a WIN and the two large-n wins are preserved** - the point of a
+byte gate rather than simply deleting the parallel path. The two small sizes are the control: they
+were below the old gate and are below the new one, and they do not move.
+
+PARITY: 579 cells - 7 dtypes (float64/32, int64/32, uint8, bool, complex128) x 9 sizes (0, 1, 7,
+and both sides of BOTH the old gate at 65535/65536/98304 and the new one at 2097152/2097153) x 6
+shifts including 0, negative, `n` and `n+5` (the wrap cases), plus `pad` at three widths and 2-D
+`roll` with `axis=0/1/None` on two shapes, comparing dtype, shape and raw bytes: **0 divergences**.
+General parity 5320 cells -> 1 divergence, identical on the pre-change build (pre-existing
+`deadlock-audit-neu7z`). Both byte-order oracles unchanged (1 integer / 26 float). 660 error/edge
+cells identical. 655 lib tests pass. clippy `-D warnings` and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 2^22 float64 = 32 MB, two live (input and rolled output).
+
+RETRY PREDICATE: **`delete` at 131072 is still 2.068x and was NOT touched here** - it is the other
+readable loss the copy triage surfaced, it has its own `DELETE_PAR_MIN = 1 << 16`, and whether it
+shares this cause is unmeasured. That is the next cell. This is now the THIRD parallel-gate defect
+in three rows, so the general rule stands and is worth stating plainly: **a gate constant that is
+a round power of two, with no fitted table beside it, is unmeasured - and if the function is
+generic over `T`, an element-count gate is a bug independent of its value.** Remaining constants
+of that shape: `INSERT_PAR_MIN`, `DELETE_PAR_MIN`, `COPYTO_PAR_MIN`, `RAVEL_PAR_MIN`,
+`UNRAVEL_PAR_MIN`, `SCATTER_PAR_MIN`, `SELECT_PAR_MIN` (all `1 << 16`), and `TRI_FILL_PAR_MIN`
+(`1 << 20`).

@@ -16929,11 +16929,31 @@ fn try_zerocopy_int_select(
 #[inline]
 fn par_copy_slice<T: Copy + Send + Sync>(dst: &mut [T], src: &[T]) {
     use rayon::prelude::*;
-    const PAR_COPY_MIN: usize = 1 << 16;
-    const COPY_CHUNK: usize = 1 << 16;
-    if dst.len() >= PAR_COPY_MIN && rayon::current_num_threads() >= 2 {
-        dst.par_chunks_mut(COPY_CHUNK)
-            .zip(src.par_chunks(COPY_CHUNK))
+    // GATE IN BYTES, AND MEASURED. This was `dst.len() >= 1 << 16` with a fixed `1 << 16` chunk,
+    // which is two separate mistakes: it is an ELEMENT count on a function generic over `T`, and
+    // 65536 elements is far too small for a parallel memcpy to pay - a serial `copy_from_slice`
+    // is already bandwidth-saturating there, so the rayon fan-out is pure overhead. It made
+    // `roll` and `pad` LOSE across a whole band they had been winning. Measured, `np.roll` f64,
+    // fnp ns, serial vs the old parallel:
+    //
+    //         n        serial     parallel
+    //     32768        5954.8       6168.4     (below the old gate; identical by construction)
+    //     98304       16139.1      70387.4     <- 4.4x WORSE parallel; ratio 0.705x vs 3.083x
+    //    262144       41087.0     133993.7     <- 0.841x vs 2.721x
+    //   1048576      152979.6     360154.1     <- 0.936x vs 1.764x
+    //   2097152      629958.6     536890.0     <- parallel finally pays
+    //   4194304    17230810.7    5873787.1     <- 2.9x better parallel
+    //
+    // The crossover sits between 2^20 and 2^21 f64 elements, i.e. between 8 MB and 16 MB of
+    // destination, so the gate is 16 MB of BYTES - which is the same threshold whatever `T` is,
+    // where an element count would have been 8x too low for the u8 byte-roll path.
+    const PAR_COPY_MIN_BYTES: usize = 1 << 24;
+    if dst.len().saturating_mul(std::mem::size_of::<T>()) >= PAR_COPY_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+    {
+        let chunk = parallel_block_for(dst.len(), 1 << 16);
+        dst.par_chunks_mut(chunk)
+            .zip(src.par_chunks(chunk))
             .for_each(|(d, s)| d.copy_from_slice(s));
     } else {
         dst.copy_from_slice(src);
