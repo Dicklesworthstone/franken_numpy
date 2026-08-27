@@ -61372,3 +61372,83 @@ only the values.** The four dtypes wrong here were value-identical, so every val
 passed. Worth running against the other promoting entries (`asarray` with dtype=, `astype`
 wrappers, the `nan*` family) - none of which has been checked this way.
 AGENT_NAME=TanBridge.
+
+## 2026-08-27 - A DTYPE-ONLY AUDIT OF 1800 CELLS FOUND ONE MORE DEFECT, AND THE OBVIOUS FIX FOR IT COSTS 432 INSTRUCTIONS PER CALL WHILE THE RIGHT ONE COSTS 23 (`franken_numpy-dtype-promotion-audit`)
+
+`TanBridge`. Shipped `84e1c3b2`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1. Class: CORRECTNESS fix, with a
+COUNTED_MECHANISM for the placement decision.
+
+```
+executing elf sha256 (BEFORE)          bench_elf_sha256=9c71216f7d012e6f11115094adb23e21bdeaf63ef600165d9cc1a5b2c28cfd5d
+executing elf sha256 (UP-FRONT, REJECTED) bench_elf_sha256=152876cc53d53dac3b8d3d7f6474e50acc8c7eb0ce2d9ad363d067ad66e64bcd
+executing elf sha256 (AFTER)           bench_elf_sha256=32c99318d3942df7ce51ce27cadb24067c563b435033a884d84d1d19be0cb94b
+```
+
+### THE AUDIT
+
+The `sort_complex` row one entry above found a dtype-promotion defect whose VALUES were
+identical to numpy's, so every value-comparing test passed. That is a whole defect class no
+existing check in this repo could see, so it got its own instrument: assert the output DTYPE and
+python `type()` ONLY, across everything.
+
+1800 cells - 65 unary entries x 15 dtypes, 30 binary x 15 dtypes, and 30 binary x 11 MIXED dtype
+pairs where promotion is hardest (`int8`/`int64`, `uint64`/`int64`, `float32`/`complex64`,
+`bool`/`int8`, ...). **Exactly one further defect survived**, which is the reassuring outcome:
+
+```
+  np.searchsorted(float64 haystack, complex64 needles) -> array([1, 6, 6, 7])   int64
+  fnp                                                  -> TypeError: searchsorted(v): expected
+                                                          a bool/int/uint/float array
+```
+
+numpy promotes both sides to the common complex type, searches lexicographically, and returns
+ordinary int64 indices. Every dispatch in `searchsorted` keys on the HAYSTACK's kind, so a real
+haystack picked a real route and only died later, extracting `v`. **The mirrored case - complex
+haystack, real needles - already worked**, which is why nothing had noticed.
+
+### THE PLACEMENT IS THE RESULT, AND I GOT IT WRONG FIRST
+
+The obvious fix is an up-front probe of the needle dtype. I wrote that first. It is a permanent
+tax on every call in order to serve the one call that raises:
+
+COUNTED_MECHANISM: the up-front `dtype.kind` probe costs +432 instructions per call on the hot
+path - 11,576 -> 12,008 for an ndarray needle, baseline-subtracted over 31,000 calls, 2 reps per
+arm, rep-to-rep spread under 0.5%.
+
+Delegating FROM THE EXTRACTION FAILURE instead costs nothing on any call that succeeds:
+11,546 -> 11,569 instructions per call, **+23 (0.2%)**. Same correctness, 19x cheaper, and it
+lets numpy own the wording of any error that is genuinely an error - which is what this function
+already does deliberately for an invalid `side` and for a non-1-D haystack.
+
+**WALL-CLOCK COULD NOT DECIDE THIS.** At loadavg 28-30 the same pair read n=65536 as 1.359x ->
+1.055x and 1.458x -> 1.179x on two repeats (AFTER faster) after a first run said 1.395x ->
+2.246x (AFTER slower). Three runs, two directions. The instruction diff is deterministic to
+0.5% and answered in one shot. This is the third time this session that a counted diff settled
+something the harness could not.
+
+### A PROBE BUG, RECORDED BECAUSE IT ALMOST BANKED A FALSE DEFECT
+
+My own parity probe reported a `sorter` divergence. It was not real: the probe called
+`rng.standard_normal(4)` separately for each arm, so the two arms searched DIFFERENT needles.
+Fixed to draw the needles once - 0 divergences of 2. **An A/B that regenerates its input per arm
+is not an A/B**, and it fails in the direction of inventing defects.
+
+PARITY: 12 haystack dtypes x 12 needle dtypes x 2 sides, plus python float/int/complex, list,
+list-of-complex, tuple-of-complex, `np.complex64`, `np.complex128`, 2-D needles, 0-d, empty,
+string needle, `None`, a bare object, a sorter with real AND complex needles,
+string/datetime64/timedelta64 haystacks, an invalid `side`, and a 2-D haystack - on dtype,
+shape, python `type()` and RAW BYTES. **0 divergences of 310.** Dtype audit 3 -> 0 of 1800.
+654 lib tests pass; clippy and fmt clean.
+
+MEMORY: every operand <= 64 elements.
+
+RETRY PREDICATE: the dtype audit is CLEAN at 0 of 1800 and lives at
+`scratchpad/dtype_promotion_audit.py` - **re-run it after any change to a promoting route rather
+than re-deriving it**, and extend it rather than writing a new one. It covers unary entries,
+same-dtype binaries and 11 mixed pairs; it does NOT yet cover `out=` forms, `dtype=` overrides,
+axis forms, or 0-d/empty inputs, and those are where the next instance of this class would hide.
+**The transferable rule: when a fix must inspect an argument to decide whether it can be served,
+try to place the inspection ON THE FAILURE PATH rather than ahead of it** - here that was the
+difference between +432 and +23 instructions per call, and the two versions are otherwise
+identical in behaviour. AGENT_NAME=TanBridge.
