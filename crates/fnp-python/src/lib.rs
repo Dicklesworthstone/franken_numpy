@@ -50730,9 +50730,11 @@ fn nanmax(
     if !native_minmax_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
-    // Integer input cannot contain NaN, so nannanmax == the plain reduction; route to
-    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
-    if numpy_dtype_is_integer(py, a.bind(py))? {
+    // Integer input cannot contain NaN, so nanmax == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path. BOOL BELONGS
+    // HERE TOO and was missing - see the `nanmin` twin for the measurement (nanmax bool was
+    // 125.81x slower than numpy at 2^20, content-independent).
+    if numpy_dtype_is_integer(py, a.bind(py))? || numpy_dtype_is_bool(py, a.bind(py)) {
         return fallback();
     }
     // Zero-copy SIMD f64 fast path (axis=None): ~8x faster than the extract → scalar
@@ -50921,9 +50923,20 @@ fn nanmin(
     if !native_minmax_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
-    // Integer input cannot contain NaN, so nannanmin == the plain reduction; route to
+    // Integer input cannot contain NaN, so nanmin == the plain reduction; route to
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
-    if numpy_dtype_is_integer(py, a.bind(py))? {
+    //
+    // BOOL BELONGS HERE TOO, and was missing. `numpy_dtype_is_integer` matches dtype kinds 'i'
+    // and 'u' only, while `native_minmax_preserves_dtype` immediately above deliberately ADMITS
+    // bool - so a bool array passed BOTH guards and fell through to the generic extract, which
+    // widens it to f64. Measured against live numpy at 2^20: nanmin 234.85x slower, nanmax
+    // 125.81x. Every other dtype was already at parity or winning (int8 1.03x ... float64
+    // 0.79x), which is what isolates this to the one kind neither predicate covered.
+    //
+    // CONTENT-INDEPENDENT, checked because numpy's bool `min` can early-exit on the first False
+    // and that would flatter the comparison: all-True reads 60.04x and all-False 445.08x, so the
+    // defect is the route, not the input.
+    if numpy_dtype_is_integer(py, a.bind(py))? || numpy_dtype_is_bool(py, a.bind(py)) {
         return fallback();
     }
     // Zero-copy SIMD f64 fast path (axis=None): ~9x faster than the extract → scalar
