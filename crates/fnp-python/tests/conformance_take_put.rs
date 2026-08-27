@@ -95,7 +95,8 @@ print(ok)
 }
 
 #[test]
-fn take_f64_flat_integer_containers_match_numpy_without_shape_or_error_shortcuts() -> Result<(), String> {
+fn take_f64_flat_integer_containers_match_numpy_without_shape_or_error_shortcuts()
+-> Result<(), String> {
     let script = fnp_script(
         r#"
 def take_outcome(fn, indices):

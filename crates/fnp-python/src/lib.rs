@@ -25754,7 +25754,9 @@ fn take(
     // A flat Python list/tuple is an ordinary np.take index spelling.  It cannot
     // enter the ndarray-buffer gathers below without first allocating an int64
     // ndarray, so consume its existing integer objects directly.
-    if let Some(out) = try_zerocopy_f64_container_take(py, a.bind(py), indices.bind(py), axis, mode)? {
+    if let Some(out) =
+        try_zerocopy_f64_container_take(py, a.bind(py), indices.bind(py), axis, mode)?
+    {
         return Ok(out);
     }
     // Zero-copy flat gather for the common case (axis=None, mode="raise", f64 a +
