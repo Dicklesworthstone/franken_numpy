@@ -8801,12 +8801,24 @@ fn zerocopy_f64_transcendental(
             // Same invalid set as arcsin, infinities included (`deadlock-audit-2qjj3`).
             |value, _| value.abs() > 1.0,
         ),
-        UnaryOp::Arctanh => transcendental_map_f64(
-            input,
-            output,
-            |x| UnaryOp::Arctanh.apply(x),
-            |value, _| value.abs() == 1.0 || (value.is_finite() && value.abs() > 1.0),
-        ),
+        UnaryOp::Arctanh => {
+            // `f64::atanh(+-inf)` sets the host FP invalid flag. Detect it BEFORE calling
+            // libm: a post-compute deferral would retain that flag and NumPy's fallback ufunc
+            // would then record a second RuntimeWarning. Finite event inputs retain the fused
+            // map because their scalar route does not leak an extra event on this platform.
+            if input.iter().any(|cell| cell.get().is_infinite()) {
+                false
+            } else {
+                transcendental_map_f64(
+                    input,
+                    output,
+                    |x| UnaryOp::Arctanh.apply(x),
+                    // NumPy's finite arctanh event set is |v| >= 1: the boundary has
+                    // divide-by-zero and values outside it have invalid.
+                    |value, _| value.abs() >= 1.0,
+                )
+            }
+        }
         UnaryOp::Arccosh => transcendental_map_f64(
             input,
             output,
@@ -8824,6 +8836,25 @@ fn zerocopy_f64_transcendental(
             true
         }
     }
+}
+
+/// True only for the exact float64 contiguous array shape that the native unary route accepts.
+/// `arctanh(+-inf)` needs this probe before its native dispatcher begins: its generic fallback
+/// records an fnp float event, whereas NumPy must own the entire call to emit exactly one warning.
+fn exact_f64_array_contains_infinity(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !x.get_type().is(cached_ndarray_type(py)?)
+        || !x
+            .getattr(intern!(py, "dtype"))?
+            .is(cached_float64_dtype(py)?)
+    {
+        return Ok(false);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(false);
+    };
+    Ok(buffer
+        .as_slice(py)
+        .is_some_and(|values| values.iter().any(|cell| cell.get().is_infinite())))
 }
 
 fn zerocopy_f64_unary_flat<'py>(
@@ -65632,6 +65663,15 @@ fn arctanh(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kw| kw.is_empty()) && args.len() == 1 {
+        let x = args.get_item(0)?;
+        // `f64::atanh(+-inf)` and fnp's generic float-error recorder each contribute an
+        // invalid event. Sending this exact native-input shape to NumPy before either runs
+        // preserves NumPy's one-warning ufunc contract.
+        if exact_f64_array_contains_infinity(py, &x)? {
+            return core_numpy_passthrough_interned(py, intern!(py, "arctanh"), args, kwargs);
+        }
+    }
     native_unary_promoting_or_passthrough(
         py,
         args,
@@ -163110,7 +163150,11 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                     ],
                 ),
                 // Still deferring, and must stay correct.
-                ("arctanh", 0.5, vec![1.0, -1.0, 2.0, f64::NAN]),
+                (
+                    "arctanh",
+                    0.5,
+                    vec![1.0, -1.0, 2.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN],
+                ),
                 ("exp", 1.0, vec![1000.0, -1000.0, f64::NAN]),
             ];
             for (name, anchor, operands) in cases.iter() {
@@ -163223,6 +163267,47 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                     );
                 }
             }
+            Ok(())
+        });
+    }
+
+    /// The native arctanh map must defer infinities: values alone agree, but libm's
+    /// floating-point flags otherwise make its warning count differ from NumPy's ufunc.
+    /// This is intentionally a warning-count assertion, so the old `is_finite()` predicate
+    /// cannot pass merely by returning the same NaN value.
+    #[test]
+    fn arctanh_infinity_warning_count_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array = numpy.getattr("array")?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"import warnings\ndef capture(f, x):\n    with warnings.catch_warnings(record=True) as w:\n        warnings.simplefilter('always')\n        r = f(x)\n    return (r.tobytes(), r.dtype.str, sorted(m.category.__name__ for m in w))\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let capture = locals
+                .get_item("capture")?
+                .expect("warning capture fixture must exist");
+            let operand = array.call1((vec![0.5_f64, f64::NEG_INFINITY],))?;
+            let expected = capture.call1((numpy.getattr("arctanh")?, operand.clone()))?;
+            let actual = capture.call1((module.getattr("arctanh")?, operand))?;
+            assert_eq!(
+                actual.get_item(0)?.extract::<Vec<u8>>()?,
+                expected.get_item(0)?.extract::<Vec<u8>>()?,
+                "arctanh([0.5, -inf]): output bytes diverged from NumPy"
+            );
+            assert_eq!(
+                actual.get_item(2)?.extract::<Vec<String>>()?,
+                expected.get_item(2)?.extract::<Vec<String>>()?,
+                "arctanh([0.5, -inf]): warning count/category diverged from NumPy"
+            );
             Ok(())
         });
     }
