@@ -61841,3 +61841,92 @@ the histogram floor. The blanket delegate is REFUTED for it (regresses 2^12 from
 1.495x); it needs a SIZE GATE measured on a host at loadavg < 5, which this was not. The cheapest
 next probe is a size sweep of bool `median` from 2^11 to 2^20 on a quiet host to find where the
 native path stops winning. AGENT_NAME=TanBridge.
+
+## 2026-08-27 - numpy's `argsort` FINISHES A SORTED OPERAND IN O(n) AND EVERY NATIVE ROUTE HERE PAID FULL PRICE FOR IT: 15.569x -> 1.171x, and the first gate I wrote was itself a measured regression (`franken_numpy-argsort-ascending`)
+
+`TanBridge`. Shipped `a87d6120`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 13 rounds, dual A/A null, slots sized by TIME,
+OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)          bench_elf_sha256=c2cf53ba1c9b6b6758ac1e0005b6df9a191919168a3603a52bdd5df1c6f2df43
+executing elf sha256 (UNGATED, REJECTED) bench_elf_sha256=80805e1d5329fee42973f4df60c85ba4eaca8847dd4b00f8ed7a614cc268dbeb
+executing elf sha256 (AFTER)           bench_elf_sha256=f2801cceeecb68308e2e2cc36e0e8c94e09d411b88b266dbe312768e2b23a731
+```
+
+### HOW IT WAS FOUND, AND WHY THE TRIAGE HEADLINE WAS WRONG
+
+A fresh contiguous sweep nominated `argsort float64 2^20` at 1.629x with the largest absolute
+headroom in the repo. **That number was load-inflated** - the sweep ran at loadavg 39-87, and on
+a quiet host the same cell reads 1.055x. Re-measuring the nominee before attacking it is what
+this ledger already requires, and it mattered here: the real defect was not the one nominated.
+
+What the quiet re-measure found instead was a shape, not a cell: `argsort` DELEGATES below 2^20
+(~1.00x) and engages natively above it, where a COUNTED instruction diff settled what wall-clock
+could not - fnp executes **248.8M instructions per call against numpy's 83.5M, 2.98x**, on a 2^20
+int32 argsort. At 237 instructions per element that is a comparison/radix pass, not a counting
+sort.
+
+### THE REGIME MAP, REPLICATED 3/3
+
+The route is NOT uniformly stale, and that is why it was not deleted:
+
+```
+  input (int32/int64, 2^22)      ratio
+  sorted int32                   5.16 / 5.66 / 5.00x  LOSS
+  full-range random int32        1.49 / 1.52 / 1.59x  LOSS
+  reverse-sorted int32           0.60 / 0.58 / 0.59x  WIN
+  full-width random int64        0.285 / 0.351 / 0.364x  WIN
+```
+
+The sorted case is the extreme, and it is dtype-wide at 2^20: int32 31.398x, uint32 28.483x,
+float32 27.791x, float64 22.770x, int64 20.292x. **`sort` does not share it** (0.054x-1.03x on
+the identical inputs), which isolates the defect to `argsort` rather than to shared machinery.
+
+### THE FIX, AND THE GATE THAT IS THE REAL RESULT
+
+`flat_ndarray_is_ascending` short-circuits AT THE FIRST INVERSION, so unsorted data answers after
+~2 element reads. NaN makes every comparison false, so NaN-bearing floats report "not ascending"
+and keep their route.
+
+```
+ARGSORT_ASCENDING worker=thinkstation1 numpy_version=2.4.3 profile=release
+  cells with PASSING nulls in BOTH runs
+
+  SORTED float64 2^20     15.569x [9.809,22.285]  -> 1.171x [1.149,1.225]   DISJOINT
+  SORTED-VALUES i32 2^20  15.035x [13.651,17.158] -> 1.204x [1.186,1.217]   DISJOINT
+  SORTED int64 2^20       13.191x [10.453,15.124] -> 1.196x [1.112,1.234]   DISJOINT
+  SORTED float32 2^20     10.596x [6.706,18.529]  -> 1.241x [1.213,1.268]   DISJOINT
+  -- CONTROLS, unsorted, must not move --
+  ctl random i64 2^20      0.696x -> 0.668x     ctl random i32 2^16  0.999x -> 1.003x
+  ctl random i32 2^20      2.173x/2.236x -> 2.145x/2.183x  (focused repeats)
+```
+
+**THE FIRST VERSION OF THE GATE WAS A MEASURED REGRESSION.** Ungated by size, the probe ran below
+2^20 where NO native argsort route engages at all - so on sorted input it paid an O(n) scan and
+collected nothing: `sorted i32 2^16` went **1.012x [1.000,1.049] -> 1.200x [1.189,1.210], both
+nulls passing, CIs DISJOINT.** Gated on `ARGSORT_NATIVE_MIN_N` it reads 1.006x [0.987,1.032].
+
+`ARGSORT_PARALLEL_MIN` was a local `1 << 20` repeated in NINE argsort gates and now references one
+module-level constant, so the probe and the routes it guards cannot drift. **This is the second
+time this session that a REACHABILITY gate was the entire result** - the `nanmedian` reroute was
+the first, and it failed the same way for the same reason: an optimisation that only pays above a
+floor must not run below it.
+
+PARITY: 13 dtypes x 6 shapes x 3 orderings (random/sorted/reversed) x 7 axis+kind forms, plus
+all-equal, sorted-with-duplicates, sorted-plus-NaN, NaN-first, -0.0, +/-inf, sorted uint64,
+sorted subclass, sorted strided and a sorted list, all at 2^20 where the guard is live - on
+dtype, shape, python `type()` and RAW BYTES. **0 divergences of 1671.** Subclass audit 10 of 198
+and dtype audit 0 of 1800, both unchanged. 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^22 int64 = 32 MB, one live.
+
+RETRY PREDICATE: the ascending guard is DONE - do not ungate it by size (1.012x -> 1.200x is what
+that costs), and do not extend it to axis forms without measuring, since a per-lane answer costs a
+full pass. **STILL OPEN and measured: `argsort` on FULL-RANGE random int32 is 1.837x-2.236x
+replicated, and reverse-sorted int32 1.585x-1.877x** - but full-width random int64 is a 0.668x
+WIN, so THE ROUTE MUST NOT SIMPLY BE DELETED the way `sort_complex`'s tail was. The next probe is
+a value-range sweep of the int radix at fixed n to find where its pass count stops paying, on a
+host at loadavg < 5. AGENT_NAME=TanBridge.
