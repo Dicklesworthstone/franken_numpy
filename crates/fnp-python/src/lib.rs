@@ -52273,10 +52273,30 @@ fn try_zerocopy_f32_nanargextreme(
             *best = Some((idx, v));
         }
     };
-    // Mirror the f64 gate: parallel single-pass beats numpy's copy+argmax from ~1<<18 up.
-    const NANARG_PARALLEL_MIN: usize = 1 << 18;
+    // FITTED, not mirrored from the f64 sibling. The comment here used to say "mirror the f64
+    // gate" and used `1 << 18`; f64's serial loop is competitive with numpy's (1.042x at 65536)
+    // and f32's is NOT (numpy vectorises f32 8 lanes wide), so copying f64's threshold left a
+    // whole band of f32 on a serial path that loses. Measured, float32 `nanargmax`, fnp ns,
+    // serial (gate 1<<18) against parallel (gate dropped to 1<<12 for the measurement):
+    //
+    //        n       serial    parallel     numpy
+    //    16384      16531.5     61507.7   12691.3   <- serial wins
+    //    32768      32361.5     59858.1   18427.7   <- serial wins
+    //    65536      63541.4     62633.7   28937.0   <- a wash, both lose ~2.2x
+    //   131072     126258.5     57077.6   48428.6   <- parallel wins, 2.595x -> 1.179x
+    //   262144      66184.1     59570.3   85894.7
+    //
+    // The parallel arm costs a near-constant ~60 us (it is ~1 us per rayon task at 64 tasks), so
+    // it only pays once the serial pass exceeds that - which happens just under 2^17. Below
+    // that the constant dominates and at 4096 it is 8.4x.
+    const NANARG_PARALLEL_MIN: usize = 1 << 17;
     let best = if n >= NANARG_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
+        // `n / threads`, NOT a floored chunk. A 16384-element floor was BUILT AND MEASURED here
+        // and is REJECTED: it made every size worse (262144 went 0.688x -> 1.637x, 131072
+        // 1.179x -> 2.559x) because this reduction wants MORE chunks, not fewer - the partial
+        // per chunk is a single `Option<(usize, f32)>`, so the merge is trivial and extra
+        // parallelism is nearly free.
         let chunk = n.div_ceil(rayon::current_num_threads());
         let partials: Vec<Option<(usize, f32)>> = data
             .par_chunks(chunk)
