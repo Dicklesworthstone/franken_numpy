@@ -80,7 +80,7 @@ success** — one line, revert, next lever, no retraction narrative.
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
-- **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-07-05` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
+- **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-08-25` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
 - **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes, plus narrow layout-checked views of native result buffers) for zero-copy fast paths. Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 9 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.

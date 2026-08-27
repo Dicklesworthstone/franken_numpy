@@ -1801,7 +1801,7 @@ empty = np.empty\n",
             let allocated = numpy
                 .call_method1(pyo3::intern!(py, "empty"), (n, "int64"))
                 .expect("numpy.empty");
-            assert!(copied.get_type().is(&allocated.get_type()), "copy type");
+            assert!(copied.get_type().is(allocated.get_type()), "copy type");
             assert_eq!(
                 copied.getattr("dtype").unwrap().str().unwrap().to_string(),
                 "int64",

@@ -18,7 +18,7 @@ source_id=$(git hash-object "$source_file")
 preflight_bin="$common_dir/fnp-perf-ledger-preflight-$source_id"
 
 if [ ! -x "$preflight_bin" ]; then
-    rustc +nightly-2026-07-05 --edition 2024 "$source_file" -o "$preflight_bin"
+    rustc +nightly-2026-08-25 --edition 2024 "$source_file" -o "$preflight_bin"
 fi
 
 cd "$repo_root"

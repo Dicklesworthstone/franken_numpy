@@ -88094,7 +88094,7 @@ where
                 let acc = if parallel {
                     data.par_chunks(1 << 14)
                         .map(&lane_fold)
-                        .reduce_with(&fold)
+                        .reduce_with(fold)
                         .unwrap()
                 } else {
                     lane_fold(data)

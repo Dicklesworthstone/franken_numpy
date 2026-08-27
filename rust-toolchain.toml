@@ -15,5 +15,5 @@
 #   is hidden, otherwise ci.yml is silently missed).
 # After the bump, the 12 living files above should match nightly-<NEW-DATE>;
 # the 3 frozen records keep the old pin verbatim.
-channel = "nightly-2026-07-05"
+channel = "nightly-2026-08-25"
 components = ["rustfmt", "clippy"]

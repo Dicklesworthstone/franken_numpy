@@ -275,7 +275,7 @@ cargo test  --workspace      # 6,392 tests
 cargo test  --workspace --all-features
 ```
 
-Requirements: **Rust nightly `nightly-2026-07-05`**, pinned in `rust-toolchain.toml` and mirrored in `.github/workflows/ci.yml` via the `RUST_TOOLCHAIN` env var (single source of truth).
+Requirements: **Rust nightly `nightly-2026-08-25`**, pinned in `rust-toolchain.toml` and mirrored in `.github/workflows/ci.yml` via the `RUST_TOOLCHAIN` env var (single source of truth).
 
 ### Python access via the `fnp_python` PyO3 extension
 
@@ -1130,7 +1130,7 @@ FrankenNumPy parallelizes per operation rather than globally: an op runs `rayon`
 | `numpy.__all__` parity | Tracked against the **live numpy on the build host**, whatever that version is. The structural lock-in test (`fnp_python_covers_full_numpy_all`) catches any new name that numpy adds to `__all__`. New names fail CI until explicitly added to the re-export block. |
 | RNG bit-exactness | Promised vs **PCG64DXSM** specifically, the algorithm NumPy 1.20+ ships as its high-quality default. Other bit generators (PCG64, MT19937, Philox, SFC64) match their upstream NumPy counterparts at the wire-stream level. |
 | `.npy` / `.npz` round-trip | Promised for NPY 1.0 and 2.0 formats with every supported dtype. NumPy 3.0 will introduce a new format version; FrankenNumPy will follow once the format is finalized. |
-| Rust toolchain | Pinned to `nightly-2026-07-05` in both `rust-toolchain.toml` and `.github/workflows/ci.yml` (`env.RUST_TOOLCHAIN`). Bumps are scheduled, coordinated, and CI-verified before merge. |
+| Rust toolchain | Pinned to `nightly-2026-08-25` in both `rust-toolchain.toml` and `.github/workflows/ci.yml` (`env.RUST_TOOLCHAIN`). Bumps are scheduled, coordinated, and CI-verified before merge. |
 | Edition | Rust 2024. |
 | MSRV vs MSRRust | The minimum is also the maximum. We pin a specific nightly rather than supporting a range, because some used features (`let-chains`, certain `const fn` capabilities) graduated through nightly during the project's lifetime. |
 | Public Rust API | Will likely receive a major reshape before `0.2.0`. Treat 0.x as exploratory; do not load-bear on `UFuncError` variant names or on undocumented method signatures yet. |
@@ -1142,7 +1142,7 @@ FrankenNumPy parallelizes per operation rather than globally: an op runs `rayon`
 
 A concrete checklist for "make my numerical pipeline bit-reproducible from a fresh checkout, on any compatible machine, today and three years from now."
 
-1. **Pin the toolchain.** Add `rust-toolchain.toml` with a specific nightly. We use `nightly-2026-07-05`.
+1. **Pin the toolchain.** Add `rust-toolchain.toml` with a specific nightly. We use `nightly-2026-08-25`.
 2. **Pin every dependency.** Use exact `=x.y.z` constraints in `Cargo.toml`, not caret/tilde. Commit `Cargo.lock`.
 3. **Use an explicit RNG seed for reproducibility.** `Generator::from_pcg64_dxsm(seed)` for new code; `SeedMaterial::None` intentionally sources OS entropy like NumPy.
 4. **Spawn child streams for parallelism, not OS entropy.** `let mut parent = SeedSequence::new(&[seed])?; let children = parent.spawn(n_workers)?;` gives each worker a child stream. The full lineage is captured in the spawn counter, so child indices reproduce.
@@ -2023,7 +2023,7 @@ The workspace ships **7 fuzz crates** with **27 fuzz targets** and **~200 curate
 ```bash
 cargo install cargo-fuzz
 cd crates/fnp-io/fuzz
-cargo +nightly-2026-07-05 fuzz run fuzz_npy -- -max_total_time=300
+cargo +nightly-2026-08-25 fuzz run fuzz_npy -- -max_total_time=300
 ```
 
 ---
@@ -2081,7 +2081,7 @@ The three libraries above are excellent in their target domains; FrankenNumPy is
 ```
 franken_numpy/
 ├── Cargo.toml                         # Workspace root (10 crates)
-├── rust-toolchain.toml                # nightly-2026-07-05 (single source of truth)
+├── rust-toolchain.toml                # nightly-2026-08-25 (single source of truth)
 ├── CHANGELOG.md                       # Capability-area changelog
 ├── docs/
 │   ├── planning/                      # Design spec, porting plan, parity matrix, audits
@@ -2397,7 +2397,7 @@ Surface-wise yes: `fnp-python` exposes **100% of `numpy.__all__`** (499/499 name
 Oracle tests. We run the same operations with the same inputs in both NumPy and FrankenNumPy and compare outputs to floating-point tolerance. For RNG, the comparison is bit-exact. The G3 CI gate enforces `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects pure-Python fallback oracle output.
 
 **Why Rust nightly?**
-Rust Edition 2024. The toolchain is pinned to `nightly-2026-07-05` for reproducibility; see `rust-toolchain.toml` and the `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`, which is the single source of truth for the CI gates.
+Rust Edition 2024. The toolchain is pinned to `nightly-2026-08-25` for reproducibility; see `rust-toolchain.toml` and the `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`, which is the single source of truth for the CI gates.
 
 **Why zero unsafe code?**
 Memory safety is a core value. 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]` and contain zero hand-written unsafe. `fnp-python` is the one that doesn't: PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point, and the boundary crate uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts`) for layout-checked zero-copy views of borrowed Python buffers and a few native result buffers. That unsafe is confined to `fnp-python`; the `codebase_hygiene` tests enforce that the numeric core stays unsafe-free.
