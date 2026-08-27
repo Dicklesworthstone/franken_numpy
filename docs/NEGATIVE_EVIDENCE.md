@@ -62442,3 +62442,107 @@ guards and add `numpy_dtype_is_native_fN` for buffer-read guards, then audit all
 for direction. The 560-cell oracle is the acceptance test and it already names every cell, so
 that audit is checkable rather than speculative. UNMEASURED, and it is a large enough change that
 it should be done in one sitting with the oracle run before and after.
+
+## 2026-08-27 - WIN (SHIP): the byte-order defect is not a float defect - INTEGERS were wrong too, 67 known cells down to 29, and one guard turned a wrong VALUE into a RAISE until it was moved to the op entry (`franken_numpy-byteorder-int`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+The class is nominal and the row is a CORRECTNESS row: the measured perf effect is a small COST,
+stated below, not a gain.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=75a087aee3e129a4145d00ba31ebf26f92376fa48c449a5e3a21e0fc1a084a95
+executing elf sha256 (AFTER)   bench_elf_sha256=c8c4f0b5c0585d28bb024a2d9bd2629dee3f81c3935b1e7ebc18ae6a98a79f01
+```
+
+### THE FLOAT ORACLE WAS ASKING TOO NARROW A QUESTION
+
+Both previous rows measured byte order on FLOAT dtypes only. An integer probe (28 ops x
+`i8`/`>i8`/`i4`/`>i4`/`u8`/`>u8`/`i2`/`>i2`) found **33 more wrong-value cells**: `cumsum`,
+`cumprod`, `diff`, `ediff1d`, `absolute`, `negative`, `square`, `ptp` and `unique` all returned
+byte-reversed results on big-endian integers. `fnp.absolute` on `>i8` returned
+**72057594037927938 for -3**.
+
+Total known defect at the start of this row: **67 cells (34 float + 33 integer)**.
+
+ROOT SHAPE, and it is systematic: **86 typed dispatchers in this file select a Rust type with
+`match (kind.as_str(), itemsize)`, and both of those fields are blind to byte order** -
+`np.dtype('>i8')` reports kind `'i'`, itemsize 8 and char `'l'` exactly as native int64 does. The
+selected `PyBuffer::<i64>::get` then ACCEPTS the array, and the output is allocated with the
+INPUT's dtype, so wrong values come back correctly labelled and nothing raises. There are 482
+inline `dtype.kind` reads; there is no shared choke point.
+
+COUNTED_MECHANISM: integer oracle 33 wrong-value cells before and 1 after; float oracle
+(560 cells) 34 before and 28 after; 67 -> 29 total, with 0 regressions in either oracle.
+
+### `dtype_is_native_order`, AND THE 8 SITES IT NOW GUARDS
+
+One predicate (`dtype.byteorder` in `'='`/`'|'` - `'|'` is the 1-byte widths where order is
+meaningless, and NumPy normalises `'<i8'` on a little-endian host to `'='`). Applied to
+`zerocopy_i64_unary_flat`, `zerocopy_i32_unary_flat`, `zerocopy_narrow_int_unary_flat`,
+`try_zerocopy_int_diff`, `try_zerocopy_int_ediff1d`, `try_zerocopy_int_ptp`,
+`try_zerocopy_int_cumsum`, `try_zerocopy_int_cumprod`, `try_zerocopy_int_unique` and
+`try_zerocopy_int_unique_full`.
+
+### A GUARD THAT MADE THINGS WORSE, AND WHY DECLINING IS NOT ENOUGH
+
+Guarding `try_zerocopy_int_diff` turned `>u8` `diff` from a wrong VALUE into a **ValueError**:
+
+```
+ValueError: to_storage: value at index 0 (-2) cannot be represented exactly as u64
+            through the temporary Vec<f64> storage bridge
+```
+
+Declining a zero-copy route does not send the operand to NumPy - it sends it to the route
+UNDERNEATH, which is another native-order reader, and for `uint64` `diff` that one is an f64
+storage bridge that cannot represent a wrapping difference. A pre-existing latent defect,
+invisible until the wrong route stopped swallowing it. **Trading a wrong value for an exception
+is still a regression**, so `diff` and `ediff1d` take the guard at their PUBLIC ENTRY instead,
+where `fallback()` already delegates to NumPy. That also fixed the FLOAT `diff`/`ediff1d` cells
+for free, which is why the float oracle moved without a single float route being touched.
+
+### THE COST, AND WHY IT IS REPORTED IN ns AND NOT AS A RATIO
+
+Every guard is one `dtype.byteorder` read on the NATIVE fast path - the only path anyone runs.
+Two paired runs, the second with the arm order reversed:
+
+```
+  run 1 (load 19.86 / 11.45):  GUARDED median 0.968x   CONTROL median 0.983x
+  run 2 (load  7.82 /  7.17):  GUARDED median 0.986x   CONTROL median 0.989x
+```
+
+**The control (`sqrt`/`exp` float64, which reach no guarded route) moved as much as the guarded
+cells did, in both runs.** A median ratio here would be reporting run-to-run drift, so the
+per-cell figures are the honest ones - n=16, after minus before:
+
+```
+  diff     int16   0.965x -> 1.017x   +71.2 ns     (entry guard: 3 attribute reads)
+  ediff1d  int32   1.131x -> 1.163x   +51.1 ns     (entry guard)
+  square   int32   2.294x -> 2.433x   +38.5 ns     (route guard: 1 attribute read)
+  absolute int16   2.383x -> 2.468x   +32.4 ns     (route guard)
+  unique   int32   0.492x -> 0.515x   +30.0 ns     (route guard)
+```
+
+`diff int16` at n=16 crosses from a WIN to a marginal LOSS (0.965x -> 1.017x, replicated
+0.960x -> 1.046x). That cell is bought with the correctness fix and is not disguised here.
+
+PARITY: 5320 cells raw-byte -> 1 divergence, identical on the pre-change build (pre-existing
+`deadlock-audit-neu7z`). 660 error/edge cells identical. 655 lib tests pass. clippy `-D warnings`
+and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 4096 elements.
+
+RETRY PREDICATE: **29 cells still wrong** - 1 integer (`>i8 unique`, which reaches a wide-int
+setop route none of these ten guards cover) and 28 float. The float remainder is NOT reachable by
+site guards: those routes are gated by `numpy_dtype_is_f64`/`_f32`/`_f16`, and tightening those
+is REFUTED (previous row: 35 fixed / 22 broken, because the same predicate is also read inverted
+as a delegate guard). The design that can work is the SPLIT - keep `numpy_dtype_is_fN` blind, add
+`numpy_dtype_is_native_fN`, convert only the ~80 functions where the predicate immediately
+precedes a `PyBuffer::get`, and audit each for direction. `dtype_is_native_order` already exists
+for this and makes each conversion a one-line change. **Both oracles must be run before and
+after** - `scratchpad/byteorder_wide.py` (560 float cells) and `scratchpad/intswap.py` (integer
+cells); they are what caught the 22-regression variant and the ValueError, neither of which any
+test in the repo detects. AGENTS.md bars a scripted sweep, so budget the ~80 edits as hand work.

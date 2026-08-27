@@ -9428,6 +9428,12 @@ fn zerocopy_i64_unary_flat<'py>(
     // Exact int64 only: kind 'i', itemsize 8. Other widths/signedness (int32,
     // uint*, etc.) have their own wrap range and stay on the fallback.
     let dtype = x.getattr(intern!(py, "dtype"))?;
+    // ...and NATIVE order, which kind/itemsize cannot see: `>i8` reports kind 'i' itemsize 8 and
+    // was read here with its bytes reversed (`fnp.absolute` on `>i8` returned 72057594037927938
+    // for -3).
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "i"
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
@@ -9524,6 +9530,10 @@ fn zerocopy_i32_unary_flat<'py>(
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
+    // Native order too; kind/itemsize are blind to it and `>i4` was read byte-reversed.
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "i"
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
     {
@@ -9679,6 +9689,49 @@ where
 // 64). For unsigned, abs is identity (numpy). Each width extracted to an f64 Vec
 // and rebuilt otherwise — 170-850x slower than numpy — and the f64 round-trip
 // mis-wrapped square. Returns None for other dtypes / non-ndarray.
+/// True when this dtype's in-memory layout matches the host's native byte order.
+///
+/// **The precondition every typed zero-copy dispatcher needs and almost none of them state.**
+/// `dtype.kind`, `dtype.itemsize` and `dtype.char` are ALL blind to byte order -
+/// `np.dtype('>i8')` reports kind `'i'`, itemsize 8, char `'l'` exactly as native `int64` does -
+/// so a `(kind, itemsize)` match happily dispatches a BIG-ENDIAN array into the `i64` typed
+/// core, whose `PyBuffer::<i64>::get` accepts it and reads the bytes in the wrong order. The
+/// output is then allocated with the input's own dtype, so wrong values come back correctly
+/// labelled and nothing anywhere raises.
+///
+/// `'='` is native, `'|'` is not-applicable (1-byte widths and bool, where order is
+/// meaningless). NumPy normalises an explicitly-native spelling - `'<i8'` on a little-endian
+/// host - to `'='`, so this admits exactly the arrays whose layout matches the typed core's
+/// assumption and no others.
+fn dtype_is_native_order(dtype: &Bound<'_, PyAny>) -> bool {
+    dtype
+        .getattr(intern!(dtype.py(), "byteorder"))
+        .and_then(|order| order.extract::<char>())
+        .is_ok_and(|order| matches!(order, '=' | '|'))
+}
+
+/// True for an exact ndarray whose dtype is NOT in the host's native byte order.
+///
+/// **Declining one zero-copy route is not always enough.** The route underneath it is usually
+/// another native-order reader, so a byte-swapped operand that falls through lands somewhere
+/// equally wrong - and for `uint64` `diff` that next route is an f64 storage bridge which does
+/// not merely answer wrongly, it RAISES (`cannot be represented exactly as u64`). Whole ops whose
+/// every internal path assumes native order should hand the operand to numpy at the entry
+/// instead, which is what `fallback` already does for every other reason.
+///
+/// Returns false for anything that is not an exact ndarray, so lists, scalars and subclasses are
+/// unaffected.
+fn ndarray_is_byteswapped(py: Python<'_>, x: &Bound<'_, PyAny>) -> bool {
+    let Ok(ndarray_type) = cached_ndarray_type(py) else {
+        return false;
+    };
+    if !x.is_exact_instance(ndarray_type) {
+        return false;
+    }
+    x.getattr(intern!(py, "dtype"))
+        .is_ok_and(|dtype| !dtype_is_native_order(&dtype))
+}
+
 fn zerocopy_narrow_int_unary_flat<'py>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -9696,6 +9749,11 @@ fn zerocopy_narrow_int_unary_flat<'py>(
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
+    // Measured wrong before this guard: `absolute`, `negative` and `square` on `>i2`/`>i4`/
+    // `>i8`/`>u8` all returned values read with their bytes reversed.
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
@@ -19301,6 +19359,10 @@ fn try_zerocopy_int_cumsum(
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // `kind`/`itemsize` are byte-order blind; `>i8` was read with its bytes reversed.
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     // numpy promotes a bool cumsum to an int64 accumulator. bool buffers export '?'
     // (PyBuffer<u8> rejects it) so read the 0/1 bytes via a zero-copy uint8 view. Was
     // falling through to the f64-bridge extract path (~3.7x slower than numpy).
@@ -20377,6 +20439,10 @@ fn try_zerocopy_int_cumprod(
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // `kind`/`itemsize` are byte-order blind; `>i8` was read with its bytes reversed.
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     let mul_i64 = |x: i64, y: i64| x.wrapping_mul(y);
     let mul_u64 = |x: u64, y: u64| x.wrapping_mul(y);
     // numpy promotes a bool cumprod to an int64 accumulator (the 0/1 product never
@@ -21302,6 +21368,10 @@ fn try_zerocopy_int_diff(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
+    // `kind`/`itemsize` are byte-order blind; `>i8` was read with its bytes reversed.
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if kind != "i" && kind != "u" {
         return Ok(None);
@@ -21674,6 +21744,10 @@ fn try_zerocopy_int_ediff1d(py: Python<'_>, ary: &Bound<'_, PyAny>) -> PyResult<
         return Ok(None);
     }
     let dtype = ary.getattr(intern!(py, "dtype"))?;
+    // `kind`/`itemsize` are byte-order blind; `>i8` was read with its bytes reversed.
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if kind != "i" && kind != "u" {
         return Ok(None);
@@ -40085,6 +40159,13 @@ fn diff(
         }
         Ok(diff_fn.call(args, Some(&call_kwargs))?.unbind())
     };
+
+    // A byte-swapped operand belongs to numpy, and it has to be decided HERE. Declining only the
+    // zero-copy route drops `>u8` into the f64 storage bridge, which RAISES on a wrapping
+    // difference rather than answering; every native route below reads bytes in host order.
+    if ndarray_is_byteswapped(py, a.bind(py)) {
+        return fallback();
+    }
 
     // Fused prepend=/append= SCALAR form (n=1, 1-D, axis collapses): numpy
     // composes concatenate-then-diff; the fused arm computes boundary elements
@@ -105115,6 +105196,10 @@ fn try_zerocopy_int_unique(py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<
     let dtype = item.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // `kind`/`itemsize` are byte-order blind; `>i8` was read with its bytes reversed.
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     let out = match (kind.as_str(), itemsize) {
         ("i", 1) => {
             unique_counting_typed::<i8>(py, numpy, item, "int8", |x| x as i128, |v| v as i8)?
@@ -105346,6 +105431,10 @@ fn try_zerocopy_int_unique_full(
     let dtype = item.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // `kind`/`itemsize` are byte-order blind; `>i8` was read with its bytes reversed.
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     macro_rules! run {
         ($t:ty, $name:expr, $narrow:expr) => {
             unique_counting_full_typed::<$t>(
@@ -111056,6 +111145,10 @@ fn try_zerocopy_int_ptp(
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // `kind`/`itemsize` are byte-order blind; `>i8` was read with its bytes reversed.
+    if !dtype_is_native_order(&dtype) {
+        return Ok(None);
+    }
     match (kind.as_str(), itemsize) {
         ("i", 1) => ptp_typed::<i8, _>(py, numpy, a, "int8", |x, y| x.wrapping_sub(y)),
         ("i", 2) => ptp_typed::<i16, _>(py, numpy, a, "int16", |x, y| x.wrapping_sub(y)),
@@ -117182,6 +117275,13 @@ fn ediff1d(
             .call((ary_ref.bind(py),), Some(&kwargs))?
             .unbind())
     };
+
+    // A byte-swapped operand belongs to numpy, decided here for the same reason as in `diff`:
+    // declining only the zero-copy route drops `>u8` into the f64 storage bridge, which raises
+    // rather than answering.
+    if ndarray_is_byteswapped(py, ary.bind(py)) {
+        return fallback();
+    }
 
     // BOOL MUST RAISE, NOT COMPUTE. `np.ediff1d` on a boolean array raises
     // `TypeError: numpy boolean subtract, the `-` operator, is not supported`, because it is
