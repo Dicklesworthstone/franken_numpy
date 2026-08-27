@@ -60491,3 +60491,82 @@ axis reductions go through extract-and-rebuild and need `ndarray_subclass_needs_
 anything that indexes, slices or views can take the cheaper no-conversion fix used here. Do not
 apply one remedy blindly to the list - that is how a correctness pass becomes a perf regression.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - FIVE SEPARATE FUNCTIONS SERVE THE UNARY FAMILY, AND `rint`/`sign` WERE THE TWO NOBODY HAD COUNTED: subclass audit 40 -> 35, no perf cost (`deadlock-audit-ljn3e`)
+
+`TanBridge`. Shipped `d1cefffa`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1, loadavg 9.91-13.35.
+
+This row makes NO performance claim and declares no campaign result class: it is a CORRECTNESS
+fix, and the cells exist only to show it cost nothing.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=2c22f04380516d64092bae322a356e6517aaa38b6c27b919cefc7daa1a6a5ac1
+executing elf sha256 (AFTER)  bench_elf_sha256=a8d128e11767bb4729e4ee3a29c22462c18ff4ac02f98045040b70e0ff1a9ed2
+```
+
+Applies the rule `deadlock-audit-h79ek` established - classify each op by how it BUILDS its result,
+then pick the remedy - to three more of the audit's remaining divergences.
+
+### EXTRACT-AND-REBUILD -> DELEGATE, AND THE ROUTE COUNT IS THE FINDING
+
+`rint` and `sign` are the **FOURTH and FIFTH** routes into the unary family, after
+`native_unary_elementwise`, `native_unary_promoting` and `native_rounding_unary`. Each has its own
+entry, and neither got the guard the other three received across two earlier cycles - so
+`np.rint(np.matrix(a))` and `np.sign(np.matrix(a))` still came back plain `ndarray` long after the
+"unary family" was believed fixed.
+
+**Five separate functions serve one user-visible family.** That count is the real result here. A
+guard placed "in the unary family" means nothing until every route is enumerated, and grepping for
+the family name does not enumerate them - `deadlock-audit-1zl3e` already learned this once when
+fixing one route moved the probe 131 -> 128 instead of 131 -> 126, and this is the same lesson
+arriving with three more routes attached.
+
+### INDEXING -> STOP EXCLUDING
+
+`try_zerocopy_trim_zeros` returns `filt[lo:hi]`, which preserves the subclass, but gated on
+`is_exact_instance`. **Excluding subclasses there protected nothing**: it dropped them into the
+extract residual below, which rebuilds a plain `ndarray` and STRIPS the type. Admitting them is
+simultaneously the correctness fix and the fast path - the same shape of fix as the flip family.
+
+```
+UNARY_ROUTE_GUARDS worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  TWO runs per build, interleaved BEFORE/AFTER/BEFORE/AFTER, all nulls PASS
+
+  rint f64 2^8       BEFORE 2.023x, 2.006x   ->   AFTER 2.004x, 1.983x
+  square f64 2^8     BEFORE 1.842x, 1.840x   ->   AFTER 1.853x, 1.869x   (CONTROL, untouched)
+  trim_zeros f64     BEFORE 0.066x WIN       ->   AFTER 0.067x WIN
+  trim_zeros f32     BEFORE 0.064x WIN       ->   AFTER 0.067x WIN
+  negative f64 2^8   BEFORE 1.901x           ->   AFTER 1.912x           (CONTROL, untouched)
+  sqrt f64 2^8       BEFORE 1.338x           ->   AFTER 1.369x           (CONTROL, untouched)
+```
+
+**`rint` moved DOWN while its untouched control moved UP** - 2.023/2.006 -> 2.004/1.983 against
+square's 1.842/1.840 -> 1.853/1.869. Neither movement is real; what the pair establishes is that
+adding an `ndarray_subclass_needs_numpy` check (an `is_exact_instance` pointer compare that
+short-circuits for exact arrays) to a hot path costs nothing measurable. `trim_zeros` keeps its
+~15x win at both dtypes.
+
+**A FIRST READING I DID NOT BANK:** the initial run showed `rint` 1.966x -> 2.003x, which reads as
+a regression. Its AFTER null was **1.1261** - unusable. Re-measured twice per build with clean
+nulls, the BEFORE arm is 2.023/2.006, so the 1.966 was low-side run-to-run spread and there was
+never a regression to explain. The control moving in lockstep is what made that obvious.
+
+Also replaced two `py.import("numpy")` in `rint_native` with `cached_numpy` (382.5 ns each).
+
+PARITY: whole-repo subclass audit **40 -> 35 of 198** (rint x2, sign x2, trim_zeros 1-D x1). The
+unary parity probe is unchanged at 126 divergences before and after - all of them the probe's own
+`longdouble` padding-byte artifact - confirming nothing else moved. 654 lib tests pass; clippy and
+fmt clean.
+
+MEMORY: largest operand 2^20 f64 = 8 MB.
+
+RETRY PREDICATE: **before guarding a "family", enumerate its routes by following every
+`#[pyfunction]` that names the op, not by grepping the family's helper name** - this file has five
+for the unary ops and four for `sort`-like dispatch. The remaining 35 are the axis reductions
+(min/max/any/all/argmin/argmax/cumsum/cumprod/prod), `take`, `unique`, `median`, `round`, `ravel`
+and `count_nonzero(axis=)`; all but `ravel` are extract-and-rebuild and take the delegation
+remedy - `ravel` returns a reshape VIEW and takes the cheap one.
+AGENT_NAME=TanBridge.
