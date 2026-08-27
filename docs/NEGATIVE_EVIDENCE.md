@@ -61930,3 +61930,99 @@ replicated, and reverse-sorted int32 1.585x-1.877x** - but full-width random int
 WIN, so THE ROUTE MUST NOT SIMPLY BE DELETED the way `sort_complex`'s tail was. The next probe is
 a value-range sweep of the int radix at fixed n to find where its pass count stops paying, on a
 host at loadavg < 5. AGENT_NAME=TanBridge.
+
+## 2026-08-27 - THE VARIABLE WAS NEVER THE VALUE RANGE: every native integer argsort SORTS IN FULL AND THEN DISCARDS IT on a single duplicate, and one element decides a 0.227x WIN or a 1.832x LOSS (`deadlock-audit-e56rk`)
+
+`TanBridge`. Shipped `d55106d7`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=f2801cceeecb68308e2e2cc36e0e8c94e09d411b88b266dbe312768e2b23a731
+executing elf sha256 (AFTER)  bench_elf_sha256=ebefc63340be2f7ea895759cade39a70d457489f97ca5fa355330916c36a9497
+```
+
+### THE FILED REGIME MAP POINTED AT THE WRONG VARIABLE
+
+The bead this row closes recorded that the radix loses on full-range int32 and wins on
+full-width int64, and hypothesised the LSD pass count (`nbytes` = significant bytes of the span)
+as the mechanism. **A span sweep refuted that outright**: at fixed n=2^22 the int64 timings were
+wildly non-monotonic in pass count - 6 bytes read 486 ms, 7 bytes read 75 ms, 8 bytes read 236 ms.
+Pass count cannot produce that.
+
+What DOES change with span is the probability of a DUPLICATE. The decisive experiment holds span,
+dtype and n fixed and changes exactly ONE element:
+
+```
+  int32 span 2^31, n=2^22    distinct 0.227x WIN    one duplicate 1.832x LOSS
+  int64 span 2^48, n=2^22    distinct 0.260x WIN    one duplicate 2.084x LOSS
+```
+
+### THE MECHANISM: PAY-IN-FULL, THEN DISCARD
+
+These routes are byte-exact against numpy's UNSTABLE introsort only on tie-free data, because a
+tie's index order is algorithm-specific. So each one sorts and then defers:
+`radix_perm_from_keys` runs the entire LSD radix and then `keys.par_windows(2).any(|w| w[0]==w[1])`
+throws the permutation away; `int_argsort_flat_typed` runs a full `par_sort_unstable_by` and does
+the same. A tie therefore costs fnp's sort AND numpy's re-sort.
+
+The guard that existed was pigeonhole only - `range < lane_len`, the GUARANTEED-tie case. Every
+loss lived in the band above it, where a tie is merely LIKELY. **The helper's own comment already
+named this**: "Only a SUFFICIENT condition - wide-range sparse ties still fall to the tail
+sort-then-defer." The defect was documented and unquantified; this row quantifies and closes it.
+
+### THE FIX IS A PREDICTION, AND THE BET IS ASYMMETRIC
+
+`int_argsort_tie_is_probable` keeps the exact pigeonhole and adds the birthday bound: random
+draws expect `lane_len^2 / (2*range)` duplicate pairs, so a range below `lane_len^2 / 2` expects
+at least one. Declining on a guess is right here because a needless decline costs about 1.0x -
+numpy sorts either way - while a needless engage measured up to 2.650x.
+
+**ONE ORACLE, FIVE ROUTES.** The first attempt was an inline gate in the radix alone and it
+BARELY MOVED THE NUMBERS (1.501x -> 1.387x): it simply handed the work to `int_argsort_flat_typed`,
+which has the identical shape. A defect that lives in a *family* of routes cannot be fixed in one
+of them. The predicate is now shared by the flat, last-axis, axis-0, middle-axis and radix gates.
+
+```
+ARGSORT_TIE_ORACLE worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation, median of 9, n = 2^22, loadavg 6.6-7.3
+
+  RANDOM DRAWS (duplicate near-certain) - the realistic case
+    int32 span 2^23  1.443x -> 0.893x WIN     int64 span 2^24  1.408x -> 1.040x
+    int32 span 2^28  1.390x -> 0.958x WIN     int64 span 2^32  1.539x -> 1.206x
+    int32 span 2^31  1.444x -> 0.882x WIN     int64 span 2^40  1.572x -> 1.376x
+  WINS THAT MUST SURVIVE (duplicates improbable)
+    int64 span 2^48  0.245x -> 0.251x   int64 span 2^62  0.306x -> 0.279x
+    int64 distinct 2^48  0.267x -> 0.292x
+```
+
+**A/A NULL CONTROLS:** the dual-null pair ran at loadavg 13 then 28-37 and most cells read
+BIASED; they are NOT quoted as deltas. The cells with PASSING nulls in BOTH runs are
+`rand int64 2^32` **1.419x [1.351,1.567] -> 1.027x [1.015,1.084], DISJOINT**, and the control
+`int32 2^16` 0.988x -> 1.005x, unchanged. The median-of-9 grid above, taken on a quiet host, is
+the primary evidence and is labelled as such.
+
+### THE PRICE OF THE BET, REPORTED
+
+An artificially DISTINCT array whose range sits below `lane_len^2/2` now delegates and forfeits
+its win: `int32 distinct 2^31` goes **0.416x -> 1.130x**. That is the unique-IDs pattern. It is a
+lost win rather than a regression against numpy, and it is the direct, intended cost of declining
+on a probabilistic prediction. Anyone who wants it back needs an EXACT cheap duplicate oracle,
+which is the open question below.
+
+PARITY: 11 dtypes x 6 shapes x 3 orderings x 7 axis/kind forms, plus distinct / one-duplicate /
+wide-range arrays at 2^20 for four integer dtypes either side of the new threshold, and 2-D lane
+forms for the axis routes that share the oracle - on dtype, shape and RAW BYTES. **0 divergences
+of 1418.** 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^22 int64 = 32 MB, one live.
+
+RETRY PREDICATE: the oracle is DONE and is SHARED - do not add a tie gate to one route without
+routing it through `int_argsort_tie_is_probable`, because that is precisely the mistake that made
+the first attempt worthless. **The open question is an EXACT duplicate oracle cheaper than a
+sort**, which would recover the forfeited distinct-array win AND remove the remaining
+`int64 span 2^32/2^40` losses (1.206x/1.376x, which the birthday bound does not reach because
+those ranges sit above lane_len^2/2 for their n). Sorting keys alone without carrying indices was
+estimated at ~67% of the full cost and is UNMEASURED - that is the next probe, and it should be
+compared against simply widening the birthday threshold, which is free.
