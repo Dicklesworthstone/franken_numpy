@@ -88324,12 +88324,25 @@ fn try_zerocopy_int_minmax(
         .and_then(|s| s.extract())
         .unwrap_or(0);
     if itemsize <= 2 || size < (1 << 23) {
-        let op = if take_min { "min" } else { "max" };
+        // INTERNED, not `getattr("min")` on a bare `&str`: a non-interned `getattr` builds a
+        // fresh PyString every call, counted at ~795 instructions per site in this campaign.
+        // This delegate is the LIVE route for every integer min/max below 2^23 elements - which
+        // is nearly all of them - so it was paying that on the hot path, not a cold one.
+        let op = if take_min {
+            intern!(py, "min")
+        } else {
+            intern!(py, "max")
+        };
         let kwargs = PyDict::new(py);
         if let Some(ax) = axis {
             kwargs.set_item(intern!(py, "axis"), ax)?;
         }
-        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
+        // Only set `keepdims` when it would change the answer. numpy's default is the
+        // `np._NoValue` sentinel and the dict entry is not free; `false` is what "absent" means
+        // for the exact-ndarray operands this path is gated to (`deadlock-audit-30d18`).
+        if keepdims {
+            kwargs.set_item(intern!(py, "keepdims"), true)?;
+        }
         return Ok(Some(numpy.getattr(op)?.call((a,), Some(&kwargs))?.unbind()));
     }
     match (kind.as_str(), itemsize) {
@@ -89444,12 +89457,34 @@ fn py_min(
         return fallback();
     };
 
+    // ONE (rank, kind, itemsize) read that decides which of the gates below can possibly accept
+    // this operand, so the ones that cannot are never entered - the same lever `matmul` and
+    // `sort` already use. Each flag is a NECESSARY condition copied from the gate it guards,
+    // never a sufficient one: a gate that IS entered still decides everything for itself, and
+    // `None` facts (not an exact ndarray) leave every gate running exactly as before.
+    //
+    // The cost this removes is real: an i64 operand used to walk the f64-extremum gate, the
+    // temporal gate and the f64-minmax gate, each re-reading `dtype` and `dtype.kind` and each
+    // allocating a fresh `String` for a one-character kind, before reaching the integer gate
+    // that serves it. `fnp.min` on i64 measured 1.641x numpy at n=256 with ~1050 ns of excess
+    // that is FLAT from n=256 to n=131072.
+    let facts = numeric_operand_facts(py, a.bind(py))?;
+    let maybe_f64 = facts.is_none_or(|f| f.kind == 'f' && f.itemsize == 8);
+    let maybe_int = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u' | 'b'));
+    let maybe_f16 = facts.is_none_or(|f| f.kind == 'f' && f.itemsize == 2);
+    let maybe_f32_or_f16 =
+        facts.is_none_or(|f| f.kind == 'f' && (f.itemsize == 4 || f.itemsize == 2));
+    // `is_some_and`, NOT `is_none_or`, for this one: the temporal branch is the only gate here
+    // that already REQUIRED an exact ndarray, so an unclassifiable operand must skip it rather
+    // than enter it.
+    let is_temporal = facts.is_some_and(|f| f.kind == 'M' || f.kind == 'm');
+
     // Non-contiguous (transposed/strided) ndarrays can't use the zero-copy fold and
     // make the cold extract → native scan ~19-32x slower than numpy's cache-blocked
     // strided reduction. Delegate to numpy up front (before the any-NaN scan inside
     // the f64 fast path, which itself is O(n) on a non-contiguous array).
-    if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
+    // `facts.is_some()` IS the exact-ndarray test, already paid for above.
+    if facts.is_some()
         && !a
             .bind(py)
             .getattr(intern!(py, "flags"))?
@@ -89462,7 +89497,8 @@ fn py_min(
     // Native parallel FLAT f64 min: NumPy's reduction is single-threaded, and
     // selection is order-independent, so the parallel split is exact provided
     // ties keep the LATER element (see `parallel_extremum_f64`). Flat only.
-    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+    if maybe_f64
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(o) = try_zerocopy_f64_extremum_flat(py, a.bind(py), true, keepdims)?
     {
         return Ok(o);
@@ -89486,15 +89522,7 @@ fn py_min(
     // datetime64/timedelta64 min == int64 min (temporal ordering == int64 ordering), the int64
     // result viewed back as the SAME temporal dtype. numpy's temporal reduce is slow; native int64
     // min wins ~7-8x. NaT (i64::MIN) makes numpy propagate NaT -> pre-scan isnat + defer if any.
-    if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndt)
-        && let Ok(kind) = a
-            .bind(py)
-            .getattr(intern!(py, "dtype"))
-            .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-        && (kind == "M" || kind == "m")
-    {
+    if is_temporal {
         if numpy
             .getattr(intern!(py, "isnat"))?
             .call1((a.bind(py),))?
@@ -89514,21 +89542,26 @@ fn py_min(
         };
     }
 
-    match try_zerocopy_f64_minmax(py, a.bind(py), axis_val, keepdims, F64MinMaxOp::Min)? {
-        F64MinMaxFastPath::Output(out) => return Ok(out),
-        F64MinMaxFastPath::DelegateToNumpy => return fallback(),
-        F64MinMaxFastPath::NotApplicable => {}
+    if maybe_f64 {
+        match try_zerocopy_f64_minmax(py, a.bind(py), axis_val, keepdims, F64MinMaxOp::Min)? {
+            F64MinMaxFastPath::Output(out) => return Ok(out),
+            F64MinMaxFastPath::DelegateToNumpy => return fallback(),
+            F64MinMaxFastPath::NotApplicable => {}
+        }
     }
 
     // Zero-copy integer min: total-order autovectorizing fold (the f64 path
     // delegates to numpy, but native int min/max beats numpy's strided reduce).
-    if let Some(out) = try_zerocopy_int_minmax(py, a.bind(py), axis_val, keepdims, true)? {
+    if maybe_int
+        && let Some(out) = try_zerocopy_int_minmax(py, a.bind(py), axis_val, keepdims, true)?
+    {
         return Ok(out);
     }
 
     // f16 FLAT min: numpy widens f16->f32 to reduce (~80ms@16M). A direct uint16-view parallel
     // f32-fold reduce is bit-exact (defers NaN / zero-extremum) and far faster.
-    if axis_val.is_none()
+    if maybe_f16
+        && axis_val.is_none()
         && !keepdims
         && numpy_dtype_is_f16(a.bind(py))
         && let Some(out) = try_zerocopy_f16_minmax_flat(py, a.bind(py), false)?
@@ -89538,7 +89571,8 @@ fn py_min(
     // f16 min ALONG AN AXIS: numpy widens f16->f32 per lane (~76ms@16M, ~12x f64) AND strides for
     // non-last axes. A uint16-view per-lane parallel f32-fold reduce is bit-exact (NaN/zero-extremum
     // defer). Covers last/axis0/middle uniformly.
-    if axis_val.is_some()
+    if maybe_f16
+        && axis_val.is_some()
         && !keepdims
         && numpy_dtype_is_f16(a.bind(py))
         && let Some(out) = try_zerocopy_f16_minmax_axis(py, a.bind(py), axis_val, false)?
@@ -89547,7 +89581,7 @@ fn py_min(
     }
     // f32/f16 min: numpy's native reduction beats fnp's widening extract->f64 scan
     // (8vdtg ceiling, ~1.5-20x slower); delegate.
-    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
+    if maybe_f32_or_f16 && (numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py))) {
         return fallback();
     }
 
@@ -89636,12 +89670,22 @@ fn py_max(
         return fallback();
     };
 
+    // One (rank, kind, itemsize) read that decides which gates can accept this operand - see the
+    // `py_min` twin for the full note and the measurement that motivated it.
+    let facts = numeric_operand_facts(py, a.bind(py))?;
+    let maybe_f64 = facts.is_none_or(|f| f.kind == 'f' && f.itemsize == 8);
+    let maybe_int = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u' | 'b'));
+    let maybe_f16 = facts.is_none_or(|f| f.kind == 'f' && f.itemsize == 2);
+    let maybe_f32_or_f16 =
+        facts.is_none_or(|f| f.kind == 'f' && (f.itemsize == 4 || f.itemsize == 2));
+    let is_temporal = facts.is_some_and(|f| f.kind == 'M' || f.kind == 'm');
+
     // Non-contiguous (transposed/strided) ndarrays can't use the zero-copy fold and
     // make the cold extract → native scan ~19-32x slower than numpy's cache-blocked
     // strided reduction. Delegate to numpy up front (before the any-NaN scan inside
     // the f64 fast path, which itself is O(n) on a non-contiguous array).
-    if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
+    // `facts.is_some()` IS the exact-ndarray test, already paid for above.
+    if facts.is_some()
         && !a
             .bind(py)
             .getattr(intern!(py, "flags"))?
@@ -89653,7 +89697,8 @@ fn py_max(
 
     // Native parallel FLAT f64 max: same structure and same take-later-on-tie
     // rule as the min route above.
-    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+    if maybe_f64
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(o) = try_zerocopy_f64_extremum_flat(py, a.bind(py), false, keepdims)?
     {
         return Ok(o);
@@ -89677,15 +89722,7 @@ fn py_max(
     // datetime64/timedelta64 max == int64 max (temporal ordering == int64 ordering), the int64
     // result viewed back as the SAME temporal dtype. numpy's temporal reduce is slow; native int64
     // max wins ~7-8x. NaT (i64::MIN) makes numpy propagate NaT -> pre-scan isnat + defer if any.
-    if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndt)
-        && let Ok(kind) = a
-            .bind(py)
-            .getattr(intern!(py, "dtype"))
-            .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-        && (kind == "M" || kind == "m")
-    {
+    if is_temporal {
         if numpy
             .getattr(intern!(py, "isnat"))?
             .call1((a.bind(py),))?
@@ -89705,21 +89742,26 @@ fn py_max(
         };
     }
 
-    match try_zerocopy_f64_minmax(py, a.bind(py), axis_val, keepdims, F64MinMaxOp::Max)? {
-        F64MinMaxFastPath::Output(out) => return Ok(out),
-        F64MinMaxFastPath::DelegateToNumpy => return fallback(),
-        F64MinMaxFastPath::NotApplicable => {}
+    if maybe_f64 {
+        match try_zerocopy_f64_minmax(py, a.bind(py), axis_val, keepdims, F64MinMaxOp::Max)? {
+            F64MinMaxFastPath::Output(out) => return Ok(out),
+            F64MinMaxFastPath::DelegateToNumpy => return fallback(),
+            F64MinMaxFastPath::NotApplicable => {}
+        }
     }
 
     // Zero-copy integer max: total-order autovectorizing fold (the f64 path
     // delegates to numpy, but native int min/max beats numpy's strided reduce).
-    if let Some(out) = try_zerocopy_int_minmax(py, a.bind(py), axis_val, keepdims, false)? {
+    if maybe_int
+        && let Some(out) = try_zerocopy_int_minmax(py, a.bind(py), axis_val, keepdims, false)?
+    {
         return Ok(out);
     }
 
     // f16 FLAT max: numpy widens f16->f32 to reduce (~80ms@16M). A direct uint16-view parallel
     // f32-fold reduce is bit-exact (defers NaN / zero-extremum) and far faster.
-    if axis_val.is_none()
+    if maybe_f16
+        && axis_val.is_none()
         && !keepdims
         && numpy_dtype_is_f16(a.bind(py))
         && let Some(out) = try_zerocopy_f16_minmax_flat(py, a.bind(py), true)?
@@ -89729,7 +89771,8 @@ fn py_max(
     // f16 max ALONG AN AXIS: numpy widens f16->f32 per lane (~76ms@16M, ~12x f64) AND strides for
     // non-last axes. A uint16-view per-lane parallel f32-fold reduce is bit-exact (NaN/zero-extremum
     // defer). Covers last/axis0/middle uniformly.
-    if axis_val.is_some()
+    if maybe_f16
+        && axis_val.is_some()
         && !keepdims
         && numpy_dtype_is_f16(a.bind(py))
         && let Some(out) = try_zerocopy_f16_minmax_axis(py, a.bind(py), axis_val, true)?
@@ -89738,7 +89781,7 @@ fn py_max(
     }
     // f32/f16 max: numpy's native reduction beats fnp's widening extract->f64 scan
     // (8vdtg ceiling, ~1.5-20x slower); delegate.
-    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
+    if maybe_f32_or_f16 && (numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py))) {
         return fallback();
     }
 
