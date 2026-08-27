@@ -60650,3 +60650,151 @@ check whether `np.matrix` OVERRIDES the operation** - `np.matrix` reimplements `
 every one of those the method and the function can disagree. The safe default for that list is the
 FUNCTION, gated on `ndarray_subclass_needs_numpy` so non-array operands keep their existing path.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - A THREE-STATE `np._NoValue` ARGUMENT CANNOT BE AN `Option<bool>`: my own earlier repair of that sentinel ANSWERED 500 calls numpy REFUSES, and the strict-bool line alone was 285 of the last 346 divergences (`deadlock-audit-30d18`)
+
+`TanBridge`. Shipped `2f37927f`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1.
+
+This row makes NO performance claim and declares no campaign result class: it is a CORRECTNESS
+fix, and the cells exist only to show it cost nothing. It DOES publish six standing LOSSES it
+measured on the way, listed at the bottom, which are the useful output here.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=6aa981502995c387a9df8dbc0dd1ee9f1f0dcbb60d20e11b74e3ab7cd0d0fbb0
+executing elf sha256 (AFTER)  bench_elf_sha256=d73d0e39f501f4add94b528992b052848d6c4efc01cab8b159bdadc6947640fe
+```
+
+**HOST DISCLOSURE:** loadavg 12.25 of 64 cores with peer benches (`fp-bench-new`,
+`perf_eigh_vs_sc`) running, maximum_observed_busy_fraction ~0.19. Both arms run in the SAME
+invocation so contention hits them equally, and the nulls arbitrate: the AFTER run passes
+60 of 60, the BEFORE run 52 of 56 (four BIASED cells are named below and are not read).
+
+### THE DEFECT, AND THE ONE I PUT THERE MYSELF
+
+numpy defaults `keepdims` to the `np._NoValue` sentinel, so a call has THREE observable states -
+absent, an explicit `bool`, and a value only numpy can interpret - and the OPERAND'S OWN METHOD
+decides which of them raise:
+
+```
+  np.any(np.matrix(a))                 -> np.True_          fnp -> np.True_    (was already ok)
+  np.any(np.matrix(a), keepdims=False) -> TypeError         fnp -> np.True_    <- silently ANSWERED
+  np.sum(a, keepdims=None)             -> TypeError         fnp -> 66.0        <- silently ANSWERED
+  np.sum(a, keepdims=np.True_)         -> TypeError         fnp -> array(66.0) <- silently ANSWERED
+```
+
+The second line is the original bead. **The third line is mine**: I repaired `sum`/`mean`/`std`/
+`var` in `aa76d46d` with `Option<bool>`, and pyo3 maps BOTH an absent argument and an explicit
+`keepdims=None` onto `None`. Two states cannot encode three. The repair was correct about the
+case it was pointed at and wrong one column over, and nothing caught it for ten days because the
+probe that found the first defect never passed `keepdims=None`.
+
+`KeepdimsArg{NotGiven, Native(bool), Delegate(Py<PyAny>)}` with `from_py_with`, built on the
+`DdofArg` pattern already in this file. `native()` hands the kernels a plain `bool` or tells the
+caller to delegate; `set_numpy_kwarg` forwards NOTHING when the argument was absent.
+
+### THE MOST EXPENSIVE LINE WAS THE PARSER, NOT THE PLUMBING
+
+The parser is `cast_exact::<PyBool>`, **NOT** `extract::<bool>()`. `extract::<bool>()` also
+accepts `np.True_` and anything else carrying `__bool__`, while numpy does not. With the whole
+three-state fix in place and `extract` still in the parser, 346 divergences remained; **285 of
+them were that one line.** A permissive extractor on a sentinel argument is not a convenience,
+it is a fourth state invented at the boundary.
+
+### TWO MORE DEFECTS THE PROBE FOUND THAT READING DID NOT
+
+- `min`/`max`/`any`/`all`/`prod` and the whole `nan*` family LOST an ndarray subclass numpy
+  preserves, and silently SUCCEEDED where `matrix.min()` raises. Gated on
+  `ndarray_subclass_needs_numpy`, which an exact ndarray settles on the first pointer compare.
+- `any`/`all` on a 1-D operand reduced along its ONLY axis returned a 0-d ARRAY where numpy
+  returns a `numpy.bool_` SCALAR. Present in BOTH axis routes (`axis_any_all_fold` and
+  `finish_any_all`), which is the tell that it was written twice rather than inherited.
+
+### PARITY
+
+16 ops x 17 operand kinds x 13 keepdims/axis forms = 3536 cases, compared on dtype, shape,
+python `type()` and RAW BYTES plus the error surface (`scratchpad/keepdims_parity.py`).
+
+```
+  BEFORE 1259 divergences of 3536      AFTER 3 of 3536
+    625  err(TypeError) vs ok()          3  bytes (nanvar[list], PRE-EXISTING)
+    500  ok() vs err(TypeError)
+     66  type MyArray vs ndarray
+     20  type MyArray vs float64
+     12  type matrix vs ndarray
+     12  ValueError / 10 TypeError
+      6  type bool vs ndarray
+      4  type MyArray vs bool
+      4  bytes
+```
+
+The 3 survivors are a 1-ULP `nanvar` difference on NON-ndarray operands (`nanvar([[...]])`),
+which predates this change and is a separate defect: the native fold composes differently from
+numpy's two-pass. Whole-repo subclass audit 34 -> 21 of 198. 654 lib tests pass; clippy and fmt
+clean.
+
+### PERFORMANCE: UNCHANGED, WHICH IS THE POINT
+
+Every touched entry gained one type-pointer compare on the ENTRY path, so the cells that could
+show it are the small-n ones. 30 cells, BEFORE -> AFTER:
+
+```
+KEEPDIMS_SENTINEL_PERF worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+
+  any bool 2^16   0.532x -> 0.502x      min f64 2^16    1.202x -> 1.153x
+  all bool 2^16   BIASED -> 0.481x      max f64 2^16    1.182x -> 1.156x
+  any f64 2^8     0.291x -> 0.304x      sum f64 2^16    1.076x -> 1.077x
+  all f64 2^8     0.311x -> 0.318x      mean f64 2^16   1.059x -> 1.060x
+  min f64 2^8     0.933x -> 0.945x      prod f64 2^16   0.982x -> 0.982x
+  max f64 2^8     0.996x -> 0.935x      min i64 2^16    1.198x -> 1.187x
+  prod f64 2^8    BIASED -> 0.750x      sum i64 2^16    1.128x -> 1.123x
+  sum f64 2^8     1.446x -> 1.401x      min 2-D axis=0  1.058x -> 1.050x
+  mean f64 2^8    1.236x -> 1.243x      sum 2-D axis=0  1.072x -> 1.088x
+  std f64 2^8     0.079x -> 0.080x      std 2-D axis=0  0.294x -> 0.290x
+  var f64 2^8     0.085x -> 0.086x      var 2-D axis=1  0.480x -> 0.496x
+  nanmin f64 2^16 BIASED -> 0.688x      sum 2-D keepdim 1.092x -> 1.097x
+  nanmax f64 2^16 BIASED -> 0.699x      min f64 2^20    1.023x -> 1.022x
+  nanstd f64 2^16 0.237x -> 0.232x      sum f64 2^20    1.296x -> 1.073x (both CIs straddle)
+  nanvar f64 2^16 0.239x -> 0.236x      nanprod f64 2^16 0.619x -> 0.630x
+```
+
+**Every cell overlaps its own before/after CI.** No cell regressed. The added gate is not
+visible above the noise, which is the correct outcome for one pointer compare on an entry that
+already costs 500-2400 ns.
+
+**A/A NULL CONTROLS:** AFTER 60 of 60 PASS, worst 0.9905 / 1.0122 against a 2% band; BEFORE 52
+of 56 PASS, worst passing 0.9791. The four BIASED BEFORE cells are `all bool 2^16` (0.9791),
+`prod f64 2^8` (0.9703), `nanmin f64 2^16` (1.0152 / 0.9797) and `nanmax f64 2^16` (1.0513) -
+all four are read only as "unreadable BEFORE", never as a delta.
+
+### THE SIX STANDING LOSSES THIS MEASURED
+
+These are vs-numpy LOSSES on the AFTER build with passing nulls, and they are the useful
+output of this row - not the correctness fix:
+
+```
+  sum f64 2^8       1.401x [1.331,1.453]   excess 696 ns on 256 elements
+  mean f64 2^8      1.243x [1.231,1.282]   excess 629 ns on 256 elements
+  min i64 2^16      1.187x [1.156,1.323]
+  min f64 2^16      1.153x [1.139,1.170]   max f64 2^16 1.156x [1.138,1.181]
+  sum i64 2^16      1.123x [1.111,1.149]
+  sum 2-D keepdims  1.097x [1.083,1.113]   sum 2-D axis=0 1.088x [1.076,1.117]
+```
+
+`sum f64 2^8` is the worst readable cell in this family. Its excess is 696 ns on a 256-element
+operand - CONSTANT-IN-N entry cost, not kernel cost, which is the signature the `dtype.name`
+and `py.import` levers both had.
+
+MEMORY: largest operand 2^20 f64 = 8 MB, one live.
+
+RETRY PREDICATE: the three-state conversion is DONE for sum, mean, std, var, prod, min, max,
+any, all, amin, amax, nanmin, nanmax, nanprod, nanstd, nanvar - do not re-open them. **STILL
+DIVERGENT and verified so on the AFTER build: `nansum`, `nanmean`, `nanmedian`, `nanargmin`,
+`nanargmax`, `ptp`, `median`, `average`.** Do NOT blanket-apply this fix to that list:
+`np.median(a, keepdims=None)` SUCCEEDS where `np.sum(a, keepdims=None)` raises, so **the
+polarity is per-op and each entry needs `np.f(a, keepdims=<each of None/True_/1/False>)` probed
+against the INSTALLED numpy before any Rust is written.** The acceptance tests are
+`scratchpad/keepdims_parity.py` (3536 cases) and `scratchpad/subclass_audit.py` (198).
+AGENT_NAME=TanBridge.
