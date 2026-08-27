@@ -15594,6 +15594,150 @@ fn bench_bool_storage_bytes_median_gate(c: &mut Criterion) {
     });
 }
 
+// The bool median route has opposing measured regimes: its native f64 path wins
+// at 2^12, while NumPy wins in the mid-size band before the 2^20 histogram
+// threshold. Keep the full boundary sweep in one same-process H2H contract so
+// a prospective size gate cannot hide a small-input regression or disturb the
+// independent int32 histogram control.
+fn bench_bool_median_mid_size_vs_numpy_median_gate(c: &mut Criterion) {
+    let _ = c;
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bool_median_mid_size")
+            .expect("bool median mid-size bench module");
+        fnp_python(&module).expect("initialize fnp_python bool median mid-size module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let namespace = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(
+                r#"import numpy as np
+rng = np.random.default_rng(20260827)
+bool_4096 = rng.integers(0, 2, 1 << 12, dtype=np.uint8).view(bool)
+bool_8192 = rng.integers(0, 2, 1 << 13, dtype=np.uint8).view(bool)
+bool_16384 = rng.integers(0, 2, 1 << 14, dtype=np.uint8).view(bool)
+bool_65536 = rng.integers(0, 2, 1 << 16, dtype=np.uint8).view(bool)
+bool_262144 = rng.integers(0, 2, 1 << 18, dtype=np.uint8).view(bool)
+int32_65536 = rng.integers(-1024, 1024, 1 << 16, dtype=np.int32)
+"#,
+            )
+            .expect("bool median mid-size setup CString")
+            .as_c_str(),
+            Some(&namespace),
+            Some(&namespace),
+        )
+        .expect("bool median mid-size setup");
+
+        let rows = [
+            (
+                "median",
+                "bool_4096",
+                namespace.get_item("bool_4096").expect("bool_4096"),
+            ),
+            (
+                "median",
+                "bool_8192",
+                namespace.get_item("bool_8192").expect("bool_8192"),
+            ),
+            (
+                "median",
+                "bool_16384",
+                namespace.get_item("bool_16384").expect("bool_16384"),
+            ),
+            (
+                "median",
+                "bool_65536",
+                namespace.get_item("bool_65536").expect("bool_65536"),
+            ),
+            (
+                "median",
+                "bool_262144",
+                namespace.get_item("bool_262144").expect("bool_262144"),
+            ),
+            (
+                "nanmedian",
+                "bool_65536",
+                namespace.get_item("bool_65536").expect("bool_65536"),
+            ),
+            (
+                "nanmedian",
+                "bool_262144",
+                namespace.get_item("bool_262144").expect("bool_262144"),
+            ),
+            (
+                "median",
+                "int32_65536_control",
+                namespace.get_item("int32_65536").expect("int32_65536"),
+            ),
+        ];
+
+        for (operation, input_label, input) in rows {
+            let numpy_fn = numpy.getattr(operation).expect("numpy median callable");
+            let fnp_fn = module.getattr(operation).expect("fnp median callable");
+            common::report_numpy_incumbent_identity(py, operation, &numpy_fn);
+            assert!(
+                !numpy_fn.is(&fnp_fn),
+                "dispatch trap: incumbent {operation} resolved to our callable"
+            );
+            common::report_incumbent_topology(
+                &format!("fnp.{operation}"),
+                &format!("numpy.{operation}"),
+            );
+
+            let candidate = fnp_fn.call1((&input,)).expect("fnp median parity");
+            let incumbent = numpy_fn.call1((&input,)).expect("numpy median parity");
+            assert_workload_outputs_equal(
+                &numpy,
+                &format!("bool_median_mid_size_{operation}_{input_label}"),
+                &[candidate],
+                &[incumbent],
+            );
+
+            let mut observe_incumbent = || {
+                let started = Instant::now();
+                let output = numpy_fn
+                    .call1((black_box(&input),))
+                    .expect("numpy median arm");
+                common::ContractObservation {
+                    elapsed: started.elapsed(),
+                    checksum: workload_checksum(&numpy, &[output]),
+                }
+            };
+            let mut observe_candidate = || {
+                let started = Instant::now();
+                let output = fnp_fn.call1((black_box(&input),)).expect("fnp median arm");
+                common::ContractObservation {
+                    elapsed: started.elapsed(),
+                    checksum: workload_checksum(&numpy, &[output]),
+                }
+            };
+            let row = format!("bool_median_mid_size_{operation}_{input_label}");
+            let (effect, incumbent_null, candidate_null) = common::run_dual_null_median_ci_contract(
+                &row,
+                &mut observe_incumbent,
+                &mut observe_candidate,
+            );
+            let verdict =
+                common::dual_null_contract_verdict(effect, incumbent_null, candidate_null);
+            println!(
+                "BOOL_MEDIAN_MID_SIZE row={row} verdict={verdict} \\
+                 incumbent_median_ns={:.3} candidate_median_ns={:.3} \\
+                 ratio_median={:.6} ratio_ci95=[{:.6},{:.6}] \\
+                 incumbent_null_ratio={:.6} candidate_null_ratio={:.6} \\
+                 harness=same-invocation-dual-null",
+                effect.arm_a_median_ns,
+                effect.arm_b_median_ns,
+                effect.ratio_median,
+                effect.ratio_ci_low,
+                effect.ratio_ci_high,
+                incumbent_null.ratio_median,
+                candidate_null.ratio_median,
+            );
+        }
+    });
+}
+
 fn main() {
     common::gated_main_with_source(
         include_str!("criterion_python_median_gate.rs"),
@@ -15605,6 +15749,10 @@ fn main() {
             (
                 "bench_bool_public_vs_numpy_median_gate",
                 bench_bool_public_vs_numpy_median_gate,
+            ),
+            (
+                "bench_bool_median_mid_size_vs_numpy_median_gate",
+                bench_bool_median_mid_size_vs_numpy_median_gate,
             ),
             (
                 "bench_flat_all_any_vs_numpy_median_gate",
