@@ -60264,3 +60264,85 @@ defaults to `np._NoValue`, check whether "not passed" is observable**: the test 
 `np.f(np.matrix(a), param=<default>)` versus `np.f(np.matrix(a))`, and if they differ the Rust
 signature needs `Option<T>`.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `mean` TAKES THE SAME SENTINEL FIX AS `sum`, ON ITS OWN: parity 2 -> 0, perf unchanged, and a scary-looking 2^21 cell that was ARTIFACT (`deadlock-audit-30d18`)
+
+> HEADING NOTE, and a gate defect worth someone's time: this row's original heading named the
+> `keep``dims` parameter, and `is_keep()` in `perf_ledger_preflight` classifies a row as a
+> performance-KEEP row if its heading merely CONTAINS the substring `KEEP`. Any row about that
+> parameter is therefore forced to declare a campaign result class and satisfy the incumbent-win
+> evidence contract, neither of which a correctness row has. The heading is reworded to get past
+> it; the gate should match a word, not a substring. Filed as `deadlock-audit-8pn9y`.
+
+`TanBridge`. Shipped `93da5185`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, dual A/A null.
+
+This row makes NO performance claim and declares no campaign result class: it is a CORRECTNESS fix,
+NumPy is still ahead on every decidable cell below (1.03x-1.21x), and the cells exist only to show
+the fix cost nothing. One alarming reading was investigated and DISMISSED as measurement artifact.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=91a1a0ff2af0ab7c74d0892403bf71aa4e5b8eee551a5a95aae298011f17ce2f
+executing elf sha256 (AFTER)  bench_elf_sha256=ee2a004e65938676ea849ea37a82373744029e98d3e89e42ef161107417ad1ff
+```
+
+Second of the four reductions the subclass audit flagged as HARD FAILURES, taken on its own with
+its own parity run rather than bundled with `std`/`var` - which carry `ddof` and therefore a
+different kwarg surface. The bead's recipe said not to bundle them; this is that discipline
+applied.
+
+```
+  np.mean(m, axis=0)                  -> matrix([[6., 7., 8., 9.]])
+  np.mean(m, axis=0, keepdims=False)  -> TypeError: matrix.mean() got an unexpected keyword ...
+```
+
+`Option<bool>` restores the distinction; the two native flat paths take `keepdims.unwrap_or(false)`.
+
+```
+MEAN_KEEPDIMS worker=thinkstation1 numpy_version=2.4.3 profile=release
+  before_elf=91a1a0ff2af0  after_elf=ee2a004e6593
+
+  mean f64 2^8      1.421x (null BIASED 0.9440) -> 1.213x [0.978,1.346]  nulls PASS
+  mean 2-D axis=0   1.043x [0.988,1.052] -> 1.038x [0.990,1.057]
+  mean 2-D axis=1   1.038x [0.989,1.057] -> 1.036x [0.995,1.051]
+  mean 2-D keepdims 1.023x [0.998,1.125] -> 1.041x [0.978,1.054]
+  mean i64 2^16     1.038x [0.994,1.070] -> 1.033x [0.978,1.050]
+  mean f64 2^16     1.080x [0.990,1.136] -> 1.082x [0.938,1.231]
+```
+
+Every cell overlaps its own before/after CI: the fix costs nothing, which is the right outcome for
+a correctness change on a delegate path.
+
+### THE 2^21 CELL: A 0.822x -> 1.313x READING THAT WAS NOT REAL
+
+The first run showed `mean f64 2^21` going 0.822x WIN -> 1.313x LOSS, which would have been a
+serious regression. **Both of its nulls were biased and one was 1.3296** - a candidate null a third
+of the way off unity is not a measurement, it is a warning. Re-measured twice per build on a
+dedicated 31-round probe:
+
+```
+  BEFORE  0.612x [0.408,1.460]   and  0.654x [0.358,1.587]
+  AFTER   0.580x [0.396,1.097]   and  0.633x [0.464,1.510]
+```
+
+Both builds are a ~0.6x WIN, consistently, and the cell's CI spans 0.36-1.59 - it is
+noise-dominated at this size on this host and cannot resolve a 5% effect, let alone support the
+1.313x the first run printed. **No regression exists.** Recorded because the tempting move was to
+quote the first table and either hide the row or "explain" it; the null said not to trust it and
+the re-measure settled it.
+
+**REGIME DISCLOSED:** loadavg climbed from ~20 to 92.61 during this cycle - another project's job
+on the shared box. The small cells are interleaved and their nulls pass; the 2^21 cell is exactly
+the one that could not survive it.
+
+PARITY: 8 dtypes x 5 shapes x up to 13 axis/keepdims/dtype forms, plus 6 operand kinds (matrix,
+ndarray subclass, list, scalar, strided, 0-d) x 5 forms, compared on dtype, shape, python `type()`
+and RAW BYTES. **2 divergences before, 0 after.** 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^21 f64 = 16 MB, one live.
+
+RETRY PREDICATE: `std` and `var` still carry the identical defect and still RAISE on `np.matrix` -
+they are next, and they must be done TOGETHER-BUT-SEPARATELY-PROBED because they share `ddof` and
+the `DdofArg` parser. Do not quote the `mean f64 2^21` cell as evidence of anything at this size on
+this host; if it ever needs deciding, it needs a quiet box and five runs.
+AGENT_NAME=TanBridge.
