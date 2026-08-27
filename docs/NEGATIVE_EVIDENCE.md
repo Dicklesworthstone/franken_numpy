@@ -61216,3 +61216,75 @@ this lever worth building. A second, independent route is to move the delegate v
 `try_zerocopy_f64_minmax` to just after `as_slice` (using `input.len()`, which costs nothing),
 which skips the `out_shape` Vec without taxing anyone; that is also untested.
 AGENT_NAME=TanBridge.
+
+## 2026-08-27 - LEVER CLOSED, NOT PENDING: the SECOND placement of the f64 min/max delegate short-circuit is LOGICALLY FREE and loses identically, and the degradation lands on the sizes that DO NOT FIRE IT (`franken_numpy-minmax-gateplan`)
+
+`TanBridge`. Reverted in `b1597287`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1, loadavg 10.2. Class: REJECT.
+
+```
+executing elf sha256 (BEFORE)   bench_elf_sha256=3280291ae3438c3a2e3487911a64f20357a15f932dfdacf9f29f8040904605b4
+executing elf sha256 (REJECTED) bench_elf_sha256=c3bb3a95a3918915b1e619651a0b9347ff6180c381f9b8cd687e1417b5c131e3
+executing elf sha256 (REVERTED) bench_elf_sha256=91178b6c7d32d4188661315dcd1cda9a1dce45c6e86be1298723338a6cab2b62
+```
+
+The row one entry above rejected the CALLER-SIDE version of this lever and named two untested
+variants worth building. This tests the better of the two. **It also loses, which closes the
+lever instead of leaving it open for the next agent to re-derive.**
+
+### THE VARIANT WAS FREE BY CONSTRUCTION
+
+Put the delegate verdict INSIDE `try_zerocopy_f64_minmax`, immediately after `as_slice`:
+`input.len()` is a field read on a slice already held, nothing is allocated, no attribute is
+read, and a flat reduction provably cannot reach the parallel branch below it (that branch needs
+`inner >= 2`; flat gives `inner == 1`). At or above the crossover the verdict is already
+`DelegateToNumpy`. There is no work here to be slower.
+
+```
+MINMAX_SHORTCIRCUIT_INHELPER worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation, median of 21 slot medians x 300 inner reps, both arms interleaved
+  loadavg 10.2, two repeats
+
+  n=2048   1.198x / 1.180x  ->  1.305x / 1.303x    WORSE, replicated 2/2
+  n=4095   1.440x / 1.423x  ->  1.649x / 1.643x    WORSE, replicated 2/2
+  n=4096   1.468x / 1.075x  ->  1.470x / 1.461x    BEFORE unstable, inconclusive
+  n=65536  1.337x / 1.154x  ->  1.053x / 1.171x    BEFORE unstable, inconclusive
+```
+
+COUNTED_MECHANISM: the degradation is +0.11 to +0.21 in ratio on 2 sizes that execute 0 of the
+added instructions, replicated 4 times across 2 independent implementations.
+
+### THE ONE-ELEMENT CONTROL IS THE WHOLE ARGUMENT
+
+**n=4095 and n=4096 differ by a single element, and only n=4096 takes the early return. n=4095
+is the cell that moved.** A cost that lands on the sizes which never execute the new code is not
+extra work - it is CODEGEN, the same shape as the SROA-defeating branch this campaign already
+recorded. The earlier caller-side placement degraded the identical cells by an identical amount
+(n=2048 1.186x -> 1.356x, n=4095 1.449x -> 1.726x), so two independent implementations of one
+idea reproduce one effect. That is what promotes this from "this design failed" to "the idea
+fails here".
+
+### AND THERE WAS NEVER A STABLE BASELINE TO IMPROVE
+
+The supposed benefit lives above the crossover, and the BEFORE build reads 1.468x then 1.075x at
+n=4096, and 1.337x then 1.154x at n=65536, across two repeats twenty seconds apart on a quiet
+host. **A lever cannot be credited against a baseline that moves 0.39 between repeats.** Had I
+quoted the single loud run from earlier, n=65536 1.376x -> 1.120x would have looked like a clean
+win; it is an unstable BEFORE cell, and the second repeat says so.
+
+The revert was verified rather than assumed: n=2048 1.171x vs 1.178x and n=4095 1.417x vs 1.421x
+against the pre-change build in the same window. Parity 0 divergences of 3720; 654 lib tests
+pass; clippy and fmt clean.
+
+MEMORY: largest operand 65536 f64 = 512 KB.
+
+RETRY PREDICATE: **CLOSED. Do not re-attempt any placement of a size-based pre-decision for the
+f64 min/max delegate** - caller-side and in-helper are both measured losses, and the DO-NOT-ADD
+note now sits in the code at the exact line where the next attempt would go. The residual on
+`min f64 n=4096` (~1.44x, ~950 ns flat excess) is REAL and still unattacked, but it must be
+approached by a COUNTED INSTRUCTION DIFF that says where the time goes, not by another guess at
+which branch to add - two guesses have now cost two build-and-measure cycles and both were
+refuted by the same one-element control. **The general lesson for this file: when adding a
+branch to a hot pyo3 dispatch chain, ALWAYS measure a size that does NOT take it.** If that size
+moves, the effect is codegen and the lever is dead no matter how free the branch looks.
+AGENT_NAME=TanBridge.
