@@ -40426,17 +40426,26 @@ fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
     // subclass") is necessary but NOT sufficient: it says nothing about a subclass that
     // reimplements the operation. Delegating to the function reproduces numpy for every
     // subclass by construction, and the exact-ndarray fast path below is untouched.
+    // ONLY A SUBCLASS DELEGATES. Sending every non-exact operand to `numpy.ravel` also
+    // caught lists and tuples, which have no subclass to preserve and were perfectly
+    // served by `asarray` + the method - and it cost them: `ravel(list)` measured
+    // 0.851x WIN -> 1.142x LOSS, DISJOINT CIs, because the function re-does the
+    // conversion behind a dispatch. Delegation is the remedy for the case that NEEDS it,
+    // not a default.
     let numpy = cached_numpy(py)?;
     let a_bound = a.bind(py);
-    if !a_bound.is_exact_instance(cached_ndarray_type(py)?) {
+    if ndarray_subclass_needs_numpy(py, a_bound)? {
         return Ok(numpy
             .getattr(intern!(py, "ravel"))?
             .call1((a_bound, order))?
             .unbind());
     }
-    Ok(a_bound
-        .call_method1(intern!(py, "ravel"), (order,))?
-        .unbind())
+    let arr = if a_bound.is_exact_instance(cached_ndarray_type(py)?) {
+        a_bound.clone()
+    } else {
+        numpy.call_method1(intern!(py, "asarray"), (a_bound,))?
+    };
+    Ok(arr.call_method1(intern!(py, "ravel"), (order,))?.unbind())
 }
 
 #[pyfunction]
