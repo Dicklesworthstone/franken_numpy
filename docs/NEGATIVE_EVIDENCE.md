@@ -64449,3 +64449,112 @@ STILL OPEN from the same audit, unattacked and re-void until re-counted with OPE
 `concatenate` (its serial block copy is `dst.set(src.get())` over cells, with a comment claiming it
 "autovectorizes into a memcpy" - the same claim that was false for bool min/max and for digitize's
 `partial_cmp` scan) and `take`.
+
+## 2026-08-27 - REJECT: `concatenate`'s parallel block copy burns ~35x the INSTRUCTIONS and is still FASTER - fewer instructions does not mean less time on a bandwidth-bound copy; plus a SILENT WRONG-ANSWER byte-order bug fixed in passing (`deadlock-audit-hzl1w` boundary)
+
+`TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE / SHIPPED-EQUIVALENT GATE)  bench_elf_sha256=77befce451cf495cc1b65f1ec5559ce38d4521a8f1e66851e150a43dcf41e039
+executing elf sha256 (REJECTED 64 MB gate)               bench_elf_sha256=8422dc6333290086163cdc05f1e267c18886b561b7ca1b23061db4c185195323
+executing elf sha256 (REJECTED gate + byte-order guards) bench_elf_sha256=a3bba65b585d8d3db538a74f00d330b1d96dc505362f1e8728b8c8d54077d57e
+executing elf sha256 (AFTER - guards kept, gate restored) bench_elf_sha256=7b11850d12d2076d873ad9e34a9241e8ebcd7e9c8bb7395d071ed33564388c17
+```
+
+### THE INSTRUCTION EVIDENCE SAID "GATE IS WRONG" AND IT WAS WRONG
+
+Counted instructions per output element, OPENBLAS pinned, at the 8 MB gate. Both dtypes straddle
+it, and the straddle is what nominated the gate rather than the kernel:
+
+```
+   f32 2^20   4.26 MB   SERIAL     0.44/elt  vs numpy 0.46    0.97x
+   f32 2^21   8.45 MB   parallel  14.92/elt  vs numpy 0.44   34.17x
+   f64 2^20   8.52 MB   parallel  29.37/elt  vs numpy 0.90   32.81x
+   f64 2^21   17.0 MB   parallel  21.59/elt  vs numpy 0.89   24.23x
+```
+
+A profile of the parallel arm spends **10.00%** in `__memmove_avx_unaligned_erms` and **~46% in
+rayon** (`crossbeam_epoch::with_handle` 21.78%, `Stealer::steal` 9.25%, `try_advance` 8.63%, TLS
+3.53%, steal `try_fold` 3.05%). Raising the gate to 64 MB took every counted cell to 0.92x-1.00x -
+a 35.8x reduction in instructions at the worst cell.
+
+**AND IT IS A WALL-CLOCK REGRESSION.** Three paired dual-null runs, counting ONLY cells where both
+A/A nulls landed inside 2%:
+
+```
+  8 MB gate  (parallel in band)   f64 8.5MB 0.834x | f64 34MB 0.818x, 0.684x, 0.851x | f64 68MB 0.892x
+  64 MB gate (serial in band)     f64 8.5MB 1.052x | f32 8.5MB 1.208x | f32 17MB 1.011x
+```
+
+Every decidable parallel cell WINS; every decidable serial cell loses or ties. A block copy is
+memory-bandwidth-bound and several cores pull more AGGREGATE bandwidth than one, so the 35x
+instruction saving buys nothing a caller can observe. **Reverted to `1 << 23`.**
+
+COUNTED_MECHANISM: the rejected build executed 894,189 instructions per call against the shipped
+build's 31,277,156 at n=2^20 (0.84 vs 29.37 per output element, numpy 0.91) - a 35.0x instruction
+reduction that measured 1.052x SLOWER in wall clock at the same size, against the parallel arm's
+0.834x. Instructions and time point in opposite directions here and time is what the incumbent
+ratio is defined on.
+
+### WHY `repeat` WENT THE OTHER WAY - THE DISTINCTION IS READ TRAFFIC
+
+The sibling change earlier today (`a103b894`) made `repeat` serial below 64 MB, and the same three
+paired runs CONFIRM it, so that one stands:
+
+```
+                              33.6 MB            8.4 MB      134 MB (parallel in both)
+  repeat parallel   (8f1ff379)  1.355x          void 1.48-1.70   0.746x, 0.793x
+  repeat serial     (77ed7214)  1.001x, 0.981x  0.922x           0.726x, 0.692x
+```
+
+`repeat` reads a CACHE-RESIDENT source - 1024 elements, 8 KB - and only the write side scales, so
+one core already saturates it and fan-out is pure overhead. `concatenate` streams a large source
+AND a large destination, roughly twice the traffic and genuinely bandwidth-hungry, so extra cores
+add real bandwidth. **Read traffic, not output size, decides whether fan-out pays for a copy.**
+That is the refinement `deadlock-audit-hzl1w`'s compute-vs-bandwidth rule needs: "bandwidth-bound"
+is not one class.
+
+### KEPT: A SILENT WRONG-ANSWER BUG, FOUND BY THE PARITY PROBE THIS ROW NEEDED
+
+`try_zerocopy_f64_concatenate` gated on `numpy_dtype_is_f64`, whose own source comment says it is
+**deliberately byte-order BLIND** and that buffer-reading callers must check order themselves. It
+did not, and `PyBuffer::<f64>::get` accepts a byte-swapped array:
+
+```
+  np.concatenate([np.array([1.,2.,3.]).astype('>f8'), np.array([9.,8.])])
+    numpy -> float64 [1. 2. 3. 9. 8.]
+    fnp   -> >f8     [3.03865e-319 3.16202e-322 1.04347e-320 9. 8.]     <- silent wrong answer
+```
+
+The by-itemsize helper had the same hole by a different route: its "mixed dtype" guard compares
+`kind` and `itemsize`, **both blind to byte order**, so `>f8` and `<f8` rate as one dtype and the
+mover copies bytes verbatim into an output allocated at the FIRST input's dtype. NumPy's
+`concatenate` always returns a NATIVE-order result, so even an all-`>f8` concat diverged in dtype
+(numpy `float64`, fnp `>f8`). Both helpers now decline any non-native input and defer.
+
+Cost of the two guards: none. Counted after the fix, 0.92x/0.92x/1.00x/0.96x - identical to before.
+
+PARITY: 120 cells - 13 dtypes x 5 sizes straddling both the old and new gates, 3-way concats, 2-D/
+3-D/4-D across every axis with RAGGED concat-axis lengths, `axis=None`, mixed dtypes, shape
+mismatch, empty list, non-contiguous, Fortran-ordered, big-endian, 0-D, tuple input, `out=` and
+`dtype=` kwargs, and a 72 MB case for the parallel branch. **4 divergences, IDENTICAL in count on
+the pre-change build - 0 introduced**, and the big-endian one moved from WRONG VALUES to correct.
+`cargo test -p fnp-python --lib --release`: 656 passed, 0 failed.
+
+NOT FIXED, PRE-EXISTING, STATED: all 4 surviving divergences are `.base is not None` where numpy's
+concatenate returns an array owning its data (`mixed dtype`, `noncontig`, `fortran`, `bigendian` -
+every one a path that DEFERS). Values and dtypes agree on all four. That is
+`deadlock-audit-concatenate-base-attribute-st00f`, which the mover path already fixed and these
+deferral paths did not.
+
+MEMORY: largest operand 8.4M f64 = 67 MB in the parity probe's parallel-branch case; the A/B tops
+out at 8.4M f64 = 68 MB.
+
+RETRY PREDICATE: **do not re-propose raising `CONCAT_PARALLEL_MIN_BYTES` on instruction counts -
+that is measured above and rejected, with the wall-clock cells that refute it.** The real open
+question is the opposite one: the parallel arm wins 0.684x-0.892x from 8 MB up, so the gate may be
+too HIGH, and the band below 8 MB has never been measured against a parallel arm at all. Test
+LOWERING it. And `crossbeam_epoch::with_handle` at 21.78% of the parallel profile is a genuine
+rayon-entry cost worth attacking directly for every fan-out site in this file, not just this one.

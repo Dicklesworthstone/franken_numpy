@@ -29352,6 +29352,22 @@ fn concat_copy_blocks_parallel<T: Copy>(
         });
 }
 
+// RAISING THIS TO 64 MB WAS BUILT, MEASURED, AND REJECTED - do not re-propose it on instruction
+// counts. The parallel arm really does burn ~35x the instructions of the serial loop: pinned
+// counts per output element, against NumPy's 0.89-0.90 (f64) and 0.44-0.46 (f32), are 0.44
+// SERIAL vs 14.92-29.37 PARALLEL, and a profile of it spends only 10.00% in
+// `__memmove_avx_unaligned_erms` against ~46% in rayon (`crossbeam_epoch::with_handle` 21.78%,
+// `Stealer::steal` 9.25%, `try_advance` 8.63%).
+//
+// IT IS STILL FASTER, because a block copy is memory-bandwidth-bound and several cores pull more
+// aggregate bandwidth than one - so fewer instructions does NOT mean less time here. Three paired
+// dual-null runs, counting only cells where BOTH A/A nulls landed inside 2%:
+//
+//   8 MB gate (parallel in band)   f64 8.5MB 0.834x | 34MB 0.818x/0.684x/0.851x | 68MB 0.892x
+//   64 MB gate (serial in band)    f64 8.5MB 1.052x | f32 8.5MB 1.208x | f32 17MB 1.011x
+//
+// Every decidable parallel cell wins and every decidable serial cell loses or ties. The
+// instruction saving is real and buys nothing a caller can observe.
 const CONCAT_PARALLEL_MIN_BYTES: usize = 1 << 23; // 8MB output -> parallelize the block copy
 
 fn try_zerocopy_f64_concatenate(
@@ -29372,6 +29388,22 @@ fn try_zerocopy_f64_concatenate(
     let mut shapes: Vec<Vec<usize>> = Vec::with_capacity(items.len());
     for item in &items {
         if !item.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, item) {
+            return Ok(None);
+        }
+        // BYTE ORDER MUST BE CHECKED AT THE BUFFER SITE. `numpy_dtype_is_f64` is deliberately
+        // byte-order BLIND - its own comment says so, because its other callers need a `>f8`
+        // operand to still take a delegate - so a reader like this one has to ask separately.
+        // Without it `PyBuffer::<f64>::get` happily accepts a byte-swapped array and its bytes
+        // were copied VERBATIM into a native-f64 output:
+        //
+        //   np.concatenate([np.array([1.,2.,3.]).astype('>f8'), np.array([9.,8.])])
+        //     numpy -> [1. 2. 3. 9. 8.]
+        //     fnp   -> [3.03865e-319 3.16202e-322 1.04347e-320 9. 8.]   <- silent wrong answer
+        //
+        // Declining sends mixed-order input to the by-itemsize helper, which already refuses
+        // mixed dtypes and defers to numpy, and sends an all-`>f8` concat there too - where a
+        // byte-preserving copy into a `>f8` output is correct.
+        if !dtype_is_native_order(&item.getattr(intern!(py, "dtype"))?) {
             return Ok(None);
         }
         let Ok(buffer) = PyBuffer::<f64>::get(item) else {
@@ -29606,6 +29638,19 @@ fn try_zerocopy_bytes_concatenate(
             || d.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != itemsize
         {
             return Ok(None); // mixed dtype → numpy would promote; defer
+        }
+        // `kind` AND `itemsize` ARE BOTH BLIND TO BYTE ORDER, so the test above rates `>f8` and
+        // `<f8` the same dtype and this mover then copies their bytes verbatim. Two ways that is
+        // wrong, and NumPy disagrees on both:
+        //
+        //   concatenate([>f8, f8])    numpy float64 [1. 2. 3. 9. 8.]
+        //                             fnp   >f8     [1. 2. 3. 4.332e-320 4.079e-320]  <- wrong
+        //   concatenate([>f8, >f8])   numpy float64 (NATIVE)      fnp >f8             <- wrong dtype
+        //
+        // NumPy's concatenate always yields a NATIVE-order result, so any non-native input has to
+        // go to it rather than through a byte-preserving copy.
+        if !dtype_is_native_order(&d) {
+            return Ok(None);
         }
         // A size-changing uintN view requires C-contiguous data; otherwise defer.
         if !item
