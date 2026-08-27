@@ -88357,7 +88357,7 @@ fn prod(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn mean(
     py: Python<'_>,
@@ -88365,10 +88365,16 @@ fn mean(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    // `Option<bool>`, NOT `bool` - numpy's default is the `np._NoValue` sentinel and
+    // "not passed" is observably different from "passed False" (`deadlock-audit-30d18`).
+    // See the full note on `sum`; `np.mean(np.matrix(a), axis=0)` is a `matrix` and
+    // `np.mean(m, axis=0, keepdims=False)` is a `TypeError`, so forwarding the default
+    // unconditionally made fnp raise where numpy works.
+    keepdims: Option<bool>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let keepdims_effective = keepdims.unwrap_or(false);
     // Native exact-tree parallel flat float32/float64 mean.  The incumbent's
     // scalar division is negligible; its single-threaded pairwise reduction is
     // the whole-job hotspot, so schedule those independent tree nodes on Rayon.
@@ -88376,7 +88382,7 @@ fn mean(
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_float_mean_flat(py, a.bind(py), keepdims)?
+        && let Some(o) = try_zerocopy_float_mean_flat(py, a.bind(py), keepdims_effective)?
     {
         return Ok(o);
     }
@@ -88386,7 +88392,7 @@ fn mean(
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims
+        && !keepdims_effective
         && let Some(o) = try_zerocopy_f16_mean_flat(py, a.bind(py))?
     {
         return Ok(o);
@@ -88403,7 +88409,10 @@ fn mean(
     if let Some(o) = out.as_ref() {
         kw.set_item(intern!(py, "out"), o.bind(py))?;
     }
-    kw.set_item(intern!(py, "keepdims"), keepdims)?;
+    // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
+    if let Some(k) = keepdims {
+        kw.set_item(intern!(py, "keepdims"), k)?;
+    }
     Ok(mean_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
