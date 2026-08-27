@@ -60798,3 +60798,136 @@ polarity is per-op and each entry needs `np.f(a, keepdims=<each of None/True_/1/
 against the INSTALLED numpy before any Rust is written.** The acceptance tests are
 `scratchpad/keepdims_parity.py` (3536 cases) and `scratchpad/subclass_audit.py` (198).
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - THE FLAT-SUM GATES PAY BEFORE THEY DECLINE: three of them re-read the same six attributes to say "too small", and one `nbytes` read takes the 2^8 loss 1.371x -> 1.148x on DISJOINT CIs (`franken_numpy-sumgate`)
+
+`TanBridge`. Shipped `1b885ad6`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1. Result class: **incumbent-win** is NOT claimed - every cell below is
+still a LOSS to numpy, this row only shrinks the loss. Class: `maintenance-self-speedup`.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=d73d0e39f501f4add94b528992b052848d6c4efc01cab8b159bdadc6947640fe
+executing elf sha256 (AFTER)  bench_elf_sha256=bf9d336888520e57c9a06293a46a856cdcb4f4d89d22622d4b4c5a4c9cce6534
+```
+
+**HOST DISCLOSURE:** loadavg 30.9 (BEFORE) and 33.1 (AFTER) of 64 cores, peers benching,
+maximum_observed_busy_fraction ~0.52. The small-n cells that carry this claim are
+SINGLE-THREADED on both arms and run in the same invocation, so load hits them equally; the
+large-n cells are parallel-vs-serial and several go BIASED, which is exactly the contention
+signature this ledger already records. No parallel cell is read as a claim here.
+
+### HOW IT WAS FOUND: EXCESS THAT DOES NOT MOVE WITH N
+
+The `keepdims` row one entry above published `sum f64 2^8` at 1.401x as a standing loss. Walking
+n told the rest:
+
+```
+  n=1      excess 679.8 ns      n=1024    excess 749.6 ns
+  n=4      excess 854.7 ns      n=4096    excess 706.0 ns
+  n=16     excess 695.2 ns      n=16384   excess 821.1 ns
+  n=256    excess 688.0 ns
+```
+
+**Flat from n=1 to n=16384.** Constant-in-n excess is entry cost, and it is the same signature
+that found `numpy.dtype.name` (1213.5 ns) and `py.import("numpy")` (382.5 ns).
+
+### THE MECHANISM, COUNTED
+
+`sum` tries three flat fast paths in a row - float, integer, f16 - and each one reads `dtype`,
+`dtype.kind` **into a freshly allocated `String`**, `dtype.isnative`, `flags`,
+`flags.c_contiguous` and `nbytes` BEFORE it reaches its own size check. A 256-element operand
+pays roughly ELEVEN attribute reads and THREE String allocations to be told "too small" three
+times. Priced against the installed interpreter:
+
+```
+  a.dtype 20.6 ns   a.dtype.itemsize 30.5 ns   a.dtype.kind 37.9 ns
+  a.dtype.isnative 30.3 ns   a.flags.c_contiguous 38.3 ns   a.nbytes 24.2 ns
+```
+
+### THE FLOOR IS 8_000_000 BYTES, AND 8 MiB WOULD HAVE BEEN A BUG
+
+Every flat route has a size floor, so the smallest is an exact NECESSARY condition for all four
+and skipping them below it cannot change a result:
+
+```
+  f64      1_000_000 elements * 8 = 8_000_000 bytes   <- the smallest
+  integer  8 * 1024 * 1024        = 8_388_608
+  f16      (1 << 22) elements * 2 = 8_388_608
+  f32      16 * 1024 * 1024       = 16_777_216
+```
+
+The obvious constant to reach for is 8 MiB. **8 MiB is 8_388_608, which is LARGER than the f64
+floor**, and using it would have silently stopped routing real f64 sums between 8_000_000 and
+8_388_608 bytes - a 388 KB band of live traffic, invisible to any parity test because the
+delegate returns the same bytes. The gate is `< 8_000_000`.
+
+### MEASURED
+
+```
+SUM_FLAT_PREGATE worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+
+  cell                BEFORE                    AFTER                     verdict
+  sum f64 n=1         1.392x [1.363,1.440]      1.135x [1.098,1.203]      DISJOINT
+  sum f64 n=256       1.371x [1.318,1.412]      1.148x [1.099,1.203]      DISJOINT
+  sum f64 n=4096      1.277x [1.260,1.322]      1.099x [1.085,1.174]      DISJOINT
+  sum i64 n=65536     1.119x [1.107,1.152]      1.037x [0.984,1.087]      DISJOINT
+  sum f64 n=65536     1.073x [1.061,1.081]      1.023x [0.963,1.063]      overlap by 0.002
+  sum f32 n=65536     1.064x [1.054,1.087]      1.022x [1.013,1.070]      overlap
+  sum f16 n=65536     1.010x [1.007,1.016]      1.003x [1.000,1.046]      overlap
+  sum 2-D axis=0      1.092x [1.082,1.119]      1.110x [1.080,1.132]      overlap (not gated)
+  sum list n=256      1.029x [0.944,1.101]      1.024x [0.954,1.084]      overlap (not gated)
+  sum f64 n=999999    1.006x [1.000,1.012]      1.003x [0.995,1.015]      overlap (delegates)
+```
+
+Four DISJOINT improvements. The axis form and the list operand are untouched by construction -
+`&&` short-circuits on the axis test before the gate is evaluated - and they measure untouched,
+which is the control that says the gate went where it was meant to.
+
+**A/A NULL CONTROLS:** every cell quoted above PASSES on both builds, worst 0.9874 / 1.0070
+against a 2% band. Four large-n parallel cells went BIASED and none of them is quoted as a
+delta.
+
+### ENGAGEMENT, BECAUSE EQUALITY PROVES NOTHING HERE
+
+The native route is BIT-EXACT with numpy by design, so equal outputs cannot distinguish "routed"
+from "delegated" - a green parity run would look identical if the gate had killed the route
+entirely. The proof is the parallel speedup, which survives: n=2_000_000 reads 0.712x and
+n=4_000_000 0.357x on the AFTER build, and n=999_999 delegates at 1.003x/1.006x on BOTH builds.
+
+PARITY: 13 dtypes x 7 shapes x 7 axis/keepdims/dtype/initial forms, plus f64/f32/i64 operands at
+999_998 / 999_999 / 1_000_000 / 1_000_001 / 1_048_576 / 2_000_000, compared on dtype, shape,
+python `type()` and RAW BYTES - **0 divergences of 655**. The full keepdims grid stays at 3 of
+3536 and the subclass audit at 21 of 198, both unchanged. 654 lib tests pass; clippy, fmt clean.
+
+### A SECOND LOSS THIS FOUND AND DID NOT FIX
+
+`F64_SUM_PARALLEL_MIN_ELEMENTS = 1_000_000` appears to sit BELOW where the parallel route pays.
+A fine grid on the AFTER build at loadavg 25.25:
+
+```
+  n=1_000_000  1.527x LOSS      n=1_050_000  1.023x
+  n=1_000_001  1.551x LOSS      n=1_100_000  0.787x WIN
+  n=1_005_000  1.454x LOSS      n=1_200_000  0.900x WIN
+  n=1_020_000  1.302x LOSS
+```
+
+A clean monotone ramp: the route loses at its own floor, breaks even near 1_050_000 and wins
+above it. The dual-null cell at n=1_000_000 reads **1.516x [1.296,1.827] with BOTH nulls
+PASSING**, so the loss is decidable. **I did not move the constant.** The break-even of a
+parallel arm against a serial incumbent MOVES WITH LOAD - this ledger already records the same
+ELF reading 4.107x under load 98 and 6.994x under load 33 - and tuning a threshold against a
+host at loadavg 25 would bake this afternoon's contention into a shipped constant.
+
+MEMORY: largest operand 8e6 f64 = 64 MB, one live.
+
+RETRY PREDICATE: the pre-gate itself is DONE; do not re-derive it, and do not "simplify"
+8_000_000 to 8 MiB - that is a live-traffic bug, not a rounding. **The open lever is
+`F64_SUM_PARALLEL_MIN_ELEMENTS`, and it may only be moved on a host at loadavg < 5**, with the
+grid above re-run there: if the ramp still crosses unity above 1_000_000 on a QUIET host, raise
+the constant to the first size that wins by more than its CI half-width; if the ramp crosses at
+or below 1_000_000 when quiet, the constant is correct and this row's 1.516x is a contention
+artifact, which is itself the answer. The same "gates pay before they decline" shape is worth
+checking on `mean` (1.243x at 2^8, 629 ns of flat excess), `min`/`max` (1.153x/1.156x at 2^16)
+and `prod`, all of which carry the same three-gates-in-a-row entry. AGENT_NAME=TanBridge.
