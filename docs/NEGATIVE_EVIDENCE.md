@@ -63905,3 +63905,93 @@ misrepresent the whole is routed on bad information. That costs throughput only 
 sweep pins its correctness, but no cell has been TIMED for it - if it is ever chased, time
 `np.sort`ed and block-constant corpora specifically rather than random ones. Do NOT move either
 floor after the admission scan; that placement is measured at 2.745x, worse than having no floor.
+
+## 2026-08-27 - WIN (SHIP): the f32 `nanargextreme` parallel gate was COPIED from its f64 sibling, but f64's serial loop is competitive with NumPy's and f32's is not - 1<<18 -> 1<<17, and the decisive cell had to be measured fnp-vs-fnp because the vs-NumPy ratio is not readable on this host (`franken_numpy-nanarg-f32-gate`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)     bench_elf_sha256=362436f9777e51702cfd917f05e022fbf1fc55516a410b478a1307764b7cd085
+executing elf sha256 (DISCOVERY)  bench_elf_sha256=96c27a7d14ab2365147b4d4ea0940a6ae9097f6e4413d75f69913f0ead306582
+executing elf sha256 (AFTER)      bench_elf_sha256=ae01900e67278e7e7a4d05b6d3aa3556a6bc6648a427fd50ef7fb2211ba9a729
+```
+
+### A THRESHOLD COPIED FROM A SIBLING THAT DOES NOT SHARE ITS COSTS
+
+`try_zerocopy_f32_nanargextreme` carried `const NANARG_PARALLEL_MIN: usize = 1 << 18` under the
+comment *"Mirror the f64 gate"*. The two are not alike: **f64's serial loop is competitive with
+NumPy's (1.033x-1.042x at 65536) and f32's is not**, because NumPy vectorises f32 eight lanes
+wide. Mirroring the constant therefore left a band of f32 on a serial path that loses, and the
+shape is a spike rather than a slope - `nanargmax` f32 was 0.556x at 4096 and 0.883x at 262144
+but **2.204x at 65536**.
+
+Measured with the gate dropped to `1 << 12` for a discovery build, so serial and parallel could be
+priced on the same host in the same run (fnp ns):
+
+```
+        n       serial    parallel      numpy
+    16384      16531.5     61507.7    12691.3   <- serial wins
+    32768      32361.5     59858.1    18427.7   <- serial wins
+    65536      63541.4     62633.7    28937.0   <- a wash; both lose ~2.2x
+   131072     126258.5     57077.6    48428.6   <- parallel wins
+   262144      66184.1     59570.3    85894.7
+```
+
+The parallel arm costs a near-constant ~60 us (about 1 us per rayon task at 64 tasks), so it pays
+only once the serial pass exceeds that - just under 2^17. Gate set there, fitted to this table.
+
+A CHUNK FLOOR WAS ALSO TRIED AND IS REJECTED: `parallel_block_for(n, 1 << 14)` in place of
+`n.div_ceil(threads)` made every size worse (262144 went 0.688x -> 1.637x, 131072 1.179x ->
+2.559x). This reduction wants MORE chunks, not fewer - each chunk's partial is a single
+`Option<(usize, f32)>`, so the merge is trivial and extra parallelism is nearly free. That is the
+opposite of the flatnonzero family, where a floor was the fix; the two differ in how much state
+each chunk carries.
+
+### THE VS-NUMPY RATIO FOR THIS CELL IS NOT READABLE HERE, AND THE ROW SAYS SO
+
+Three paired dual-null runs put `nanargmax f32 131072` at 2.624x -> 1.226x, 2.532x -> 1.783x and
+2.595x -> 1.179x. The direction is consistent and the magnitude is not, and **the A/A nulls fail on
+the parallel arm every time** (nullF 0.963, 0.779, 1.076). The proof that this is the cell and not
+the change: at 262144 the two builds are CODE-IDENTICAL for this route and still measured 0.806x
+against 1.079x.
+
+So the decision was taken fnp-vs-fnp, which removes NumPy's variance from the question entirely -
+same array, same harness, one arm per build:
+
+```
+                          BEFORE        AFTER     verdict
+  n=65536    (identical code)   64234.6      64897.3     1.03x  <- CONTROL: builds agree where they share code
+  n=131072   (the change)      127268.1      66827.8     1.90x  <- the effect
+  n=262144   (identical code)   71994.9      86886.7     1.21x  <- CONTROL: pure noise, and the bound on it
+```
+
+The 262144 control is the useful one: identical code differing by 1.21x bounds how much of the
+1.90x can be noise, leaving **at least ~1.5x of real self-speedup** at 131072. COUNTED_MECHANISM:
+at n=131072 the route executes one serial pass of 131072 elements (126258.5 ns measured) before
+the change and 64 parallel partial reductions after it (57077.6 ns in the discovery build,
+66827.8 ns here).
+
+**NOT FIXED, AND STATED:** 65536 remains ~2.2x and 16384 ~1.3x. Neither arm helps there - serial
+and parallel measured 63541.5 vs 62633.7 ns at 65536 - because the underlying defect is that
+**fnp's serial f32 loop runs at ~0.96 ns/element against NumPy's ~0.37**. The gate cannot fix a
+kernel gap; it can only stop that kernel being used where a parallel one is cheaper.
+
+PARITY: 516 cells - 3 float dtypes (f32/f64/f16) x 6 sizes straddling the new gate
+(131071/131072/131073) x 7 corpora (plain, scattered NaN, NaN-first, NaN-last, ALL-NaN, all-ties,
++inf) x {nanargmax, nanargmin, argmax, argmin}, comparing the returned index and the raised
+exception type (all-NaN must raise `ValueError` in both), plus 2-D `axis=0/1/None`: **0
+divergences**. General parity 5320 cells -> 1 divergence, identical on the pre-change build
+(pre-existing `deadlock-audit-neu7z`). Integer byte-order oracle unchanged (1 wrong cell).
+
+MEMORY: largest operand 524288 float32 = 2 MB.
+
+RETRY PREDICATE: **the remaining cell is a KERNEL gap, not a gate.** fnp's serial f32
+nanarg loop is ~2.6x NumPy's per element (0.96 vs 0.37 ns) while its f64 loop is at parity, which
+points at NumPy's 8-wide f32 vectorisation rather than anything about NaN handling - the no-NaN
+variant measures the same 2.27x. Do NOT re-tune this gate: 65536 was measured with serial and
+parallel within 1.5% of each other, so no threshold can help it. And do not add a chunk floor;
+that is measured above and rejected. **Before trusting any vs-NumPy ratio for this op on this
+host, run the 262144 identical-code control - it read 1.21x apart from noise alone.**
