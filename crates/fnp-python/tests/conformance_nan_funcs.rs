@@ -206,6 +206,37 @@ fn nan_function_keyword_outcomes_match_numpy() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn empty_median_family_preserves_numpy_nan_sign_bits() -> Result<(), String> {
+    // One Python process owns both arms: this is a raw-bit differential check
+    // against the live NumPy incumbent, not an equality-with-NaN comparison.
+    let result = numpy_oracle(&fnp_script(
+        "dtypes = [np.bool_, np.int8, np.int32, np.int64, np.uint8, np.uint64, np.float64]\n\
+for dtype in dtypes:\n\
+    empty = np.zeros(0, dtype=dtype)\n\
+    for name, args in [(\"median\", ()), (\"nanmedian\", ()), (\"nanpercentile\", (50.0,)), (\"nanquantile\", (0.5,))]:\n\
+        incumbent = getattr(np, name)(empty, *args)\n\
+        candidate = getattr(fnp, name)(empty, *args)\n\
+        incumbent_bits = np.asarray(incumbent, dtype=np.float64).view(np.uint64).item()\n\
+        candidate_bits = np.asarray(candidate, dtype=np.float64).view(np.uint64).item()\n\
+        assert incumbent_bits == candidate_bits == 0xfff8000000000000, (name, dtype, incumbent_bits, candidate_bits)\n\
+        incumbent_axis = getattr(np, name)(empty, *args, axis=0, keepdims=True)\n\
+        candidate_axis = getattr(fnp, name)(empty, *args, axis=0, keepdims=True)\n\
+        incumbent_axis_bits = np.asarray(incumbent_axis, dtype=np.float64).view(np.uint64).tolist()\n\
+        candidate_axis_bits = np.asarray(candidate_axis, dtype=np.float64).view(np.uint64).tolist()\n\
+        assert incumbent_axis_bits == candidate_axis_bits == [0xfff8000000000000], (name, dtype, incumbent_axis_bits, candidate_axis_bits)\n\
+all_nan = np.array([np.nan, np.nan])\n\
+for name, args in [(\"median\", ()), (\"nanmedian\", ()), (\"nanpercentile\", (50.0,)), (\"nanquantile\", (0.5,))]:\n\
+    incumbent_bits = np.asarray(getattr(np, name)(all_nan, *args), dtype=np.float64).view(np.uint64).item()\n\
+    candidate_bits = np.asarray(getattr(fnp, name)(all_nan, *args), dtype=np.float64).view(np.uint64).item()\n\
+    assert incumbent_bits == candidate_bits, (name, incumbent_bits, candidate_bits)\n\
+print(\"same_process_numpy_fnp_empty_median_bits=passed\")"
+            .to_string(),
+    ))?;
+    assert_eq!(result, "same_process_numpy_fnp_empty_median_bits=passed");
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // nansum
 // ─────────────────────────────────────────────────────────────────────────────

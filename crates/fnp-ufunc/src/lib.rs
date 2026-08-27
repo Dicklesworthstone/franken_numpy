@@ -17667,7 +17667,7 @@ impl UFuncArray {
             None => {
                 let n = self.values.len();
                 if n == 0 {
-                    return Ok(Self::scalar(f64::NAN, DType::F64));
+                    return Ok(Self::scalar(empty_reduction_nan(), DType::F64));
                 }
                 // NumPy propagates NaN in median. For large inputs the parallel
                 // radix-select beats the serial introselect (numpy's algorithm) by
@@ -17703,7 +17703,7 @@ impl UFuncArray {
                     let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                     return Ok(Self {
                         shape: out_shape,
-                        values: vec![f64::NAN; out_count],
+                        values: vec![empty_reduction_nan(); out_count],
                         dtype: DType::F64,
                         integer_sidecar: None,
                     });
@@ -27041,7 +27041,15 @@ impl UFuncArray {
                     .filter(|v| !v.is_nan())
                     .collect();
                 if filtered.is_empty() {
-                    return Ok(Self::scalar(f64::NAN, DType::F64));
+                    // NumPy distinguishes an actually empty input from an all-NaN
+                    // non-empty input in the NaN payload sign. Do not use the empty
+                    // sentinel for the latter: it already matches NumPy.
+                    let nan = if self.values.is_empty() {
+                        empty_reduction_nan()
+                    } else {
+                        f64::NAN
+                    };
+                    return Ok(Self::scalar(nan, DType::F64));
                 }
                 const NANMEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
                 let med = if filtered.len() >= NANMEDIAN_GLOBAL_PARALLEL_MIN
@@ -27058,11 +27066,14 @@ impl UFuncArray {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
                 if axis_len == 0 {
-                    return self.nan_empty_axis_result(
-                        ax,
-                        false,
-                        promote_for_mean_reduction(self.dtype),
-                    );
+                    let out_shape = reduced_shape(&self.shape, ax, false);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: vec![empty_reduction_nan(); out_count],
+                        dtype: promote_for_mean_reduction(self.dtype),
+                        integer_sidecar: None,
+                    });
                 }
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
@@ -27385,7 +27396,12 @@ impl UFuncArray {
                 // Remove NaN values (flattens to 1-D), then compute percentile.
                 let mut values = self.nan_removed().values;
                 if values.is_empty() {
-                    return Ok(Self::scalar(f64::NAN, DType::F64));
+                    let nan = if self.values.is_empty() {
+                        empty_reduction_nan()
+                    } else {
+                        f64::NAN
+                    };
+                    return Ok(Self::scalar(nan, DType::F64));
                 }
                 Ok(Self::scalar(
                     select_percentile_method(&mut values, fraction, QuantileInterp::Linear),
@@ -27400,7 +27416,7 @@ impl UFuncArray {
                     let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                     return Ok(Self {
                         shape: out_shape,
-                        values: vec![f64::NAN; out_count],
+                        values: vec![empty_reduction_nan(); out_count],
                         dtype: DType::F64,
                         integer_sidecar: None,
                     });
@@ -30435,6 +30451,14 @@ fn in1d_membership_mask<T: Sync>(values: &[T], contains: impl Fn(&T) -> bool + S
 /// path: odd n picks sorted[n/2]; even n averages sorted[n/2-1] and sorted[n/2]
 /// as `(a+b)/2.0` (NOT the linear-percentile `a*0.5+b*0.5`, to match the
 /// incumbent rounding). `data` must be NaN-free.
+#[inline]
+fn empty_reduction_nan() -> f64 {
+    // NumPy's empty median-family reductions produce this negative quiet NaN.
+    // Keep this dedicated to the empty-input paths: all-NaN inputs have a
+    // distinct, already-compatible payload sign.
+    f64::from_bits(0xfff8_0000_0000_0000)
+}
+
 fn select_median(data: &mut [f64]) -> f64 {
     let n = data.len();
     if n == 0 {
@@ -57389,6 +57413,38 @@ print(json.dumps(payload))
         let r = a.median(Some(0)).unwrap();
         assert_eq!(r.shape(), &[2]);
         assert_eq!(r.values(), &[2.0, 5.0]);
+    }
+
+    #[test]
+    fn empty_median_family_uses_numpy_negative_nan_without_changing_all_nan() {
+        const NEGATIVE_QNAN: u64 = 0xfff8_0000_0000_0000;
+        let empty = UFuncArray::new(vec![0], vec![], DType::I32).unwrap();
+        let empty_axis = UFuncArray::new(vec![2, 0], vec![], DType::I32).unwrap();
+
+        for value in [
+            empty.median(None).unwrap().values()[0],
+            empty_axis.median(Some(1)).unwrap().values()[0],
+            empty.nanmedian(None).unwrap().values()[0],
+            empty_axis.nanmedian(Some(1)).unwrap().values()[0],
+            empty.nanpercentile(50.0, None).unwrap().values()[0],
+            empty_axis.nanpercentile(50.0, Some(1)).unwrap().values()[0],
+            empty.nanquantile(0.5, None).unwrap().values()[0],
+            empty_axis.nanquantile(0.5, Some(1)).unwrap().values()[0],
+        ] {
+            assert_eq!(value.to_bits(), NEGATIVE_QNAN, "empty reduction NaN sign");
+        }
+
+        // A tempting but incorrect repair would return the negative sentinel for
+        // every NaN. The all-NaN path is a different NumPy result and must stay as-is.
+        let all_nan = UFuncArray::new(vec![2], vec![f64::NAN, f64::NAN], DType::F64).unwrap();
+        for value in [
+            all_nan.median(None).unwrap().values()[0],
+            all_nan.nanmedian(None).unwrap().values()[0],
+            all_nan.nanpercentile(50.0, None).unwrap().values()[0],
+            all_nan.nanquantile(0.5, None).unwrap().values()[0],
+        ] {
+            assert_eq!(value.to_bits(), f64::NAN.to_bits(), "all-NaN must not inherit empty sign");
+        }
     }
 
     #[test]
