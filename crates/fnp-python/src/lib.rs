@@ -28017,6 +28017,47 @@ fn append(
         return Ok(out);
     }
 
+    // THE EXTRACT PATH SILENTLY WIDENS THE DTYPE, SO IT ONLY RUNS WHERE IT CANNOT
+    // (`deadlock-audit-1zl3e`).
+    //
+    // `extract_numeric_array` canonicalises to f64/i64 and `build_numpy_array_from_ufunc`
+    // then builds with THAT dtype, so every narrow operand came back promoted. Measured
+    // against numpy 2.4.3, `np.append(x, y, axis=0)` on a 2-D operand:
+    //
+    //     float32    -> numpy float32     fnp float64
+    //     float16    -> numpy float16     fnp float64
+    //     int32      -> numpy int32       fnp int64
+    //     int8       -> numpy int8        fnp int64
+    //     uint8      -> numpy uint8       fnp uint64
+    //     longdouble -> numpy float128    fnp float64
+    //
+    // Six dtypes returning a SILENTLY DIFFERENT dtype from numpy - no error, no warning,
+    // and invisible to any probe that compares values rather than dtypes. Only f64 and
+    // i64 survived the round trip, which is exactly the set this gate now admits: both
+    // operands exact ndarrays of the SAME dtype, and that dtype one of the two. A
+    // non-ndarray `values` (list/scalar) also delegates, because its promotion against
+    // the array is numpy's business and the extract does not model it - `np.append(i8,
+    // 1.5)` is float64 in numpy and was int64 here.
+    //
+    // This DELEGATES calls that used to run natively. They were producing the wrong
+    // dtype, so that is a correctness fix taking a measured cost, not a regression.
+    let preserved_dtype = |o: &Bound<'_, PyAny>| -> PyResult<Option<(char, usize)>> {
+        if !o.is_exact_instance(cached_ndarray_type(py)?) {
+            return Ok(None);
+        }
+        let dt = o.getattr(intern!(py, "dtype"))?;
+        let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+        let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+        Ok(Some((kind, itemsize)))
+    };
+    match (
+        preserved_dtype(arr.bind(py))?,
+        preserved_dtype(values.bind(py))?,
+    ) {
+        (Some(a_dt), Some(v_dt)) if a_dt == v_dt && matches!(a_dt, ('f', 8) | ('i', 8)) => {}
+        _ => return fallback(),
+    }
+
     let a = match extract_numeric_array(py, arr.bind(py), "append(arr)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
