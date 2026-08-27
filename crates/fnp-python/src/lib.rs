@@ -118071,7 +118071,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // pinned to match numpy: pi, e, euler_gamma, inf, nan, little_endian.
     m.add("pi", std::f64::consts::PI)?;
     m.add("e", std::f64::consts::E)?;
-    m.add("euler_gamma", 0.577_215_664_901_532_9_f64)?;
+    m.add("euler_gamma", std::f64::consts::EULER_GAMMA)?;
     m.add("inf", f64::INFINITY)?;
     m.add("nan", f64::NAN)?;
     m.add("little_endian", cfg!(target_endian = "little"))?;
@@ -174925,7 +174925,7 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 "e value mismatch"
             );
             assert!(
-                (ours_euler - 0.577_215_664_901_532_9_f64).abs() < 1e-15,
+                (ours_euler - std::f64::consts::EULER_GAMMA).abs() < 1e-15,
                 "euler_gamma value mismatch"
             );
             assert!(

@@ -1,3 +1,6 @@
+// Fixture construction in a benchmark; retained capacity is not meaningful here.
+#![allow(clippy::repeat_vec_with_capacity)]
+
 //! sort/histogram misc domain criterion benches — integer median/percentile
 //! histograms, stable argsort for temporal-complex / string / struct keys, and
 //! array-API unique (the interspersed leftovers between the extracted domains) —

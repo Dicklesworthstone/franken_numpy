@@ -23,8 +23,14 @@
 //! This crate uses `#![forbid(unsafe_code)]` - all operations are
 //! implemented in safe Rust with no raw pointer manipulation.
 
+// These ufunc kernels advance multi-dimensional index counters (a_multi/b_multi) in step
+// with the range index; an iterator rewrite would change the index arithmetic in hot
+// numeric paths for a style preference only.
+#![allow(clippy::needless_range_loop)]
+
 #![forbid(unsafe_code)]
 #![feature(portable_simd)]
+
 
 pub mod sort_small;
 
@@ -70439,7 +70445,7 @@ print("\n".join(out))
         let a = UFuncArray::new(vec![1], vec![1.0], DType::F64).unwrap();
         let d = a.digamma();
         assert!(
-            (d.values[0] - (-0.5772156649)).abs() < 1e-4,
+            (d.values[0] + std::f64::consts::EULER_GAMMA).abs() < 1e-4,
             "digamma(1) = {}, expected ≈ -0.5772",
             d.values[0]
         );
