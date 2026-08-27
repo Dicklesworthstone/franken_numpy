@@ -247,6 +247,44 @@ fn convolution_fnp_python_module_paths_match_numpy() {
 }
 
 #[test]
+fn f64_convolution_and_correlation_preserve_numpy_raw_bytes() {
+    // This is deliberately a raw-byte, finite-value negative case.  The previous
+    // native f64 gather followed a different reduction order and was close but not
+    // identical to NumPy for this 256x128 input (up to 1.1e-12).  `allclose` would
+    // accept that incorrect implementation, so it cannot protect this contract.
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        ns.set_item("fnp", &module)?;
+        ns.set_item("np", &numpy)?;
+        let script = r#"
+a = np.arange(256, dtype=np.float64) / 17.0 - 3.0
+v = np.arange(128, dtype=np.float64) / 19.0 - 2.0
+ok = True
+for op in ("convolve", "correlate"):
+    native = getattr(fnp, op)
+    oracle = getattr(np, op)
+    for mode in ("full", "same", "valid"):
+        got = native(a, v, mode)
+        expected = oracle(a, v, mode)
+        ok = ok and got.dtype == expected.dtype and got.shape == expected.shape
+        ok = ok and got.tobytes() == expected.tobytes()
+result_ok = bool(ok)
+"#;
+        py.run(
+            std::ffi::CString::new(script).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let ok: bool = ns.get_item("result_ok")?.unwrap().extract()?;
+        assert!(
+            ok,
+            "f64 convolve/correlate must preserve NumPy raw output bytes"
+        );
+        Ok(())
+    });
+}
+
+#[test]
 fn int_convolve_correlate_native_parallel_bit_exact_matches_numpy() {
     with_fnp_and_numpy(|py, module, numpy| {
         let ns = PyDict::new(py);

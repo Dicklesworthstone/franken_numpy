@@ -114746,6 +114746,15 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
         return Ok(out);
     }
 
+    // NumPy's float64 direct reduction is not bit-reproducible by our gather
+    // implementation: even a 256x128 finite input changes output bytes in every
+    // mode.  The native route is fast but only tolerance-equivalent, whereas this
+    // public API promises NumPy's observable result.  Keep the integer route above
+    // (whose wrapping reduction is associative) and let NumPy own f64 instead.
+    if lens.is_some() {
+        return fallback();
+    }
+
     // Zero-copy short-kernel direct path: reads buffers + writes the numpy output
     // in place, skipping the extract+build copies. Closes the 9-15x short-kernel
     // loss to parity. Falls through for long kernels / non-f64 / non-contiguous.
@@ -114797,11 +114806,9 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
         return fallback();
     }
 
-    let result = match a_arr.convolve_mode(&v_arr, mode) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // Array-like float64 inputs do not have a buffer-backed `lens` above, but
+    // reach the same non-bit-exact native reduction after `asarray`.
+    fallback()
 }
 
 #[pyfunction]
@@ -114832,6 +114839,12 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
         && let Some(out) = try_native_int_convolve(py, a.bind(py), v.bind(py), mode, true)?
     {
         return Ok(out);
+    }
+
+    // See `convolve`: f64 correlation shares the same non-bit-exact reduction
+    // kernel.  Delegation preserves raw NumPy result bytes.
+    if lens.is_some() {
+        return fallback();
     }
 
     // Zero-copy short-kernel direct path (defers when len(a)<len(v): correlate is
@@ -114886,19 +114899,8 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
         return fallback();
     }
 
-    // All modes (including "valid") route through correlate_mode, which computes
-    // correlate(a, v) = convolve(a, v[::-1]) via the same cache-friendly convolve
-    // kernel that already serves "full"/"same" and beats numpy. The previous
-    // "valid"-only branch used a naive O(n*m) scalar dot whose `acc` dependency
-    // never vectorized — ~26x slower than numpy on a 50000⊗1000 correlate. Result
-    // matches numpy within float tolerance, exactly as the "full"/"same" path
-    // already does (correlate is a non-associative sum reduction, so neither
-    // kernel is bit-reproducible across summation orders).
-    let result = match a_arr.correlate_mode(&v_arr, mode) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // As with convolve, array-like f64 inputs reach this point without `lens`.
+    fallback()
 }
 
 #[pyfunction]
