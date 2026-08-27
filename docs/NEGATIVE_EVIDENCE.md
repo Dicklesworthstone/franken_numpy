@@ -59881,3 +59881,61 @@ structured input were NOT covered and `trim_zeros` already has a known N-D/0-d d
 the seeded-random differential. Do NOT re-guard the order-statistic entries at their top: the
 zero-copy slice/select paths below them are dtype-exact by construction.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - SEVEN PUBLIC FUNCTIONS RAISED `TypeError` ON A 0-d float16 OPERAND: `Bound::len()` is Python `len()`, undefined at rank 0, inside a size gate's `?` (`deadlock-audit-gmfbf`)
+
+`TanBridge`. Shipped `67cecf27`. Found on `thinkstation1` against the LIVE installed numpy 2.4.3.
+
+**Campaign result class:** correctness defect on seven public entries; no perf change (the fix is
+on a DECLINE path), engagement re-verified.
+
+`deadlock-audit-qdp30`'s retry predicate said its audit had NOT covered 0-d, N-D or structured
+input. Round 2 covered them - 1648 cases - and came back with **one** divergence:
+`unique(float16, 0-d)` raising `TypeError` where numpy returns a shape-(1,) float16 array.
+
+Chasing that one found six more, because round 2 only put 0-d operands into SINGLE-argument ops:
+
+```
+  fnp.unique(np.array(np.float16(2.5)))            -> TypeError: len() of unsized object
+  fnp.isin(0-d f16, arr) / (0-d, 0-d)              -> TypeError
+  fnp.searchsorted(f16 arr, 0-d f16)               -> TypeError
+  fnp.intersect1d / union1d / setdiff1d / setxor1d(0-d f16, ...)  -> TypeError
+```
+
+numpy returns a result for every one. **`Bound::len()` calls Python's `len()`, which is undefined
+for rank 0.** Four f16 size gates used it inside a `?`, so the `TypeError` propagated out of the
+PUBLIC function instead of the gate declining to numpy. `ndarray.size` is defined at every rank and
+is 1 for 0-d, which is what a `< 1 << 14` comparison wanted all along. One shared
+`ndarray_element_count` helper replaces all four uses.
+
+**This is the same family as the standing note that a 0-d array's PyBuffer yields NO slice: rank 0
+is the shape that silently breaks assumptions written for rank >= 1.** The difference is the
+failure mode - that one declined silently, this one RAISED out of a public API.
+
+PARITY: a dedicated 0-d probe - 11 dtypes x 18 one-arg ops, plus 12 two-arg ops in BOTH argument
+positions and 0-d-against-0-d - **12 divergences before, 0 after, 605 cases.** The round-2 shape
+audit reads 0 of 1648. 654 lib tests pass; clippy and fmt clean.
+
+ENGAGEMENT re-verified, since the fix touches the gate that admits the f16 kernels (median of 7 x 5
+calls, n=2^16 against 2^14):
+
+```
+                    BEFORE ea81e44167f2      AFTER 095bacbd1bef
+  unique f16 2^16      0.190x WIN               0.193x WIN
+  isin f16 2^16        0.242x WIN               0.100x WIN
+  union1d f16          0.288x WIN               0.280x WIN
+  intersect1d f16      0.203x WIN               0.201x WIN
+```
+
+Unchanged, as they must be: `size == len` for every rank-1 array, so nothing about the admitted
+set moved. (These are min-of-k timings for an ENGAGEMENT check, not dual-null contract rows, and
+are not quoted as ratios elsewhere.)
+
+MEMORY: every operand in both probes is <= 64 elements except the four engagement cells at 2^16.
+
+RETRY PREDICATE: `Bound::len()` on a numpy array is now a KNOWN HAZARD in this file - grep it
+before writing another size gate, and prefer `ndarray_element_count`. The remaining `.len()?` uses
+(lines around the plan/shape checks) are on tuples and lists, where `len()` is defined. The 0-d
+probe and the round-2 shape audit are both reusable and are the cheapest correctness instruments
+this campaign has produced: 2253 cases between them, one run, two defect classes.
+AGENT_NAME=TanBridge.
