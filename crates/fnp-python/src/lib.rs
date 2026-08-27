@@ -27842,7 +27842,16 @@ fn try_zerocopy_append_flat(
     // misinterprets it as a dtype field-spec (and a weak Python int under-promotes a
     // narrow-int array). asarray gives the same strong dtype numpy.append concatenates
     // against. No-op promotion only: result dtype must stay arr's dtype.
-    let v_arr = numpy.getattr(intern!(py, "asarray"))?.call1((values,))?;
+    //
+    // AN EXACT ndarray IS ALREADY THAT ARRAY (`deadlock-audit-1zl3e`). `numpy.asarray`
+    // with no dtype/order returns an exact ndarray UNCHANGED, so the call was a
+    // round-trip through numpy for an object it hands straight back - and `append`'s
+    // commonest form passes two arrays.
+    let v_arr = if values.is_exact_instance(&ndarray_type) {
+        values.clone()
+    } else {
+        numpy.getattr(intern!(py, "asarray"))?.call1((values,))?
+    };
     if !numpy
         .getattr(intern!(py, "result_type"))?
         .call1((arr, &v_arr))?
@@ -27850,17 +27859,26 @@ fn try_zerocopy_append_flat(
     {
         return Ok(None);
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
+    let uint8 = cached_uint8_type(py)?;
     // ravel both (C-order) and cast values to arr's dtype, then view the raw bytes.
     let a_flat = arr.call_method0(intern!(py, "ravel"))?;
-    let kw = PyDict::new(py);
-    kw.set_item(intern!(py, "dtype"), &arr_dtype)?;
-    let v_flat = numpy
-        .getattr(intern!(py, "asarray"))?
-        .call((&v_arr,), Some(&kw))?
-        .call_method0(intern!(py, "ravel"))?;
-    let a_bytes = a_flat.call_method1(intern!(py, "view"), (&uint8,))?;
-    let v_bytes = v_flat.call_method1(intern!(py, "view"), (&uint8,))?;
+    // THE CAST IS SKIPPED WHEN THERE IS NOTHING TO CAST (`deadlock-audit-1zl3e`).
+    // `result_type(arr, v_arr) == arr_dtype` above does NOT imply `v_arr.dtype ==
+    // arr_dtype` - f32 values against an f64 arr promote to f64 and genuinely need the
+    // cast - so the test has to be on `v_arr`'s OWN dtype. numpy's builtin dtype objects
+    // are singletons, so that is a pointer compare. `dtype` is also `asarray`'s SECOND
+    // POSITIONAL parameter, which retires the kwargs dict on the path that still casts.
+    let v_dtype = v_arr.getattr(intern!(py, "dtype"))?;
+    let v_flat = if v_dtype.is(&arr_dtype) {
+        v_arr.call_method0(intern!(py, "ravel"))?
+    } else {
+        numpy
+            .getattr(intern!(py, "asarray"))?
+            .call1((&v_arr, &arr_dtype))?
+            .call_method0(intern!(py, "ravel"))?
+    };
+    let a_bytes = a_flat.call_method1(intern!(py, "view"), (uint8,))?;
+    let v_bytes = v_flat.call_method1(intern!(py, "view"), (uint8,))?;
     let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<u8>::get(&a_bytes), PyBuffer::<u8>::get(&v_bytes))
     else {
         return Ok(None);
@@ -27870,9 +27888,8 @@ fn try_zerocopy_append_flat(
     };
     let na = a_in.len();
     let nv = v_in.len();
-    let kw2 = PyDict::new(py);
-    kw2.set_item(intern!(py, "dtype"), &uint8)?;
-    let out_bytes = numpy.call_method(intern!(py, "empty"), (na + nv,), Some(&kw2))?;
+    // Positional dtype, held type object: no per-call `PyDict` (`deadlock-audit-1zl3e`).
+    let out_bytes = numpy.call_method1(intern!(py, "empty"), (na + nv, uint8))?;
     if na + nv > 0 {
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_bytes) else {
             return Ok(None);
@@ -27950,15 +27967,17 @@ fn append(
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let append_fn = numpy.getattr(intern!(py, "append"))?;
+    // The handle is fetched INSIDE the closure and `axis` goes positionally: it is
+    // numpy's third positional parameter, so the kwargs dict was avoidable, and the
+    // native path below returns without ever delegating (`deadlock-audit-1zl3e`).
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        if let Some(ref a) = axis {
-            kwargs.set_item(intern!(py, "axis"), a.bind(py))?;
+        let append_fn = numpy.getattr(intern!(py, "append"))?;
+        match axis {
+            Some(ref a) => Ok(append_fn
+                .call1((arr.bind(py), values.bind(py), a.bind(py)))?
+                .unbind()),
+            None => Ok(append_fn.call1((arr.bind(py), values.bind(py)))?.unbind()),
         }
-        Ok(append_fn
-            .call((arr.bind(py), values.bind(py)), Some(&kwargs))?
-            .unbind())
     };
 
     // Fast path: axis=None case (flatten and concatenate)
@@ -59317,6 +59336,19 @@ fn native_unary_elementwise(
             return Ok(output.bind(py).get_item(())?.unbind());
         }
         return Ok(output);
+    }
+    // AN ndarray SUBCLASS KEEPS ITS TYPE THROUGH A NUMPY UFUNC (`deadlock-audit-1zl3e`).
+    // `np.square(np.matrix(a))` is a `matrix`; every fast path above gates on
+    // `is_exact_instance`, so a subclass fell through to `extract_precise_numeric_array`
+    // and came back a plain `ndarray`. Values and dtype matched, which is why a
+    // value-level probe never saw it - only `type()` does. Same defect and same remedy as
+    // `deadlock-audit-c0g2r` fixed for isnan/isinf/isfinite/signbit, found by the parity
+    // probe written for `deadlock-audit-cfivt` and owed since.
+    //
+    // Costs nothing on the hot path: an exact ndarray has already returned from a fast
+    // path long before this is reached.
+    if ndarray_subclass_needs_numpy(py, x)? {
+        return fallback(py);
     }
     // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
     // zero-copy fast paths into the cold extract → rebuild, which transpose-copies the
