@@ -25817,6 +25817,20 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
                     }
                 }
             }
+            // A REDUCTION THAT REMOVES THE ONLY AXIS RETURNS A SCALAR, NOT A 0-d ARRAY
+            // (`deadlock-audit-54arr`). `np.count_nonzero(a_1d, axis=0)` is
+            // `np.int64(k)`; this reshaped to `()` and handed back `array(k)` instead.
+            // The values and the dtype match, so only `type()` separates them - the same
+            // blind spot that hid the 0-d integral predicate results and the `np.matrix`
+            // results. 28 probe cells hit it: every dtype x {axis=0, axis=-1} on a 1-D
+            // operand, and the empty-array form too.
+            //
+            // `axis=None` already returns a scalar a few lines up and `keepdims=True` is
+            // handled by the caller, so this is the one branch left that can produce a
+            // rank-0 result, and it has to extract it the same way.
+            if out_shape.is_empty() {
+                return Ok(Some(flat.get_item(0)?.unbind()));
+            }
             let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
             let output = flat
                 .call_method1(intern!(py, "reshape"), (&output_shape,))?
