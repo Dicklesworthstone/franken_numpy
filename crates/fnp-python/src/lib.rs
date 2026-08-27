@@ -40411,9 +40411,32 @@ fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
     // from numpy's view semantics (writing through the result must alias the
     // input). Build the view via the array's ravel method, which reproduces
     // numpy's exact view-or-copy decision and preserves the input dtype.
+    //
+    // ANYTHING THAT IS NOT AN EXACT ndarray GOES TO `numpy.ravel`, THE FUNCTION
+    // (`deadlock-audit-3ou6y`). `numpy.asarray` strips a subclass, so an `MyArray` came
+    // back a plain `ndarray` where numpy preserves it. The obvious repair - skip the
+    // conversion and call the operand's own `.ravel()`, as the flip family does - is
+    // WRONG HERE, and checking it against numpy is what showed why:
+    //
+    //     np.ravel(np.matrix(a))   -> ndarray, shape (12,)
+    //     np.matrix(a).ravel()     -> matrix,  shape (1, 12)
+    //
+    // `np.matrix` OVERRIDES `ravel`, so the method and the function disagree. A
+    // build-mechanism heuristic ("this returns a view, so indexing preserves the
+    // subclass") is necessary but NOT sufficient: it says nothing about a subclass that
+    // reimplements the operation. Delegating to the function reproduces numpy for every
+    // subclass by construction, and the exact-ndarray fast path below is untouched.
     let numpy = cached_numpy(py)?;
-    let arr = numpy.call_method1(intern!(py, "asarray"), (a.bind(py),))?;
-    Ok(arr.call_method1(intern!(py, "ravel"), (order,))?.unbind())
+    let a_bound = a.bind(py);
+    if !a_bound.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(numpy
+            .getattr(intern!(py, "ravel"))?
+            .call1((a_bound, order))?
+            .unbind());
+    }
+    Ok(a_bound
+        .call_method1(intern!(py, "ravel"), (order,))?
+        .unbind())
 }
 
 #[pyfunction]
