@@ -77791,7 +77791,42 @@ fn int_argsort_all_lanes_have_tie<T: Copy + Ord + Send + Sync + Into<i128>>(
         })
         .reduce(|| (data[0], data[0]), |x, y| (x.0.min(y.0), x.1.max(y.1)));
     let range: i128 = hi.into() - lo.into();
-    range < (lane_len as i128) - 1
+    int_argsort_tie_is_probable(range, lane_len)
+}
+
+// Shared tie oracle for EVERY native integer-argsort route, so the flat, last-axis, axis-0,
+// middle-axis and radix gates cannot disagree with each other.
+//
+// `range` is the inclusive value span minus one; `lane_len` the length of a sorted lane.
+//
+// TWO CONDITIONS, ONE EXACT AND ONE PROBABILISTIC:
+//   * PIGEONHOLE (exact): a lane of `lane_len` values drawn from fewer than `lane_len` distinct
+//     values must contain a tie. This is what the routes already had.
+//   * BIRTHDAY (probabilistic): random draws expect `lane_len^2 / (2 * range)` duplicate pairs,
+//     so a range below `lane_len^2 / 2` expects at least one. This band is where the losses
+//     lived, and the helper's own comment already predicted it - "wide-range sparse ties still
+//     fall to the tail sort-then-defer".
+//
+// It is worth declining on a GUESS here because the bet is ASYMMETRIC. Every one of these routes
+// sorts in full and then throws the result away on any tie, paying its own sort AND numpy's.
+// Measured on the SAME span, dtype and n, changing exactly ONE element to create a duplicate:
+//
+//   int32 span 2^31, n=2^22   distinct 0.227x WIN   one duplicate 1.832x LOSS
+//   int64 span 2^48, n=2^22   distinct 0.260x WIN   one duplicate 2.084x LOSS
+//
+// A needless decline costs about 1.0x - numpy sorts either way. A needless engage measured up to
+// 2.650x. The price of the bet is that an artificially DISTINCT array whose range sits below
+// lane_len^2/2 now delegates instead of collecting its win; that is recorded, not hidden.
+fn int_argsort_tie_is_probable(range: i128, lane_len: usize) -> bool {
+    if lane_len < 2 {
+        return false;
+    }
+    if range < (lane_len as i128) - 1 {
+        return true;
+    }
+    let span = (range + 1).max(0) as u128;
+    let expected_tie_bound = (lane_len as u128).saturating_mul(lane_len as u128) / 2;
+    span < expected_tie_bound
 }
 
 fn int_argsort_flat_typed<T: pyo3::buffer::Element + Copy + Ord + Send + Sync + Into<i128>>(
@@ -78138,9 +78173,27 @@ fn argsort_stable_radix<T: pyo3::buffer::Element + Copy + Send + Sync + Into<i12
             },
             |(a0, a1), (b0, b1)| (a0.min(b0), a1.max(b1)),
         );
-    // Pigeonhole: fewer distinct values than elements guarantees a tie -> for the default-kind (distinct-only)
-    // caller, skip the radix and defer to numpy immediately (numpy owns the unstable tie order).
-    if distinct_only && (max_i - min_i + 1) < n as i128 {
+    // TIE PREDICTION, BEFORE ANY WORK. For the default-kind caller the tie check at the end of
+    // `radix_perm_from_keys` runs AFTER the whole LSD radix and then THROWS IT AWAY, because
+    // numpy's unstable introsort tie order is unmatchable. One duplicated element anywhere is
+    // therefore the difference between a win and a loss, and it is a large difference - measured
+    // on the SAME span, dtype and n, changing exactly one element:
+    //
+    //   int32 span 2^31, n=2^22   distinct 0.227x WIN   one duplicate 1.832x LOSS
+    //   int64 span 2^48, n=2^22   distinct 0.260x WIN   one duplicate 2.084x LOSS
+    //
+    // Pigeonhole (`range < n`) is the EXACT case and stays. The band above it - where a tie is
+    // merely LIKELY - is where the losses live: random draws expect n^2 / (2 * range) duplicate
+    // pairs, so a range below n^2/2 expects at least one. Declining there is the right side of
+    // an ASYMMETRIC bet: a needless decline costs ~1.0x (numpy does the sort either way), while a
+    // needless engage measured up to 2.650x.
+    //
+    // The cost of the bet is real and is recorded rather than hidden: an artificially DISTINCT
+    // array whose range sits below n^2/2 now delegates instead of collecting its win.
+    // Same oracle the other four integer-argsort routes use, so a decline here cannot disagree
+    // with a decline there - the first version of this gate was inline and only moved the work to
+    // `int_argsort_flat_typed`, which has the identical sort-then-discard shape.
+    if distinct_only && int_argsort_tie_is_probable(max_i - min_i, n) {
         return Ok(None);
     }
     // Monotonic keys = value - min (non-negative u64, preserves value order for signed/unsigned).
