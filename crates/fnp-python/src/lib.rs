@@ -89076,6 +89076,15 @@ fn bytes_all_nonzero(raw: &[u8]) -> bool {
 /// `bytes_all_nonzero`: a whole word is compared at once and the early exit moves to word
 /// granularity.
 fn bytes_any_nonzero(raw: &[u8]) -> bool {
+    // THIS FOLD DOES NOT VECTORISE, AND THREE REWRITES DID NOT CHANGE THAT. `bytes_all_nonzero`
+    // above is lowered to `vpcmpeqb`/`vpandn` because LLVM has a pattern for its zero-byte test;
+    // there is no dual pattern for "some byte is set", so `max` on an all-False array sits at
+    // 1.023x/1.035x/1.079x (2^16/2^20/2^22) while `min` on the same byte count WINS at
+    // 0.933x/0.941x/0.802x. Rejected, by counted codegen over the whole function rather than by
+    // wall clock: a byte OR-fold and a popcount of the recognised SWAR mask BOTH emitted the
+    // identical 2 `vpcmpeqb` / 2 `vpandn` / 1 `vpor` as this form, and the popcount was deleted
+    // outright. Closing the remaining ~4.8 us at 2^22 needs an explicit `_mm256_testz_si256`
+    // behind an ISA gate, not another safe-Rust phrasing.
     let block = raw.len() - raw.len() % 32;
     let (blocks, rest) = raw.split_at(block);
     for chunk in blocks.chunks_exact(32) {

@@ -63995,3 +63995,117 @@ variant measures the same 2.27x. Do NOT re-tune this gate: 65536 was measured wi
 parallel within 1.5% of each other, so no threshold can help it. And do not add a chunk floor;
 that is measured above and rejected. **Before trusting any vs-NumPy ratio for this op on this
 host, run the 262144 identical-code control - it read 1.21x apart from noise alone.**
+
+## 2026-08-27 - WIN (SHIP): `min`/`max` on bool scanned `&[ReadOnlyCell<u8>]` a BYTE AT A TIME because `Cell::get` blocks autovectorisation - 28.93x -> 0.941x, and the `any` half is a REJECT that three rewrites could not move (`deadlock-audit-x8cbc`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell and an
+out-of-family `np.sum` f64 control.
+
+**Campaign result class:** maintenance-self-speedup
+
+The conservative class: the row does not carry the full same-invocation incumbent-win contract
+(numpy artifact sha, shared invocation id, isolation marker). Four `min` cells nevertheless end
+BELOW 1.0x against the live numpy in the same invocation and are reported as measured.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=584d863e418a4776deac4f77ad1d92a9c493d3d81c98ae144d3b094d835de6f5
+executing elf sha256 (AFTER)   bench_elf_sha256=04123d963545b4dd4ca2ff1e26e6db045ff2d25ca781e1a576562775e0cb5321
+```
+
+### THE BEAD'S PREMISE HAD MOVED, AND THE REAL LOSS WAS NEXT DOOR
+
+`deadlock-audit-x8cbc` was filed against `nanmin`/`nanmax` on bool. Re-measured first, as the
+standing rule requires: those are now 1.15x-1.22x. **Plain `min`/`max` were 28.93x.** Attacking
+the bead as written would have tuned a cell that no longer loses.
+
+Why a random-data benchmark cannot see this: both sides short-circuit. The loss appears only when
+the exit CANNOT fire - for `min` an all-True array, for `max` an all-False one.
+
+```
+    op    corpus            n     numpy_ns       fnp_ns    ratio
+   min    all_true       2^20      17456.2     505006.8   28.93x
+   max    all_false      2^20      16209.7     248352.6   15.32x
+   min    all_true       2^16       2661.3      32801.1   12.33x
+   min    first_false    2^20      17479.5       1782.3    0.10x   <- short circuit, fnp WINS
+```
+
+`minmax_bool_typed` wrote `input.iter().all(|cell| cell.get() != 0)` over `&[ReadOnlyCell<u8>]`.
+LLVM cannot assume cell memory is unchanged across iterations, so it will not vectorise the scan:
+0.24 ns/byte against NumPy's 0.042.
+
+### THE FIX, AND WHY THE HALF THAT LOOKS CHEAPER IS THE HALF THAT LOSES
+
+Reinterpret the buffer as `&[u8]` (read-only under the GIL for the whole function) and fold 32
+bytes per branch. `min` uses the standard zero-byte test `(w - 0x01..01) & !w & 0x80..80`; `max`
+ORs the words.
+
+**The side doing MORE arithmetic is the fast one.** Counted over the whole of
+`minmax_bool_typed` (`objdump` across the symbol's true extent, 0x1aaa bytes):
+
+```
+  vpcmpeqb  2      vpandn  2     <- the `all` side: LLVM RECOGNISES the SWAR zero-byte idiom
+  vpor      1                    <- the `any` side: one instruction, i.e. still SCALAR
+```
+
+That asymmetry is the whole remaining gap, and it is visible in the ratios: `min` wins, `max` does
+not.
+
+COUNTED_MECHANISM: at 2^22 the vectorised `all` side scans 4194304 bytes in 49183.3 ns
+(0.0117 ns/byte) against NumPy's 61354.9 ns; the scalar `any` side takes 65328.9 ns against
+NumPy's 60546.9 ns on the identical byte count - a 4782.0 ns excess attributable entirely to the
+1-vs-2 vector-instruction difference above, since the two paths differ in nothing else.
+
+### THE MEASUREMENT (23/24 cells decidable; the 24th is named)
+
+```
+op    corpus              n   numpy_ns     fnp_ns    ratio   nullNP  nullFNP
+min   all_true        65536     2724.9     2542.7   0.933x    0.999    0.999
+max   all_false       65536     2703.0     2766.0   1.023x    0.996    1.001
+min   all_true      1048576    19787.7    18614.0   0.941x    0.986    1.007
+max   all_false     1048576    16875.4    17469.7   1.035x    1.011    0.988
+min   all_true      4194304    61354.9    49183.3   0.802x    0.995    0.980
+max   all_false     4194304    60546.9    65328.9   1.079x    1.017    0.995
+min   last_false    4194304    60373.8    48810.4   0.808x    0.995    0.980  BIASED (null at 2.0%)
+```
+
+Sixteen further cells (`random`, and the corpus each op short-circuits on) sit at 0.986x-1.014x
+with both nulls inside 1%. Out-of-family control `np.sum` f64 2^20: 1.223x.
+
+### REJECT: THREE REWRITES OF THE `any` FOLD, ALL EMITTING IDENTICAL CODE
+
+Rejected by COUNTED CODEGEN rather than wall clock, because the confirming run was contaminated -
+its `np.sum` control drifted 1.223x -> 1.595x and four cells came back BIASED, so its magnitudes
+are not readable. The instruction counts are host-free and decided it anyway:
+
+```
+  formulation                                   elf sha256 (16)     vpcmpeqb  vpandn  vpor  popcnt
+  u64 OR-fold                (SHIPPED)          04123d963545b4dd           2       2     1       0
+  branch-free BYTE OR-fold over a 32-trip chunk 8047fb6c5d5225c5           2       2     1       0
+  popcount of the RECOGNISED SWAR zero-mask     7b14920eb5000471           2       2     1       0
+```
+
+COUNTED_MECHANISM: 3 source formulations produced 0 change in every vector-instruction count, and
+the third's `count_ones()` was eliminated outright - 0 `popcnt` in a function whose source asks for
+4 per 32-byte block. There is no LLVM pattern for "some byte is set" dual to the zero-byte test.
+The shipped form is kept because it is the simplest of three that compile to the same thing.
+
+RETRY PREDICATE: **do not re-phrase this fold in safe Rust again - three shapes are measured above
+and all compile identically.** The remaining 4782.0 ns at 2^22 (1.079x) needs an explicit
+`_mm256_testz_si256` behind a runtime ISA gate, which on this AVX2 host is a real lever and
+belongs with the other ISA-gated work. Re-measure the `min` cells before citing them: this host
+moved an identical-code control by 1.22x-1.60x between runs.
+
+PARITY: 1280 cells - `min`/`max`/`nanmin`/`nanmax` x 17 sizes straddling the 8- and 32-byte block
+boundaries (1,2,7,8,9,31,32,33,63,64,65,255,256,257,4096,65536,1048577) x corpora {all-True,
+all-False, random, and a single flipped byte at each of offsets 0,1,7,8,31,32,n/2,n-1} - plus
+`np.frombuffer` arrays holding bool bytes that are NOT 0/1 (the word test asks `byte != 0`, so a
+byte of 2 must count as True exactly as numpy counts it), 5 shapes x every axis x `keepdims`,
+strided, transposed and empty: **0 divergences**.
+
+Byte-order oracle 560 cells and error-text oracle 660 cells: **0 cells changed** against baseline
+(the 29 standing WRONG byte-order cells are unchanged pre-existing debt). Unary value-parity 126
+divergences, IDENTICAL on the pre-change build - pre-existing `longdouble` padding-byte artifacts
+of that probe's byte comparison. `cargo test -p fnp-python --lib --release`: 655 passed, 0 failed.
+
+MEMORY: largest operand 4194304 bool = 4 MB; three live at once.
