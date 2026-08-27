@@ -43345,13 +43345,31 @@ fn linear_quantile_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Sen
 
 // Dispatch an integer flat median to the histogram order-statistics path. Ravels (flatten for axis=None); only
 // C-contiguous, non-empty, n >= 1<<20. Any width int/uint. Returns None (delegate) for wide range / other cases.
+// The element count below which the bounded-range histogram order-statistic kernels do not
+// engage. Module-level because `nanmedian` reroutes into `median` ONLY when this kernel can
+// actually be reached - a threshold that lives in two places drifts, and getting this one wrong
+// costs a measured win (see the note on that reroute).
+const INT_ORDER_STAT_HIST_MIN_N: usize = 1 << 20;
+
 fn try_native_int_median(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const MIN_N: usize = 1 << 20;
-    if !numpy_dtype_is_integer(py, a)? {
+    const MIN_N: usize = INT_ORDER_STAT_HIST_MIN_N;
+    // BOOL IS ADMITTED, and it is the IDEAL input for this kernel: its value range is 2, the
+    // smallest a histogram can have. `numpy_dtype_is_integer` matches dtype kinds 'i' and 'u'
+    // only, so bool declined HERE and again at the integer delegate inside `median`, and fell
+    // into the generic extract instead - measured 2.39x slower than numpy at 2^20 while int32,
+    // on this very path, is a 0.19x WIN.
+    // The bool arm MUST also require an exact ndarray. `numpy_dtype_is_integer` checks
+    // `is_exact_instance` itself, but `numpy_dtype_is_bool` answers through `asarray` - so it
+    // says TRUE for a Python LIST of bools, and the `ravel()` below is an ndarray method. The
+    // first version of this admission omitted the check and turned `fnp.median([True, False,
+    // True])` into an AttributeError where numpy returns 1.0; the list parity case caught it.
+    if !numpy_dtype_is_integer(py, a)?
+        && !(a.is_exact_instance(cached_ndarray_type(py)?) && numpy_dtype_is_bool(py, a))
+    {
         return Ok(None);
     }
     let flat = a.call_method0(intern!(py, "ravel"))?;
@@ -43378,6 +43396,14 @@ fn try_native_int_median(
         ("u", 2) => median_hist_typed::<u16>(py, numpy, &flat, n),
         ("u", 4) => median_hist_typed::<u32>(py, numpy, &flat, n),
         ("u", 8) => median_hist_typed::<u64>(py, numpy, &flat, n),
+        // A bool array stores 0/1 BYTES, so a `uint8` view reinterprets nothing and hands the
+        // kernel exactly the same memory. The view is required because the buffer format is '?'
+        // and `PyBuffer::<u8>::get` would refuse it.
+        ("b", 1) => {
+            let as_u8 =
+                flat.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+            median_hist_typed::<u8>(py, numpy, &as_u8, n)
+        }
         _ => Ok(None),
     }
 }
@@ -43470,6 +43496,13 @@ fn median(
         || numpy_dtype_is_narrow_float(py, a.bind(py))
         // Integer input widens int->f64 in extract (~2x at 1M; parity at 8M) and never beats numpy
         // median; delegate (the f64 native path keeps its 0.5x win).
+        //
+        // BOOL IS DELIBERATELY *NOT* ADDED HERE, and it was tried. Adding it fixes the mid band
+        // (2^16 went 1.882x -> 1.053x) and REGRESSES the small one: 2^12 went 0.549x -> 1.495x,
+        // because the native path WINS on small bool arrays. Same trap as the bool unary row -
+        // a dtype-shaped defect does not license a dtype-shaped fix. Bool's large sizes are
+        // served by the histogram above (0.091x at 2^22); the residual is the [2^13, 2^20) band
+        // and it needs a size gate measured on a QUIET host, not a blanket delegate.
         || numpy_dtype_is_integer(py, a.bind(py))?
     {
         return fallback();
@@ -80629,10 +80662,29 @@ fn nanmedian(
         return fallback();
     }
 
+    // A NaN-IMPOSSIBLE dtype makes `nanmedian` == `median`, so route it to fnp's `median` - which
+    // owns the bounded-range histogram this function has no access to. The same argument the
+    // `nan*` reductions already make for their integer inputs, and the same reroute `nanstd` and
+    // `nanvar` already make into `py_std`/`var`.
+    //
+    // Verified rather than assumed: `np.median` and `np.nanmedian` agree on dtype, shape and RAW
+    // BYTES across 9 integer/bool dtypes x 5 shapes x 4 axis/keepdims forms - 0 of 180 differ.
+    //
+    // GATED ON THE HISTOGRAM ACTUALLY BEING REACHABLE, and the gate is not optional. The ungated
+    // version of this reroute was measured and it REGRESSED small arrays: `nanmedian` has its own
+    // native f64 path that beats numpy below the histogram floor (int32 at 2^16 reads 0.516x),
+    // while `median` there just delegates - so rerouting everything took that cell to 0.991x and
+    // handed back a win. Above the floor the reroute is worth 2.446x -> 0.061x at 2^22 int32.
+    if (numpy_dtype_is_integer(py, a.bind(py))? || numpy_dtype_is_bool(py, a.bind(py)))
+        && a.bind(py).is_exact_instance(cached_ndarray_type(py)?)
+        && ndarray_element_count(a.bind(py))? >= INT_ORDER_STAT_HIST_MIN_N
+    {
+        return median(py, a, axis, out, overwrite_input, keepdims);
+    }
+
     // The native kernel computes in f64; defer float16/float32/complex inputs to
     // numpy.nanmedian so the narrow float dtype is preserved (numpy keeps float32 ->
-    // float32) instead of widening to float64. int/bool/float64 keep the native path
-    // (numpy's nanmedian of integers is float64, matching the widened native result).
+    // float32) instead of widening to float64. float64 keeps the native path.
     if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
