@@ -63716,3 +63716,113 @@ the mapping many-to-one in the other direction, so a bitwise counting sort is wr
 **And do not re-attack `asfortranarray`/`ascontiguousarray`**: measured above, two attribute reads
 cost more than numpy's whole call, so the 4.0x-4.7x ratios there are the pyo3 crossing wall and
 are already at their floor.
+
+## 2026-08-27 - WIN (SHIP): the f64 `unique` bucket path is FLAT in cardinality while NumPy's cost GROWS with it, so a route banked as a 13x win in 2026-06 is a 2.1x LOSS on low-cardinality data - a sampled floor fixes it: 2.056x -> 1.016x (`franken_numpy-unique-grid-cardinality-floor`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)     bench_elf_sha256=9bfd9f7a58a51caaecc9d4d8a51c51c05fffa2fa653dbce78787fce5d6ec0fc6
+executing elf sha256 (AFTER)      bench_elf_sha256=9c59f9651d5cc907002192b25d4d38502a25cdd55b1493f854320ae8b60b4918
+```
+
+### A BANKED 13x WIN HAS BEEN OVERTAKEN BY NUMPY, AND ITS ROW'S BASELINE SAYS SO
+
+`2026-06-26 - BlackThrush WIN: bounded-grid f64 np.unique bucket path (7.1-13.0x over NumPy)`
+banked `repeated f64 1m: fnp 4.745ms vs NumPy 61.706ms`. On this host with numpy 2.4.3 the SAME
+corpus shape measures **numpy 5.425 ms at 1m** - the baseline that row beat by 13x is now 11x
+faster than it was. The route is unchanged; what it is racing is not.
+
+That row is NOT wrong and is not being retracted: on its own corpus (4096 distinct values on the
+1/16 grid) the path is still a real win here - 0.370x at 50k, 0.455x at 512k, 0.395x at 262144.
+What has changed is that the win no longer covers the whole admitted range.
+
+### THE MECHANISM: THE ROUTE IS FLAT IN CARDINALITY, NUMPY IS NOT
+
+The bucket path is O(n + range) with range capped, so its cost barely depends on how many
+distinct values there are. NumPy's `unique` cost rises steeply with that count. Measured at
+n=262144, values on the 1/16 grid, varying ONLY the distinct count, fnp on the grid path
+throughout:
+
+```
+   distinct  key_range     numpy_ns      fnp_ns    ratio
+          8          7     490239.8   1008084.3    2.056x   <- LOSS
+         32         31     668397.3    816277.6    1.221x   <- LOSS
+        128        127     852059.6    743404.5    0.872x   <- WIN
+        512        511    1050505.6    728886.2    0.694x
+       4096       4095    1717370.1    726371.4    0.423x
+      65536      65535    2868265.9    786150.6    0.274x
+```
+
+fnp's column moves 1.4x across that sweep; numpy's moves 5.9x. The crossing sits between 31 and
+127, and the gate had no term for it - which is why one corpus measured 0.42x and another 2.06x
+through the same code.
+
+COUNTED_MECHANISM: across a 8192x change in distinct count at fixed n=262144, the grid path's own
+time moves from 1008084.3 to 786150.6 ns (1.28x) while numpy's moves from 490239.8 to 2868265.9 ns
+(5.85x); the ratio therefore crosses 1.0 between key_range 31 and 127, and the floor is set at 64.
+
+### THE FLOOR MUST PRECEDE THE SCAN - MEASURED, NOT ASSUMED
+
+The obvious placement is beside the existing `range` test, where `range` is already computed and
+the check looks free. **BUILT AND MEASURED THERE FIRST, AND IT MADE THE LOSING CELLS WORSE:
+2.056x -> 2.745x at 8 distinct**, because a decline at that point has already paid a 2 ns/element
+admission pass and then hands the work to the fallback regardless. The floor is therefore taken
+from a 1024-element PREFIX SAMPLE before the scan (~1 us). A prefix that misrepresents the array
+can only cost throughput, never correctness: every path still re-derives the true range, and a
+wrong decline lands on the fallback that measures ~1.0x.
+
+Also removed from the admission scan: a per-element `key_f.fract() != 0.0` that was REDUNDANT with
+the `key as f64 != key_f` round trip two lines below it (for finite `key_f` with `|key_f| <= 2^52`
+the round trip IS the integrality test). Worth ~10% of the grid path's own time (50k grid corpus
+0.415x -> 0.379x).
+
+### THE MEASUREMENT
+
+n=262144, 1/16 grid, varying distinct count:
+
+```
+   distinct     BEFORE     AFTER
+          8     2.056x     1.016x    LOSS -> parity
+         32     1.221x     1.008x    LOSS -> parity
+         64     1.721x     1.001x    LOSS -> parity
+        128     0.872x     0.818x    win kept, improved
+        512     0.694x     0.638x
+       4096     0.423x     0.400x
+      65536     0.274x     0.255x
+  50k  grid     0.415x     0.350x
+  512k grid     0.550x     0.455x
+```
+
+**Every losing cell reaches parity and every winning cell improves.**
+
+**WHAT THIS DOES NOT FIX, STATED:** `rng.integers(0,8,n).astype(float)` - eight distinct values
+spaced a whole unit apart - still measures **2.112x at 262144**. Its key range is 112, above the
+floor, so the sample admits it. RANGE IS NOT CARDINALITY when the values are spaced out, and this
+row's floor is a range floor. Unchanged from before (2.22x), so nothing regressed, but the shape
+is not covered.
+
+PARITY: 240 cells - four sizes straddling the grid's own `1 << 15` gate (32767/32768/40000/262144)
+x {seven distinct counts straddling the new floor at 63/64/65, integers-as-float, standard normal},
+plus the corpora the route must DEFER on (NaN, +inf, -0.0, 1e300, non-grid fractions) and a
+`prefix_narrow` array whose first 2048 elements are all zero and whose tail is high-cardinality -
+the sample heuristic's deliberate worst case - each under four keyword forms, comparing dtype,
+shape and raw bytes: **0 divergences**. General parity 5320 cells -> 1 divergence, identical on the
+pre-change build (pre-existing `deadlock-audit-neu7z`). Both byte-order oracles unchanged (1
+integer / 26 float). 660 error/edge cells identical. 655 lib tests pass. clippy `-D warnings` and
+`cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 512000 float64 = 4 MB.
+
+RETRY PREDICATE: **the remaining shape needs SAMPLED CARDINALITY, not sampled range.** For
+integers-as-float the prefix contains 8 distinct keys spread over a range of 112; a bitmap over the
+sampled key range (512 bytes covers a 4096-wide range) would count them and decline, where the
+range test cannot. That is UNMEASURED and it is the only thing standing between this route and
+being right on both corpora. **Do not re-place the floor after the scan** - measured above at
+2.745x, worse than no floor at all. And **re-read the 2026-06-26 row before touching this path**:
+its 13x figure is real for the numpy of its day, so the lesson is not that it was wrong but that
+**a banked ratio decays when the incumbent improves, and a route admitted on a stale ratio needs
+re-measuring, not deleting.**
