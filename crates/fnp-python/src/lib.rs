@@ -28017,75 +28017,36 @@ fn append(
         return Ok(out);
     }
 
-    // THE EXTRACT PATH SILENTLY WIDENS THE DTYPE, SO IT ONLY RUNS WHERE IT CANNOT
+    // THE NATIVE EXTRACT PATH IS DELETED: IT WAS WRONG *AND* SLOWER THAN NUMPY
     // (`deadlock-audit-1zl3e`).
     //
-    // `extract_numeric_array` canonicalises to f64/i64 and `build_numpy_array_from_ufunc`
-    // then builds with THAT dtype, so every narrow operand came back promoted. Measured
-    // against numpy 2.4.3, `np.append(x, y, axis=0)` on a 2-D operand:
+    // WRONG. `extract_numeric_array` canonicalises to f64/i64 and
+    // `build_numpy_array_from_ufunc` then built with THAT dtype, so every narrow operand
+    // came back promoted. Against numpy 2.4.3, `np.append(x, y, axis=0)` on a 2-D
+    // operand: float32 -> float64, float16 -> float64, int32 -> int64, int8 -> int64,
+    // uint8 -> uint64, longdouble -> float64. Six dtypes returning a SILENTLY different
+    // dtype - no error, no warning, invisible to any probe comparing values not dtypes.
+    // (`np.append(uint8, int8)` is int16 in numpy and came back float64 here too.)
     //
-    //     float32    -> numpy float32     fnp float64
-    //     float16    -> numpy float16     fnp float64
-    //     int32      -> numpy int32       fnp int64
-    //     int8       -> numpy int8        fnp int64
-    //     uint8      -> numpy uint8       fnp uint64
-    //     longdouble -> numpy float128    fnp float64
+    // SLOWER. Gating it to the two dtypes it did preserve exposed what it cost where it
+    // was "working". Same-invocation dual-null against live numpy, 64x16 2-D, axis=0:
     //
-    // Six dtypes returning a SILENTLY DIFFERENT dtype from numpy - no error, no warning,
-    // and invisible to any probe that compares values rather than dtypes. Only f64 and
-    // i64 survived the round trip, which is exactly the set this gate now admits: both
-    // operands exact ndarrays of the SAME dtype, and that dtype one of the two. A
-    // non-ndarray `values` (list/scalar) also delegates, because its promotion against
-    // the array is numpy's business and the extract does not model it - `np.append(i8,
-    // 1.5)` is float64 in numpy and was int64 here.
+    //     axis=0 f64, native path      7.577x LOSS   [6.198,7.764]
+    //     axis=0 i64, native path     14.069x LOSS  [11.165,14.226]
+    //     axis=0 f32, DELEGATED        1.578x LOSS   [1.298,1.807]
+    //     axis=0 i32, DELEGATED        1.596x LOSS   [1.561,1.761]
     //
-    // This DELEGATES calls that used to run natively. They were producing the wrong
-    // dtype, so that is a correctness fix taking a measured cost, not a regression.
-    let preserved_dtype = |o: &Bound<'_, PyAny>| -> PyResult<Option<(char, usize)>> {
-        if !o.is_exact_instance(cached_ndarray_type(py)?) {
-            return Ok(None);
-        }
-        let dt = o.getattr(intern!(py, "dtype"))?;
-        let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
-        let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-        Ok(Some((kind, itemsize)))
-    };
-    match (
-        preserved_dtype(arr.bind(py))?,
-        preserved_dtype(values.bind(py))?,
-    ) {
-        (Some(a_dt), Some(v_dt)) if a_dt == v_dt && matches!(a_dt, ('f', 8) | ('i', 8)) => {}
-        _ => return fallback(),
-    }
-
-    let a = match extract_numeric_array(py, arr.bind(py), "append(arr)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    let v = match extract_numeric_array(py, values.bind(py), "append(values)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    if a.has_integer_sidecar() || v.has_integer_sidecar() {
-        return fallback();
-    }
-
-    let result = match axis_val {
-        None => {
-            // Flatten both and concatenate
-            let a_flat = a.flatten();
-            let v_flat = v.flatten();
-            match UFuncArray::concatenate(&[&a_flat, &v_flat], 0) {
-                Ok(r) => r,
-                Err(_) => return fallback(),
-            }
-        }
-        Some(ax) => match UFuncArray::concatenate(&[&a, &v], ax) {
-            Ok(r) => r,
-            Err(_) => return fallback(),
-        },
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // Delegating is 4-9x FASTER than the native path it replaces. `UFuncArray::
+    // concatenate` here means a full extract of both operands into owned Vecs, a
+    // concatenate, and a rebuild across the export bridge - three copies where numpy
+    // does one. There is no dtype and no shape for which this path was worth taking, so
+    // the answer is not a narrower gate but no path: every `axis=` form now delegates.
+    //
+    // The axis=None byte-concat fast path above is untouched and still serves every
+    // dtype - it is dtype-exact by construction (it copies raw bytes and views the
+    // result back as the input dtype) and it WINS, which is exactly the contrast that
+    // makes this deletion safe rather than a retreat.
+    fallback()
 }
 
 #[pyfunction]
