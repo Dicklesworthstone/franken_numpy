@@ -9321,11 +9321,14 @@ fn zerocopy_f32_unary_flat<'py>(
     //
     // This route was still doing `empty(n, dtype=...)` flat and letting its caller
     // reshape, so it paid both. Rank 1 passes a bare int, skipping a one-element tuple.
+    // The dtype is the operand's own object, not the string "float32": a `&str` builds a
+    // fresh `PyString` per call and makes numpy re-parse it (`deadlock-audit-tsyfb`).
+    let out_dtype = x.getattr(intern!(py, "dtype"))?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, "float32"))?
+        numpy.call_method1(intern!(py, "empty"), (*only, &out_dtype))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, "float32"))?
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, &out_dtype))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -9429,9 +9432,14 @@ fn zerocopy_i64_unary_flat<'py>(
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "int64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    // Allocate at the final shape with the operand's own dtype object, same as the i32
+    // sibling (`deadlock-audit-tsyfb`).
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, &dtype))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, &dtype))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -9520,9 +9528,19 @@ fn zerocopy_i32_unary_flat<'py>(
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "int32")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    // ALLOCATE AT THE FINAL SHAPE, WITH THE OPERAND'S OWN DTYPE OBJECT
+    // (`deadlock-audit-tsyfb`). This route paid all three of the levers the f64 and f32
+    // siblings have already taken: a per-call `PyDict`, a fresh `PyString` for "int32"
+    // that numpy then re-parsed, and a flat allocation whose caller had to `reshape`.
+    // The dtype is already in hand from the kind/itemsize check above - passing that
+    // object is both cheaper than a name and exactly numpy's own dtype.
+    // Rank 1 passes a bare int, skipping a one-element tuple.
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, &dtype))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, &dtype))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<i32>::get(&flat) else {
             return Ok(None);
@@ -9598,7 +9616,6 @@ fn zerocopy_int_unary_typed<'py, T, N, A, S>(
     numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
     op: UnaryOp,
-    dtype_name: &str,
     neg: N,
     abs_: A,
     sqr: S,
@@ -9617,9 +9634,19 @@ where
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    // ALLOCATE AT THE FINAL SHAPE, WITH THE OPERAND'S OWN DTYPE OBJECT
+    // (`deadlock-audit-tsyfb`). The `dtype_name: &str` parameter this used to carry is
+    // GONE, not just unused: the width is already fixed by the `T` the caller
+    // instantiates, so naming it again bought nothing and cost a fresh `PyString` plus
+    // a numpy dtype parse on every call. Allocating in shape also retires the caller's
+    // per-call `reshape`. Rank 1 passes a bare int.
+    let dtype = x.getattr(intern!(py, "dtype"))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, &dtype))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, &dtype))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -9668,7 +9695,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
             numpy,
             x,
             op,
-            "int8",
             |v| v.wrapping_neg(),
             |v| v.wrapping_abs(),
             |v| v.wrapping_mul(v),
@@ -9678,7 +9704,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
             numpy,
             x,
             op,
-            "int16",
             |v| v.wrapping_neg(),
             |v| v.wrapping_abs(),
             |v| v.wrapping_mul(v),
@@ -9688,7 +9713,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
             numpy,
             x,
             op,
-            "uint8",
             |v| v.wrapping_neg(),
             |v| v,
             |v| v.wrapping_mul(v),
@@ -9698,7 +9722,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
             numpy,
             x,
             op,
-            "uint16",
             |v| v.wrapping_neg(),
             |v| v,
             |v| v.wrapping_mul(v),
@@ -9708,7 +9731,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
             numpy,
             x,
             op,
-            "uint32",
             |v| v.wrapping_neg(),
             |v| v,
             |v| v.wrapping_mul(v),
@@ -9718,7 +9740,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
             numpy,
             x,
             op,
-            "uint64",
             |v| v.wrapping_neg(),
             |v| v,
             |v| v.wrapping_mul(v),
@@ -59248,10 +59269,8 @@ fn native_unary_elementwise(
     if int_of(8)
         && let Some((flat, shape)) = zerocopy_i64_unary_flat(py, numpy, x, op)?
     {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        let output = flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind();
+        // No reshape: the helper allocates at the final shape (`deadlock-audit-tsyfb`).
+        let output = flat.unbind();
         if shape.is_empty() {
             return Ok(output.bind(py).get_item(())?.unbind());
         }
@@ -59263,10 +59282,8 @@ fn native_unary_elementwise(
     if int_of(4)
         && let Some((flat, shape)) = zerocopy_i32_unary_flat(py, numpy, x, op)?
     {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        let output = flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind();
+        // No reshape: the helper allocates at the final shape (`deadlock-audit-tsyfb`).
+        let output = flat.unbind();
         if shape.is_empty() {
             return Ok(output.bind(py).get_item(())?.unbind());
         }
@@ -59278,10 +59295,8 @@ fn native_unary_elementwise(
     if narrow_integral
         && let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, numpy, x, op)?
     {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        let output = flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind();
+        // No reshape: the helper allocates at the final shape (`deadlock-audit-tsyfb`).
+        let output = flat.unbind();
         if shape.is_empty() {
             return Ok(output.bind(py).get_item(())?.unbind());
         }
@@ -59293,10 +59308,11 @@ fn native_unary_elementwise(
     if float_of(4)
         && let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)?
     {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        let output = flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind();
+        // NO RESHAPE. `zerocopy_f32_unary_flat` has allocated at the FINAL shape since
+        // `deadlock-audit-ei9jz`, but this caller kept reshaping the result to the shape
+        // it already had - a no-op `reshape` plus its tuple, ~117 ns per call, on every
+        // f32 unary (`deadlock-audit-tsyfb`).
+        let output = flat.unbind();
         if shape.is_empty() {
             return Ok(output.bind(py).get_item(())?.unbind());
         }
