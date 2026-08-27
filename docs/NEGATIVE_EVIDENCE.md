@@ -63120,3 +63120,112 @@ compaction. AVX-512 `vpcompressd`/`vpcompressq` is the instruction numpy uses, a
 **`thinkstation1` is AVX2 - it has no compaction instruction at all**, so that work belongs on
 `hz2`, the only avx512f host in the fleet, and must be ISA-gated. The 2.55x SPARSE cell is the
 worst in this family and is untouched by either idea.
+
+## 2026-08-27 - WIN (SHIP): five "parallel" paths ran SERIAL across the whole band [2^19, 2^21) because their fixed block was larger than their own admission gate - `compress` 4.829x -> 1.474x (`franken_numpy-parallel-block-gate`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell, on a
+quiet host after two contaminated attempts were discarded.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=c3199b41b2a2032514f2f90e09cd38db922d6b732141e7a6b99b977429b11676
+executing elf sha256 (AFTER)   bench_elf_sha256=dffe2260985966eb6046269fc59f6b83d921025fd1d3979d6f85a68c0099a539
+```
+
+### FIRST, HALF THE TRIAGE'S NOMINATIONS WERE NOT REAL
+
+The broad sweep (`loss_triage.py`, min-of-timeit) nominated `trunc int64 2^20` at **1.775x**. Its
+code path is a PURE DELEGATE - `native_rounding_unary` sends every non-f64 dtype straight to
+`numpy.trunc` - and a delegate cannot be 172000 ns slower than what it delegates to. Re-measured
+with an interleaved dual-null harness it is **1.009x**. Sixteen nominations were re-run that way:
+
+```
+  op            dtype        n     triage   measured   verdict
+  trunc         int64    2^20     1.775x     1.009x    UNREADABLE (both nulls fail)
+  sign          int64    2^20     1.638x     1.260x    UNREADABLE
+  argwhere      int32    2^20     1.323x     1.051x    UNREADABLE
+  signbit       int64    2^20     1.247x     1.002x    readable - NOT A LOSS
+  argsort       int32    2^20     1.099x     1.069x    UNREADABLE
+  std           int64    2^20     1.061x     1.002x    UNREADABLE
+```
+
+**8 of 16 were UNREADABLE and several collapsed on re-measurement.** At 2^20 these ops return a
+4-16 MB buffer, and min-of-N over ~28 reps measures page behaviour, not the kernel. The three that
+survived as genuine losses were `nonzero`/`flatnonzero` bool (~1.26x) and `nan_to_num` f32
+(1.204x). **Do not rank from that sweep's 2^20 rows without re-measuring.**
+
+### THE DEFECT
+
+`nonzero`'s cost turned out to be INDEPENDENT of how many elements are true (503-518 us at 2^20
+for every mask pattern) while numpy's scales (199 us at 1% density). The reason is not the kernel:
+
+```rust
+const FLATNONZERO_PAR_MIN: usize = 1 << 19;   // admission gate
+const FLATNONZERO_BLOCK:   usize = 1 << 20;   // par_chunks size
+```
+
+**The block is larger than the gate**, so every array in [2^19, 2^21) produces exactly ONE chunk
+and runs on one core inside code written to be parallel. The ratio tracks chunk count and nothing
+else:
+
+```
+        n      chunks   numpy_ns      fnp_ns   ratio
+   524288           1   197627.6    252390.0   1.28x   LOSS
+  1048576           1   401778.0    508113.3   1.26x   LOSS
+  2097152           2   807458.4    575030.0   0.71x   WIN
+  4194304           4  1635079.8    828327.5   0.51x   WIN
+  8388608           8  5364048.6   2416380.6   0.45x   WIN
+```
+
+FIVE families carried the identical `PAR_MIN = 1<<19` / `BLOCK = 1<<20` pairing: compress/extract
+(`COMPACT`), flatnonzero, nonzero 2-D, nonzero n-D, argwhere, and isin. A new
+`parallel_block_for(len, min_block)` derives the block from `rayon::current_num_threads()` with a
+floor.
+
+COUNTED_MECHANISM: `par_chunks(1 << 20)` over an array of 2^19 or 2^20 elements yields exactly 1
+chunk, so 63 of this host's 64 threads received no work; after the fix the same arrays yield 8 and
+16 chunks respectively.
+
+### THE MEASUREMENT
+
+Both arms readable, quiet host (loadavg 6.39 / 6.70):
+
+```
+  op            n        BEFORE     AFTER
+  compress   524288      4.829x     1.474x    <- 3.28x, the single-chunk path was 5x numpy
+  nonzero    1048576     1.247x     0.944x    LOSS -> WIN
+  flatnonzero 1048576    1.258x     0.968x    LOSS -> WIN
+  nonzero     524288     1.282x     1.100x
+  argwhere   1048576     1.002x     0.999x    in-family CONTROL, unmoved
+  argwhere    524288     1.015x     1.000x    in-family CONTROL, unmoved
+```
+
+`argwhere` is the control that matters: it takes the same fix but its per-chunk n-D index
+arithmetic already dominated, so it neither gains nor loses - the change does only what it claims.
+
+A FIRST FLOOR OF `1 << 16` REGRESSED THE SMALL END and was corrected before shipping: it took
+`flatnonzero 2^19` from 1.265x to **1.375x** by handing 8 chunks of index-building work to threads
+that could not amortise it. At `1 << 17` the same cell is **1.096x-1.135x**, better than either.
+compress and isin keep the `1 << 16` floor, where they measured well (2^19: 4.829x -> 1.474x);
+their inner loop is cheaper per element than the index builders'.
+
+PARITY: 232 cells over 11 sizes (0, 1, 17, 4095, 65536, and both sides of the new floor at
+131071/131072, plus 524288, 1048576, 1048577, 2097152) x 4 densities (random, 1% sparse, all-true,
+all-false) x {flatnonzero, nonzero, argwhere, compress, extract} plus 2-D nonzero/argwhere and two
+isin sizes, comparing dtype, shape and raw bytes: **0 divergences**. General parity 5320 cells -> 1
+divergence, identical on the pre-change build (pre-existing `deadlock-audit-neu7z`). Both
+byte-order oracles unchanged (1 integer / 26 float). 660 error/edge cells identical. 655 lib tests
+pass. clippy `-D warnings` and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 2097152 bool with its index output (up to 16 MB), a few live.
+
+RETRY PREDICATE: **grep for any other `const *_BLOCK` compared against a smaller `*_PAR_MIN`** -
+this row fixed the five that had it, and the defect is invisible to every ratio table because the
+affected band looks like an ordinary small loss rather than a disabled optimisation. The remaining
+readable loss from the verified nominations is **`nan_to_num` float32 at 2^20, 1.204x with 130439
+ns of excess**, which is NOT in this family and is untouched here. Also note `compress` at 2^19 is
+still 1.474x and `nonzero` at 2^19 still 1.100x: the block fix removed the disabled-parallelism
+part of those cells, not the compaction wall underneath them, which is recorded one row up as
+needing AVX-512.

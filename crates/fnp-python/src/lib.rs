@@ -17712,9 +17712,9 @@ fn compact_typed<
         let c_raw: &[C] = unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<C>(), m) };
         let a_raw: &[T] =
             unsafe { std::slice::from_raw_parts(arr_in.as_ptr().cast::<T>(), arr_in.len()) };
-        const COMPACT_BLOCK: usize = 1 << 20;
+        let block = parallel_block_for(c_raw.len(), 1 << 16);
         let counts: Vec<usize> = c_raw
-            .par_chunks(COMPACT_BLOCK)
+            .par_chunks(block)
             .map(|c| c.iter().filter(|&&v| pred(v)).count())
             .collect();
         let total: usize = counts.iter().sum();
@@ -17738,11 +17738,11 @@ fn compact_typed<
                 rest = tail;
             }
             c_raw
-                .par_chunks(COMPACT_BLOCK)
+                .par_chunks(block)
                 .zip(slices.into_par_iter())
                 .enumerate()
                 .for_each(|(b, (cc, outs))| {
-                    let base = b * COMPACT_BLOCK;
+                    let base = b * block;
                     let mut w = 0usize;
                     for (i, &cv) in cc.iter().enumerate() {
                         if pred(cv) {
@@ -24677,6 +24677,31 @@ fn flatnonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
 // bandwidth-bound, and numpy's NON-BOOL nonzero core is branchy per element
 // (92.4ms for 16M int64 vs 19.1ms for 16M bool measured) - the weak side the
 // old reject never separated by dtype.
+/// Chunk size that actually SPLITS `len` across the rayon pool.
+///
+/// **A fixed block larger than the admission gate makes a "parallel" path run serial.** Five
+/// families here paired `PAR_MIN = 1 << 19` with `BLOCK = 1 << 20` - compress/extract,
+/// flatnonzero, nonzero (2-D and n-D), argwhere and isin - so every array in the whole band
+/// [2^19, 2^21) produced exactly ONE chunk and executed on one core inside code written to be
+/// parallel. Measured on `flatnonzero`, 50% bool, against numpy, where the ratio tracks the chunk
+/// count and nothing else:
+///
+/// ```text
+///        n      chunks   numpy_ns      fnp_ns   ratio
+///   524288           1   197627.6    252390.0   1.28x   LOSS
+///  1048576           1   401778.0    508113.3   1.26x   LOSS
+///  2097152           2   807458.4    575030.0   0.71x   WIN
+///  4194304           4  1635079.8    828327.5   0.51x   WIN
+///  8388608           8  5364048.6   2416380.6   0.45x   WIN
+/// ```
+///
+/// The floor keeps per-chunk overhead amortised on the small end rather than handing 64 threads
+/// a few hundred elements each.
+fn parallel_block_for(len: usize, min_block: usize) -> usize {
+    len.div_ceil(rayon::current_num_threads().max(1))
+        .max(min_block)
+}
+
 fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -24686,9 +24711,9 @@ fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
-    const FLATNONZERO_BLOCK: usize = 1 << 20;
+    let block = parallel_block_for(raw.len(), 1 << 17);
     let counts: Vec<usize> = raw
-        .par_chunks(FLATNONZERO_BLOCK)
+        .par_chunks(block)
         .map(|c| c.iter().filter(|&&v| pred(v)).count())
         .collect();
     let total: usize = counts.iter().sum();
@@ -24713,11 +24738,11 @@ fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
             slices.push(head);
             rest = tail;
         }
-        raw.par_chunks(FLATNONZERO_BLOCK)
+        raw.par_chunks(block)
             .zip(slices.into_par_iter())
             .enumerate()
             .for_each(|(b, (chunk, outs))| {
-                let base = (b * FLATNONZERO_BLOCK) as i64;
+                let base = (b * block) as i64;
                 let mut w = 0usize;
                 for (i, &v) in chunk.iter().enumerate() {
                     if w < outs.len() {
@@ -24806,9 +24831,9 @@ fn nonzero_2d_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
-    const FLATNONZERO_BLOCK: usize = 1 << 20;
+    let block = parallel_block_for(raw.len(), 1 << 17);
     let counts: Vec<usize> = raw
-        .par_chunks(FLATNONZERO_BLOCK)
+        .par_chunks(block)
         .map(|c| c.iter().filter(|&&v| pred(v)).count())
         .collect();
     let total: usize = counts.iter().sum();
@@ -24845,12 +24870,12 @@ fn nonzero_2d_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
             c_slices.push(ch);
             c_rest = ct;
         }
-        raw.par_chunks(FLATNONZERO_BLOCK)
+        raw.par_chunks(block)
             .zip(r_slices.into_par_iter())
             .zip(c_slices.into_par_iter())
             .enumerate()
             .for_each(|(b, ((chunk, r_o), c_o))| {
-                let start = b * FLATNONZERO_BLOCK;
+                let start = b * block;
                 let mut r = (start / inner) as i64;
                 let mut c = (start % inner) as i64;
                 let inner_i = inner as i64;
@@ -24892,9 +24917,9 @@ fn nonzero_nd_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     let ndim = shape.len();
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let raw: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
-    const FLATNONZERO_BLOCK: usize = 1 << 20;
+    let block = parallel_block_for(raw.len(), 1 << 17);
     let counts: Vec<usize> = raw
-        .par_chunks(FLATNONZERO_BLOCK)
+        .par_chunks(block)
         .map(|c| c.iter().filter(|&&v| pred(v)).count())
         .collect();
     let total: usize = counts.iter().sum();
@@ -24944,13 +24969,13 @@ fn nonzero_nd_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
                 )
             })
             .collect();
-        raw.par_chunks(FLATNONZERO_BLOCK)
+        raw.par_chunks(block)
             .zip(tasks.into_par_iter())
             .for_each(|(chunk, (b, mut outs))| {
                 // Seed this block's odometer from its flat start (C-order
                 // decomposition, one divmod per dim).
                 let mut coords = vec![0i64; ndim];
-                let mut rem = b * FLATNONZERO_BLOCK;
+                let mut rem = b * block;
                 for d in (0..ndim).rev() {
                     coords[d] = (rem % shape[d]) as i64;
                     rem /= shape[d];
@@ -25199,9 +25224,9 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
         // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
         let raw: &[T] =
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
-        const ARGWHERE_BLOCK: usize = 1 << 20;
+        let block = parallel_block_for(raw.len(), 1 << 17);
         let counts: Vec<usize> = raw
-            .par_chunks(ARGWHERE_BLOCK)
+            .par_chunks(block)
             .map(|c| c.iter().filter(|&&v| pred(v)).count())
             .collect();
         let total: usize = counts.iter().sum();
@@ -25227,14 +25252,14 @@ fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy + Sync, F: Fn(T) -> bool 
                 slices.push(head);
                 rest = tail;
             }
-            raw.par_chunks(ARGWHERE_BLOCK)
+            raw.par_chunks(block)
                 .zip(slices.into_par_iter())
                 .enumerate()
                 .for_each(|(b, (chunk, outs))| {
                     // Seed this block's odometer from its flat start (C-order
                     // decomposition, one divmod per dim).
                     let mut coords = vec![0i64; ndim];
-                    let mut rem = b * ARGWHERE_BLOCK;
+                    let mut rem = b * block;
                     for d in (0..ndim).rev() {
                         coords[d] = (rem % shape[d]) as i64;
                         rem /= shape[d];
@@ -57602,7 +57627,7 @@ fn isin_typed<
     // identical to the serial scan -> bit-exact. The build passes stay serial
     // (test set is typically much smaller than element).
     const ISIN_PAR_MIN: usize = 1 << 19;
-    const ISIN_BLOCK: usize = 1 << 20;
+    let isin_block = parallel_block_for(n, 1 << 16);
     let par = n >= ISIN_PAR_MIN && rayon::current_num_threads() >= 2;
 
     // Dense-table membership when the test value range is small relative to the
@@ -57638,8 +57663,8 @@ fn isin_typed<
             };
             if par {
                 out_raw
-                    .par_chunks_mut(ISIN_BLOCK)
-                    .zip(e_raw.par_chunks(ISIN_BLOCK))
+                    .par_chunks_mut(isin_block)
+                    .zip(e_raw.par_chunks(isin_block))
                     .for_each(|(oc, ec)| lookup(oc, ec));
             } else {
                 lookup(&mut *out_raw, e_raw);
@@ -57668,8 +57693,8 @@ fn isin_typed<
         };
         if par {
             out_raw
-                .par_chunks_mut(ISIN_BLOCK)
-                .zip(e_raw.par_chunks(ISIN_BLOCK))
+                .par_chunks_mut(isin_block)
+                .zip(e_raw.par_chunks(isin_block))
                 .for_each(|(oc, ec)| lookup(oc, ec));
         } else {
             lookup(&mut *out_raw, e_raw);
