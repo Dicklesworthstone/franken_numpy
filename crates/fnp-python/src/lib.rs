@@ -102178,8 +102178,40 @@ fn try_zerocopy_f64_unique_binary_grid(
         }
         // NaN/inf in the sample leave this comparison false, so the full scan below still owns
         // the decision for those.
-        if (hi - lo) * SCALE < GRID_MIN_KEY_RANGE {
+        let spread = (hi - lo) * SCALE;
+        if spread < GRID_MIN_KEY_RANGE {
             return Ok(None);
+        }
+        // RANGE IS NOT CARDINALITY, and the floor above only measures range. Eight distinct
+        // values spaced a whole unit apart span a key range of 112 and sail past it, which is
+        // exactly the `np.array(rng.integers(0, 8, n), float)` shape that stayed a 2.1x LOSS
+        // when the range floor alone shipped. What decides the race is the DISTINCT COUNT,
+        // because that is what NumPy's cost scales with.
+        //
+        // Counting distinct keys in the sample is cheap whenever the sampled spread is narrow
+        // enough to bitmap: 4096 bits is 512 bytes of stack and covers every low-cardinality
+        // shape that reaches here. A wider spread is left alone - it cannot be low-cardinality
+        // AND widely spread within 1024 samples without being unusual, and guessing wrong only
+        // costs throughput.
+        const GRID_BITMAP_MAX_SPREAD: usize = 4095;
+        const GRID_MIN_DISTINCT: usize = 64;
+        if spread <= GRID_BITMAP_MAX_SPREAD as f64 {
+            let base = (lo * SCALE) as i64;
+            let mut seen = [0u64; 64];
+            let mut distinct = 0usize;
+            for &v in head {
+                let key = (v * SCALE) as i64 - base;
+                if (0..=GRID_BITMAP_MAX_SPREAD as i64).contains(&key) {
+                    let (word, bit) = (key as usize / 64, key as usize % 64);
+                    if seen[word] & (1u64 << bit) == 0 {
+                        seen[word] |= 1u64 << bit;
+                        distinct += 1;
+                    }
+                }
+            }
+            if distinct < GRID_MIN_DISTINCT {
+                return Ok(None);
+            }
         }
     }
 
