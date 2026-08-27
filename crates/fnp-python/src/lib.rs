@@ -8895,8 +8895,17 @@ fn zerocopy_f64_unary_flat<'py>(
     if !x.get_type().is(&ndarray_type) {
         return Ok(None);
     }
-    // A float64 buffer view; wrong dtype (format mismatch) or non-C-contiguous
-    // layout (`as_slice` returns None) falls through unchanged.
+    // A float64 buffer view. The dtype must be checked HERE rather than left to the buffer
+    // request: `PyBuffer::<f64>::get` ACCEPTS a byte-swapped `>f8` array and hands over its
+    // bytes, which were then read as native doubles. Identity against the canonical descriptor
+    // is byte-order exact where `dtype.char`/`kind`/`itemsize` are all blind to it.
+    // Non-C-contiguous layout still falls through below via `as_slice` returning None.
+    if !x
+        .getattr(intern!(py, "dtype"))?
+        .is(cached_float64_dtype(py)?)
+    {
+        return Ok(None);
+    }
     let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
         return Ok(None);
     };
@@ -9284,8 +9293,16 @@ fn zerocopy_f32_unary_flat<'py>(
     if !x.get_type().is(&ndarray_type) {
         return Ok(None);
     }
-    // PyBuffer::<f32>::get only succeeds for an exact float32 buffer (format 'f',
-    // itemsize 4); float16/float64/other dtypes fall through unchanged.
+    // The dtype must be checked HERE, not left to the buffer request: `PyBuffer::<f32>::get`
+    // does NOT only succeed for an exact native float32 buffer as the old comment claimed - it
+    // accepts a byte-swapped `>f4` and hands over bytes that were then read as native floats.
+    // Identity against the canonical descriptor is byte-order exact.
+    if !x
+        .getattr(intern!(py, "dtype"))?
+        .is(cached_float32_dtype(py)?)
+    {
+        return Ok(None);
+    }
     let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
         return Ok(None);
     };
@@ -9884,6 +9901,13 @@ fn zerocopy_f64_unary_flat_with<'py, F: Fn(f64) -> f64>(
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
     let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    // Byte-order exact; the buffer request alone accepts `>f8`. See `zerocopy_f64_unary_flat`.
+    if !x
+        .getattr(intern!(py, "dtype"))?
+        .is(cached_float64_dtype(py)?)
+    {
         return Ok(None);
     }
     let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
@@ -15102,6 +15126,13 @@ fn try_zerocopy_f64_clip(
     if !x.get_type().is(&ndarray_type) {
         return Ok(None);
     }
+    // Byte-order exact; the buffer request alone accepts `>f8`. See `zerocopy_f64_unary_flat`.
+    if !x
+        .getattr(intern!(py, "dtype"))?
+        .is(cached_float64_dtype(py)?)
+    {
+        return Ok(None);
+    }
     let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
         return Ok(None);
     };
@@ -15472,6 +15503,13 @@ fn try_zerocopy_f64_nan_to_num(
     let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    // Byte-order exact; the buffer request alone accepts `>f8`. See `zerocopy_f64_unary_flat`.
+    if !x
+        .getattr(intern!(py, "dtype"))?
+        .is(cached_float64_dtype(py)?)
+    {
         return Ok(None);
     }
     let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
@@ -106249,6 +106287,20 @@ fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     // probe UNCHANGED, because for them `asarray` genuinely converts and its answer is not
     // predictable from the object alone. That is why this is a fast path and not a
     // replacement: narrowing here would change the answer for 117 callers at once.
+    // DELIBERATELY BYTE-ORDER BLIND, and that is NOT an oversight — it is REQUIRED here.
+    // This predicate has two opposite kinds of caller and cannot serve both:
+    //
+    //   * "can I read this buffer as native f64?" — needs byte-order EXACT, or a `>f8` array is
+    //     read with its bytes in the wrong order. Those callers must NOT ask this question; they
+    //     check `dtype.is(cached_float64_dtype(py)?)` at the buffer site itself.
+    //   * "is this logically float64, so DELEGATE to numpy?" — needs byte-order BLIND, because a
+    //     `>f8` operand must still take the delegate.
+    //
+    // Tightening this to descriptor identity was BUILT AND MEASURED: over 560 (dtype, op) cells
+    // it fixed 35 wrong-value cells and BROKE 22 previously-correct ones — the `>f2` family plus
+    // `>f4` sin/cos and `>f8` unique, every one of them an inverted `if is_fN { fallback }`
+    // delegate guard that stopped delegating. Net-negative, so it was reverted. Do not redo it
+    // without splitting the predicate in two and auditing all 123 call sites for direction.
     if let Some(typechar) = dtype_char_of(value) {
         return typechar == 'd';
     }
@@ -106290,6 +106342,8 @@ fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
 /// kind/itemsize branch is retained for any dtype whose `char` is unreadable, so no caller can see
 /// an answer it would not have seen before.
 fn numpy_dtype_is_f32(value: &Bound<'_, PyAny>) -> bool {
+    // Byte-order BLIND on purpose; see the note in `numpy_dtype_is_f64`. Making this exact broke
+    // `>f4` sin/cos, whose guard is an inverted `if is_f32 { fallback }` delegate.
     let probe = || -> PyResult<bool> {
         let py = value.py();
         let dtype = value.getattr(intern!(py, "dtype"))?;
@@ -106312,6 +106366,9 @@ fn numpy_dtype_is_f32(value: &Bound<'_, PyAny>) -> bool {
 /// only dtype with kind `'f'` and itemsize 2, and its typechar is `'e'`. 25 call sites, nearly all
 /// of which reach it only to decline.
 fn numpy_dtype_is_f16(value: &Bound<'_, PyAny>) -> bool {
+    // Byte-order BLIND on purpose; see the note in `numpy_dtype_is_f64`. This one is the
+    // clearest case: `native_unary_promoting` reads it as `if numpy_dtype_is_f16(x) { fallback }`,
+    // so making it exact stopped 19 `>f2` cells from delegating and made them WRONG.
     let probe = || -> PyResult<bool> {
         let py = value.py();
         let dtype = value.getattr(intern!(py, "dtype"))?;

@@ -62335,3 +62335,110 @@ kind+itemsize - that spelling is measured at +150 ns on the common operand. **Th
 question is hoisting the dtype read to the `*_native` callers and passing it down**, which would
 pay the ~62 ns ONCE instead of once per gate and would erase the float64 cost this row books;
 that is the only way to make this family strictly free, and it is UNMEASURED.
+
+## 2026-08-27 - WIN (SHIP): widening the byte-order fix - 62 wrong-value cells found on big-endian floats, 28 fixed at the buffer sites, and the PREDICATE-LEVEL fix BUILT AND REVERTED because it broke 22 (`franken_numpy-byteorder-widen`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=36dbb0971454d47f4cf31324d80b2c15adce2795341d202c810124f3cacf3f32
+executing elf sha256 (AFTER)   bench_elf_sha256=75a087aee3e129a4145d00ba31ebf26f92376fa48c449a5e3a21e0fc1a084a95
+```
+
+### HOW BIG THE DEFECT ACTUALLY IS
+
+The previous row fixed two zero-copy predicate gates. A WIDE oracle - 70 ops x 8 dtypes
+(`f8`/`>f8`/`<f8`/`f4`/`>f4`/`<f4`/`f2`/`>f2`), 560 cells, fnp compared to numpy by value and
+dtype - shows the defect was never confined to them:
+
+```
+  wrong-value cells on the previous build:  62 of 560
+  by dtype:   >f8: 40    >f4: 18    >f2: 4    native-order dtypes: 0
+  ops wrong on >f8: absolute all arctan argmax argmin ceil cos count_nonzero cumprod cumsum
+    diff ediff1d fabs flatnonzero floor frexp log log10 log1p log2 max min modf nan_to_num
+    nanmax nanmean nanmin nansum negative positive prod reciprocal rint round sign sin sqrt
+    square tan trunc
+```
+
+**ZERO wrong cells on any native-order dtype**, which is what makes the whole class safe to
+attack: nothing on the common path is at stake.
+
+### THE PREDICATE-LEVEL FIX: BUILT, MEASURED, REVERTED
+
+`numpy_dtype_is_f64` (123 call sites), `_f32` (40) and `_f16` answer from `dtype.char`, which is
+byte-order BLIND - `np.dtype('>f8').char` is `'d'`, and `.kind`/`.itemsize` are blind too. Only
+`.byteorder` or descriptor identity separates them. Tightening all three to descriptor identity
+looked like the root fix. Measured over the same 560 cells:
+
+```
+  FIXED 35   BROKE 22   (net 62 -> 49 wrong cells)
+  broke: 19 x >f2 (absolute arctan argmax argmin cos cosh cumprod cumsum expm1 fabs log1p
+         negative positive reciprocal sin sinh sqrt square tan) + >f4 sin + >f4 cos + >f8 unique
+```
+
+REVERTED. **These predicates have two opposite kinds of caller and cannot serve both:**
+
+* *"can I read this buffer as native f64?"* needs byte-order EXACT, or `>f8` bytes are read in
+  the wrong order.
+* *"is this logically float64, so DELEGATE to numpy?"* needs byte-order BLIND, because a `>f8`
+  operand must still take the delegate.
+
+Every one of the 22 breakages is the second kind read INVERTED - `if numpy_dtype_is_f16(x) {
+return fallback(py); }` in `native_unary_promoting` is the clearest: tightening it stopped 19
+`>f2` cells from delegating and made them wrong. A predicate that is asked a question in both
+directions cannot be made stricter in only one of them.
+
+### WHAT SHIPPED INSTEAD: THE GUARD AT THE BUFFER SITE
+
+Five writers had NO dtype guard at all and went straight to the buffer request -
+`zerocopy_f64_unary_flat`, `zerocopy_f32_unary_flat`, `zerocopy_f64_unary_flat_with`,
+`try_zerocopy_f64_clip`, `try_zerocopy_f64_nan_to_num`. Each now checks
+`dtype.is(cached_float{64,32}_dtype(py)?)` at the site. A site guard cannot be read inverted:
+
+```
+  wrong-value cells: 62 -> 34      FIXED 28      BROKE 0      OTHER-CHANGED 0
+```
+
+COUNTED_MECHANISM: 560-cell byte-order oracle, 62 wrong-value cells before and 34 after, 28
+fixed and 0 regressions; the rejected predicate-level variant scored 35 fixed against 22 broken
+on the identical 560 cells.
+
+### THE PERFORMANCE, INCLUDING WHAT IT COST
+
+Replicated at matched low load (3.45 / 6.04), 45 readable cells, 3 BIASED. `BEFORE -> AFTER`:
+
+```
+  float32, EVERY op gains ~150 ns at n=16 - it pays a DECLINING f64 gate first, which used to
+  decline by raising:
+    sqrt  f32   16   2.776x -> 2.245x   (815.8 -> 662.1 ns)   1.24x
+    exp   f32   16   2.588x -> 1.997x   (790.3 -> 621.1)      1.30x
+    log   f32   16   2.259x -> 1.794x   (717.1 -> 575.2)      1.26x
+    cos   f32   16   2.902x -> 2.398x   (917.5 -> 766.4)      1.21x
+  int64 sqrt reaches the same writer and gains more:
+    sqrt  int64 16   2.538x -> 2.024x  (1387.7 -> 1118.8)     1.25x
+  float64 PAYS, because for it the gate passes rather than declines:
+    18 cells, median 0.993x, mean 0.991x, range 0.959x-1.014x; +9 to +34 ns at n=16
+```
+
+Every cell above remains a LOSS to numpy except `nan_to_num` and `sqrt f64 4096`, which were
+already wins.
+
+PARITY: 5320 cells raw-byte -> 1 divergence, identical on the pre-change build (pre-existing
+`deadlock-audit-neu7z`). 660 error/edge cells identical. 655 lib tests pass. clippy `-D warnings`
+and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 4096 elements.
+
+RETRY PREDICATE: **34 wrong-value cells remain and the site-guard trick will not reach them** -
+they run through routes gated by the three BLIND predicates (the reductions `min`/`max`/`prod`/
+`all`/`nansum`/`nanmean`, `argmin`/`argmax`, `cumsum`/`cumprod`, `diff`/`ediff1d`,
+`count_nonzero`/`flatnonzero`, `frexp`/`modf`, plus the whole `>f2` column). **Do NOT retry the
+tightening measured above** - it is refuted, 22 regressions, and the reason is structural.
+The design that can work is SPLITTING the predicate: keep `numpy_dtype_is_fN` blind for delegate
+guards and add `numpy_dtype_is_native_fN` for buffer-read guards, then audit all 163 call sites
+for direction. The 560-cell oracle is the acceptance test and it already names every cell, so
+that audit is checkable rather than speculative. UNMEASURED, and it is a large enough change that
+it should be done in one sitting with the oracle run before and after.
