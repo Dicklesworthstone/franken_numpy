@@ -29421,6 +29421,13 @@ fn trim_zeros(
     if !filt.bind(py).is_instance(&ndarray_type)? {
         return fallback();
     }
+    // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
+    // (`deadlock-audit-qdp30`): `np.trim_zeros(float16)` is float16 and came back float64,
+    // `longdouble` came back float64. `trim_zeros` only ever SELECTS a sub-range of its
+    // input, so a widened result is doubly wrong - nothing was computed to justify it.
+    if float_dtype_needs_numpy_precision(py, filt.bind(py))? {
+        return fallback();
+    }
     let trim_mode = match normalize_trim_zeros_mode(trim) {
         Ok(mode) => mode,
         Err(_) => return fallback(),
@@ -31634,6 +31641,25 @@ fn solve_triangular(
 fn ndarray_subclass_needs_numpy(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
     let ndarray = cached_ndarray_type(py)?;
     Ok(!x.is_exact_instance(ndarray) && x.is_instance(ndarray)?)
+}
+
+/// True when a route that canonicalises through `extract_numeric_array` would return the WRONG
+/// dtype for this operand (`deadlock-audit-qdp30`).
+///
+/// The order-statistic family - `median`/`quantile`/`percentile` and their `nan*` forms - and
+/// `trim_zeros` all PRESERVE a float input's own dtype in numpy: f16 -> f16, f32 -> f32,
+/// longdouble -> float128. They promote integer and bool input to f64, which is exactly what the
+/// native path produces, so those stay native. A float that is NOT f64 is the one case the native
+/// path gets silently wrong, and this is the predicate for it.
+///
+/// Found by the dtype-only audit that followed `np.append`'s silent widening
+/// (`deadlock-audit-1zl3e`): 11 divergences over 299 cases, every one of them a non-f64 FLOAT.
+fn float_dtype_needs_numpy_precision(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let Some(facts) = numeric_operand_facts(py, x)? else {
+        // Not an exact ndarray: a list/scalar operand promotes to f64 in numpy AND here.
+        return Ok(false);
+    };
+    Ok(facts.kind == 'f' && facts.itemsize != 8)
 }
 
 fn try_const_bool_integral(
@@ -43254,6 +43280,12 @@ fn median(
         Ok(median_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
+    // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
+    // (`deadlock-audit-qdp30`).
+    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
+        return fallback();
+    }
+
     // Integer flat median (axis=None, no out/overwrite/keepdims): histogram order-statistics beats numpy's
     // partition for a bounded value range. Falls through to the delegate below for wide range / other args.
     let axis_is_flatten = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
@@ -52210,6 +52242,12 @@ fn percentile(
             .unbind())
     };
 
+    // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
+    // (`deadlock-audit-qdp30`).
+    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
+        return fallback();
+    }
+
     // Integer flat percentile (axis=None, scalar q, default/linear method): reuse the median histogram
     // order-statistics primitive and linearly interpolate the two straddling ranks. Wide ranges and all
     // non-default surfaces fall through to numpy below.
@@ -52535,6 +52573,14 @@ fn nanpercentile(
         return fallback();
     }
 
+    // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
+    // (`deadlock-audit-qdp30`). The multi-q branch below already gates on
+    // `numpy_dtype_is_f64`; the SCALAR-q branch after it did not, which is the whole
+    // defect - one function, two branches, one guard.
+    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
+        return fallback();
+    }
+
     // Original ndim for keepdims axis re-insertion (keepdims-on-axis class, BlackThrush 2026-06-22).
     let orig_ndim = a
         .bind(py)
@@ -52698,6 +52744,14 @@ fn nanquantile(
         || weights.is_some()
         || interpolation.is_some()
     {
+        return fallback();
+    }
+
+    // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
+    // (`deadlock-audit-qdp30`). The multi-q branch below already gates on
+    // `numpy_dtype_is_f64`; the SCALAR-q branch after it did not, which is the whole
+    // defect - one function, two branches, one guard.
+    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
         return fallback();
     }
 
@@ -80834,6 +80888,12 @@ fn quantile(
             .unbind())
     };
 
+    // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
+    // (`deadlock-audit-qdp30`).
+    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
+        return fallback();
+    }
+
     // Integer flat quantile (axis=None, scalar q, default/linear method): same histogram
     // order-statistics primitive as percentile, with q already in [0, 1].
     let axis_is_flatten = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
@@ -81017,6 +81077,14 @@ fn quantile(
         (b.is_instance_of::<PyTuple>() || b.is_instance_of::<PyList>())
             && b.len().map(|l| l != 1).unwrap_or(true)
     }) {
+        return fallback();
+    }
+
+    // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
+    // (`deadlock-audit-qdp30`). The multi-q branch below already gates on
+    // `numpy_dtype_is_f64`; the SCALAR-q branch after it did not, which is the whole
+    // defect - one function, two branches, one guard.
+    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
         return fallback();
     }
 
