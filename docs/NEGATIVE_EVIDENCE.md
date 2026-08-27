@@ -61288,3 +61288,87 @@ refuted by the same one-element control. **The general lesson for this file: whe
 branch to a hot pyo3 dispatch chain, ALWAYS measure a size that does NOT take it.** If that size
 moves, the effect is codegen and the lever is dead no matter how free the branch looks.
 AGENT_NAME=TanBridge.
+
+## 2026-08-27 - `sort_complex` RETURNED complex128 WHERE NUMPY RETURNS COMPLEX64, and the same branch lost to numpy on ALL ELEVEN dtypes it served - one removal fixes both (`franken_numpy-sortcomplex-stale-tail`)
+
+`TanBridge`. The code landed in peer commit `fcc9d824`, which swept my uncommitted working-tree
+edit (the known shared-tree hazard). **Verified byte-identical before banking**: the measured
+source, the worktree and `HEAD` all match, so the ELF below is the one HEAD builds. Measured on
+`thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME invocation,
+OPENBLAS_NUM_THREADS=1. Class: CORRECTNESS fix; the perf figures are PRICING grade
+(median of 5, same invocation), not a dual-null contract.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=f10d576025f223f5582fe89b04bcd915e40c72113850daec18babf90363d564e
+executing elf sha256 (AFTER)  bench_elf_sha256=9c71216f7d012e6f11115094adb23e21bdeaf63ef600165d9cc1a5b2c28cfd5d
+```
+
+### TWO DEFECTS, ONE CAUSE
+
+`sort_complex` had a generic tail that extracted any remaining dtype, sorted it through
+`fnp_ufunc::sort_complex`, and materialised the result with
+`numpy_complex128_array_from_interleaved_f64` - which, as its name says, ALWAYS produced
+complex128.
+
+**CORRECTNESS.** `np.sort_complex` promotes through `promote_types(dtype, 'F')`, so a 1- or
+2-byte integer yields **complex64**:
+
+```
+  np.sort_complex(int8 array)  -> dtype complex64      fnp -> dtype complex128
+  same for int16, uint8, uint16 - four dtypes, VALUES IDENTICAL, dtype WIDER than numpy's
+```
+
+The values matched exactly, which is precisely why this survived: the tests compared values.
+**A dtype-promotion defect is invisible to any check that does not assert the dtype.**
+
+**PERFORMANCE.** The same tail lost to numpy on EVERY dtype it served and won on none. At
+n = 2^18:
+
+```
+  uint32 19.84x   int32 17.83x   float32 14.46x   int64 11.60x   uint64 11.33x
+  float16 2.20x   uint16 1.93x   int16 1.89x      uint8 1.78x    bool 1.41x   int8 1.27x
+```
+
+### THE FIX IS A DELETION
+
+Removed the tail, so those dtypes delegate. `numpy_complex128_array_from_interleaved_f64` had no
+other caller and went with it.
+
+```
+SORT_COMPLEX_STALE_TAIL worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation, median of 5, n = 2^18
+
+  dtype     BEFORE    AFTER        dtype     BEFORE   AFTER
+  uint32    19.84x -> 1.03x        float16    2.20x -> 1.01x
+  int32     17.83x -> 1.38x        uint16     1.93x -> 1.00x
+  float32   14.46x -> 1.02x        int16      1.89x -> 1.01x
+  int64     11.60x -> 1.03x        uint8      1.78x -> 1.00x
+  uint64    11.33x -> 1.03x        bool       1.41x -> 0.99x
+                                   int8       1.27x -> 0.92x
+```
+
+**THE DTYPES THAT ACTUALLY WIN WERE NEVER IN THIS TAIL** and are untouched - they are served by
+the zero-copy kernels above it. Re-checked at n = 2^20 on the AFTER build, byte-exact:
+`float64` 0.813x, `complex128` 0.238x, `complex64` 0.202x. That is the control that says the
+deletion removed only the losing route.
+
+This is the STALE-ROUTING class, and the same shape as the `meshgrid` row: a covering native
+branch that the incumbent had overtaken, kept alive because it was covered by tests that only
+checked values. **When a native branch loses on every dtype it serves, the fix is to delete it,
+not to tune it.**
+
+PARITY: 15 dtypes x 7 shapes (including 0-d, empty and 3-D), plus NaN, inf, -0.0, duplicates,
+strided, 2-D, F-order, complex-with-NaN, ndarray subclass, list and scalar - compared on dtype,
+shape, python `type()` and RAW BYTES. **0 divergences of 116**, against 4 dtype divergences
+before. 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^20 complex128 = 16 MB, one live.
+
+RETRY PREDICATE: do not restore a generic native `sort_complex` tail. If one is ever rebuilt it
+must (a) reproduce `promote_types(dtype, 'F')` rather than assuming complex128, and (b) beat
+numpy on the specific dtype it claims - the removed one lost on all eleven, several by more than
+10x. **The transferable audit move: for any route that PROMOTES, assert the output DTYPE and not
+only the values.** The four dtypes wrong here were value-identical, so every value-comparing test
+passed. Worth running against the other promoting entries (`asarray` with dtype=, `astype`
+wrappers, the `nan*` family) - none of which has been checked this way.
+AGENT_NAME=TanBridge.
