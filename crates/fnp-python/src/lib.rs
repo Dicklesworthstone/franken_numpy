@@ -87265,7 +87265,7 @@ fn try_zerocopy_integer_sum_flat(
 // calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
 // See perf bead franken_numpy-c6t1m.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=None, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn sum(
     py: Python<'_>,
@@ -87273,11 +87273,25 @@ fn sum(
     axis: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    // `Option<bool>`, NOT `bool`: numpy's own default is the `np._NoValue` sentinel, and
+    // "not passed" is OBSERVABLY DIFFERENT from "passed False" (`deadlock-audit-30d18`).
+    // `np.sum` forwards `keepdims` to the operand's METHOD, and `np.matrix.sum` does not
+    // accept that parameter - so numpy raises `TypeError: matrix.sum() got an unexpected
+    // keyword argument 'keepdims'` when it is passed at all, and succeeds when it is not:
+    //
+    //     np.sum(m, axis=0)                  -> matrix([[24., 28., 32., 36.]])
+    //     np.sum(m, axis=0, keepdims=False)  -> TypeError
+    //     np.sum(m, axis=0, keepdims=True)   -> TypeError
+    //
+    // Defaulting to `false` and forwarding it unconditionally collapsed those three cases
+    // into the raising one, so `fnp.sum(np.matrix(a), axis=0)` FAILED where numpy works.
+    keepdims: Option<bool>,
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    // The native paths below only ever need the effective value.
+    let keepdims_effective = keepdims.unwrap_or(false);
     // Large flat float32/float64 sum: evaluate NumPy's exact pairwise tree on
     // Rayon.  The incumbent pays one serial DOUBLE/FLOAT_pairwise_sum; every
     // candidate subtree is independent and preserves the same combine edges.
@@ -87286,7 +87300,7 @@ fn sum(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_float_sum_flat(py, a.bind(py), keepdims)?
+        && let Some(o) = try_zerocopy_float_sum_flat(py, a.bind(py), keepdims_effective)?
     {
         return Ok(o);
     }
@@ -87298,7 +87312,7 @@ fn sum(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_integer_sum_flat(py, a.bind(py), keepdims)?
+        && let Some(o) = try_zerocopy_integer_sum_flat(py, a.bind(py), keepdims_effective)?
     {
         return Ok(o);
     }
@@ -87310,7 +87324,8 @@ fn sum(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_f64_sum_lastaxis(py, a.bind(py), ax.bind(py), keepdims)?
+        && let Some(o) =
+            try_zerocopy_f64_sum_lastaxis(py, a.bind(py), ax.bind(py), keepdims_effective)?
     {
         return Ok(o);
     }
@@ -87322,7 +87337,7 @@ fn sum(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims
+        && !keepdims_effective
         && let Some(o) = try_zerocopy_f16_sum_flat(py, a.bind(py))?
     {
         return Ok(o);
@@ -87338,8 +87353,13 @@ fn sum(
         && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Ok(ax_i) = ax.bind(py).extract::<isize>()
-        && let Some(o) =
-            try_zerocopy_f16_sum_nonlast_axis(py, a.bind(py), Some(ax_i), keepdims, false)?
+        && let Some(o) = try_zerocopy_f16_sum_nonlast_axis(
+            py,
+            a.bind(py),
+            Some(ax_i),
+            keepdims_effective,
+            false,
+        )?
     {
         return Ok(o);
     }
@@ -87355,7 +87375,12 @@ fn sum(
     if let Some(o) = out.as_ref() {
         kw.set_item(intern!(py, "out"), o.bind(py))?;
     }
-    kw.set_item(intern!(py, "keepdims"), keepdims)?;
+    // ONLY FORWARD `keepdims` IF THE CALLER SUPPLIED IT (`deadlock-audit-30d18`). numpy's
+    // default is the `np._NoValue` sentinel, and forwarding an explicit `False` is not the
+    // same thing - see the note on the parameter.
+    if let Some(k) = keepdims {
+        kw.set_item(intern!(py, "keepdims"), k)?;
+    }
     if let Some(init) = initial.as_ref() {
         kw.set_item(intern!(py, "initial"), init.bind(py))?;
     }
