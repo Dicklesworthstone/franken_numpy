@@ -408,6 +408,38 @@ fn take_contract_case<'py>(
     Some((wanted.to_owned(), "take".to_owned(), args))
 }
 
+/// Build finite, non-negative `sqrt` inputs without discovering unrelated public calls.
+///
+/// The generic sweep's `f64` ladder intentionally mixes signs, which is valuable for a
+/// behavioural sweep but charges both arms NumPy's invalid-event machinery. These two
+/// runtime-built sizes instead isolate the ordinary native sqrt route that owns the Rayon
+/// chunking decision. Their values vary across a non-power-of-two period, so neither the
+/// implementation nor this contract can qualify by recognizing a constant or a fixture.
+fn sqrt_contract_case<'py>(
+    py: Python<'py>,
+    wanted: &str,
+) -> Option<(String, String, pyo3::Bound<'py, PyTuple>)> {
+    let n = match wanted {
+        "sqrt[finite-mixed262144]" => 262_144,
+        "sqrt[finite-mixed1048576]" => 1_048_576,
+        _ => return None,
+    };
+    let ns = PyDict::new(py);
+    py.run(
+        std::ffi::CString::new(format!(
+            "import numpy as np\nN = {n}\ni = np.arange(N, dtype=np.float64)\nsqrt_input = 0.125 + np.mod(i * 17.0 + 3.0, 1009.0) / 19.0\n"
+        ))
+        .expect("sqrt contract setup CString")
+        .as_c_str(),
+        Some(&ns),
+        Some(&ns),
+    )
+    .expect("sqrt contract setup");
+    let input = ns.get_item("sqrt_input").expect("sqrt input");
+    let args = PyTuple::new(py, [&input]).expect("sqrt contract arguments");
+    Some((wanted.to_owned(), "sqrt".to_owned(), args))
+}
+
 /// Build finite same-shape f64 `fmod` calls directly for the dual-null contract.
 ///
 /// `fmod` needs two operands and therefore cannot enter the generic one-operand
@@ -647,6 +679,8 @@ fn bench_vs_numpy_worst_contract(_c: &mut Criterion) {
             .expect("numpy version string");
 
         let (label, name, args) = if let Some(case) = take_contract_case(py, &wanted) {
+            case
+        } else if let Some(case) = sqrt_contract_case(py, &wanted) {
             case
         } else if let Some(case) = fmod_contract_case(py, &wanted) {
             case
