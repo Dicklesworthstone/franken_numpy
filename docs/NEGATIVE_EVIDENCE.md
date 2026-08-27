@@ -61752,3 +61752,92 @@ kind 'b'.** Still open from the same vein and NOT fixed: `median` on bool 3.66x 
 on bool 2.74x (`deadlock-audit-wxgh9`) - neither has a guard at the equivalent point in its flow,
 and median's int32 path is a 0.30x WIN, so they need routing analysis rather than the one-line
 edit. AGENT_NAME=TanBridge.
+
+## 2026-08-27 - BOOL WAS LOCKED OUT OF THE HISTOGRAM IT IS THE IDEAL INPUT FOR, AND `nanmedian` COULD NOT REACH IT AT ALL: 4.048x -> 0.106x, with the size gate that a first, ungated attempt proved is mandatory (`franken_numpy-median-hist-admission`)
+
+`TanBridge`. Shipped `039f3069`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, median of 9, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** maintenance-self-speedup
+
+Several cells cross into large wins over numpy and are marked; the class is still
+maintenance-self-speedup because the row's subject is a route that was LOSING and now is not.
+Perf figures are PRICING grade - the effects are 2x-38x and the float64 controls are flat.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=58d7e16a12a8217b23806a95ec7fb15fd55dfc2d606ffa4e814009e8467b9722
+executing elf sha256 (AFTER)  bench_elf_sha256=8d1bd28eb6e4f6d5fde1f472e4be0a497793a6b022785f5de742301d36b895b8
+```
+
+### TWO GAPS, ONE KERNEL
+
+`try_native_int_median` owns a bounded-range histogram that makes `median` on int32 a **0.19x
+win** at 2^20. Neither bool nor `nanmedian` could get to it.
+
+1. **BOOL ADMITTED.** `numpy_dtype_is_integer` matches dtype kinds 'i'/'u' only, so bool declined
+   the histogram **despite having the smallest possible range, 2**. A bool array stores 0/1
+   BYTES, so a `uint8` view reinterprets nothing; the view is needed only because the buffer
+   format is '?' and `PyBuffer::<u8>::get` refuses it. Fourth site this session where a predicate
+   written for "integers" silently excluded bool.
+2. **NANMEDIAN REROUTED.** For a NaN-impossible dtype `nanmedian` == `median`. Verified rather
+   than assumed: `np.median` and `np.nanmedian` agree on dtype, shape and RAW BYTES across 9
+   integer/bool dtypes x 5 shapes x 4 axis/keepdims forms - **0 of 180 differ**.
+
+```
+MEDIAN_HIST_ADMISSION worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation, median of 9
+
+  median    bool  2^20   3.115x -> 0.149x      nanmedian bool  2^20   3.076x -> 0.137x
+  median    bool  2^22   2.144x -> 0.050x      nanmedian bool  2^22   3.600x -> 0.055x
+  nanmedian int32 2^20   1.930x -> 0.302x      nanmedian int32 2^22   4.048x -> 0.106x
+  -- CONTROLS, float64 has no integer histogram path --
+  median f64 2^20 0.341x -> 0.425x   median f64 2^22 0.607x -> 0.584x
+  nanmedian f64 2^16 0.362x -> 0.341x   nanmedian int32 2^16 0.561x -> 0.546x
+```
+
+### THE SIZE GATE IS THE RESULT, AND THE UNGATED VERSION PROVED IT
+
+The obvious reroute - "integer/bool `nanmedian` goes to `median`" - was written first, measured,
+and **it regressed small arrays**. `nanmedian` has its own native f64 path that beats numpy
+BELOW the histogram floor (int32 at 2^16 reads 0.516x), while `median` down there simply
+delegates. Rerouting everything took that cell to 0.991x and handed a win back.
+
+Gated on `ndarray_element_count >= INT_ORDER_STAT_HIST_MIN_N`, which is now module-level
+precisely so the reroute and the kernel it targets cannot drift apart. The 2^16 control confirms
+it: 0.561x -> 0.546x, unchanged.
+
+### AND A BLANKET BOOL DELEGATE, TRIED AND REVERTED
+
+Adding bool to `median`'s integer delegate fixes the mid band (2^16: 1.882x -> 1.053x) and
+**regresses the small one (2^12: 0.549x -> 1.495x)**, because the native path WINS on small bool
+arrays. Reverted, with the numbers recorded at the line. This is the second time in one session
+that the dtype-shaped fix for a dtype-shaped defect was wrong, and the bool-unary row above is
+the first - **enumerate the sizes as well as the ops before widening a gate.**
+
+### A DEFECT I INTRODUCED, AND THE PROBE CAUGHT
+
+The first bool admission omitted an exact-ndarray check. `numpy_dtype_is_integer` performs one
+itself; `numpy_dtype_is_bool` answers through `asarray` and therefore says TRUE for a Python
+LIST of bools - and `ravel()` is an ndarray method. `fnp.median([True, False, True])` became an
+`AttributeError` where numpy returns 1.0. The list case in the parity grid caught it on the first
+run. **Any new use of `numpy_dtype_is_bool` that then calls ndarray methods needs the same
+guard**, and the four uses shipped earlier today were re-checked: all of them feed a `fallback()`
+that handles lists correctly, so none has this hazard.
+
+PARITY: 2 entries x 12 dtypes x 5 shapes x 6 axis/keepdims/overwrite forms, plus the histogram
+floor probed at 2^20-1 / 2^20 / 2^20+1 for three dtypes, plus 13 operand kinds (all-True,
+all-False, 2-D, subclass, matrix, list, tuple, 4096-element list, strided, F-order, 0-d, f64 NaN,
+f64 all-NaN) - on dtype, shape, python `type()` and RAW BYTES. **0 divergences of 816**, with 8
+PRE-EXISTING lost-subclass rows (`deadlock-audit-30d18`) excluded and verified unchanged against
+the pre-change build. Order-statistic parity 0 of 449; dtype-promotion audit 0 of 1800. 654 lib
+tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^22 int32 = 16 MB, one live.
+
+RETRY PREDICATE: the histogram admission and the gated reroute are DONE - do not re-derive them,
+and **do not ungate the reroute** (0.516x -> 0.991x is what that costs). **STILL OPEN: `median` on
+bool in the band [2^13, 2^20) reads ~1.9x**, above the sizes where the native path wins and below
+the histogram floor. The blanket delegate is REFUTED for it (regresses 2^12 from 0.549x to
+1.495x); it needs a SIZE GATE measured on a host at loadavg < 5, which this was not. The cheapest
+next probe is a size sweep of bool `median` from 2^11 to 2^20 on a quiet host to find where the
+native path stops winning. AGENT_NAME=TanBridge.
