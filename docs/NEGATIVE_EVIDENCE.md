@@ -59785,3 +59785,99 @@ on. **AND: grep for other users of `extract_numeric_array` whose result is rebui
 `build_numpy_array_from_ufunc` - that pairing is what silently widens, and `append` is unlikely to
 be the only one.**
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - THE AUDIT `np.append` LICENSED FOUND ELEVEN MORE SILENT DTYPE WIDENINGS: `nanpercentile(float32)` returned float64, and the BEFORE build could not be measured on those cells at all (`deadlock-audit-qdp30`)
+
+`TanBridge`. Shipped `a8adfba7` + `492e5585`. Measured on `thinkstation1` against the LIVE
+installed numpy 2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** one correctness defect class fixed across six entries; no-change on the
+f64/i64 hot paths; a measured cost on the non-f64 float cells, and one self-corrected regression.
+
+The retry predicate on `deadlock-audit-1zl3e` said to grep for other `extract_numeric_array`
+results rebuilt with `build_numpy_array_from_ufunc`, because that pairing is what silently widened
+`np.append`. A **dtype-ONLY** audit over the 31 functions containing it - 299 cases across 13
+dtypes, comparing dtype and shape and nothing else - found 11 more, every one a non-f64 FLOAT:
+
+```
+  nanpercentile / nanquantile    float32 -> float64      float16 -> float64
+  trim_zeros                     float16 -> float64      longdouble -> float64
+  median / quantile / percentile / nanpercentile / nanquantile
+                                 longdouble -> float64
+```
+
+numpy PRESERVES a float input's own dtype through this family (f16 -> f16, f32 -> f32, longdouble
+-> float128) and promotes integer and bool to f64 - which is what the native path produces, so
+integer input was and remains correct. **A float that is not f64 is the one case the path gets
+silently wrong**, and one shared predicate now guards all six entries.
+
+**`nanpercentile` is the clearest instance: its multi-q branch ALREADY gated on
+`numpy_dtype_is_f64` and its scalar-q branch did not.** One function, two branches, one guard - and
+the branch without it had been returning the wrong dtype for every f32 and f16 caller since it was
+written. Nothing about the code looks wrong until the two branches are read against each other.
+
+```
+DTYPE_GUARDS worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=0e71f269c88f  after_elf=ea81e44167f2      loadavg 17-42 (DISCLOSED)
+
+  f64 HOT PATH - must not regress, and does not:
+  median f64 2^16          0.768x WIN  -> 0.754x WIN
+  nanpercentile f64 2^16   0.323x WIN  -> 0.333x WIN
+  nanquantile f64 2^16     0.320x WIN  -> 0.324x WIN
+  percentile f64 2^16      0.949x WIN  -> 0.940x WIN
+  i64 cells                unchanged (median 1.007x, nanpercentile 0.369x WIN)
+
+  NON-f64 FLOAT - the measured cost of correctness:
+  nanpercentile f32 2^16   NOT MEASURABLE -> 1.000x
+  nanquantile   f32 2^16   NOT MEASURABLE -> 1.014x
+  median f32 2^16          1.005x      -> 1.005x
+  percentile f32 2^16      0.998x      -> 1.002x
+
+  trim_zeros f32           0.066x WIN  -> 0.065x WIN   (after the self-correction below)
+```
+
+**THE BEFORE BUILD COULD NOT BE MEASURED ON TWO CELLS.** The A/B script checks dtype parity before
+timing and printed `DTYPE MISMATCH float32 vs float64 - not measured` for `nanpercentile f32` and
+`nanquantile f32`. That is the second time this session a correctness defect has stopped its own
+measurement, and it is a good property to build into a harness: a probe that refuses to time a
+wrong answer cannot report a fast one.
+
+**A/A NULL CONTROLS:** the great majority pass; several read BIASED at loadavg 42 and are marked
+"about" in the run. The f64 hot-path rows and the trim_zeros rows have clean nulls on both sides.
+**REGIME DISCLOSED:** loadavg 17-42 throughout, a shared box; the ratios are same-invocation and
+interleaved, and numpy's own absolute times moved by up to 2x between runs, which is exactly why
+only ratios are quoted.
+
+### A REGRESSION I SHIPPED AND CORRECTED IN THE SAME CYCLE
+
+The first version of the fix (`a8adfba7`) put the `trim_zeros` guard at the TOP of the function -
+above `try_zerocopy_trim_zeros`, which finds the trim bounds and returns a **slice of the caller's
+own array**. That path's dtype is whatever the input had; there is nothing for it to widen. The
+guard sent f32/f16/longdouble to numpy anyway and surrendered a measured 15x win:
+
+```
+  trim_zeros f32   0.066x WIN  -> 1.099x LOSS    (guard above the zero-copy path)
+  trim_zeros f32   1.099x LOSS -> 0.065x WIN     (guard moved below it, 492e5585)
+```
+
+The widening was only ever in the EXTRACT residual further down. **The lesson is placement, not
+predicate: a correctness guard belongs at the defect, not at the entry, or it takes working paths
+down with the broken one.** The dtype audit still reads 0 divergences over 299 cases after the
+move, so the fix is intact and the win is back.
+
+PARITY: the dtype-only audit, 299 cases over 13 dtypes x 31 functions - **11 divergences before, 0
+after**, re-run after the self-correction and still 0. 654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^16 f64 = 512 KB.
+
+RETRY PREDICATE: the six guarded entries are done. **The audit itself is the reusable artifact** -
+it compares ONLY dtype/shape/type and it found in one run what no value-comparing probe in this
+campaign had found in weeks. Point it at other families before assuming they are clean: `take`,
+`extract`, `select`, `searchsorted`, `unique`, `frexp`, `bincount` and the linalg group all came
+back clean here, but only for the 13 dtypes and the shapes this run used - 0-d, N-D and
+structured input were NOT covered and `trim_zeros` already has a known N-D/0-d defect class from
+the seeded-random differential. Do NOT re-guard the order-statistic entries at their top: the
+zero-copy slice/select paths below them are dtype-exact by construction.
+AGENT_NAME=TanBridge.
