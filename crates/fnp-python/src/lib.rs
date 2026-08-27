@@ -26812,17 +26812,23 @@ fn frombuffer(
             .unbind());
     }
 
+    // `dtype`, `count` and `offset` are POSITIONAL-or-keyword in numpy's signature - only
+    // `like` is keyword-only - so this needs no dict (`deadlock-audit-yhg7k`).
+    // `frombuffer` is PURE DELEGATION since the native path was removed for being both
+    // slower and semantically wrong, which makes this wrapper the ENTIRE fnp cost: numpy
+    // finishes the whole call in 156.3 ns and fnp took 444.0 ns, 2.846x, for a function
+    // that does nothing but forward. numpy's own default is `dtype=float`, i.e. float64,
+    // so the held `numpy.float64` is that default written out.
     let numpy_frombuffer = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
+        let frombuffer_fn = numpy.getattr(intern!(py, "frombuffer"))?;
+        match dtype.as_ref() {
+            Some(dtype_val) => Ok(frombuffer_fn
+                .call1((buffer.bind(py), dtype_val.bind(py), count, offset))?
+                .unbind()),
+            None => Ok(frombuffer_fn
+                .call1((buffer.bind(py), cached_float64_type(py)?, count, offset))?
+                .unbind()),
         }
-        kwargs.set_item(intern!(py, "count"), count)?;
-        kwargs.set_item(intern!(py, "offset"), offset)?;
-        Ok(numpy
-            .getattr(intern!(py, "frombuffer"))?
-            .call((buffer.bind(py),), Some(&kwargs))?
-            .unbind())
     };
 
     // np.frombuffer returns a ZERO-COPY VIEW that shares memory with the buffer. The
@@ -53784,13 +53790,38 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
     Ok(build_flip_view(py, &arr, &mask)?.unbind())
 }
 
+/// `numpy.asarray(x)` for anything that is not already an EXACT ndarray, and `x` itself when it
+/// is (`deadlock-audit-yhg7k`).
+///
+/// `asarray` with no dtype/order argument returns an exact ndarray UNCHANGED, so calling it on one
+/// is a round trip into numpy for the object it hands straight back. `flipud`/`fliplr` are
+/// otherwise pure view construction - numpy's own `flipud` is 221.7 ns - so that one call was a
+/// large share of the whole wrapper.
+///
+/// NOT applicable to an ndarray SUBCLASS: `np.asarray(np.matrix(a))` returns a base-class view,
+/// which `flipud` then flips, and numpy's own `flipud` does the same. `is_exact_instance` keeps
+/// subclasses on the conversion, so that behaviour is unchanged.
+fn flip_operand_as_array<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    m: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    if m.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(m.clone());
+    }
+    numpy.call_method1(intern!(py, "asarray"), (m,))
+}
+
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // numpy.flipud(m) == m[::-1, ...] — a stride-flip view of axis 0 (requires
     // ndim >= 1, else numpy raises ValueError). Build the view directly.
     let numpy = cached_numpy(py)?;
-    let arr = numpy.call_method1(intern!(py, "asarray"), (m.bind(py),))?;
+    // `numpy.asarray` returns an EXACT ndarray unchanged, so for the operand this is
+    // called with most it was a round trip through numpy for the object it hands back
+    // (`deadlock-audit-yhg7k`). Same identity skip as `append`'s.
+    let arr = flip_operand_as_array(py, numpy, m.bind(py))?;
     let ndim = arr.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 1 {
         return Ok(numpy
@@ -53809,7 +53840,7 @@ fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // numpy.fliplr(m) == m[:, ::-1] — a stride-flip view of axis 1 (requires
     // ndim >= 2, else numpy raises ValueError). Build the view directly.
     let numpy = cached_numpy(py)?;
-    let arr = numpy.call_method1(intern!(py, "asarray"), (m.bind(py),))?;
+    let arr = flip_operand_as_array(py, numpy, m.bind(py))?;
     let ndim = arr.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2 {
         return Ok(numpy
