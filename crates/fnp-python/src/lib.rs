@@ -43137,7 +43137,12 @@ fn median_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Send + Sync>
     flat: &Bound<'_, PyAny>,
     n: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const RANGE_MAX: usize = 1 << 22;
+    // 1 << 20, NOT 1 << 22. Even with the chunk count capped by range (below), a range this
+    // large drives the chunk count to 1 and the whole histogram - allocate, fill, merge,
+    // prefix-sum - goes SERIAL over r cells, which stops paying once r passes ~2^20:
+    // measured at n = 2^22, r = n/4 is 0.595x (win) while r = n/2 is 1.840x and r = n is 3.564x.
+    // Every range that still wins is admitted; the ones that only lose are handed to numpy.
+    const RANGE_MAX: usize = 1 << 20;
     let Ok(buffer) = PyBuffer::<T>::get(flat) else {
         return Ok(None);
     };
@@ -43169,7 +43174,19 @@ fn median_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Send + Sync>
         return Ok(None);
     }
     let r = (span + 1) as usize;
-    let target_chunks = (rayon::current_num_threads() * 4).max(1);
+    // COST AND MEMORY HERE ARE O(chunks * r), NOT O(n): every chunk allocates and zeroes its own
+    // r-cell histogram, and the merge across them is SERIAL. Gating only on `r <= RANGE_MAX`
+    // ignored that completely - at n = 2^20 on a 64-core host this took 256 chunks of r cells, so
+    // r = 4.19M meant ~1.6 GB of partial histograms and a ~1.07-billion-operation serial merge to
+    // reduce a 4 MB array. Measured against live numpy: `median` 403x SLOWER at +3.5 GB peak RSS,
+    // `percentile` 241x at +1.6 GB, `quantile` 316x - and 92x/65x/55x at r = 2^20.
+    //
+    // Capping the chunk count so the partials can never hold more cells than the INPUT bounds
+    // both the merge and the peak memory by O(n), and leaves the small-range case - the one that
+    // actually wins, 0.37-0.66x - on exactly the chunking it already had.
+    let target_chunks = (rayon::current_num_threads() * 4)
+        .max(1)
+        .min((n / r).max(1));
     let chunk_size = n.div_ceil(target_chunks).max(1);
     let partials: Vec<Vec<u64>> = data
         .par_chunks(chunk_size)
@@ -43219,7 +43236,12 @@ fn linear_quantile_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Sen
     n: usize,
     q_unit: f64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const RANGE_MAX: usize = 1 << 22;
+    // 1 << 20, NOT 1 << 22. Even with the chunk count capped by range (below), a range this
+    // large drives the chunk count to 1 and the whole histogram - allocate, fill, merge,
+    // prefix-sum - goes SERIAL over r cells, which stops paying once r passes ~2^20:
+    // measured at n = 2^22, r = n/4 is 0.595x (win) while r = n/2 is 1.840x and r = n is 3.564x.
+    // Every range that still wins is admitted; the ones that only lose are handed to numpy.
+    const RANGE_MAX: usize = 1 << 20;
     if !q_unit.is_finite() || !(0.0..=1.0).contains(&q_unit) {
         return Ok(None);
     }
@@ -43254,7 +43276,19 @@ fn linear_quantile_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Sen
         return Ok(None);
     }
     let r = (span + 1) as usize;
-    let target_chunks = (rayon::current_num_threads() * 4).max(1);
+    // COST AND MEMORY HERE ARE O(chunks * r), NOT O(n): every chunk allocates and zeroes its own
+    // r-cell histogram, and the merge across them is SERIAL. Gating only on `r <= RANGE_MAX`
+    // ignored that completely - at n = 2^20 on a 64-core host this took 256 chunks of r cells, so
+    // r = 4.19M meant ~1.6 GB of partial histograms and a ~1.07-billion-operation serial merge to
+    // reduce a 4 MB array. Measured against live numpy: `median` 403x SLOWER at +3.5 GB peak RSS,
+    // `percentile` 241x at +1.6 GB, `quantile` 316x - and 92x/65x/55x at r = 2^20.
+    //
+    // Capping the chunk count so the partials can never hold more cells than the INPUT bounds
+    // both the merge and the peak memory by O(n), and leaves the small-range case - the one that
+    // actually wins, 0.37-0.66x - on exactly the chunking it already had.
+    let target_chunks = (rayon::current_num_threads() * 4)
+        .max(1)
+        .min((n / r).max(1));
     let chunk_size = n.div_ceil(target_chunks).max(1);
     let partials: Vec<Vec<u64>> = data
         .par_chunks(chunk_size)
@@ -77651,8 +77685,12 @@ fn argsort_stable_counting<T: pyo3::buffer::Element + Copy + Ord + Send + Sync +
     }
     let r = span as usize;
     let nthreads = rayon::current_num_threads().max(1);
-    // ~4 chunks per thread keeps per-chunk histograms cheap while giving rayon slack; cap at n.
-    let target_chunks = (nthreads * 4).max(1);
+    // ~4 chunks per thread keeps per-chunk histograms cheap while giving rayon slack - but the
+    // cap has to be BY RANGE, not just by n. Each chunk allocates and zeroes r cells and the
+    // cross-chunk offset pass walks all of them, so the real cost is O(chunks * r): at n = 2^20
+    // with r near this RANGE_MAX, 256 chunks measured 3.43x SLOWER than numpy. Bounding
+    // `chunks * r` by the input size keeps the small-range case (where this wins) unchanged.
+    let target_chunks = (nthreads * 4).max(1).min((n / r).max(1));
     let chunk_size = n.div_ceil(target_chunks).max(1);
     // Phase 1: per-chunk histograms (parallel, sequential value reads).
     let chunk_hists: Vec<Vec<u32>> = data
