@@ -53861,20 +53861,22 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
 /// otherwise pure view construction - numpy's own `flipud` is 221.7 ns - so that one call was a
 /// large share of the whole wrapper.
 ///
-/// `is_exact_instance`, NOT `is_instance`, and the subclass case is a KNOWN OPEN DEFECT rather
-/// than a design choice: `np.flipud(np.matrix(a))` is a `matrix` in numpy, and fnp returns a plain
-/// `ndarray` because the `asarray` below strips the subclass before the view is built. Keeping
-/// subclasses on the conversion leaves that behaviour EXACTLY as it was - this helper neither
-/// causes nor fixes it. (An earlier draft of this comment claimed numpy also returns a base-class
-/// array here; the parity probe for `deadlock-audit-yhg7k` shows it does not.) The remedy is the
-/// `ndarray_subclass_needs_numpy` delegation used by the predicate and unary families, and it
-/// needs its own parity run.
+/// `is_instance`, so an ndarray SUBCLASS is passed through UNCONVERTED
+/// (`deadlock-audit-h79ek`).
+///
+/// This started as an exact-instance identity skip and left subclasses on the `asarray`
+/// conversion, which STRIPPED them: `np.flipud(np.matrix(a))` is a `matrix` in numpy and fnp
+/// returned a plain `ndarray`. The remedy is not the `ndarray_subclass_needs_numpy` delegation the
+/// predicate and unary families use - it is simply not converting, because the flip is built by
+/// INDEXING and `subclass[slices]` already returns the subclass. Verified against numpy 2.4.3 for
+/// `np.matrix` and a plain `ndarray` subclass, all three of flipud/fliplr/flip: same type, same
+/// values, same shape. So the correct fix here is cheaper than delegating, not more expensive.
 fn flip_operand_as_array<'py>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     m: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    if m.is_exact_instance(cached_ndarray_type(py)?) {
+    if m.is_instance(cached_ndarray_type(py)?)? {
         return Ok(m.clone());
     }
     numpy.call_method1(intern!(py, "asarray"), (m,))
