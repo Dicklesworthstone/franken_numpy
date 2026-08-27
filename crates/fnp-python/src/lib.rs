@@ -5396,21 +5396,27 @@ fn extract_numeric_array(
         .extract::<Vec<usize>>()?;
     let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
     let dtype = array.getattr(intern!(py, "dtype"))?;
-    let dtype_name = dtype.str()?.extract::<String>()?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    // `kind` as a char, and the dtype's NAME read only on the failure path. `str(dtype)` is
+    // 1639.2 ns against `dtype.kind` at 20.2 ns (timeit, numpy 2.4.3, installed interpreter) -
+    // it is not a C getset, it runs numpy's pure-Python name machinery - and the value it
+    // produces was consumed by the `_` arm alone, so every SUCCEEDING call bought a string it
+    // never read. Reading it inside the arm that formats it costs the error path nothing it
+    // was not already paying. `extract::<char>()` also drops a heap String per call.
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
 
-    let storage = match kind.as_str() {
-        "b" => ArrayStorage::Bool(numpy_bool_to_vec(py, &flat)?),
+    let storage = match kind {
+        'b' => ArrayStorage::Bool(numpy_bool_to_vec(py, &flat)?),
         // astype(copy=False): when the array is already int64/uint64/float64 (and
         // contiguous after reshape) NumPy returns it as-is, so the only data movement
         // is the single buffer read instead of a redundant widening copy. Narrower
         // widths still copy (the widen is required) — bit-identical either way.
-        "i" => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
-        "u" => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
-        "f" => ArrayStorage::F64(numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")?),
+        'i' => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
+        'u' => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
+        'f' => ArrayStorage::F64(numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")?),
         _ => {
             return Err(PyTypeError::new_err(format!(
-                "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
+                "{context}: expected a bool/int/uint/float array, got dtype {}",
+                dtype.str()?.extract::<String>()?,
             )));
         }
     };
@@ -5510,19 +5516,21 @@ fn extract_integer_array(
         .extract::<Vec<usize>>()?;
     let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
     let dtype = array.getattr(intern!(py, "dtype"))?;
-    let dtype_name = dtype.str()?.extract::<String>()?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    // Same shape as `extract_numeric_array`: the name is 1639.2 ns of pure-Python dtype
+    // machinery, was read on every call, and is consumed by the failure arm alone.
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
 
-    let storage = match kind.as_str() {
+    let storage = match kind {
         // Read the index array straight out of its buffer (one memcpy) instead of
         // boxing every element into a Python int via .tolist() — for a large index
         // array (e.g. np.take with millions of indices) the PyList round-trip was
         // the dominant cost. Bit-identical (same integer values).
-        "i" => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
-        "u" => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
+        'i' => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
+        'u' => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
         _ => {
             return Err(PyTypeError::new_err(format!(
-                "{context}: expected an integer index array, got dtype {dtype_name}",
+                "{context}: expected an integer index array, got dtype {}",
+                dtype.str()?.extract::<String>()?,
             )));
         }
     };
@@ -9801,6 +9809,31 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
     if !x.get_type().is(&ndarray_type) {
         return Ok(None);
     }
+    // DECLINE WITHOUT RAISING. `PyBuffer::<f64>::get` says no to a non-f64 array by RAISING a
+    // Python exception, which pyo3 builds and then immediately discards. `isnan`/`isinf`/
+    // `isfinite`/`signbit` call this helper AND its f32 twin before an integer or bool operand
+    // reaches its real route, so such an operand paid two raise-and-discards to learn what
+    // `dtype.kind` answers for ~40 ns. The f16 predicate helper one level up already pre-checks
+    // exactly this way; it was only ever missing here and in the f32 twin.
+    //
+    // ONE getattr AND A POINTER COMPARE, not three getattrs. The first version of this
+    // pre-check read kind+itemsize, which cost the f64 operand ~150 ns it had not paid before -
+    // and f64 is this gate's COMMONEST operand, so that version won on int/bool (-190 ns) while
+    // LOSING on float64 (729.0 -> 882.7 ns, 2.432x -> 2.902x). Measured, not assumed. Builtin
+    // dtype descriptors are canonical singletons, so identity against the cached `float64`
+    // descriptor decides it outright.
+    //
+    // Exactly equivalent: the buffer request succeeds only for native-order format 'd'.
+    // longdouble, float16 and a BYTE-SWAPPED `>f8` are all refused by the old path (pyo3's
+    // `Element` check requires native order) and are all non-identical to this descriptor. A
+    // NON-CONTIGUOUS f64 array still passes here and is still declined below by `as_slice`
+    // returning None, exactly as before.
+    if !x
+        .getattr(intern!(py, "dtype"))?
+        .is(cached_float64_dtype(py)?)
+    {
+        return Ok(None);
+    }
     let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
         return Ok(None);
     };
@@ -9920,6 +9953,13 @@ fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
     let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    // Twin of the pre-check in `zerocopy_f64_predicate_flat`; see the reasoning there.
+    if !x
+        .getattr(intern!(py, "dtype"))?
+        .is(cached_float32_dtype(py)?)
+    {
         return Ok(None);
     }
     let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
@@ -11048,6 +11088,24 @@ fn cached_float64_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
             Ok(cached_numpy(py)?
                 .call_method1(intern!(py, "dtype"), ("float64",))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
+/// The `numpy.dtype('float32')` object, resolved once — the f32 twin of
+/// `cached_float64_dtype`, and singleton for the same reason.
+///
+/// Used to let the zero-copy f32 gates decline by POINTER COMPARISON instead of by raising a
+/// buffer-protocol exception. A byte-swapped `>f4` is deliberately NOT this object, which is
+/// the answer the old `PyBuffer::<f32>::get` gave too: pyo3's `Element` check requires native
+/// byte order, so both spellings decline it.
+fn cached_float32_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static F32_DTYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(F32_DTYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "dtype"), ("float32",))?
                 .unbind())
         })?
         .bind(py))
@@ -142711,6 +142769,50 @@ mod tests {
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    /// A BYTE-SWAPPED float array must not be read through the native-order zero-copy route.
+    ///
+    /// `PyBuffer::<f64>::get` ACCEPTS a `>f8` array, so before the dtype-identity pre-check the
+    /// predicate helpers reinterpreted big-endian bytes as native doubles and answered from
+    /// garbage: `isnan` returned all-False on an array containing a NaN, and `isinf` and
+    /// `signbit` did the same. Silently wrong values, not an error. None of the 654 tests here
+    /// caught it because every one of them builds a native-order array.
+    ///
+    /// The four predicates below are the ones whose gates carry the pre-check. `sign`,
+    /// `absolute`, `sqrt` and `square` are deliberately NOT asserted: they reach the same defect
+    /// through the other zero-copy helpers, which are not fixed yet.
+    #[test]
+    fn float_predicates_match_numpy_on_byteswapped_input() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            for dtype in [">f8", "<f8", ">f4", "<f4"] {
+                let values = numpy
+                    .call_method1(
+                        "array",
+                        (vec![1.0_f64, f64::NAN, f64::INFINITY, -2.5, -0.0],),
+                    )?
+                    .call_method1("astype", (dtype,))?;
+                for name in ["isnan", "isinf", "isfinite", "signbit"] {
+                    let actual = match name {
+                        "isnan" => isnan_native(py, &values)?,
+                        "isinf" => isinf_native(py, &values)?,
+                        "isfinite" => isfinite_native(py, &values)?,
+                        _ => signbit_native(py, &values)?,
+                    };
+                    let expected = numpy.call_method1(name, (&values,))?;
+                    assert_eq!(
+                        repr_string(&actual.bind(py).call_method0("tolist")?),
+                        repr_string(&expected.call_method0("tolist")?),
+                        "{name} on {dtype} diverged from numpy",
+                    );
+                }
+            }
             Ok(())
         });
     }

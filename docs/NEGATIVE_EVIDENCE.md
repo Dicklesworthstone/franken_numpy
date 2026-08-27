@@ -62226,3 +62226,112 @@ gone from these routes. The next probe is the ~7500-instruction residue common t
 against numpy's ~6000, which is a call-shape and dispatch question. Also note `exp`/`log` sit at
 1.7x on integer input purely from that residue, with no extract involved at all - they are the
 cleanest cell to profile it in.
+
+## 2026-08-27 - WIN (SHIP): the zero-copy float gates DECLINED BY RAISING, and on a byte-swapped array they did not decline at all - `fnp.isnan` answered all-False on an array containing NaN (`franken_numpy-predicate-gate-raise`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+Exact class, and the honest one: every perf cell here remains a LOSS to numpy. The row's larger
+result is a CORRECTNESS defect, found by a probe written to check that a perf change was inert.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=2a65751e7248a6d62fc5e52b66c22f92658bd17793b8088fe0b1cfaf0b85ef49
+executing elf sha256 (AFTER)   bench_elf_sha256=36dbb0971454d47f4cf31324d80b2c15adce2795341d202c810124f3cacf3f32
+```
+
+### THE CORRECTNESS DEFECT
+
+`zerocopy_f64_predicate_flat` and its f32 twin declined a non-matching operand by calling
+`PyBuffer::<f64>::get`, letting it RAISE, and swallowing the exception. On a BYTE-SWAPPED array
+that request does not fail - the buffer is handed over and the big-endian bytes are read as
+native doubles. Measured, both builds, same five-element `>f8` input:
+
+```
+                 numpy        fnp BEFORE      fnp AFTER
+  isfinite   [1 0 0 1 1]     [1 1 1 1 1]     [1 0 0 1 1]
+  isnan      [0 1 0 0 0]     [0 0 0 0 0]     [0 1 0 0 0]
+  isinf      [0 0 1 0 0]     [0 0 0 0 0]     [0 0 1 0 0]
+  signbit    [0 0 0 1 1]     [0 0 0 0 0]     [0 0 0 1 1]
+```
+
+**`isnan` returned all-False on an array containing a NaN.** Not an error - a wrong value. None
+of the 654 lib tests caught it because every one of them builds a native-order array; a
+regression test over `>f8`/`<f8`/`>f4`/`<f4` x four predicates is added with this row.
+
+The fix decides by IDENTITY against the cached `numpy.dtype('float64')` descriptor (builtin
+descriptors are canonical singletons, and a byte-swapped `>f8` is deliberately not that object),
+which is also what the old path meant to say: pyo3's `Element` check requires native order.
+
+### THE PERFORMANCE DEFECT IS THE SAME LINE
+
+Declining by exception is the expensive way to say no. `isnan`/`isinf`/`isfinite`/`signbit` call
+the f64 helper and then the f32 helper, so an integer or bool operand paid TWO raise-and-discards
+before reaching its real route. Priced from the deltas: a swallowed raise ~185 ns, the
+replacement getattr+identity ~62 ns.
+
+33 readable cells, 21 skipped BIASED. `HEAD -> AFTER (numpy ns, after ns)`:
+
+```
+  isnan    int64    16   2.445x -> 1.604x   (291.8 np, 468.1)   1.52x self-speedup
+  isnan    int32    16   2.477x -> 1.574x   (298.8 np, 470.3)   1.57x
+  isinf    uint8   256   2.445x -> 1.557x   (295.2 np, 459.5)   1.57x
+  isinf    int64    16   2.433x -> 1.567x   (295.8 np, 463.6)   1.55x
+  isnan    bool     16   2.339x -> 1.623x   (289.8 np, 470.3)   1.44x
+  isfinite int32    16   5.036x -> 4.186x   (296.1 np, 1239.4)  1.20x
+  isfinite uint8   256   5.067x -> 4.333x   (287.7 np, 1246.7)  1.17x
+  isfinite float64  16   2.361x -> 2.554x   (308.9 np, 788.9)   0.92x   <-- COST, see below
+```
+
+Integer and bool: **1.13x-1.57x faster, -235 to -250 ns per call**. Every cell still a LOSS.
+
+### THE COST, STATED PLAINLY
+
+**float64 REGRESSES 0.92x-0.96x (+62 ns)** across all five readable f64 cells, because an f64
+operand now pays one `getattr(dtype)` + identity compare before a buffer request that was always
+going to succeed. f64 is this gate's commonest operand, so this is a real trade, not a rounding
+error. It is shipped anyway because the correctness defect is not optional.
+
+A FIRST version of the pre-check read `kind`+`itemsize` (three getattrs) and cost float64
+**+150 ns (2.432x -> 2.902x)** while winning the same amount on int/bool. Measuring the control
+is what caught it; the identity compare halved that cost. Recorded because the obvious spelling
+of this fix is the expensive one.
+
+COUNTED_MECHANISM: 16 call sites in this file decline a float buffer by raising
+(`PyBuffer::<f64>::get`/`<f32>`); 2 are fixed here. A byte-order probe over 208 cells shows 23
+numpy-value mismatches BEFORE and 11 AFTER - the 12 fixed are the four predicates x three
+non-native dtypes, and the 11 that remain (`sign`, `absolute`, `sqrt`, `square` on swapped input)
+are reached through the 14 unfixed sites, which is direct evidence the same latent wrong-value
+bug lives at all of them.
+
+### AN UNPRICED CHANGE IN THE SAME COMMIT, LABELLED AS SUCH
+
+`extract_numeric_array` (132 call sites) and `extract_integer_array` read the dtype's NAME on
+every call and consumed it only in the failure arm. That read is now inside the arm that formats
+it. **NO RATIO IS CLAIMED**: `str(dtype)` prices at 1639.2 ns by `timeit` on the installed
+interpreter, but the six ops measured against it moved 0.97x-1.04x - a NO-OP - and the reason is
+that none of them reaches the helper (`isfinite` on int64 returns from `try_const_bool_integral`
+three gates earlier). It is kept as hygiene on a provably dead read, verified inert by 660
+error-and-value cells identical across builds, and it is NOT evidence for the 1639.2 ns figure.
+**A Python-level `timeit` price did not transfer to the same call made from Rust; do not quote
+one as the other without a route check.**
+
+PARITY: 5320 cells raw-byte compared -> 1 divergence, identical on the pre-change build
+(pre-existing `deadlock-audit-neu7z`). 660 error/edge cells identical. 655 lib tests pass (654 +
+the new byte-order regression test). clippy `-D warnings` and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 4096 elements.
+
+RETRY PREDICATE: **do the remaining 14 raising-decline sites** - `zerocopy_f64_unary_flat`,
+`zerocopy_f32_unary_flat`, `zerocopy_f64_unary_flat_with`, `try_zerocopy_f64_clip`,
+`try_zerocopy_f32_clip`, `try_zerocopy_f64_nan_to_num`, `try_zerocopy_f32_nan_to_num`,
+`try_zerocopy_f64_frexp`, `try_zerocopy_f32_frexp`, `try_zerocopy_f64_modf`,
+`try_zerocopy_f32_modf`, `try_zerocopy_f64_vander`, `try_zerocopy_f64_polyval`,
+`try_zerocopy_f32_polyval`. The byte-order probe already names the 11 cells they get WRONG, so
+each one has an acceptance test before it is written. Use the IDENTITY compare, not
+kind+itemsize - that spelling is measured at +150 ns on the common operand. **The open design
+question is hoisting the dtype read to the `*_native` callers and passing it down**, which would
+pay the ~62 ns ONCE instead of once per gate and would erase the float64 cost this row books;
+that is the only way to make this family strictly free, and it is UNMEASURED.
