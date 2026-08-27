@@ -29357,7 +29357,12 @@ fn try_zerocopy_trim_zeros(
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !filt.is_exact_instance(&ndarray_type) {
+    // `is_instance`, so an ndarray SUBCLASS takes this path too (`deadlock-audit-ljn3e`).
+    // This route returns `filt[lo:hi]` - INDEXING, which preserves the subclass, exactly
+    // as in the flip family. Excluding subclasses here did not protect anything: it just
+    // dropped them into the extract residual below, which rebuilds a plain `ndarray` and
+    // STRIPS the type. So admitting them is both the correctness fix and the fast path.
+    if !filt.is_instance(&ndarray_type)? {
         return Ok(None);
     }
     let shape: Vec<usize> = filt.getattr(intern!(py, "shape"))?.extract()?;
@@ -32363,6 +32368,15 @@ fn sign(
     }
     let x: Py<PyAny> = args.get_item(0)?.unbind();
     let numpy = cached_numpy(py)?;
+    // A FIFTH route into the unary family, and the same guard applies: this one ends in
+    // an extract-and-rebuild that cannot carry a subclass, and `np.sign(np.matrix(a))` is
+    // a `matrix` (`deadlock-audit-ljn3e`).
+    if ndarray_subclass_needs_numpy(py, x.bind(py))? {
+        return Ok(numpy
+            .getattr(intern!(py, "sign"))?
+            .call1((x.bind(py),))?
+            .unbind());
+    }
     let arr = numpy.call_method1(intern!(py, "asarray"), (x.bind(py),))?;
     let dtype_kind = arr
         .getattr(intern!(py, "dtype"))?
@@ -32526,11 +32540,24 @@ fn rint_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // float16 rint: numpy has no native f16 ALU and emulates via widen->f32->round_ties_even->
     // narrow (compute-bound ~77ms at 16M). Native parallel path wins ~15x, bit-exact (verified
     // over the full f16 domain) and warning-free; f16 input keeps f16 (no int promotion involved).
+    // `rint` is a FOURTH route into the unary family, after `native_unary_elementwise`,
+    // `native_unary_promoting` and `native_rounding_unary` - and it needs the same
+    // subclass guard they got, because it too finishes in an extract-and-rebuild that
+    // cannot carry a subclass (`deadlock-audit-ljn3e`). `np.rint(np.matrix(a))` is a
+    // `matrix`. This route BUILDS its result, so delegation is the remedy here; the flip
+    // family's cheaper no-conversion fix does not apply.
+    if ndarray_subclass_needs_numpy(py, x)? {
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "rint"))?
+            .call1((x,))?
+            .unbind());
+    }
     if let Some(out) = try_zerocopy_f16_unary_widen(py, x, UnaryOp::Rint)? {
         return Ok(out);
     }
     if !numpy_dtype_is_f64(py, x) {
-        let numpy = py.import("numpy")?;
+        // `cached_numpy`, not `py.import` - 382.5 ns/call on this host.
+        let numpy = cached_numpy(py)?;
         return Ok(numpy.getattr(intern!(py, "rint"))?.call1((x,))?.unbind());
     }
     if let Some(out) = try_zerocopy_f64_unary(py, x, UnaryOp::Rint)? {
