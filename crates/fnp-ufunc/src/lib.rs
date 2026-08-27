@@ -27,10 +27,8 @@
 // with the range index; an iterator rewrite would change the index arithmetic in hot
 // numeric paths for a style preference only.
 #![allow(clippy::needless_range_loop)]
-
 #![forbid(unsafe_code)]
 #![feature(portable_simd)]
-
 
 pub mod sort_small;
 
