@@ -28286,7 +28286,6 @@ fn try_zerocopy_append_flat(
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, na + nv) };
         let a_raw: &[u8] = unsafe { std::slice::from_raw_parts(a_in.as_ptr() as *const u8, na) };
         let v_raw: &[u8] = unsafe { std::slice::from_raw_parts(v_in.as_ptr() as *const u8, nv) };
-        use rayon::prelude::*;
         // MEASURED CROSSOVER, IN OUTPUT BYTES (`deadlock-audit-dc6mz`).
         //
         // This was `1 << 16`, i.e. 64 KiB, while the comment below describes the design target as
@@ -28317,20 +28316,15 @@ fn try_zerocopy_append_flat(
         //
         // A PINNED PROBE CANNOT SEE THIS BUG. Under `taskset -c 40` rayon reports one CPU, the
         // serial branch is taken, and the cell reads 1.05x. Thread count is the axis; do not pin.
-        const APPEND_PAR_MIN: usize = 1 << 24;
-        const COPY_CHUNK: usize = 1 << 16;
-        let par_copy = |dst: &mut [u8], src: &[u8]| {
-            dst.par_chunks_mut(COPY_CHUNK)
-                .zip(src.par_chunks(COPY_CHUNK))
-                .for_each(|(d, s)| d.copy_from_slice(s));
-        };
-        if na + nv >= APPEND_PAR_MIN && rayon::current_num_threads() >= 2 {
+        // `par_copy_slice`, not a local copy of it. This site's own gate was already in BYTES and
+        // at 16 MB (`na`/`nv` are byte counts), which is the same threshold the shared helper was
+        // later fitted to - so the routing here is unchanged and only the fixed 65536-byte chunk
+        // is replaced by a pool-derived one. `append`'s remaining 1.891x at 2^22 is NOT this
+        // (it is above the gate either way) and is untouched.
+        {
             let (left, right) = out_raw.split_at_mut(na);
-            par_copy(left, a_raw);
-            par_copy(right, v_raw);
-        } else {
-            out_raw[..na].copy_from_slice(a_raw);
-            out_raw[na..].copy_from_slice(v_raw);
+            par_copy_slice(left, a_raw);
+            par_copy_slice(right, v_raw);
         }
     }
     Ok(Some(
@@ -28634,22 +28628,17 @@ fn try_zerocopy_f64_insert_scalar(
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n + 1) };
         // numpy.insert == concatenate: a single-threaded ~64MB copy (~40-66ms@8M). A chunked parallel copy
         // saturates more memory channels (fnp.concatenate already does ~6x this way). Bit-identical.
-        use rayon::prelude::*;
-        const INSERT_PAR_MIN: usize = 1 << 16;
-        const COPY_CHUNK: usize = 1 << 16;
-        let par_copy = |dst: &mut [f64], src: &[f64]| {
-            dst.par_chunks_mut(COPY_CHUNK)
-                .zip(src.par_chunks(COPY_CHUNK))
-                .for_each(|(d, s)| d.copy_from_slice(s));
-        };
-        if n >= INSERT_PAR_MIN && rayon::current_num_threads() >= 2 {
-            par_copy(&mut o[..idx], &data[..idx]);
+        // `par_copy_slice`, not a local copy of it. This site had its own `INSERT_PAR_MIN` and
+        // `COPY_CHUNK`, both `1 << 16` ELEMENTS, and carried exactly the defect measured on
+        // `roll`/`pad`: a parallel memcpy is pure overhead at that size, so `insert` LOST a band
+        // it had been winning - 0.660x at 65536, then 2.483x at 98304 and 2.550x at 262144, with
+        // the jump landing precisely on the gate. The shared helper gates on 16 MB of BYTES
+        // (measured crossover) and derives its chunk from the pool, and it falls back to a plain
+        // `copy_from_slice` below that, so no gate is needed at this call site at all.
+        {
+            par_copy_slice(&mut o[..idx], &data[..idx]);
             o[idx] = val;
-            par_copy(&mut o[idx + 1..], &data[idx..]);
-        } else {
-            o[..idx].copy_from_slice(&data[..idx]);
-            o[idx] = val;
-            o[idx + 1..].copy_from_slice(&data[idx..]);
+            par_copy_slice(&mut o[idx + 1..], &data[idx..]);
         }
     }
     Ok(Some(out.unbind()))
@@ -28893,21 +28882,11 @@ fn try_zerocopy_f64_delete_scalar(
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n - 1) };
         // Chunked parallel copy of the two kept runs (numpy delete of one element = a ~64MB single-threaded
         // copy, ~48ms@8M); par_chunks_mut saturates more memory channels. Bit-identical. Mirrors insert.
-        use rayon::prelude::*;
-        const DELETE_PAR_MIN: usize = 1 << 16;
-        const COPY_CHUNK: usize = 1 << 16;
-        let par_copy = |dst: &mut [f64], src: &[f64]| {
-            dst.par_chunks_mut(COPY_CHUNK)
-                .zip(src.par_chunks(COPY_CHUNK))
-                .for_each(|(d, s)| d.copy_from_slice(s));
-        };
-        if n >= DELETE_PAR_MIN && rayon::current_num_threads() >= 2 {
-            par_copy(&mut o[..idx], &data[..idx]);
-            par_copy(&mut o[idx..], &data[idx + 1..]);
-        } else {
-            o[..idx].copy_from_slice(&data[..idx]);
-            o[idx..].copy_from_slice(&data[idx + 1..]);
-        }
+        // `par_copy_slice`, not a local copy of it - same `1 << 16` element gate and chunk as the
+        // `insert` twin above, and the same measured defect. The helper gates on 16 MB of bytes
+        // and falls back to `copy_from_slice` below that, so this site needs no gate.
+        par_copy_slice(&mut o[..idx], &data[..idx]);
+        par_copy_slice(&mut o[idx..], &data[idx + 1..]);
     }
     Ok(Some(out.unbind()))
 }

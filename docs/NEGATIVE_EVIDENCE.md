@@ -63424,3 +63424,96 @@ generic over `T`, an element-count gate is a bug independent of its value.** Rem
 of that shape: `INSERT_PAR_MIN`, `DELETE_PAR_MIN`, `COPYTO_PAR_MIN`, `RAVEL_PAR_MIN`,
 `UNRAVEL_PAR_MIN`, `SCATTER_PAR_MIN`, `SELECT_PAR_MIN` (all `1 << 16`), and `TRI_FILL_PAR_MIN`
 (`1 << 20`).
+
+## 2026-08-27 - WIN (SHIP): the same 65536-element copy gate was DUPLICATED inline in `append`/`insert`/`delete` - six more cells cross from LOSS to WIN, and three copies of one helper are now one (`franken_numpy-par-copy-inline-dupes`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=c47765d4719dd28b45dbe53246ec9e062feb2e304cb1fc0bea3d1d64592d8861
+executing elf sha256 (AFTER)   bench_elf_sha256=d8d082252f60d50fa75093e5e00cf34e492d68effe9783bfee065bcea9f361b8
+```
+
+### THE PREVIOUS FIX DID NOT REACH THREE OF ITS OWN CALLERS
+
+The row one back fixed `par_copy_slice` - an element-count gate at 65536 with a fixed 65536 chunk -
+and `roll`/`pad` crossed to wins. But `append`, `insert` and `delete` do not CALL that helper: each
+had its own inline `let par_copy = |dst, src| { dst.par_chunks_mut(COPY_CHUNK)... }` closure with
+its own `const COPY_CHUNK: usize = 1 << 16`, a verbatim third, fourth and fifth copy of the same
+code and the same defect. Fixing the shared helper left them untouched.
+
+`insert` shows the identical signature to `roll`: a DISCONTINUITY on the gate, not a slope -
+0.665x at 65536 and **2.708x at 98304**. `delete` (scalar index) the same: 0.880x then **3.086x**.
+
+All three call sites now call `par_copy_slice`, whose measured 16 MB byte gate and pool-derived
+chunk they inherit; the helper falls back to `copy_from_slice` below the gate, so none of them
+needs a gate of its own and all three local closures and constants are gone.
+
+COUNTED_MECHANISM: three inline duplicates of one 5-line closure removed, each carrying a
+`1 << 16` element gate; measured at 98304 f64, insert 61814.4 -> 16917.7 ns and delete
+58656.9 -> 16387.3 ns, against numpy's 22825.0 and 19004.5.
+
+### THE MEASUREMENT
+
+BEFORE arm at loadavg 6.62, AFTER arm at 15.11 - the AFTER arm ran on the BUSIER host, so these
+wins are UNDERSTATED:
+
+```
+  op        n         BEFORE     AFTER
+  insert    98304     2.708x     0.741x    LOSS -> WIN
+  insert   262144     2.419x     0.868x    LOSS -> WIN
+  insert  1048576     1.614x     0.865x    LOSS -> WIN
+  delete    98304     3.086x     0.892x    LOSS -> WIN
+  delete   262144     2.335x     0.961x    LOSS -> WIN
+  delete  1048576     1.887x     0.971x    LOSS -> WIN
+  insert  4194304     0.619x     0.371x    already a win, improved
+  delete  4194304     1.603x     1.203x    still a LOSS, improved
+  append  4194304     2.114x     1.278x    still a LOSS, improved
+  insert/delete 32768, 65536     unchanged (0.507x/0.665x, 0.753x/0.880x)  CONTROL, below the gate
+  append  32768..1048576         unchanged (1.084x -> 1.173x, 0.985x -> 0.992x)  CONTROL
+```
+
+`append` below 2^22 is the control that shows the change is confined to where it should be: its
+own gate was ALREADY in bytes and at 16 MB, so its routing does not move and only its fixed chunk
+becomes pool-derived - visible solely at 2^22 (2.114x -> 1.278x).
+
+`roll`/`pad` re-measured on this build to confirm the previous row did not regress: pad 0.334x /
+0.492x / 0.575x / 0.756x / 0.914x / 0.373x across 32768..4194304, matching.
+
+### A DIFFERENT `delete` ROUTE IS STILL LOSING, AND IT IS NOT THIS ONE
+
+An earlier triage read `delete` at ~2.0x across ALL sizes including below the gate, which did not
+fit the discontinuity story - because that probe passed an index ARRAY and this one a scalar. They
+are different routes. Measured on the shipped build, `np.delete(a, idx_array_of_64)`:
+
+```
+   n=32768    numpy 20552.4   fnp 41499.0   2.019x
+   n=131072   numpy 64659.2   fnp 143701.3  2.222x
+   n=1048576  numpy 501093.1  fnp 832838.3  1.662x
+```
+
+Flat in size and present below the gate: a different mechanism, untouched by this row.
+
+PARITY: 805 cells - 7 dtypes x 10 sizes (0, 1, 2, 7, and both sides of BOTH the old gate at
+65535/65536/98304 and the new one at 2097152/2097153) x insert at five positions including 0,
+`n-1` and `n` (the append-at-end case), delete at first/middle/last, append with 0/1/64 values,
+and a block-valued insert - comparing dtype, shape and raw bytes: **0 divergences**. General parity
+5320 cells -> 1 divergence, identical on the pre-change build (pre-existing
+`deadlock-audit-neu7z`). Both byte-order oracles unchanged (1 integer / 26 float). 660 error/edge
+cells identical. 655 lib tests pass. clippy `-D warnings` and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 2^22 float64 = 32 MB, two live.
+
+RETRY PREDICATE: **`delete` with an INDEX ARRAY is the next cell** - 2.019x-2.222x, flat in size,
+a different route from the scalar path fixed here, and unmeasured as to cause. Do NOT look for a
+copy gate in it; the flatness across the gate is the evidence that it is something else. Also
+still standing and NOT explained by chunking: `append` at 2^22 (1.278x) and `delete` at 2^22
+(1.203x), both above every gate involved, both in the 32 MB regime where this campaign has
+recorded allocator/mmap effects. **This is the fourth parallel-gate defect in four rows; the
+duplication is the lesson - grep for INLINE re-implementations of a helper before concluding that
+fixing the helper fixed the family.** The remaining `1 << 16` element gates named one row back
+(`COPYTO_PAR_MIN`, `RAVEL_PAR_MIN`, `UNRAVEL_PAR_MIN`, `SCATTER_PAR_MIN`, `SELECT_PAR_MIN`) are
+still unmeasured.
