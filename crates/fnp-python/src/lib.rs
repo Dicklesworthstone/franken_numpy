@@ -31890,21 +31890,56 @@ fn try_const_bool_integral(
     if !x.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
+    // `char`, not a heap `String`, for a one-character answer.
     let kind = x
         .getattr(intern!(py, "dtype"))?
         .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if !matches!(kind.as_str(), "i" | "u" | "b") {
+        .extract::<char>()?;
+    if !matches!(kind, 'i' | 'u' | 'b') {
         return Ok(None);
     }
     let shape = x.getattr(intern!(py, "shape"))?;
-    // np.zeros (calloc) / np.ones beat np.full(value) for the constant bool fill.
-    // Positional dtype and the held `bool_` type, on the terms of the predicate fast
-    // paths above: the kwargs dict and the "bool" `PyString` were both per-call, and
-    // the constructor name was a NON-INTERNED key, which allocates another.
+    // `np.zeros` is calloc and costs 163.0 ns at n=16. **`np.ones` costs 897.1 ns** - 5.5x -
+    // because it is `empty` + a full `copyto(1)` ufunc dispatch, and that single call was most
+    // of `isfinite`'s excess over numpy (`np.isfinite` on the same operand is 316.0 ns, so we
+    // were paying nearly three times numpy's WHOLE cost just to allocate the answer). It is why
+    // `isfinite` measured 4.04x-4.20x while `isnan`/`isinf` - identical routes that ask for
+    // `false` and so get calloc - measured ~1.6x.
+    //
+    // `np.empty` is 161.6 ns, so the true branch allocates uninitialised and memsets the bytes
+    // itself. Measured across sizes (timeit, installed interpreter): empty+fill beats `ones` at
+    // every size, 16 through 2^22 (379.4 vs 897.1 at n=16; 46550 vs 51088 at 2^22 where both are
+    // memory-bound), so no size gate is needed. The false branch keeps calloc, which stays
+    // better than a memset at large n because the pages are never touched.
+    //
+    // A bool_ array exports buffer format '?', which `PyBuffer::<u8>` refuses, so the bytes are
+    // reached through a zero-copy uint8 view - bool_ and uint8 share a 1-byte layout, and numpy
+    // stores True as exactly 1, so writing 1s is bit-identical to what `np.ones` produces.
     let bool_type = cached_bool_type(py)?;
     let filled = if value {
-        numpy.call_method1(intern!(py, "ones"), (&shape, bool_type))?
+        let out = numpy.call_method1(intern!(py, "empty"), (&shape, bool_type))?;
+        let mut memset_done = false;
+        if let Ok(view) = out.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))
+            && let Ok(buffer) = PyBuffer::<u8>::get(&view)
+            && let Some(slice) = buffer.as_mut_slice(py)
+        {
+            // SAFETY: `Cell<u8>` is repr(transparent) over u8; `out` is a fresh
+            // `numpy.empty` buffer that nothing else holds, and the GIL is held, so there
+            // is no aliasing reader. A raw `write_bytes` is a memset where a per-`Cell`
+            // loop would not be guaranteed to become one.
+            unsafe {
+                std::ptr::write_bytes(slice.as_ptr() as *mut u8, 1u8, slice.len());
+            }
+            memset_done = true;
+        }
+        if memset_done {
+            out
+        } else {
+            // Any array whose bytes we cannot reach that way (an exotic layout, a refused
+            // view) falls back to the original call rather than returning a buffer of
+            // uninitialised memory.
+            numpy.call_method1(intern!(py, "ones"), (&shape, bool_type))?
+        }
     } else {
         numpy.call_method1(intern!(py, "zeros"), (&shape, bool_type))?
     };

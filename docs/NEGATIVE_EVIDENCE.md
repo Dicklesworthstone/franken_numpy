@@ -62546,3 +62546,100 @@ for this and makes each conversion a one-line change. **Both oracles must be run
 after** - `scratchpad/byteorder_wide.py` (560 float cells) and `scratchpad/intswap.py` (integer
 cells); they are what caught the 22-regression variant and the ValueError, neither of which any
 test in the repo detects. AGENTS.md bars a scripted sweep, so budget the ~80 edits as hand work.
+
+## 2026-08-27 - WIN (SHIP): `np.ones(shape, bool)` costs 897 ns where `np.zeros` costs 163 - one allocator call was most of `isfinite`'s gap, and it is why `isfinite` measured 4.2x while its identical twins `isnan`/`isinf` measured 1.6x (`franken_numpy-const-bool-ones`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell,
+replicated with the arm order reversed.
+
+**Campaign result class:** maintenance-self-speedup
+
+Every cell below remains a LOSS to numpy; the gap narrows, it does not close.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=c8c4f0b5c0585d28bb024a2d9bd2629dee3f81c3935b1e7ebc18ae6a98a79f01
+executing elf sha256 (AFTER)   bench_elf_sha256=14005f343657841fba1ab28c600f10adf3bbede74b051efcb5328bf65bf38dbb
+```
+
+### THE TELL WAS IN THE TRIAGE TABLE ALL ALONG
+
+`isfinite` on integer/bool sat at **4.04x-4.20x** while `isnan` and `isinf` - which take the
+IDENTICAL route through `try_const_bool_integral` and differ only in asking for `true` instead of
+`false` - sat at ~1.6x. Same code, same operand, 2.5x apart. The only thing that differs is which
+numpy constructor fills the answer, so that is where the cost had to be. Priced with `timeit`
+against the installed interpreter:
+
+```
+        n     np.isfinite   np.ones(sh,bool)  np.zeros(sh,bool)   np.empty(sh,bool)
+       16          316.0            897.1              163.0             161.6
+      256          316.4            895.4              165.1             164.9
+     4096          446.5           1032.5              292.7             205.4
+    65536          948.6           1555.3              791.2             188.3
+```
+
+**`np.ones` is 5.5x `np.zeros` and nearly 3x numpy's ENTIRE `isfinite` call.** `zeros` is calloc;
+`ones` is `empty` plus a full `copyto(1)` ufunc dispatch. fnp was paying more to allocate the
+answer than numpy pays to compute it.
+
+### THE FIX
+
+The `true` branch allocates with `np.empty` (161.6 ns) and memsets the bytes itself. A `bool_`
+array exports buffer format `'?'`, which `PyBuffer::<u8>` refuses, so the bytes are reached
+through a zero-copy `uint8` view - `bool_` and `uint8` share a 1-byte layout and numpy stores
+True as exactly 1, so the result is bit-identical to what `np.ones` produced. Any array whose
+bytes cannot be reached that way falls back to `np.ones` rather than returning uninitialised
+memory. The `false` branch KEEPS calloc, which beats a memset at large n because the pages are
+never touched. `empty+fill` beats `ones` at every size from 16 to 2^22 (379.4 vs 897.1 at n=16;
+46550 vs 51088 at 2^22, where both are memory-bound), so no size gate is needed.
+
+COUNTED_MECHANISM: `np.ones(shape, bool)` 897.1 ns against `np.zeros(shape, bool)` 163.0 ns and
+`np.empty(shape, bool)` 161.6 ns at n=16, min-of-5 x 4000 reps by `timeit` on the installed
+interpreter; numpy's whole `np.isfinite` call on the same operand is 316.0 ns.
+
+### THE MEASUREMENT, AND ITS CONTROLS
+
+Replication run (arm order reversed; the AFTER arm ran at loadavg 16.06 against BEFORE's 5.98,
+so the win is understated). 34 readable cells, 20 BIASED:
+
+```
+  isfinite bool     16   4.311x -> 2.925x   (284.5 np, 1255.8 -> 832.4 ns)   1.47x
+  isfinite bool    256   4.360x -> 2.911x   (291.9 np, 1255.8 -> 850.0)      1.50x
+  isfinite int32    16   4.299x -> 2.787x   (304.2 np, 1269.4 -> 847.8)      1.54x
+  isfinite int32   256   4.235x -> 2.784x   (306.7 np, 1258.7 -> 853.8)      1.52x
+  isfinite uint8   256   4.297x -> 2.870x   (294.7 np, 1270.2 -> 845.9)      1.50x
+  isfinite uint8  4096   3.554x -> 2.358x   (389.2 np, 1407.8 -> 917.7)      1.51x
+  isfinite int64  4096   3.309x -> 2.190x   (424.4 np, 1379.5 -> 929.4)      1.51x
+```
+
+**-406 to -450 ns per call, 1.47x-1.54x, seven cells, all one direction.** First run agreed
+(1.40x-1.56x).
+
+THREE CONTROLS, all flat, and they are what make the attribution exact:
+
+```
+  isnan / isinf on int/bool  0.96x-1.03x   same route, `false` branch, UNTOUCHED
+  isfinite/isnan on float64  0.97x-1.01x   never reaches try_const_bool_integral
+  sign  on int32/int64/uint8 0.99x-1.04x   different route entirely
+```
+
+Only the branch that was edited moved.
+
+PARITY: 5320 cells raw-byte -> 1 divergence, identical on the pre-change build (pre-existing
+`deadlock-audit-neu7z`), plus a dedicated const-bool sweep over 9 integer/bool dtypes x 6 shapes
+including 0-d, empty and 3-D: **0 divergences**, type/dtype/shape/bytes all compared (the 0-d
+case returns a numpy SCALAR, not a 0-d array, and that is asserted). Both byte-order oracles
+unchanged (1 integer / 28 float, exactly as before). 660 error/edge cells identical. 655 lib
+tests pass. clippy `-D warnings` and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 4096 elements in the A/B, 2^22 in the `timeit` price table (4 MB bool).
+
+RETRY PREDICATE: `isfinite` on int/bool is now ~2.2x-2.9x, still a LOSS, and the residue is the
+gate chain ABOVE `try_const_bool_integral`, not the allocation - an int operand still walks the
+f64, f32 and f16 predicate gates before reaching its own route. Skipping those for a non-float
+kind needs ONE `dtype.kind` read hoisted above them; the previous rows measured such a read at
+~40 ns against ~62 ns for a passing gate, so the arithmetic is not obviously favourable and it
+must be measured, with float64 as the control since it would pay the hoisted read for nothing.
+**The new worst small-n cell is `sign` on int32/uint8 at ~4.1x** (1177.6 ns against numpy's
+301.0), which does NOT go through this route - it is `try_zerocopy_int_sign`, and it is the next
+target. Do not re-price `np.ones`: it is measured here and it is not coming back.
