@@ -60108,3 +60108,76 @@ constant (a `slice`, a small tuple, a sentinel) inside a per-call path. The `np.
 defect across flipud/fliplr/flip remains open and needs `ndarray_subclass_needs_numpy` plus its own
 parity run.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - `count_nonzero` BUILT A SHAPE `Vec` IT USED ONLY FOR A RANK TEST: 2.647x -> 2.022x - and the probe guarding that found a 0-d/scalar defect in 28 cells (`deadlock-audit-54arr`)
+
+`TanBridge`. Shipped `54064835` + `b6b3b0e2`. Measured on `thinkstation1` against the LIVE
+installed numpy 2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1, loadavg 7.63.
+
+**Campaign result class:** candidate-win on six cells (three still losses, three already wins that
+grow), plus a correctness defect fixed in 28 probe cells.
+
+`count_nonzero_typed` used `shape` for exactly two things: a `shape.is_empty()` 0-d guard and the
+per-axis reduction geometry. **The guard is a RANK question**, so `ndim` answers it with one
+integer read instead of a tuple-to-`Vec` extraction, and the geometry is only needed on the
+`axis=Some` branch - which is not the branch `np.count_nonzero(a)` takes. All seven
+`count_nonzero_typed` call sites are inside `try_zerocopy_count_nonzero`, so hoisting the guard
+covers every one. The `axis=None` branch also refetched `numpy.int64` BY NAME to wrap each result;
+it is a type object and is now held like `uint8`/`bool_`/`float64`.
+
+```
+COUNT_NONZERO_ENTRY worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+  before_elf=d17d303e52bf  after_elf=162e9f645b58     loadavg 7.63
+
+  case                  BEFORE                      AFTER              excess ns
+  f64 2^8 axis=None  2.647x [2.298,3.019] -> 2.022x [2.004,2.264]    1103 ->  280
+  bool 2^8           5.261x [4.571,5.472] -> 4.273x [4.100,4.653]     805 ->  646
+  i64 2^8            4.910x [4.000,5.603] -> 4.064x [3.968,4.345]     780 ->  638
+  f64 2^12           0.565x WIN           -> 0.468x WIN               -968 -> -936
+  f64 2-D axis=None  0.597x WIN           -> 0.488x WIN               -684 -> -854
+  f64 2^16           0.246x WIN           -> 0.239x WIN
+
+  CONTROL (axis= reductions still build the shape Vec - must barely move):
+  f64 2-D axis=0     0.502x WIN -> 0.473x WIN     f64 2-D axis=1  0.454x -> 0.440x
+```
+
+The `f64 2^8` excess falls 1103 -> 280 ns, which is the shape `Vec` and the `int64` lookup counted.
+The two axis= CONTROLS still build the shape `Vec` by design and barely move, which is what places
+the effect on the `axis=None` branch specifically.
+
+### THE PROBE FOUND A 0-d/SCALAR DEFECT IN 28 CELLS
+
+`np.count_nonzero(a_1d, axis=0)` is `np.int64(k)`. fnp reshaped its output buffer to `()` and
+handed back `array(k)`. **Values and dtype match, so only `type()` separates them** - the same blind
+spot that hid the 0-d integral predicate results (`deadlock-audit-c0g2r`) and the `np.matrix`
+results (`deadlock-audit-1zl3e`). Every dtype x {axis=0, axis=-1} on a 1-D operand hit it, plus the
+empty-array form: **28 of the probe's 30 divergences.**
+
+`axis=None` already returned a scalar and `keepdims=True` is handled by the caller, so the
+`Some(axis)` branch was the one place left that could produce a rank-0 result. **This is the THIRD
+distinct op family this session in which "reduce to rank 0" produced an array where numpy produces
+a scalar** - it is a systematic hazard of building output through a buffer and reshaping, not an
+isolated slip.
+
+PARITY: 10 dtypes x 6 shapes (including 0-d, empty and 3-D) x up to 11 axis/keepdims forms,
+plus 7 layout/non-array operands x 3 forms - compared on dtype, shape, python `type()` and RAW
+BYTES. **30 divergences before, 2 after.** 654 lib tests pass; clippy and fmt clean.
+
+**STILL OPEN, and NOT fixed here:** the remaining 2 are `np.count_nonzero(np.matrix(a), axis=0)`
+and `keepdims=True`, where numpy RAISES and fnp returns a value. That is the `np.matrix` subclass
+class again - the fourth family it has appeared in - and it needs `ndarray_subclass_needs_numpy`
+plus its own parity run rather than riding a perf ship.
+
+MEMORY: largest operand 2^16 f64 = 512 KB.
+
+RETRY PREDICATE: do not re-attack the shape `Vec` or the `int64` lookup. **NOT TAKEN and recorded
+in the source where it lives:** the one-character dtype kind is still extracted as a `String`,
+which allocates per call. Converting it to `char` is two lines at the read site but rewrites eight
+`match` arms whose text is NOT unique in this 175k-line file - the uniqueness check is exactly what
+stops a replace-all from silently editing another function - and it is worth ~50 ns of the ~280 ns
+this route still spends over numpy. Give it its own diff review. `bool`/`i64` at 4.3-4.5x are the
+family's worst cells and their excess is ~640 ns against a ~190 ns incumbent, i.e. almost entirely
+the shared entry.
+AGENT_NAME=TanBridge.
