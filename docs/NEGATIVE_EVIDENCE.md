@@ -62643,3 +62643,85 @@ must be measured, with float64 as the control since it would pay the hoisted rea
 **The new worst small-n cell is `sign` on int32/uint8 at ~4.1x** (1177.6 ns against numpy's
 301.0), which does NOT go through this route - it is `try_zerocopy_int_sign`, and it is the next
 target. Do not re-price `np.ones`: it is measured here and it is not coming back.
+
+## 2026-08-27 - WIN (SHIP): `sign` was the one int-unary route that never got the 2026 allocation modernisation - a kwargs dict, a dtype-string parse and a per-call reshape, worth 1.52x (`franken_numpy-int-sign-alloc`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell,
+replicated with the arm order reversed at matched low load.
+
+**Campaign result class:** maintenance-self-speedup
+
+Every cell below remains a LOSS to numpy.
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=14005f343657841fba1ab28c600f10adf3bbede74b051efcb5328bf65bf38dbb
+executing elf sha256 (AFTER)   bench_elf_sha256=b3dde56914b8a66ee45af17585502255aa4553219a627ae1ca037ae8cd10b51d
+```
+
+### THE SIBLING DIVERGENCE AGAIN
+
+`sign` on int32/uint8 sat at ~4.1x while `absolute`/`negative`/`square` - the same family, the
+same widths, the same `unary_map_int` kernel - sat at ~2.4x. That gap is the whole finding:
+`zerocopy_int_unary_typed` was modernised under `deadlock-audit-tsyfb` and `sign_typed`, its
+twin, was not. It still carried all three of the costs that row removed:
+
+* a `PyDict` built per call for a `dtype=` KEYWORD, when `dtype` is numpy's second POSITIONAL
+  parameter;
+* a fresh `PyString` from the `&str` dtype name plus numpy's dtype-from-string parse - and the
+  width was already fixed by the `T` the caller instantiates, so naming it bought nothing;
+* allocation at `(n,)` followed by a caller-side `reshape`, measured elsewhere in this file at
+  116.9 ns of pure ceremony.
+
+`sign_typed` now allocates at the final shape with the operand's own dtype OBJECT (bare int for
+rank 1, `np.empty(n, dt)` beating `np.empty((n,), dt)`), and the caller's reshape is gone. The
+dispatch reads `kind` as a `char` rather than a heap `String`.
+
+COUNTED_MECHANISM: three removed per-call operations - one `PyDict` allocation, one `PyString`
+construction plus numpy dtype-string parse, and one `reshape` call priced at 116.9 ns in this
+file - worth 414 to 467 ns per call measured end to end at n=16 (1236.6 -> 779.2 ns on int64).
+
+### A CORRECTNESS CONDITION THE CHANGE CREATED, AND THE GUARD FOR IT
+
+Echoing the operand's dtype object is only safe because `try_zerocopy_int_sign` now refuses a
+non-native byte order. **numpy's own `sign` NORMALISES byte order in its output**: `np.sign` on a
+`>i8` array returns `int64`, not `>i8`. Allocating with the input's descriptor would therefore
+have produced an output numpy never produces - a defect the previous `"int64"`-string spelling
+could not have, since it always named a native dtype. Verified: `>i8`/`<i8`/`>i4`/`>u8`/`>i2` all
+still match numpy in value, dtype AND type.
+
+### THE MEASUREMENT
+
+Replication run, arm order reversed, matched load (3.11 / 4.03). 35 readable cells, 19 BIASED:
+
+```
+  sign int64    16   4.169x -> 2.571x   (303.1 np, 1236.6 -> 779.2 ns)   1.62x
+  sign int32    16   4.066x -> 2.693x   (289.8 np, 1194.1 -> 780.6)      1.51x
+  sign int32   256   3.684x -> 2.452x   (321.0 np, 1191.9 -> 786.9)      1.50x
+  sign uint8    16   4.133x -> 2.649x   (293.2 np, 1192.8 -> 776.5)      1.56x
+  sign uint8  4096   2.960x -> 1.948x   (437.3 np, 1318.9 -> 851.9)      1.52x
+
+  SIGN    median 1.520x  (n=5)
+  CONTROL median 0.989x  (n=30: isfinite/isnan/isinf/signbit/count_nonzero/exp/sqrt)
+```
+
+First run agreed (1.37x-1.59x) but is NOT quoted for magnitude: its arms straddled loadavg 28.05
+against 7.74 and its own controls drifted to 0.90x-1.00x, so only the replication is banked.
+
+PARITY: 5320 cells raw-byte -> 1 divergence, identical on the pre-change build (pre-existing
+`deadlock-audit-neu7z`), plus a dedicated `sign` sweep over 16 dtypes x 7 shapes - including
+`>i8`/`<i8`/`>i4`/`>u8`/`>i2`, 0-d, empty and 3-D - comparing type, dtype, shape and raw bytes:
+**96 cells, 0 divergences**. Both byte-order oracles unchanged (1 integer / 28 float). 660
+error/edge cells identical. 655 lib tests pass. clippy `-D warnings` and `cargo fmt --check` exit
+0, unpiped.
+
+MEMORY: largest operand 4096 elements.
+
+RETRY PREDICATE: `sign` on int is now ~1.95x-2.69x, still a LOSS, and what remains is the shared
+small-n entry cost this campaign has now hit from four directions - not anything `sign`-specific,
+so do not re-open `sign_typed`. **The generalisable move is the audit this row is an instance of:
+`deadlock-audit-tsyfb` modernised ONE typed allocator and its twins were never swept.** Grep for
+the three tells - `PyDict::new` feeding a `dtype=` kwarg, a `dtype_name: &str` parameter, and a
+`call_method1(reshape)` on a freshly allocated output - and each hit is a candidate worth ~400 ns
+at small n. `sign_typed` was found only because its RATIO diverged from its siblings' by 1.7x;
+the others will not announce themselves that way if their whole family is uniformly unmodernised.

@@ -110695,7 +110695,6 @@ fn sign_typed<'py, T, F>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
-    dtype_name: &str,
     sign_fn: F,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
 where
@@ -110710,9 +110709,25 @@ where
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    // ALLOCATE AT THE FINAL SHAPE, WITH THE OPERAND'S OWN DTYPE OBJECT — the same shape
+    // `zerocopy_int_unary_typed` already took (`deadlock-audit-tsyfb`), which this twin never
+    // got. What it was doing instead cost three avoidable things on EVERY call: a `PyDict` for a
+    // `dtype=` keyword that is numpy's SECOND POSITIONAL parameter, a fresh `PyString` built
+    // from the `&str` name, and numpy's dtype-from-string parse. The width is already fixed by
+    // the `T` the caller instantiates, so naming it again bought nothing. Allocating in shape
+    // also retires the caller's per-call `reshape`, measured elsewhere in this file at 116.9 ns
+    // of pure ceremony. Rank 1 passes a bare int (`np.empty(n, dt)` beats `np.empty((n,), dt)`).
+    //
+    // Using the OPERAND's dtype is only correct because `try_zerocopy_int_sign` refuses a
+    // non-native byte order above: numpy's own `sign` normalises `>i8` to `int64`, so echoing a
+    // byte-swapped input dtype here would produce an output numpy never produces.
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, &dtype))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, &dtype))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -110735,37 +110750,35 @@ fn try_zerocopy_int_sign(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Optio
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    // `char`, not a heap `String`, for a one-character answer.
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
+        return Ok(None);
+    }
+    // Native order only. `kind`/`itemsize` cannot see byte order, and `sign_typed` now allocates
+    // its output with THIS dtype object — numpy's `sign` normalises `>i8` to `int64`, so a
+    // byte-swapped operand has to go to numpy rather than come back wearing a dtype numpy would
+    // not have produced.
+    if !dtype_is_native_order(&dtype) {
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    let result = match (kind.as_str(), itemsize) {
-        ("i", 1) => {
-            sign_typed::<i8, _>(py, numpy, a, "int8", |v| i8::from(v > 0) - i8::from(v < 0))?
-        }
-        ("i", 2) => sign_typed::<i16, _>(py, numpy, a, "int16", |v| {
-            i16::from(v > 0) - i16::from(v < 0)
-        })?,
-        ("i", 4) => sign_typed::<i32, _>(py, numpy, a, "int32", |v| {
-            i32::from(v > 0) - i32::from(v < 0)
-        })?,
-        ("i", 8) => sign_typed::<i64, _>(py, numpy, a, "int64", |v| {
-            i64::from(v > 0) - i64::from(v < 0)
-        })?,
-        ("u", 1) => sign_typed::<u8, _>(py, numpy, a, "uint8", |v| u8::from(v > 0))?,
-        ("u", 2) => sign_typed::<u16, _>(py, numpy, a, "uint16", |v| u16::from(v > 0))?,
-        ("u", 4) => sign_typed::<u32, _>(py, numpy, a, "uint32", |v| u32::from(v > 0))?,
-        ("u", 8) => sign_typed::<u64, _>(py, numpy, a, "uint64", |v| u64::from(v > 0))?,
+    let result = match (kind, itemsize) {
+        ('i', 1) => sign_typed::<i8, _>(py, numpy, a, |v| i8::from(v > 0) - i8::from(v < 0))?,
+        ('i', 2) => sign_typed::<i16, _>(py, numpy, a, |v| i16::from(v > 0) - i16::from(v < 0))?,
+        ('i', 4) => sign_typed::<i32, _>(py, numpy, a, |v| i32::from(v > 0) - i32::from(v < 0))?,
+        ('i', 8) => sign_typed::<i64, _>(py, numpy, a, |v| i64::from(v > 0) - i64::from(v < 0))?,
+        ('u', 1) => sign_typed::<u8, _>(py, numpy, a, |v| u8::from(v > 0))?,
+        ('u', 2) => sign_typed::<u16, _>(py, numpy, a, |v| u16::from(v > 0))?,
+        ('u', 4) => sign_typed::<u32, _>(py, numpy, a, |v| u32::from(v > 0))?,
+        ('u', 8) => sign_typed::<u64, _>(py, numpy, a, |v| u64::from(v > 0))?,
         _ => return Ok(None),
     };
     let Some((flat, shape)) = result else {
         return Ok(None);
     };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
+    // No reshape: `sign_typed` allocates at the final shape.
+    let output = flat.unbind();
     if shape.is_empty() {
         return Ok(Some(output.bind(py).get_item(())?.unbind()));
     }
