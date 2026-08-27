@@ -8090,22 +8090,6 @@ fn numpy_array_from_slice<'py, T: pyo3::buffer::Element + Copy>(
     Ok(array)
 }
 
-fn numpy_complex128_array_from_interleaved_f64<'py>(
-    py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
-    values: &[f64],
-) -> PyResult<Bound<'py, PyAny>> {
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "complex128")?;
-    let array = numpy.call_method(intern!(py, "empty"), (values.len() / 2,), Some(&kwargs))?;
-    if !values.is_empty() {
-        let view = array.call_method1(intern!(py, "view"), ("float64",))?;
-        let buffer = PyBuffer::<f64>::get(&view)?;
-        buffer.copy_from_slice(py, values)?;
-    }
-    Ok(array)
-}
-
 fn direct_f64_unary_output_supported(array: &UFuncArray, op: UnaryOp) -> bool {
     if array.dtype() != DType::F64 || array.has_integer_sidecar() {
         return false;
@@ -80494,34 +80478,24 @@ fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             _ => {}
         }
     }
-    let native = match extract_precise_numeric_array(py, a_bound, "sort_complex(a)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    if native.has_integer_sidecar()
-        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
-        || native.shape().is_empty()
-    {
-        return fallback(py);
-    }
-
-    // fnp_ufunc::sort_complex requires a 1-D input; matrix tests call
-    // numpy.sort_complex on a 2-D array, and numpy sorts along the last
-    // axis there — we don't reproduce that axis behavior natively, so
-    // hand 2-D+ inputs back to numpy.
-    if native.shape().len() != 1 {
-        return fallback(py);
-    }
-
-    let sorted = match fnp_ufunc::sort_complex(&native) {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    // sorted has shape [n, 2] with interleaved (re, im) f64 values.
-    let pairs = sorted.values();
-    let n = sorted.shape()[0];
-    debug_assert_eq!(pairs.len(), n * 2);
-    Ok(numpy_complex128_array_from_interleaved_f64(py, numpy, pairs)?.unbind())
+    // EVERYTHING ELSE DELEGATES. There used to be a generic extract-and-sort tail here that
+    // served every remaining dtype through `fnp_ufunc::sort_complex` and materialised the result
+    // with `numpy_complex128_array_from_interleaved_f64`. It was removed because it was WRONG and
+    // SLOW, and the two faults share one cause: it always produced complex128.
+    //
+    // WRONG: `np.sort_complex` promotes through `promote_types(dtype, 'F')`, so a 1- or 2-byte
+    // integer yields COMPLEX64, not complex128. Values matched; the dtype did not, on int8,
+    // int16, uint8 and uint16 - four dtypes silently returning a wider array than numpy.
+    //
+    // SLOW: measured against live numpy at n = 2^18, the native tail lost on EVERY dtype it
+    // served - uint32 19.84x, int32 17.83x, float32 14.46x, int64 11.60x, uint64 11.33x,
+    // float16 2.20x, uint16 1.93x, int16 1.89x, uint8 1.78x, bool 1.41x, int8 1.27x - and won on
+    // none of them. The dtypes that DO win here (f64 0.99x, complex128 0.24x at 2^20) are served
+    // by the zero-copy kernels above and never reached this tail.
+    //
+    // This is the stale-routing class: a covering native branch that the incumbent had overtaken,
+    // kept alive because it was covered by tests that only checked values.
+    fallback(py)
 }
 
 #[pyfunction]
