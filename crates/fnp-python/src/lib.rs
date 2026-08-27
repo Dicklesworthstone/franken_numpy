@@ -50926,16 +50926,10 @@ fn nanstd(
             None => DdofArg::Native(0),
             Some(v) => parse_ddof_arg(v.bind(py))?,
         };
-        return py_std(
-            py,
-            a,
-            axis,
-            None,
-            None,
-            ddof_arg,
-            keepdims.unwrap_or(false),
-            None,
-        );
+        // Pass the `Option` STRAIGHT THROUGH, not `unwrap_or(false)`: `nanstd`'s own
+        // `keepdims` is already the sentinel-preserving `Option<bool>`, and collapsing it
+        // here would re-introduce the defect `deadlock-audit-30d18` fixes one call deeper.
+        return py_std(py, a, axis, None, None, ddof_arg, keepdims, None);
     }
 
     if dtype.is_some()
@@ -51220,16 +51214,8 @@ fn nanvar(
             None => DdofArg::Native(0),
             Some(v) => parse_ddof_arg(v.bind(py))?,
         };
-        return var(
-            py,
-            a,
-            axis,
-            None,
-            None,
-            ddof_arg,
-            keepdims.unwrap_or(false),
-            None,
-        );
+        // Pass the `Option` straight through - see the note on the `nanstd` twin above.
+        return var(py, a, axis, None, None, ddof_arg, keepdims, None);
     }
 
     if dtype.is_some()
@@ -88490,7 +88476,7 @@ fn var_std_int_input_to_f64(
 
 // std: passthrough to NumPy - see sum() comment
 #[pyfunction]
-#[pyo3(name = "std", signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=false, **kwargs))]
+#[pyo3(name = "std", signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn py_std(
     py: Python<'_>,
@@ -88499,10 +88485,15 @@ fn py_std(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = parse_ddof_arg)] ddof: DdofArg,
-    keepdims: bool,
+    // `Option<bool>` for the `np._NoValue` sentinel - see the full note on `sum`
+    // (`deadlock-audit-30d18`). `np.std(np.matrix(a))` is a float64 and
+    // `np.std(m, keepdims=False)` is a TypeError, so forwarding the default
+    // unconditionally made fnp raise where numpy works.
+    keepdims: Option<bool>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let keepdims_effective = keepdims.unwrap_or(false);
     // Conversion is gated to AXIS forms: the flat kernel's scalar composition
     // differs from numpy's flat int chain at sub-ULP level (gate-measured),
     // so flat int inputs keep the byte-exact numpy delegate.
@@ -88521,7 +88512,7 @@ fn py_std(
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims
+        && !keepdims_effective
         && let DdofArg::Native(d) = &ddof
         && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
     {
@@ -88538,7 +88529,8 @@ fn py_std(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) = try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, true, keepdims)?
+        && let Some(o) =
+            try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, true, keepdims_effective)?
     {
         return Ok(o);
     }
@@ -88550,7 +88542,7 @@ fn py_std(
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Some(o) =
-            try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, true, keepdims)?
+            try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, true, keepdims_effective)?
     {
         return Ok(o);
     }
@@ -88560,8 +88552,14 @@ fn py_std(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) =
-            try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, true, keepdims)?
+        && let Some(o) = try_zerocopy_f64_var_nonlast_axis(
+            py,
+            a.bind(py),
+            ax.bind(py),
+            *d,
+            true,
+            keepdims_effective,
+        )?
     {
         return Ok(o);
     }
@@ -88571,8 +88569,14 @@ fn py_std(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) =
-            try_zerocopy_f32_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, true, keepdims)?
+        && let Some(o) = try_zerocopy_f32_var_nonlast_axis(
+            py,
+            a.bind(py),
+            ax.bind(py),
+            *d,
+            true,
+            keepdims_effective,
+        )?
     {
         return Ok(o);
     }
@@ -88583,8 +88587,15 @@ fn py_std(
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Ok(ax_i) = ax.bind(py).extract::<isize>()
-        && let Some(o) =
-            try_zerocopy_f16_nanvar_lastaxis(py, a.bind(py), Some(ax_i), *d, true, keepdims, false)?
+        && let Some(o) = try_zerocopy_f16_nanvar_lastaxis(
+            py,
+            a.bind(py),
+            Some(ax_i),
+            *d,
+            true,
+            keepdims_effective,
+            false,
+        )?
     {
         return Ok(o);
     }
@@ -88602,7 +88613,7 @@ fn py_std(
             Some(ax_i),
             *d,
             true,
-            keepdims,
+            keepdims_effective,
             false,
         )?
     {
@@ -88620,13 +88631,16 @@ fn py_std(
         kw.set_item(intern!(py, "out"), o.bind(py))?;
     }
     ddof.set_numpy_kwarg(py, &kw)?;
-    kw.set_item(intern!(py, "keepdims"), keepdims)?;
+    // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
+    if let Some(k) = keepdims {
+        kw.set_item(intern!(py, "keepdims"), k)?;
+    }
     Ok(std_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
 // Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=false, **kwargs))]
+#[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn var(
     py: Python<'_>,
@@ -88635,10 +88649,13 @@ fn var(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     #[pyo3(from_py_with = parse_ddof_arg)] ddof: DdofArg,
-    keepdims: bool,
+    // `Option<bool>` for the `np._NoValue` sentinel - see the full note on `sum`
+    // (`deadlock-audit-30d18`).
+    keepdims: Option<bool>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let keepdims_effective = keepdims.unwrap_or(false);
     // Conversion is gated to AXIS forms: the flat kernel's scalar composition
     // differs from numpy's flat int chain at sub-ULP level (gate-measured),
     // so flat int inputs keep the byte-exact numpy delegate.
@@ -88657,7 +88674,7 @@ fn var(
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims
+        && !keepdims_effective
         && let DdofArg::Native(d) = &ddof
         && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
     {
@@ -88670,7 +88687,7 @@ fn var(
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Some(o) =
-            try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, false, keepdims)?
+            try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, false, keepdims_effective)?
     {
         return Ok(o);
     }
@@ -88681,7 +88698,7 @@ fn var(
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Some(o) =
-            try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, false, keepdims)?
+            try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, false, keepdims_effective)?
     {
         return Ok(o);
     }
@@ -88691,8 +88708,14 @@ fn var(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) =
-            try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, false, keepdims)?
+        && let Some(o) = try_zerocopy_f64_var_nonlast_axis(
+            py,
+            a.bind(py),
+            ax.bind(py),
+            *d,
+            false,
+            keepdims_effective,
+        )?
     {
         return Ok(o);
     }
@@ -88702,8 +88725,14 @@ fn var(
         && out.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let DdofArg::Native(d) = &ddof
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
-        && let Some(o) =
-            try_zerocopy_f32_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, false, keepdims)?
+        && let Some(o) = try_zerocopy_f32_var_nonlast_axis(
+            py,
+            a.bind(py),
+            ax.bind(py),
+            *d,
+            false,
+            keepdims_effective,
+        )?
     {
         return Ok(o);
     }
@@ -88720,7 +88749,7 @@ fn var(
             Some(ax_i),
             *d,
             false,
-            keepdims,
+            keepdims_effective,
             false,
         )?
     {
@@ -88740,7 +88769,7 @@ fn var(
             Some(ax_i),
             *d,
             false,
-            keepdims,
+            keepdims_effective,
             false,
         )?
     {
@@ -88758,7 +88787,10 @@ fn var(
         kw.set_item(intern!(py, "out"), o.bind(py))?;
     }
     ddof.set_numpy_kwarg(py, &kw)?;
-    kw.set_item(intern!(py, "keepdims"), keepdims)?;
+    // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
+    if let Some(k) = keepdims {
+        kw.set_item(intern!(py, "keepdims"), k)?;
+    }
     Ok(var_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
