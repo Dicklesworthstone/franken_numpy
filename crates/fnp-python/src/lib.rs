@@ -43351,6 +43351,69 @@ fn linear_quantile_hist_typed<T: pyo3::buffer::Element + Copy + Into<i128> + Sen
 // costs a measured win (see the note on that reroute).
 const INT_ORDER_STAT_HIST_MIN_N: usize = 1 << 20;
 
+// The element count below which NO native argsort route engages - every one of the nine gates in
+// that family declines under it and the call delegates. Module-level because the ascending-input
+// probe below must not run beneath it: down there the probe buys nothing and is pure cost, which
+// was MEASURED, not assumed (sorted int32 at 2^16 went 1.012x -> 1.200x on disjoint CIs before
+// this gate was added).
+const ARGSORT_NATIVE_MIN_N: usize = 1 << 20;
+
+// True when a 1-D contiguous buffer is already in ascending order. Returns `None` when the
+// operand cannot be read as `T` (non-contiguous, wrong dtype), which callers treat as "unknown"
+// and route exactly as they did before.
+//
+// SHORT-CIRCUITS AT THE FIRST INVERSION, which is what makes it affordable on the hot path:
+// random data answers after ~2 element reads. NaN makes every comparison false, so a
+// NaN-bearing float array reports "not ascending" and keeps its existing route.
+fn flat_buffer_is_ascending<T: pyo3::buffer::Element + Copy + PartialOrd>(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+) -> Option<bool> {
+    let buffer = PyBuffer::<T>::get(a).ok()?;
+    let cells = buffer.as_slice(py)?;
+    // SAFETY: `ReadOnlyCell<T>` is repr(transparent) over `T`, and the exact ndarray stays alive
+    // and read-only under the held GIL.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    Some(data.windows(2).all(|w| w[0] <= w[1]))
+}
+
+// NUMPY'S `argsort` DETECTS AN ASCENDING RUN AND FINISHES IN O(n). Every native argsort route
+// here is a radix or comparison pass whose cost does not depend on the input order, so an
+// already-sorted operand is exactly where they lose worst - measured at 2^20 against live numpy:
+// int32 31.398x, uint32 28.483x, float32 27.791x, float64 22.770x, int64 20.292x. `sort` does not
+// share the defect (0.054x-1.03x on the same inputs), which is what isolates it to argsort.
+//
+// Only rank 1 is answered here: that is the shape the native flat routes serve, and a per-lane
+// answer for an axis form would cost a full pass and defeat the point.
+fn flat_ndarray_is_ascending(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    facts: Option<NumericOperandFacts>,
+) -> bool {
+    let Some(f) = facts else { return false };
+    // Rank 1 only - that is the shape the native flat routes serve, and a per-lane answer for an
+    // axis form would cost a full pass and defeat the point. And only at or above the size where
+    // a native route can engage at all: below it the call already delegates, so the scan would be
+    // a tax with nothing to collect.
+    if f.rank != 1 || a.len().unwrap_or(0) < ARGSORT_NATIVE_MIN_N {
+        return false;
+    }
+    let answer = match (f.kind, f.itemsize) {
+        ('i', 1) => flat_buffer_is_ascending::<i8>(py, a),
+        ('i', 2) => flat_buffer_is_ascending::<i16>(py, a),
+        ('i', 4) => flat_buffer_is_ascending::<i32>(py, a),
+        ('i', 8) => flat_buffer_is_ascending::<i64>(py, a),
+        ('u', 1) => flat_buffer_is_ascending::<u8>(py, a),
+        ('u', 2) => flat_buffer_is_ascending::<u16>(py, a),
+        ('u', 4) => flat_buffer_is_ascending::<u32>(py, a),
+        ('u', 8) => flat_buffer_is_ascending::<u64>(py, a),
+        ('f', 4) => flat_buffer_is_ascending::<f32>(py, a),
+        ('f', 8) => flat_buffer_is_ascending::<f64>(py, a),
+        _ => None,
+    };
+    answer.unwrap_or(false)
+}
+
 fn try_native_int_median(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -76610,7 +76673,7 @@ fn try_zerocopy_f64_argsort_flat(
         return Ok(None);
     };
     let n = cells.len();
-    const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
     if n < ARGSORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -76685,7 +76748,7 @@ fn try_zerocopy_f32_argsort_flat(
         return Ok(None);
     };
     let n = cells.len();
-    const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
     if n < ARGSORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -76759,7 +76822,7 @@ fn try_zerocopy_c128_argsort_flat(
         return Ok(None);
     }
     let n = a.len()?;
-    const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
     if n < ARGSORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -76863,7 +76926,7 @@ fn try_zerocopy_c64_argsort_flat(
         return Ok(None);
     }
     let n = a.len()?;
-    const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
     if n < ARGSORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -78374,7 +78437,7 @@ fn try_native_argsort_stable_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -78455,7 +78518,7 @@ fn try_native_datetime_argsort_stable(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -78694,7 +78757,7 @@ fn try_native_complex_argsort_stable(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -78742,7 +78805,7 @@ fn try_native_int_argsort_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -78787,7 +78850,7 @@ fn try_native_datetime_argsort_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    const ARGSORT_PARALLEL_MIN: usize = 1 << 20;
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -80250,6 +80313,15 @@ fn argsort(
             let structured = facts.is_none_or(|f| f.kind == 'V');
             // The stable (value, orig-index) gate serves int/uint AND float.
             let stable_numeric = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u' | 'f'));
+
+            // AN ALREADY-ASCENDING OPERAND GOES TO NUMPY - see `flat_ndarray_is_ascending`. numpy
+            // finishes such an argsort in O(n); every native route below pays its full radix or
+            // comparison cost regardless, and measured 20.292x to 31.398x SLOWER at 2^20 for it.
+            // The probe short-circuits at the first inversion, so unsorted data - the overwhelming
+            // majority - pays about two element reads to skip this.
+            if flat_ndarray_is_ascending(py, &a, facts) {
+                return core_numpy_passthrough_interned(py, intern!(py, "argsort"), args, kwargs);
+            }
 
             if matches!(
                 axis_spec,
