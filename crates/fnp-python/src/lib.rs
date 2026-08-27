@@ -18068,7 +18068,7 @@ fn try_zerocopy_f64_container_take(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        let mut gather = |slot: &std::cell::Cell<f64>, item: Bound<'_, PyAny>| {
+        let gather = |slot: &std::cell::Cell<f64>, item: Bound<'_, PyAny>| {
             let Ok(index) = item.extract::<i64>() else {
                 return false;
             };
@@ -89043,6 +89043,53 @@ where
     Ok(Some(output))
 }
 
+/// True when EVERY byte of `raw` is nonzero, read eight bytes at a time.
+///
+/// This is `min` on a `bool_` array: the minimum is False iff some byte is zero. Written as
+/// `raw.iter().all(|&b| b != 0)` it stays SCALAR - the early exit blocks autovectorisation - and
+/// measured 0.24 ns/byte against NumPy's 0.042. The word form uses the standard zero-byte test,
+/// `(w - 0x01..01) & !w & 0x80..80`, which is nonzero exactly when some byte of `w` is zero, and
+/// keeps the early exit at word granularity instead of byte granularity.
+fn bytes_all_nonzero(raw: &[u8]) -> bool {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    // THIRTY-TWO BYTES PER TEST, not eight. The zero-byte masks of four words are OR-ed before
+    // the branch, so the fold itself has no early exit for LLVM to trip over and the branch is
+    // taken a quarter as often. At eight bytes this measured 0.063 ns/byte against NumPy's
+    // 0.017; the block form closes most of what is left.
+    let block = raw.len() - raw.len() % 32;
+    let (blocks, rest) = raw.split_at(block);
+    for chunk in blocks.chunks_exact(32) {
+        let mut zero_mask = 0u64;
+        for word in chunk.chunks_exact(8) {
+            let w = u64::from_ne_bytes(word.try_into().expect("chunks_exact(8) yields 8 bytes"));
+            zero_mask |= (w.wrapping_sub(LO)) & !w & HI;
+        }
+        if zero_mask != 0 {
+            return false;
+        }
+    }
+    rest.iter().all(|&byte| byte != 0)
+}
+
+/// True when ANY byte of `raw` is nonzero - `max` on a `bool_` array. Same shape as
+/// `bytes_all_nonzero`: a whole word is compared at once and the early exit moves to word
+/// granularity.
+fn bytes_any_nonzero(raw: &[u8]) -> bool {
+    let block = raw.len() - raw.len() % 32;
+    let (blocks, rest) = raw.split_at(block);
+    for chunk in blocks.chunks_exact(32) {
+        let mut acc = 0u64;
+        for word in chunk.chunks_exact(8) {
+            acc |= u64::from_ne_bytes(word.try_into().expect("chunks_exact(8) yields 8 bytes"));
+        }
+        if acc != 0 {
+            return true;
+        }
+    }
+    rest.iter().any(|&byte| byte != 0)
+}
+
 fn minmax_bool_typed(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -89104,24 +89151,42 @@ fn minmax_bool_typed(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
+        // SCAN A PLAIN SLICE, NOT A SLICE OF CELLS. `all`/`any` over `&[ReadOnlyCell<u8>]` reads
+        // each byte through `Cell::get`, which LLVM will not autovectorise - it cannot assume the
+        // memory is unchanged across iterations - so this compiled to a byte-at-a-time loop while
+        // NumPy scans the same buffer with SIMD. It only shows when the short circuit CANNOT
+        // fire, which for `min` is an all-True array and for `max` an all-False one:
+        //
+        //          op    corpus         n     numpy_ns       fnp_ns    ratio
+        //         min    all_true    2^20      17456.2     505006.8   28.93x
+        //         max    all_false   2^20      16209.7     248352.6   15.32x
+        //         min    all_true    2^16       2661.3      32801.1   12.33x
+        //         min    first_false 2^20      17479.5       1782.3    0.10x   <- short circuit
+        //
+        // The last row is why this was invisible to a random-data benchmark: with a mixed array
+        // both sides exit in the first few bytes and the cell reads 1.00x.
+        //
+        // SAFETY: `ReadOnlyCell<u8>` is `repr(transparent)` over `u8` and the buffer is
+        // read-only under the GIL for the whole of this function, so the bytes cannot change
+        // under the scan. This is the same reinterpretation the parallel arms in this file
+        // already make.
+        let raw: &[u8] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), input.len()) };
         if axis.is_none() {
             let value = if take_min {
-                input.iter().all(|cell| cell.get() != 0)
+                bytes_all_nonzero(raw)
             } else {
-                input.iter().any(|cell| cell.get() != 0)
+                bytes_any_nonzero(raw)
             };
             output[0].set(u8::from(value));
         } else if inner == 1 {
             for (o, slot) in output.iter().enumerate() {
                 let base = o * axis_len;
+                let lane = &raw[base..base + axis_len];
                 let value = if take_min {
-                    input[base..base + axis_len]
-                        .iter()
-                        .all(|cell| cell.get() != 0)
+                    bytes_all_nonzero(lane)
                 } else {
-                    input[base..base + axis_len]
-                        .iter()
-                        .any(|cell| cell.get() != 0)
+                    bytes_any_nonzero(lane)
                 };
                 slot.set(u8::from(value));
             }
