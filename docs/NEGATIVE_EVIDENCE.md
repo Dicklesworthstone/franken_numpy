@@ -63022,3 +63022,101 @@ anything remaining at small n. Do NOT re-attack `where`'s entry cost: what is le
 shared small-n floor plus a byte-order guard that is not optional. **And do not sweep `NpBool`
 blindly** - this row is the evidence that the lever only pays where a cell's excess is of the
 same order as 171.9 ns, which at 65536 it never is.
+
+## 2026-08-27 - REJECT: a branchless compaction for `compress`/`extract` wins the unpredictable mask and LOSES 2.2x on a sparse one - plus a correction to the 2026-06-21 "branchless already" premise (`franken_numpy-compress-branchless`)
+
+`TanBridge`. Built, measured, REVERTED. Measured on `thinkstation1` against the LIVE installed
+numpy 2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1.
+
+**Campaign result class:** maintenance-self-speedup
+
+The class is nominal: NOTHING SHIPPED but comments. The code after this row is byte-identical in
+behaviour to the code before it; only the two kernels' comments changed, to record what was
+measured so the next person does not rebuild it.
+
+```
+executing elf sha256 (BEFORE)    bench_elf_sha256=9c5b7e98efe868b93351e88124c704500599276f6575e71e80e7b6a8b7f0c8bb
+executing elf sha256 (REJECTED)  bench_elf_sha256=779dd009c76ddb1bfadf545f736687ec7c208178fe8b03b22a91d2a7e19268f2
+executing elf sha256 (REVERTED)  bench_elf_sha256=c3199b41b2a2032514f2f90e09cd38db922d6b732141e7a6b99b977429b11676
+```
+
+### A BANKED PREMISE, CORRECTED
+
+`2026-06-21 - NEGATIVE: indexing/set ops dominated; compress/extract = SIMD-compaction wall`
+records compress/extract as a structural wall and says "don't re-sweep", on the grounds that
+"fnp's safe-Rust scalar **branchless** mask can't match" numpy's SIMD compaction. The code comment
+in `compact_typed` repeats the claim: "This avoids both per-element branch mispredicts and
+speculative stores for unkept lanes."
+
+**Neither kernel is branch-free in effect.** The operand that proves it holds density fixed and
+varies only the PATTERN - 65536 elements, 50% density either way:
+
+```
+                     numpy_ns     fnp_ns    ratio
+  float64 alternating  43913.9    47505.6   1.08x
+  float64 random50     42327.8    66410.8   1.57x
+  int32   alternating  43186.6    48078.5   1.11x
+  int32   random50     41981.8    65627.3   1.56x
+  uint8   alternating  43524.8    48497.6   1.11x
+  uint8   random50     41778.1    65789.0   1.57x
+```
+
+Same output size, same bytes moved. **NumPy is flat across each pair; fnp is not** - it pays
+~18000-21000 ns of mispredicts on the unpredictable mask. `try_zerocopy_f64_compress` uses a plain
+`if cond { out[w]=v; w+=1 }`; `compact_typed` builds a 16-lane mask and then drains it with
+`while mask != 0 { trailing_zeros }`, whose trip count IS the popcount, so it mispredicts once per
+chunk. The 2026-06-21 verdict may still be right about the ceiling, but its stated reason does not
+describe this code.
+
+### THE LEVER, BUILT: RIGHT FOR ONE MASK, WRONG FOR THE OTHERS
+
+Replaced both kernels with a true branchless compaction - store every element at `out[w]`, advance
+`w` by the flag, terminate at `w == count` (which is what keeps the unconditional store in
+bounds, since exactly `count` flags are set).
+
+```
+                      branchy    branchless    verdict
+  random50 (50%)      66410.8      55643.1     branchless WINS   1.57x -> 1.29x
+  alternating (50%)   47505.6      56610.5     branchy wins      1.08x -> 1.31x
+  sparse 1%           25506.3      55862.7     branchy wins      2.55x -> 5.61x
+  uint8 sparse 1%     24513.6      59811.1     branchy wins      2.45x -> 6.03x
+```
+
+COUNTED_MECHANISM: the branchless kernel costs a near-constant 55643 to 56611 ns across all three
+mask patterns at 65536 f64, against 25506 to 66411 ns for the branchy one - it is a CEILING, not a
+speedup. It wins only where the branchy loop exceeds ~55700 ns, which is the unpredictable
+50% case alone.
+
+**Why it loses:** the skipped store is worth more than the mispredict whenever the predictor can
+see the pattern, and a SPARSE mask - the commonest shape for a real filter - is exactly what it
+predicts best. A branchless loop cannot skip anything: it reads and stores all 65536 elements to
+produce 655 outputs.
+
+**And a density gate cannot rescue it.** `count` is already known before the loop, so gating on
+density is free - but `alternating` and `random50` have the SAME density and want OPPOSITE
+kernels. Density measures how many, not how predictably. Nothing cheap at hand distinguishes them.
+
+PARITY (of the rejected build, so the reject is on merit and not on a broken candidate): a
+dedicated compress sweep of 17 dtypes x 8 sizes x 10 mask patterns - all-true, all-false, random,
+alternating, first-only, last-only, sparse, a SHORT condition, and non-bool int/float conditions -
+**1343 cells, 0 divergences**; plus extract/compress/delete over 6 dtypes x 7 sizes including
+600000 (the parallel path above `COMPACT_PAR_MIN`), **366 cells, 0 divergences**.
+
+REVERT VERIFIED against the pre-change build rather than assumed: float64 1.13x/1.54x/2.55x and
+int32 1.12x/1.53x/2.44x for alternating/random50/sparse, matching 1.08x/1.57x/2.55x and
+1.11x/1.56x/2.53x before. Both byte-order oracles unchanged (1 integer / 26 float), general parity
+5320 cells -> 1 pre-existing divergence, 655 lib tests pass, clippy `-D warnings` and
+`cargo fmt --check` exit 0.
+
+MEMORY: largest operand 600000 elements in the parity sweep, 65536 in the timings.
+
+RETRY PREDICATE: **do not rebuild the unconditional-store kernel** - it is measured above and it
+is a ceiling. Two things could still work and neither is attempted here. (1) A PREDICTABILITY
+probe rather than a density one: `alternating` has a mask transition rate of 1.0 and `random50`
+about 0.5, so a cheap transition count over a small prefix separates the two cases that density
+cannot - but it costs a sampling pass and has to beat ~10000 ns of headroom to be worth it, so
+measure the probe before the kernel. (2) The route the 2026-06-21 row named: an actual SIMD
+compaction. AVX-512 `vpcompressd`/`vpcompressq` is the instruction numpy uses, and
+**`thinkstation1` is AVX2 - it has no compaction instruction at all**, so that work belongs on
+`hz2`, the only avx512f host in the fleet, and must be ISA-gated. The 2.55x SPARSE cell is the
+worst in this family and is untouched by either idea.

@@ -17526,6 +17526,20 @@ fn try_zerocopy_f64_compress(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
+        // BRANCHY ON PURPOSE. A fully branchless compaction (store every element at `out[w]`,
+        // advance `w` by the flag) was BUILT AND MEASURED here and REJECTED: it costs a
+        // near-constant ~55700 ns at 65536 f64 whatever the mask looks like, which beats this
+        // loop only when the mask is genuinely unpredictable.
+        //
+        //                        this loop     branchless
+        //   random50 (50%)        66410.8       55643.1     branchless wins  1.57x -> 1.29x
+        //   alternating (50%)     47505.6       56610.5     this loop wins   1.08x -> 1.31x
+        //   sparse 1%             25506.3       55862.7     this loop wins   2.55x -> 5.61x
+        //
+        // The skipped store is worth more than the mispredict whenever the branch predictor can
+        // see the pattern, and a sparse mask - the common shape for a filter - is the case it
+        // predicts best. Density alone cannot select between the two: `alternating` and
+        // `random50` have the SAME density and want OPPOSITE kernels.
         let mut w = 0usize;
         for (cond_cell, arr_cell) in cond_in.iter().zip(arr_in.iter()) {
             if cond_cell.get() != 0 {
@@ -17751,9 +17765,21 @@ fn compact_typed<
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // Build a mask per condition chunk, then gather only selected
-        // lanes with trailing-zero iteration. This avoids both per-element branch
-        // mispredicts and speculative stores for unkept lanes.
+        // Build a mask per condition chunk, then gather only selected lanes with trailing-zero
+        // iteration.
+        //
+        // THIS IS NOT BRANCH-FREE, and the comment here used to claim it was. The drain loop's
+        // trip count is the popcount of the chunk's mask, so on an unpredictable mask it
+        // mispredicts. MEASURED at 65536 against numpy, same density, only the PATTERN
+        // differing: int32 1.08x on `alternating` vs 1.54x on `random50`; float32 1.12x vs
+        // 1.55x; uint8 1.12x vs 1.54x - numpy is flat across the pair.
+        //
+        // A genuinely branchless replacement was BUILT AND MEASURED and is REJECTED: it flattens
+        // the cost to ~55700 ns for every pattern, which wins on `random50` (1.57x -> 1.29x) and
+        // LOSES on `alternating` (1.08x -> 1.31x) and badly on a SPARSE mask
+        // (2.55x -> 5.61x), because skipping the store is worth more than the mispredict
+        // whenever the predictor can see the pattern. Density cannot choose between them -
+        // `alternating` and `random50` have the same density and want opposite kernels.
         let mut w = 0usize;
         let mut base = 0usize;
         while base + 16 <= m {
