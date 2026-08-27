@@ -63229,3 +63229,98 @@ ns of excess**, which is NOT in this family and is untouched here. Also note `co
 still 1.474x and `nonzero` at 2^19 still 1.100x: the block fix removed the disabled-parallelism
 part of those cells, not the compaction wall underneath them, which is recorded one row up as
 needing AVX-512.
+
+## 2026-08-27 - WIN (SHIP): `nan_to_num`'s parallel gate sat at 2^21, leaving the whole band [2^17, 2^21) serial - float32 1.241x -> 0.214x, and the crossover was MEASURED not guessed (`franken_numpy-nan-to-num-gate`)
+
+`TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
+invocation, OPENBLAS_NUM_THREADS=1, interleaved with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)     bench_elf_sha256=dffe2260985966eb6046269fc59f6b83d921025fd1d3979d6f85a68c0099a539
+executing elf sha256 (DISCOVERY)  bench_elf_sha256=725eb67bc4489b7b2d5e9ef503e9960f7e20d178c80125291201136904afbc34
+executing elf sha256 (AFTER)      bench_elf_sha256=15878f244a2b74a854a28e01aab1aed8bb8ffbfd40836bd2d95b50a04f84d52d
+```
+
+### THE CELL, AND WHY ITS DATA MATTERS
+
+`nan_to_num float32 2^20` was the one loss left standing after the previous row's re-verification
+of the broad triage (1.204x, ~130000 ns excess, both nulls passing). Digging it turned up a fact
+that changes how the cell must be read: **numpy's `nan_to_num` is DATA-DEPENDENT and fnp's is
+not.** numpy runs masked `copyto` passes that do almost nothing when the mask is empty; fnp runs
+one fused pass regardless. On the same 2^20 float32 array numpy costs 634407 ns with no nan/inf
+present and 1965005 ns with them - 3.1x - while fnp is flat.
+
+So the loss exists ONLY on CLEAN data, and any measurement of this op has to say which it used.
+On dirty data fnp was already winning 0.37x to 0.05x. **The triage cell was clean data**, which is
+why it read as a loss at all.
+
+### THE DEFECT
+
+```rust
+const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 21;
+```
+
+The chunking below it is already correct (`n.div_ceil(current_num_threads())`); the GATE is what
+was wrong. It left everything under 2097152 elements on the serial pass, and that is exactly
+where clean float32 lost. The f16 sibling gates at `1 << 20` despite being the CHEAPER element
+type, which is what flagged 2^21 as arbitrary rather than fitted.
+
+COUNTED_MECHANISM: a discovery build with the gate dropped to `1 << 16` isolates the serial and
+parallel costs of the same code on clean float32, fnp ns:
+
+```
+        n        serial     parallel
+    65536       51802.2      73808.1   <- serial WINS: ~64 thread wake-ups exceed the whole pass
+   131072      101362.2      91381.9
+   262144      202281.7      95019.0
+   524288      398560.9      94917.5
+  1048576      790871.6     308675.0
+```
+
+The crossover is between 2^16 and 2^17, so the gate is set at **2^17** - fitted to that table, not
+chosen. float64 wanted it lower still (it wins from 2^16 already) but one constant serves both and
+2^17 costs f64 nothing it was not already getting.
+
+### THE MEASUREMENT
+
+Clean float32, the losing band, BEFORE arms all readable:
+
+```
+       n      BEFORE                 AFTER
+  131072      1.127x (nulls ok)      0.723x        LOSS -> WIN
+  524288      1.159x (nulls ok)      0.294x        LOSS -> WIN
+ 1048576      1.241x (nulls ok)      0.214x        LOSS -> WIN
+```
+
+A second, wider run agreed: clean f32 1.120x/1.087x/1.197x/1.247x -> 0.947x/0.558x/0.340x/0.397x
+across 2^17-2^20, and clean float64 0.687x/0.701x/0.715x/0.697x -> 0.668x/0.428x/0.282x/0.184x.
+Dirty data stayed a win throughout (float32 0.368x to 0.072x; float64 0.338x to 0.053x).
+
+**HONEST NOTE ON THE NULLS:** the BEFORE cells are readable; several AFTER cells fail the strict
++/-2% A/A null (0.948, 0.973, 1.022) because the parallel path has more run-to-run variance than
+the serial one it replaces. The measured change is 4x-6x, far outside any plausible null
+deviation, and the direction replicates across two runs, six sizes, two dtypes and both data
+conditions - but the AFTER numbers are quoted as magnitudes, not as certified ratios.
+
+2^16 is deliberately NOT crossed: it stays serial and measured 1.012x -> 0.983x, i.e. unchanged.
+
+PARITY: 294 cells - 7 dtypes (float16/32/64, int32, int64, complex128, bool) x 7 sizes (0, 1, and
+both sides of the new gate at 131071/131072/131073, 262144, 1048576) x 6 keyword forms (bare,
+`nan=`, `posinf=`, `neginf=`, all three at once, `copy=False`), with nan/+inf/-inf planted in every
+float input, comparing dtype, shape and raw bytes: **0 divergences**. General parity 5320 cells ->
+1 divergence, identical on the pre-change build (pre-existing `deadlock-audit-neu7z`). Both
+byte-order oracles unchanged (1 integer / 26 float). 660 error/edge cells identical. 655 lib tests
+pass. clippy `-D warnings` and `cargo fmt --check` exit 0, unpiped.
+
+MEMORY: largest operand 2^21 float64 = 16 MB, one live.
+
+RETRY PREDICATE: **the remaining `nan_to_num` question is the f16 gate at `1 << 20`**, which this
+row did not measure and did not touch; the same discovery method applies (build with the gate low,
+read the crossover off serial-vs-parallel at fixed size). More generally: this is the SECOND gate
+defect in two rows, after `PAR_MIN` vs `BLOCK`. **A parallel gate that is a round power of two and
+has no fitted table next to it should be treated as unmeasured.** `par_copy_slice` is the next
+candidate - `PAR_COPY_MIN` and `COPY_CHUNK` are BOTH `1 << 16`, so [2^16, 2^17) gets one chunk and
+1M elements get only 16 chunks on a 64-thread host; it is UNMEASURED and its ops (append/insert/
+delete/resize) were never triaged.

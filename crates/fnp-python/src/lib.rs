@@ -15592,7 +15592,23 @@ fn try_zerocopy_f64_nan_to_num(
         // copyto), each single-threaded; fnp does ONE fused per-element pass. Parallelizing the
         // raw-slice map aggregates bandwidth and stacks on top of that temp-elimination. Each
         // output element depends only on its matching input => bit-exact regardless of chunking.
-        const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 21;
+        // MEASURED CROSSOVER, not a guess. The old value was `1 << 21`, which left the whole band
+        // [2^17, 2^21) on the serial pass - and float32 LOST there against numpy, which
+        // short-circuits its masked `copyto` passes when the array holds no nan/inf. Measured on
+        // CLEAN float32 (the losing case), fnp ns, serial vs parallel:
+        //
+        //     n        serial     parallel
+        //   65536      51802.2     73808.1   <- serial wins: ~64 thread wake-ups cost more
+        //  131072     101362.2     91381.9      than the whole pass at this size
+        //  262144     202281.7     95019.0
+        //  524288     398560.9     94917.5
+        // 1048576     790871.6    308675.0
+        //
+        // so the gate belongs at 2^17, where parallel first pays. float64 wanted it lower still
+        // (it wins from 2^16), but one constant serves both and 2^17 costs f64 nothing it was
+        // not already getting. The f16 sibling gates at 2^20 and is left alone - it is not
+        // measured here.
+        const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 17;
         if n >= NAN_TO_NUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
@@ -15692,7 +15708,23 @@ fn try_zerocopy_f32_nan_to_num(
         // Same lever as the f64 nan_to_num: numpy runs several single-threaded masked passes;
         // fnp does one fused parallel per-element pass. Each output element depends only on its
         // matching input => bit-exact regardless of chunking.
-        const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 21;
+        // MEASURED CROSSOVER, not a guess. The old value was `1 << 21`, which left the whole band
+        // [2^17, 2^21) on the serial pass - and float32 LOST there against numpy, which
+        // short-circuits its masked `copyto` passes when the array holds no nan/inf. Measured on
+        // CLEAN float32 (the losing case), fnp ns, serial vs parallel:
+        //
+        //     n        serial     parallel
+        //   65536      51802.2     73808.1   <- serial wins: ~64 thread wake-ups cost more
+        //  131072     101362.2     91381.9      than the whole pass at this size
+        //  262144     202281.7     95019.0
+        //  524288     398560.9     94917.5
+        // 1048576     790871.6    308675.0
+        //
+        // so the gate belongs at 2^17, where parallel first pays. float64 wanted it lower still
+        // (it wins from 2^16), but one constant serves both and 2^17 costs f64 nothing it was
+        // not already getting. The f16 sibling gates at 2^20 and is left alone - it is not
+        // measured here.
+        const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 17;
         if n >= NAN_TO_NUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
