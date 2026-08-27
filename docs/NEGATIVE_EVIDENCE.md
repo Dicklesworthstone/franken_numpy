@@ -60424,3 +60424,70 @@ where numpy RAISES. Those need `ndarray_subclass_needs_numpy` at each entry, and
 defaults to `np._NoValue`, test `np.f(np.matrix(a), param=<default>)` against
 `np.f(np.matrix(a))`** - and check every internal caller that forwards it, not just the entry.
 AGENT_NAME=TanBridge.
+
+## 2026-08-26 - THE FLIP FAMILY STRIPPED ndarray SUBCLASSES, AND THE FIX WAS TO STOP CONVERTING RATHER THAN TO DELEGATE: audit 50 -> 40, no perf cost (`deadlock-audit-h79ek`)
+
+`TanBridge`. Shipped `84a62020`. Measured on `thinkstation1` against the LIVE installed numpy
+2.4.3 in the SAME invocation, ABBAABBA, 21 rounds, dual A/A null per cell,
+OPENBLAS_NUM_THREADS=1, loadavg 37.31.
+
+This row makes NO performance claim and declares no campaign result class: it is a CORRECTNESS
+fix, and the cells exist only to show it cost nothing.
+
+```
+executing elf sha256 (BEFORE) bench_elf_sha256=afc8ff077d7fe60f08996d85cceed63cd433fd91bcf86f9921cba5d801cfe579
+executing elf sha256 (AFTER)  bench_elf_sha256=2c22f04380516d64092bae322a356e6517aaa38b6c27b919cefc7daa1a6a5ac1
+```
+
+First of the ~50 lost-subclass divergences `deadlock-audit-30d18`'s audit enumerated.
+`flip_operand_as_array` began as an exact-instance identity skip - a PERF lever from
+`deadlock-audit-yhg7k` - and left subclasses on the `numpy.asarray` conversion, which strips them:
+`np.flipud(np.matrix(a))` is a `matrix` in numpy and fnp returned a plain `ndarray`.
+
+**THE REMEDY IS NOT THE DELEGATION THE OTHER FAMILIES USE.** The predicate and unary families fix
+this by handing subclasses to numpy (`ndarray_subclass_needs_numpy`), which costs a full numpy
+call. These three build their result by INDEXING, and `subclass[slices]` ALREADY returns the
+subclass - so simply not converting is both correct and CHEAPER than delegating. Verified against
+numpy 2.4.3 for `np.matrix` and a plain `ndarray` subclass across all three ops: same type, same
+values, same shape. `is_exact_instance` -> `is_instance`, one word, and the conversion now runs
+only for genuine non-arrays, which is what it was for.
+
+**The general point: the right fix for a lost subclass depends on how the result is BUILT.**
+Indexing and slicing preserve the subclass for free; extract-and-rebuild cannot, and only that
+second case needs delegation. Choosing delegation everywhere would have made three winning ops
+slower for no reason.
+
+```
+FLIP_SUBCLASS worker=thinkstation1 numpy_version=2.4.3 profile=release
+  harness=same-invocation ABBAABBA, 21 rounds, median of round ratios, dual A/A null
+
+  flip 1-D default   0.725x WIN [0.622,0.862] -> 0.609x WIN [0.601,0.625]
+  flip 2-D default   0.771x WIN [0.673,0.908] -> 0.609x WIN [0.553,0.613]
+  flip 2-D axis=0    0.306x WIN [0.278,0.339] -> 0.253x WIN [0.240,0.294]
+  flip 1-D 2^16      0.737x WIN [0.619,0.878] -> 0.596x WIN [0.490,0.645]
+  fliplr 2-D 64^2    0.763x WIN [0.538,0.810] -> 0.706x WIN [0.689,0.831]
+  flipud 2-D 64^2    0.862x WIN [0.658,1.115] -> 0.900x WIN [0.778,1.053]
+  flipud 1-D 2^8     0.740x WIN [0.617,0.799] -> 0.847x WIN [0.714,0.856]
+  flipud from list   1.074x     [0.910,1.322] -> 1.068x     [0.972,1.168]
+```
+
+**No decidable change in either direction** - every pair of CIs overlaps, the movements run both
+ways (`flip 1-D` looks better, `flipud 1-D 2^8` looks worse), and numpy's own arm moved 333.8 ->
+328.9 ns between the runs. All 40 nulls pass. What the row establishes is the NEGATIVE: swapping a
+pointer compare (`is_exact_instance`) for a subclass check (`is_instance`) on the hot path did not
+cost anything measurable, which was the only real risk in this change.
+
+PARITY: 11 dtypes x 6 shapes x {flipud, fliplr} plus 8 layout/non-array cases; `np.flip` over 4
+dtypes x 3 shapes x up to 9 axis forms plus 5 operand kinds x 2 axis forms; compared on dtype,
+shape, `type()`, five flags, RAW BYTES and the `np.shares_memory` aliasing relation.
+**4 divergences before, 0 after.** The whole-repo subclass audit drops **50 -> 40 of 198**.
+654 lib tests pass; clippy and fmt clean.
+
+MEMORY: largest operand 2^16 f64 = 512 KB.
+
+RETRY PREDICATE: the flip family is done. For the remaining 40, **classify each op by how it BUILDS
+its result before choosing a remedy**: `take`, `unique`, `trim_zeros`, `median`, `round` and the
+axis reductions go through extract-and-rebuild and need `ndarray_subclass_needs_numpy`;
+anything that indexes, slices or views can take the cheaper no-conversion fix used here. Do not
+apply one remedy blindly to the list - that is how a correctness pass becomes a perf regression.
+AGENT_NAME=TanBridge.
