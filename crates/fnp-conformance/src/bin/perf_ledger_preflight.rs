@@ -332,7 +332,14 @@ fn is_reject(entry: &LedgerEntry) -> bool {
 
 fn is_keep(entry: &LedgerEntry) -> bool {
     let heading = entry.heading.to_ascii_uppercase();
-    if heading.contains("KEEP") || heading.contains("WIN (SHIP") || heading.contains("WIN:") {
+    let heading_tokens: Vec<&str> = heading
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    if heading_tokens.iter().any(|&token| token == "KEEP")
+        || heading.contains("WIN (SHIP")
+        || heading.contains("WIN:")
+    {
         return true;
     }
     entry.body.lines().any(|line| {
@@ -1410,6 +1417,14 @@ source_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
 ",
         );
         assert_eq!(audit_entries(&entries).len(), 1);
+    }
+
+    #[test]
+    fn keepdims_is_not_a_keep_verdict() {
+        let entries = split_entries("## 2026-08-27 - correctness: keepdims preserves rank\n");
+        assert!(!is_keep(&entries[0]), "substring matching would misclassify keepdims");
+        let keep = split_entries("## 2026-08-27 - KEEP: real verdict\n");
+        assert!(is_keep(&keep[0]));
     }
 
     #[test]
