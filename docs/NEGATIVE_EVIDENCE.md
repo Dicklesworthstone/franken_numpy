@@ -65105,3 +65105,118 @@ unblocks it. The rail itself is proven: `rch exec --job` + copying the pooled
 the in-process sha matches the locally retrieved artifact byte for byte.
 
 MEMORY: the harness holds one 2^16 f64 key pair at a time; nothing on this host exceeded 2 MB.
+
+## 2026-08-28 - CAPABILITY + MEASURED LOSS: a worker-side head-to-head harness makes rch-only measurement VALID again, and it prices the standing lexsort loss at 1.591x / 1.421x; plus a CI-hard-error clippy lint that the local toolchain cannot see (`deadlock-audit-sfgg3`, `deadlock-audit-h4pjj`)
+
+`TanBridge`. Both arms in ONE process, on ONE worker CPU, in ONE invocation.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (self-reported from inside the measuring process)
+  bench_elf_sha256=ce684f5ef5635c53edf4f82b5cf147a8de81d57a65f4c3e8919db8d8c95172de
+```
+
+### THE ROUTE THE PREVIOUS ROW REJECTED IS REPLACED, NOT WORKED AROUND
+
+That row concluded an rch-built artifact cannot be measured on the developer host (worker glibc
+2.43 > local 2.42; worker CPython 3.14 vs a numpy that exists only for local 3.13). The fix is to
+stop moving the artifact at all: `crates/fnp-python/examples/h2h_lexsort.rs` runs the whole
+comparison ON the worker.
+
+```
+rch exec --job -- cargo run --release -p fnp-python --example h2h_lexsort
+```
+
+Three properties make it a valid measurement rather than a convenient one:
+
+  * **No `.so` exists anywhere in the loop.** `pyo3::append_to_inittab!` registers the extension
+    module into the embedded interpreter, so `import fnp_python` resolves to code linked into the
+    example binary itself. The harness prints `fnp module -> fnp_python (linked into this binary,
+    no .so)` to say so.
+  * **The incumbent is the live numpy in that same interpreter** - `import numpy` alongside it, both
+    arms timed by one `timeit` in one address space on one CPU, interleaved ABBAABBA with a dual
+    A/A null per cell and an out-of-family control.
+  * **The binary self-reports its own SHA-256** by hashing `std::env::current_exe()` from inside
+    the running process, so the row's ELF identity cannot be a different build than the one timed.
+
+Two mechanical facts worth keeping, both cost a remote round-trip to learn:
+
+  * `append_to_inittab!(fnp_python)` resolves the bare identifier to the CRATE, not the item the
+    `#[pymodule]` macro generates beside the function - they share a name. It fails with
+    "cannot find value `__PYO3_NAME` in crate `fnp_python`" until `use fnp_python::fnp_python;`
+    brings the generated item into scope.
+  * **rch does NOT forward the remote command's stdout.** cargo's own build log arrives because
+    cargo writes it to STDERR; a `print()` in the harness is silently lost. The harness prints
+    results to stderr deliberately. `rch exec` also refuses a bare benchmark
+    (`RCH-E301 non-compilation command`); `rch exec --job` is the rail that admits one.
+
+### THE MEASUREMENT
+
+hz3, CPython 3.14.4, numpy 2.5.2, loadavg 18.08, `N = 2^16`, two f64 keys, fresh draw per rep:
+
+```
+  case                 rep      numpy_ns        fnp_ns    ratio  nullNP  nullFNP
+  2 x f64 card=2         0     3193177.7     5667347.0   1.775x   1.002    0.925  VOID
+  2 x f64 card=2         1     3191030.6     6542159.6   2.050x   0.993    0.899  VOID
+  2 x f64 card=4         0     4486737.1     7137452.1   1.591x   1.000    1.019
+  2 x f64 card=4         1     4492584.5     7400685.8   1.647x   1.002    1.028  VOID
+  2 x f64 card=8         0     5208845.2     7403714.6   1.421x   1.000    0.997
+  2 x f64 card=8         1     5181384.5     7166996.2   1.383x   1.000    0.932  VOID
+  2 x f64 card=32        0     6970567.5     7343507.0   1.054x   1.001    1.008
+  2 x f64 card=32        1     6902622.2     6951630.5   1.007x   0.999    0.999
+```
+
+COUNTED_MECHANISM: the standing low-cardinality lexsort loss is confirmed by this independent
+method at 1.591x (card=4, nulls 1.000/1.019) and 1.421x (card=8, nulls 1.000/0.997), decaying to
+1.007x-1.054x by card=32 - the same monotone decay with cardinality the local runs found, now
+measured on a different CPU, a different CPython and a different numpy. An earlier run of the same
+harness on the same worker read 1.753x (card=8) and 1.144x/1.212x (card=32).
+
+TWO HONEST CAVEATS ON THIS RAIL, both visible above:
+  * **The out-of-family control is NOT at unity** - `np.sum` f64 2^20 read 1.464x here and 1.266x
+    in the earlier run. Either fnp's `sum` is genuinely behind on this worker or the host adds
+    drift; the per-cell A/A nulls passed regardless, so the cells are internally consistent, but no
+    row should treat this worker as a quiet bench.
+  * **The worker's numpy CHANGED UNDER ME**, 2.3.5 in the morning run and 2.5.2 in the afternoon
+    one. The incumbent version is not pinned on these machines, so a ratio from this rail must
+    always carry the numpy version it was taken against, and two runs are only comparable if that
+    version matches.
+
+### KEPT: A CLIPPY LINT THAT IS A CI HARD ERROR AND THE LOCAL TOOLCHAIN CANNOT SEE
+
+The worker toolchain is newer than the developer host's, and it flags
+`clippy::chunks_exact_to_as_chunks` at 4 sites in `bytes_all_nonzero` / `bytes_any_nonzero` - the
+bool `min`/`max` SWAR helpers shipped in `d64d2aaf`. **Local `cargo clippy` is silent on all four.**
+That lint is the same one recorded as a hard CI error in `deadlock-audit-h4pjj`, so this was live
+G1 debt introduced by my own earlier row and invisible from here. Rewritten to `as_chunks::<32>()`
+/ `as_chunks::<8>()`, which also drops the `try_into().expect(..)` each slice-shaped chunk needed.
+Remote `cargo clippy --lib --examples`: clean. Remote `cargo fmt --check`: clean.
+
+**LESSON: a local clippy pass does not certify this repo.** Run `rch exec -- cargo clippy` before
+claiming a lint gate is green.
+
+### FOUND, NOT FIXED: ONE LIB TEST FAILS ON THE WORKER'S NUMPY AND PASSES ON THE HOST'S
+
+`cargo test --release -p fnp-python --lib` on hz3: **656 passed, 1 failed**, against 657/0 locally.
+
+```
+  log([2.0, 0.0, -1.0]): output BITS differ from NumPy
+    numpy=[4604418534313441775 18442240474082181120 18444492273895866368]
+    fnp  =[4604418534313441775 18442240474082181120  9221120237041090560]
+```
+
+`log(-1.0)`: numpy returns **-NaN** (sign bit set, `0xFFF8...`) and fnp returns **+NaN**
+(`0x7FF8...`). Same NaN-sign class as `deadlock-audit-jd6lt` (nextafter discards NaN sign). It is
+NOT this change's doing: the two helpers I edited are called from exactly four sites
+(lib.rs:89632-89644), all inside `minmax_bool_typed`, which `log` cannot reach. It is a genuine
+divergence that the local numpy happens not to expose.
+
+MEMORY: the harness holds one 2^16 f64 key pair plus a 2^20 control array; peak well under 100 MB.
+
+RETRY PREDICATE: **this rail is now the way to measure anything in this workspace** - copy
+`h2h_lexsort.rs`, change the subject, keep the stderr printing and the self-reported exe hash. Do
+not reintroduce a build-locally-then-run step. For the lexsort subject itself the open work is
+unchanged from the previous row (an O(1) direct-mapped bucket, count and scatter fused), and it now
+has a measurement method that can actually judge it. Before trusting any ratio from this rail,
+re-read the numpy version line in its own output.
