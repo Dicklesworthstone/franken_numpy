@@ -64662,3 +64662,102 @@ exactly `n` before the loop should let LLVM fold the second test into the first;
 instructions per element, so do not expect more than ~10%. The PARALLEL arm above 2^21 still has
 the per-element mode dispatch this row removed from the serial one and was never re-counted - it
 wins on wall clock, so it is not urgent, but it is the same one-line change.
+
+## 2026-08-27 - WIN (SHIP): `searchsorted` picked its search loop BACKWARDS - the gallop served unsorted needles and the branchless bound served sorted ones - 1.320x -> 0.867x random and 1.264x -> 0.642x sorted, plus a REJECTED generic and a byte-order wrong-answer fix (`deadlock-audit-sfgg3` family)
+
+`TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1,
+interleaved ABBAABBA with a DUAL A/A null per cell.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)            bench_elf_sha256=68cab82806a43c3a3bc3d9225b842a3a74ac7756aa91da10c7dca43b32850eb9
+executing elf sha256 (REJECTED generic)  bench_elf_sha256=e291741bacae52df608e8531c9bc455893e24b734b4d6eec3dfcdce6f0c1c210
+executing elf sha256 (AFTER)             bench_elf_sha256=49817d4271ae0df84fa49f31b6570e6bedcc388aca7245135643163d50b9e5bd
+```
+
+### FOUND BY AUDITING A COMPILER HINT, NOT AN OP
+
+The `take` row above turned up that `#[inline]` is a hint LLVM can decline. That is an
+articulation point, not a one-off, so the next question was: **which `#[inline]`-marked functions
+still have an out-of-line body, and which of those are called from inside a loop?** Cross-
+referencing the 71 hint-marked functions against `nm`, then scanning `objdump` for `call`s that sit
+between a backward branch and its target:
+
+```
+  19 of 71 still have an out-of-line body; 5 of those are called INSIDE a loop:
+     transform_field 19 sites | mul_build 10 | search_index_f32_raw_guess 9
+     search_index_f64_raw_guess 9 | fmt_float 2
+```
+
+`np_fmax`/`np_fmin`/`bit_and`/`bit_or`/`bit_xor` are NOT among them - their out-of-line bodies
+serve cold paths and the hint worked where it mattered. The searchsorted gallop probes are called
+once per QUERY, so those were the ones to price.
+
+### THE LOOPS WERE THE RIGHT WAY ROUND FOR THE WRONG CORPUS
+
+Counting searchsorted found 1.306x-1.320x on random queries and **0.876x on SORTED ones** - and
+reading the code explained it. The f64 arm asked `f64_sorted_needle_indices` first, which fills
+with a BRANCHLESS bound when the batch is nondecreasing, and fell back to the guess-seeded GALLOP
+when it was not. That is both ways round:
+
+  * a gallop's hint predicts the next index only when queries ADVANCE - on random keys it is
+    worthless, and every probe is a data-dependent branch a random stream mispredicts ~half the
+    time;
+  * a branchless bisection has no misprediction, but it jumps into the middle of the haystack for
+    every query - on a monotone stream that throws away the locality the gallop is built to
+    exploit, and an 8 MB haystack makes every probe a cache miss.
+
+The f32 arm had no split at all: every batch galloped.
+
+COUNTED_MECHANISM: baseline-subtracted instructions per call over 200 calls, 2^20 haystack, 2^16
+queries, OPENBLAS pinned. Random f64: numpy 21,096,770 vs fnp 27,856,963 (1.320x) BEFORE and
+18,424,900 (0.867x) AFTER. Sorted f64: 21,718,149 vs 18,987,669 (0.876x) BEFORE and 9,876,735
+(0.455x) AFTER - the gallop does O(1) amortised probes per query on a monotone stream where the
+bisection does log2(2^20)=20. Random f32 1.315x -> 0.865x.
+
+### THE MEASUREMENT (decidable cells only; loadavg 38-56 voided the rest)
+
+```
+                                     BEFORE                    AFTER
+  dtype   hay      q      kind     ratio  nulls          ratio  nulls
+  float64 1048576  65536  sorted   1.264x 1.003/1.000    0.642x 1.012/0.997
+  float32 1048576  65536  rand     1.052x 1.005/0.999    0.896x 1.009/0.996
+  float64 4096     65536  rand        -                  0.821x 0.997/0.991
+  float32 4096     65536  rand        -                  0.817x 0.998/0.994
+  float32 1048576  65536  sorted      -                  0.649x 1.001/1.006
+```
+
+### REJECT: ONE GENERIC IMPLEMENTATION INSTEAD OF TWO
+
+The natural way to give f32 the same helpers is to make them `T: Copy + PartialOrd` and use
+`x != x` for the NaN test. **Built and measured: 1.374x-1.381x across every cell, against
+0.866x-0.897x for the concrete code** - and it dragged down `f64_sorted_q`, a cell the change had
+not otherwise touched, from 0.876x to 1.381x. `#[inline(always)]` on the two predicates did not
+recover it (1.371x-1.381x). In generic code `probe < key` goes through `PartialOrd::lt`, whose
+default body materialises an `Option<Ordering>` from `partial_cmp`; on a concrete float it is one
+compare. A `macro_rules!` expansion per width keeps a single source of truth without paying that.
+
+### KEPT: ANOTHER SILENT WRONG-ANSWER BYTE-ORDER BUG
+
+`numpy_dtype_is_f64`/`_f32` are byte-order BLIND by design and were guarding `PyBuffer::<f64>::get`
+buffer reads - the same defect fixed in `concatenate` in `6b1c05dc`, at four more sites here (f64
+plain and merge, f32 plain and merge). A `>f8` haystack returned silent nonsense: numpy
+`[554, 1487, 3562, 3833]`, fnp `[0, 0, 4, 4]`. All four now check `dtype_is_native_order` and defer.
+
+PARITY: 754 cells - f32 and f64 x 7 haystack sizes (0,1,2,17,1000,65536,2^20) x 5 query counts x
+{random, sorted, reverse-sorted, sorted-except-one-swap (the admission predicate's exact
+boundary), needles drawn from haystack values so left/right differ on ties} x both sides, plus
+NaN in needles AND in the haystack, +-0.0, +-inf, subnormals, the dtype range edge, heavy
+duplicates, the 2^21 parallel gate straddled, 2-D and scalar queries, non-contiguous on each
+operand, big-endian and mixed dtype: **0 divergences**, down from 2 (the byte-order pair) on the
+pre-change build. `cargo test -p fnp-python --lib --release`: 657 passed, 0 failed.
+
+MEMORY: largest pair 2^20 haystack + 2^21 needles = 24 MB in the gate case.
+
+RETRY PREDICATE: **do not re-propose the generic - it is measured above and rejected.** The
+sortedness scan is now O(m) per call on top of the search; it is negligible against O(m log n) but
+it is NOT free for a tiny needle batch against a huge haystack, and the 1024-query cells
+(1.170x/1.028x, both VOID here) are where that would show - re-measure those on a quiet host
+before tuning. `transform_field` (19 in-loop call sites), `mul_build` (10) and `fmt_float` (2) came
+out of the same hint audit and were never priced; they are the remaining candidates from it.

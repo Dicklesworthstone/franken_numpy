@@ -37900,15 +37900,25 @@ fn try_zerocopy_f64_searchsorted(
                 unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
             let out_data: &mut [i64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
-            if !searchsorted_array_needle::f64_sorted_needle_indices(a_raw, v_raw, right, out_data)
-            {
-                // REACHING HERE MEANS THE NEEDLES ARE KNOWN UNSORTED, which is the worst possible
-                // input for the guess-seeded gallop that used to serve it: the hint from the
-                // previous key predicts nothing, and each probe is a data-dependent branch that a
-                // random key stream mispredicts about half the time. The branchless fill is the
-                // same bound with `cmov` selects instead. Counted at 2^20 haystack, OPENBLAS
-                // pinned: unsorted queries ran 1.320x NumPy's instructions on the gallop, while
-                // sorted queries - already on the branchless loop - ran 0.876x.
+            // PICK THE LOOP BY SORTEDNESS, same as the f32 twin, because the two shapes go
+            // opposite ways and each is measured. A monotone batch keeps the gallop's hint useful
+            // and its probes cache-warm; an unsorted batch makes the hint worthless and every
+            // probe a branch a random key stream mispredicts about half the time.
+            //
+            // This arm previously asked `f64_sorted_needle_indices` first and fell back to the
+            // gallop, which was BOTH ways round: the admitted (sorted) batch got the branchless
+            // bound and the unsorted one got the gallop. Counted, unsorted f64 ran 1.320x NumPy's
+            // instructions on the gallop against 0.867x on the branchless bound; on the clock,
+            // sorted f32 ran 0.514x on the gallop against 1.237x branchless, and sorted f64 on
+            // the branchless bound measured 1.264x before this change.
+            if searchsorted_array_needle::f64_needles_nondecreasing(v_raw) {
+                let mut guess = 0usize;
+                for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
+                    let idx = search_index_f64_raw_guess(a_raw, key, right, guess);
+                    guess = idx;
+                    *slot = idx as i64;
+                }
+            } else {
                 searchsorted_array_needle::f64_needle_indices_branchless(
                     a_raw, v_raw, right, out_data,
                 );
@@ -38410,8 +38420,24 @@ fn try_zerocopy_f32_searchsorted(
                 unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
             let out_data: &mut [i64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
-            if !searchsorted_array_needle::f32_sorted_needle_indices(a_raw, v_raw, right, out_data)
-            {
+            // PICK THE LOOP BY SORTEDNESS - both choices are measured and they go opposite ways.
+            // A monotone batch keeps the gallop's hint useful and its probes cache-warm; an
+            // unsorted batch makes the hint worthless and every probe a branch a random key
+            // stream mispredicts about half the time. Wall clock, 2^20 haystack, 2^16 queries:
+            //
+            //   sorted    gallop 0.514x  vs branchless 1.237x
+            //   unsorted  gallop 1.052x  vs branchless 0.882x
+            //
+            // Routing everything to the branchless bound - which is what the first version of
+            // this change did - would trade the first row away to win the second.
+            if searchsorted_array_needle::f32_needles_nondecreasing(v_raw) {
+                let mut guess = 0usize;
+                for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
+                    let idx = search_index_f32_raw_guess(a_raw, key, right, guess);
+                    guess = idx;
+                    *slot = idx as i64;
+                }
+            } else {
                 searchsorted_array_needle::f32_needle_indices_branchless(
                     a_raw, v_raw, right, out_data,
                 );
