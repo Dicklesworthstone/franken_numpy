@@ -89496,12 +89496,17 @@ fn bytes_all_nonzero(raw: &[u8]) -> bool {
     // the branch, so the fold itself has no early exit for LLVM to trip over and the branch is
     // taken a quarter as often. At eight bytes this measured 0.063 ns/byte against NumPy's
     // 0.017; the block form closes most of what is left.
-    let block = raw.len() - raw.len() % 32;
-    let (blocks, rest) = raw.split_at(block);
-    for chunk in blocks.chunks_exact(32) {
+    // `as_chunks` rather than `chunks_exact`: the chunk size is a constant, so the fixed-size
+    // form hands LLVM the length it already knows and drops the `try_into().expect(..)` that a
+    // slice-shaped chunk needs. It is also what `clippy::chunks_exact_to_as_chunks` requires, and
+    // that lint is a HARD ERROR in this repo's CI gate (`deadlock-audit-h4pjj`) on a newer
+    // toolchain than the developer host carries - the local clippy is silent here.
+    let (blocks, rest) = raw.as_chunks::<32>();
+    for chunk in blocks {
+        let (words, _) = chunk.as_chunks::<8>();
         let mut zero_mask = 0u64;
-        for word in chunk.chunks_exact(8) {
-            let w = u64::from_ne_bytes(word.try_into().expect("chunks_exact(8) yields 8 bytes"));
+        for word in words {
+            let w = u64::from_ne_bytes(*word);
             zero_mask |= (w.wrapping_sub(LO)) & !w & HI;
         }
         if zero_mask != 0 {
@@ -89524,12 +89529,14 @@ fn bytes_any_nonzero(raw: &[u8]) -> bool {
     // identical 2 `vpcmpeqb` / 2 `vpandn` / 1 `vpor` as this form, and the popcount was deleted
     // outright. Closing the remaining ~4.8 us at 2^22 needs an explicit `_mm256_testz_si256`
     // behind an ISA gate, not another safe-Rust phrasing.
-    let block = raw.len() - raw.len() % 32;
-    let (blocks, rest) = raw.split_at(block);
-    for chunk in blocks.chunks_exact(32) {
+    // `as_chunks` for the same reason as the twin above: constant chunk size, and
+    // `clippy::chunks_exact_to_as_chunks` is a hard error in CI.
+    let (blocks, rest) = raw.as_chunks::<32>();
+    for chunk in blocks {
+        let (words, _) = chunk.as_chunks::<8>();
         let mut acc = 0u64;
-        for word in chunk.chunks_exact(8) {
-            acc |= u64::from_ne_bytes(word.try_into().expect("chunks_exact(8) yields 8 bytes"));
+        for word in words {
+            acc |= u64::from_ne_bytes(*word);
         }
         if acc != 0 {
             return true;
