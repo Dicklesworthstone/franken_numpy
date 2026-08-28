@@ -65331,3 +65331,86 @@ records over 65536 elements is a regime where even one hash probe per element is
 deserves, and the answer there is a two-pass radix on the packed key, not a finer bucket. The
 `FNP_LEXSORT_COUNTING` variable is a measurement knob, not a tuning surface - it exists so the two
 implementations can be A/B'd in one process, and its default is the shipped route.
+
+## 2026-08-28 - NO MEASURABLE EFFECT (kept, not claimed) + a CORRECTION to the row above: folding the count into pass 1 is below a 13% paired noise floor, and the card=8 win I claimed yesterday is CONTRADICTED (`deadlock-audit-sfgg3`)
+
+`TanBridge`. Worker-side h2h harness; both arms and both fnp implementations in one process.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE - counting with a separate count pass)
+  bench_elf_sha256=eceb61113b152d785e1ee24a43f871908edef77945907672d381dfc6417bf0ee
+executing elf sha256 (AFTER  - count folded into pass 1)
+  bench_elf_sha256=f64d8b40f83ebb83b221b2dfca9ed117bc507ad9e353f74314de75fee2832592
+```
+
+### THE LEVER: ONE FEWER PASS OVER n
+
+The counting route walked `ids` a second time purely to tally per rank. The tally is per bucket id
+and the id is already in hand while probing, so it now happens in pass 1 and the id-counts are
+remapped to rank-counts in O(distinct) afterwards. Strictly less work, identical semantics: three
+passes over n become two.
+
+**It is not measurable.** That is the result.
+
+### THE CONTROL SAYS WHY, AND CALIBRATES EVERYTHING ELSE ON THIS RAIL
+
+`card=32` is the run's built-in control: 32 distinct values per key give ~1024 distinct records,
+which exceeds the 128-record cap, so the counting arm ABORTS and falls back - **both arms execute
+identical code there**. Its `counting / cmp-sort` ratio should therefore be 1.000. Across three
+runs it reads:
+
+```
+  0.957  0.949   (load 48.8)     1.025  1.010   (load 16.7)     1.129  0.972   (load 15.1)
+```
+
+**Span 0.949-1.129, i.e. a paired-arm noise floor of about 13% even for byte-identical code.**
+Anything between 0.871 and 1.129 is indistinguishable from no difference on this rail. The
+fused-count change moves nothing outside that band, so it is kept for being strictly less work and
+is NOT claimed as a win.
+
+COUNTED_MECHANISM: the removed pass was `n` loads of `ids` plus `n` rank lookups plus `n`
+increments - 3 x 65536 = 196608 operations - replaced by 1 increment per element already inside the
+probe loop plus a 128-entry remap. Against a route whose measured cost is 5.0-8.9 ms per call, that
+is under the 13% floor the control establishes, and three runs confirm it: normalised
+counting/cmp-sort at card=4 read 0.654/0.635 before and 0.786/0.884, 0.725/0.869 after - moving in
+the wrong direction, but every reading inside the band.
+
+### CORRECTION: THE card=8 CLAIM IN THE ROW ABOVE DOES NOT HOLD
+
+That row reported "8 of 8 paired comparisons in that run favour the counting pass". That was one
+run. With two more runs the picture is:
+
+```
+  counting / cmp-sort, all three runs, six readings per cardinality
+  card=2   0.413 0.819 | 0.856 0.717 | 0.825 0.839   -> 6/6 below the floor: counting better
+  card=4   0.654 0.635 | 0.786 0.884 | 0.725 0.869   -> 5/6 below the floor: counting better
+  card=8   0.786 0.824 | 0.858 0.806 | 1.136 1.111   -> CONTRADICTORY
+```
+
+The two card=8 readings above 1.11 are from the quietest run of the three (loadavg 15.1) and BOTH
+arms were decidable there - cmp-sort 1.352x/1.365x against counting 1.536x/1.517x. **So the
+counting pass is established at card=2 and card=4 and is NOT established at card=8**; yesterday's
+row generalised a single run's sweep into a claim its own data could not carry. The shipped
+default is unchanged - the 128-record cap still admits card=8 - because the evidence is
+contradictory rather than negative, but no row should cite card=8 as a win until it replicates.
+
+The headline of that row is unaffected: card=4 at 1.903x/1.994x -> 1.244x/1.267x, both arms
+decidable in one process, is 2 of the 6 card=4 readings and the other 4 agree in sign.
+
+PARITY: the harness gate ran twice per invocation, once per implementation, and both matched the
+documented pre-existing divergence set exactly (100 cells each, 10 known labels, set equality in
+both directions). `cargo test --release -p fnp-python --lib` on the worker: 655 passed, 2 failed,
+**identical with the change stashed**. Remote `clippy --lib --examples` and `fmt --check`: clean.
+
+MEMORY: harness holds one 2^16 f64 key pair plus a 2^20 control array; the bucket table is 512
+u128 slots plus a 128-entry distinct list and a 128-entry count list, under 10 KB.
+
+RETRY PREDICATE: **do not measure anything on this rail with fewer than 2 reps x 2 cardinalities of
+identical-code control, and do not believe a paired difference inside 0.871-1.129.** That floor is
+this rail's resolution at loadavg 15-49 and it is what makes single-run sweeps untrustworthy - the
+correction above exists because I trusted one. For card=2, still 1.57x-1.97x and the only cell now
+firmly established as losing, the open design is unchanged: four distinct records over 65536
+elements is a regime where even one hash probe per element is more than the work deserves, and the
+answer is a two-pass radix on the packed key.

@@ -54500,6 +54500,10 @@ fn try_native_lexsort_valuelex(
         let mut slot_key = vec![0u128; LEX_BUCKET_SLOTS];
         let mut slot_id = vec![u32::MAX; LEX_BUCKET_SLOTS];
         let mut distinct: Vec<u128> = Vec::with_capacity(LEX_BUCKET_MAX);
+        // Tallied HERE rather than in a second walk of `ids`: the count is per bucket id, and the
+        // ids are already in hand as each element is probed. Remapping id-counts to rank-counts
+        // afterwards is O(distinct), so this removes a whole pass over n.
+        let mut counts: Vec<u32> = Vec::with_capacity(LEX_BUCKET_MAX);
         let mut ids: Vec<u32> = Vec::with_capacity(n);
         let mut admitted = true;
         for r in 0..n as u32 {
@@ -54519,11 +54523,14 @@ fn try_native_lexsort_valuelex(
                     slot_key[idx] = key;
                     slot_id[idx] = distinct.len() as u32;
                     distinct.push(key);
+                    counts.push(1);
                     ids.push(slot_id[idx]);
                     break;
                 }
                 if slot_key[idx] == key {
-                    ids.push(slot_id[idx]);
+                    let id = slot_id[idx];
+                    counts[id as usize] += 1;
+                    ids.push(id);
                     break;
                 }
                 idx = (idx + 1) & (LEX_BUCKET_SLOTS - 1);
@@ -54533,7 +54540,7 @@ fn try_native_lexsort_valuelex(
             }
         }
         if admitted {
-            // Rank the handful of distinct records; `d log d` on d <= 1024, not on n.
+            // Rank the handful of distinct records; `d log d` on d <= 128, not on n.
             let mut order: Vec<u32> = (0..distinct.len() as u32).collect();
             order.sort_unstable_by_key(|&i| distinct[i as usize]);
             let mut rank = vec![0u32; distinct.len()];
@@ -54541,8 +54548,8 @@ fn try_native_lexsort_valuelex(
                 rank[id as usize] = r as u32;
             }
             let mut pos = vec![0u32; distinct.len() + 1];
-            for &id in &ids {
-                pos[rank[id as usize] as usize + 1] += 1;
+            for (id, &c) in counts.iter().enumerate() {
+                pos[rank[id] as usize + 1] = c;
             }
             for k in 1..pos.len() {
                 pos[k] += pos[k - 1];
