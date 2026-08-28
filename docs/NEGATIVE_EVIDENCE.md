@@ -65220,3 +65220,114 @@ not reintroduce a build-locally-then-run step. For the lexsort subject itself th
 unchanged from the previous row (an O(1) direct-mapped bucket, count and scatter fused), and it now
 has a measurement method that can actually judge it. Before trusting any ratio from this rail,
 re-read the numpy version line in its own output.
+
+## 2026-08-28 - WIN (SHIP): the low-cardinality lexsort loss finally yields - an O(1)-lookup counting pass takes card=4 from 1.903x/1.994x to 1.244x/1.267x, both arms decidable in ONE process (`deadlock-audit-sfgg3`)
+
+`TanBridge`. Measured with the worker-side h2h harness: both arms, and BOTH fnp implementations,
+in one process on one worker CPU in one invocation.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (self-reported from inside the measuring process)
+  bench_elf_sha256=eceb61113b152d785e1ee24a43f871908edef77945907672d381dfc6417bf0ee
+```
+
+### THE THIRD ATTEMPT AT THIS CELL, AND THE FIRST THAT WORKED
+
+The previous row rejected a counting pass and said exactly why: it ranked through a sorted
+`Vec<u128>`, an **O(log d) lookup paid THREE times per element**, and lost at every cardinality.
+Its retry predicate named the fix - "a genuinely O(1) bucket lookup ... and it must FUSE the count
+and scatter passes so the lookup happens once". That is what this is:
+
+  * one open-addressed probe into a 512-slot table (load factor <= 0.25 against a 128-record cap),
+    with a multiply-xor fold rather than the std SipHash;
+  * the bucket id is stored in `ids` on the way past, so **count and scatter are plain array
+    indexing with no second lookup**;
+  * ranking is `d log d` on d <= 128 distinct records, never on n.
+
+### BOTH IMPLEMENTATIONS TIMED IN ONE PROCESS, BECAUSE TWO JOBS CANNOT BE COMPARED
+
+The route reads `FNP_LEXSORT_COUNTING` per call, so the harness flips it between arms and times
+the comparison sort and the counting pass **on the same arrays, back to back, in one interpreter**.
+This is not a convenience: rch cannot pin a worker, one pair of runs landed on hz3 and the next on
+hz4, and this campaign has measured a host change as worth ~35% on a ratio. The default is the
+shipped path, so an ordinary caller never takes a different route than the one benchmarked.
+
+COUNTED_MECHANISM: at n=2^16, hz4, numpy 2.5.2, loadavg 48.78, two f64 keys of cardinality 4 - the
+only cells in the run where BOTH arms cleared their dual A/A nulls:
+
+```
+  card=4 rep0   cmp-sort  numpy 4708346.3 ns  fnp 8958384.6 ns  1.903x  nulls 0.999/1.015
+  card=4 rep0   counting  numpy 5111963.3 ns  fnp 6358970.8 ns  1.244x  nulls 1.002/1.013
+  card=4 rep1   cmp-sort  numpy 4614838.3 ns  fnp 9200544.3 ns  1.994x  nulls 0.996/1.009
+  card=4 rep1   counting  numpy 4632215.4 ns  fnp 5871310.7 ns  1.267x  nulls 1.002/0.993
+```
+
+`card=8 counting 1.291x` is also decidable in the same run. **8 of 8 paired comparisons in that run
+favour the counting pass, and 22 of 24 across three runs.**
+
+### THE CAP IS FITTED TO A MEASURED CROSSOVER, NOT GUESSED
+
+Two f64 keys of cardinality c produce about c*c distinct records. The counting pass wins while that
+stays small and loses once it does not - 16 paired comparisons across two runs at the original
+1024-record cap:
+
+```
+  cardinality      2         4          8          32
+  distinct recs    4        16         64        1024
+  counting wins   2/2       2/2        2/2        1/4
+```
+
+e.g. at card=8 the pair read cmp-sort 1.408x/1.518x against counting 0.996x/1.002x, and at card=32
+it inverted to 1.071x/0.994x against 1.141x/1.120x. The cap is now **128 records**, which admits
+everything through ~11 distinct values per key and rejects the 1024-record case. Being wrong costs
+only a fast abort back to the comparison sort - the pass gives up the moment it exceeds the cap -
+and at card=32 both arms now execute the SAME code, which is why they read near-equal (1.303x vs
+1.247x, 1.223x vs 1.161x) and serve as the run's internal control.
+
+### THE CORRECTNESS GATE TRAVELS WITH THE MEASUREMENT, AND WAS TIGHTENED, NOT RELAXED
+
+The developer host cannot import this build at all, so parity cannot be run locally. The harness
+now runs it in the same process, **once per implementation**, before any timing - a single pass
+would have certified only whichever path the ambient environment selected, and the counting pass is
+the one under test.
+
+100 cells each: n at 4095/4096/4097/8192/65536 straddling the path's own size gate, cardinality
+1/2/3/8/100, 2 and 3 keys, the distinct-record cap straddled at 31x31/32x32/33x33, record widths
+across the 16-byte pack limit (i4+f8 = 12, f4+f4 = 8, 3xf8 = 24 which must fall back), signed zero,
+NaN/inf specials, and an all-equal batch whose answer must be the IDENTITY permutation.
+
+`lexsort` has a DOCUMENTED pre-existing defect on multi-key float (-NaN sorts first instead of
+last; a 0.0/-0.0 tie returns in the opposite order), so those two corpora diverge at every size.
+The gate therefore asserts **SET EQUALITY against that documented set** rather than "no
+divergences": a new divergence adds a label and fails, and silently fixing one removes a label and
+also fails. Neither can pass unnoticed, which a count could hide. Verified pre-existing by stashing
+the change under test and re-running: the same 10 labels, the same first-differing indices. **Both
+implementations match the set exactly.**
+
+`cargo test --release -p fnp-python --lib` on the worker: **655 passed, 2 failed - and the identical
+655/2 with this change stashed**, so zero regressions. Remote `cargo clippy --lib --examples` and
+`cargo fmt --check`: clean.
+
+REPORTED, NOT RELAXED - two gates this rail cannot satisfy:
+  * The 2 failing tests are a numpy SURFACE gap, not a regression:
+    `AttributeError('register_dlpack_dtype')` from `dtypes_submodule_matches_numpy`. The worker's
+    numpy is ahead of the crate's mirrored surface.
+  * **The worker's numpy moved mid-session, 2.3.5 -> 2.5.2**, and the failing test set moved with
+    it (a `log(-1.0)` NaN-sign divergence on 2.3.5, these two on 2.5.2). Any ratio from this rail
+    must carry the numpy version printed in its own output.
+  * The out-of-family control is not at unity (np.sum f64 2^20 read 1.086x here, 1.083x-1.464x
+    across runs), and worker loadavg ran 24-122. That is why the paired in-process A/B - both
+    implementations on the same arrays back to back - carries this row rather than any single ratio.
+
+MEMORY: the harness holds one 2^16 f64 key pair plus a 2^20 control array; the bucket table is
+512 slots of u128 plus a 128-record distinct list, i.e. under 10 KB.
+
+RETRY PREDICATE: **do not raise the 128-record cap without re-running the paired A/B** - the
+crossover above is where it was measured, and the 1024 cap is what made the previous attempt lose.
+The remaining loss is card=2 (about 1.7x-2.2x, rarely decidable at these loadavgs): four distinct
+records over 65536 elements is a regime where even one hash probe per element is more than the work
+deserves, and the answer there is a two-pass radix on the packed key, not a finer bucket. The
+`FNP_LEXSORT_COUNTING` variable is a measurement knob, not a tuning surface - it exists so the two
+implementations can be A/B'd in one process, and its default is the shipped route.

@@ -54461,8 +54461,105 @@ fn try_native_lexsort_valuelex(
     // worth trying would need a direct-mapped table (feasible when the packed key range is small,
     // not merely its cardinality), or a cheap non-cryptographic hash, AND would have to fuse the
     // count and scatter passes so the lookup happens once.
-    let mut perm: Vec<u32> = (0..n as u32).collect();
-    perm.par_sort_by(|&i, &j| reck(i).cmp(reck(j)));
+    // COUNTING PASS WITH AN O(1) BUCKET LOOKUP, which is the one shape the earlier reject did not
+    // try. That attempt ranked through a sorted `Vec<u128>` - an O(log d) lookup paid THREE times
+    // per element - and lost at every cardinality. Here the lookup is a single open-addressed
+    // probe, and it happens ONCE per element: the bucket id is stored in `ids` on the way past, so
+    // the count and scatter passes are plain array indexing with no further lookup.
+    //
+    // Records are equal-length unsigned byte strings, so right-padding into a big-endian u128
+    // makes numeric order identical to lexicographic order; ranking the few distinct keys and
+    // scattering in ascending element order reproduces the stable permutation exactly.
+    // CAP FITTED TO THE MEASURED CROSSOVER, not guessed. Two f64 keys of cardinality c produce
+    // about c*c distinct records, and the counting pass wins while that stays small and loses once
+    // it does not - 16 paired in-process comparisons on identical arrays, across two runs:
+    //
+    //   cardinality      2         4          8          32
+    //   distinct recs    4        16         64        1024
+    //   counting wins   2/2       2/2        2/2        1/4
+    //
+    // e.g. at card=8 the pair read cmp-sort 1.408x/1.518x against counting 0.996x/1.002x, while at
+    // card=32 it inverted to 1.071x/0.994x against 1.141x/1.120x. 128 admits everything through
+    // ~11 distinct values per key and rejects the 1024-record case; being wrong costs only a fast
+    // abort back to the comparison sort, since the pass gives up the moment it exceeds the cap.
+    const LEX_BUCKET_MAX: usize = 1 << 7;
+    const LEX_BUCKET_SLOTS: usize = 1 << 9; // power of two, >= 4x the cap: load factor <= 0.25
+    // SELECTABLE AT RUNTIME so both implementations can be timed in ONE process against one
+    // numpy, on one CPU, in one invocation. Comparing them across two rch jobs is not sound - the
+    // fleet cannot be pinned and a job may land on a different worker (this pair landed on hz3 and
+    // hz4), which this campaign has measured as worth ~35% on a ratio. The read is one `getenv`
+    // per call against a multi-millisecond sort, and the DEFAULT is the shipped path, so an
+    // ordinary caller never takes a different route than the one benchmarked. DEFAULT ON: an
+    // ordinary caller sets nothing and gets the measured winner; setting it to "0" forces the
+    // comparison sort, which is how examples/h2h_lexsort.rs A/Bs the two in one process.
+    let counting_enabled =
+        std::env::var_os("FNP_LEXSORT_COUNTING").is_none_or(|v| v != std::ffi::OsStr::new("0"));
+    let mut perm: Vec<u32> = Vec::new();
+    let mut counted = false;
+    if counting_enabled && total_width <= 16 && n > (1 << 12) {
+        let mut slot_key = vec![0u128; LEX_BUCKET_SLOTS];
+        let mut slot_id = vec![u32::MAX; LEX_BUCKET_SLOTS];
+        let mut distinct: Vec<u128> = Vec::with_capacity(LEX_BUCKET_MAX);
+        let mut ids: Vec<u32> = Vec::with_capacity(n);
+        let mut admitted = true;
+        for r in 0..n as u32 {
+            let mut buf = [0u8; 16];
+            buf[..total_width].copy_from_slice(reck(r));
+            let key = u128::from_be_bytes(buf);
+            // Cheap multiply-xor fold; the std hasher is SipHash and would cost more than the
+            // comparison sort this replaces.
+            let folded = ((key as u64) ^ ((key >> 64) as u64)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut idx = (folded >> 40) as usize & (LEX_BUCKET_SLOTS - 1);
+            loop {
+                if slot_id[idx] == u32::MAX {
+                    if distinct.len() >= LEX_BUCKET_MAX {
+                        admitted = false;
+                        break;
+                    }
+                    slot_key[idx] = key;
+                    slot_id[idx] = distinct.len() as u32;
+                    distinct.push(key);
+                    ids.push(slot_id[idx]);
+                    break;
+                }
+                if slot_key[idx] == key {
+                    ids.push(slot_id[idx]);
+                    break;
+                }
+                idx = (idx + 1) & (LEX_BUCKET_SLOTS - 1);
+            }
+            if !admitted {
+                break;
+            }
+        }
+        if admitted {
+            // Rank the handful of distinct records; `d log d` on d <= 1024, not on n.
+            let mut order: Vec<u32> = (0..distinct.len() as u32).collect();
+            order.sort_unstable_by_key(|&i| distinct[i as usize]);
+            let mut rank = vec![0u32; distinct.len()];
+            for (r, &id) in order.iter().enumerate() {
+                rank[id as usize] = r as u32;
+            }
+            let mut pos = vec![0u32; distinct.len() + 1];
+            for &id in &ids {
+                pos[rank[id as usize] as usize + 1] += 1;
+            }
+            for k in 1..pos.len() {
+                pos[k] += pos[k - 1];
+            }
+            perm = vec![0u32; n];
+            for (i, &id) in ids.iter().enumerate() {
+                let slot = &mut pos[rank[id as usize] as usize];
+                perm[*slot as usize] = i as u32;
+                *slot += 1;
+            }
+            counted = true;
+        }
+    }
+    if !counted {
+        perm = (0..n as u32).collect();
+        perm.par_sort_by(|&i, &j| reck(i).cmp(reck(j)));
+    }
     let out = numpy.call_method(intern!(py, "empty"), ((n,), "intp"), None)?;
     let out_buf = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buf.as_mut_slice(py) else {
