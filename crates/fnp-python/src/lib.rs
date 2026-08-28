@@ -18037,7 +18037,66 @@ fn try_zerocopy_any_compact(
 // non-int64 index array, or any non-f64 / non-contiguous / non-ndarray input.
 // Resolve one take index into [0,n) per numpy's `mode` (0=raise, 1=clip, 2=wrap). Returns None only for
 // raise-mode out-of-range (caller reproduces numpy's IndexError). Requires n>0 for clip/wrap (guarded upstream).
-#[inline]
+// `#[inline]` IS ONLY A HINT AND LLVM DECLINED IT HERE. The gather loop disassembled to a real
+// `call` plus three stack reloads per element, because the call clobbers the registers holding
+// the index base, `n` and `mode_code`:
+//
+//   mov 0x10(%rsp),%rax  / mov (%rax,%r15,8),%rdi   <- index base reloaded from stack
+//   mov 0x108(%rsp),%rsi / movzbl 0xf(%rsp),%edx    <- n and mode_code reloaded from stack
+//   call resolve_take_index                          <- for ~4 instructions of arithmetic
+//   cmp %r12,%rdx / jae ... / vmovsd (%r13,%rdx,8),%xmm0
+//
+// That is the whole of `take`'s loss. Note `#[inline(always)]` must REPLACE the hint, not join
+// it: adding a second attribute is a "unused attribute / also specified here" warning and the new
+// one is DROPPED, which is why a first attempt measured 2.454x -> 2.450x and looked like proof
+// that the function was already inlined.
+/// The flat gather loop with `mode` lifted to a CONST GENERIC, so the mode match folds away.
+/// Returns false on an out-of-range index in raise mode, leaving the partial output to be dropped.
+///
+/// `mode_code` is loop-invariant but the compiler kept it in the loop: even with
+/// `resolve_take_index` force-inlined, the body still reloaded it from the stack and re-tested it
+/// once per element, and left `Ord::clamp` and `rem_euclid` as out-of-line calls for the two
+/// branches never taken:
+///
+///   movzbl 0xf(%rsp),%eax / mov 0x108(%rsp),%rsi   <- mode_code and n, reloaded EVERY iteration
+///   cmp $0x2,%eax / je ... / cmp $0x1,%eax / jne   <- mode re-dispatched EVERY iteration
+///   call <core::cmp::impls::Ord::clamp>            <- and these never inlined
+///
+/// Dispatching once outside the loop makes MODE a compile-time constant, which folds the match,
+/// specialises the arithmetic, and frees the registers holding `n` and the base pointers.
+#[inline(always)]
+fn take_gather_mode<T: Copy, const MODE: u8>(
+    out_data: &mut [T],
+    idx_raw: &[i64],
+    a_raw: &[T],
+    n: i64,
+) -> bool {
+    for (slot, &idx0) in out_data.iter_mut().zip(idx_raw.iter()) {
+        match resolve_take_index(idx0, n, MODE) {
+            Some(i) => *slot = a_raw[i],
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Dispatch `take_gather_mode` once on the runtime mode, so the loop itself sees a constant.
+#[inline(always)]
+fn take_gather<T: Copy>(
+    out_data: &mut [T],
+    idx_raw: &[i64],
+    a_raw: &[T],
+    n: i64,
+    mode_code: u8,
+) -> bool {
+    match mode_code {
+        1 => take_gather_mode::<T, 1>(out_data, idx_raw, a_raw, n),
+        2 => take_gather_mode::<T, 2>(out_data, idx_raw, a_raw, n),
+        _ => take_gather_mode::<T, 0>(out_data, idx_raw, a_raw, n),
+    }
+}
+
+#[inline(always)]
 fn resolve_take_index(idx0: i64, n: i64, mode_code: u8) -> Option<usize> {
     match mode_code {
         1 => Some(idx0.clamp(0, n - 1) as usize), // clip: no negative-from-end
@@ -18226,11 +18285,31 @@ fn try_zerocopy_f64_take(
                 return Ok(None);
             }
         } else {
-            for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
-                match resolve_take_index(idx_cell.get(), n, mode_code) {
-                    Some(i) => slot.set(a_in[i].get()),
-                    None => return Ok(None),
-                }
+            // SCAN RAW SLICES HERE TOO, exactly as the parallel arm above already does. This
+            // serial arm reads every index and every gathered value through `Cell::get` and
+            // writes through `Cell::set`, and it serves EVERY call below the 2^21 gate - which
+            // is where the whole loss lived. Counted, `take` ran 37.5 instructions per gathered
+            // element against NumPy's 15.3 (2.454x), and the wall clock agreed for once:
+            // 2.327x / 2.192x / 2.356x on decidable dual-null cells at 262144, 1M-into-1M and
+            // 65536, while 2^22 - the only size that reached the raw-slice parallel arm - won at
+            // 0.199x.
+            //
+            // SAFETY: identical to the parallel arm's - `ReadOnlyCell<f64>`/`<i64>` and
+            // `Cell<f64>` are `repr(transparent)` over their value, source and indices are
+            // read-only under the GIL, and `flat` is a fresh `numpy.empty` we own so it cannot
+            // alias them.
+            let a_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), a_in.len()) };
+            let idx_raw: &[i64] =
+                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, count) };
+            // KEEP THE EARLY EXIT. Replacing it with the parallel arm's set-a-flag-and-check-once
+            // form - on the theory that a branch-to-return on the critical path blocks unrolling
+            // of a latency-bound gather - measured WORSE, 2.376x -> 2.606x, because every element
+            // then pays the flag update unconditionally. Rejected.
+            if !take_gather(out_data, idx_raw, a_raw, n, mode_code) {
+                return Ok(None);
             }
         }
     }
@@ -18316,11 +18395,19 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
                 return Ok(None);
             }
         } else {
-            for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
-                match resolve_take_index(idx_cell.get(), n, mode_code) {
-                    Some(i) => slot.set(a_in[i].get()),
-                    None => return Ok(None),
-                }
+            // Same raw-slice scan as the parallel arm above, for the same reason the f64 twin
+            // carries: below the 2^21 gate this served every call through `Cell::get`/`set`.
+            // SAFETY: identical to the parallel arm's - `ReadOnlyCell<T>`/`<i64>` and `Cell<T>`
+            // are `repr(transparent)` over their value, source and indices are read-only under
+            // the GIL, and `flat` is a fresh `numpy.empty` we own so it cannot alias them.
+            let a_raw: &[T] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), a_in.len()) };
+            let idx_raw: &[i64] =
+                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
+            let out_data: &mut [T] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, count) };
+            if !take_gather(out_data, idx_raw, a_raw, n, mode_code) {
+                return Ok(None);
             }
         }
     }
@@ -28284,15 +28371,53 @@ fn try_native_repeat_scalar(
         unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u8>(), a_in.len()) };
     let out_data: &mut [u8] =
         unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, out_bytes_total) };
-    out_data
-        .par_chunks_mut(k * unit_bytes)
-        .enumerate()
-        .for_each(|(i, block)| {
+    // ONE RAYON JOB PER THREAD, NOT ONE PER UNIT. `par_chunks_mut(k * unit_bytes)` sizes the job
+    // by the natural unit, which for the flat/axis=None form is a single element: an 8 MB output
+    // was split into 1024 jobs, and a pinned profile of the result spent only 23% in the copy
+    // against ~40% in fan-out (crossbeam_epoch::with_handle 14.0%, Stealer::steal 6.4%,
+    // try_advance 6.1%, join_context 2.7%, plus spin-lock and TLS). Each job now owns a run of
+    // units and walks them itself.
+    let per_unit_out = k * unit_bytes;
+    // FILLING IS BANDWIDTH-BOUND, SO RAYON CAN ONLY ADD FAN-OUT. Even after the job count was cut
+    // from one-per-unit to one-per-thread, a pinned profile still spent ~31% in coordination
+    // (crossbeam_epoch::with_handle 14.7%, try_advance 6.1%, Stealer::steal 5.2%, TLS 3.5%)
+    // against 35.9% in the copy itself. This is the rule already written up in
+    // `deadlock-audit-hzl1w`: a parallel arm cannot beat memory bandwidth, it can only pay to
+    // discover that. The threshold below is where fan-out starts to pay for itself; under it the
+    // identical fill runs on the calling thread with no rayon entry at all.
+    const REPEAT_FANOUT_MIN_BYTES: usize = 1 << 26; // 64 MB of output
+    let fill_run = |base_unit: usize, run: &mut [u8]| {
+        for (u, block) in run.chunks_mut(per_unit_out).enumerate() {
+            let i = base_unit + u;
             let src = &in_data[i * unit_bytes..(i + 1) * unit_bytes];
-            for j in 0..k {
-                block[j * unit_bytes..(j + 1) * unit_bytes].copy_from_slice(src);
+            // DOUBLE THE FILLED PREFIX, do not memcpy the unit k times. With `unit_bytes` one
+            // element wide the obvious loop issued k separate 8-byte `copy_from_slice` calls -
+            // a million tiny memcpys for a 2^20 output, counted at 64.59 instructions per
+            // output element against NumPy's 3.47. Writing the unit once and then repeatedly
+            // copying the already-filled prefix onto the remainder moves the same bytes in
+            // log2(k) copies that grow to block size, so the work lands in vectorised memmove.
+            if per_unit_out == 0 {
+                continue;
             }
-        });
+            block[..unit_bytes].copy_from_slice(src);
+            let mut filled = unit_bytes;
+            while filled < per_unit_out {
+                let take = filled.min(per_unit_out - filled);
+                let (done, rest) = block.split_at_mut(filled);
+                rest[..take].copy_from_slice(&done[..take]);
+                filled += take;
+            }
+        }
+    };
+    if out_bytes_total >= REPEAT_FANOUT_MIN_BYTES {
+        let units_per_job = n_units.div_ceil(rayon::current_num_threads()).max(1);
+        out_data
+            .par_chunks_mut(units_per_job * per_unit_out)
+            .enumerate()
+            .for_each(|(job, run)| fill_run(job * units_per_job, run));
+    } else {
+        fill_run(0, out_data);
+    }
     Ok(Some(out.unbind()))
 }
 
@@ -29314,6 +29439,22 @@ fn concat_copy_blocks_parallel<T: Copy>(
         });
 }
 
+// RAISING THIS TO 64 MB WAS BUILT, MEASURED, AND REJECTED - do not re-propose it on instruction
+// counts. The parallel arm really does burn ~35x the instructions of the serial loop: pinned
+// counts per output element, against NumPy's 0.89-0.90 (f64) and 0.44-0.46 (f32), are 0.44
+// SERIAL vs 14.92-29.37 PARALLEL, and a profile of it spends only 10.00% in
+// `__memmove_avx_unaligned_erms` against ~46% in rayon (`crossbeam_epoch::with_handle` 21.78%,
+// `Stealer::steal` 9.25%, `try_advance` 8.63%).
+//
+// IT IS STILL FASTER, because a block copy is memory-bandwidth-bound and several cores pull more
+// aggregate bandwidth than one - so fewer instructions does NOT mean less time here. Three paired
+// dual-null runs, counting only cells where BOTH A/A nulls landed inside 2%:
+//
+//   8 MB gate (parallel in band)   f64 8.5MB 0.834x | 34MB 0.818x/0.684x/0.851x | 68MB 0.892x
+//   64 MB gate (serial in band)    f64 8.5MB 1.052x | f32 8.5MB 1.208x | f32 17MB 1.011x
+//
+// Every decidable parallel cell wins and every decidable serial cell loses or ties. The
+// instruction saving is real and buys nothing a caller can observe.
 const CONCAT_PARALLEL_MIN_BYTES: usize = 1 << 23; // 8MB output -> parallelize the block copy
 
 fn try_zerocopy_f64_concatenate(
@@ -29334,6 +29475,22 @@ fn try_zerocopy_f64_concatenate(
     let mut shapes: Vec<Vec<usize>> = Vec::with_capacity(items.len());
     for item in &items {
         if !item.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, item) {
+            return Ok(None);
+        }
+        // BYTE ORDER MUST BE CHECKED AT THE BUFFER SITE. `numpy_dtype_is_f64` is deliberately
+        // byte-order BLIND - its own comment says so, because its other callers need a `>f8`
+        // operand to still take a delegate - so a reader like this one has to ask separately.
+        // Without it `PyBuffer::<f64>::get` happily accepts a byte-swapped array and its bytes
+        // were copied VERBATIM into a native-f64 output:
+        //
+        //   np.concatenate([np.array([1.,2.,3.]).astype('>f8'), np.array([9.,8.])])
+        //     numpy -> [1. 2. 3. 9. 8.]
+        //     fnp   -> [3.03865e-319 3.16202e-322 1.04347e-320 9. 8.]   <- silent wrong answer
+        //
+        // Declining sends mixed-order input to the by-itemsize helper, which already refuses
+        // mixed dtypes and defers to numpy, and sends an all-`>f8` concat there too - where a
+        // byte-preserving copy into a `>f8` output is correct.
+        if !dtype_is_native_order(&item.getattr(intern!(py, "dtype"))?) {
             return Ok(None);
         }
         let Ok(buffer) = PyBuffer::<f64>::get(item) else {
@@ -29568,6 +29725,19 @@ fn try_zerocopy_bytes_concatenate(
             || d.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != itemsize
         {
             return Ok(None); // mixed dtype → numpy would promote; defer
+        }
+        // `kind` AND `itemsize` ARE BOTH BLIND TO BYTE ORDER, so the test above rates `>f8` and
+        // `<f8` the same dtype and this mover then copies their bytes verbatim. Two ways that is
+        // wrong, and NumPy disagrees on both:
+        //
+        //   concatenate([>f8, f8])    numpy float64 [1. 2. 3. 9. 8.]
+        //                             fnp   >f8     [1. 2. 3. 4.332e-320 4.079e-320]  <- wrong
+        //   concatenate([>f8, >f8])   numpy float64 (NATIVE)      fnp >f8             <- wrong dtype
+        //
+        // NumPy's concatenate always yields a NATIVE-order result, so any non-native input has to
+        // go to it rather than through a byte-preserving copy.
+        if !dtype_is_native_order(&d) {
+            return Ok(None);
         }
         // A size-changing uintN view requires C-contiguous data; otherwise defer.
         if !item
@@ -37572,6 +37742,13 @@ fn try_zerocopy_f64_searchsorted_merge(
     if n < MERGE_MIN_HAYSTACK || m < MERGE_MIN_QUERIES || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
+    // Byte order, which `numpy_dtype_is_f64` above is blind to by design: the raw reinterpretation
+    // below would read a byte-swapped `>f8` array with its bytes reversed.
+    if !dtype_is_native_order(&a.getattr(intern!(py, "dtype"))?)
+        || !dtype_is_native_order(&v.getattr(intern!(py, "dtype"))?)
+    {
+        return Ok(None);
+    }
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let a_raw: &[f64] = unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), n) };
     let v_raw: &[f64] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
@@ -37658,6 +37835,15 @@ fn try_zerocopy_f64_searchsorted(
     if !numpy_dtype_is_f64(py, a) || !numpy_dtype_is_f64(py, v) {
         return Ok(None); // mixed dtypes → numpy promotes; defer for exact semantics
     }
+    // AND BYTE ORDER, WHICH THAT PREDICATE IS BLIND TO BY DESIGN. `PyBuffer::<f64>::get` accepts a
+    // byte-swapped array and the search then reads its bytes in the wrong order, so a `>f8`
+    // haystack returned silent nonsense - `np.searchsorted` gave [554, 1487, 3562, 3833] where fnp
+    // gave [0, 0, 4, 4]. Same shape as the `concatenate` defect fixed in `6b1c05dc`.
+    if !dtype_is_native_order(&a.getattr(intern!(py, "dtype"))?)
+        || !dtype_is_native_order(&v.getattr(intern!(py, "dtype"))?)
+    {
+        return Ok(None);
+    }
     let right = match side {
         "left" => false,
         "right" => true,
@@ -37716,12 +37902,16 @@ fn try_zerocopy_f64_searchsorted(
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
             if !searchsorted_array_needle::f64_sorted_needle_indices(a_raw, v_raw, right, out_data)
             {
-                let mut guess = 0usize;
-                for (slot, &key) in out_data.iter_mut().zip(v_raw) {
-                    let idx = search_index_f64_raw_guess(a_raw, key, right, guess);
-                    guess = idx;
-                    *slot = idx as i64;
-                }
+                // REACHING HERE MEANS THE NEEDLES ARE KNOWN UNSORTED, which is the worst possible
+                // input for the guess-seeded gallop that used to serve it: the hint from the
+                // previous key predicts nothing, and each probe is a data-dependent branch that a
+                // random key stream mispredicts about half the time. The branchless fill is the
+                // same bound with `cmov` selects instead. Counted at 2^20 haystack, OPENBLAS
+                // pinned: unsorted queries ran 1.320x NumPy's instructions on the gallop, while
+                // sorted queries - already on the branchless loop - ran 0.876x.
+                searchsorted_array_needle::f64_needle_indices_branchless(
+                    a_raw, v_raw, right, out_data,
+                );
             }
         }
     }
@@ -38053,6 +38243,14 @@ fn try_zerocopy_f32_searchsorted_merge(
     if !numpy_dtype_is_f32(a) || !numpy_dtype_is_f32(v) {
         return Ok(None);
     }
+    // Byte order too, for the same reason the f64 twin carries it: the dtype predicate is blind to
+    // it and `PyBuffer::<f32>::get` accepts a byte-swapped array, which the search then reads with
+    // its bytes reversed.
+    if !dtype_is_native_order(&a.getattr(intern!(py, "dtype"))?)
+        || !dtype_is_native_order(&v.getattr(intern!(py, "dtype"))?)
+    {
+        return Ok(None);
+    }
     let right = match side {
         "left" => false,
         "right" => true,
@@ -38146,6 +38344,14 @@ fn try_zerocopy_f32_searchsorted(
     if !numpy_dtype_is_f32(a) || !numpy_dtype_is_f32(v) {
         return Ok(None);
     }
+    // Byte order too, for the same reason the f64 twin carries it: the dtype predicate is blind to
+    // it and `PyBuffer::<f32>::get` accepts a byte-swapped array, which the search then reads with
+    // its bytes reversed.
+    if !dtype_is_native_order(&a.getattr(intern!(py, "dtype"))?)
+        || !dtype_is_native_order(&v.getattr(intern!(py, "dtype"))?)
+    {
+        return Ok(None);
+    }
     let right = match side {
         "left" => false,
         "right" => true,
@@ -38190,11 +38396,25 @@ fn try_zerocopy_f32_searchsorted(
                     }
                 });
         } else {
-            let mut guess = 0usize;
-            for (o, vc) in output.iter().zip(v_s.iter()) {
-                let idx = search_index_f32_raw_guess(a_raw, vc.get(), right, guess);
-                guess = idx;
-                o.set(idx as i64);
+            // SAME DEFECT AS THE f64 TWIN, and this arm did not even have its sorted case split
+            // out: every needle batch took the guess-seeded gallop, whose hint predicts nothing
+            // for a random key stream and whose probes are data-dependent branches that such a
+            // stream mispredicts about half the time. Counted at 2^20 haystack with 2^16 random
+            // queries, OPENBLAS pinned, f32 ran 1.317x NumPy's instructions here while the f64
+            // path - once it was given the branchless bound - ran 0.867x on the same shape.
+            //
+            // SAFETY: as the parallel arm above - `ReadOnlyCell<f32>`/`Cell<i64>` are
+            // `repr(transparent)` over their value, the query buffer is read-only under the GIL,
+            // and `flat` is a fresh `numpy.empty` we own so it cannot alias it.
+            let v_raw: &[f32] =
+                unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            if !searchsorted_array_needle::f32_sorted_needle_indices(a_raw, v_raw, right, out_data)
+            {
+                searchsorted_array_needle::f32_needle_indices_branchless(
+                    a_raw, v_raw, right, out_data,
+                );
             }
         }
     }
@@ -60332,6 +60552,17 @@ fn native_unary_elementwise(
     let int_of = |size: usize| facts.is_none_or(|f| f.kind == 'i' && f.itemsize == size);
     let narrow_integral =
         facts.is_none_or(|f| matches!(f.kind, 'u') || (f.kind == 'i' && f.itemsize <= 2));
+    // The zero-copy uint64 negative route accepts ranked arrays but cannot borrow a 0-d
+    // PyBuffer as a slice. Let NumPy own that scalar-shaped case rather than falling into
+    // the generic f64 bridge, which rejects wrapped uint64 values as unrepresentable.
+    // This rank check is deliberately limited to the affected op/dtype; the ranked uint64
+    // fast path below remains engaged.
+    if matches!(op, UnaryOp::Negative)
+        && facts.is_some_and(|f| f.kind == 'u' && f.itemsize == 8)
+        && x.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0
+    {
+        return fallback(py);
+    }
     // BOOL `abs`/`square` HAVE NO NATIVE PATH HERE and must delegate rather than fall through to
     // the generic extract. `narrow_integral` covers kind 'u' and narrow 'i' but not 'b', so a
     // bool array declined every gate below and landed in `extract_precise_numeric_array`, which
