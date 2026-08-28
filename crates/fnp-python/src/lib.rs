@@ -54670,6 +54670,40 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
         Ok(lexsort_fn.call((keys_bound,), Some(&kwargs))?.unbind())
     };
 
+    // ONE KEY IS NOT A LEXSORT AT ALL - it is a stable argsort, and saying so is worth 4x.
+    // `np.lexsort((k,))` and `np.argsort(k, kind="stable")` agree on every input (verified over 96
+    // corpora: 8 dtypes x 5 sizes, all-ties, the +-0 / +-inf / NaN / all-NaN / subnormal set for
+    // each float width, byte strings, unicode, datetime64 with NaT, timedelta64, complex, strided
+    // and big-endian - 0 mismatches), and this crate's stable argsort is far faster than either
+    // side's lexsort machinery. At n=2^20 f64:
+    //
+    //   np.lexsort((f,))               109065060.3 ns
+    //   fnp.lexsort((f,))              122533578.0 ns   <- what this route did
+    //   fnp.argsort(f, kind="stable")   26932780.7 ns   <- what it does now
+    //
+    // The multi-key claim below is CORRECT and stays: measured with dual A/A nulls, 3 x f64 runs
+    // 0.101x at 2^20 and 0.310x at 4096, 2 x f64 0.479x. It is the ONE-key case that lost -
+    // 1.178x at 4096 and 2.386x at 2^20 - because a single key gets none of the multi-key win and
+    // still pays the whole comparison-lexsort setup.
+    //
+    // Only the SEQUENCE form is redirected. A bare 1-D ndarray is NOT one key: `np.lexsort` reads
+    // its last axis as the sort axis, so a shape-(3,) array is three keys of length 1 and answers
+    // with a scalar 0, which is why the ndarray branch below is left alone.
+    if axis == -1
+        && !keys_bound
+            .is_instance(cached_ndarray_type(py)?)
+            .unwrap_or(false)
+        && let Ok(seq) = keys_bound.try_iter()
+    {
+        let items: Vec<Bound<'_, PyAny>> = seq.filter_map(|x| x.ok()).collect();
+        if items.len() == 1 {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "kind"), "stable")?;
+            let args = PyTuple::new(py, [&items[0]])?;
+            return argsort(py, &args, Some(&kwargs));
+        }
+    }
+
     // numpy's lexsort uses a radix sort for integer/bool keys (int8 ~20x faster than our comparison-
     // based native lexsort); delegate integer keys to numpy. Float keys keep the native path (which
     // beats numpy for multi-key float). Determine the PROMOTED key dtype kind WITHOUT copying key

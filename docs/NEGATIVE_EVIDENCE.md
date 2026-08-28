@@ -64761,3 +64761,116 @@ it is NOT free for a tiny needle batch against a huge haystack, and the 1024-que
 (1.170x/1.028x, both VOID here) are where that would show - re-measure those on a quiet host
 before tuning. `transform_field` (19 in-loop call sites), `mul_build` (10) and `fmt_float` (2) came
 out of the same hint audit and were never priced; they are the remaining candidates from it.
+
+## 2026-08-27 - WIN (SHIP): a ONE-key `lexsort` is a stable argsort, and saying so is worth 4.3x - 2.386x -> 0.232x; the multi-key premise it sits next to is CORRECT and my instruction-count reading of it was WRONG (`deadlock-audit-sfgg3` family)
+
+`TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1,
+interleaved ABBAABBA with a DUAL A/A null per cell. **Wall cells below were taken at loadavg 6.9.**
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)  bench_elf_sha256=49817d4271ae0df84fa49f31b6570e6bedcc388aca7245135643163d50b9e5bd
+executing elf sha256 (AFTER)   bench_elf_sha256=df642d357731bbac7820d66eb7809ea0cc34d539ab36e27e28082d68c13f1b87
+```
+
+### THE INSTRUCTION COUNT SENT ME AT THE WRONG TARGET, AND SAID SO LOUDLY
+
+Continuing the `#[inline]`-hint audit, `transform_field` (19 in-loop call sites) turned out to
+serve seven structured-dtype ops. Pricing that family found structured `sort` at **0.155x** (a 6.4x
+win), `argsort` and `unique` at 1.000x (delegating), and `lexsort` at 2.393x. Isolating lexsort by
+counted instructions then pointed hard at FLOAT keys:
+
+```
+  int32 + int32 contiguous    1.090x        float64 alone            3.265x
+  int32 + float64 contiguous 11.356x        3 keys                   6.566x
+```
+
+**Every one of those is misleading.** The same cells on the clock, dual-null, quiet host:
+
+```
+  3 x f64  n=2^20   0.101x       2 x f64  n=4096   0.479x
+  3 x f64  n=4096   0.310x       i4+f64   n=4096   0.615x
+```
+
+fnp executes 11.4x the instructions and finishes in a sixth of the time, because numpy runs K
+sequential radix passes over memory while fnp runs one parallel comparison sort. **The source
+comment's claim - "float keys keep the native path (which beats numpy for multi-key float)" - is
+CORRECT, and the counted ranking that appeared to refute it was worthless here.** Second time this
+session instructions and time have pointed opposite ways (see the `concatenate` row); both times
+the op was memory-bound.
+
+### WHAT ACTUALLY LOST WAS THE ONE-KEY CASE
+
+Multi-key wins; a single key gets none of that win and still pays the whole comparison-lexsort
+setup. And a one-key lexsort is not a lexsort at all - it is a stable argsort:
+
+```
+  np.lexsort((f,))               109065060.3 ns
+  fnp.lexsort((f,))              122533578.0 ns   <- what this route did
+  fnp.argsort(f, kind="stable")   26932780.7 ns   <- what it does now
+  np.argsort(f, kind="stable")   109628378.0 ns
+```
+
+COUNTED_MECHANISM: at n=2^20 f64 the one-key route ran fnp's comparison lexsort at 122533578.0 ns
+against the identical answer from this crate's stable argsort at 26932780.7 ns - a 4.55x
+self-speedup - and against NumPy's own 109065060.3 ns lexsort, 4.05x. The redirect is exact:
+`np.lexsort((k,))` and `np.argsort(k, kind="stable")` agree on 96 corpora (8 dtypes x 5 sizes,
+all-ties, the +-0/+-inf/NaN/all-NaN/subnormal set per float width, byte strings, unicode,
+datetime64 with NaT, timedelta64, complex, strided, big-endian) with **0 mismatches**.
+
+Only the SEQUENCE form is redirected. A bare 1-D ndarray is NOT one key - `np.lexsort` reads its
+last axis as the sort axis, so a shape-(3,) array is three keys of length 1 and answers with a
+scalar `0`.
+
+### THE MEASUREMENT (paired, loadavg 6.9)
+
+```
+  keys           n        BEFORE            AFTER
+  1 x f64     4096    1.175x (1.000/1.005)  1.036x (0.999/1.001)
+  1 x f64    65536    1.035x (0.997/1.012)  1.003x (0.999/1.003)
+  1 x f64  1048576    1.405x VOID           0.232x (0.999/1.010)
+  3 x f64     4096          -               0.298x (0.998/1.017)   <- multi-key preserved
+  3 x f64    65536          -               0.418x (0.997/0.991)   <- multi-key preserved
+```
+
+An earlier quiet run put the 2^20 one-key cell at **2.386x** decidable (0.992/1.010); the BEFORE
+column above caught it VOID at 1.405x. Either reading, the AFTER cell is 0.232x and decidable.
+
+PARITY: 217 cells - 8 dtypes x 6 sizes x {1-key tuple, 1-key list, all-ties, 2-key} plus the
+float specials set and its tiling and an all-NaN array for each float width, byte strings,
+unicode, datetime64 with NaT, timedelta64, strided, big-endian, a 2-D element inside a 1-tuple,
+the BARE 1-D and 2-D ndarray forms, `axis=-1` and `axis=0`, an empty tuple, a Python list of
+lists, and mismatched key lengths. **Divergences 12 -> 6: the change FIXED six pre-existing
+wrong-answer cells and introduced none.** `cargo test -p fnp-python --lib --release`: 657 passed,
+0 failed.
+
+The six it fixed are the one-key float-specials cells, which now go through the verified-identical
+stable argsort instead of the u64-key transform described next.
+
+PRE-EXISTING, NOT FIXED, PRECISELY CHARACTERISED: the MULTI-key float path mis-orders NaN and
+breaks stability on signed zero.
+
+```
+  key   [0.0, -0.0, inf, -inf, nan, -nan, 1.0, -1.0, 5e-324]
+  numpy [-inf, -1.0,  0.0, -0.0, 5e-324, 1.0, inf, nan, nan]
+  fnp   [ nan, -inf, -1.0, -0.0,    0.0, 5e-324, 1.0, inf, nan]
+```
+
+**-NaN sorts FIRST instead of last, and the `0.0`/`-0.0` pair comes back in the opposite order
+from the input** - so the sort is not stable across a signed-zero tie. Both are the signature of
+an order-preserving u64 bit transform: flipping the bits of negatives drops `-NaN` below every
+finite value and separates `-0.0` from `+0.0`, which compare EQUAL. 6 cells, f16/f32/f64. Left
+alone deliberately: that transform is what makes the multi-key path win 0.101x-0.479x, and a fix
+has to preserve that.
+
+MEMORY: largest key 2^20 f64 = 8 MB; the wall sweep holds at most 3 such keys.
+
+RETRY PREDICATE: **do not re-attack multi-key float lexsort on instruction counts - it is 11.356x
+by that measure and 0.101x-0.479x on the clock, and this row exists partly to record that.** Two
+things are open. First, the NaN/signed-zero defect above; the fix is in the u64 key transform, and
+its acceptance test is the 9-element special array plus a stability check that a `0.0`/`-0.0` tie
+comes back in input order. Second, LOW-CARDINALITY float keys are a standing loss the redirect
+does not touch: 2 x f64 drawn from 8 distinct values measured **3.897x** at n=65536 (nulls
+0.997/0.996) and 1.662x at 4096, against 0.519x at 2^20 - the comparison sort degrades where ties
+dominate and numpy's radix does not.
