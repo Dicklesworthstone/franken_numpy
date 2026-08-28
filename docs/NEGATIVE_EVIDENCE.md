@@ -65414,3 +65414,70 @@ correction above exists because I trusted one. For card=2, still 1.57x-1.97x and
 firmly established as losing, the open design is unchanged: four distinct records over 65536
 elements is a regime where even one hash probe per element is more than the work deserves, and the
 answer is a two-pass radix on the packed key.
+
+## 2026-08-28 - REJECT: force-inlining `transform_field` makes lexsort 20-30% SLOWER - the same `#[inline]` -> `#[inline(always)]` fix that WON on `take` loses here, and the difference is what the body contains (`deadlock-audit-sfgg3`)
+
+`TanBridge`. Worker-side h2h harness; both arms and both fnp implementations in one process.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE - hint left alone)    bench_elf_sha256=f64d8b40f83ebb83b221b2dfca9ed117bc507ad9e353f74314de75fee2832592
+executing elf sha256 (REJECTED - inline(always))   bench_elf_sha256=199c7f72ed59625655bca6122f93a275015fc7f6cdec4bd6abcfb70867590817
+```
+
+### THE HYPOTHESIS HAD A PRECEDENT IN THIS SAME LEDGER
+
+The `#[inline]`-hint audit found 19 functions that still carry an out-of-line body, 5 of them
+called from inside a loop. `transform_field` is the one on this subject's hot path: it is called
+once per (element x key) while building the lexsort record array, so a 2-key 2^16 lexsort makes
+131072 real calls. Two rows ago the identical fix - REPLACING the `#[inline]` hint with
+`#[inline(always)]`, since adding a second attribute is silently dropped - took
+`resolve_take_index` off `take`'s gather loop for 2.454x -> 1.685x.
+
+**Here it is a 20-30% regression.**
+
+COUNTED_MECHANISM: 12 matched-seed paired comparisons of fnp's own wall time (same arrays, same
+harness, two seeds x four cardinalities), after/before: 1.24 1.41 1.16 1.50 1.16 1.25 / 1.20 1.13
+1.86 1.32 1.25 1.01 - **12 of 12 slower, median 1.244x, worst 1.86x**. NumPy's arm moved under 2%
+at matched seeds (e.g. card=4 seed 9001: 4474178.5 ns against 4415828.0 ns before), and the
+out-of-family control does not explain it either (1.002x and 1.207x after, 1.156x and 1.111x
+before). The degradation is far outside the 13% paired noise floor this rail was calibrated at.
+
+```
+  counting arm, fnp ms, matched seeds     BEFORE          REJECTED
+  card=2  seed 4242                    6.51 / 6.06     8.05 / 8.53
+  card=4  seed 4242                    7.03 / 6.58     8.17 / 9.90
+  card=8  seed 4242                    8.73 / 8.29    10.17 / 10.37
+  card=2  seed 9001                    5.03 / 5.37     6.05 / 6.05
+  card=4  seed 9001                    5.44 / 5.89    10.13 / 7.77
+  card=8  seed 9001                    7.92 / 7.96     9.91 / 8.00
+```
+
+### WHY THE SAME FIX WINS ON ONE HELPER AND LOSES ON ANOTHER
+
+`resolve_take_index` is four instructions of arithmetic - a negative-index wrap and a bounds test -
+and forcing it inline removed a call plus three stack reloads per element.
+
+`transform_field` is a **four-arm `match` on the field width whose arms are four differently-shaped
+`copy_from_slice` calls**. Duplicating that into each of its 19 in-loop call sites bloats every one
+of those loops; kept out of line it is one hot copy that stays in icache and whose branch predictor
+state is shared. **Inline the tiny arithmetic helper, not the multi-arm dispatcher** - "it still has
+an out-of-line body and it is called in a loop" is a reason to MEASURE, never a reason to force.
+
+The hint is left exactly as it was and the reason is now recorded beside it, so the next reader of
+that audit list does not re-run this experiment.
+
+PARITY: the harness gate ran twice per invocation, once per implementation, and both matched the
+documented pre-existing divergence set exactly in both runs. `cargo test --release -p fnp-python
+--lib` on the worker: 655 passed, 2 failed - the established baseline, unchanged. Remote
+`clippy --lib --examples` and `fmt --check`: clean.
+
+MEMORY: harness holds one 2^16 f64 key pair plus a 2^20 control array.
+
+RETRY PREDICATE: **do not force-inline `transform_field`, and do not force any of the other
+multi-arm helpers on that audit list without measuring first.** The list's remaining unpriced
+entries are `mul_build` (10 in-loop sites, string multiply) and `fmt_float` (2, `%`-formatting of
+floats); both are dispatchers rather than arithmetic, so the prior here is that forcing them loses
+too. The lexsort card=2 cell is untouched by this and remains the standing loss at 1.57x-1.97x with
+its own named design (a two-pass radix on the packed key).

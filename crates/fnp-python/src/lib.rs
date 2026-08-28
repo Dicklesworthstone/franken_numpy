@@ -103134,6 +103134,17 @@ fn sortable_u64(u: u64, kind: u8) -> u64 {
         _ => u,
     }
 }
+// LEAVE THIS AS A HINT. LLVM declines to inline it and that is the RIGHT call: forcing it with
+// `#[inline(always)]` was built and measured and made lexsort 20-30% SLOWER at every cardinality,
+// on two runs with matched seeds (card=4 counting 5.44/5.89 ms -> 10.13/7.77 ms; card=2 5.03/5.37
+// -> 6.05/6.05), while NumPy's own times moved under 1% and the out-of-family control did not
+// explain it.
+//
+// The contrast with `resolve_take_index` - where replacing the same hint won 2.454x -> 1.685x - is
+// the whole lesson: THAT was four instructions of arithmetic, this is a four-arm `match` on the
+// field width whose arms are four differently-shaped `copy_from_slice` calls. Duplicating it into
+// each of the 19 in-loop call sites bloats every one of those loops; kept out of line it stays one
+// hot copy in icache. Inline the tiny arithmetic helper, not the multi-arm dispatcher.
 #[inline]
 fn transform_field(src: &[u8], dst: &mut [u8], kind: u8, w: usize) {
     match w {
