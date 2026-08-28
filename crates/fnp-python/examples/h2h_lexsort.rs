@@ -162,6 +162,28 @@ for card in (2, 4, 8, 32):
         del k1, k2, g
     summary[card] = good
 
+# WHERE DOES THE TIME GO? The counting path materialises an n x total_width byte record array
+# before it sorts anything. If that traffic dominates, fnp's own time should scale with the RECORD
+# WIDTH; if the sort dominates, it should not. Two f64 keys give 16-byte records, two f32 keys give
+# 8-byte records, and both are admitted by the counting path - so this separates the two without
+# touching the library. numpy times are printed alongside only as a sanity check; the discriminator
+# is fnp's OWN time, which removes the incumbent's variance.
+out("\n-- phase discriminator: fnp's own time vs RECORD WIDTH, card=2, n=2^16 --")
+out("%-26s%6s%16s%16s" % ("keys", "bytes", "numpy_ns", "fnp_ns"))
+for label, width, mk in (
+        ("2 x f64", 16, lambda m: rng.integers(0, 2, m).astype(np.float64)),
+        ("2 x f32",  8, lambda m: rng.integers(0, 2, m).astype(np.float32)),
+        ("2 x i32",  8, lambda m: rng.integers(0, 2, m).astype(np.int32)),
+        ("2 x i16",  4, lambda m: rng.integers(0, 2, m).astype(np.int16)),
+):
+    kk = (mk(N), mk(N))
+    gg = {"np": np, "fnp": fnp, "k": kk}
+    os.environ["FNP_LEXSORT_COUNTING"] = "1"
+    tn, tf = inter("np.lexsort(k)", "fnp.lexsort(k)", gg, 45)
+    out("%-26s%6d%16.1f%16.1f" % (label, width, tn, tf))
+    del kk, gg
+os.environ.pop("FNP_LEXSORT_COUNTING", None)
+
 # An out-of-family control: if this is off, the whole run is suspect regardless of the nulls.
 a = rng.standard_normal(1 << 20)
 g = {"np": np, "fnp": fnp, "a": a}

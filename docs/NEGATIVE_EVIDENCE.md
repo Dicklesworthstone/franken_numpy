@@ -65481,3 +65481,82 @@ entries are `mul_build` (10 in-loop sites, string multiply) and `fmt_float` (2, 
 floats); both are dispatchers rather than arithmetic, so the prior here is that forcing them loses
 too. The lexsort card=2 cell is untouched by this and remains the standing loss at 1.57x-1.97x with
 its own named design (a two-pass radix on the packed key).
+
+## 2026-08-28 - REJECT x2, and the standing lexsort loss is now bounded from BOTH sides: neither the per-element dispatch nor the record traffic is where the time goes (`deadlock-audit-sfgg3`)
+
+`TanBridge`. Worker-side h2h harness; both arms and both fnp implementations in one process.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BASELINE element-major)   bench_elf_sha256=f64d8b40f83ebb83b221b2dfca9ed117bc507ad9e353f74314de75fee2832592
+executing elf sha256 (REJECTED field-major)     bench_elf_sha256=ba4991ac2afff1589527803d5a092bd9b806fc5407193256913f9a34555ff114
+```
+
+### FIRST, A DISCRIMINATOR INSTEAD OF A GUESS
+
+Three rejects this week came from building before locating the cost, so this turn started with a
+measurement that needed no library change. The counting route materialises an `n x total_width`
+byte record array before sorting; if that traffic dominates, fnp's own time should scale with the
+RECORD WIDTH. Two f64 keys give 16-byte records and two f32 keys give 8-byte records, and both are
+admitted by the counting path:
+
+```
+  keys        record bytes      numpy_ns        fnp_ns
+  2 x f64              16      3196873.4     5530086.4
+  2 x f32               8      3277974.4     5229624.4      <- half the bytes, 5% less time
+  2 x i32               8      2170945.6     2254717.8      <- 1.04x: integer keys DELEGATE
+  2 x i16               4       665878.2      713423.0      <- 1.07x: same, not this path
+```
+
+**Halving the record width moved fnp 5%.** Record traffic is not the bottleneck. (The integer rows
+are a reminder, not a result: integer keys never enter this route - they delegate to NumPy's radix -
+which is exactly why they sit at parity.)
+
+### THEN THE OTHER SIDE: HOISTING THE DISPATCH LOSES TOO
+
+`transform_field` runs a 4-way `match` on the field width per (element x key) - 131072 dynamic
+dispatches for a 2-key 2^16 lexsort. Rewriting the build FIELD-MAJOR, so each field gets one
+monomorphic pass with the width matched once, is the same shape that took `take` from 1.685x to
+1.307x by lifting its mode dispatch out of the loop.
+
+COUNTED_MECHANISM: fnp's own time on the phase discriminator (identical input, 2 x f64, card=2,
+n=2^16) went 5530086.4 ns element-major to 6135272.9 ns and 6782024.7 ns field-major across two
+runs, and card=4 counting went 7030000 ns / 6580000 ns to 9030000 ns / 8860000 ns on the run whose
+out-of-family control was sane at 1.042x. It loses because it walks `records` once PER KEY instead
+of once in total - 2 strided passes over 1048576 bytes rather than 1 - and those cost more than the
+131072 dynamic dispatches they remove. Both rejected changes are
+reverted; the surviving diff is comment-only.
+
+**One run was DISCARDED and is not counted above**: its out-of-family control read 0.364x, with
+NumPy's own `np.sum` at 734954.2 ns against its usual ~230000 ns - a host disturbance, not a
+result. Its card=4 numbers (6.10/7.75 ms) would have flattered the rejected build, which is
+precisely why the control exists.
+
+### WHAT THIS BOUNDS
+
+The two rejects come at the standing loss from opposite directions and both fail, which is more
+informative than either alone: **the record build's per-element dispatch is not the cost, and the
+record array's traffic is not the cost.** Whatever is left - the pack-and-probe loop, the scatter's
+random writes, the output allocation, or the Python-level entry - has not been separated yet, and
+the next attempt on this cell should isolate those before touching code. The `transform_field`
+force-inline rejected in the row above is the third failed attack on the same build, so the record
+build as a whole now looks like the wrong target.
+
+PARITY: the harness gate ran twice per invocation, once per implementation, and both matched the
+documented pre-existing divergence set exactly in every run. `cargo test --release -p fnp-python
+--lib` on the worker: 655 passed, 2 failed - the established baseline, unchanged. Remote
+`clippy --lib --examples` and `fmt --check`: clean.
+
+KEPT: the phase discriminator is now a permanent block in `examples/h2h_lexsort.rs`. It costs one
+extra timed cell per run and it is what turned "the record array must be the problem" from a
+plausible story into a measured 5%.
+
+MEMORY: harness holds one 2^16 f64 key pair plus a 2^20 control array.
+
+RETRY PREDICATE: **do not re-attack the record build.** Three attempts now - force-inlining
+`transform_field`, folding the count into pass 1, and the field-major rewrite - have produced one
+20-30% regression, one below-floor no-op, and one 11-23% regression. Before any further code on
+this cell, separate the remaining phases: time `np.lexsort` against a fnp call that stops after the
+record build, and against one that stops after the probe loop. Until that exists, card=2 at
+1.76x-1.93x stays a standing loss with no attackable mechanism identified.

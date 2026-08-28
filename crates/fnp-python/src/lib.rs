@@ -54403,6 +54403,21 @@ fn try_native_lexsort_valuelex(
         off += w;
     }
     let mut records: Vec<u8> = vec![0; n * total_width];
+    // ELEMENT-MAJOR, AND A FIELD-MAJOR REWRITE IS A MEASURED REJECT. `transform_field` runs a
+    // 4-way `match` on the field width per (element x key) - 131072 dynamic dispatches for a 2-key
+    // 2^16 lexsort - so hoisting that match outside the element loop and giving each field its own
+    // monomorphic pass looks like the same win that took `take` from 1.685x to 1.307x.
+    //
+    // It loses, because it walks `records` once PER KEY instead of once in total, and those extra
+    // strided passes cost more than the dispatch they remove. fnp's own time on the phase
+    // discriminator (2 x f64, card=2, n=2^16, identical input) went 5530086.4 ns element-major to
+    // 6135272.9 and 6782024.7 ns field-major across two runs, and card=4 counting went 7.03/6.58 ms
+    // to 9.03/8.86 ms on the run whose out-of-family control was sane at 1.042x.
+    //
+    // The width experiment that motivated it is still worth knowing and is what bounds the prize
+    // here: halving the record width (2 x f64 -> 2 x f32, 16 bytes to 8) moved fnp only 5530086.4
+    // -> 5229624.4 ns, about 5%, so record TRAFFIC is not the bottleneck either. Neither the
+    // dispatch nor the traffic is where this route's time goes.
     records
         .par_chunks_exact_mut(total_width)
         .enumerate()
