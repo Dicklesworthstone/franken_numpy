@@ -54443,6 +54443,24 @@ fn try_native_lexsort_valuelex(
     // 1.815-1.867x, card=32 0.972x -> 1.236x, and card=65536 0.507x -> 0.628x). Twenty bytes per
     // element of extra buffer, a build pass, an extract pass, and a stable `par_sort_by_key` that
     // clones the tuple key cost more than the comparison it saves.
+    // A BUCKET/COUNTING PASS WAS BUILT FOR THE LOW-CARDINALITY CASE AND IS A MEASURED REJECT.
+    // The reasoning was sound - with 4 to 16 distinct records over 65536 elements a comparison
+    // sort spends O(n log n) rediscovering that most elements are equal, and a counting pass is
+    // O(n) and stable for free - but the IMPLEMENTATION cost more than the sort it replaced, at
+    // every cardinality (paired, same seed, comparable load):
+    //
+    //   distinct values      2         4        32
+    //   comparison sort   2.321x    1.660x    1.098x
+    //   counting pass     3.814x    2.528x    2.725x
+    //
+    // WHY, so the same shape is not re-proposed: ranking through a SORTED `Vec<u128>` makes the
+    // bucket lookup O(log d), and it was paid THREE times per element - once to build the distinct
+    // set, once to accumulate counts, once to scatter - about 30 comparisons per element against
+    // the sort's ~log2(n) = 16 whole-record ones, plus a 16-byte-per-element key buffer and a
+    // random-write scatter. **A counting sort only pays when the bucket lookup is O(1).** A version
+    // worth trying would need a direct-mapped table (feasible when the packed key range is small,
+    // not merely its cardinality), or a cheap non-cryptographic hash, AND would have to fuse the
+    // count and scatter passes so the lookup happens once.
     let mut perm: Vec<u32> = (0..n as u32).collect();
     perm.par_sort_by(|&i, &j| reck(i).cmp(reck(j)));
     let out = numpy.call_method(intern!(py, "empty"), ((n,), "intp"), None)?;

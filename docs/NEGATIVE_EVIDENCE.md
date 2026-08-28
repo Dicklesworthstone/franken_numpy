@@ -64968,3 +64968,69 @@ over 65536 elements the right structure is a counting pass over the distinct rec
 comparison sort of any kind, and that is the next thing to try. The measurement protocol matters
 more than usual here - one draw of one corpus read 1.001x and 3.897x for the same shape - so any
 attempt needs a fresh draw per repetition and should be judged on the SIGN across at least 8.
+
+## 2026-08-27 - REJECT: a bucket/counting pass for low-cardinality lexsort is 1.6x-2.5x WORSE than the comparison sort it replaces - a counting sort only pays when the bucket lookup is O(1), and mine was O(log d) paid THREE times per element (`deadlock-audit-sfgg3` family)
+
+`TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1,
+interleaved ABBAABBA with a DUAL A/A null per cell, fresh key draw per repetition.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (SHIPPED, comparison sort)  bench_elf_sha256=29f651e610502b3e89d2d6da91e381e29cc740c563748020250347a9b64c7e15
+executing elf sha256 (REJECTED counting pass)    bench_elf_sha256=21550d5eba66533d7b3b58f7d2f07859a4338ba477ef719bd1a8d828e7070bfa
+executing elf sha256 (AFTER - comment only)      bench_elf_sha256=e72a4fec921d3f195468c38eeb5eacee5a562f58a2039652fadec873d89fcf48
+```
+
+`br ready` could not be consulted - the beads DB has been returning "database disk image is
+malformed: failed to parse B-tree page 1980" all session - so this took the worst measured
+vs-incumbent cell this campaign currently holds, which the previous row registered as its own
+retry predicate: 2 x f64 lexsort keys with <= 4 distinct values, ~2.0x.
+
+### THE REASONING WAS SOUND AND THE IMPLEMENTATION WAS NOT
+
+With 4 to 16 distinct records over 65536 elements a comparison sort spends O(n log n)
+rediscovering that most elements are equal; a counting pass is O(n) and, scattering in ascending
+element order, stable for free. Built exactly that: pack each record into a big-endian u128 (equal
+length unsigned byte strings, so numeric order IS lexicographic order), collect the distinct keys
+into a sorted `Vec<u128>` with binary-search insert, abandon the attempt above a 1024-record cap,
+then count and scatter.
+
+**It lost at every cardinality.** Paired, same seed, comparable load (18.6 vs 27.6):
+
+```
+  distinct values      2         4        32
+  comparison sort   2.321x    1.660x    1.098x
+  counting pass     3.814x    2.528x    2.725x
+```
+
+COUNTED_MECHANISM: ranking through a sorted `Vec<u128>` makes the bucket lookup O(log d), and it
+was paid THREE times per element - once to build the distinct set, once to accumulate counts, once
+to scatter. At the 1024-record cap that is 3 x 10 = 30 u128 comparisons per element against the
+comparison sort's ~log2(65536) = 16 whole-record ones, plus a 16-byte-per-element key buffer
+(1048576 extra bytes at n=65536) and a random-write scatter. The asymptotic argument was about the
+wrong constant.
+
+**A counting sort only pays when the bucket lookup is O(1).** Reverted; the change that survives is
+comment-only.
+
+PARITY (run before reverting, so the rejected build is the one certified): a new 114-cell probe
+aimed at the window the counting path actually engages in - n at 4095/4096/4097 to straddle its own
+size gate, 8192/65536/2^18, cardinality 1/2/3/8/100, 2 and 3 keys, plus record widths straddling
+the u128 pack limit (i4+f8 = 12 bytes, f4+f4 = 8, 3 x f8 = 24 which must fall back), the
+1024-distinct cap straddled by 31x31 / 32x32 / 33x33 record products, signed zero inside a
+low-cardinality batch, and an all-equal batch whose answer must be the IDENTITY permutation (a
+direct stability assertion). **6 divergences, IDENTICAL on the pre-change build - 0 introduced**,
+and the all-equal identity check passed. The 6 are the pre-existing multi-key signed-zero defect
+already described two rows above; they appear at n=4095, below this path's own gate, which is what
+proves they are not its doing. `cargo test -p fnp-python --lib --release`: 657 passed, 0 failed.
+
+MEMORY: largest parity cell 3 keys x 2^18 f64 = 6 MB; the replication harness holds one 2^16 pair.
+
+RETRY PREDICATE: **do not rebuild this shape.** A version worth trying needs the bucket lookup to
+be genuinely O(1) - a direct-mapped table, which is feasible when the packed key RANGE is small
+rather than merely its cardinality (low-cardinality float keys drawn from small integers do have a
+small range, so this is not hopeless) - and it must fuse the count and scatter passes so the lookup
+happens once rather than three times. Judge it the same way: fresh draw per repetition, sign across
+at least 8 draws, and a BEFORE arm re-run at the same loadavg, because the first AFTER reading here
+was taken at load 27.6 against a BEFORE at 7.2 and that alone would have overstated the loss.
