@@ -65034,3 +65034,74 @@ small range, so this is not hopeless) - and it must fuse the count and scatter p
 happens once rather than three times. Judge it the same way: fresh draw per repetition, sign across
 at least 8 draws, and a BEFORE arm re-run at the same loadavg, because the first AFTER reading here
 was taken at load 27.6 against a BEFORE at 7.2 and that alone would have overstated the loss.
+
+## 2026-08-28 - REJECT (measurement route, not a lever): under "build via rch, never local" this project cannot produce a DECIDABLE in-process measurement - four verified blockers, and the one cell that survived confirms the standing lexsort loss at 2.727x (`deadlock-audit-sfgg3` family)
+
+`TanBridge`. No code change. This row exists so the next agent does not re-walk the same wall.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (rch remote build, hz3)  bench_elf_sha256=ab41b810b41d2a73142b8f7957ee70698e61848e41c4bb37012d613db207627d
+```
+
+That sha was taken TWICE - `sha256sum` on the retrieved artifact locally, and self-reported from
+inside the measuring process on the worker - and they match, so the numbers below are against the
+binary named here.
+
+### THE FOUR BLOCKERS, EACH VERIFIED RATHER THAN ASSUMED
+
+1. **The remote build links a different libpython.** Workers run CPython 3.14.4; this host's numpy
+   (2.4.3) is installed only for 3.13.7. Importing the artifact here fails with
+   `ImportError: libpython3.14.so.1.0: cannot open shared object file`. A local 3.14 exists
+   (uv-managed, `libpython3.14.so.1.0` present) but has **no numpy**, so it cannot host an
+   incumbent comparison.
+2. **`PYO3_PYTHON` is not forwarded to the worker.** Rebuilding with
+   `PYO3_PYTHON=/usr/bin/python3.13` produced an artifact still linking `libpython3.14.so.1.0` -
+   the same shape as the already-recorded finding that RUSTFLAGS does not cross the shim.
+3. **glibc is NEWER on the workers than on this host, so the artifact cannot load here at all.**
+   Local `ldd` is 2.42 and the local `libm.so.6` exposes up to `GLIBC_2.42`; the artifact requires
+   `GLIBC_2.43`. This one is independent of Python entirely - even a 3.13-linked build from these
+   workers would not run here.
+4. **`rch exec` refuses a benchmark** - `RCH-E301 (non-compilation command)`. The sanctioned rail
+   is `rch exec --job`, which explicitly admits "sharded tests, fuzzing, benchmarks". That works,
+   and is how the measurement below was taken.
+
+### THE MEASUREMENT RAIL WORKS, THE MEASUREMENT HOST DOES NOT
+
+`rch exec --job` ran the dual-null harness on hz3 against the worker-resident artifact
+(numpy **2.3.5**, CPython 3.14.4 - a DIFFERENT incumbent version from this host's 2.4.3, so these
+ratios are not comparable to any earlier row in this ledger and are not offered as such):
+
+```
+  case                  numpy_ns        fnp_ns    ratio  nullNP  nullFNP
+  2 x f64 card=2       3160704.3     7724902.6   2.444x   0.989    1.049  VOID
+  2 x f64 card=2       3173558.2    10219554.3   3.220x   1.008    0.966  VOID
+  2 x f64 card=4       4287334.4    11122687.0   2.594x   1.005    0.961  VOID
+  2 x f64 card=4       4289361.6    11912910.0   2.777x   0.998    0.954  VOID
+  2 x f64 card=8       5087345.0    10948193.4   2.152x   1.032    0.995  VOID
+  2 x f64 card=8       5190193.3    14156080.0   2.727x   0.983    0.983
+  2 x f64 card=32      6721800.3    13718863.7   2.041x   1.000    1.076  VOID
+  2 x f64 card=32      6724823.9    12005222.9   1.785x   0.998    0.965  VOID
+```
+
+COUNTED_MECHANISM: 7 of 8 cells failed the dual A/A null because the worker was at **loadavg 49.3**
+- it is a compile server, and it was compiling. `rch status` reports the fleet **degraded**: 2 of 14
+workers offline, hz1 in critical disk pressure (10.4 GB free), storage pressure on 6 more, and a
+stale build heartbeat on hz3 itself. Worker selection cannot be pinned (refused fleet-wide), so
+there is no way to route a job to a quiet host.
+
+**The one decidable cell (card=8, 2.727x, nulls 0.983/0.983) reproduces the standing
+low-cardinality lexsort loss in a second, independent environment** - different CPU, different
+CPython, different numpy - which is worth more than the seven that voided.
+
+RETRY PREDICATE: **do not attempt a before/after perf lever through this route while the fleet is
+degraded** - a treatment arm measured at loadavg ~50 against a control at the same load will void,
+and one that happens not to void cannot be trusted at these magnitudes. Either (a) a worker whose
+glibc is <= 2.42 AND whose CPython matches a numpy-bearing interpreter here, which would let the
+artifact be measured on THIS host, or (b) `rch exec --job` on a worker at loadavg < 5, is what
+unblocks it. The rail itself is proven: `rch exec --job` + copying the pooled
+`.rch-target-<worker>-pool-*/release/libfnp_python.so` to a temp dir and importing it works, and
+the in-process sha matches the locally retrieved artifact byte for byte.
+
+MEMORY: the harness holds one 2^16 f64 key pair at a time; nothing on this host exceeded 2 MB.
