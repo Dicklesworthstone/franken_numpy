@@ -54420,8 +54420,31 @@ fn try_native_lexsort_valuelex(
         let b = r as usize * total_width;
         &records[b..b + total_width]
     };
+    // A STABLE SORT ON THE RECORD ALONE, not an unstable one tie-broken by index. The two produce
+    // the IDENTICAL permutation - `perm` starts as `0..n`, so stability is exactly "equal records
+    // keep ascending index order", which is what the `then_with(|| i.cmp(&j))` spelled out - but
+    // the tie-break made the comparator NEVER return `Equal`, and that is what cost us. Pattern-
+    // defeating quicksort detects runs of equal elements and partitions them out in one pass; a
+    // comparator that always discriminates hides them, so every duplicate was carried through the
+    // full O(n log n) with a whole-record memcmp at each step.
+    //
+    // It shows up exactly where ties dominate. Dual-null, n=2^16, 2 x f64, fresh draw per rep,
+    // every one of 16 draws a loss and the magnitude scaling with cardinality:
+    //
+    //   distinct values   2      4          8            32
+    //   ratio           3.020x  1.508-2.071x  1.568-1.621x  1.325-1.499x
+    //
+    // High-cardinality keys were never the problem (card=1024 0.744x, card=65536 0.507x) because
+    // there the comparator discriminates on the first bytes and there is nothing to partition.
+    // PACKING THE RECORD INTO A VALUE WAS TRIED AND IS A MEASURED REJECT. Zero-padding each record
+    // into a big-endian `u128` and sorting a contiguous `Vec<(u128, u32)>` removes both the
+    // `memcmp` CALL and the random `reck(i)` indexing, and it is order-equivalent by construction -
+    // but it measured WORSE at every cardinality (card=4 1.492x -> 2.085x, card=8 0.988x ->
+    // 1.815-1.867x, card=32 0.972x -> 1.236x, and card=65536 0.507x -> 0.628x). Twenty bytes per
+    // element of extra buffer, a build pass, an extract pass, and a stable `par_sort_by_key` that
+    // clones the tuple key cost more than the comparison it saves.
     let mut perm: Vec<u32> = (0..n as u32).collect();
-    perm.par_sort_unstable_by(|&i, &j| reck(i).cmp(reck(j)).then_with(|| i.cmp(&j)));
+    perm.par_sort_by(|&i, &j| reck(i).cmp(reck(j)));
     let out = numpy.call_method(intern!(py, "empty"), ((n,), "intp"), None)?;
     let out_buf = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buf.as_mut_slice(py) else {

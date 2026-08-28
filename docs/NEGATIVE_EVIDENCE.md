@@ -64874,3 +64874,97 @@ comes back in input order. Second, LOW-CARDINALITY float keys are a standing los
 does not touch: 2 x f64 drawn from 8 distinct values measured **3.897x** at n=65536 (nulls
 0.997/0.996) and 1.662x at 4096, against 0.519x at 2^20 - the comparison sort degrades where ties
 dominate and numpy's radix does not.
+
+## 2026-08-27 - PARTIAL WIN + REJECT: a lexsort comparator that tie-breaks by INDEX never returns Equal, so pdqsort cannot partition duplicates - low-cardinality float keys 1.921x -> 1.119x; packing the record into a u128 is a MEASURED REJECT (`deadlock-audit-sfgg3` family)
+
+`TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1,
+interleaved ABBAABBA with a DUAL A/A null per cell, **fresh key draw per repetition**.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (BEFORE)          bench_elf_sha256=df642d357731bbac7820d66eb7809ea0cc34d539ab36e27e28082d68c13f1b87
+executing elf sha256 (REJECTED u128)   bench_elf_sha256=4c58001160c4451d7b8e68348365a95ba48cde250e0054baf4b08ad071595d14
+executing elf sha256 (AFTER)           bench_elf_sha256=29f651e610502b3e89d2d6da91e381e29cc740c563748020250347a9b64c7e15
+```
+
+### THE BANKED CELL WAS RIGHT, BUT ONLY AFTER REPLICATION SAID SO
+
+The previous row registered "2 x f64 low-cardinality 3.897x" as a standing loss. Re-measuring it
+first, as the standing rule requires, gave **1.369x, 1.074x and 1.001x** on three draws in one run
+- which looks like the cell evaporating. It does not: sweeping CARDINALITY with a fresh draw per
+repetition shows a loss on **every one of 16 draws**, scaling monotonically as ties dominate:
+
+```
+  distinct values      2              4              8              32
+  decidable ratios   3.020x    1.508-2.071x   1.498-1.663x   1.325-1.499x
+```
+
+High-cardinality keys were never the problem: card=1024 is 0.744x and card=65536 0.507x. **One
+draw of one corpus decides nothing here; the SIGN across many draws is what carried it.**
+
+### THE COMPARATOR HID ITS OWN DUPLICATES
+
+```rust
+perm.par_sort_unstable_by(|&i, &j| reck(i).cmp(reck(j)).then_with(|| i.cmp(&j)));
+```
+
+`perm` starts as `0..n`, so that tie-break spells out "equal records keep ascending index order" -
+which is exactly what a STABLE sort on the record alone does. The two produce the identical
+permutation. But the tie-break makes the comparator **never return `Equal`**, and pattern-defeating
+quicksort's whole defence against duplicate-heavy input is detecting equal runs and partitioning
+them out in one pass. Hiding equality from it means every duplicate is carried through the full
+O(n log n), each step paying a whole-record `memcmp`.
+
+COUNTED_MECHANISM: at n=2^16 with 2 float keys drawn from 8 distinct values there are 64 distinct
+records over 65536 elements - about 1024 duplicates each - and the comparator discriminates all
+65536 of them. `par_sort_by` on the record alone lets equal runs collapse: two paired runs at
+loadavg 9 measured the same cell 1.231x -> 0.988x and 1.921x -> 1.119x.
+
+### THE MEASUREMENT (two paired runs, same seed per pair, decidable cells only)
+
+```
+                    seed 202                     seed 909
+  card    BEFORE        AFTER            BEFORE        AFTER
+     2    2.259x        1.866x           2.331x        2.037x
+     4    2.001x        1.492x           2.094x        2.975x   <- flips; single cell each
+     8    1.231x        0.988x           1.921x        1.119x
+    32    0.945x        0.972x           0.931x        0.821x
+```
+
+Favourable in 6 of 8 paired comparisons, consistently at card=2 and card=8. **card=4 goes the other
+way in the second run and both readings are a single decidable cell, so no claim is made there.**
+This is a partial win on a noisy corpus, not a clean one, and the ranges above are the result.
+
+### REJECT: PACKING THE RECORD INTO A u128
+
+The remaining cost is visibly a `memcmp` CALL per comparison plus random `reck(i)` indexing into an
+n x width array. Zero-padding each record into a big-endian `u128` and sorting a contiguous
+`Vec<(u128, u32)>` removes both and is order-equivalent by construction (equal-length unsigned byte
+strings, right-padded). **It measured WORSE at every cardinality:**
+
+```
+  card         4        8              32       65536
+  stable    1.492x   0.988x         0.972x     0.507x
+  packed    2.085x   1.815-1.867x   1.236x     0.628x
+```
+
+Twenty bytes per element of extra buffer, a build pass, an extract pass, and a stable
+`par_sort_by_key` that clones the tuple key cost more than the comparison they save. Reverted.
+
+PARITY: the 217-cell lexsort probe (8 dtypes x 6 sizes x {1-key tuple, 1-key list, all-ties,
+2-key}, the float specials set and its tiling and all-NaN per width, byte strings, unicode,
+datetime64 with NaT, timedelta64, strided, big-endian, a 2-D element in a 1-tuple, the bare 1-D and
+2-D ndarray forms, `axis=-1`/`axis=0`, empty tuple, list of lists, mismatched lengths):
+**6 divergences, unchanged from before this change - 0 introduced.** The 6 are the pre-existing
+multi-key NaN / signed-zero defect described in the previous row.
+`cargo test -p fnp-python --lib --release`: 657 passed, 0 failed.
+
+MEMORY: 3 keys x 2^16 f64 = 1.6 MB per cell; the cardinality sweep holds one pair at a time.
+
+RETRY PREDICATE: **do not re-propose the u128 packing - it is measured above and rejected.** What
+remains is a genuine algorithmic gap at card <= 4, still ~2.0x: with only 4-16 distinct records
+over 65536 elements the right structure is a counting pass over the distinct records, not a
+comparison sort of any kind, and that is the next thing to try. The measurement protocol matters
+more than usual here - one draw of one corpus read 1.001x and 3.897x for the same shape - so any
+attempt needs a fresh draw per repetition and should be judged on the SIGN across at least 8.
