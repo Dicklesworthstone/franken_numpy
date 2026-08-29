@@ -28386,6 +28386,11 @@ fn try_native_repeat_scalar(
     // discover that. The threshold below is where fan-out starts to pay for itself; under it the
     // identical fill runs on the calling thread with no rayon entry at all.
     const REPEAT_FANOUT_MIN_BYTES: usize = 1 << 26; // 64 MB of output
+    // DEFAULT ON - the shipped route. `FNP_REPEAT_SPLAT=0` forces the byte-doubling fill so the
+    // two can be A/B'd in ONE process (see examples/h2h_repeat.rs); an ordinary caller sets
+    // nothing and gets the measured winner. One `getenv` against a multi-millisecond fill.
+    let splat_enabled =
+        std::env::var_os("FNP_REPEAT_SPLAT").is_none_or(|v| v != std::ffi::OsStr::new("0"));
     let fill_run = |base_unit: usize, run: &mut [u8]| {
         for (u, block) in run.chunks_mut(per_unit_out).enumerate() {
             let i = base_unit + u;
@@ -28398,6 +28403,46 @@ fn try_native_repeat_scalar(
             // log2(k) copies that grow to block size, so the work lands in vectorised memmove.
             if per_unit_out == 0 {
                 continue;
+            }
+            // SPLAT A SMALL UNIT AS A TYPED VALUE instead of doubling bytes. The doubling above is
+            // right when the unit is wide or `k` is large - it turns k copies into log2(k) that
+            // grow to block size - but it is the wrong shape when the BLOCK is small: for one f64
+            // element repeated 16 times the block is 128 bytes, so doubling issues 4 memcpy calls
+            // of 8/16/32/64 bytes, and at 65536 units that is 262144 calls whose overhead dwarfs
+            // the 8 bytes each moves. Loading the element once and storing it k times is a
+            // register splat the vectoriser turns into whole-width stores.
+            if splat_enabled && per_unit_out <= 256 {
+                match unit_bytes {
+                    1 => {
+                        block[..per_unit_out].fill(src[0]);
+                        continue;
+                    }
+                    2 => {
+                        let v: [u8; 2] = src.try_into().expect("unit_bytes == 2");
+                        let (units, _) = block[..per_unit_out].as_chunks_mut::<2>();
+                        for slot in units {
+                            *slot = v;
+                        }
+                        continue;
+                    }
+                    4 => {
+                        let v: [u8; 4] = src.try_into().expect("unit_bytes == 4");
+                        let (units, _) = block[..per_unit_out].as_chunks_mut::<4>();
+                        for slot in units {
+                            *slot = v;
+                        }
+                        continue;
+                    }
+                    8 => {
+                        let v: [u8; 8] = src.try_into().expect("unit_bytes == 8");
+                        let (units, _) = block[..per_unit_out].as_chunks_mut::<8>();
+                        for slot in units {
+                            *slot = v;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
             }
             block[..unit_bytes].copy_from_slice(src);
             let mut filled = unit_bytes;

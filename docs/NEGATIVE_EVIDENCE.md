@@ -65560,3 +65560,84 @@ RETRY PREDICATE: **do not re-attack the record build.** Three attempts now - for
 this cell, separate the remaining phases: time `np.lexsort` against a fnp call that stops after the
 record build, and against one that stops after the probe loop. Until that exists, card=2 at
 1.76x-1.93x stays a standing loss with no attackable mechanism identified.
+
+## 2026-08-28 - WIN (SHIP): `repeat`'s byte-doubling fill degenerates into four tiny memcpys per element when the BLOCK is small - a typed splat takes 4.499x -> 1.109x, with both fills timed in one process (`deadlock-audit-sfgg3` survey)
+
+`TanBridge`. Worker-side h2h; both arms and BOTH fill implementations in one process, one CPU, one
+invocation.
+
+**Campaign result class:** maintenance-self-speedup
+
+```
+executing elf sha256 (self-reported from inside the measuring process)
+  bench_elf_sha256=9ad4d7ff65fd082f568261a268a492a7ea599bbad781471a0dcd2b5872d42cc2
+```
+
+### THE CELL WAS FOUND BY RE-PRICING THE BOARD, NOT BY FOLLOWING THE OLD ONE
+
+Every loss this campaign was chasing had been ranked with a local harness that can no longer even
+import a build. A 24-op survey on the worker rail (`examples/h2h_survey.rs`, new) re-ranked what is
+actually decidable now:
+
+```
+  worst decidable    3.367x  repeat f64 2^16       numpy   331735.1   fnp  1117072.7
+                     2.473x  searchsorted 2^16     numpy  1344774.4   fnp  3325909.6
+                     1.282x  isnan f64 2^20        numpy   169095.3   fnp   216828.2
+  best decidable     0.068x  unique i64 2^16 | 0.279x cumprod | 0.305x cumsum | 0.398x std
+  14 of 24 cells decidable
+```
+
+`repeat` was the worst - and it is a shape the earlier `repeat` work (`a103b894`) never touched.
+That row tuned a SMALL source repeated MANY times (1024 elements x k=1024), where the per-unit
+block is 8 KB and doubling the filled prefix is clearly right. The survey's cell is the opposite: a
+LARGE source repeated FEW times, where the block is 128 bytes.
+
+### THE DOUBLING FILL IS THE WRONG SHAPE FOR A SMALL BLOCK
+
+COUNTED_MECHANISM: for one f64 element repeated 16 times the block is 128 bytes, so the doubling
+issues 4 `copy_from_slice` calls of 8, 16, 32 and 64 bytes; at 65536 units that is 262144 memcpy
+calls whose per-call overhead dwarfs the 8 bytes each moves. The f64 k=2 case is worse still - a
+16-byte block, 2 calls per unit, 524288 calls over 2^18 units. Loading the element once and storing
+it k times is a register splat the vectoriser turns into whole-width stores, gated to blocks of at
+most 256 bytes so the large-k shape keeps the doubling that suits it.
+
+### THE MEASUREMENT (both fills, same arrays, same process)
+
+```
+  case                        impl        numpy_ns        fnp_ns    ratio  nullNP  nullFNP
+  2^16 src, k=16 float64      doubling    320509.2     1441885.5   4.499x   1.000    0.989
+  2^16 src, k=16 float64      splat       318744.3      353582.7   1.109x   0.999    0.999
+  2^18 src, k=2  float64      doubling    503466.9     2294063.7   4.557x   1.012    1.003
+  2^18 src, k=2  float64      splat       651092.1     1037143.2   1.593x   0.986    0.993
+  2^16 src, k=16 int32        doubling    203705.8     1744113.8   8.562x   0.995    0.999
+  2^16 src, k=16 int32        splat       205460.8      326520.5   1.589x   0.976    0.998  VOID
+  1024 src, k=1024 float64    doubling    226677.0      228689.3   1.009x   1.000    1.004
+  1024 src, k=1024 float64    splat       228086.3      227500.2   0.997x   1.000    1.000
+  1024 src, k=1024 int32      doubling    125027.2      130652.5   1.045x   0.983    1.000
+  1024 src, k=1024 int32      splat       127162.8      130337.0   1.025x   0.996    0.998
+```
+
+**The two headline cells have BOTH arms decidable**: 4.499x -> 1.109x and 4.557x -> 1.593x. The
+shape the earlier row tuned is preserved (1.009x -> 0.997x, 1.045x -> 1.025x), which is the control
+that matters here - a fix for one regime that broke the other would be no fix at all. The int32
+k=16 splat cell is VOID and is quoted only for its doubling arm, which is decidable at 8.562x.
+
+Out-of-family control `np.sum` f64 2^20: 1.220x - this worker is never at unity, which is why the
+paired same-array in-process comparison carries the row rather than any single ratio.
+
+PARITY: 778 cells, **0 divergences**, run ONCE PER IMPLEMENTATION before any timing - 8 dtypes
+(int8/16/32/64, float32/64, complex128, bool) x 4 sizes x 6 repeat counts including k=1 and odd k,
+each with and without `axis=0`, plus 2-D across every axis. `repeat` moves bytes verbatim so there
+are no documented exceptions here and the gate is zero, not set-equality.
+`cargo test --release -p fnp-python --lib` on the worker: 655 passed, 2 failed - the established
+baseline (a numpy 2.5.2 surface gap, `AttributeError('register_dlpack_dtype')`), unchanged. Remote
+`clippy --lib --examples` and `fmt --check`: clean.
+
+MEMORY: largest cell 2^18 x k=2 f64 = 4 MB output; the parity probe caps `n * k` at 2^22 elements.
+
+RETRY PREDICATE: **the 256-byte block gate is fitted to the two regimes measured above and both
+sides of it are held by evidence** - below it the doubling degenerates into per-call overhead,
+above it the doubling is what keeps 1024-src/k=1024 at parity. Do not widen it without re-running
+`h2h_repeat` on both shapes. The next two cells on the re-priced board are `searchsorted 2^16` at
+**2.473x** (a same-dtype self-search, which is not the corpus the earlier searchsorted work tuned)
+and `isnan f64 2^20` at **1.282x**; both are decidable and neither has been attacked.
