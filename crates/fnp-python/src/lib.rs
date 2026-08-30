@@ -38265,11 +38265,34 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             // travels, and starting the pointer at the first needle's own insertion point means
             // clustered queries never pay for the haystack prefix below them.
             let sorted_q = v_raw.windows(2).all(|w| w[0] <= w[1]);
-            let mode = if sorted_q { merge_mode() } else { None };
+            // A DESCENDING BATCH IS EXACTLY AS PREDICTABLE AS AN ASCENDING ONE, and it was
+            // measured losing 2.329x on the same corpus where the ascending route wins 8.9x
+            // (`deadlock-audit-sfgg3`). Non-increasing needles have non-increasing insertion
+            // points, so the identical argument runs with the pointer moving DOWN from the
+            // largest needle's insertion point. `m > 1` because a single needle is already
+            // nondecreasing and is handled above; an all-equal batch satisfies both tests and
+            // ascending wins, which is arbitrary but consistent.
+            let desc_q = !sorted_q && m > 1 && v_raw.windows(2).all(|w| w[0] >= w[1]);
+            let mode = if sorted_q || desc_q {
+                merge_mode()
+            } else {
+                None
+            };
             let merge_off = mode.as_deref() == Some(std::ffi::OsStr::new("0"));
             let merge_forced = mode.as_deref() == Some(std::ffi::OsStr::new("force"));
             let gallop_forced = mode.as_deref() == Some(std::ffi::OsStr::new("gallop"));
-            let (merge_from, gallop_from) = if sorted_q && !merge_off {
+            let mut merge_down_from = None;
+            let (merge_from, gallop_from) = if desc_q && !merge_off {
+                // Same span arithmetic as the ascending arm, with the roles of the first and
+                // last needle exchanged: the LAST needle is now the smallest.
+                let lo = search_index(a_raw, v_raw[m - 1], right) as usize;
+                let hi = search_index(a_raw, v_raw[0], right) as usize;
+                let log2n = (usize::BITS - a_raw.len().leading_zeros()) as usize;
+                if merge_forced || ((hi - lo) + m) <= m.saturating_mul(log2n) {
+                    merge_down_from = Some(hi);
+                }
+                (None, None)
+            } else if sorted_q && !merge_off {
                 let lo = search_index(a_raw, v_raw[0], right) as usize;
                 let hi = search_index(a_raw, v_raw[m - 1], right) as usize;
                 let log2n = (usize::BITS - a_raw.len().leading_zeros()) as usize;
@@ -38301,6 +38324,24 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
                             break;
                         }
                         p += 1;
+                    }
+                    *slot = p as i64;
+                }
+            } else if let Some(mut p) = merge_down_from {
+                // The mirror of the ascending walk. `p` is the insertion point of the largest
+                // needle and only ever moves DOWN, so the whole batch costs one backward pass
+                // bounded by the span priced above.
+                for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
+                    while p > 0 {
+                        let before = if right {
+                            a_raw[p - 1] <= key
+                        } else {
+                            a_raw[p - 1] < key
+                        };
+                        if before {
+                            break;
+                        }
+                        p -= 1;
                     }
                     *slot = p as i64;
                 }

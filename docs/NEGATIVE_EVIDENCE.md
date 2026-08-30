@@ -27420,6 +27420,8 @@ serial guard 8,254,562 ns = 1.043x vs ORIG (noise band) and 0.679x vs NumPy. Con
 `where(condition=..., x=..., y=...)` now matches NumPy's "takes no keyword arguments" TypeError.
 AGENT_NAME=BlackThrush.
 
+- 2026-08-30 REJECT `lexsort card=2 stable LSD radix per-key reused permutation workspace`: `h2h_lexsort` ABBAABBA on ovh-a (ELF `afecab51f37ca09ef1d4738d1e5b33ea3ff2ec8b24f5fb1776fe4058b7e6e319`) kept the documented 100-cell/10-divergence parity set but measured 2.427x NumPy/FNP (1.945 ms/4.720 ms; A/A 0.999/1.001); second draw 2.297x was void (FNP A/A 0.955). Reverted the source route; do not retry this primitive without a different measured mechanism.
+
 ## 2026-06-28 - NO-SHIP: lowering the 1536 matmul-shaped native GEMM window back to 1024 is worker-fragile and regresses badly on hz2
 
 `BlueStone`. LAND-OR-DIG found no measured `.scratch` / `.worktrees` keep still
@@ -65817,4 +65819,64 @@ is attempted here.
 RETRY PREDICATE: the `(hi - lo) + m <= m * log2(n)` clause is fitted to the rows above and BOTH
 sides of it are held by measurement — the `force` row IS the losing side. Do not widen or remove it
 without re-running `h2h_searchsorted` on both the spread and the clustered shapes on one worker.
+AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — WIN: a DESCENDING query batch is as predictable as an ascending one — `searchsorted` reverse-sorted needles go 2.502x SLOWER to **0.522x** (1.92x FASTER than live NumPy) by walking the same span backwards (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** incumbent-win
+
+Direct follow-on to the ascending merge row above, taken from its own "NOT CLOSED" line: *"a
+descending batch is exactly as predictable as an ascending one and could take the same walk
+backwards."* It can, and it does.
+
+Live NumPy 2.5.2 in the SAME process, arms interleaved ABBAABBA, dual A/A null per cell. Worker
+`hz4` (rch), python 3.14.4, stock `release`, loadavg 18.31 (quieter than the previous row's 39.14).
+`bench_elf_sha256=34122815bad1bf14427dc36f36619fe4aac9f9c5399cf534b74428f6ce7dd3e4`.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.5.2 artifact_sha256=27bd88fd60f4b9fcd5c938572e9b9e3df0aed9cfed4888e57d94c516b45512b7 invocation_id=hz4-3914477-1788121439 measured_ratio=0.522x
+
+**Incumbent isolation proof:** candidate=fnp.searchsorted incumbent=numpy.searchsorted shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.54
+
+**A/A null control (same invocation):** reverse-sorted bisect ratio nullNP=1.005 nullFNP=0.998; merge nullNP=1.000 nullFNP=1.001 — the decided pair sits inside [0.998, 1.005].
+
+```
+  case                        impl        numpy_ns        fnp_ns     ratio  nullNP  nullFNP
+  reverse-sorted q            bisect     1425272.2     3566519.9     2.502x   1.005   0.998
+  reverse-sorted q            merge      1413006.3      737402.8     0.522x   1.000   1.001
+  reverse-sorted q            gallop     1414590.0      739458.1     0.523x   1.000   0.999
+  self-search (sorted q)      bisect     1344730.1     3516611.3     2.615x   1.004   0.997
+  self-search (sorted q)      merge      1357495.2      145066.5     0.107x   0.999   0.999
+```
+
+**Both arms of the decided pair are in ONE invocation**, which is what makes this admissible; the
+`bisect` arm is the route as it stood before this change, selected per call by the same env switch.
+
+COUNTED_MECHANISM: non-increasing needles have non-increasing insertion points, so m bisections at
+O(log n) branchy random probes each are replaced by ONE backward pass whose pointer starts at the
+LARGEST needle's insertion point and only ever moves down — at most (span + m) sequential steps.
+Admission is the same span clause as the ascending arm with the roles of the first and last needle
+exchanged (`lo` from `v[m-1]`, `hi` from `v[0]`), so the same "never open a large loss" argument
+carries over unchanged: it is admitted only when the walk's step count cannot exceed the bisection's
+probe count.
+A/A NULL CONTROLS: tabulated above; every row backing this claim sits inside [0.996, 1.005]. The
+f16 row (nullFNP 1.118) and the `force` spread row (1.023) are marked VOID inline and back no claim
+here.
+PARITY: **6328 cells, 0 divergences**, run once per strategy BEFORE any timing. The corpus already
+carried reverse-sorted needles for every integer dtype x haystack size x side, which is why this
+path was gated by the existing parity harness the moment it existed rather than needing a new one.
+Independently simulated against `numpy.searchsorted` over 360 descending cells (random, heavy-dup,
+exact-hit and edge batches x both sides x 5 haystack sizes) before the kernel was built: 0
+divergences. The route test
+`searchsorted_sorted_query_merge_matches_numpy_on_span_gate_corpora` pins reverse batches too.
+VERIFICATION: `cargo fmt --check` exit 0. Ascending rows replicate in this third run
+(self-search 2.615x -> 0.107x), which is the control that the new branch did not disturb the old one.
+DISCLOSED: `m > 1` is required, because a single needle is already nondecreasing and is served by
+the ascending arm; an all-equal batch satisfies both predicates and ascending wins, which is
+arbitrary but deterministic.
+RETRY PREDICATE: the remaining loss on this surface is `RANDOM q` at **3.78x-3.88x**, where no batch
+order exists to exploit and both merge arms correctly decline. That is a different lever - the
+per-query bisection itself - and nothing in this row or the one above touches it. Do not re-attack
+ordered batches: ascending, descending and clustered are all now measured wins.
 AGENT_NAME=BlackThrush.
