@@ -106,24 +106,29 @@ def parity():
         out("  expected-to-diverge cells that now AGREE (gate needs updating):", repaired)
     return unexpected, repaired
 
-# RUN THE GATE ONCE PER IMPLEMENTATION. The route reads the flag per call, so a single parity
-# pass would certify only whichever path the ambient environment selected - and the counting pass
-# is the one under test. Both must produce the identical documented divergence set.
-for _impl, _flag in (("cmp-sort", "0"), ("counting", "1")):
-    os.environ["FNP_LEXSORT_COUNTING"] = _flag
+# RUN THE GATE ONCE PER IMPLEMENTATION. The route reads the flags per call, so a single parity
+# pass would certify only whichever path the ambient environment selected. Every selectable route
+# must produce the identical documented divergence set.
+for _impl, _counting, _lsd_radix in (
+        ("cmp-sort", "0", "0"),
+        ("counting", "1", "0"),
+        ("lsd-radix", "0", "1")):
+    os.environ["FNP_LEXSORT_COUNTING"] = _counting
+    os.environ["FNP_LEXSORT_LSD_RADIX"] = _lsd_radix
     out("parity for impl=%s" % _impl)
     NEW_BAD, REPAIRED = parity()
     if NEW_BAD or REPAIRED:
         out("ABORTING: parity set changed for impl=%s, a ratio would be meaningless" % _impl)
         raise SystemExit(1)
 os.environ.pop("FNP_LEXSORT_COUNTING", None)
-out("parity gate: BOTH implementations match the documented pre-existing defect set exactly")
+os.environ.pop("FNP_LEXSORT_LSD_RADIX", None)
+out("parity gate: ALL implementations match the documented pre-existing defect set exactly")
 
-def inter(sa, sb, g, k, rounds=6):
+def inter(sa, sb, g, k, rounds=1):
     """ABBAABBA so a monotone drift in the host cancels between the arms."""
     ta, tb = [], []
     for r in range(rounds):
-        for w in (("a","b","b","a") if r % 2 == 0 else ("b","a","a","b")):
+        for w in ("a", "b", "b", "a", "a", "b", "b", "a"):
             t = timeit.timeit(sa if w == "a" else sb, globals=g, number=k) / k * 1e9
             (ta if w == "a" else tb).append(t)
     return statistics.median(ta), statistics.median(tb)
@@ -142,12 +147,16 @@ for card in (2, 4, 8, 32):
         k1 = rng.integers(0, card, N).astype(np.float64)
         k2 = rng.integers(0, card, N).astype(np.float64)
         g = {"np": np, "fnp": fnp, "k": (k1, k2)}
-        # BOTH fnp IMPLEMENTATIONS AND numpy, same arrays, same process, same CPU. The env var is
-        # read per call inside the route, so flipping it here selects the comparison sort or the
-        # counting pass without rebuilding - which is the only way to compare them soundly, since
+        # ALL fnp IMPLEMENTATIONS AND numpy, same arrays, same process, same CPU. The env vars are
+        # read per call inside the route, so flipping them here selects the comparison sort, counting
+        # pass, or per-key LSD radix pass without rebuilding - which is the only way to compare them soundly, since
         # two rch jobs can land on different workers.
-        for impl_name, flag in (("cmp-sort", "0"), ("counting", "1")):
-            os.environ["FNP_LEXSORT_COUNTING"] = flag
+        for impl_name, counting, lsd_radix in (
+                ("cmp-sort", "0", "0"),
+                ("counting", "1", "0"),
+                ("lsd-radix", "0", "1")):
+            os.environ["FNP_LEXSORT_COUNTING"] = counting
+            os.environ["FNP_LEXSORT_LSD_RADIX"] = lsd_radix
             tn, tf = inter("np.lexsort(k)", "fnp.lexsort(k)", g, 45)
             n1, n2 = inter("np.lexsort(k)", "np.lexsort(k)", g, 45)
             c1, c2 = inter("fnp.lexsort(k)", "fnp.lexsort(k)", g, 45)
@@ -159,6 +168,7 @@ for card in (2, 4, 8, 32):
                   % ("card=%d" % card, impl_name, rep, tn, tf, tf / tn, nn, nf,
                      "" if ok else "  VOID"))
         os.environ.pop("FNP_LEXSORT_COUNTING", None)
+        os.environ.pop("FNP_LEXSORT_LSD_RADIX", None)
         del k1, k2, g
     summary[card] = good
 
@@ -192,7 +202,7 @@ out("\nout-of-family control np.sum f64 2^20: numpy %.1f fnp %.1f -> %.3fx" % (c
 
 out("\nDECIDABLE ratios per cardinality (both A/A nulls within 2%):")
 for card, rs in summary.items():
-    for impl_name in ("cmp-sort", "counting"):
+    for impl_name in ("cmp-sort", "counting", "lsd-radix"):
         vals = [v for (nm, v) in rs if nm == impl_name]
         if vals:
             out("  card=%-4d %-9s n=%d  min %.3fx  median %.3fx  max %.3fx"

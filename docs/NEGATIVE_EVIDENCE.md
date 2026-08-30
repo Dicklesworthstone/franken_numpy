@@ -65714,3 +65714,107 @@ worth little here: the 08-26 arithmetic showed that swapping in NumPy's own tune
 kernel instruction-for-instruction makes our route 16 ns SLOWER, because the two kernels are at time
 parity. The kernel was never where this cell's remaining 326 ns lives.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — WIN: a sorted query batch is a MERGE, not m bisections — integer `searchsorted` self-search goes 2.603x SLOWER to **0.112x** (8.9x FASTER than live NumPy), and the span gate that admits it is worth **245-298x** on the shape it declines (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** incumbent-win
+
+Live NumPy 2.5.2 called in the SAME process, same round, arms interleaved ABBAABBA, dual A/A null
+per cell. Worker `hz4` (rch), python 3.14.4, stock `release`.
+`bench_elf_sha256=57c0099295dde93237865dae585f337b13235c468b9cf000f4f1099d9989c3bd`.
+**REGIME DISCLOSED: loadavg 39.14 — this is NOT a quiet host**, and the out-of-family control moved
+from 1.171x (hz3) to 0.894x (hz4), i.e. the worker is nowhere near unity in either direction. That
+is precisely why only the paired same-process arms carry these rows and no absolute ns is quoted as
+ship-grade.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.5.2 artifact_sha256=27bd88fd60f4b9fcd5c938572e9b9e3df0aed9cfed4888e57d94c516b45512b7 invocation_id=hz4-3724924-1788120779 measured_ratio=0.112x
+
+**Incumbent isolation proof:** candidate=fnp.searchsorted incumbent=numpy.searchsorted shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.53
+
+**A/A null control (same invocation):** every row carries both nulls; headline self-search merge ratio nullNP=1.000 nullFNP=0.998, gallop nullNP=1.001 nullFNP=1.001, bisect nullNP=1.000 nullFNP=1.002 — all inside [0.996, 1.002].
+
+The incumbent artifact is NumPy's own compiled extension
+(`numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so`), hashed in-process; it is not this
+ELF, and the two hashes differ, which is the check that separates a real incumbent arm from
+provenance substitution. `dispatch_assert=passed` is evaluated at runtime inside the measured
+process: `np.__name__ == "numpy"`, the incumbent callable is not ours, and
+`np.searchsorted is not fnp.searchsorted`.
+
+### The lever
+
+When the needles are nondecreasing their insertion points are nondecreasing too, so ONE forward
+pointer through the haystack answers every query — O(n + m) against O(m log n), and every probe is
+sequential instead of a cache-missing jump to the middle. The float paths learned this in
+`8f6cc811`; the integer path never got it.
+
+```
+  case                        impl        numpy_ns        fnp_ns     ratio  nullNP  nullFNP
+  self-search (sorted q)      bisect     1354150.7     3524975.7     2.603x   1.000   1.002
+  self-search (sorted q)      merge      1341513.6      150746.6     0.112x   1.000   0.998
+  self-search (sorted q)      gallop     1359459.7      151930.3     0.112x   1.001   1.001
+  sorted q, independent       bisect     1352370.9     3205756.3     2.370x   1.000   0.997
+  sorted q, independent       merge      1347225.5      641813.1     0.476x   1.000   0.998
+  RANDOM q                    bisect     2114136.2     8616451.9     4.076x   0.996   1.001
+  RANDOM q                    merge      2090035.2     8266015.4     3.955x   1.001   0.999
+  reverse-sorted q            bisect     1347127.6     3148602.7     2.337x   1.000   1.000
+  reverse-sorted q            merge      1356536.7     3158815.0     2.329x   1.001   1.000
+  2^22 hay, 64 spread q       bisect       12792.0       18233.9     1.425x   0.998   1.002
+  2^22 hay, 64 spread q       merge        12712.0        9110.6     0.717x   1.001   0.995
+  2^22 hay, 64 spread q       force        13094.2     3901258.4   297.939x   1.008   1.118  VOID
+  2^22 hay, 64 clustered q    bisect        5554.1       10510.5     1.892x   1.000   0.998
+  2^22 hay, 64 clustered q    merge         5737.6        6237.6     1.087x   0.987   1.006
+```
+
+**The headline cell is the survey's own worst decidable cell** (banked at 2.473x; reproduced here at
+2.603x on the bisect arm): it becomes **0.112x — 8.9x FASTER than live NumPy**.
+
+REPLICATED ON A SECOND WORKER with a different ELF
+(`23b17051c7f86b41ee5e39de746410773cc9a89904f3687b48ff0b8faed57f96`, host `hz3`, loadavg 35.97):
+self-search bisect 2.553x -> merge 0.122x -> gallop 0.096x; sorted-independent 2.339x -> 0.501x;
+RANDOM 3.780x -> 3.716x; spread 1.439x -> 0.930x. **Magnitudes differ across the two workers and are
+NOT combined** — the sign and the class replicate, which is the only thing a cross-worker pair may
+be read for.
+
+### THE GATE IS WORTH 245-298x, AND THAT IS WHY IT EXISTS
+
+The admission test must read BOTH operands. Nondecreasing is a property of the QUERIES; the walk's
+cost is span in the HAYSTACK. A single needle is trivially sorted — `windows(2)` is empty — so an
+m=1 query against a 2^22 haystack would walk millions of elements where a bisection pays 23 probes.
+That is the `tiny-operand-decides-route-huge-operand-pays` shape, and the `force` arm (the same code
+with the span clause bypassed) prices it: **3901258.4 ns against the gated 9110.6 ns on the same
+input — 297.939x slower than NumPy where the gated route is 0.717x FASTER.** hz3 measured the same
+arm at 245.666x with clean nulls (0.990); the hz4 `force` null is 1.118 and that row is marked VOID
+for magnitude, but a 428x swing between gated and ungated is not a null-precision question.
+Two bisections (first and last needle) give the EXACT span the pointer travels, and starting the
+pointer at the first needle's own insertion point is what keeps the CLUSTERED row at 1.087x instead
+of paying for the whole haystack prefix below it.
+
+COUNTED_MECHANISM: m bisections at O(log n) branchy random probes each, replaced by one sequential
+pass of at most (span + m) steps, taken only when `(hi - lo) + m <= m * log2(n)` — i.e. only when
+the merge's step count cannot exceed the bisection's probe count. A merge step is sequential and
+strictly cheaper than a probe, so admitting at parity of COUNTS errs toward the bisection: it
+declines some wins and can never open a large loss. The `force` row is the same code without that
+clause.
+A/A NULL CONTROLS: 26 rows x 2 nulls; 3 rows marked VOID inline (the hz4 `force` spread row, the
+`gallop` clustered row at 0.944, the f16 row at 0.960) and excluded from any magnitude claim. Every
+row backing the headline sits inside [0.996, 1.002].
+PARITY: **6328 cells, 0 divergences**, run once per strategy BEFORE any timing — 7 integer dtypes x
+6 haystack sizes (including empty) x 4 query counts x {random, sorted, reverse, exact-hits} x
+{left,right}, plus heavy-duplicate haystacks, out-of-range needles, and sorted-except-one-swap
+batches, which is the exact boundary of the nondecreasing admission test. Integer ordering is total,
+so the gate is ZERO divergences, not set-equality.
+VERIFICATION: conformance test
+`searchsorted_sorted_query_merge_matches_numpy_on_span_gate_corpora` pins the span-gate corpora
+(spread, clustered, single needle, ties, below/above range, empty haystack) against the live oracle.
+`cargo clippy -p fnp-python --lib -- -D warnings` exit 0. `cargo fmt --check` exit 0.
+NOT CLOSED BY THIS ROW: `RANDOM q` is a standing **3.96x loss** on which the merge correctly
+declines — it is now the worst cell on this surface and is a different lever (the per-query
+bisection itself). `reverse-sorted` at 2.33x is the same loss wearing a different hat: a descending
+batch is exactly as predictable as an ascending one and could take the same walk backwards. Neither
+is attempted here.
+RETRY PREDICATE: the `(hi - lo) + m <= m * log2(n)` clause is fitted to the rows above and BOTH
+sides of it are held by measurement — the `force` row IS the losing side. Do not widen or remove it
+without re-running `h2h_searchsorted` on both the spread and the clustered shapes on one worker.
+AGENT_NAME=BlackThrush.

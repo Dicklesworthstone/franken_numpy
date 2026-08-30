@@ -29,6 +29,27 @@ out("in-process ELF sha256", hashlib.sha256(open(EXE_PATH, "rb").read()).hexdige
 out("host", os.uname().nodename, "| loadavg", [round(x, 2) for x in os.getloadavg()])
 rng = np.random.default_rng(SEED)
 
+# THE incumbent-win CONTRACT'S OWN FIELDS, emitted by the process that does the measuring.
+# `bench_elf_sha256` is spelled the way the ledger gate greps for it. The incumbent artifact is
+# NumPy's compiled extension - the thing that actually performs np.searchsorted - and NOT this
+# ELF; the gate rejects the row if the two hashes are equal, because that is provenance
+# substitution. `invocation_id` ties both arms to this one process.
+NP_SO = np._core._multiarray_umath.__file__
+NP_SHA = hashlib.sha256(open(NP_SO, "rb").read()).hexdigest()
+INVOCATION = "%s-%d-%d" % (os.uname().nodename, os.getpid(), int(__import__("time").time()))
+out("bench_elf_sha256=%s" % hashlib.sha256(open(EXE_PATH, "rb").read()).hexdigest())
+out("incumbent artifact %s" % NP_SO)
+out("incumbent artifact_sha256=%s" % NP_SHA)
+out("invocation_id=%s" % INVOCATION)
+
+# DISPATCH ASSERT, at runtime, inside the measured process: the incumbent arm must be genuine
+# NumPy and must not be one of ours. This is trap 1 of the six, and it has produced a false win
+# in this fleet before.
+assert np.__name__ == "numpy", np.__name__
+assert "fnp" not in type(np.searchsorted).__module__.lower()
+assert np.searchsorted is not fnp.searchsorted
+out("dispatch_assert=passed incumbent=numpy.searchsorted candidate=fnp.searchsorted")
+
 # PARITY FIRST, ONCE PER STRATEGY. This host cannot import the build, so the gate travels with the
 # measurement. Integer ordering is total, so there are no documented exceptions here: the gate is
 # ZERO divergences. The corpora are the places a merge can go wrong - duplicates in the haystack
@@ -119,11 +140,26 @@ def cell(label, hay_, q, k):
         ok = abs(nn - 1) <= 0.02 and abs(nf - 1) <= 0.02
         out("%-30s%-9s%14.1f%14.1f%8.3fx%8.3f%9.3f%s"
             % (label, impl, tn, tf, tf / tn, nn, nf, "" if ok else "  VOID"))
+        RESULTS[(label, impl)] = (tn, tf, tf / tn, nn, nf)
     os.environ.pop("FNP_SEARCHSORTED_MERGE", None)
     del g
 
+RESULTS = {}
 for label, q in CASES:
     cell(label, hay, q, 20)
+
+# THE SHARED TIMED COMPONENT, QUANTIFIED RATHER THAN DENIED. Our arm allocates its output with
+# `numpy.empty`, so a piece of the INCUMBENT's own code is inside the candidate's timing. That is
+# never to be declared as `none`. Time it directly and report it as a share of the candidate arm,
+# so the ledger row can disclose the number instead of asserting isolation it does not have.
+_g = {"np": np, "N": N}
+_e1, _e2 = inter("np.empty(N, 'intp')", "np.empty(N, 'intp')", _g, 20)
+_empty_ns = (_e1 + _e2) / 2
+for _impl in ("merge", "gallop"):
+    _tn, _tf, _r, _, _ = RESULTS[("self-search (sorted q)", _impl)]
+    out("shared_timed_component numpy.empty=%.1f ns = %.2f%% of candidate %s arm (%.1f ns)"
+        % (_empty_ns, 100.0 * _empty_ns / _tf, _impl, _tf))
+del _g
 
 # Native f16 is intentionally a separate cell: it has a finite-order cumulative
 # table rather than the integer merge, and its admission gate needs enough
