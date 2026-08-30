@@ -2,6 +2,10 @@
 //!
 //! Tests histogram2d, histogramdd for 2D, 3D, and higher-dimensional histograms.
 
+mod common;
+
+use common::with_fnp_and_numpy;
+use pyo3::types::{PyDict, PyDictMethods};
 use std::process::Command;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
@@ -316,35 +320,39 @@ fn histogramdd_one_dimensional_ndarray_sample_matches_numpy() -> Result<(), Stri
     // keeps the `(N, D)` reading, and 3-D must RAISE exactly as NumPy does rather than be
     // silently reinterpreted. `histogramdd` returns a tuple, so shape, dtype, counts and
     // every edge array are compared.
-    let script = fnp_script(
-        r#"
+    with_fnp_and_numpy(|py, fnp, np| {
+        let globals = PyDict::new(py);
+        globals.set_item("np", np)?;
+        globals.set_item("fnp", fnp)?;
+        py.run(
+            pyo3::ffi::c_str!(
+                r#"
 rng = np.random.default_rng(20260826)
-checks = []
 
 for n, bins in ((7, 3), (256, 10), (4096, 17)):
     x = rng.standard_normal(n)
     H, edges = fnp.histogramdd(x, bins=bins)
     nH, nedges = np.histogramdd(x, bins=bins)
-    checks.append(
-        H.dtype == nH.dtype
-        and H.shape == nH.shape
-        and np.array_equal(H, nH)
-        and len(edges) == len(nedges) == 1
-        and all(e.dtype == ne.dtype and np.array_equal(e, ne) for e, ne in zip(edges, nedges))
-    )
+    assert H.dtype == nH.dtype
+    assert H.shape == nH.shape
+    assert np.array_equal(H, nH)
+    assert len(edges) == len(nedges) == 1
+    assert all(e.dtype == ne.dtype and np.array_equal(e, ne) for e, ne in zip(edges, nedges))
 
 # the default-bins spelling, and the one with an explicit range
 x = rng.standard_normal(1024)
 for kwargs in ({}, {"bins": 5}, {"bins": 5, "range": [(-1.0, 1.0)]}):
     H, edges = fnp.histogramdd(x, **kwargs)
     nH, nedges = np.histogramdd(x, **kwargs)
-    checks.append(np.array_equal(H, nH) and all(np.array_equal(e, ne) for e, ne in zip(edges, nedges)))
+    assert np.array_equal(H, nH)
+    assert all(np.array_equal(e, ne) for e, ne in zip(edges, nedges))
 
 # a 2-D sample keeps the (N, D) reading
 s2 = rng.standard_normal((512, 2))
 H, edges = fnp.histogramdd(s2, bins=4)
 nH, nedges = np.histogramdd(s2, bins=4)
-checks.append(np.array_equal(H, nH) and all(np.array_equal(e, ne) for e, ne in zip(edges, nedges)))
+assert np.array_equal(H, nH)
+assert all(np.array_equal(e, ne) for e, ne in zip(edges, nedges))
 
 # a 3-D ndarray sample must raise the SAME error type NumPy raises
 def outcome(fn):
@@ -353,18 +361,15 @@ def outcome(fn):
         return "no-raise"
     except Exception as exc:
         return type(exc).__name__
-checks.append(outcome(fnp.histogramdd) == outcome(np.histogramdd))
-
-print(all(checks))
+assert outcome(fnp.histogramdd) == outcome(np.histogramdd)
 "#
-        .into(),
-    );
-    let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "1-D ndarray histogramdd must match numpy in counts, edges and error type: {result}"
-    );
+            ),
+            Some(&globals),
+            None,
+        )?;
+
+        Ok(())
+    });
     Ok(())
 }
 
