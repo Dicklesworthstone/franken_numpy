@@ -10048,7 +10048,7 @@ fn zerocopy_f64_isnan_flat<'py>(
             return Ok(None);
         };
         let (input_chunks, input_tail) = input.as_chunks::<LANES>();
-        let (output_chunks, output_tail) = output.as_chunks_mut::<LANES>();
+        let (output_chunks, output_tail) = output.as_chunks::<LANES>();
         for (input_chunk, output_chunk) in input_chunks.iter().zip(output_chunks) {
             let lanes = Lanes::from_array([
                 input_chunk[0].get(),
@@ -38277,9 +38277,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
                 // pays m * log2(n) random probes. A merge step is sequential and strictly
                 // cheaper than a probe, so admitting only at parity of COUNTS errs toward the
                 // bisection - it declines some wins and can never open a large loss.
-                if merge_forced
-                    || (!gallop_forced && ((hi - lo) + m) <= m.saturating_mul(log2n))
-                {
+                if merge_forced || (!gallop_forced && ((hi - lo) + m) <= m.saturating_mul(log2n)) {
                     (Some(lo), None)
                 } else {
                     // The merge's sequential walk would cost too much over this wide span, but
@@ -60989,19 +60987,17 @@ fn fmod(
                 let b_raw: &[f64] = unsafe {
                     std::slice::from_raw_parts(b_slice.as_ptr().cast::<f64>(), b_slice.len())
                 };
-                b_raw.contains(&0.0)
-                    || PyBuffer::<f64>::get(&a)
-                        .ok()
-                        .and_then(|a_buf| a_buf.as_slice(py))
-                        .is_some_and(|a_slice| {
-                            let a_raw: &[f64] = unsafe {
-                                std::slice::from_raw_parts(
-                                    a_slice.as_ptr().cast::<f64>(),
-                                    a_slice.len(),
-                                )
-                            };
-                            a_raw.iter().any(|value| value.is_infinite())
-                        })
+                let infinite_dividend = if let Ok(a_buf) = PyBuffer::<f64>::get(&a)
+                    && let Some(a_slice) = a_buf.as_slice(py)
+                {
+                    let a_raw: &[f64] = unsafe {
+                        std::slice::from_raw_parts(a_slice.as_ptr().cast::<f64>(), a_slice.len())
+                    };
+                    a_raw.iter().any(|value| value.is_infinite())
+                } else {
+                    false
+                };
+                b_raw.contains(&0.0) || infinite_dividend
             } else {
                 false
             };
@@ -61021,19 +61017,17 @@ fn fmod(
                 let b_raw: &[f32] = unsafe {
                     std::slice::from_raw_parts(b_slice.as_ptr().cast::<f32>(), b_slice.len())
                 };
-                b_raw.contains(&0.0)
-                    || PyBuffer::<f32>::get(&a)
-                        .ok()
-                        .and_then(|a_buf| a_buf.as_slice(py))
-                        .is_some_and(|a_slice| {
-                            let a_raw: &[f32] = unsafe {
-                                std::slice::from_raw_parts(
-                                    a_slice.as_ptr().cast::<f32>(),
-                                    a_slice.len(),
-                                )
-                            };
-                            a_raw.iter().any(|value| value.is_infinite())
-                        })
+                let infinite_dividend = if let Ok(a_buf) = PyBuffer::<f32>::get(&a)
+                    && let Some(a_slice) = a_buf.as_slice(py)
+                {
+                    let a_raw: &[f32] = unsafe {
+                        std::slice::from_raw_parts(a_slice.as_ptr().cast::<f32>(), a_slice.len())
+                    };
+                    a_raw.iter().any(|value| value.is_infinite())
+                } else {
+                    false
+                };
+                b_raw.contains(&0.0) || infinite_dividend
             } else {
                 false
             };
