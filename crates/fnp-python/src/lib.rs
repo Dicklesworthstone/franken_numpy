@@ -38453,6 +38453,32 @@ fn searchsorted_mode_override() -> Option<std::ffi::OsString> {
 ///
 /// `par` and `ser` force the two sides so the threshold itself can be A/B'd
 /// inside ONE process rather than across two invocations.
+fn searchsorted_parallel_min_f32() -> usize {
+    /// FITTED ON THIS ROUTE (`deadlock-audit-sfgg3`, worker hz4, numpy 2.5.2, ser/par forced in
+    /// ONE process, f32 needles into a 2^16 f32 haystack):
+    ///
+    /// ```text
+    ///   m        serial   parallel   verdict
+    ///   2^10     0.786x    0.934x    parallel LOSES by 18.8%
+    ///   2^12     0.869x    0.186x    4.67x
+    ///   2^14     0.869x    0.074x    11.7x
+    ///   2^16     0.887x    0.054x    16.4x
+    ///   sorted   0.590x    0.053x    11.1x
+    /// ```
+    ///
+    /// Lands on the same 2^12 as the integer and f64 routes, but it had to be measured to know
+    /// that: f32 halves the element width, so twice as much haystack fits in each cache level,
+    /// the serial arm is less latency-bound, and parallelism pays LATER - which is why 2^10
+    /// loses here where the f64 route's 2^10 was already (marginally) winning. Same number,
+    /// different reason, and only the measurement distinguishes those.
+    const SHIPPED: usize = 1 << 12;
+    match searchsorted_mode_override() {
+        Some(mode) if mode == *"par" => 1 << 10,
+        Some(mode) if mode == *"ser" => usize::MAX,
+        _ => SHIPPED,
+    }
+}
+
 fn searchsorted_parallel_min_f64() -> usize {
     /// FITTED ON THIS ROUTE, not inherited from the integer one (`deadlock-audit-sfgg3`,
     /// worker hz4, numpy 2.5.2, ser/par forced in ONE process, f64 needles into a 2^16 f64
@@ -38910,8 +38936,14 @@ fn try_zerocopy_f32_searchsorted(
         // read-only under the GIL and `flat` is this call's fresh output allocation.
         let a_raw: &[f32] =
             unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f32>(), a_s.len()) };
-        const SEARCHSORTED_PARALLEL_MIN: usize = 1 << 21;
-        if m >= SEARCHSORTED_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        // Third route, third separately-fitted threshold. f32 halves the element width, so twice
+        // as much haystack fits in each cache level and the serial arm is correspondingly less
+        // latency-bound - which is exactly the quantity the crossover depends on, and exactly why
+        // the f64 number is a prior and not an answer.
+        // Nothing above this arm can be stolen by widening it: the f32 sorted-batch merge
+        // (`try_zerocopy_f32_searchsorted_merge`) needs m >= 1<<19 AND n >= 1<<19 and has already
+        // declined for every m below that.
+        if m >= searchsorted_parallel_min_f32() && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let v_raw: &[f32] =
                 unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f32>(), m) };

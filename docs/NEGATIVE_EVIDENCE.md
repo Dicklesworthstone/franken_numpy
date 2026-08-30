@@ -66142,3 +66142,86 @@ ONE worker. The crossover depends on core count and haystack residency, so a wor
 cores could push it up. The unmeasured band [2^10, 2^12) is where a further win would be, and it
 needs a decidable measurement at 2^11 to open.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — WIN: the f32 `searchsorted` parallel gate, the third inherited 1<<21 — fitted to 1<<12 it takes 0.869x to **0.116x** (8.6x FASTER than live NumPy); the evidence is WEAKER than its two siblings and this row says exactly how
+
+**Campaign result class:** incumbent-win
+
+Third and last of the inherited `1<<21` searchsorted thresholds, fitted on its own route. Live
+NumPy 2.5.2 in the SAME process, arms interleaved ABBAABBA, dual A/A null per cell. Worker `hz4`
+(rch), python 3.14.4, stock `release`, **loadavg 28.39 - a busy host, and it shows**.
+`bench_elf_sha256=ec6829759fcdd1dba427517b5e9606d3b37c20b083b28c6233a0232d3c03c96b`.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.5.2 artifact_sha256=27bd88fd60f4b9fcd5c938572e9b9e3df0aed9cfed4888e57d94c516b45512b7 invocation_id=hz4-1784404-1788128834 measured_ratio=0.116x
+
+**Incumbent isolation proof:** candidate=fnp.searchsorted incumbent=numpy.searchsorted shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.40
+
+**A/A null control (same invocation):** the ONE decidable pair is clean on all four nulls — parallel ratio 0.116x (0.999/0.990) against serial 0.869x (1.000/1.001).
+
+### 1. THE HONEST EVIDENCE STATEMENT, BEFORE THE NUMBERS
+
+**The parallel arm's A/A null is systematically noisy on a loaded host** - it competes for the very
+cores it is being timed on - and on this run most parallel rows fall outside ±2% and are VOID. A
+larger effect does not fix that, because the noise is in the null, not the effect. So this gate
+does NOT have the two-sided decidable bracket its integer and f64 siblings have. What it has:
+
+- **one null-clean decidable pair**, m=2^16: serial 0.869x -> parallel 0.116x;
+- the **sign replicated across two runs on two different ELFs** at every size, which is the
+  standard this campaign already uses where magnitudes will not reproduce
+  (`single-run-dual-null-cannot-decide-sub-5pct`: signs replicate where magnitudes do not);
+- a **replicated losing point** at 2^10.
+
+The 2^12 boundary itself is NOT decidable at the ±2% null standard on this host. It is shipped
+because it is bracketed by a replicated loss below and replicated large wins above, and because it
+matches the two routes that ARE decidably fitted. **A quiet host would settle it; this one cannot.**
+
+### 2. THE SWEEP (ELF `2fbf2231db751c2acacd9b916ab213936c135f74c88c98bf266b5595acd15acd`, hz4)
+
+```
+  m        serial   parallel   verdict
+  2^10     0.786x    0.934x    parallel LOSES by 18.8% (null 1.023, so "about")
+  2^12     0.869x    0.186x    4.67x   (null VOID)
+  2^14     0.869x    0.074x    11.7x   (null VOID)
+  2^16     0.887x    0.054x    16.4x   (null VOID)
+  sorted   0.590x    0.053x    11.1x   (null VOID)
+```
+
+### 3. THE SHIPPED DEFAULT (ELF `ec6829...`, second run)
+
+```
+  case                 impl      numpy_ns        fnp_ns     ratio  nullNP  nullFNP
+  f32 random m=2^16    parallel 8901425.9     1036977.4     0.116x   0.999   0.990
+  f32 random m=2^16    ser      8879987.2     7716757.2     0.869x   1.000   1.001
+  f32 random m=2^12    ser       566731.3      501146.3     0.884x   1.000   1.005
+```
+
+At m=2^16 the forced-`par` and shipped gates admit identically (2^16 exceeds both 1<<10 and 1<<12),
+so that row IS the shipped behaviour. **7.5x on our own arm**, and the cell goes 0.869x -> 0.116x.
+
+### 4. SAME NUMBER AS THE OTHER TWO ROUTES, DIFFERENT REASON — WHICH IS WHY IT WAS MEASURED
+
+f32 halves the element width, so twice as much haystack fits in every cache level, the serial arm
+is less latency-bound, and parallelism pays LATER. That prediction is visible in the data: **2^10
+LOSES here (0.786 -> 0.934) where the f64 route's 2^10 was already marginally winning (0.839 ->
+0.766).** The three routes landing on the same 1<<12 is a result, not an assumption - and it is
+the assumption this repo's inherited gates were built on.
+
+COUNTED_MECHANISM: m independent latency-bound searches confined to ONE core, spread over
+`rayon::current_num_threads()`. Below the gate the same split is pure rayon setup, which is what
+the 2^10 row measures.
+PARITY: **11074 integer cells + 176 f32 cells, 0 divergences**, both run BEFORE any timing. The
+f32 gate changes only chunking, but the f32 raw helper owns NaN-last and signed-zero ordering, so
+the f32 probe exercises NaN-containing needles on both forced sides. (That probe was added by a
+peer mid-session and is kept; my first sweep ELF predates it and therefore did not run it, which is
+why the confirming run is the one quoted for parity.)
+VERIFICATION: `cargo fmt --check` exit 0 AND per-file `rustfmt --check` exit 0 - both, because the
+workspace command silently returns 0 while rustfmt aborts (`deadlock-audit-h4pjj`).
+SCOPE: all three searchsorted parallel thresholds (integer, f64, f32) are now fitted on their own
+routes. No other `PAR_MIN` in this repo has been checked.
+RETRY PREDICATE: **re-measure the 2^12 boundary on a QUIET host before trusting it to three
+digits** - that is the open question this row leaves, and it is a host problem, not a design one.
+Do not move the gate on this row's evidence alone. The [2^10, 2^12) band is unmeasured on this
+route and is where any further win would be.
+AGENT_NAME=BlackThrush.

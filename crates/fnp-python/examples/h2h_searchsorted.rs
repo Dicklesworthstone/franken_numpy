@@ -104,7 +104,37 @@ def parity():
     out("parity: %d cells, %d divergences" % (cells, bad))
     return bad
 
-if parity():
+def parity_f32():
+    # The f32 gate changes only chunking, but its raw helper owns NaN-last and signed-zero
+    # ordering. Exercise both forced sides on ordinary, monotone, and NaN-containing arrays.
+    bad = cells = 0
+    for impl, flag in (("ser", "ser"), ("par", "par")):
+        os.environ["FNP_SEARCHSORTED_MERGE"] = flag
+        for n in (0, 1, 17, 65536):
+            hay = np.sort(rng.standard_normal(n).astype(np.float32))
+            for m in (0, 1, 17, 2048):
+                q = rng.standard_normal(m).astype(np.float32)
+                variants = (("random", q), ("sorted", np.sort(q)))
+                if m:
+                    variants += (("nan", np.concatenate((
+                        q[:-1], np.array([np.nan], dtype=np.float32)))),)
+                for label, qq in variants:
+                    for side in ("left", "right"):
+                        cells += 1
+                        want = np.searchsorted(hay, qq, side=side)
+                        got = fnp.searchsorted(hay, qq, side=side)
+                        if not np.array_equal(want, got):
+                            bad += 1
+                            if bad < 6:
+                                out("  F32 PARITY DIVERGE impl=%s n=%d m=%d %s %s"
+                                    % (impl, n, m, label, side))
+                del q
+            del hay
+    os.environ.pop("FNP_SEARCHSORTED_MERGE", None)
+    out("f32 parity: %d cells, %d divergences" % (cells, bad))
+    return bad
+
+if parity() or parity_f32():
     out("ABORTING: parity failed, a ratio would be meaningless")
     raise SystemExit(1)
 out("parity gate: both query strategies agree with NumPy on every cell")
@@ -218,6 +248,18 @@ for mq in (1 << 10, 1 << 12, 1 << 14, 1 << 16):
 # arm must not cost anything relative to the serial guess-based search it replaces.
 cell("f64 sorted m=2^16", f64_hay, np.sort(rng.standard_normal(1 << 16)), 20)
 del f64_hay
+
+# The f32 route, whose threshold is a THIRD separate constant still at the inherited 1<<21. f32
+# halves the element width, so twice as much haystack fits in each cache level and the serial arm
+# is less latency-bound - the very quantity the crossover depends on. The f64 result is a prior
+# here, not an answer.
+f32_hay = np.sort(rng.standard_normal(1 << 16).astype(np.float32))
+for mq in (1 << 10, 1 << 12, 1 << 14, 1 << 16):
+    cell("f32 random m=2^%d" % (mq.bit_length() - 1), f32_hay,
+         rng.standard_normal(mq).astype(np.float32), max(2, 2000 // max(1, mq >> 8)))
+cell("f32 sorted m=2^16", f32_hay,
+     np.sort(rng.standard_normal(1 << 16).astype(np.float32)), 20)
+del f32_hay
 
 # THE GATE'S LOSING SIDE. A nondecreasing needle batch is admissible on the QUERY test alone, but
 # the walk's cost is span in the HAYSTACK: 64 sorted queries spread over 2^22 elements make the
