@@ -9977,6 +9977,118 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
     Ok(Some((flat, shape)))
 }
 
+// Expands the eight-lane SIMD unordered-comparison mask into the exact uint8
+// representation NumPy uses for bool (`0x00` / `0x01`). Keeping this as a
+// table avoids materialising a Rust bool for every element on the `isnan` hot
+// path: the SIMD comparison produces one mask, then eight output bytes.
+const fn predicate_mask_byte_lanes(mask: usize) -> u64 {
+    let mut bytes = 0_u64;
+    let mut lane = 0;
+    while lane < 8 {
+        bytes |= (((mask >> lane) & 1) as u64) << (lane * 8);
+        lane += 1;
+    }
+    bytes
+}
+
+const fn predicate_mask_byte_lut() -> [u64; 256] {
+    let mut table = [0_u64; 256];
+    let mut mask = 0;
+    while mask < table.len() {
+        table[mask] = predicate_mask_byte_lanes(mask);
+        mask += 1;
+    }
+    table
+}
+
+const ISNAN_MASK_BYTE_LUT: [u64; 256] = predicate_mask_byte_lut();
+
+// `isnan` is the only f64 predicate that the survey still finds materially
+// slower than NumPy at 2^20. Its unordered self-compare maps directly to a
+// portable-SIMD mask; unlike the generic predicate closure, this writes the
+// packed mask bytes without a per-element Rust-bool conversion.
+fn zerocopy_f64_isnan_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialEq;
+
+    const LANES: usize = 8;
+    type Lanes = Simd<f64, LANES>;
+
+    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    if !x.get_type().is(&ndarray_type)
+        || !x
+            .getattr(intern!(py, "dtype"))?
+            .is(cached_float64_dtype(py)?)
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let bytes = if shape.len() >= 2 {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+    } else {
+        numpy.call_method1(intern!(py, "empty"), (n, cached_uint8_type(py)?))?
+    };
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let (input_chunks, input_tail) = input.as_chunks::<LANES>();
+        let (output_chunks, output_tail) = output.as_chunks_mut::<LANES>();
+        for (input_chunk, output_chunk) in input_chunks.iter().zip(output_chunks) {
+            let lanes = Lanes::from_array([
+                input_chunk[0].get(),
+                input_chunk[1].get(),
+                input_chunk[2].get(),
+                input_chunk[3].get(),
+                input_chunk[4].get(),
+                input_chunk[5].get(),
+                input_chunk[6].get(),
+                input_chunk[7].get(),
+            ]);
+            let byte_lanes = ISNAN_MASK_BYTE_LUT[lanes.simd_ne(lanes).to_bitmask() as usize]
+                .to_le_bytes();
+            for (slot, byte) in output_chunk.iter().zip(byte_lanes) {
+                slot.set(byte);
+            }
+        }
+        for (slot, cell) in output_tail.iter().zip(input_tail) {
+            slot.set(u8::from(cell.get().is_nan()));
+        }
+    }
+    let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
+    Ok(Some((flat, shape)))
+}
+
+fn try_zerocopy_f64_isnan(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = cached_numpy(py)?;
+    let Some((flat, shape)) = zerocopy_f64_isnan_flat(py, numpy, x)? else {
+        return Ok(None);
+    };
+    if !shape.is_empty() {
+        return Ok(Some(flat.unbind()));
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat
+        .call_method1(intern!(py, "reshape"), (&output_shape,))?
+        .unbind();
+    Ok(Some(output.bind(py).get_item(())?.unbind()))
+}
+
 // f64->f64 counterpart of zerocopy_f64_predicate_flat for elementwise ops not covered by
 // the UnaryOp dispatch (e.g. spacing): read the contiguous f64 buffer and write `f(v)`
 // straight into a fresh np.empty(float64) buffer, no intermediate Rust Vec / extract.
@@ -11754,8 +11866,18 @@ fn try_zerocopy_f16_binary_widen(
         let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), n) };
         let b_raw: &[u16] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), n) };
         // fmod (5) / remainder (6) / divide (10) / floor_divide (11): a zero divisor must defer to
-        // numpy so its RuntimeWarning + nan/inf surface exactly (f16 zero is +0.0=0x0000/-0.0=0x8000).
+        // NumPy so its RuntimeWarning + NaN/inf surface exactly (f16 zero is +0.0=0x0000/-0.0=0x8000).
         if matches!(op, 5 | 6 | 10 | 11) && b_raw.iter().any(|&v| v == 0x0000 || v == 0x8000) {
+            return Ok(None);
+        }
+        // fmod has one additional invalid input class: an infinite dividend with a finite divisor.
+        // The widened f32 `%` produces the matching NaN bits, but cannot reproduce NumPy's invalid
+        // warning or errstate behavior, so defer the exceptional array to the live ufunc.
+        if op == 5
+            && a_raw
+                .iter()
+                .any(|&v| (v & 0x7c00) == 0x7c00 && (v & 0x03ff) == 0)
+        {
             return Ok(None);
         }
         // hypot (16): a result overflowing f16 (|hypot| > 65504) makes numpy emit an "overflow"
@@ -11830,7 +11952,8 @@ fn try_zerocopy_f16_binary_widen(
                         }
                         // 5 = fmod (f32 % = IEEE fmodf, sign of dividend); 6 = remainder (floored,
                         // sign of divisor). numpy widens f16->f32 for these, so narrow(op_f32(widen))
-                        // is bit-exact (verified). Zero divisors are deferred by the dispatcher.
+                        // is bit-exact (verified). Zero divisors and infinite dividends are deferred
+                        // by the dispatcher so NumPy owns invalid-event behavior.
                         5 => f16::from_f32(av % bv).to_bits(),
                         // 10 = divide: numpy widens f16->f32, divides, narrows (round-to-nearest-
                         // even) — bit-exact (verified random + full f16 domain x divisor set). Zero
@@ -32776,7 +32899,7 @@ fn signbit(
 }
 
 fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_f64_predicate(py, x, f64::is_nan)? {
+    if let Some(out) = try_zerocopy_f64_isnan(py, x)? {
         return Ok(out);
     }
     if let Some(out) = try_zerocopy_f32_predicate(py, x, f32::is_nan)? {
@@ -38041,9 +38164,13 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         // `examples/h2h_searchsorted.rs`); two invocations can land on two workers and are not
         // comparable. `0` = per-query bisection. `force` = merge with the span gate bypassed,
         // which exists so the gate's LOSING side is measurable and not merely asserted.
-        let merge_mode = std::env::var_os("FNP_SEARCHSORTED_MERGE");
-        let merge_off = merge_mode.as_deref() == Some(std::ffi::OsStr::new("0"));
-        let merge_forced = merge_mode.as_deref() == Some(std::ffi::OsStr::new("force"));
+        //
+        // READ LAZILY, AND ONLY BEHIND THE SORTEDNESS SCAN. `getenv` walks `environ` and
+        // allocates, so consulting it unconditionally would tax every searchsorted call -
+        // including the unsorted-query majority, which can never take the merge and would be
+        // paying purely for a switch that exists to measure it. The closure below is invoked
+        // only after the queries are known to be nondecreasing.
+        let merge_mode = || std::env::var_os("FNP_SEARCHSORTED_MERGE");
         // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL. Raw
         // &[T] is Sync so the search runs on worker threads.
         let a_raw: &[T] =
@@ -38090,8 +38217,11 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             // it: two bisections, on the first and last needle, give the EXACT span the pointer
             // travels, and starting the pointer at the first needle's own insertion point means
             // clustered queries never pay for the haystack prefix below them.
-            let sorted_q = !merge_off && v_raw.windows(2).all(|w| w[0] <= w[1]);
-            let merge_from = if sorted_q {
+            let sorted_q = v_raw.windows(2).all(|w| w[0] <= w[1]);
+            let mode = if sorted_q { merge_mode() } else { None };
+            let merge_off = mode.as_deref() == Some(std::ffi::OsStr::new("0"));
+            let merge_forced = mode.as_deref() == Some(std::ffi::OsStr::new("force"));
+            let merge_from = if sorted_q && !merge_off {
                 let lo = search_index(a_raw, v_raw[0], right) as usize;
                 let hi = search_index(a_raw, v_raw[m - 1], right) as usize;
                 let log2n = (usize::BITS - a_raw.len().leading_zeros()) as usize;
@@ -60782,50 +60912,77 @@ fn fmod(
     // fmod is C-style mod (sign of the dividend). numpy runs it single-threaded (SIMD),
     // so the zero-copy PARALLEL binary kernel (op.apply(Fmod) = lhs % rhs, the SAME
     // per-element op, bit-identical f64) fans the work across cores and wins for large
-    // same-shape c-contiguous f64. A zero divisor must defer to numpy so its RuntimeWarning
-    // + nan surface exactly; scan the divisor buffer zero-copy (no extract). Scalar/
-    // broadcast/non-f64/non-contiguous defer to numpy. (BlackThrush 2026-06-25: the old
+    // same-shape c-contiguous f64. A zero divisor OR infinite dividend must defer to NumPy so its
+    // RuntimeWarning + NaN surface exactly; scan the zero-copy buffers (no extract). Scalar/
+    // broadcast/non-f64/non-contiguous defer to NumPy. (BlackThrush 2026-06-25: the old
     // "1.6-2.3x slower native" note predated the no-copy from_raw_parts parallel kernel.)
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let a = args.get_item(0)?;
         let b = args.get_item(1)?;
         if numpy_dtype_is_f64(py, &a) && numpy_dtype_is_f64(py, &b) {
-            let zero_divisor = if let Ok(b_buf) = PyBuffer::<f64>::get(&b)
+            let requires_numpy_exception_surface = if let Ok(b_buf) = PyBuffer::<f64>::get(&b)
                 && let Some(b_slice) = b_buf.as_slice(py)
             {
                 let b_raw: &[f64] = unsafe {
                     std::slice::from_raw_parts(b_slice.as_ptr().cast::<f64>(), b_slice.len())
                 };
                 b_raw.contains(&0.0)
+                    || PyBuffer::<f64>::get(&a)
+                        .ok()
+                        .and_then(|a_buf| a_buf.as_slice(py))
+                        .is_some_and(|a_slice| {
+                            let a_raw: &[f64] = unsafe {
+                                std::slice::from_raw_parts(
+                                    a_slice.as_ptr().cast::<f64>(),
+                                    a_slice.len(),
+                                )
+                            };
+                            a_raw.iter().any(|value| value.is_infinite())
+                        })
             } else {
                 false
             };
-            if !zero_divisor && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Fmod)?
+            if !requires_numpy_exception_surface
+                && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Fmod)?
             {
                 return Ok(out);
             }
         }
         // float32 sibling: numpy runs f32 fmod single-threaded (~138ms @16M); the native
-        // parallel f32 kernel (lhs % rhs = IEEE fmodf, bit-identical) wins ~9x. A zero divisor
-        // must defer so numpy's RuntimeWarning + nan surface exactly; scan zero-copy.
+        // parallel f32 kernel (lhs % rhs = IEEE fmodf, bit-identical) wins ~9x. A zero divisor or
+        // infinite dividend must defer so NumPy's RuntimeWarning + NaN surface exactly; scan zero-copy.
         else if numpy_dtype_is_f32(&a) && numpy_dtype_is_f32(&b) {
-            let zero_divisor = if let Ok(b_buf) = PyBuffer::<f32>::get(&b)
+            let requires_numpy_exception_surface = if let Ok(b_buf) = PyBuffer::<f32>::get(&b)
                 && let Some(b_slice) = b_buf.as_slice(py)
             {
                 let b_raw: &[f32] = unsafe {
                     std::slice::from_raw_parts(b_slice.as_ptr().cast::<f32>(), b_slice.len())
                 };
                 b_raw.contains(&0.0)
+                    || PyBuffer::<f32>::get(&a)
+                        .ok()
+                        .and_then(|a_buf| a_buf.as_slice(py))
+                        .is_some_and(|a_slice| {
+                            let a_raw: &[f32] = unsafe {
+                                std::slice::from_raw_parts(
+                                    a_slice.as_ptr().cast::<f32>(),
+                                    a_slice.len(),
+                                )
+                            };
+                            a_raw.iter().any(|value| value.is_infinite())
+                        })
             } else {
                 false
             };
-            if !zero_divisor && let Some(out) = try_zerocopy_f32_binary(py, &a, &b, BinaryOp::Fmod)?
+            if !requires_numpy_exception_surface
+                && let Some(out) = try_zerocopy_f32_binary(py, &a, &b, BinaryOp::Fmod)?
             {
                 return Ok(out);
             }
         }
         // float16 sibling: numpy widens f16->f32 for fmod (~214ms@16M). Native parallel
-        // widen-fmod-narrow is bit-identical (op 5); defers on a zero divisor (scanned in-helper).
+        // widen-fmod-narrow is bit-identical (op 5); defers on zero divisors and infinite dividends
+        // (scanned in-helper) so NumPy emits its invalid event.
         else if let Some(out) = try_zerocopy_f16_binary_widen(py, &a, &b, 5)? {
             return Ok(out);
         }

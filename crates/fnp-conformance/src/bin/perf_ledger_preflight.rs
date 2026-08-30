@@ -1422,7 +1422,10 @@ source_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.
     #[test]
     fn keepdims_is_not_a_keep_verdict() {
         let entries = split_entries("## 2026-08-27 - correctness: keepdims preserves rank\n");
-        assert!(!is_keep(&entries[0]), "substring matching would misclassify keepdims");
+        assert!(
+            !is_keep(&entries[0]),
+            "substring matching would misclassify keepdims"
+        );
         let keep = split_entries("## 2026-08-27 - KEEP: real verdict\n");
         assert!(is_keep(&keep[0]));
     }

@@ -153,9 +153,17 @@ pub fn sort_i64(values: &mut [i64]) {
 /// claim") can run BOTH kernels in ONE process on the same corpus.  Shipping it
 /// on by default before that gate passes would be exactly the unmeasured
 /// route-level claim the predicate bars.
+///
+/// NOT an `env::var_os` per call.  `getenv` walks `environ` and allocates, and
+/// this is read on the entry path of the very cell being measured — a route
+/// whose WHOLE remaining deficit is 326 ns.  A switch that costs a hundred
+/// nanoseconds to read would be paid by the shipped default arm and would
+/// corrupt the number it exists to produce.  The environment is consulted once;
+/// after that this is a relaxed atomic load.
 #[inline]
 fn bitonic_enabled() -> bool {
-    std::env::var_os("FNP_SORT_I64_BITONIC").is_some_and(|v| v == *"1")
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FNP_SORT_I64_BITONIC").is_some_and(|v| v == *"1"))
 }
 
 /// The comparison-sort arm, named so the standalone A/B harness can hold both

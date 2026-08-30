@@ -2,6 +2,10 @@
 //!
 //! Tests remainder and fmod functions.
 
+mod common;
+
+use common::with_fnp_and_numpy;
+use pyo3::types::{PyDict, PyDictMethods};
 use std::process::Command;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
@@ -192,9 +196,14 @@ print(np.allclose(result, expected, equal_nan=True))
 }
 
 #[test]
-fn fmod_infinite_dividend_matches_numpy_invalid_event_and_nan_bits() -> Result<(), String> {
-    let script = fnp_script(
-        r#"
+fn fmod_infinite_dividend_matches_numpy_invalid_event_and_nan_bits() {
+    with_fnp_and_numpy(|py, fnp, np| {
+        let globals = PyDict::new(py);
+        globals.set_item("np", np)?;
+        globals.set_item("fnp", fnp)?;
+        py.run(
+            pyo3::ffi::c_str!(
+                r#"
 import warnings
 
 dividend = np.array([np.inf, -np.inf, np.inf, np.nan, 3.0], dtype=np.float64)
@@ -217,17 +226,15 @@ def invalid_raise(ufunc):
             return (type(error).__name__, str(error))
     return None
 
-print(observe(fnp.fmod) == observe(np.fmod), invalid_raise(fnp.fmod) == invalid_raise(np.fmod))
+assert observe(fnp.fmod) == observe(np.fmod)
+assert invalid_raise(fnp.fmod) == invalid_raise(np.fmod)
 "#
-        .into(),
-    );
-    let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True True",
-        "fmod infinite dividend should preserve NumPy invalid events and NaN bits: {result}"
-    );
-    Ok(())
+            ),
+            Some(&globals),
+            None,
+        )?;
+        Ok(())
+    });
 }
 
 #[test]
