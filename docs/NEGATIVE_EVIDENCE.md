@@ -66349,3 +66349,56 @@ decidable pair (both nulls inside ±2%) at 2^11 on at least two workers of diffe
 since this row also shows a single worker cannot settle a crossover. Anything less is not evidence
 that survives the host dependence demonstrated here.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — STRENGTHENING THE BAND REJECT: below 2^12 the parallel arm's sign is HOST-DIVERGENT, not merely negative — the same f32 m=2^11 cell reads 2.419x on one worker and 0.632x on another (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** maintenance-self-speedup
+
+An addendum to the band reject above, and it changes that row's conclusion in kind rather than
+degree. No vs-NumPy claim: every pair is `ser` against `par`, ours against ours, in one process.
+
+### The contradiction
+
+```
+  route  m      worker      serial              parallel            nulls
+  f32    2^11   hetzner2    0.763x 1.006/1.009  2.419x 0.990/1.011  BOTH CLEAN - parallel 3.17x WORSE
+  f32    2^11   hz4         0.865x 0.999/1.001  0.632x 1.000/0.973  par VOID    - parallel  1.4x BETTER
+  f64    2^11   hetzner2    0.726x 0.990/0.999  1.894x 1.014/0.873  par VOID    - parallel  2.6x WORSE
+  f64    2^11   hz4         0.890x 1.003/0.999  0.675x 0.997/0.943  par VOID    - parallel  1.3x BETTER
+```
+
+**The sign itself flips between workers.** The band reject above concluded "the [2^10, 2^12) band
+is a loss"; the truthful statement is stronger and less comfortable: **in that band the answer
+depends on the machine, so no single threshold value inside it is safe anywhere.** Only the
+hetzner2 f32 pair is null-clean; the hz4 counter-readings are VOID and are quoted for SIGN, which
+is precisely the point — a VOID row cannot establish a magnitude but it can still contradict a
+sign, and a lever whose sign is contested has no business being shipped.
+
+### What is NOT contested
+
+`m = 2^10`, freshly measured on hz4 with BOTH nulls clean: integer serial 2.993x against parallel
+**5.825x** (1.001/1.001 and 1.000/1.013). Parallel loses by 1.95x. Every worker measured agrees at
+2^10, and every worker agrees that 2^12 is better or neutral. The disagreement is confined to 2^11.
+
+### The integer 2^11 cell stays CLOSED, and the predicate is why
+
+The band reject's retry predicate required a decidable pair at 2^11 on two workers of different
+core counts. This run supplies neither: on hz4 the integer 2^11 arms read serial 3.318x
+(0.978/1.000) and parallel 3.173x (0.988/1.026) — **both VOID**. So the predicate is unmet, the
+cell is not reopened, and the 5.7%-null reading from the previous row is not upgraded by a second
+equally-undecidable one. Two undecidable measurements are not one decidable measurement.
+
+COUNTED_MECHANISM: integer m=1024 on hz4, serial 95229.0 ns against parallel 183507.2 ns = +88278 ns added for an identical gather of the same 1024 results.
+Below the gate no work is removed and rayon setup plus per-chunk dispatch is added; the added cost
+is comparable to the serial arm's entire runtime, which is the signature of fixed per-call setup.
+A/A NULL CONTROLS: 6 nulls on the two clean pairs quoted (integer 2^10 hz4, f32 2^11 hetzner2), all
+inside ±2%. Every other row above is explicitly marked VOID and used for sign only.
+PARITY: 11074 integer cells + 176 f32 cells, 0 divergences, before any timing.
+VERIFICATION: `cargo fmt --check` exit 0 and per-file `rustfmt --check` exit 0.
+RETRY PREDICATE: the [2^10, 2^12) band is now closed on a stronger basis than before — not "it
+loses" but "its sign is host-dependent". Do not reopen it with measurements from a SINGLE worker,
+whatever their nulls: this row is the demonstration that one worker's clean pair can be
+contradicted by another's. A reopening needs decidable pairs, same direction, on at least three
+workers of differing core counts, and should probably gate on `rayon::current_num_threads()`
+rather than on a bare element count if it ever succeeds.
+AGENT_NAME=BlackThrush.
