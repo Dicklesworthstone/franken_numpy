@@ -38036,10 +38036,14 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             }
             left as i64
         }
-        // DEFAULT ON - the shipped route. `FNP_SEARCHSORTED_MERGE=0` forces the per-query
-        // bisection so the two can be A/B'd in ONE process (see examples/h2h_searchsorted.rs).
-        let merge_enabled = std::env::var_os("FNP_SEARCHSORTED_MERGE")
-            .is_none_or(|v| v != std::ffi::OsStr::new("0"));
+        // DEFAULT ON - the shipped route is the SPAN-GATED merge below. The env knob selects the
+        // loop per call so every arm is timed on the same arrays in ONE process (see
+        // `examples/h2h_searchsorted.rs`); two invocations can land on two workers and are not
+        // comparable. `0` = per-query bisection. `force` = merge with the span gate bypassed,
+        // which exists so the gate's LOSING side is measurable and not merely asserted.
+        let merge_mode = std::env::var_os("FNP_SEARCHSORTED_MERGE");
+        let merge_off = merge_mode.as_deref() == Some(std::ffi::OsStr::new("0"));
+        let merge_forced = merge_mode.as_deref() == Some(std::ffi::OsStr::new("force"));
         // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL. Raw
         // &[T] is Sync so the search runs on worker threads.
         let a_raw: &[T] =
@@ -38077,9 +38081,29 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             //
             // The scan costs one pass over the needles; it is O(m) against a search that is
             // O(m log n), so it cannot pay for itself only on a bench input.
-            let merge_ok = merge_enabled && v_raw.windows(2).all(|w| w[0] <= w[1]);
-            if merge_ok {
-                let mut p = 0usize;
+            //
+            // BUT THE ADMISSION TEST MUST READ BOTH OPERANDS. Nondecreasing is a property of the
+            // QUERIES, while the walk's cost is O(span) in the HAYSTACK. A single needle is
+            // trivially sorted - `windows(2)` is empty - so an m=1 query against a 2^22 haystack
+            // would walk up to 4.2M elements where the bisection pays 23 probes. That is the
+            // gate-reads-operand-A-while-operand-B-pays shape, so price the walk before taking
+            // it: two bisections, on the first and last needle, give the EXACT span the pointer
+            // travels, and starting the pointer at the first needle's own insertion point means
+            // clustered queries never pay for the haystack prefix below them.
+            let sorted_q = !merge_off && v_raw.windows(2).all(|w| w[0] <= w[1]);
+            let merge_from = if sorted_q {
+                let lo = search_index(a_raw, v_raw[0], right) as usize;
+                let hi = search_index(a_raw, v_raw[m - 1], right) as usize;
+                let log2n = (usize::BITS - a_raw.len().leading_zeros()) as usize;
+                // The merge walks `hi - lo` haystack steps plus m needle steps; the bisection
+                // pays m * log2(n) random probes. A merge step is sequential and strictly
+                // cheaper than a probe, so admitting only at parity of COUNTS errs toward the
+                // bisection - it declines some wins and can never open a large loss.
+                (merge_forced || ((hi - lo) + m) <= m.saturating_mul(log2n)).then_some(lo)
+            } else {
+                None
+            };
+            if let Some(mut p) = merge_from {
                 for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
                     while p < a_raw.len() {
                         let before = if right {
@@ -54592,9 +54616,22 @@ fn try_native_lexsort_valuelex(
     // comparison sort, which is how examples/h2h_lexsort.rs A/Bs the two in one process.
     let counting_enabled =
         std::env::var_os("FNP_LEXSORT_COUNTING").is_none_or(|v| v != std::ffi::OsStr::new("0"));
+    let radix_enabled = std::env::var_os("FNP_LEXSORT_RADIX")
+        .is_some_and(|v| v != std::ffi::OsStr::new("0"));
     let mut perm: Vec<u32> = Vec::new();
     let mut counted = false;
-    if counting_enabled && total_width <= 16 && n > (1 << 12) {
+    if radix_enabled && items.len() == 2 && total_width == 16 {
+        let keys: Vec<u128> = records
+            .par_chunks_exact(16)
+            .map(|record| {
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(record);
+                u128::from_be_bytes(bytes)
+            })
+            .collect();
+        perm = stable_radix_sort_u128_permutation(&keys);
+        counted = true;
+    } else if counting_enabled && total_width <= 16 && n > (1 << 12) {
         let mut slot_key = vec![0u128; LEX_BUCKET_SLOTS];
         let mut slot_id = vec![u32::MAX; LEX_BUCKET_SLOTS];
         let mut distinct: Vec<u128> = Vec::with_capacity(LEX_BUCKET_MAX);
@@ -54680,6 +54717,54 @@ fn try_native_lexsort_valuelex(
         .zip(perm.par_iter())
         .for_each(|(dst, &p)| *dst = p as i64);
     Ok(Some(out.unbind()))
+}
+
+fn stable_radix_sort_u128_permutation(keys: &[u128]) -> Vec<u32> {
+    let mut source: Vec<u32> = (0..keys.len() as u32).collect();
+    let mut destination = vec![0u32; keys.len()];
+    for shift in (0..128).step_by(8) {
+        let mut counts = [0usize; 256];
+        for &index in &source {
+            let digit = ((keys[index as usize] >> shift) & 0xff) as usize;
+            counts[digit] += 1;
+        }
+        if counts.iter().filter(|&&count| count != 0).take(2).count() < 2 {
+            continue;
+        }
+        let mut offsets = [0usize; 256];
+        let mut next = 0usize;
+        for (offset, &count) in offsets.iter_mut().zip(counts.iter()) {
+            *offset = next;
+            next += count;
+        }
+        for &index in &source {
+            let digit = ((keys[index as usize] >> shift) & 0xff) as usize;
+            destination[offsets[digit]] = index;
+            offsets[digit] += 1;
+        }
+        std::mem::swap(&mut source, &mut destination);
+    }
+    source
+}
+
+#[cfg(test)]
+mod radix_permutation_tests {
+    use super::stable_radix_sort_u128_permutation;
+
+    #[test]
+    fn orders_packed_keys_and_preserves_equal_key_input_order() {
+        let keys = [
+            0x8000_0000_0000_0000_0000_0000_0000_0010_u128,
+            0x8000_0000_0000_0000_0000_0000_0000_0001_u128,
+            0x7000_0000_0000_0000_0000_0000_0000_00ff_u128,
+            0x8000_0000_0000_0000_0000_0000_0000_0001_u128,
+        ];
+
+        assert_eq!(
+            stable_radix_sort_u128_permutation(&keys),
+            vec![2, 1, 3, 0]
+        );
+    }
 }
 
 // WIDE K-key (K=2/3/4) integer lexsort: the composite packer defers when the
@@ -121159,7 +121244,7 @@ mod tests {
     use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
     use pyo3::types::{
         PyAny, PyAnyMethods, PyBytes, PyDict, PyDictMethods, PyList, PyListMethods, PyModule,
-        PyTuple, PyTypeMethods,
+        PyStringMethods, PyTuple, PyTypeMethods,
     };
     use pyo3::{Py, PyResult, Python};
     use std::time::Instant;
@@ -136858,6 +136943,64 @@ mod tests {
                 "mixed f32/f64 diverged - a width dispatch that accepted a mismatched \
                  pair would reinterpret f64 bytes as f32"
             );
+            Ok(())
+        });
+    }
+
+    /// The omitted `keepdims` default is NumPy's private `_NoValue` sentinel, not `False`.
+    ///
+    /// `matrix` deliberately exposes the difference: its reduction methods do not accept a
+    /// `keepdims` keyword.  A wrapper that materializes the Rust `false` default and forwards it
+    /// raises for the default call, while a wrapper that drops an explicit `False` silently masks
+    /// the real NumPy error.  Exercise both sides for the four reductions that originally shared
+    /// that bug (`deadlock-audit-30d18`).
+    #[test]
+    fn matrix_reduction_keepdims_omission_and_explicit_keyword_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_matrix_keepdims")?;
+            fnp_python(&module)?;
+            let matrix = numpy
+                .getattr("matrix")?
+                .call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
+
+            for name in ["sum", "mean", "std", "var"] {
+                let ours_fn = module.getattr(name)?;
+                let numpy_fn = numpy.getattr(name)?;
+                let axis_only = PyDict::new(py);
+                axis_only.set_item("axis", 0_i64)?;
+
+                let ours_default = ours_fn.call((matrix.clone(),), Some(&axis_only))?;
+                let numpy_default = numpy_fn.call((matrix.clone(),), Some(&axis_only))?;
+                assert_eq!(
+                    ours_default.get_type().name()?.to_str()?,
+                    numpy_default.get_type().name()?.to_str()?,
+                    "{name}: omitting keepdims must preserve NumPy's matrix dispatch"
+                );
+                assert_eq!(
+                    ours_default.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    numpy_default.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "{name}: omitted keepdims result diverged from NumPy"
+                );
+
+                let explicit_false = PyDict::new(py);
+                explicit_false.set_item("axis", 0_i64)?;
+                explicit_false.set_item("keepdims", false)?;
+                let ours_error = ours_fn
+                    .call((matrix.clone(),), Some(&explicit_false))
+                    .expect_err("matrix reduction with explicit keepdims=False must raise");
+                let numpy_error = numpy_fn
+                    .call((matrix.clone(),), Some(&explicit_false))
+                    .expect_err("fixture check: NumPy matrix reduction must reject keepdims=False");
+                assert_eq!(
+                    ours_error.get_type(py).name()?.to_str()?,
+                    numpy_error.get_type(py).name()?.to_str()?,
+                    "{name}: explicit keepdims=False error type diverged from NumPy"
+                );
+            }
             Ok(())
         });
     }
