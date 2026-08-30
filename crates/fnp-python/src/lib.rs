@@ -38453,9 +38453,25 @@ fn searchsorted_mode_override() -> Option<std::ffi::OsString> {
 /// `par` and `ser` force the two sides so the threshold itself can be A/B'd
 /// inside ONE process rather than across two invocations.
 fn searchsorted_parallel_min_f64() -> usize {
-    // UNFITTED, and deliberately left at the inherited value until it is measured on its own
-    // route. `par`/`ser` expose both sides so it can be swept the way the integer one was.
-    const SHIPPED: usize = 1 << 21;
+    /// FITTED ON THIS ROUTE, not inherited from the integer one (`deadlock-audit-sfgg3`,
+    /// worker hz4, numpy 2.5.2, ser/par forced in ONE process, f64 needles into a 2^16 f64
+    /// haystack):
+    ///
+    /// ```text
+    ///   m      serial   parallel   verdict
+    ///   2^10   0.839x    0.766x    better, but only 8.7% and the null is 1.020 - not decidable
+    ///   2^12   0.934x    0.193x    4.8x
+    ///   2^14   0.933x    0.077x    12.1x
+    ///   2^16   0.931x    0.078x    11.9x
+    ///   sorted 0.572x    0.085x    6.7x - the per-chunk guess survives chunking, so ordered
+    ///                               batches gain here too rather than regressing
+    /// ```
+    ///
+    /// The crossover is at or BELOW 2^10 on this route, so 2^12 is conservative: it declines
+    /// some wins in [2^10, 2^12) and cannot open a loss. It is set to the first size where the
+    /// effect is unambiguous (4.8x against a ~1% null) rather than to the first size where the
+    /// sign merely favours parallel.
+    const SHIPPED: usize = 1 << 12;
     match searchsorted_mode_override() {
         Some(mode) if mode == *"par" => 1 << 10,
         Some(mode) if mode == *"ser" => usize::MAX,

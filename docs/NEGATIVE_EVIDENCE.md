@@ -66060,3 +66060,85 @@ a function of core count and haystack residency, so a worker with far fewer core
 The f64/f32 thresholds are the obvious next candidates and are UNMEASURED; do not assume 1<<12
 transfers to them.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — WIN: the f64 `searchsorted` parallel gate was the SAME inherited 1<<21 — fitted on its own route it takes an already-winning cell from 0.948x to **0.062x** (16.1x FASTER than live NumPy) (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** incumbent-win
+
+Sibling of the integer gate row above, and deliberately fitted SEPARATELY rather than inheriting
+the integer's 1<<12 — the crossover is a property of the search cost and the core count, and
+nothing had measured that the two coincide. Assuming the transfer would have repeated exactly the
+mistake that left both gates at 1<<21.
+
+Live NumPy 2.5.2 in the SAME process, arms interleaved ABBAABBA, dual A/A null per cell. Worker
+`hz4` (rch), python 3.14.4, stock `release`, loadavg 25.25.
+`bench_elf_sha256=25a503f00dd9af875cdec135e6280c2089fb1f861debb0f22c0a704b1eaa2540`.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.5.2 artifact_sha256=27bd88fd60f4b9fcd5c938572e9b9e3df0aed9cfed4888e57d94c516b45512b7 invocation_id=hz4-1391335-1788126340 measured_ratio=0.062x
+
+**Incumbent isolation proof:** candidate=fnp.searchsorted incumbent=numpy.searchsorted shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.14
+
+**A/A null control (same invocation):** the two decided pairs are clean on ALL FOUR nulls each — m=2^12 shipped ratio 0.207x (1.004/1.019) against serial 0.948x (1.000/0.999); m=2^16 shipped-equivalent 0.062x (0.997/0.992) against serial 0.948x (0.999/1.001).
+
+### 1. THE SWEEP, ON THE f64 ROUTE ITSELF
+
+`ser`/`par` force the two sides per call; f64 needles into a 2^16 f64 haystack, worker `hz4`:
+
+```
+  m        serial   parallel   verdict
+  2^10     0.839x    0.766x    better by 8.7%, null 1.020 - NOT decidable, excluded
+  2^12     0.934x    0.193x    4.8x
+  2^14     0.933x    0.077x    12.1x
+  2^16     0.931x    0.078x    11.9x
+  sorted   0.572x    0.085x    6.7x
+```
+
+The crossover on this route is at or BELOW 2^10, so the shipped 1<<12 is CONSERVATIVE: it declines
+some wins in [2^10, 2^12) and cannot open a loss. It is set at the first size where the effect is
+unambiguous (4.8x against a ~1% null), not at the first size where the sign merely favours
+parallel — an 8.7% effect sitting next to a 2.0% null is not a gate boundary.
+
+### 2. ORDERED BATCHES GAIN HERE TOO, WHICH IS WHY NO GUARD WAS NEEDED
+
+The integer route needed an explicit ordered-batch exclusion because its parallel arm sits above
+the merge. This route does not: the f64 sorted-batch merge requires `m >= 1<<19` and has already
+declined for every m below the new gate, and the f64 parallel arm keeps the per-chunk *guess*
+(`search_index_f64_raw_guess`), so a sorted batch retains its locality within each chunk. Measured
+rather than assumed: `f64 sorted m=2^16` reads serial 0.572x against parallel 0.085x — ordered
+batches get 6.7x FASTER, not slower.
+
+### 3. THE SHIPPED DEFAULT, CONFIRMED
+
+```
+  case                      impl        numpy_ns        fnp_ns     ratio  nullNP  nullFNP
+  f64 random m=2^12         shipped     560068.8      115954.6     0.207x   1.004   1.019
+  f64 random m=2^12         ser         561179.3      531890.1     0.948x   1.000   0.999
+  f64 random m=2^16         shipped    9201356.6      565991.0     0.062x   0.997   0.992
+  f64 random m=2^16         ser        9125100.4     8647724.4     0.948x   0.999   1.001
+  RANDOM q (integer, 2^16)  shipped    2050003.7      436673.9     0.213x   1.002   0.983
+  RANDOM q (integer, 2^16)  ser        2068143.4     6420531.4     3.104x   1.002   1.001
+```
+
+**4.58x and 15.3x on our own arm**, and this cell was ALREADY a win serially (0.948x) — the gate
+was leaving a 15x on the table on a cell nobody would have flagged, because it was not a loss.
+That is the general hazard: a mis-fitted gate is invisible on any board that only lists losses.
+The integer row reconfirms at 14.6x in the same run.
+
+COUNTED_MECHANISM: m independent latency-bound searches confined to ONE core, spread over
+`rayon::current_num_threads()`. Below the gate the same split is pure rayon setup cost.
+A/A NULL CONTROLS: both decided pairs clean on all four nulls (section above). This run was noisier
+than earlier ones (loadavg 25.25) and many other rows are VOID — none of them backs a claim here;
+every quoted pair has both arms inside ±2%.
+PARITY: **11074 cells, 0 divergences**, run once per strategy BEFORE any timing. Chunking cannot
+change the answer: every chunk searches the same shared haystack, and NaN operands still defer to
+NumPy on this route exactly as before.
+VERIFICATION: `cargo fmt --check` exit 0.
+SCOPE: f64 route only. The **f32** route still carries its own unfitted `1<<21` and was NOT
+measured — same lever, still open.
+RETRY PREDICATE: fitted to the sweep in section 1; do not move it without re-running that sweep on
+ONE worker. The crossover depends on core count and haystack residency, so a worker with far fewer
+cores could push it up. The unmeasured band [2^10, 2^12) is where a further win would be, and it
+needs a decidable measurement at 2^11 to open.
+AGENT_NAME=BlackThrush.
