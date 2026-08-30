@@ -38247,7 +38247,8 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         // the threshold below is free to move on its own evidence. The scan short-circuits on the
         // first descent, so an unordered batch pays ~2 comparisons for it.
         let ordered_batch = m > 1
-            && (v_probe.windows(2).all(|w| w[0] <= w[1]) || v_probe.windows(2).all(|w| w[0] >= w[1]));
+            && (v_probe.windows(2).all(|w| w[0] <= w[1])
+                || v_probe.windows(2).all(|w| w[0] >= w[1]));
         if m >= searchsorted_parallel_min() && !ordered_batch && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             // SAFETY: Cell<i64> is repr(transparent) over i64; `flat` is a fresh numpy.empty
@@ -137371,11 +137372,9 @@ mod tests {
                 .getattr("matrix")?
                 .call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
 
-            let assert_same_outcome = |
-                label: &str,
-                ours: PyResult<Bound<'_, PyAny>>,
-                expected: PyResult<Bound<'_, PyAny>>,
-            |
+            let assert_same_outcome = |label: &str,
+                                       ours: PyResult<Bound<'_, PyAny>>,
+                                       expected: PyResult<Bound<'_, PyAny>>|
              -> PyResult<()> {
                 match (ours, expected) {
                     (Ok(ours), Ok(expected)) => {
@@ -137399,9 +137398,7 @@ mod tests {
                         );
                         assert_eq!(
                             ours_array.getattr("shape")?.extract::<Vec<usize>>()?,
-                            expected_array
-                                .getattr("shape")?
-                                .extract::<Vec<usize>>()?,
+                            expected_array.getattr("shape")?.extract::<Vec<usize>>()?,
                             "{label}: shape diverged from NumPy"
                         );
                         assert_eq!(
