@@ -57443,7 +57443,11 @@ print(json.dumps(payload))
             all_nan.nanpercentile(50.0, None).unwrap().values()[0],
             all_nan.nanquantile(0.5, None).unwrap().values()[0],
         ] {
-            assert_eq!(value.to_bits(), f64::NAN.to_bits(), "all-NaN must not inherit empty sign");
+            assert_eq!(
+                value.to_bits(),
+                f64::NAN.to_bits(),
+                "all-NaN must not inherit empty sign"
+            );
         }
     }
 
