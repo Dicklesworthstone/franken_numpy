@@ -232,7 +232,7 @@ out("")
 out("%-30s%-9s%14s%14s%9s%8s%9s"
     % ("parallel-threshold sweep","impl","numpy_ns","fnp_ns","ratio","nullNP","nullFNP"))
 sweep_hay = np.sort(rng.integers(0, 1 << 20, 1 << 16))
-for mq in (1 << 8, 1 << 10, 1 << 12, 1 << 14, 1 << 16):
+for mq in (1 << 8, 1 << 10, 1 << 11, 1 << 12, 1 << 14, 1 << 16):
     cell("random m=2^%d" % (mq.bit_length() - 1), sweep_hay,
          rng.integers(0, 1 << 20, mq), max(2, 2000 // max(1, mq >> 8)))
 del sweep_hay
@@ -241,7 +241,7 @@ del sweep_hay
 # 1<<21. Same element width and a near-identical search cost, so the integer crossover is a
 # plausible prior - which is exactly why it has to be measured rather than assumed.
 f64_hay = np.sort(rng.standard_normal(1 << 16))
-for mq in (1 << 10, 1 << 12, 1 << 14, 1 << 16):
+for mq in (1 << 10, 1 << 11, 1 << 12, 1 << 14, 1 << 16):
     cell("f64 random m=2^%d" % (mq.bit_length() - 1), f64_hay,
          rng.standard_normal(mq), max(2, 2000 // max(1, mq >> 8)))
 # f64 SORTED needles: the band below the f64 merge's own m>=1<<19 gate, where a widened parallel
@@ -254,7 +254,7 @@ del f64_hay
 # is less latency-bound - the very quantity the crossover depends on. The f64 result is a prior
 # here, not an answer.
 f32_hay = np.sort(rng.standard_normal(1 << 16).astype(np.float32))
-for mq in (1 << 10, 1 << 12, 1 << 14, 1 << 16):
+for mq in (1 << 10, 1 << 11, 1 << 12, 1 << 14, 1 << 16):
     cell("f32 random m=2^%d" % (mq.bit_length() - 1), f32_hay,
          rng.standard_normal(mq).astype(np.float32), max(2, 2000 // max(1, mq >> 8)))
 cell("f32 sorted m=2^16", f32_hay,

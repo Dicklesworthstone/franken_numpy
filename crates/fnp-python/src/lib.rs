@@ -104783,6 +104783,14 @@ fn unique(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // NumPy preserves ndarray subclasses through unique's flattening and
+    // axis routes. Every native branch below rebuilds a base ndarray, so route
+    // subclasses through NumPy before selecting a fast path
+    // (`deadlock-audit-30d18`).
+    if args.len() == 1 && ndarray_subclass_needs_numpy(py, &args.get_item(0)?)? {
+        return core_numpy_passthrough_interned(py, intern!(py, "unique"), args, kwargs);
+    }
+
     // Fast path for simple single-arg calls
     if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 1 {
         let item = args.get_item(0)?;
@@ -160717,6 +160725,58 @@ mod tests {
                     "extract({dt}) dtype {:?} != numpy {:?}",
                     ours_e.getattr("dtype")?,
                     theirs_e.getattr("dtype")?
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unique_preserves_ndarray_subclasses_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_unique_subclass")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours_fn = module.getattr("unique")?;
+            let numpy_fn = numpy.getattr("unique")?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"class PlainSubclass(np.ndarray):\n    pass\n\
+                  base = np.array([[3, 1], [2, 1]], dtype=np.int64)\n\
+                  plain = base.view(PlainSubclass)\n\
+                  matrix = np.matrix(base)\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+
+            for name in ["plain", "matrix"] {
+                let value = locals.get_item(name).expect("subclass fixture");
+                let ours = ours_fn.call1((&value,))?;
+                let expected = numpy_fn.call1((&value,))?;
+                assert_eq!(
+                    ours.get_type().name()?.to_str()?,
+                    expected.get_type().name()?.to_str()?,
+                    "unique({name}) result type diverged from NumPy"
+                );
+                let ours_array = numpy.call_method1("asarray", (&ours,))?;
+                let expected_array = numpy.call_method1("asarray", (&expected,))?;
+                assert_eq!(
+                    ours_array.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    expected_array
+                        .getattr("dtype")?
+                        .getattr("str")?
+                        .extract::<String>()?,
+                    "unique({name}) dtype diverged from NumPy"
+                );
+                assert_eq!(
+                    ours_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    expected_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    "unique({name}) values diverged from NumPy"
                 );
             }
             Ok(())
