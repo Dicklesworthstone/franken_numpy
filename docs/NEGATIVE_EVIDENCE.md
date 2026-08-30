@@ -66225,3 +66225,62 @@ digits** - that is the open question this row leaves, and it is a host problem, 
 Do not move the gate on this row's evidence alone. The [2^10, 2^12) band is unmeasured on this
 route and is where any further win would be.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — RETRY PREDICATE DISCHARGED: on a QUIET worker the f32 gate's 2^12 boundary is decidable on BOTH sides — 2^10 loses 0.730x->0.810x and 2^12 wins 0.893x->0.134x, all four nulls clean (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** maintenance-self-speedup
+
+This row decides nothing new about NumPy and claims nothing against it. It discharges the open
+retry predicate of the f32 gate row above, which shipped `1<<12` while stating plainly that the
+boundary itself was NOT decidable at the ±2% null standard on a loaded host, and that "a quiet host
+would settle it". A quiet host settled it.
+
+Worker `fixmydocuments` (rch), **loadavg 2.09** against the 28.39 of the row being discharged.
+`bench_elf_sha256=2ac04c6ae8cbad4e8cbddbb8871d44023d372f6f24b6fd13bb2593d325995d36`,
+`invocation_id=fixmydocuments-2807974-1788129899`.
+
+### The bracket, now decidable on both sides
+
+`ser`/`par` forced per call, one invocation, f32 needles into a 2^16 f32 haystack:
+
+```
+  m        serial              parallel            verdict
+  2^10     0.730x 1.000/1.000  0.810x 1.000/1.008  parallel LOSES by 11.0%, BOTH nulls clean
+  2^12     0.893x 0.999/0.997  0.134x 1.000/1.012  parallel wins 6.66x, BOTH nulls clean
+  2^14     0.920x 0.999/1.003  0.102x 1.001/0.995  parallel wins 9.02x, BOTH nulls clean
+  2^16     0.936x 0.999/1.000  0.094x 1.003/0.992  parallel wins 9.96x, BOTH nulls clean
+  sorted   0.883x 1.000/0.996  0.102x 0.998/1.008  parallel wins 8.66x, BOTH nulls clean
+```
+
+**The shipped 1<<12 now sits between a DECIDABLE loss at 2^10 and a DECIDABLE win at 2^12**, which
+is the standard its two sibling gates met and this one previously did not. Nothing about the gate
+changes; what changes is that it is no longer carried by replicated sign alone.
+
+**WHY THE NULLS CAME BACK:** the earlier VOIDs were not a property of the parallel arm's design but
+of core contention on a loaded worker - a parallel arm competes for the cores it is being timed on,
+so its A/A null degrades with host load while a serial arm's does not. At loadavg 2.09 every
+parallel null lands inside ±2%; at 28.39 most did not. That is worth knowing generally: **a VOID
+null on a parallel arm is evidence about the HOST, not about the lever**, and re-running elsewhere
+is the correct response rather than widening the null envelope.
+
+### What this row must NOT be read as
+
+This worker is NOT the one the f32 gate row was measured on, and its INCUMBENT differs: the numpy
+artifact hash here is `ed49278029e17db9fc349d4181a2ee5a064a86bbb1241141592b8653824fd102`, the same
+extension seen on the numpy 2.3.5 worker, not the `27bd88fd…` of the 2.5.2 workers. Its
+out-of-family `np.sum` control reads **0.221x** against 1.1-1.6x on the hz workers - a different
+machine and a different incumbent entirely. **So none of the vs-NumPy ratios above may be compared
+to the f32 row's, and none is quoted as a competitive claim.** The ser/par comparison survives that
+because it is OURS against OURS in one process: the gate decision never involved NumPy.
+
+COUNTED_MECHANISM: unchanged from the row being discharged - m independent latency-bound searches
+confined to one core, spread over `rayon::current_num_threads()`; below the gate the same split is
+pure rayon setup, which is what the 2^10 row measures, now decidably.
+A/A NULL CONTROLS: 10 nulls across the five decided pairs, ALL inside ±2% (range 0.992-1.012).
+PARITY: 11074 integer cells + 176 f32 cells, 0 divergences, before any timing.
+VERIFICATION: `cargo fmt --check` exit 0 and per-file `rustfmt --check` exit 0.
+RETRY PREDICATE: the f32 gate is now bracketed by decidable measurements on both sides and needs no
+further work. The [2^10, 2^12) band remains unmeasured on every route and is the only place a
+further gate win could come from; it needs a decidable pair at 2^11, which this worker could now
+supply.
+AGENT_NAME=BlackThrush.
