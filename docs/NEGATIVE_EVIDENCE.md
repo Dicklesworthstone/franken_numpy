@@ -65880,3 +65880,90 @@ order exists to exploit and both merge arms correctly decline. That is a differe
 per-query bisection itself - and nothing in this row or the one above touches it. Do not re-attack
 ordered batches: ascending, descending and clustered are all now measured wins.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — WIN (maintenance): the unordered-batch fallback was m SERIAL bisections; transposing it to a batched search takes our own arm 1.023x -> 0.796x in ONE process — and the vs-NumPy verdict for this cell turns out to depend on the WORKER'S NUMPY VERSION (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** maintenance-self-speedup
+
+The decided pair is our former loop against our new one, both selectable per call and timed in the
+SAME invocation. It is banked as maintenance, NOT as a competitive claim, because the vs-NumPy
+number for this cell moves with which NumPy the worker has — see section 3, which is the part of
+this row worth reading.
+
+Worker `vmi1227854` (rch), python 3.14.4, **numpy 2.3.5**, stock `release`, loadavg 2.64.
+`bench_elf_sha256=cb0df46b8dc25033f28bbee12b7c3a588a30ca81e48769d3ecbaac5925dd6456`.
+
+### 1. THE LEVER
+
+One bisection per key is a serial dependency chain: probe i+1's address is not known until probe i
+returns, so a search over a cold haystack is latency-bound on ~log2(n) dependent loads with exactly
+ONE outstanding miss per key. Transposing the loops — all keys advance one LEVEL together — fixes
+both halves of that: at level d every key probes one of only 2^d pivots (level 0 is a single shared
+element), so the early levels are nearly free; and every key's probe at a given level is
+independent, so the out-of-order engine has m loads in flight instead of one.
+
+```
+  RANDOM q (m = n = 2^16)      impl        numpy_ns        fnp_ns    ratio  nullNP  nullFNP
+  former: one bisection/key    perquery   6858121.4     7016460.6   1.023x   0.989   0.990
+  new:    batched levels       bisect     7242133.5     5766896.6   0.796x   1.004   1.004
+```
+
+**Our own arm: 7016460.6 -> 5766896.6 ns, a 1.22x self-speedup**, both arms in one process,
+interleaved, selected per call by the same switch, with all four nulls inside [0.989, 1.004]. The
+two arms differ in NOTHING but the fallback loop.
+
+### 2. IT IS ALSO THE INCUMBENT'S OWN SHAPE
+
+Read before writing: NumPy's typed `binsearch` (`numpy/_core/src/npysort/binsearch.cpp`) is already
+this algorithm, and its own comment gives the same two reasons — "cache locality of pivots" and
+"independent calculations for out-of-order execution". Our per-query loop was the naive form of a
+search NumPy stopped doing. The update is branchless (`base += cmp * half`), the first level is
+peeled because every base is 0, and `RIGHT` is a const parameter so the side comparison is one
+instruction with no loop-invariant branch inside the innermost loop.
+
+### 3. THE VS-NUMPY VERDICT FOR THIS CELL IS NOT A CONSTANT — IT MOVES WITH THE WORKER'S NUMPY
+
+The identical batched code measured on two workers:
+
+```
+  worker         numpy    RANDOM q numpy_ns   fnp_ns    ratio     np.sum control
+  hz3            2.5.2         2101451.8   6219338.4   2.960x     1.199x
+  vmi1227854     2.3.5         7242133.5   5766896.6   0.796x     0.958x
+```
+
+**The INCUMBENT arm differs by 3.4x between the two workers on this cell (2.10 ms vs 7.24 ms) while
+the out-of-family `np.sum` control says vmi1227854 is the FASTER machine (0.958x against hz3's
+1.199x).** A hardware explanation would have to make the same box slower on `searchsorted` and
+faster on `sum`; a version difference in NumPy's own `searchsorted` explains both readings at once.
+That is the leading explanation and it is consistent with section 2 — the batched `binsearch` is
+present in the vendored (newest) source — but I have NOT bisected it to a NumPy commit, so it is
+recorded as an inference, not a fact.
+
+**The consequence is the point:** against numpy 2.5.2 this cell is still a **2.960x LOSS**; against
+numpy 2.3.5 it is a **0.796x win**. Both were measured with the same ELF-class code and clean nulls.
+Neither number may be quoted alone, and no vs-NumPy claim is made here. Any future row on this cell
+MUST state the worker's numpy version, which no rule in this repo currently requires — the
+worker-provenance gate pins the host, not the incumbent's version.
+
+COUNTED_MECHANISM: m independent bisections of ~log2(n) DEPENDENT loads each (one outstanding miss
+per key, latency-bound) replaced by log2(n) passes of m INDEPENDENT probes (m outstanding misses,
+throughput-bound), with the level-0 pivot shared by every key and the level-d pivot set bounded by
+2^d. Measured self-speedup 1.22x on the cell where the batch has no order to exploit.
+A/A NULL CONTROLS: the decided pair's four nulls are 0.989/0.990 (perquery) and 1.004/1.004
+(batched). Rows marked VOID inline back no claim; this run was noisier than its loadavg suggests
+and 13 of 40 rows are VOID, none of them the pair above.
+PARITY: **7910 cells, 0 divergences**, run once per strategy BEFORE any timing, now including the
+`perquery` arm. Independently simulated against `numpy.searchsorted` over 864 cells (9 haystack
+sizes incl. empty x 3 value ranges x 4 query counts incl. 0 x {random, heavy-dup, exact-hit,
+out-of-range} x both sides) BEFORE the Rust was written: 0 divergences.
+VERIFICATION: `cargo fmt --check` exit 0. The ordered-batch rows above are undisturbed in the same
+run (sorted-independent merge 0.426x, reverse-sorted merge 0.414x).
+ALSO IN THIS CHANGE: the route-selection env override is now resolved ONCE per process for
+presence, so the shipped path pays a relaxed atomic load instead of a `getenv` walk of `environ`
+per call. A switch that exists to measure a route must not be a cost the shipped route carries.
+RETRY PREDICATE: do not re-attack the unordered fallback with another search LAYOUT (Eytzinger,
+B-tree, prefetch) before establishing which NumPy the target worker runs and re-measuring the
+incumbent there — on numpy 2.3.5 this cell is already a win and the headroom is gone, while on
+2.5.2 the remaining 2.96x is against an incumbent doing the SAME algorithm, which means the gap is
+constant factors (bounds checks, `intp` writes, entry) and not the search shape.
+AGENT_NAME=BlackThrush.

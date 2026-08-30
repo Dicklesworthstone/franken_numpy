@@ -38212,12 +38212,12 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         // bypassed. `force` = merge with the span gate bypassed, which exists so the gate's
         // LOSING side is measurable and not merely asserted.
         //
-        // READ LAZILY, AND ONLY BEHIND THE SORTEDNESS SCAN. `getenv` walks `environ` and
-        // allocates, so consulting it unconditionally would tax every searchsorted call -
-        // including the unsorted-query majority, which can never take the merge and would be
-        // paying purely for a switch that exists to measure it. The closure below is invoked
-        // only after the queries are known to be nondecreasing.
-        let merge_mode = || std::env::var_os("FNP_SEARCHSORTED_MERGE");
+        // THE SHIPPED PATH PAYS ONE ATOMIC LOAD, NOT A `getenv`. Whether the variable EXISTS is
+        // decided once per process; only if it does is it read per call, which is what lets a
+        // harness switch arms between timed cases in ONE invocation. In production the variable
+        // is absent, so this never walks `environ` and never allocates - a switch that exists to
+        // measure a route must not be a cost the shipped route carries.
+        let merge_mode = searchsorted_mode_override;
         // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL. Raw
         // &[T] is Sync so the search runs on worker threads.
         let a_raw: &[T] =
@@ -38351,8 +38351,31 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
                     *slot = p as i64;
                 }
             } else {
-                for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
-                    *slot = search_index(a_raw, key, right);
+                // AN UNORDERED BATCH HAS NO ORDER TO EXPLOIT, BUT IT STILL HAS PARALLELISM.
+                // One bisection per key is a serial dependency chain: probe i+1's address is not
+                // known until probe i returns, so the whole search is latency-bound on ~log2(n)
+                // dependent loads and the machine can keep only one in flight per key.
+                //
+                // Transposing the loops fixes both halves of that. All keys advance ONE level
+                // together, so (a) at level d every key probes one of only 2^d pivots - the first
+                // level is a single shared element, the second is two - and the early levels are
+                // effectively free; and (b) every key's probe at a given level is INDEPENDENT, so
+                // the out-of-order engine has m loads in flight instead of one and the search
+                // becomes throughput-bound rather than latency-bound.
+                //
+                // This is the shape NumPy's own typed `binsearch` uses, which is why the
+                // per-query loop was losing ~3.8x on random needles; it is a standard batched
+                // binary search and the update is branchless (`base += cmp * half`).
+                //
+                // `perquery` selects the FORMER loop so the two can be timed against each other
+                // in one process; without that arm the improvement could only be shown across
+                // two invocations, which is not an admissible comparison here.
+                if merge_mode().as_deref() == Some(std::ffi::OsStr::new("perquery")) {
+                    for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
+                        *slot = search_index(a_raw, key, right);
+                    }
+                } else {
+                    batched_search_indices(a_raw, v_raw, out_data, right);
                 }
             }
         }
@@ -38362,6 +38385,80 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     Ok(Some(
         flat.call_method1(intern!(py, "reshape"), (&output_shape,))?,
     ))
+}
+
+/// The `searchsorted` route-selection override, for in-process A/B only.
+///
+/// Presence of the variable is resolved ONCE; absent (the shipped case) this is
+/// a single relaxed load and never touches `environ`. Present, it is re-read per
+/// call so a harness can alternate arms between timed cases inside one
+/// invocation - which is the only kind of A/B this repo accepts.
+fn searchsorted_mode_override() -> Option<std::ffi::OsString> {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*PRESENT.get_or_init(|| std::env::var_os("FNP_SEARCHSORTED_MERGE").is_some()) {
+        return None;
+    }
+    std::env::var_os("FNP_SEARCHSORTED_MERGE")
+}
+
+/// Batched ("transposed") binary search: every key advances one level per outer
+/// iteration instead of each key running its own bisection to completion.
+///
+/// `RIGHT` is a const parameter rather than a runtime flag so the comparison is
+/// one instruction with no branch in the innermost loop - the loop runs
+/// `key_len * log2(arr_len)` times and a loop-invariant branch inside it is
+/// exactly the shape that stops this from vectorising.
+///
+/// Invariant, for every key j: the insertion index lies in
+/// `[base_j, base_j + interval]`, and each pass halves `interval`. When
+/// `interval == 1` one final comparison picks `base_j` or `base_j + 1`.
+fn batched_search_level<T: Copy + PartialOrd, const RIGHT: bool>(
+    a: &[T],
+    v: &[T],
+    out: &mut [i64],
+) {
+    #[inline(always)]
+    fn before<U: Copy + PartialOrd, const RIGHT: bool>(probe: U, key: U) -> bool {
+        if RIGHT { probe <= key } else { probe < key }
+    }
+    let mut interval = a.len();
+    // The first pass is peeled: every base is 0, so the pivot is the SAME element for every
+    // key. That saves the zero-initialisation of `out` and one load per key, and it is why
+    // the early levels cost almost nothing.
+    let half = interval >> 1;
+    interval -= half;
+    let mid_val = a[half];
+    for (slot, &key) in out.iter_mut().zip(v.iter()) {
+        *slot = i64::from(before::<T, RIGHT>(mid_val, key)) * half as i64;
+    }
+    while interval > 1 {
+        let half = interval >> 1;
+        interval -= half;
+        for (slot, &key) in out.iter_mut().zip(v.iter()) {
+            let base = *slot as usize;
+            let mid_val = a[base + half];
+            *slot += i64::from(before::<T, RIGHT>(mid_val, key)) * half as i64;
+        }
+    }
+    for (slot, &key) in out.iter_mut().zip(v.iter()) {
+        let base = *slot as usize;
+        *slot += i64::from(before::<T, RIGHT>(a[base], key));
+    }
+}
+
+/// Dispatch the batched search on `right` ONCE, outside the loops.
+fn batched_search_indices<T: Copy + PartialOrd>(a: &[T], v: &[T], out: &mut [i64], right: bool) {
+    if a.is_empty() {
+        // NumPy returns all zeros for an empty haystack; the level loop below indexes `a[half]`
+        // unconditionally, so this case must not reach it.
+        out.fill(0);
+        return;
+    }
+    if right {
+        batched_search_level::<T, true>(a, v, out);
+    } else {
+        batched_search_level::<T, false>(a, v, out);
+    }
 }
 
 fn searchsorted_int_merge_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
@@ -44645,14 +44742,14 @@ fn try_native_int_linear_quantile(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, overwrite_input=false, keepdims=false))]
+#[pyo3(signature = (a, axis=None, out=None, overwrite_input=false, keepdims=KeepdimsArg::NotGiven))]
 fn median(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     overwrite_input: bool,
-    keepdims: bool,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let median_fn = numpy.getattr(intern!(py, "median"))?;
@@ -44666,8 +44763,15 @@ fn median(
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
-        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         Ok(median_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    if ndarray_subclass_needs_numpy(py, a.bind(py))? {
+        return fallback();
+    }
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
     };
 
     // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
@@ -70152,14 +70256,14 @@ fn native_minmax_preserves_dtype(py: Python<'_>, value: &Bound<'_, PyAny>) -> bo
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, weights=None, returned=false, keepdims=false))]
+#[pyo3(signature = (a, axis=None, weights=None, returned=false, keepdims=KeepdimsArg::NotGiven))]
 fn average(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     weights: Option<Py<PyAny>>,
     returned: bool,
-    keepdims: bool,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     // Flat (axis=None) no-weights average == mean. numpy.average routes to
     // numpy.mean, whose SIMD pairwise sum is FASTER than our native
@@ -70167,7 +70271,7 @@ fn average(
     // so delegating straight to numpy is parity, while the old code ran two
     // np.asarray dtype probes and then the slower native kernel (~1.55x). Delegate
     // up front for every dtype; weighted and per-axis cases keep their native wins.
-    if !keepdims
+    if matches!(&keepdims, KeepdimsArg::NotGiven)
         && !returned
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && weights.as_ref().is_none_or(|w| w.bind(py).is_none())
@@ -70192,10 +70296,17 @@ fn average(
             kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "returned"), returned)?;
-        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         Ok(avg_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
+    };
+
+    if ndarray_subclass_needs_numpy(py, a.bind(py))? {
+        return fallback();
+    }
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
     };
 
     // NumPy has no f16 ALU. For a large, finite, C-contiguous last-axis
@@ -82247,14 +82358,14 @@ fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, overwrite_input=false, keepdims=false))]
+#[pyo3(signature = (a, axis=None, out=None, overwrite_input=false, keepdims=KeepdimsArg::NotGiven))]
 fn nanmedian(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
     overwrite_input: bool,
-    keepdims: bool,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let nanmedian_fn = numpy.getattr(intern!(py, "nanmedian"))?;
@@ -82268,13 +82379,20 @@ fn nanmedian(
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "overwrite_input"), overwrite_input)?;
-        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         Ok(nanmedian_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || overwrite_input {
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || overwrite_input
+        || ndarray_subclass_needs_numpy(py, a.bind(py))?
+    {
         return fallback();
     }
+
+    let Some(keepdims_effective) = keepdims.native() else {
+        return fallback();
+    };
 
     // A NaN-IMPOSSIBLE dtype makes `nanmedian` == `median`, so route it to fnp's `median` - which
     // owns the bounded-range histogram this function has no access to. The same argument the
@@ -82331,7 +82449,7 @@ fn nanmedian(
     };
     // keepdims over the full array (axis=None) reshapes to all-ones dims; delegate. Single-axis
     // keepdims runs the native path then re-inserts the reduced axis.
-    if keepdims && axis.is_none() {
+    if keepdims_effective && axis.is_none() {
         return fallback();
     }
     let result = match a.nanmedian(axis) {
@@ -82339,7 +82457,7 @@ fn nanmedian(
         Err(_) => return fallback(),
     };
     let output = build_numpy_array_from_ufunc(py, &result)?;
-    if keepdims && let Some(ax) = axis {
+    if keepdims_effective && let Some(ax) = axis {
         let Some(ndim) = orig_ndim else {
             return fallback();
         };
@@ -113296,13 +113414,13 @@ fn try_zerocopy_f32_ptp_axis(
 
 // Peak-to-peak reduction (max - min) with native Rust fast path.
 #[pyfunction]
-#[pyo3(signature = (a, axis=None, out=None, keepdims=false))]
+#[pyo3(signature = (a, axis=None, out=None, keepdims=KeepdimsArg::NotGiven))]
 fn ptp(
     py: Python<'_>,
     a: Py<PyAny>,
     axis: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
-    keepdims: bool,
+    #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let ptp_fn = numpy.getattr(intern!(py, "ptp"))?;
@@ -113319,10 +113437,17 @@ fn ptp(
         if let Some(o) = out_for_fallback.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
+        keepdims.set_numpy_kwarg(py, &kwargs)?;
         Ok(ptp_fn
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
+    };
+
+    if ndarray_subclass_needs_numpy(py, a.bind(py))? {
+        return fallback();
+    }
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
     };
 
     // Fallback for `out` buffer, keepdims, or tuple axis (multi-axis reduction)
@@ -137144,10 +137269,8 @@ mod tests {
     /// The omitted `keepdims` default is NumPy's private `_NoValue` sentinel, not `False`.
     ///
     /// `matrix` deliberately exposes the difference: its reduction methods do not accept a
-    /// `keepdims` keyword.  A wrapper that materializes the Rust `false` default and forwards it
-    /// raises for the default call, while a wrapper that drops an explicit `False` silently masks
-    /// the real NumPy error.  Exercise both sides for the four reductions that originally shared
-    /// that bug (`deadlock-audit-30d18`).
+    /// `keepdims` keyword. A wrapper must preserve omitted, exact-bool, and NumPy-only keyword
+    /// states across every native and fallback route (`deadlock-audit-30d18`).
     #[test]
     fn matrix_reduction_keepdims_omission_and_explicit_keyword_match_numpy() {
         with_python(|py| {
@@ -137161,41 +137284,101 @@ mod tests {
                 .getattr("matrix")?
                 .call1((vec![vec![1.0_f64, 2.0], vec![3.0, 4.0]],))?;
 
-            for name in ["sum", "mean", "std", "var"] {
+            let assert_same_outcome = |
+                label: &str,
+                ours: PyResult<Bound<'_, PyAny>>,
+                expected: PyResult<Bound<'_, PyAny>>,
+            |
+             -> PyResult<()> {
+                match (ours, expected) {
+                    (Ok(ours), Ok(expected)) => {
+                        assert_eq!(
+                            ours.get_type().name()?.to_str()?,
+                            expected.get_type().name()?.to_str()?,
+                            "{label}: result type diverged from NumPy"
+                        );
+                        let ours_array = numpy.call_method1("asarray", (&ours,))?;
+                        let expected_array = numpy.call_method1("asarray", (&expected,))?;
+                        assert_eq!(
+                            ours_array
+                                .getattr("dtype")?
+                                .getattr("str")?
+                                .extract::<String>()?,
+                            expected_array
+                                .getattr("dtype")?
+                                .getattr("str")?
+                                .extract::<String>()?,
+                            "{label}: dtype diverged from NumPy"
+                        );
+                        assert_eq!(
+                            ours_array.getattr("shape")?.extract::<Vec<usize>>()?,
+                            expected_array
+                                .getattr("shape")?
+                                .extract::<Vec<usize>>()?,
+                            "{label}: shape diverged from NumPy"
+                        );
+                        assert_eq!(
+                            ours_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                            expected_array
+                                .call_method0("tobytes")?
+                                .extract::<Vec<u8>>()?,
+                            "{label}: bytes diverged from NumPy"
+                        );
+                    }
+                    (Err(ours), Err(expected)) => assert_eq!(
+                        ours.get_type(py).name()?.to_str()?,
+                        expected.get_type(py).name()?.to_str()?,
+                        "{label}: exception type diverged from NumPy"
+                    ),
+                    (Ok(_), Err(expected)) => panic!(
+                        "{label}: fnp succeeded but NumPy raised {}",
+                        expected.get_type(py).name()?.to_str()?
+                    ),
+                    (Err(ours), Ok(_)) => panic!(
+                        "{label}: fnp raised {} but NumPy succeeded",
+                        ours.get_type(py).name()?.to_str()?
+                    ),
+                }
+                Ok(())
+            };
+
+            for name in [
+                "sum",
+                "mean",
+                "std",
+                "var",
+                "median",
+                "nanmedian",
+                "average",
+                "ptp",
+            ] {
                 let ours_fn = module.getattr(name)?;
                 let numpy_fn = numpy.getattr(name)?;
                 let axis_only = PyDict::new(py);
                 axis_only.set_item("axis", 0_i64)?;
-
-                let ours_default = ours_fn.call((matrix.clone(),), Some(&axis_only))?;
-                let numpy_default = numpy_fn.call((matrix.clone(),), Some(&axis_only))?;
-                assert_eq!(
-                    ours_default.get_type().name()?.to_str()?,
-                    numpy_default.get_type().name()?.to_str()?,
-                    "{name}: omitting keepdims must preserve NumPy's matrix dispatch"
-                );
-                assert_eq!(
-                    ours_default.call_method0("tobytes")?.extract::<Vec<u8>>()?,
-                    numpy_default
-                        .call_method0("tobytes")?
-                        .extract::<Vec<u8>>()?,
-                    "{name}: omitted keepdims result diverged from NumPy"
-                );
+                assert_same_outcome(
+                    &format!("{name}: omitted keepdims"),
+                    ours_fn.call((matrix.clone(),), Some(&axis_only)),
+                    numpy_fn.call((matrix.clone(),), Some(&axis_only)),
+                )?;
 
                 let explicit_false = PyDict::new(py);
                 explicit_false.set_item("axis", 0_i64)?;
                 explicit_false.set_item("keepdims", false)?;
-                let ours_error = ours_fn
-                    .call((matrix.clone(),), Some(&explicit_false))
-                    .expect_err("matrix reduction with explicit keepdims=False must raise");
-                let numpy_error = numpy_fn
-                    .call((matrix.clone(),), Some(&explicit_false))
-                    .expect_err("fixture check: NumPy matrix reduction must reject keepdims=False");
-                assert_eq!(
-                    ours_error.get_type(py).name()?.to_str()?,
-                    numpy_error.get_type(py).name()?.to_str()?,
-                    "{name}: explicit keepdims=False error type diverged from NumPy"
-                );
+                assert_same_outcome(
+                    &format!("{name}: explicit keepdims=False"),
+                    ours_fn.call((matrix.clone(),), Some(&explicit_false)),
+                    numpy_fn.call((matrix.clone(),), Some(&explicit_false)),
+                )?;
+
+                let explicit_none = PyDict::new(py);
+                explicit_none.set_item("axis", 0_i64)?;
+                explicit_none.set_item("keepdims", py.None())?;
+                assert_same_outcome(
+                    &format!("{name}: explicit keepdims=None"),
+                    ours_fn.call((matrix.clone(),), Some(&explicit_none)),
+                    numpy_fn.call((matrix.clone(),), Some(&explicit_none)),
+                )?;
             }
             Ok(())
         });

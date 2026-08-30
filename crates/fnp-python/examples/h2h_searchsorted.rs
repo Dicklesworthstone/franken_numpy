@@ -58,7 +58,8 @@ out("dispatch_assert=passed incumbent=numpy.searchsorted candidate=fnp.searchsor
 # is the exact boundary of the nondecreasing admission test.
 def parity():
     bad = cells = 0
-    for impl, flag in (("bisect", "0"), ("merge", "1"), ("gallop", "gallop"), ("force", "force")):
+    for impl, flag in (("perquery", "perquery"), ("bisect", "0"), ("merge", "1"),
+                       ("gallop", "gallop"), ("force", "force")):
         os.environ["FNP_SEARCHSORTED_MERGE"] = flag
         for dt in ("int8","int16","int32","int64","uint8","uint32","uint64"):
             hi = 100 if dt.endswith("8") else 100000
@@ -131,7 +132,10 @@ CASES = [
 ]
 def cell(label, hay_, q, k):
     g = {"np": np, "fnp": fnp, "h": hay_, "q": q}
-    for impl, flag in (("bisect", "0"), ("merge", "1"), ("gallop", "gallop"), ("force", "force")):
+    # `perquery` is the FORMER fallback loop - one full bisection per key - kept selectable so the
+    # batched search can be A/B'd against it in THIS process rather than across two runs.
+    for impl, flag in (("perquery", "perquery"), ("bisect", "0"), ("merge", "1"),
+                       ("gallop", "gallop"), ("force", "force")):
         os.environ["FNP_SEARCHSORTED_MERGE"] = flag
         tn, tf = inter("np.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, k)
         n1, n2 = inter("np.searchsorted(h,q)", "np.searchsorted(h,q)", g, k)
