@@ -1010,6 +1010,69 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+// A NONDECREASING QUERY BATCH TAKES A MERGE INSTEAD OF m BISECTIONS, and the admission test has to
+// read BOTH operands: sortedness is a property of the QUERIES while the walk's cost is the span it
+// covers in the HAYSTACK. The cases below are the ones that separate the two loops - ties on both
+// sides (where side= decides the answer), queries entirely below or above the haystack, a single
+// needle (trivially "sorted": `windows(2)` is empty), a batch clustered far from index 0 (which is
+// why the pointer starts at the first needle's own insertion point rather than at 0), and a sparse
+// batch over a large haystack, which is the shape the span gate must DECLINE. Every one of them
+// must answer exactly what numpy answers whichever loop runs.
+#[test]
+fn searchsorted_sorted_query_merge_matches_numpy_on_span_gate_corpora() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260830)
+bad = []
+for dt in ("int8", "int16", "int32", "int64", "uint32", "uint64"):
+    hi = {"int8": 100, "int16": 20000}.get(dt, 100000)
+    for n in (0, 1, 2, 17, 4096):
+        hay = np.sort(rng.integers(0, hi, n).astype(dt))
+        batches = {
+            "empty": np.array([], dtype=dt),
+            "single": np.array([hi // 2], dtype=dt),
+            "sorted": np.sort(rng.integers(0, hi, 64).astype(dt)),
+            "reverse": np.sort(rng.integers(0, hi, 64).astype(dt))[::-1].copy(),
+            "ties": np.array([0, 0, 1, 1, 1, 2, 2], dtype=dt),
+            "below": np.array([0, 0, 0], dtype=dt),
+            "above": np.array([hi - 1, hi - 1], dtype=dt),
+        }
+        if n > 4:
+            # clustered high: the merge must not walk the prefix below the first needle
+            batches["clustered_high"] = np.sort(hay[-3:]).astype(dt)
+        for label, q in batches.items():
+            for side in ("left", "right"):
+                got = np.asarray(fnp.searchsorted(hay, q, side=side))
+                want = np.asarray(np.searchsorted(hay, q, side=side))
+                if not (np.array_equal(got, want) and got.dtype == want.dtype
+                        and got.shape == want.shape):
+                    bad.append((dt, n, label, side))
+
+# THE SPAN GATE'S OWN SHAPE: 64 sorted needles spread over a large haystack. The merge would walk
+# the whole array here where the bisection pays 64*log2(n) probes, so the gate declines - and the
+# answer must be identical either way.
+big = np.sort(rng.integers(0, 1 << 30, 1 << 18))
+for label, q in (("spread", np.sort(rng.integers(0, 1 << 30, 64))),
+                 ("clustered", np.sort(rng.integers(0, 1 << 12, 64))),
+                 ("one", np.array([1 << 29]))):
+    for side in ("left", "right"):
+        got = np.asarray(fnp.searchsorted(big, q, side=side))
+        want = np.asarray(np.searchsorted(big, q, side=side))
+        if not np.array_equal(got, want):
+            bad.append(("int64-big", big.size, label, side))
+print("OK" if not bad else "DIVERGE %s" % (bad[:5],))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "OK",
+        "sorted-query merge and its span gate must match numpy on every corpus"
+    );
+    Ok(())
+}
+
 #[test]
 fn searchsorted_structured_uint64_records_match_numpy() -> Result<(), String> {
     let script = fnp_script(

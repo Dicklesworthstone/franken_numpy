@@ -65641,3 +65641,5 @@ above it the doubling is what keeps 1024-src/k=1024 at parity. Do not widen it w
 `h2h_repeat` on both shapes. The next two cells on the re-priced board are `searchsorted 2^16` at
 **2.473x** (a same-dtype self-search, which is not the corpus the earlier searchsorted work tuned)
 and `isnan f64 2^20` at **1.282x**; both are decidable and neither has been attacked.
+
+- 2026-08-30 REJECT (`deadlock-audit-sfgg3`): packed-u128 stable radix permutation loses lexsort card=2 at 2.728x/2.587x NumPy/FNP (live hz3; A/A 1.001/0.989 and 1.000/1.024); reverted in `b77790d9`.

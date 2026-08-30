@@ -192,6 +192,45 @@ print(np.allclose(result, expected, equal_nan=True))
 }
 
 #[test]
+fn fmod_infinite_dividend_matches_numpy_invalid_event_and_nan_bits() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+dividend = np.array([np.inf, -np.inf, np.inf, np.nan, 3.0], dtype=np.float64)
+divisor = np.array([2.0, -2.0, np.inf, 2.0, np.nan], dtype=np.float64)
+
+def observe(ufunc):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = ufunc(dividend, divisor)
+    return (
+        result.view(np.uint64).tolist(),
+        [(warning.category.__name__, str(warning.message)) for warning in caught],
+    )
+
+def invalid_raise(ufunc):
+    with np.errstate(invalid="raise"):
+        try:
+            ufunc(dividend, divisor)
+        except FloatingPointError as error:
+            return (type(error).__name__, str(error))
+    return None
+
+print(observe(fnp.fmod) == observe(np.fmod), invalid_raise(fnp.fmod) == invalid_raise(np.fmod))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True True",
+        "fmod infinite dividend should preserve NumPy invalid events and NaN bits: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn remainder_divide_by_zero() -> Result<(), String> {
     let script = fnp_script(
         r#"

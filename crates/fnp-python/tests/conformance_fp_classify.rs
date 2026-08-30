@@ -103,6 +103,33 @@ fn isnan_matches_numpy_across_50_cases() -> Result<(), String> {
 }
 
 #[test]
+fn isnan_float64_payload_nan_bytes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+cases = [
+    np.array([], dtype=np.float64),
+    np.array([0.0, -0.0, np.inf, -np.inf], dtype=np.float64),
+    np.array([0x7ff8000000000123, 0xfff8000000000456,
+              0x7ff0000000000001, 0xfff0000000000001], dtype=np.uint64).view(np.float64),
+    np.array([0x7ff8000000000123, 0, 0xfff8000000000456,
+              0x3ff0000000000000, 0x7ff0000000000001, 0], dtype=np.uint64)
+      .view(np.float64).reshape(2, 3),
+]
+for i, values in enumerate(cases):
+    expected = np.isnan(values)
+    actual = fnp.isnan(values)
+    assert type(actual) is type(expected), (i, type(actual), type(expected))
+    assert actual.dtype == expected.dtype and actual.shape == expected.shape, i
+    assert actual.tobytes() == expected.tobytes(), (i, actual.tobytes(), expected.tobytes())
+print("ok")
+"#
+        .to_owned(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "ok");
+    Ok(())
+}
+
+#[test]
 fn isinf_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         "np.array([0.0, 1.0, -1.0])",
