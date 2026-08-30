@@ -18378,8 +18378,7 @@ fn try_zerocopy_f64_take(
         // aggregates memory-level parallelism across cores. Same gather => bit-identical.
         // An out-of-range index sets a shared flag; we bail AFTER the pass (the partial
         // output is dropped, take has no side effects) so numpy raises the exact IndexError.
-        const TAKE_PARALLEL_MIN: usize = 1 << 21;
-        if count >= TAKE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        if count >= take_parallel_min() && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicBool, Ordering};
             // SAFETY: ReadOnlyCell<f64>/<i64> and Cell<f64> are repr(transparent) over their
@@ -18488,8 +18487,7 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         // reads are memory-latency-bound, so parallelize over chunks (aggregate MLP across
         // cores). Same gather => bit-identical. OOB sets a shared flag -> bail AFTER the pass
         // (partial output dropped; take has no side effects) so numpy raises the IndexError.
-        const TAKE_PARALLEL_MIN: usize = 1 << 21;
-        if count >= TAKE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        if count >= take_parallel_min() && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicBool, Ordering};
             // SAFETY: ReadOnlyCell<T>/<i64> and Cell<T> are repr(transparent) over their value;
@@ -38421,6 +38419,42 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     Ok(Some(
         flat.call_method1(intern!(py, "reshape"), (&output_shape,))?,
     ))
+}
+
+/// Index-count threshold above which `np.take`'s flat gather is split across
+/// rayon workers.
+///
+/// UNFITTED. `1 << 21` was set by the 2026-06-25 parallel-take win, which
+/// demonstrated 5.2x at 8M indices and never swept the threshold - the identical
+/// provenance, author and day as the three `searchsorted` gates, two of which
+/// turned out to be three decades too high and were worth 12-15x once fitted
+/// (`deadlock-audit-sfgg3`). The mechanism is the same too: a gather from a large
+/// source is memory-latency-bound, so everything below the gate runs on one core
+/// with one outstanding miss.
+///
+/// That is a REASON TO MEASURE IT, not a reason to assume the searchsorted answer
+/// transfers - `take` moves whole elements rather than probing, so its serial arm
+/// is bandwidth-bound where searchsorted's is latency-bound, and the crossover has
+/// no reason to land in the same place. `par`/`ser` expose both sides for an
+/// in-process sweep.
+fn take_parallel_min() -> usize {
+    const SHIPPED: usize = 1 << 21;
+    match take_mode_override() {
+        Some(mode) if mode == *"par" => 1 << 10,
+        Some(mode) if mode == *"ser" => usize::MAX,
+        _ => SHIPPED,
+    }
+}
+
+/// `np.take`'s route-selection override, for in-process A/B only. Presence is
+/// resolved ONCE, so the shipped path pays a relaxed atomic load and never walks
+/// `environ`.
+fn take_mode_override() -> Option<std::ffi::OsString> {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*PRESENT.get_or_init(|| std::env::var_os("FNP_TAKE_PARALLEL").is_some()) {
+        return None;
+    }
+    std::env::var_os("FNP_TAKE_PARALLEL")
 }
 
 /// The `searchsorted` route-selection override, for in-process A/B only.

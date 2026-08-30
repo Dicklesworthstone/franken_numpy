@@ -66402,3 +66402,79 @@ contradicted by another's. A reopening needs decidable pairs, same direction, on
 workers of differing core counts, and should probably gate on `rayon::current_num_threads()`
 rather than on a bare element count if it ever succeeds.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — NON-RESULT (premise wrong) on `np.take`'s 1<<21 parallel gate, and a NEWLY PRICED standing loss: `fnp.take` is 1.25-1.49x SLOWER than NumPy on a route the spy proves is NATIVE (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** maintenance-self-speedup
+
+Two things, and the first is a correction to my own reasoning rather than a finding about the code.
+
+### 1. THE PREMISE WAS WRONG AND THE GATE MEASUREMENT IS A NON-RESULT
+
+I found that **21 distinct parallel-gate declarations sit at exactly `1 << 21`**, the same value as
+the three `searchsorted` gates I had just measured to be three decades too high (worth 12-15x once
+fitted). `TAKE_PARALLEL_MIN` was the strongest candidate: same value, and the 2026-06-25 ledger row
+that set it is the SAME row, author and day as the searchsorted one ("Gate index-count
+count>=1<<21; below-gate serial unchanged"), with the same latency-bound-gather mechanism.
+
+It does not reproduce. Forcing both sides of that gate per call (`FNP_TAKE_PARALLEL=ser|par`)
+produces timings identical to three decimal places at every size:
+
+```
+  case                  ser        par        (2^22 f64 source, DRAM-resident)
+  f64 gather m=2^10   1.493x     1.488x
+  f64 gather m=2^12   1.432x     1.432x
+  f64 gather m=2^14   1.374x     1.373x
+  f64 gather m=2^16   1.381x     1.383x
+  f64 gather m=2^18   1.262x     1.259x
+  f64 gather m=2^20   1.250x     1.248x
+```
+
+**Identical arms are not "the gate does not matter" — they are the signature of a switch that is
+not on the executed path**, and this row records it as a non-result rather than as evidence that
+take's threshold is well placed. The `1 << 21` constant I changed lives in
+`try_zerocopy_f64_take`, which is the function the dispatcher reaches for this shape, so the
+mechanism of the miss is NOT yet identified and no conclusion about take's gate may be drawn from
+these numbers in either direction.
+
+What was ruled out: **delegation.** A first pass had no engagement probe, and my initial reading
+was that `fnp.take` must be handing off to NumPy. It is not — a spy that replaces `numpy.take` and
+counts calls reports **0 calls on the timed shape**. The route is ours. Adding that probe is what
+turned a plausible-but-wrong story into a known-unknown, and this harness now aborts if the count
+is ever non-zero.
+
+### 2. WHAT THE RUN DID ESTABLISH, AND IT IS WORTH A LEVER
+
+On that native route, across a 32 MB source and six index counts spanning 2^10..2^20:
+
+**`fnp.take` is 1.25x-1.49x SLOWER than live NumPy at EVERY size**, nulls clean on 14 of 16 rows
+(worst 0.991), on a 64-core worker. Two shapes of source were measured because they are different
+regimes - a 2^22 DRAM-resident source (1.25-1.49x) and a 2^12 cache-resident one (1.35-1.36x) - and
+the loss is present in both, so it is not a cache-residency artefact. numpy 2.5.2, worker `hz4`,
+`bench_elf_sha256=379b93304b6d1d0b53ee149a6c06fe27826b6c18693ce82be42ec844141fb2b4`.
+
+The 2026-06-25 row banked take at **0.193x (5.2x FASTER)** on an 8M-index gather. Both can be true -
+that cell is far above everything measured here - but nobody had priced the sizes below it, and
+below it we lose at every size tested. That is the lever, and it is unclaimed.
+
+COUNTED_MECHANISM: none established - this row explicitly declines to attribute the 1.25-1.49x, because the ser/par arms were identical (1.493 vs 1.488 at m=1024) and therefore isolate nothing.
+The loss is priced, not explained, and the next attempt must start by identifying which branch of
+`try_zerocopy_f64_take` actually executes for a plain `np.take(f64, int64)` call.
+A/A NULL CONTROLS: 32 nulls across 16 rows, 30 inside ±2% (range 0.991-1.004); the two exceptions
+are in the first run and are not quoted.
+PARITY: **432 cells, 0 divergences** across 4 dtypes x 3 source sizes x 4 index counts x
+{random, negative, boundary, repeat}, plus out-of-range indices asserted to raise `IndexError` from
+both forced sides - the one behaviour a parallel gather can get wrong, since its OOB bail is a
+shared flag checked after the pass.
+VERIFICATION: `cargo fmt --check` exit 0; per-file `rustfmt --check` exit 0. The
+`take_parallel_min()` indirection introduced for this measurement preserves the shipped `1 << 21`
+exactly and is behaviour-identical; it is retained ONLY as the switch a future attempt needs, and
+nothing in this row validates it.
+RETRY PREDICATE: do NOT re-attempt take's gate by sweeping it - that is what produced identical
+arms twice. First establish WHICH route serves `np.take(f64 2^22, int64 m)` by instrumenting the
+branch (a counter per `return Ok(None)` site, or a route-name print), and only then decide whether
+a threshold is involved at all. The 1.25-1.49x loss is the real target and it may have nothing to
+do with parallelism. Separately: **the 21 gates at `1 << 21` remain unaudited, and this row is
+evidence that "same constant, same provenance" is a hypothesis, not a finding** - each one needs
+its own engagement-probed measurement before any claim.
+AGENT_NAME=BlackThrush.
