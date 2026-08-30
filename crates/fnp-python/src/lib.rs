@@ -54616,22 +54616,9 @@ fn try_native_lexsort_valuelex(
     // comparison sort, which is how examples/h2h_lexsort.rs A/Bs the two in one process.
     let counting_enabled =
         std::env::var_os("FNP_LEXSORT_COUNTING").is_none_or(|v| v != std::ffi::OsStr::new("0"));
-    let radix_enabled = std::env::var_os("FNP_LEXSORT_RADIX")
-        .is_some_and(|v| v != std::ffi::OsStr::new("0"));
     let mut perm: Vec<u32> = Vec::new();
     let mut counted = false;
-    if radix_enabled && items.len() == 2 && total_width == 16 {
-        let keys: Vec<u128> = records
-            .par_chunks_exact(16)
-            .map(|record| {
-                let mut bytes = [0u8; 16];
-                bytes.copy_from_slice(record);
-                u128::from_be_bytes(bytes)
-            })
-            .collect();
-        perm = stable_radix_sort_u128_permutation(&keys);
-        counted = true;
-    } else if counting_enabled && total_width <= 16 && n > (1 << 12) {
+    if counting_enabled && total_width <= 16 && n > (1 << 12) {
         let mut slot_key = vec![0u128; LEX_BUCKET_SLOTS];
         let mut slot_id = vec![u32::MAX; LEX_BUCKET_SLOTS];
         let mut distinct: Vec<u128> = Vec::with_capacity(LEX_BUCKET_MAX);
@@ -54717,54 +54704,6 @@ fn try_native_lexsort_valuelex(
         .zip(perm.par_iter())
         .for_each(|(dst, &p)| *dst = p as i64);
     Ok(Some(out.unbind()))
-}
-
-fn stable_radix_sort_u128_permutation(keys: &[u128]) -> Vec<u32> {
-    let mut source: Vec<u32> = (0..keys.len() as u32).collect();
-    let mut destination = vec![0u32; keys.len()];
-    for shift in (0..128).step_by(8) {
-        let mut counts = [0usize; 256];
-        for &index in &source {
-            let digit = ((keys[index as usize] >> shift) & 0xff) as usize;
-            counts[digit] += 1;
-        }
-        if counts.iter().filter(|&&count| count != 0).take(2).count() < 2 {
-            continue;
-        }
-        let mut offsets = [0usize; 256];
-        let mut next = 0usize;
-        for (offset, &count) in offsets.iter_mut().zip(counts.iter()) {
-            *offset = next;
-            next += count;
-        }
-        for &index in &source {
-            let digit = ((keys[index as usize] >> shift) & 0xff) as usize;
-            destination[offsets[digit]] = index;
-            offsets[digit] += 1;
-        }
-        std::mem::swap(&mut source, &mut destination);
-    }
-    source
-}
-
-#[cfg(test)]
-mod radix_permutation_tests {
-    use super::stable_radix_sort_u128_permutation;
-
-    #[test]
-    fn orders_packed_keys_and_preserves_equal_key_input_order() {
-        let keys = [
-            0x8000_0000_0000_0000_0000_0000_0000_0010_u128,
-            0x8000_0000_0000_0000_0000_0000_0000_0001_u128,
-            0x7000_0000_0000_0000_0000_0000_0000_00ff_u128,
-            0x8000_0000_0000_0000_0000_0000_0000_0001_u128,
-        ];
-
-        assert_eq!(
-            stable_radix_sort_u128_permutation(&keys),
-            vec![2, 1, 3, 0]
-        );
-    }
 }
 
 // WIDE K-key (K=2/3/4) integer lexsort: the composite packer defers when the
