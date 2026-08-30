@@ -66284,3 +66284,68 @@ further work. The [2^10, 2^12) band remains unmeasured on every route and is the
 further gate win could come from; it needs a decidable pair at 2^11, which this worker could now
 supply.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — REJECT: lowering the searchsorted parallel gates BELOW 2^12 — the [2^10, 2^12) band is a decidable LOSS on f32 at both 2^10 and 2^11, and the crossover is HOST-DEPENDENT as predicted (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** maintenance-self-speedup
+
+A negative result closing the last open question the three gate rows left. No vs-NumPy claim is
+made: every decided pair below is OURS against OURS (`ser` vs `par`) in one process, which is what
+a gate boundary is decided by.
+
+Worker `hetzner2` (rch), **loadavg 3.45 - quiet**, numpy 2.5.2 (`artifact_sha256=27bd88fd…`),
+`bench_elf_sha256=f8128ba9b6d170945606ed6c487b38419b4d1d1a1e0548c48c20bb9b98ff68ae`,
+`invocation_id=hetzner2-192234-1788130674`.
+
+### The band, measured
+
+```
+  route      m       serial               parallel             verdict
+  f32        2^10    0.752x 0.998/0.983   1.747x 1.000/0.982   parallel LOSES 2.32x, BOTH nulls clean
+  f32        2^11    0.763x 1.006/1.009   2.419x 0.990/1.011   parallel LOSES 3.17x, BOTH nulls clean
+  f64        2^10    0.704x 0.999/1.000   1.022x 0.977/0.983   parallel loses, par null VOID - sign only
+  f64        2^11    0.726x 0.990/0.999   1.894x 1.014/0.873   parallel loses, par null VOID - sign only
+  integer    2^11    2.468x 0.996/0.994   1.324x 1.000/1.057   parallel BETTER, par null VOID - UNDECIDED
+```
+
+**For f32 the answer is decidable and it is NO**: parallelism loses at both 2^10 and 2^11 with all
+four nulls clean at each size, so the shipped 1<<12 is correct and must not be lowered. For f64 the
+sign is the same at both sizes but the parallel nulls are VOID, so it is "no" on a replicated sign
+rather than a decidable pair. **For the integer route 2^11 is UNDECIDED and is recorded as such** —
+its parallel arm reads better (1.324x against 2.468x) but its null is 1.057, and a 1.9x effect next
+to a 5.7% null on a single size is not a gate boundary. That is the one place a further gate win
+could still exist.
+
+### THE CROSSOVER IS HOST-DEPENDENT, WHICH IS WHY NONE OF THIS TRANSFERS
+
+The f32 gate row's retry predicate said "a worker with far fewer cores could push it up". It does.
+The same integer m=2^12 cell reads **0.967x on hz3** and **2.103x on hetzner2** — the parallel arm
+is far less effective here, on a QUIETER host (3.45 against hz3's ~30). Load does not explain that;
+core count does. So:
+
+- a gate fitted on one worker is not automatically right on another, and
+- the 2^12 gates are conservative in the right direction on BOTH hosts — at 2^12 the parallel arm
+  is better or neutral on hetzner2 too (integer 3.145x -> 2.103x, f64 1.087x -> 0.947x), while
+  below 2^12 it is worse on both.
+
+That is the strongest argument for leaving all three gates where they are: 2^12 is the first size
+that wins on the LEAST parallel-friendly worker measured, not merely on the most favourable one.
+
+COUNTED_MECHANISM: f32 m=2048 serial 34434.4 ns vs parallel 107426.7 ns = +72992 ns added; f32 m=1024 serial 17221.2 ns vs parallel 38659.0 ns = +21438 ns added.
+Below the gate NO work is removed and work is ADDED — the same m searches still run, plus rayon
+task setup and per-chunk dispatch. The added cost is a large fraction of the serial arm's entire
+runtime at both sizes, which is the signature of fixed per-call parallel setup rather than of
+anything proportional to the search itself.
+A/A NULL CONTROLS: 10 nulls across five decided pairs; the two f32 pairs are clean on all four
+(0.982-1.011) and carry the reject. The f64 and integer parallel nulls are VOID and are quoted for
+SIGN only, explicitly.
+PARITY: 11074 integer cells + 176 f32 cells, 0 divergences, before any timing.
+VERIFICATION: `cargo fmt --check` exit 0 with zero bytes AND per-file `rustfmt --check` exit 0 —
+both, per `deadlock-audit-h4pjj`. Fixing four peer-authored drift hunks in `lib.rs` was required to
+get there and is in the same commit.
+RETRY PREDICATE: do NOT lower any of the three gates below 2^12 on f32 or f64 evidence — both are
+measured losses in that band. The integer route's 2^11 is the ONLY open cell: reopen it with a
+decidable pair (both nulls inside ±2%) at 2^11 on at least two workers of different core counts,
+since this row also shows a single worker cannot settle a crossover. Anything less is not evidence
+that survives the host dependence demonstrated here.
+AGENT_NAME=BlackThrush.

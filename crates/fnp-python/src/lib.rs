@@ -25885,6 +25885,14 @@ fn take(
         return fallback();
     }
 
+    // `np.take` preserves ndarray subclasses for flat and axis gathers. The
+    // native gather paths below canonicalize with `asarray` and rebuild a base
+    // ndarray, so subclasses must delegate before route selection
+    // (`deadlock-audit-30d18`).
+    if ndarray_subclass_needs_numpy(py, a.bind(py))? {
+        return fallback();
+    }
+
     // O(1) SCALAR TAKE (`deadlock-audit-yphwc`).
     //
     // THE DEFECT THIS REMOVES: every gather helper below gates on the INDEX operand - each one
@@ -146440,6 +146448,76 @@ mod tests {
     }
 
     #[test]
+    fn take_preserves_ndarray_subclasses_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_take_subclass")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ours_fn = module.getattr("take")?;
+            let numpy_fn = numpy.getattr("take")?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"class PlainSubclass(np.ndarray):\n    pass\n\
+                  base = np.array([[10, 20], [30, 40]], dtype=np.int64)\n\
+                  plain = base.view(PlainSubclass)\n\
+                  matrix = np.matrix(base)\n\
+                  indices = np.array([1, 0], dtype=np.int64)\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+            let indices = locals.get_item("indices").expect("index fixture");
+
+            for axis in [None, Some(0_i64)] {
+                let kwargs = PyDict::new(py);
+                if let Some(axis) = axis {
+                    kwargs.set_item("axis", axis)?;
+                }
+                for name in ["plain", "matrix"] {
+                    let value = locals.get_item(name).expect("subclass fixture");
+                    let ours = ours_fn.call((&value, &indices), Some(&kwargs))?;
+                    let expected = numpy_fn.call((&value, &indices), Some(&kwargs))?;
+                    assert_eq!(
+                        ours.get_type().name()?.to_str()?,
+                        expected.get_type().name()?.to_str()?,
+                        "take({name}, axis={axis:?}) result type diverged from NumPy"
+                    );
+                    let ours_array = numpy.call_method1("asarray", (&ours,))?;
+                    let expected_array = numpy.call_method1("asarray", (&expected,))?;
+                    assert_eq!(
+                        ours_array
+                            .getattr("dtype")?
+                            .getattr("str")?
+                            .extract::<String>()?,
+                        expected_array
+                            .getattr("dtype")?
+                            .getattr("str")?
+                            .extract::<String>()?,
+                        "take({name}, axis={axis:?}) dtype diverged from NumPy"
+                    );
+                    assert_eq!(
+                        ours_array.getattr("shape")?.to_string(),
+                        expected_array.getattr("shape")?.to_string(),
+                        "take({name}, axis={axis:?}) shape diverged from NumPy"
+                    );
+                    assert_eq!(
+                        ours_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        expected_array
+                            .call_method0("tobytes")?
+                            .extract::<Vec<u8>>()?,
+                        "take({name}, axis={axis:?}) values diverged from NumPy"
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
     fn put_matches_numpy_in_place_and_returns_none() {
         with_python(|py| {
             if !numpy_available(py) {
@@ -160773,7 +160851,10 @@ mod tests {
                 let ours_array = numpy.call_method1("asarray", (&ours,))?;
                 let expected_array = numpy.call_method1("asarray", (&expected,))?;
                 assert_eq!(
-                    ours_array.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                    ours_array
+                        .getattr("dtype")?
+                        .getattr("str")?
+                        .extract::<String>()?,
                     expected_array
                         .getattr("dtype")?
                         .getattr("str")?
@@ -160782,7 +160863,9 @@ mod tests {
                 );
                 assert_eq!(
                     ours_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
-                    expected_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    expected_array
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
                     "unique({name}) values diverged from NumPy"
                 );
             }
@@ -160826,7 +160909,10 @@ mod tests {
                     let ours_array = numpy.call_method1("asarray", (&ours,))?;
                     let expected_array = numpy.call_method1("asarray", (&expected,))?;
                     assert_eq!(
-                        ours_array.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                        ours_array
+                            .getattr("dtype")?
+                            .getattr("str")?
+                            .extract::<String>()?,
                         expected_array
                             .getattr("dtype")?
                             .getattr("str")?
@@ -160840,7 +160926,9 @@ mod tests {
                     );
                     assert_eq!(
                         ours_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
-                        expected_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        expected_array
+                            .call_method0("tobytes")?
+                            .extract::<Vec<u8>>()?,
                         "{function}({name}) values diverged from NumPy"
                     );
                 }
