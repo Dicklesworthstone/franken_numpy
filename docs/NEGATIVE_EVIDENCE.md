@@ -27420,6 +27420,8 @@ serial guard 8,254,562 ns = 1.043x vs ORIG (noise band) and 0.679x vs NumPy. Con
 `where(condition=..., x=..., y=...)` now matches NumPy's "takes no keyword arguments" TypeError.
 AGENT_NAME=BlackThrush.
 
+- 2026-08-30 (`deadlock-audit-sfgg3`): committed `70488c72` unordered int64 `searchsorted` batched fallback is a DECIDABLE LOSS against live NumPy 2.5.2 on `hz4`: 6.419176 ms FNP / 2.165910 ms NumPy = 2.964x slower (same-invocation A/A 1.003/1.002; ELF `2c41f63c630738b0b53023706aed2050a0ba46fb3b9dde7ae622bbd4f93d0660`); it is only a maintenance improvement over the former 3.749x loss, and its revert awaits the protected uncommitted `lib.rs` follow-on overlay.
+
 - 2026-08-30 REJECT `lexsort card=2 stable LSD radix per-key reused permutation workspace`: `h2h_lexsort` ABBAABBA on ovh-a (ELF `afecab51f37ca09ef1d4738d1e5b33ea3ff2ec8b24f5fb1776fe4058b7e6e319`) kept the documented 100-cell/10-divergence parity set but measured 2.427x NumPy/FNP (1.945 ms/4.720 ms; A/A 0.999/1.001); second draw 2.297x was void (FNP A/A 0.955). Reverted the source route; do not retry this primitive without a different measured mechanism.
 
 ## 2026-06-28 - NO-SHIP: lowering the 1536 matmul-shaped native GEMM window back to 1024 is worker-fragile and regresses badly on hz2

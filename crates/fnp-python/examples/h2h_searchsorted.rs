@@ -203,9 +203,21 @@ out("%-30s%-9s%14s%14s%9s%8s%9s"
     % ("parallel-threshold sweep","impl","numpy_ns","fnp_ns","ratio","nullNP","nullFNP"))
 sweep_hay = np.sort(rng.integers(0, 1 << 20, 1 << 16))
 for mq in (1 << 8, 1 << 10, 1 << 12, 1 << 14, 1 << 16):
-    cell("random m=2^%d" % mq.bit_length(), sweep_hay,
+    cell("random m=2^%d" % (mq.bit_length() - 1), sweep_hay,
          rng.integers(0, 1 << 20, mq), max(2, 2000 // max(1, mq >> 8)))
 del sweep_hay
+
+# The SAME sweep on the f64 route, whose threshold is a separate constant still at its inherited
+# 1<<21. Same element width and a near-identical search cost, so the integer crossover is a
+# plausible prior - which is exactly why it has to be measured rather than assumed.
+f64_hay = np.sort(rng.standard_normal(1 << 16))
+for mq in (1 << 10, 1 << 12, 1 << 14, 1 << 16):
+    cell("f64 random m=2^%d" % (mq.bit_length() - 1), f64_hay,
+         rng.standard_normal(mq), max(2, 2000 // max(1, mq >> 8)))
+# f64 SORTED needles: the band below the f64 merge's own m>=1<<19 gate, where a widened parallel
+# arm must not cost anything relative to the serial guess-based search it replaces.
+cell("f64 sorted m=2^16", f64_hay, np.sort(rng.standard_normal(1 << 16)), 20)
+del f64_hay
 
 # THE GATE'S LOSING SIDE. A nondecreasing needle batch is admissible on the QUERY test alone, but
 # the walk's cost is span in the HAYSTACK: 64 sorted queries spread over 2^22 elements make the

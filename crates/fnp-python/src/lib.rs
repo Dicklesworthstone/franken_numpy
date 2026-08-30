@@ -27086,6 +27086,15 @@ fn count_nonzero(
             .unbind())
     };
 
+    // `np.count_nonzero` delegates axis forms to an ndarray subclass. In
+    // particular, `matrix` rejects those forms while the native extraction
+    // path below silently produced a base ndarray result. Preserve the
+    // subclass' own error surface by delegating before any native conversion
+    // (`deadlock-audit-30d18`).
+    if ndarray_subclass_needs_numpy(py, a.bind(py))? {
+        return fallback();
+    }
+
     // Zero-copy count for C-contiguous bool / f64 ndarrays (axis=None or a single
     // integer axis, no keepdims); skips the cold extract Vec. Counting is
     // order-independent, so bit-identical. Other dtypes / tuple axes / keepdims
@@ -38035,8 +38044,13 @@ fn try_zerocopy_f64_searchsorted(
         // numpy.searchsorted is single-threaded; each query's binary search over the shared
         // read-only haystack is independent and latency-bound, so a parallel map aggregates
         // memory-level parallelism + ALU across cores and wins. Same search => bit-identical.
-        const SEARCHSORTED_PARALLEL_MIN: usize = 1 << 21;
-        if m >= SEARCHSORTED_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        // Separate threshold from the integer route's: the crossover is a property of the search
+        // cost and the core count, and NOTHING here has measured that they coincide. Assuming the
+        // integer's fitted 1<<12 transfers would repeat the mistake that left this gate at 1<<21.
+        // Nothing above this arm can be stolen by widening it - the f64 sorted-batch merge
+        // (`try_zerocopy_f64_searchsorted_merge`) requires m >= 1<<19 and has already declined for
+        // every m below that.
+        if m >= searchsorted_parallel_min_f64() && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             // SAFETY: ReadOnlyCell<f64>/Cell<i64> are repr(transparent) over f64/i64; the
             // haystack/queries are read-only under the GIL and `flat` is a fresh numpy.empty
@@ -38438,6 +38452,17 @@ fn searchsorted_mode_override() -> Option<std::ffi::OsString> {
 ///
 /// `par` and `ser` force the two sides so the threshold itself can be A/B'd
 /// inside ONE process rather than across two invocations.
+fn searchsorted_parallel_min_f64() -> usize {
+    // UNFITTED, and deliberately left at the inherited value until it is measured on its own
+    // route. `par`/`ser` expose both sides so it can be swept the way the integer one was.
+    const SHIPPED: usize = 1 << 21;
+    match searchsorted_mode_override() {
+        Some(mode) if mode == *"par" => 1 << 10,
+        Some(mode) if mode == *"ser" => usize::MAX,
+        _ => SHIPPED,
+    }
+}
+
 fn searchsorted_parallel_min() -> usize {
     const SHIPPED: usize = 1 << 12;
     match searchsorted_mode_override() {
@@ -139061,6 +139086,44 @@ mod tests {
                 true_expected.extract::<i64>()?
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn count_nonzero_matrix_axis_error_surface_matches_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+            let module = PyModule::new(py, "fnp_python_test_count_nonzero_matrix")?;
+            fnp_python(&module)?;
+            let ours_fn = module.getattr("count_nonzero")?;
+            let numpy_fn = numpy.getattr("count_nonzero")?;
+            let matrix = numpy
+                .getattr("matrix")?
+                .call1((vec![vec![1_i64, 0_i64], vec![0_i64, 2_i64]],))?;
+
+            for keepdims in [None, Some(false), Some(true)] {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("axis", 0_i64)?;
+                if let Some(value) = keepdims {
+                    kwargs.set_item("keepdims", value)?;
+                }
+                let ours = ours_fn
+                    .call((matrix.clone(),), Some(&kwargs))
+                    .expect_err("matrix axis form must match NumPy's error");
+                let expected = numpy_fn
+                    .call((matrix.clone(),), Some(&kwargs))
+                    .expect_err("NumPy matrix axis form must error");
+                assert_eq!(
+                    ours.get_type(py).name()?.to_str()?,
+                    expected.get_type(py).name()?.to_str()?,
+                    "keepdims={keepdims:?}: count_nonzero matrix error type diverged from NumPy"
+                );
+            }
             Ok(())
         });
     }
