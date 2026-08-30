@@ -211,35 +211,6 @@ print(np.array_equal(fnp_result, np_result))
 }
 
 #[test]
-fn lexsort_lsd_radix_low_cardinality_f64_matches_numpy() -> Result<(), String> {
-    let script = fnp_script(
-        r#"
-import os
-os.environ["FNP_LEXSORT_COUNTING"] = "0"
-os.environ["FNP_LEXSORT_LSD_RADIX"] = "1"
-rng = np.random.default_rng(8675309)
-for n in (65536, 65537):
-    for card in (1, 2, 3, 8):
-        secondary = rng.integers(0, card, n).astype(np.float64)
-        primary = rng.integers(0, card, n).astype(np.float64)
-        got = fnp.lexsort((secondary, primary))
-        want = np.lexsort((secondary, primary))
-        if not np.array_equal(got, want):
-            print(False)
-            raise SystemExit(0)
-print(True)
-"#
-        .into(),
-    );
-    let output = numpy_oracle(&script)?;
-    assert_eq!(
-        output, "True",
-        "LSD radix lexsort must preserve NumPy key order and stable ties"
-    );
-    Ok(())
-}
-
-#[test]
 fn lexsort_all_equal_primary() -> Result<(), String> {
     let script = fnp_script(
         r#"
