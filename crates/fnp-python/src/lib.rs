@@ -114625,6 +114625,13 @@ fn around(
         return fallback();
     }
 
+    // NumPy keeps ndarray subclasses through both rounding aliases. Every
+    // native route below rebuilds a base ndarray, so hand subclass operands
+    // back before selecting a zero-copy kernel (`deadlock-audit-30d18`).
+    if ndarray_subclass_needs_numpy(py, a.bind(py))? {
+        return fallback();
+    }
+
     // decimals==0 is plain round-half-even (Rint); take the zero-copy buffer
     // path for exact f64 C-contiguous ndarrays (bit-identical to the
     // elementwise(Rint) branch below). Other inputs fall through unchanged.
@@ -160778,6 +160785,65 @@ mod tests {
                     expected_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
                     "unique({name}) values diverged from NumPy"
                 );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn round_preserves_ndarray_subclasses_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_round_subclass")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &numpy)?;
+            py.run(
+                c"class PlainSubclass(np.ndarray):\n    pass\n\
+                  base = np.array([[3.25, 1.75], [2.5, 1.125]], dtype=np.float64)\n\
+                  plain = base.view(PlainSubclass)\n\
+                  matrix = np.matrix(base)\n",
+                Some(&locals),
+                Some(&locals),
+            )?;
+
+            for function in ["around", "round"] {
+                let ours_fn = module.getattr(function)?;
+                let numpy_fn = numpy.getattr(function)?;
+                for name in ["plain", "matrix"] {
+                    let value = locals.get_item(name).expect("subclass fixture");
+                    let ours = ours_fn.call1((&value, 1_i32))?;
+                    let expected = numpy_fn.call1((&value, 1_i32))?;
+                    assert_eq!(
+                        ours.get_type().name()?.to_str()?,
+                        expected.get_type().name()?.to_str()?,
+                        "{function}({name}) result type diverged from NumPy"
+                    );
+                    let ours_array = numpy.call_method1("asarray", (&ours,))?;
+                    let expected_array = numpy.call_method1("asarray", (&expected,))?;
+                    assert_eq!(
+                        ours_array.getattr("dtype")?.getattr("str")?.extract::<String>()?,
+                        expected_array
+                            .getattr("dtype")?
+                            .getattr("str")?
+                            .extract::<String>()?,
+                        "{function}({name}) dtype diverged from NumPy"
+                    );
+                    assert_eq!(
+                        ours_array.getattr("shape")?.to_string(),
+                        expected_array.getattr("shape")?.to_string(),
+                        "{function}({name}) shape diverged from NumPy"
+                    );
+                    assert_eq!(
+                        ours_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        expected_array.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                        "{function}({name}) values diverged from NumPy"
+                    );
+                }
             }
             Ok(())
         });
