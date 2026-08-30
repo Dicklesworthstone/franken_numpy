@@ -6,8 +6,11 @@
 //!
 //! The float paths learned in `8f6cc811` that the right loop depends on the QUERY ORDER; the
 //! integer path never got it and still ran a branchy bisection per query through `Cell` reads.
-//! `FNP_SEARCHSORTED_MERGE` selects the loop per call so both are timed on the same arrays in the
-//! same interpreter - two rch jobs can land on different workers and cannot be compared.
+//! `FNP_SEARCHSORTED_MERGE` selects the loop per call so all three strategies are timed on the
+//! same arrays in the same interpreter - two rch jobs can land on different workers and cannot be
+//! compared. `0` = bisection, unset/`1` = the shipped span-gated merge, `force` = the merge with
+//! the span gate bypassed, which is what makes the gate's LOSING side a measurement rather than
+//! an assertion.
 
 use pyo3::prelude::*;
 use std::ffi::CString;
@@ -34,7 +37,7 @@ rng = np.random.default_rng(SEED)
 # is the exact boundary of the nondecreasing admission test.
 def parity():
     bad = cells = 0
-    for impl, flag in (("bisect", "0"), ("merge", "1")):
+    for impl, flag in (("bisect", "0"), ("merge", "1"), ("force", "force")):
         os.environ["FNP_SEARCHSORTED_MERGE"] = flag
         for dt in ("int8","int16","int32","int64","uint8","uint32","uint64"):
             hi = 100 if dt.endswith("8") else 100000
@@ -102,19 +105,33 @@ CASES = [
     ("RANDOM q", rng.integers(0, 1 << 20, N)),                         # merge must decline
     ("reverse-sorted q", np.sort(rng.integers(0, 1 << 20, N))[::-1].copy()),
 ]
-for label, q in CASES:
-    g = {"np": np, "fnp": fnp, "h": hay, "q": q}
-    for impl, flag in (("bisect", "0"), ("merge", "1")):
+def cell(label, hay_, q, k):
+    g = {"np": np, "fnp": fnp, "h": hay_, "q": q}
+    for impl, flag in (("bisect", "0"), ("merge", "1"), ("force", "force")):
         os.environ["FNP_SEARCHSORTED_MERGE"] = flag
-        tn, tf = inter("np.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, 20)
-        n1, n2 = inter("np.searchsorted(h,q)", "np.searchsorted(h,q)", g, 20)
-        c1, c2 = inter("fnp.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, 20)
+        tn, tf = inter("np.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, k)
+        n1, n2 = inter("np.searchsorted(h,q)", "np.searchsorted(h,q)", g, k)
+        c1, c2 = inter("fnp.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, k)
         nn, nf = n2 / n1, c2 / c1
         ok = abs(nn - 1) <= 0.02 and abs(nf - 1) <= 0.02
         out("%-30s%-9s%14.1f%14.1f%8.3fx%8.3f%9.3f%s"
             % (label, impl, tn, tf, tf / tn, nn, nf, "" if ok else "  VOID"))
     os.environ.pop("FNP_SEARCHSORTED_MERGE", None)
     del g
+
+for label, q in CASES:
+    cell(label, hay, q, 20)
+
+# THE GATE'S LOSING SIDE. A nondecreasing needle batch is admissible on the QUERY test alone, but
+# the walk's cost is span in the HAYSTACK: 64 sorted queries spread over 2^22 elements make the
+# pointer cross the whole array where the bisection pays 64*23 probes. `merge` must decline here
+# and land on `bisect`; `force` bypasses the span gate and prices what declining is worth.
+out("")
+big = np.sort(rng.integers(0, 1 << 30, 1 << 22))
+for label, q in (("2^22 hay, 64 spread q", np.sort(rng.integers(0, 1 << 30, 64))),
+                 ("2^22 hay, 64 clustered q", np.sort(rng.integers(0, 1 << 12, 64)))):
+    cell(label, big, q, 50)
+del big
 
 c = rng.standard_normal(1 << 20)
 g = {"np": np, "fnp": fnp, "a": c}
