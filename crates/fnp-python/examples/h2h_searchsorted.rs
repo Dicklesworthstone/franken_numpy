@@ -86,10 +86,13 @@ if parity():
     raise SystemExit(1)
 out("parity gate: both query strategies agree with NumPy on every cell")
 
-def inter(sa, sb, g, k, rounds=6):
+def inter(sa, sb, g, k, rounds=4):
     ta, tb = [], []
     for r in range(rounds):
-        for w in (("a","b","b","a") if r % 2 == 0 else ("b","a","a","b")):
+        # Keep an explicit ABBAABBA schedule.  It has both warm/cold directions,
+        # is stable under a rerun, and makes the two A/A controls directly
+        # comparable with the NumPy-vs-fnp row.
+        for w in ("a", "b", "b", "a", "a", "b", "b", "a"):
             t = timeit.timeit(sa if w == "a" else sb, globals=g, number=k) / k * 1e9
             (ta if w == "a" else tb).append(t)
     return statistics.median(ta), statistics.median(tb)
@@ -121,6 +124,31 @@ def cell(label, hay_, q, k):
 
 for label, q in CASES:
     cell(label, hay, q, 20)
+
+# Native f16 is intentionally a separate cell: it has a finite-order cumulative
+# table rather than the integer merge, and its admission gate needs enough
+# needles to amortise the 65,536-key table.  Include signed zeros, infinities,
+# duplicates, and exact haystack values so both `side` conventions are exercised
+# before the timing row below.
+f16_hay = np.sort(np.concatenate((
+    np.linspace(-500.0, 500.0, N - 8, dtype=np.float16),
+    np.array([-np.inf, -0.0, 0.0, 0.0, 1.0, 1.0, np.inf, np.inf], dtype=np.float16),
+)))
+f16_q = np.sort(rng.choice(f16_hay, size=N, replace=True)).astype(np.float16)
+for side in ("left", "right"):
+    want = np.searchsorted(f16_hay, f16_q, side=side)
+    got = fnp.searchsorted(f16_hay, f16_q, side=side)
+    if not np.array_equal(want, got):
+        out("ABORTING: native f16 parity divergence", side)
+        raise SystemExit(1)
+g = {"np": np, "fnp": fnp, "h": f16_hay, "q": f16_q}
+tn, tf = inter("np.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, 20)
+n1, n2 = inter("np.searchsorted(h,q)", "np.searchsorted(h,q)", g, 20)
+c1, c2 = inter("fnp.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, 20)
+out("%-30s%-9s%14.1f%14.1f%8.3fx%8.3f%9.3f%s"
+    % ("f16 finite table", "native", tn, tf, tf / tn, n2 / n1, c2 / c1,
+       "" if abs(n2/n1-1) <= .02 and abs(c2/c1-1) <= .02 else "  VOID"))
+del g, f16_hay, f16_q
 
 # THE GATE'S LOSING SIDE. A nondecreasing needle batch is admissible on the QUERY test alone, but
 # the walk's cost is span in the HAYSTACK: 64 sorted queries spread over 2^22 elements make the
