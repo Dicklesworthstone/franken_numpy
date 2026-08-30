@@ -59,7 +59,8 @@ out("dispatch_assert=passed incumbent=numpy.searchsorted candidate=fnp.searchsor
 def parity():
     bad = cells = 0
     for impl, flag in (("perquery", "perquery"), ("bisect", "0"), ("merge", "1"),
-                       ("gallop", "gallop"), ("force", "force")):
+                       ("gallop", "gallop"), ("force", "force"),
+                       ("ser", "ser"), ("par", "par")):
         os.environ["FNP_SEARCHSORTED_MERGE"] = flag
         for dt in ("int8","int16","int32","int64","uint8","uint32","uint64"):
             hi = 100 if dt.endswith("8") else 100000
@@ -134,8 +135,12 @@ def cell(label, hay_, q, k):
     g = {"np": np, "fnp": fnp, "h": hay_, "q": q}
     # `perquery` is the FORMER fallback loop - one full bisection per key - kept selectable so the
     # batched search can be A/B'd against it in THIS process rather than across two runs.
+    # `perquery` is the FORMER fallback loop - one full bisection per key - kept selectable so the
+    # batched search can be A/B'd against it in THIS process rather than across two runs.
+    # `ser`/`par` force the two sides of the rayon threshold for the same reason.
     for impl, flag in (("perquery", "perquery"), ("bisect", "0"), ("merge", "1"),
-                       ("gallop", "gallop"), ("force", "force")):
+                       ("gallop", "gallop"), ("force", "force"),
+                       ("ser", "ser"), ("par", "par")):
         os.environ["FNP_SEARCHSORTED_MERGE"] = flag
         tn, tf = inter("np.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, k)
         n1, n2 = inter("np.searchsorted(h,q)", "np.searchsorted(h,q)", g, k)
@@ -189,6 +194,18 @@ out("%-30s%-9s%14.1f%14.1f%8.3fx%8.3f%9.3f%s"
     % ("f16 finite table", "native", tn, tf, tf / tn, n2 / n1, c2 / c1,
        "" if abs(n2/n1-1) <= .02 and abs(c2/c1-1) <= .02 else "  VOID"))
 del g, f16_hay, f16_q
+
+# WHERE DOES THE PARALLEL THRESHOLD BELONG? Timing one size tells you that size is above the
+# crossover, not where the crossover is. Sweep the query count with the two sides forced, on random
+# needles (the only shape the parallel arm now accepts), and read the gate off the data.
+out("")
+out("%-30s%-9s%14s%14s%9s%8s%9s"
+    % ("parallel-threshold sweep","impl","numpy_ns","fnp_ns","ratio","nullNP","nullFNP"))
+sweep_hay = np.sort(rng.integers(0, 1 << 20, 1 << 16))
+for mq in (1 << 8, 1 << 10, 1 << 12, 1 << 14, 1 << 16):
+    cell("random m=2^%d" % mq.bit_length(), sweep_hay,
+         rng.integers(0, 1 << 20, mq), max(2, 2000 // max(1, mq >> 8)))
+del sweep_hay
 
 # THE GATE'S LOSING SIDE. A nondecreasing needle batch is admissible on the QUERY test alone, but
 # the walk's cost is span in the HAYSTACK: 64 sorted queries spread over 2^22 elements make the

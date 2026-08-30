@@ -65967,3 +65967,94 @@ incumbent there — on numpy 2.3.5 this cell is already a win and the headroom i
 2.5.2 the remaining 2.96x is against an incumbent doing the SAME algorithm, which means the gap is
 constant factors (bounds checks, `intp` writes, entry) and not the search shape.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — WIN: the parallel gate for unordered integer `searchsorted` was 1<<21 and was never fitted — at 1<<12 the last standing loss on this surface flips from 2.919x SLOWER to **0.267x** (3.75x FASTER than live NumPy) (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** incumbent-win
+
+Live NumPy 2.5.2 in the SAME process, arms interleaved ABBAABBA, dual A/A null per cell. Worker
+`hz4` (rch), python 3.14.4, stock `release`, loadavg 13.02.
+`bench_elf_sha256=65ccfa46c4c643fbb1c6b06befaa3e0056ad5ddb3d1b6a2152f5a6622bd9d7c9`.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.5.2 artifact_sha256=27bd88fd60f4b9fcd5c938572e9b9e3df0aed9cfed4888e57d94c516b45512b7 invocation_id=hz4-1027541-1788124906 measured_ratio=0.267x
+
+**Incumbent isolation proof:** candidate=fnp.searchsorted incumbent=numpy.searchsorted shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.14
+
+**A/A null control (same invocation):** the decided pair is CLEAN on both arms — shipped ratio 0.267x nullNP=1.000 nullFNP=1.006; forced-serial 2.919x nullNP=0.999 nullFNP=1.000.
+
+`numpy.empty` numerator (790.4 ns at this size) is quoted from the same harness on the same worker
+and size earlier today (ELF `34122815bad1bf14427dc36f36619fe4aac9f9c5399cf534b74428f6ce7dd3e4`);
+it is a property of NumPy and the size, not of this change, and at 0.14% of the candidate arm it
+cannot carry the result either way. `dispatch_assert` is a runtime `assert` in the measured
+process, so completion is its proof.
+
+### 1. THE GATE WAS INHERITED, NOT MEASURED
+
+`SEARCHSORTED_PARALLEL_MIN = 1 << 21` came from the 2026-06-25 parallel `searchsorted` win, which
+demonstrated 42x at 4M queries and set the threshold without fitting it. Everything below 2M queries
+therefore ran SERIAL, and that is where the whole standing loss lived.
+
+### 2. THE CROSSOVER, MEASURED FROM BOTH SIDES
+
+`ser`/`par` force the two sides of the threshold per call, so each row below is one invocation.
+Random needles into a 2^16 haystack, worker `hz3`, numpy 2.5.2:
+
+```
+  m       serial    parallel    verdict
+  2^8     1.165x     1.171x     below the forced gate; arms identical, as expected
+  2^10    2.889x     3.918x     parallel LOSES - rayon setup exceeds the gain
+  2^12    2.946x     0.967x     parallel wins 3.05x
+  2^14    2.945x     0.375x     parallel wins 7.98x
+  2^16    2.926x     0.234x     parallel wins 12.5x
+```
+
+**2^12 is the smallest measured winning point and 2^10 is a measured losing one**, so the shipped
+gate sits between two observations rather than on a guess. Timing a single size would have told me
+that size is above the crossover, not where the crossover is.
+
+### 3. THE SHIPPED DEFAULT, CONFIRMED
+
+Re-run with the constant at 1<<12 and no override, worker `hz4`:
+
+```
+  case                        impl        numpy_ns        fnp_ns     ratio  nullNP  nullFNP
+  RANDOM q (m = n = 2^16)     shipped    2072199.7      554178.8     0.267x   1.000   1.006
+  RANDOM q                    ser        2098162.2     6124756.3     2.919x   0.999   1.000
+  self-search (sorted q)      shipped    1357730.9      186003.1     0.137x   1.000   1.000
+  sorted q, independent       shipped    1363640.7      734403.8     0.539x   1.000   1.000
+  reverse-sorted q            shipped    1386514.7      757912.0     0.547x   0.996   0.994
+  2^22 hay, 64 clustered q    shipped       4105.0        4836.4     1.178x   1.000   1.001
+```
+
+**10.9x on our own arm, and the cell moves from a 2.919x LOSS to a 3.75x WIN over live NumPy.**
+
+### 4. THE GUARD THAT MAKES LOWERING THE GATE SAFE
+
+The parallel arm sits ABOVE the merge in this function, so widening it would have routed sorted
+needles into m parallel bisections and given back the 8.9x the merge wins on exactly that shape.
+An ordered batch is therefore excluded from the parallel arm by construction. **The control is in
+the table above**: with the gate at 1<<12 the three ordered cells read 0.137x / 0.539x / 0.547x,
+i.e. unchanged from the rows banked earlier today. A gate change that silently disengaged the
+merge would have shown up there as a 2.6x regression.
+
+COUNTED_MECHANISM: m independent latency-bound searches confined to ONE core, spread over
+`rayon::current_num_threads()` cores; each chunk additionally runs the batched (level-transposed)
+search rather than m serial bisections, so per-core memory-level parallelism and cross-core
+parallelism compose instead of competing. Below the gate the same split is pure rayon setup cost,
+which is why 2^10 measures 1.36x WORSE and is excluded.
+A/A NULL CONTROLS: the decided pair is clean on all four nulls (1.000/1.006 and 0.999/1.000).
+Several other RANDOM rows in the same run are VOID (0.882-1.100) — a parallel arm's A/A null is
+noisier because it competes for cores with a loaded host — and none of them backs this claim.
+PARITY: **11074 cells, 0 divergences**, run once per strategy BEFORE any timing, now across seven
+route selections. Chunking cannot change the answer: each chunk searches the same shared haystack.
+VERIFICATION: `cargo fmt --check` exit 0. Ordered cells unchanged (section 4).
+SCOPE: this governs the INTEGER route only. The f64/f32 routes keep their own 1<<21 thresholds and
+their own merge logic; they were NOT measured here and were NOT changed.
+RETRY PREDICATE: the gate is fitted to the sweep in section 2 and both sides are held by
+measurement. Do not move it without re-running that sweep on one worker — and note the crossover is
+a function of core count and haystack residency, so a worker with far fewer cores could move it up.
+The f64/f32 thresholds are the obvious next candidates and are UNMEASURED; do not assume 1<<12
+transfers to them.
+AGENT_NAME=BlackThrush.

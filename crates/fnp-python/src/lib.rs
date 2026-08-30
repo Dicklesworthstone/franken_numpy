@@ -38222,12 +38222,23 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         // &[T] is Sync so the search runs on worker threads.
         let a_raw: &[T] =
             unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<T>(), a_s.len()) };
-        const SEARCHSORTED_PARALLEL_MIN: usize = 1 << 21;
-        if m >= SEARCHSORTED_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        // SAFETY: `ReadOnlyCell<T>` is repr(transparent) over T and the query buffer is read-only
+        // under the GIL. Hoisted above the parallel gate because the gate now has to know whether
+        // the batch is ordered.
+        let v_probe: &[T] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<T>(), m) };
+        // THE PARALLEL ARM MUST NEVER STEAL AN ORDERED BATCH FROM THE MERGE. It sits ABOVE the
+        // merge in this function, so widening it - lowering the threshold - would silently route
+        // sorted needles into m parallel bisections and give back the 8.9x the merge wins on
+        // exactly that shape. An ordered batch is therefore excluded here by construction, and
+        // the threshold below is free to move on its own evidence. The scan short-circuits on the
+        // first descent, so an unordered batch pays ~2 comparisons for it.
+        let ordered_batch = m > 1
+            && (v_probe.windows(2).all(|w| w[0] <= w[1]) || v_probe.windows(2).all(|w| w[0] >= w[1]));
+        if m >= searchsorted_parallel_min() && !ordered_batch && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             // SAFETY: Cell<i64> is repr(transparent) over i64; `flat` is a fresh numpy.empty
             // we own (no alias). v queries are read-only under the GIL.
-            let v_raw: &[T] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<T>(), m) };
+            let v_raw: &[T] = v_probe;
             let out_data: &mut [i64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
             let chunk = m.div_ceil(rayon::current_num_threads());
@@ -38235,9 +38246,11 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
                 .par_chunks_mut(chunk)
                 .zip(v_raw.par_chunks(chunk))
                 .for_each(|(o, vq)| {
-                    for (slot, &key) in o.iter_mut().zip(vq.iter()) {
-                        *slot = search_index(a_raw, key, right);
-                    }
+                    // Each chunk runs the BATCHED search, not m serial bisections: the level
+                    // transposition is worth 1.22x on its own and its shared early-level pivots
+                    // stay hot in every core's cache, so the two levers compose rather than
+                    // compete for the same memory-level parallelism.
+                    batched_search_indices(a_raw, vq, o, right);
                 });
         } else {
             // SAFETY: as the parallel arm - `ReadOnlyCell<T>`/`Cell<i64>` are `repr(transparent)`
@@ -38399,6 +38412,39 @@ fn searchsorted_mode_override() -> Option<std::ffi::OsString> {
         return None;
     }
     std::env::var_os("FNP_SEARCHSORTED_MERGE")
+}
+
+/// Query-count threshold above which an UNORDERED integer `searchsorted` batch is
+/// split across rayon workers.
+///
+/// FITTED, WITH BOTH SIDES MEASURED (`deadlock-audit-sfgg3`, worker hz3, numpy
+/// 2.5.2, ser/par forced in ONE process, random needles into a 2^16 haystack):
+///
+/// ```text
+///   m      serial    parallel   verdict
+///   2^10   2.889x     3.918x    parallel LOSES (rayon setup exceeds the gain)
+///   2^12   2.946x     0.967x    parallel wins 3.05x
+///   2^14   2.945x     0.375x    parallel wins 7.98x
+///   2^16   2.926x     0.234x    parallel wins 12.5x
+/// ```
+///
+/// 2^12 is the smallest MEASURED winning point and 2^10 is a measured losing
+/// one, so the gate sits between two observations rather than on a guess. The
+/// previous 1<<21 was carried from the 2026-06-25 parallel win and was never
+/// fitted; it left a 3x loss standing across three decades of query count.
+///
+/// This governs the INTEGER route only - the f64/f32 routes have their own
+/// thresholds and their own merge logic, and were not measured here.
+///
+/// `par` and `ser` force the two sides so the threshold itself can be A/B'd
+/// inside ONE process rather than across two invocations.
+fn searchsorted_parallel_min() -> usize {
+    const SHIPPED: usize = 1 << 12;
+    match searchsorted_mode_override() {
+        Some(mode) if mode == *"par" => 1 << 10,
+        Some(mode) if mode == *"ser" => usize::MAX,
+        _ => SHIPPED,
+    }
 }
 
 /// Batched ("transposed") binary search: every key advances one level per outer
