@@ -38036,6 +38036,10 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             }
             left as i64
         }
+        // DEFAULT ON - the shipped route. `FNP_SEARCHSORTED_MERGE=0` forces the per-query
+        // bisection so the two can be A/B'd in ONE process (see examples/h2h_searchsorted.rs).
+        let merge_enabled = std::env::var_os("FNP_SEARCHSORTED_MERGE")
+            .is_none_or(|v| v != std::ffi::OsStr::new("0"));
         // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL. Raw
         // &[T] is Sync so the search runs on worker threads.
         let a_raw: &[T] =
@@ -38058,8 +38062,42 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
                     }
                 });
         } else {
-            for (o, vc) in output.iter().zip(v_s.iter()) {
-                o.set(search_index(a_raw, vc.get(), right));
+            // SAFETY: as the parallel arm - `ReadOnlyCell<T>`/`Cell<i64>` are `repr(transparent)`
+            // over their value, the query buffer is read-only under the GIL, and `flat` is a
+            // fresh `numpy.empty` we own so it cannot alias it.
+            let v_raw: &[T] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<T>(), m) };
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            // A SORTED QUERY BATCH IS A MERGE, NOT m BINARY SEARCHES. When the needles are
+            // nondecreasing their insertion points are nondecreasing too, so ONE forward pointer
+            // through the haystack answers every query: O(n + m) against O(m log n), and every
+            // probe is sequential rather than a cache-missing jump to the middle. The float paths
+            // learned this in `8f6cc811`; the integer path never got it and still ran a branchy
+            // bisection per query through `Cell` reads.
+            //
+            // The scan costs one pass over the needles; it is O(m) against a search that is
+            // O(m log n), so it cannot pay for itself only on a bench input.
+            let merge_ok = merge_enabled && v_raw.windows(2).all(|w| w[0] <= w[1]);
+            if merge_ok {
+                let mut p = 0usize;
+                for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
+                    while p < a_raw.len() {
+                        let before = if right {
+                            a_raw[p] <= key
+                        } else {
+                            a_raw[p] < key
+                        };
+                        if !before {
+                            break;
+                        }
+                        p += 1;
+                    }
+                    *slot = p as i64;
+                }
+            } else {
+                for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
+                    *slot = search_index(a_raw, key, right);
+                }
             }
         }
     }
