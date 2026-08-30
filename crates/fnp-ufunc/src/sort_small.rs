@@ -5,7 +5,7 @@
 //! Rust's unstable integer order is byte-exact for every NumPy `kind`.
 
 use std::simd::cmp::SimdOrd;
-use std::simd::{Mask, Simd, simd_swizzle};
+use std::simd::{Mask, Select, Simd, simd_swizzle};
 
 const LANES: usize = 4;
 type V = Simd<i64, LANES>;

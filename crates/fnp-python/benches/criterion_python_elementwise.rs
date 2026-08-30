@@ -11467,10 +11467,13 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
                 }
             };
             let parallel_arm = || {
+                // The output view is harness setup, not part of the replica operation.
+                // Mint it before the stopwatch so this region prices only maximum_parallel.
+                let output = mint();
                 let started = Instant::now();
-                maximum_parallel(a_np, b_np, mint());
+                maximum_parallel(a_np, b_np, output);
                 let elapsed = started.elapsed();
-                let checksum = divide_checksum(mint());
+                let checksum = divide_checksum(output);
                 common::ContractObservation { elapsed, checksum }
             };
             let (effect, _, _) = common::run_dual_null_median_ci_contract(
@@ -11514,10 +11517,12 @@ fn bench_maximum_arms_vs_numpy(_c: &mut Criterion) {
                 }
             };
             let serial_arm = || {
+                // As above, keep the reminted 32 MiB output view outside the timed op.
+                let output = mint();
                 let started = Instant::now();
-                maximum_serial(a_np, b_np, mint());
+                maximum_serial(a_np, b_np, output);
                 let elapsed = started.elapsed();
-                let checksum = divide_checksum(mint());
+                let checksum = divide_checksum(output);
                 common::ContractObservation { elapsed, checksum }
             };
             let (effect, _, _) = common::run_dual_null_median_ci_contract(

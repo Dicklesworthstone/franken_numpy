@@ -1023,6 +1023,7 @@ fn searchsorted_sorted_query_merge_matches_numpy_on_span_gate_corpora() -> Resul
     let script = fnp_script(
         r#"
 rng = np.random.default_rng(20260830)
+import os
 bad = []
 for dt in ("int8", "int16", "int32", "int64", "uint32", "uint64"):
     hi = {"int8": 100, "int16": 20000}.get(dt, 100000)
@@ -1060,6 +1061,21 @@ for label, q in (("spread", np.sort(rng.integers(0, 1 << 30, 64))),
         want = np.asarray(np.searchsorted(big, q, side=side))
         if not np.array_equal(got, want):
             bad.append(("int64-big", big.size, label, side))
+
+# The normal route uses the span-gated merge and falls back to previous-hit
+# galloping when that walk would be too wide.  Exercise each benchmark knob on
+# the same sparse, duplicated corpus: all four loops must retain NumPy's exact
+# left/right tie boundary even though their probe schedules differ.
+wide_ties = np.repeat(np.arange(0, 1 << 12, dtype=np.int64), 64)
+wide_queries = np.array([0, 0, 1, 1, 2047, 2047, 4095, 4095, 4096], dtype=np.int64)
+for mode in ("0", "1", "gallop", "force"):
+    os.environ["FNP_SEARCHSORTED_MERGE"] = mode
+    for side in ("left", "right"):
+        got = np.asarray(fnp.searchsorted(wide_ties, wide_queries, side=side))
+        want = np.asarray(np.searchsorted(wide_ties, wide_queries, side=side))
+        if not np.array_equal(got, want):
+            bad.append(("int64-wide-ties", mode, side))
+os.environ.pop("FNP_SEARCHSORTED_MERGE", None)
 print("OK" if not bad else "DIVERGE %s" % (bad[:5],))
 "#
         .into(),
