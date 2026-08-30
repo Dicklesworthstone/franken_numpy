@@ -138,35 +138,18 @@ fn sort_i64_network(values: &mut [i64]) {
 /// `slice::sort_unstable` uses Rust's pattern-defeating quicksort with its
 /// small-slice sorting network/insertion base cases.  It avoids Rayon setup on
 /// the tiny flat Python route while retaining the proven large-array kernel.
-/// In the `BITONIC_MIN..=BITONIC_MAX` window the branchless network above is
-/// used instead when it has been measured to win; see `sort_i64_network`.
+/// THE BRANCHLESS NETWORK BELOW IS A MEASURED REJECT AND IS NOT ON THIS PATH.
+/// `examples/h2h_sort_i64_kernel.rs`, worker `vmi1227854`, both kernels in one
+/// process on one corpus: it loses at EVERY covered length — n=64 0.894x, n=96
+/// 0.573x, n=128 0.910x, n=192 0.615x, n=256 **0.795x** (1678.1 ns against
+/// `sort_unstable`'s 1333.4 ns).  The ledger's retry predicate for this cell
+/// requires beating `sort_unstable` at n=256 in exactly that harness BEFORE any
+/// route-level attempt, so the route-level attempt must not be made.  The code
+/// is retained, reachable only from `sort_i64_network_forced`, so the reject
+/// stays reproducible rather than becoming a claim someone has to re-derive.
 #[inline]
 pub fn sort_i64(values: &mut [i64]) {
-    if (BITONIC_MIN..=BITONIC_MAX).contains(&values.len()) && bitonic_enabled() {
-        sort_i64_network(values);
-    } else {
-        values.sort_unstable();
-    }
-}
-
-/// The network is OFF by default and must be switched on explicitly.
-///
-/// It exists so the standalone batched comparison the ledger's retry predicate
-/// demands ("beat `sort_unstable`'s 1062 ns at n=256 BEFORE any route-level
-/// claim") can run BOTH kernels in ONE process on the same corpus.  Shipping it
-/// on by default before that gate passes would be exactly the unmeasured
-/// route-level claim the predicate bars.
-///
-/// NOT an `env::var_os` per call.  `getenv` walks `environ` and allocates, and
-/// this is read on the entry path of the very cell being measured — a route
-/// whose WHOLE remaining deficit is 326 ns.  A switch that costs a hundred
-/// nanoseconds to read would be paid by the shipped default arm and would
-/// corrupt the number it exists to produce.  The environment is consulted once;
-/// after that this is a relaxed atomic load.
-#[inline]
-fn bitonic_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("FNP_SORT_I64_BITONIC").is_some_and(|v| v == *"1"))
+    values.sort_unstable();
 }
 
 /// The comparison-sort arm, named so the standalone A/B harness can hold both

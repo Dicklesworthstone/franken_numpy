@@ -65643,3 +65643,74 @@ above it the doubling is what keeps 1024-src/k=1024 at parity. Do not widen it w
 and `isnan f64 2^20` at **1.282x**; both are decidable and neither has been attacked.
 
 - 2026-08-30 REJECT (`deadlock-audit-sfgg3`): packed-u128 stable radix permutation loses lexsort card=2 at 2.728x/2.587x NumPy/FNP (live hz3; A/A 1.001/0.989 and 1.000/1.024); reverted in `b77790d9`.
+
+## 2026-08-30 — REJECT: a `std::simd` bitonic SORTING NETWORK loses to `sort_unstable` at EVERY length 64..256 (0.573x-0.910x, n=256 **0.795x**) — the kernel door the 08-26 retry predicate left open is now closed by measurement, not by argument (`franken_numpy-ixs5y.409`)
+
+**Campaign result class:** a measured REJECT of the lever this cell's own retry predicate named as
+the only remaining way in. No vs-NumPy claim is made or possible here: there is no incumbent in this
+process. Host `vmi1227854` (rch worker), stock `release`, both kernels in ONE binary and ONE
+invocation on ONE corpus.
+
+### The predicate this discharges
+
+The 2026-08-26 row (`deadlock-audit-call-shape-priced-25ns-lk8zb`) closed the comparison kernel for
+this cell on AVX2 hosts and left exactly one door: *"A next attempt must (a) use `std::simd`, (b)
+beat `sort_unstable`'s 1062 ns at n=256 in the standalone batched harness BEFORE any route-level
+claim, and (c) be measured under `bench_flat_i64_sort_256_dual_null`."* This is (a) and (b). **(b)
+fails, so (c) must not be run** — and that is the point of ordering them that way.
+
+This is a DIFFERENT design from the AVX2 quicksort rejected on 08-26, which is why it was worth
+running: that attempt paid for a compress-partition through a `permutevar` LUT, and the stated
+mechanism for its loss was that **AVX2 has no `vpcompressq`**. A pure sorting network has no
+partition step at all, so that mechanism does not apply to it. The other half of the 08-26
+mechanism — **AVX2 has no `_mm256_min_epi64`** — does, and it is sufficient on its own.
+
+### The measurement
+
+`crates/fnp-ufunc/examples/h2h_sort_i64_kernel.rs`. 64 sorts per timer pair (a single `Instant`
+pair costs ~20 ns at 10 ns granularity and that IS the measurement at these sizes); the refill loop
+that restores the unsorted corpus is timed as its own arm and subtracted; arms interleaved ABBA/BAAB
+over 21 rounds; medians of round medians; an A/A null between two identical `sort_unstable` arms.
+Every batch starts from the SAME unsorted corpus — sorting an already-sorted slice flatters
+pattern-defeating quicksort enormously and is the obvious way to get this wrong.
+
+```
+     n   unstable_ns    bitonic_ns     speedup   AA_null   refill_ns
+    64         271.2         303.4      0.894x     1.009         6.5
+    96         434.9         758.4      0.573x     0.954         9.8
+   128         725.7         797.6      0.910x     1.013        12.7
+   192         999.6        1624.4      0.615x     0.995        24.6
+   256        1333.4        1678.1      0.795x     0.975        47.0
+```
+
+**It loses at every length.** The two worst cells (n=96, n=192) are the non-powers-of-two, where the
+network pads up to the next power of two and therefore sorts 256 slots to answer a 192-element
+question — the padded shape is not incidental, it is what a fixed network costs on a ragged length.
+Two A/A nulls (n=96 at 0.954, n=256 at 0.975) sit outside ±2% and those rows are "about"; the
+effects are 20-43% and the sign is unambiguous at every length regardless.
+
+PARITY: 320 slices, **0 divergences**, checked on the exact timing corpus BEFORE either arm was
+timed. Plus an exhaustive unit test over EVERY length 64..=256 x 8 input shapes (dense random,
+4-way ties, constant, ascending, descending, all-`i64::MAX`, all-`i64::MIN`, extrema interleaved)
+against `sort_unstable`. The kernel is CORRECT; it is merely slower.
+
+COUNTED_MECHANISM: a bitonic sort of 256 elements is 36 stages x 128 comparators = **4608
+comparator operations**, against roughly `n log n` ~ 2048 comparisons for pdqsort — 2.25x more work,
+accepted in exchange for branchlessness. On AVX2 that exchange does not pay for `i64`, because there
+is no `_mm256_min_epi64`: a signed 64-bit compare-exchange lowers to `vpcmpgtq` plus two `blendv`
+rather than one instruction, so the 4-lane vector never recovers the 2.25x. 4608 comparators / 4
+lanes x ~3 ops = ~3500 vector ops against ~2000 well-predicted scalar comparisons.
+A/A NULL CONTROLS: one per length, tabulated above; 3 of 5 within ±2%, the two exceptions named.
+VERIFICATION: `cargo run --release -p fnp-ufunc --example h2h_sort_i64_kernel` on worker
+`vmi1227854` via `RCH_REQUIRE_REMOTE=1 rch exec`, 178.4s. Parity gate above. `cargo fmt --check`
+clean.
+RETRY PREDICATE: **do not re-attempt a sorting network for this cell on an AVX2 host.** Both
+vectorized designs have now been measured and both lose — a vectorized quicksort (08-26, 1395 ns)
+and a pure network (today, 1678 ns) — against `sort_unstable`'s ~1062-1333 ns. The remaining
+mechanism is architectural and is stated above. Re-open ONLY on a host with AVX-512 (where
+`_mm512_min_epi64` makes the compare-exchange one instruction), or at n well above 256 where the
+instruction advantage starts to pay; neither is this cell. Note also that even a PERFECT kernel is
+worth little here: the 08-26 arithmetic showed that swapping in NumPy's own tuned AVX2 x86-simd-sort
+kernel instruction-for-instruction makes our route 16 ns SLOWER, because the two kernels are at time
+parity. The kernel was never where this cell's remaining 326 ns lives.
+AGENT_NAME=BlackThrush.
