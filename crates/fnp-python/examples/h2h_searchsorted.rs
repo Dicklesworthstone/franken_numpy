@@ -6,11 +6,11 @@
 //!
 //! The float paths learned in `8f6cc811` that the right loop depends on the QUERY ORDER; the
 //! integer path never got it and still ran a branchy bisection per query through `Cell` reads.
-//! `FNP_SEARCHSORTED_MERGE` selects the loop per call so all three strategies are timed on the
+//! `FNP_SEARCHSORTED_MERGE` selects the loop per call so all four strategies are timed on the
 //! same arrays in the same interpreter - two rch jobs can land on different workers and cannot be
-//! compared. `0` = bisection, unset/`1` = the shipped span-gated merge, `force` = the merge with
-//! the span gate bypassed, which is what makes the gate's LOSING side a measurement rather than
-//! an assertion.
+//! compared. `0` = bisection, unset/`1` = the shipped span-gated merge with previous-hit gallop
+//! fallback, `gallop` = force that fallback, and `force` = the merge with the span gate bypassed,
+//! which is what makes the gate's LOSING side a measurement rather than an assertion.
 
 use pyo3::prelude::*;
 use std::ffi::CString;
@@ -37,7 +37,7 @@ rng = np.random.default_rng(SEED)
 # is the exact boundary of the nondecreasing admission test.
 def parity():
     bad = cells = 0
-    for impl, flag in (("bisect", "0"), ("merge", "1"), ("force", "force")):
+    for impl, flag in (("bisect", "0"), ("merge", "1"), ("gallop", "gallop"), ("force", "force")):
         os.environ["FNP_SEARCHSORTED_MERGE"] = flag
         for dt in ("int8","int16","int32","int64","uint8","uint32","uint64"):
             hi = 100 if dt.endswith("8") else 100000
@@ -110,7 +110,7 @@ CASES = [
 ]
 def cell(label, hay_, q, k):
     g = {"np": np, "fnp": fnp, "h": hay_, "q": q}
-    for impl, flag in (("bisect", "0"), ("merge", "1"), ("force", "force")):
+    for impl, flag in (("bisect", "0"), ("merge", "1"), ("gallop", "gallop"), ("force", "force")):
         os.environ["FNP_SEARCHSORTED_MERGE"] = flag
         tn, tf = inter("np.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, k)
         n1, n2 = inter("np.searchsorted(h,q)", "np.searchsorted(h,q)", g, k)

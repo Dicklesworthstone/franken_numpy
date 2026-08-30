@@ -9,6 +9,9 @@ use std::simd::{Mask, Simd, simd_swizzle};
 
 const LANES: usize = 4;
 type V = Simd<i64, LANES>;
+/// The mask type must be named explicitly: `Mask::from_array` alone leaves the
+/// element type open, and the inherent `select` cannot then be resolved.
+type M = Mask<i64, LANES>;
 
 /// Largest length the branchless network handles; above it `sort_unstable` is
 /// the kernel.  256 is the size of the campaign's measured cell and is the
@@ -44,10 +47,10 @@ fn intra_stage(v: V, j: usize, asc: bool) -> V {
     // Lanes selected from `mn` are the ones holding the LOW index of their
     // comparator pair when ascending, and the high index when descending.
     let take_min = match (j, asc) {
-        (2, true) => Mask::from_array([true, true, false, false]),
-        (2, false) => Mask::from_array([false, false, true, true]),
-        (_, true) => Mask::from_array([true, false, true, false]),
-        (_, false) => Mask::from_array([false, true, false, true]),
+        (2, true) => M::from_array([true, true, false, false]),
+        (2, false) => M::from_array([false, false, true, true]),
+        (_, true) => M::from_array([true, false, true, false]),
+        (_, false) => M::from_array([false, true, false, true]),
     };
     take_min.select(mn, mx)
 }
@@ -72,7 +75,7 @@ fn bitonic_sort_pow2(buf: &mut [V]) {
         let partner = simd_swizzle!(*v, [1, 0, 3, 2]);
         let mn = v.simd_min(partner);
         let mx = v.simd_max(partner);
-        *v = Mask::from_array([true, false, false, true]).select(mn, mx);
+        *v = M::from_array([true, false, false, true]).select(mn, mx);
     }
 
     let mut k = 4;

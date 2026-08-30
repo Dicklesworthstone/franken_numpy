@@ -10060,8 +10060,8 @@ fn zerocopy_f64_isnan_flat<'py>(
                 input_chunk[6].get(),
                 input_chunk[7].get(),
             ]);
-            let byte_lanes = ISNAN_MASK_BYTE_LUT[lanes.simd_ne(lanes).to_bitmask() as usize]
-                .to_le_bytes();
+            let byte_lanes =
+                ISNAN_MASK_BYTE_LUT[lanes.simd_ne(lanes).to_bitmask() as usize].to_le_bytes();
             for (slot, byte) in output_chunk.iter().zip(byte_lanes) {
                 slot.set(byte);
             }
@@ -38159,11 +38159,58 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             }
             left as i64
         }
+        // A sorted needle batch has monotone insertion points.  When the span gate declines a
+        // full linear merge, retain that information: starting at the previous insertion point
+        // and exponentially bracketing the next one avoids restarting every search at the root.
+        // The initial `!before` test is also the duplicate fast path: a repeated needle keeps the
+        // same left/right insertion point without probing the haystack again.
+        #[inline]
+        fn search_index_from_previous<U: Copy + PartialOrd>(
+            a: &[U],
+            key: U,
+            right: bool,
+            previous: usize,
+        ) -> i64 {
+            let n = a.len();
+            if previous >= n {
+                return n as i64;
+            }
+            let before = |probe: U| if right { probe <= key } else { probe < key };
+            if !before(a[previous]) {
+                return previous as i64;
+            }
+            let mut lo = previous + 1;
+            let mut hi = n;
+            let mut step = 1usize;
+            while let Some(probe) = previous.checked_add(step) {
+                if probe >= n {
+                    break;
+                }
+                if before(a[probe]) {
+                    lo = probe + 1;
+                    step = step.saturating_mul(2);
+                } else {
+                    hi = probe;
+                    break;
+                }
+            }
+            while lo < hi {
+                let half = (hi - lo) / 2;
+                let mid = lo + half;
+                if before(a[mid]) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo as i64
+        }
         // DEFAULT ON - the shipped route is the SPAN-GATED merge below. The env knob selects the
         // loop per call so every arm is timed on the same arrays in ONE process (see
         // `examples/h2h_searchsorted.rs`); two invocations can land on two workers and are not
-        // comparable. `0` = per-query bisection. `force` = merge with the span gate bypassed,
-        // which exists so the gate's LOSING side is measurable and not merely asserted.
+        // comparable. `0` = per-query bisection. `gallop` = previous-hit gallop with the merge
+        // bypassed. `force` = merge with the span gate bypassed, which exists so the gate's
+        // LOSING side is measurable and not merely asserted.
         //
         // READ LAZILY, AND ONLY BEHIND THE SORTEDNESS SCAN. `getenv` walks `environ` and
         // allocates, so consulting it unconditionally would tax every searchsorted call -
@@ -38221,7 +38268,8 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             let mode = if sorted_q { merge_mode() } else { None };
             let merge_off = mode.as_deref() == Some(std::ffi::OsStr::new("0"));
             let merge_forced = mode.as_deref() == Some(std::ffi::OsStr::new("force"));
-            let merge_from = if sorted_q && !merge_off {
+            let gallop_forced = mode.as_deref() == Some(std::ffi::OsStr::new("gallop"));
+            let (merge_from, gallop_from) = if sorted_q && !merge_off {
                 let lo = search_index(a_raw, v_raw[0], right) as usize;
                 let hi = search_index(a_raw, v_raw[m - 1], right) as usize;
                 let log2n = (usize::BITS - a_raw.len().leading_zeros()) as usize;
@@ -38229,9 +38277,19 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
                 // pays m * log2(n) random probes. A merge step is sequential and strictly
                 // cheaper than a probe, so admitting only at parity of COUNTS errs toward the
                 // bisection - it declines some wins and can never open a large loss.
-                (merge_forced || ((hi - lo) + m) <= m.saturating_mul(log2n)).then_some(lo)
+                if merge_forced
+                    || (!gallop_forced && ((hi - lo) + m) <= m.saturating_mul(log2n))
+                {
+                    (Some(lo), None)
+                } else {
+                    // The merge's sequential walk would cost too much over this wide span, but
+                    // the sorted needles still make the previous insertion point a valid lower
+                    // bound for every following lookup.  Gallop from it rather than throwing the
+                    // batch order away and performing m root bisections.
+                    (None, Some(lo))
+                }
             } else {
-                None
+                (None, None)
             };
             if let Some(mut p) = merge_from {
                 for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
@@ -38246,6 +38304,11 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
                         }
                         p += 1;
                     }
+                    *slot = p as i64;
+                }
+            } else if let Some(mut p) = gallop_from {
+                for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
+                    p = search_index_from_previous(a_raw, key, right, p) as usize;
                     *slot = p as i64;
                 }
             } else {
@@ -137078,7 +137141,9 @@ mod tests {
                 );
                 assert_eq!(
                     ours_default.call_method0("tobytes")?.extract::<Vec<u8>>()?,
-                    numpy_default.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    numpy_default
+                        .call_method0("tobytes")?
+                        .extract::<Vec<u8>>()?,
                     "{name}: omitted keepdims result diverged from NumPy"
                 );
 
