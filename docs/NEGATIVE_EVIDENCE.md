@@ -66813,3 +66813,91 @@ reaches p<0.01 around 40 rounds - and it is worth roughly 3% on a route whose st
 15-48%, so it is the wrong thing to spend a fleet slot on. The unexplained 1.15-1.48x is elsewhere
 and remains the real target.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-31 — WIN: `np.take`'s output RESHAPE IS A NO-OP on the common shape — skipping it is 1.535x -> **1.342x** at m=2^10 and 1.345x -> **1.150x** at m=2^12 with clean nulls; and the bounds-check sign test, POOLED to 30 rounds, now DECIDES at p<0.005, superseding my "undecidable" row (`deadlock-audit-ddoeq`)
+
+**Campaign result class:** incumbent-win
+
+Live NumPy in the SAME process, arms interleaved ABBAABBA, dual A/A null per cell. Worker
+`fixmydocuments` (16 cores, loadavg 2.83),
+`bench_elf_sha256=6b239fc614765f59927ac0e229058297ba5c78119da53cd8b977332b1779438b`.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.3.5 artifact_sha256=ed49278029e17db9fc349d4181a2ee5a064a86bbb1241141592b8653824fd102 invocation_id=fixmydocuments-941538-1788142265 measured_ratio=1.150x
+
+**Incumbent isolation proof:** candidate=fnp.take incumbent=numpy.take shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=8.60
+
+**A/A null control (same invocation):** the decided pair at m=2^12 is clean on all four - shipped ratio 1.150x (0.998/0.997) against unconditional-reshape 1.345x (0.990/0.996).
+
+### 1. THE RESHAPE WAS ASKING NUMPY TO RESHAPE (count,) INTO (count,)
+
+`flat` is allocated as `numpy.empty(count, "float64")` — already `(count,)`. For a 1-D index array
+the route then built a `PyTuple` and called `reshape` to produce the shape it already had, on every
+call. Skipped when `out_shape == [count]`; N-D and 0-d index arrays still take the real path.
+
+```
+  m       shipped (skip)        unconditional reshape    numpy arm drift
+  2^10    1.342x 1.004/1.001    1.535x 1.001/0.991       1745.3 vs 1721.1  (1.4%)
+  2^12    1.150x 0.998/0.997    1.345x 0.990/0.996       5502.6 vs 5585.2  (1.5%)
+  2^14    1.177x                1.206x                   18536.4 vs 18292.1
+  2^16    1.156x                1.173x                   67425.1 vs 65920.6
+  2^18    1.155x                1.159x
+  2^20    1.157x                1.172x
+```
+
+**12.6% at m=2^10 and 14.5% at m=2^12** — both far above the 5% decidability floor, both with all
+four nulls clean, and NumPy's own arm stable to ~1.5% across the five impls in the same run, so the
+movement is ours and not the host. The effect decays with m exactly as a FIXED cost must, which is
+the signature that identified it: the excess over NumPy decomposes as ~681 ns fixed + ~0.16
+ns/element, so at small m the loss was entry, not the gather.
+
+### 2. THE SIGN TEST NOW DECIDES THE BOUNDS-CHECK LEVER — SUPERSEDING MY OWN ROW
+
+The row above this one concluded the single-bounds-check change was "undecidable by every
+instrument this fleet has", on a 15-round sign test reading 10/15 and 9/15 (`vmi1293453`). Re-run
+on `fixmydocuments` it reads **14/15 at both sizes**. Pooling the two workers — legitimate here
+because a sign test pools COUNTS of a self-comparison, not magnitudes of a vs-NumPy ratio, so the
+cross-worker magnitude ban does not apply:
+
+```
+  m=2^12   10/15 + 14/15 = 24/30   P(X>=24) one-sided 0.00072   two-sided 0.00143
+  m=2^16    9/15 + 14/15 = 23/30   P(X>=23) one-sided 0.00261   two-sided 0.00522
+```
+
+**Both decide at p<0.005 in favour of the single-check form.** So that lever is real after all — but
+only its SIGN is claimable: the median per-round deltas are +112.6/+1937.1 ns on one worker and
++80.4/+4319.6 ns on the other, i.e. not a reproducible magnitude. `signs replicate where magnitudes
+do not`, used as the instrument it is.
+
+**The earlier row is superseded, not retracted:** its verdict was correct for the evidence it had
+(15 rounds is underpowered for a ~1-3% effect, as that row itself said), and its own stated remedy
+was "the same sign test at R=51 or more". Thirty pooled rounds is that remedy, arrived at by
+running a second worker rather than a longer loop.
+
+### 3. ALSO IN THIS CHANGE
+
+`dtype.kind` extracted as a `char` instead of a heap-allocated `String`, at all three take entry
+points — the identical fix the sort route took in `franken_numpy-ixs5y.409`. Not separately
+measured; strictly one allocation removed per call from an entry path.
+
+COUNTED_MECHANISM: one `PyTuple` build and one Python `reshape` method call removed per take on 1-D indices - measured 2641.8 ns against 2343.0 ns at m=1024 and 7514.0 against 6326.5 at m=4096; plus one `String` allocation removed per call from the index dtype probe.
+A/A NULL CONTROLS: 8 nulls across the two decided reshape pairs, all inside ±1.0%. The sign test
+carries no nulls by construction; its arms are interleaved WITHIN each round and the round order
+alternates, which is what stops a drifting host from manufacturing a sign.
+PARITY: **1008 cells, 0 divergences** — the matrix now also covers 2-D, 3-D and 0-d index arrays,
+added specifically because the reshape skip changes SHAPE logic and a values-only comparison would
+pass a correct-values/wrong-shape result. Shape AND dtype are asserted, not just values. Plus
+out-of-range indices raising `IndexError` from every forced side, and an engagement spy asserting
+**0 `numpy.take` calls** before any timing.
+VERIFICATION: `cargo clippy -j2 -p fnp-python --lib --examples -- -D warnings` exit 0 - **after
+fixing a `needless_range_loop` I had committed in `e53c8e8a`**, which would have failed G1; caught
+by running the gate before this commit rather than after. `cargo fmt --check` exit 0 and per-file
+`rustfmt --check` exit 0.
+RETRY PREDICATE: the reshape skip is fitted to nothing - it is unconditional on a shape test and
+needs no threshold. The remaining loss is now ~1.15x flat from m=2^14 up, which is the
+0.16 ns/element component; the fixed entry excess that dominated at small m is largely gone
+(1.342x at m=2^10 against 1.477x before). Do NOT re-attack the entry: what is left there is
+`cached_numpy` + 2 `is_exact_instance` + 3 `PyBuffer::get`, and the three buffer acquisitions are
+the only untried item. The per-element component needs a counter this fleet does not have.
+AGENT_NAME=BlackThrush.

@@ -75,6 +75,23 @@ def parity():
                             bad += 1
                             if bad < 6:
                                 out("  PARITY DIVERGE impl=%s %s n=%d m=%d %s" % (impl, dt, n, m, label))
+                # SHAPE-PRESERVING FORMS. The reshape skip fires only when the index array is
+                # already 1-D of the right length, so N-D and 0-d indices are exactly where a
+                # wrong skip would show up - as a correct-VALUES, wrong-SHAPE result that a
+                # values-only comparison would pass. Shape and dtype are asserted, not just values.
+                for label, idx in (("2d", np.arange(min(n, 6)).reshape(-1, 1)),
+                                   ("3d", np.zeros((2, 1, 3), dtype=np.int64)),
+                                   ("0d", np.array(0))):
+                    cells += 1
+                    want = np.take(src, idx)
+                    got = fnp.take(src, idx)
+                    if not (np.array_equal(want, got)
+                            and np.asarray(want).shape == np.asarray(got).shape
+                            and np.asarray(want).dtype == np.asarray(got).dtype):
+                        bad += 1
+                        out("  SHAPE DIVERGE impl=%s %s n=%d %s want%s got%s"
+                            % (impl, dt, n, label, np.asarray(want).shape,
+                               np.asarray(got).shape))
                 # OOB must raise exactly as numpy does, from BOTH arms
                 for bad_idx in (n, -n - 1):
                     cells += 1
@@ -98,6 +115,7 @@ def parity():
 # arms the switch while leaving the SHIPPED positional spelling in force.
 os.environ["FNP_TAKE_ALLOC"] = "positional"
 os.environ["FNP_TAKE_GATHER"] = "single"
+os.environ["FNP_TAKE_RESHAPE"] = "skip"
 
 if parity():
     out("ABORTING: parity failed, a ratio would be meaningless")
@@ -149,11 +167,14 @@ def cell(label, src, idx, k):
     # `kwargs` restores the FORMER output-allocation spelling (a per-call PyDict) against the
     # shipped positional one; `ser`/`par` force the two sides of the parallel threshold. All are
     # selected per call so every comparison is inside THIS process.
-    for impl, flag in (("ser", "ser"), ("par", "par"), ("kwargs", "ser"), ("2check", "ser")):
+    for impl, flag in (("ser", "ser"), ("par", "par"), ("kwargs", "ser"),
+                       ("2check", "ser"), ("reshape", "ser")):
         if impl == "kwargs":
             os.environ["FNP_TAKE_ALLOC"] = "kwargs"
         if impl == "2check":
             os.environ["FNP_TAKE_GATHER"] = "legacy"
+        if impl == "reshape":
+            os.environ["FNP_TAKE_RESHAPE"] = "always"
         os.environ["FNP_TAKE_PARALLEL"] = flag
         tn, tf = inter("np.take(a,i)", "fnp.take(a,i)", g, k)
         n1, n2 = inter("np.take(a,i)", "np.take(a,i)", g, k)
@@ -164,6 +185,7 @@ def cell(label, src, idx, k):
             % (label, impl, tn, tf, tf / tn, nn, nf, "" if ok else "  VOID"))
         os.environ["FNP_TAKE_ALLOC"] = "positional"
         os.environ["FNP_TAKE_GATHER"] = "single"
+        os.environ["FNP_TAKE_RESHAPE"] = "skip"
     os.environ.pop("FNP_TAKE_PARALLEL", None)
     del g
 

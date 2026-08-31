@@ -126,9 +126,9 @@ fn main() -> PyResult<()> {
     }
     let mut totals = [[0u64; 3]; 3]; // [arm][rep]
     for (a, arm) in ["none", "numpy", "fnp"].iter().enumerate() {
-        for rep in 0..3 {
+        for (rep, slot) in totals[a].iter_mut().enumerate() {
             match count(&exe, arm, n_calls, n_idx) {
-                Some(v) => totals[a][rep] = v,
+                Some(v) => *slot = v,
                 None => {
                     eprintln!("arm {arm} rep {rep} produced no count; aborting");
                     return Ok(());

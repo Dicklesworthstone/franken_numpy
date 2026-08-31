@@ -18359,8 +18359,12 @@ fn try_zerocopy_f64_take(
     // indices must be a signed 64-bit integer ndarray (numpy's default index
     // width on 64-bit); other widths/kinds keep the general path.
     {
+        // `kind` as a CHAR, not a heap-allocated `String`. PyO3 extracts a one-character Python
+        // str straight into a `char`; the `String` form allocated on the entry path of every
+        // `np.take`. Same comparison, same admitted set - the sort route took the identical fix
+        // (`franken_numpy-ixs5y.409`).
         let dtype = indices.getattr(intern!(py, "dtype"))?;
-        if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "i"
+        if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
             || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
         {
             return Ok(None);
@@ -18479,6 +18483,17 @@ fn try_zerocopy_f64_take(
                 return Ok(None);
             }
         }
+    }
+    // THE RESHAPE IS A NO-OP ON THE COMMON SHAPE. `flat` was allocated as
+    // `numpy.empty(count, "float64")`, i.e. already `(count,)`, so for a 1-D index array the call
+    // below asks NumPy to reshape (count,) into (count,) - a `PyTuple` build plus a Python method
+    // call, every take, to change nothing. N-D and 0-d index arrays still need it.
+    //
+    // `deadlock-audit-ddoeq`: the excess over NumPy decomposes as ~681 ns FIXED + ~0.16 ns/element,
+    // so at small m the loss is entry, not the gather. `FNP_TAKE_RESHAPE=always` restores the
+    // unconditional form for an in-process A/B.
+    if out_shape.len() == 1 && out_shape[0] == count && !take_reshape_is_always() {
+        return Ok(Some(flat.unbind()));
     }
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let output = flat
@@ -18723,8 +18738,12 @@ fn try_zerocopy_take_axis(
         return Ok(None);
     }
     {
+        // `kind` as a CHAR, not a heap-allocated `String`. PyO3 extracts a one-character Python
+        // str straight into a `char`; the `String` form allocated on the entry path of every
+        // `np.take`. Same comparison, same admitted set - the sort route took the identical fix
+        // (`franken_numpy-ixs5y.409`).
         let dtype = indices.getattr(intern!(py, "dtype"))?;
-        if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "i"
+        if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
             || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
         {
             return Ok(None);
@@ -18823,8 +18842,12 @@ fn try_zerocopy_int_take(
         return Ok(None);
     }
     {
+        // `kind` as a CHAR, not a heap-allocated `String`. PyO3 extracts a one-character Python
+        // str straight into a `char`; the `String` form allocated on the entry path of every
+        // `np.take`. Same comparison, same admitted set - the sort route took the identical fix
+        // (`franken_numpy-ixs5y.409`).
         let dtype = indices.getattr(intern!(py, "dtype"))?;
-        if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "i"
+        if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
             || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
         {
             return Ok(None);
@@ -38463,6 +38486,16 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     Ok(Some(
         flat.call_method1(intern!(py, "reshape"), (&output_shape,))?,
     ))
+}
+
+/// Restores the UNCONDITIONAL reshape on `np.take`'s output, so skipping the
+/// no-op one can be A/B'd in a single process. Presence resolved once.
+fn take_reshape_is_always() -> bool {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*PRESENT.get_or_init(|| std::env::var_os("FNP_TAKE_RESHAPE").is_some()) {
+        return false;
+    }
+    std::env::var_os("FNP_TAKE_RESHAPE").is_some_and(|v| v == *"always")
 }
 
 /// Selects the FORMER two-bounds-check gather loop, so the single-check form can
