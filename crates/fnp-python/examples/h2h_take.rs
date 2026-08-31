@@ -184,6 +184,44 @@ for mq in (1 << 14, 1 << 18):
          rng.integers(0, 1 << 12, mq), max(2, 4000 // max(1, mq >> 8)))
 del small
 
+# SIGN TEST, because the effect is sub-5% and the fleet has no `perf`.
+#
+# The counted-attribution instrument this bead's retry predicate named (perf stat -e instructions)
+# is UNAVAILABLE on these workers - `count_take_insns` reports it and refuses to fall back to wall
+# clock. So decide the small effect the other admissible way: not by comparing two medians once,
+# but by running R INDEPENDENT rounds and asking how often the sign favours one arm. A consistent
+# sign over many rounds is decidable even when each round's magnitude is inside the noise, which is
+# exactly this campaign's "signs replicate where magnitudes do not".
+#
+# Under the null (no real difference) the count is Binomial(R, 0.5): 13+/15 is p<0.02 two-sided,
+# 14+/15 is p<0.005. Arms are interleaved WITHIN each round so a drifting host cannot manufacture
+# a sign.
+out("")
+def sign_test(label, src, idx, k, rounds=15):
+    g = {"np": np, "fnp": fnp, "a": src, "i": idx}
+    wins = 0
+    deltas = []
+    for r in range(rounds):
+        ts = {}
+        for gather in (("single", "legacy") if r % 2 == 0 else ("legacy", "single")):
+            os.environ["FNP_TAKE_GATHER"] = gather
+            t = timeit.timeit("fnp.take(a,i)", globals=g, number=k) / k * 1e9
+            ts[gather] = t
+        deltas.append(ts["legacy"] - ts["single"])
+        if ts["single"] < ts["legacy"]:
+            wins += 1
+    os.environ["FNP_TAKE_GATHER"] = "single"
+    med = statistics.median(deltas)
+    out("SIGN %-22s single beats 2check in %2d/%d rounds; median delta %+.1f ns/call"
+        % (label, wins, rounds, med))
+    del g
+
+for _m in (1 << 12, 1 << 16):
+    _s = rng.standard_normal(1 << 22)
+    sign_test("f64 m=2^%d" % (_m.bit_length() - 1), _s,
+              rng.integers(0, 1 << 22, _m), max(4, 2000 // max(1, _m >> 8)))
+    del _s
+
 c = rng.standard_normal(1 << 20)
 g = {"np": np, "fnp": fnp, "a": c}
 cn, cf = inter("np.sum(a)", "fnp.sum(a)", g, 30)

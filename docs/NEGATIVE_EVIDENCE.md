@@ -66705,3 +66705,60 @@ residual where CIs could not). Do not re-run this A/B hoping for a cleaner host;
 serial loss below 2^18 is still unexplained and is NOT the bounds check - removing it moved the
 ratio by at most 4.8%.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-31 — INSTRUMENT UNAVAILABLE: `perf` is not present on the rch workers, so `counted-attribution-by-instruction-diff` — the instrument this campaign banks for sub-5% effects, and the one my own retry predicate named — CANNOT run on this fleet (`deadlock-audit-ddoeq`)
+
+**Campaign result class:** maintenance-self-speedup
+
+No perf claim. This row exists so the next agent does not spend a build discovering what I just
+did, and so a banked instrument stops being quoted as if it were available here.
+
+### What was attempted
+
+`crates/fnp-python/examples/count_take_insns.rs`: three arms (`none`, `numpy`, `fnp`) differing
+only in which callable the loop invokes, each spawned under `perf stat -e instructions`, three reps
+each, with the `none` arm netting out interpreter startup, the numpy import, the corpus build and
+the engagement probe. This is the shape that resolved `add.accumulate`'s residual and the earlier
+`sort` kernel attribution, and it is what `deadlock-audit-ddoeq`'s retry predicate asked for,
+because the remaining take loss is a sub-5% effect that a dual-null wall-clock run cannot decide.
+
+It does not run. `perf stat -e instructions` produces no countable line on the worker, so the
+harness reports `PERF UNAVAILABLE` and **exits without measuring** rather than silently falling
+back to wall clock — falling back would produce exactly the undecidable number the instrument was
+chosen to avoid. Worker `ovh-a` selected, executing host reported itself as `fixmydocuments`;
+162.3s.
+
+### Why this matters beyond one bead
+
+`counted-attribution-by-instruction-diff` is banked in this repo as "the campaign's most reliable
+tool where wall-clock CIs cannot decide". That is true, and on THIS fleet it is also unusable. Rows
+that used it (the `sort` kernel attribution, `add.accumulate`) were measured on `thinkstation1`,
+which has `perf`; the rch workers do not, and a bench that needs the counter must therefore run
+where the ELF can be executed under `perf` — which the Python-linked benches cannot easily be,
+since those workers are also the only ones carrying `libpython`.
+
+### The substitute, written but NOT yet run
+
+Since a small CONSISTENT effect can be decided without a magnitude, `h2h_take.rs` now carries a
+**sign test**: R=15 independent rounds, arms interleaved within each round, reporting how often the
+single-bounds-check form beats the two-check form. Under the null the count is Binomial(15, 0.5),
+so 13+/15 is p<0.02 two-sided and 14+/15 is p<0.005 — decidable even when every round's magnitude
+sits inside the noise, which is the `signs replicate where magnitudes do not` principle applied
+deliberately rather than as an excuse.
+
+**It has not produced a number.** Eight consecutive rch submissions were refused
+(`no admissible workers: critical_pressure=1`, then `remote retries exhausted`), so the fleet
+admitted nothing. The code is committed unrun and this row does not pretend otherwise.
+
+COUNTED_MECHANISM: 3 arms x 3 reps = 9 counted runs attempted, 0 produced a countable `instructions` line; the probe run at 1 call and 1024 indices also produced none, so the failure is the counter's absence and not the workload.
+A/A NULL CONTROLS: not applicable - no timing was taken and none is claimed.
+VERIFICATION: `cargo fmt --check` exit 0 and per-file `rustfmt --check` exit 0.
+`count_take_insns` built and executed on the worker; its failure is a runtime report from inside
+the process, not a build error.
+RETRY PREDICATE: do NOT re-attempt the instruction diff on an rch worker - it is the counter that
+is missing, not the permission or the invocation. Either run the sign test above (one admitted
+build, no privileges needed) or move the ELF to a host with `perf` AND `libpython3.14`, which may
+be no host at all: the workers that can run the Python-linked bench are exactly the ones without
+`perf`. If that intersection is empty, sub-5% effects on Python-entry routes are simply not
+attributable on this fleet, and rows should say so rather than quoting a wall-clock median.
+AGENT_NAME=BlackThrush.
