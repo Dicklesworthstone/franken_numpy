@@ -66550,3 +66550,90 @@ serial gather itself (bounds checks, the `numpy.empty` output allocation, the pe
 `rem_euclid`/wraparound branch) rather than its dispatch. Above 2^21 the 2026-06-25 row's 5.2x
 still stands and is not contradicted by anything here.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — WIN: `np.take`'s parallel gate fitted to the AGREEMENT OF TWO WORKERS at 1<<18 (1.233x LOSS -> **0.223x**, ~5.5x), plus the kwargs output allocation removed — and TWO of my own wrong gate values were caught before shipping (`deadlock-audit-ddoeq`)
+
+**Campaign result class:** incumbent-win
+
+Live NumPy in the SAME process, arms interleaved ABBAABBA, dual A/A null per cell. Two workers,
+because one is demonstrably not enough for this quantity.
+`bench_elf_sha256=cfed10e55ae678f1962db0f5c49937e3bf8a1dab97a632fef764d77692e69234` (hz4, 64 cores,
+loadavg 25.12, numpy 2.5.2) and
+`bench_elf_sha256=a500bb772360d665601624bc1d772bcefcf2f796bc5972f494239818c1a16f38`
+(`fixmydocuments`, 16 cores, loadavg 2.47).
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.5.2 artifact_sha256=27bd88fd60f4b9fcd5c938572e9b9e3df0aed9cfed4888e57d94c516b45512b7 invocation_id=hz4-3750548-1788136234 measured_ratio=0.223x
+
+**Incumbent isolation proof:** candidate=fnp.take incumbent=numpy.take shared_timed_component=numpy.empty
+
+**Shared timed component disclosure:** components=numpy.empty direction=conservative_for_candidate share_of_candidate_pct=0.11
+
+**A/A null control (same invocation):** the decided pair is clean on all four - hz4 m=2^18 serial ratio 1.233x (1.008/1.012) against parallel 0.223x (0.997/0.984).
+
+### 1. THE GATE, FITTED WHERE TWO WORKERS AGREE
+
+```
+  m      fixmydocuments (16c, quiet)   hz4 (64c, busy)          agree?
+         serial  parallel              serial  parallel
+  2^10   1.466x   7.864x  LOSES        1.537x  45.108x LOSES    both LOSE
+  2^12   1.359x   2.637x  LOSES        1.416x  15.437x LOSES    both LOSE
+  2^14   1.240x   0.975x  wins         1.177x   2.047x LOSES    CONTRADICT
+  2^16   1.209x   0.479x  wins (VOID)  1.333x   0.925x wins (VOID)  both VOID
+  2^18   1.197x   0.317x  wins         1.233x   0.223x wins      both CLEAN
+  2^20   1.185x   0.239x  wins         1.241x   0.137x wins      both win
+```
+
+**2^18 is the first size where BOTH workers win with a clean null**, so that is the gate. The
+inherited `1 << 21` ran SERIAL across 2^18..2^20, where a **1.233x LOSS becomes a 0.223x win —
+about 5.5x — on both machines.**
+
+### 2. TWO WRONG GATE VALUES OF MINE, BOTH CAUGHT BEFORE SHIPPING
+
+This is the part worth reading, because the process is what produced a correct answer out of two
+wrong ones.
+
+- **First** I measured only busy hz4, saw `ser` and `par` identical to 0.4%, and published a
+  ledger row concluding parallelism buys NOTHING for take in 2^10..2^20. A quiet worker then
+  showed 2.5-5x. That row is retracted by this one.
+- **Then** I fitted `1 << 14` from the quiet worker alone, wrote a code comment asserting "hz4
+  measured neutral at 2^14 and above, never worse", and ran the confirmation. **hz4 measured
+  2.047x against serial 1.177x at exactly 2^14** — and 9.507x on a cache-resident source. The
+  assertion was false and the confirming run falsified it *before the commit*. Nothing shipped.
+
+**One worker cannot fit a parallel threshold.** The crossover moves with core count AND with host
+load, and those move it in opposite directions: more cores helps at large m and hurts at small m,
+while load destroys the gain everywhere. Fitting on the intersection of two workers is the cheapest
+defence, and it is what changed 2^14 (one worker's win, another's 1.7x regression) into 2^18.
+
+### 3. THE OUTPUT ALLOCATION, SEPARATELY
+
+`numpy.empty` takes dtype as its SECOND POSITIONAL parameter; the route built a per-call `PyDict`
+for it. Removed at both take sites. A/B'd in one process against the former spelling at the sizes
+where the incumbent arms match closely enough to trust (`fixmydocuments`):
+
+```
+  m      positional (shipped)   kwargs (former)
+  2^10   1.466x  0.995 null     1.554x  0.998 null
+  2^12   1.359x  0.998 null     1.394x  0.999 null
+```
+
+~187-261 ns per call, consistent with this ledger's banked ~230 ns for a small kwargs dict. Decidable
+at 2^10 and 2^12; at larger m it is below the noise and is not claimed there.
+
+COUNTED_MECHANISM: one `PyDict` allocation and one `set_item` removed per call (positional 2564.9 ns vs kwargs 2751.5 ns at m=1024); and 2^18..2^20 index gathers moved off one core onto `rayon::current_num_threads()`, measured 5443666.2 ns serial against 879734.2 ns parallel at m=2^18 on hz4.
+A/A NULL CONTROLS: the decided gate pair is clean on all four nulls; the allocation pair is clean on
+all four. Rows marked VOID inline back no claim.
+PARITY: **432 cells, 0 divergences** per run - 4 dtypes x 3 source sizes x 4 index counts x
+{random, negative, boundary, repeat}, plus out-of-range indices asserted to raise `IndexError` from
+both forced sides, which is the one behaviour a parallel gather can get wrong (its OOB bail is a
+shared flag checked after the pass). An engagement spy asserts **0 `numpy.take` calls** on the timed
+shape before any timing, so none of this is a delegation timed against itself.
+VERIFICATION: `cargo clippy -p fnp-python --lib --examples -- -D warnings` exit 0;
+`cargo fmt --check` exit 0 and per-file `rustfmt --check` exit 0.
+RETRY PREDICATE: do NOT lower this gate below 2^18 without decidable pairs from at least two
+workers of different core counts AND different load - 2^16 wins on both but is VOID on both, and
+2^14 is the documented trap that looks like a win on one machine. The remaining 1.18-1.24x serial
+loss below 2^18 is untouched and is NOT a parallelism problem; profile the serial gather itself
+(the per-element bounds check on `a_raw[i]` after `resolve_take_index` has already proven the
+bound is one concrete candidate).
+AGENT_NAME=BlackThrush.

@@ -38471,7 +38471,35 @@ fn take_alloc_is_kwargs() -> bool {
 /// no reason to land in the same place. `par`/`ser` expose both sides for an
 /// in-process sweep.
 fn take_parallel_min() -> usize {
-    const SHIPPED: usize = 1 << 21;
+    /// FITTED TO THE AGREEMENT OF TWO WORKERS, which is stricter than either alone and is the
+    /// only reason this value is trustworthy (`deadlock-audit-ddoeq`). `ser`/`par` forced per
+    /// call in ONE process; f64 gather from a 2^22 source.
+    ///
+    /// ```text
+    ///   m      fixmydocuments (16c, quiet)   hz4 (64c, loadavg 25)      agree?
+    ///          serial  parallel              serial  parallel
+    ///   2^10   1.466x   7.864x  LOSES        1.537x  45.108x  LOSES     both LOSE
+    ///   2^12   1.359x   2.637x  LOSES        1.416x  15.437x  LOSES     both LOSE
+    ///   2^14   1.240x   0.975x  wins         1.177x   2.047x  LOSES     CONTRADICT
+    ///   2^16   1.209x   0.479x  wins (VOID)  1.333x   0.925x  wins (VOID)  both VOID
+    ///   2^18   1.197x   0.317x  wins         1.233x   0.223x  wins       both CLEAN
+    ///   2^20   1.185x   0.239x  wins         1.241x   0.137x  wins       both win
+    /// ```
+    ///
+    /// **2^18 is the first size where BOTH workers win with a clean A/A null**, so that is the
+    /// gate. 2^14 is not: it wins on the quiet 16-core box and LOSES 1.7x on the busy 64-core one
+    /// (and 9.5x there on a cache-resident source), so shipping it would have traded one host's
+    /// win for another's regression. 2^16 wins on both but both nulls are VOID.
+    ///
+    /// This still recovers a lot: the inherited `1 << 21` ran SERIAL across 2^18..2^20, where the
+    /// measured effect is a 1.23x LOSS becoming a 0.22x win - about 5.5x - on both workers.
+    ///
+    /// TWICE-CORRECTED, and the corrections are the point. A first pass on a BUSY hz4 measured
+    /// ser and par identical to 0.4% and I concluded parallelism bought nothing here at all; a
+    /// quiet worker then showed 2.5-5x. A second pass fitted 2^14 from that quiet worker alone,
+    /// and the confirming run on hz4 falsified it before it shipped. One worker cannot fit a
+    /// parallel threshold - the crossover moves with core count AND with host load.
+    const SHIPPED: usize = 1 << 18;
     match take_mode_override() {
         Some(mode) if mode == *"par" => 1 << 10,
         Some(mode) if mode == *"ser" => usize::MAX,
