@@ -66902,3 +66902,79 @@ needs no threshold. The remaining loss is now ~1.15x flat from m=2^14 up, which 
 `cached_numpy` + 2 `is_exact_instance` + 3 `PyBuffer::get`, and the three buffer acquisitions are
 the only untried item. The per-element component needs a counter this fleet does not have.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-31 — LANDED AS STRICTLY LESS WORK, NOT CLAIMED: `np.take`'s index-dtype probe is REDUNDANT with the buffer acquisition it precedes; and the corpus written to prove that found a PRE-EXISTING bool-index defect (`deadlock-audit-ddoeq`, `deadlock-audit-lfl05`)
+
+**Campaign result class:** maintenance-self-speedup
+
+Worker `hz4` (64 cores, loadavg 11.47), numpy 2.5.2,
+`bench_elf_sha256=5602c58bd0203af0fb7f394e4515e150fcd784812a704a63710df9bf51972482`,
+`invocation_id=hz4-2309304-1788200446`.
+
+### 1. THE PROBE WAS PAYING FOR AN ANSWER IT ALREADY HAD
+
+`try_zerocopy_f64_take` read `indices.dtype`, then `.kind`, then `.itemsize` to establish "int64",
+two lines before calling `PyBuffer::<i64>::get(indices)` — which validates the exported buffer's
+FORMAT against `i64` and fails otherwise, i.e. rejects everything the probe rejected, in a call
+made unconditionally anyway. A `dtype` object plus two attribute lookups per `np.take`, for nothing.
+Contiguity is still enforced by `as_slice` returning `None`.
+
+```
+  m                shipped (no probe)   probe restored   delta
+  2^10             1.383x 1.000/0.999   1.410x 0.998/0.997   1.9%
+  2^12             1.268x 0.999/1.003   1.291x 0.998/0.999   1.8%
+  2^14             1.223x 1.000/0.998   1.230x 1.003/0.997   0.6%
+  2^16             1.222x 0.999/1.000   1.230x 0.999/0.998   0.7%
+  small-src 2^14   1.156x 1.000/0.996   1.174x 1.001/0.999   1.5%
+  small-src 2^18   1.162x 1.000/0.999   1.163x 1.001/1.003   0.1%
+```
+
+**NO RATIO IS CLAIMED.** Every effect is 0.1-1.9%, far under the 5% floor a single dual-null run
+can decide here. The shipped arm is ahead in all eight cells but those are cells of ONE run, not
+independent rounds, so they are not a sign test and must not be read as one. It lands because the
+work removed is provably redundant, not because these numbers say so. **The m=2^18 and m=2^20 rows
+are excluded outright**: NumPy's own arm drifts 33-41% between impls there (4367762 vs 3092290 ns),
+so nothing at those sizes is comparable in this run — the out-of-family control read 1.718x.
+
+### 2. THE PARITY CORPUS WRITTEN TO GUARD THE CHANGE FOUND A DIFFERENT BUG
+
+Removing a dtype gate risks WIDENING the admitted set — if `PyBuffer::<i64>::get` accepted a uint64
+array we would reinterpret its bits as signed and gather garbage. So the corpus grew an index-DTYPE
+sweep: `int64, int32, int16, uint64, uint32, float64, bool` x every source dtype and size, requiring
+NumPy's answer either way, natively or by delegation.
+
+The widening did not happen — **int64, int32, int16, uint64, uint32 and float64 are all clean in all
+five arms.** But `bool` came back red, 30 cells: `fnp.take(src, bool_array)` raises `TypeError`
+where NumPy gathers, treating bool as integer 0/1 (this is take, not boolean masking — it does not
+compress). Filed as **`deadlock-audit-lfl05`**.
+
+**It is PRE-EXISTING, and the harness is what proves it**: the divergence appears identically in the
+`ser-dtypeprobe` arm, which restores the very probe this row removes, and in both `2check` arms,
+which restore the former gather loop. All five arms. Nothing in this bead's edits touches bool —
+they are confined to int64-buffer routes, the output reshape and the gather bounds check.
+
+**Why it survived this long: a dtype the corpus never constructs is a dtype nothing tests.** Every
+take index array in every prior probe came from `rng.integers`, `np.arange` or `np.zeros` — int64,
+always. The bool column exists only because I went looking for a widening that turned out not to be
+there.
+
+It is now counted and printed as a KNOWN defect against `lfl05` rather than failing this gate,
+because an unrelated pre-existing bug must not block every future take measurement — and rather
+than being deleted, which would hide it.
+
+COUNTED_MECHANISM: 1 `dtype` object construction and 2 attribute lookups removed per `np.take` call, against a `PyBuffer::<i64>::get` that already performs the same rejection and is called unconditionally either way; measured 4563.4 ns against 4547.4 ns at m=1024.
+A/A NULL CONTROLS: 12 nulls across the six quoted pairs, all inside ±0.4%; they establish the arms
+were not drifting and NOT that a 0.1-1.9% effect is real.
+PARITY: **1680 cells, 0 divergences + 30 known-`lfl05`**, run once per (parallel side x gather form
+x dtype-probe setting) BEFORE any timing, now including 2-D/3-D/0-d index shapes, the index-dtype
+sweep, out-of-range indices raising `IndexError`, and an engagement spy asserting 0 `numpy.take`
+calls on the timed shape.
+VERIFICATION: `cargo clippy -j2 -p fnp-python --lib --examples -- -D warnings` exit 0;
+`cargo fmt --check` exit 0 and per-file `rustfmt --check` exit 0.
+RETRY PREDICATE: the two remaining entry items are `cached_numpy` + 2 `is_exact_instance` (pointer
+compares, not worth a slot) and 3 `PyBuffer::get` acquisitions. The buffer acquisitions are the ONLY
+untried fixed cost left and cannot be removed - the route needs all three buffers - so the entry is
+now closed. What remains is ~1.12-1.22x, and on this run it is FLAT from m=2^14 up, i.e. the
+per-element component, which needs a counter this fleet does not have (see the perf-unavailable
+row). Do not open another entry lever on this route without a counted attribution first.
+AGENT_NAME=BlackThrush.

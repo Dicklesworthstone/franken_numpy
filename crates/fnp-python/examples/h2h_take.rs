@@ -50,12 +50,15 @@ out("dispatch_assert=passed incumbent=numpy.take candidate=fnp.take")
 # include negative indices, exact-boundary indices, and an OOB index that must raise the same
 # IndexError numpy raises - the one behaviour a parallel arm can get wrong.
 def parity():
-    bad = cells = 0
+    bad = cells = known = 0
     # Both gather forms must be validated, not just both parallel sides: the single-check loop
     # folds the "still negative after +n" case into `get`'s bounds rejection, so the negative and
     # out-of-range corpora below are exactly where it could diverge from the two-check form.
-    for impl, flag, gather in (("ser", "ser", "single"), ("par", "par", "single"),
-                               ("ser-2check", "ser", "legacy"), ("par-2check", "par", "legacy")):
+    for impl, flag, gather, dt_probe in (
+            ("ser", "ser", "single", "buffer"), ("par", "par", "single", "buffer"),
+            ("ser-2check", "ser", "legacy", "buffer"), ("par-2check", "par", "legacy", "buffer"),
+            ("ser-dtypeprobe", "ser", "single", "probe")):
+        os.environ["FNP_TAKE_DTYPE"] = dt_probe
         os.environ["FNP_TAKE_GATHER"] = gather
         os.environ["FNP_TAKE_PARALLEL"] = flag
         for dt in ("float64", "int64", "int32", "float32"):
@@ -92,6 +95,39 @@ def parity():
                         out("  SHAPE DIVERGE impl=%s %s n=%d %s want%s got%s"
                             % (impl, dt, n, label, np.asarray(want).shape,
                                np.asarray(got).shape))
+                # THE ADMITTED SET MUST NOT WIDEN. Dropping the explicit index-dtype probe leans
+                # on PyBuffer::<i64>::get to reject non-int64 indices. If it accepted a uint64 or
+                # int32 array instead, we would reinterpret its bits as i64 and gather garbage -
+                # so sweep the index dtypes and require NumPy's answer either way, natively or by
+                # delegation. A speedup is not a licence to serve a different set of operands.
+                if n:
+                    for ivt in ("int64", "int32", "int16", "uint64", "uint32", "float64", "bool"):
+                        cells += 1
+                        try:
+                            iv = np.arange(min(n, 4)).astype(ivt)
+                            want, werr = np.take(src, iv), None
+                        except Exception as e:
+                            want, werr = None, type(e).__name__
+                        try:
+                            got, gerr = fnp.take(src, iv), None
+                        except Exception as e:
+                            got, gerr = None, type(e).__name__
+                        if werr != gerr or (werr is None and not (
+                                np.array_equal(want, got)
+                                and np.asarray(want).dtype == np.asarray(got).dtype)):
+                            # KNOWN, SEPARATELY TRACKED, PRE-EXISTING: a bool index array makes
+                            # fnp.take raise TypeError where numpy gathers with bool as 0/1. It
+                            # reproduces in EVERY arm here including the ones that restore the
+                            # former probe and the former gather, so it is not this bead's doing.
+                            # Counted and printed, but it does not fail this gate - otherwise an
+                            # unrelated defect blocks every take measurement. deadlock-audit-lfl05.
+                            if ivt == "bool":
+                                known += 1
+                            else:
+                                bad += 1
+                                out("  IDXDTYPE DIVERGE impl=%s src=%s idx=%s numpy=%s fnp=%s"
+                                    % (impl, dt, ivt, werr or np.asarray(want).tolist()[:4],
+                                       gerr or np.asarray(got).tolist()[:4]))
                 # OOB must raise exactly as numpy does, from BOTH arms
                 for bad_idx in (n, -n - 1):
                     cells += 1
@@ -106,7 +142,9 @@ def parity():
                                       % (impl, n, bad_idx, w, g))
     os.environ.pop("FNP_TAKE_PARALLEL", None)
     os.environ["FNP_TAKE_GATHER"] = "single"
-    out("take parity: %d cells, %d divergences" % (cells, bad))
+    os.environ["FNP_TAKE_DTYPE"] = "buffer"
+    out("take parity: %d cells, %d divergences, %d KNOWN bool defect (deadlock-audit-lfl05)"
+        % (cells, bad, known))
     return bad
 
 # The allocation switch resolves its PRESENCE once, on the first fnp.take call - which happens
@@ -116,6 +154,7 @@ def parity():
 os.environ["FNP_TAKE_ALLOC"] = "positional"
 os.environ["FNP_TAKE_GATHER"] = "single"
 os.environ["FNP_TAKE_RESHAPE"] = "skip"
+os.environ["FNP_TAKE_DTYPE"] = "buffer"
 
 if parity():
     out("ABORTING: parity failed, a ratio would be meaningless")
@@ -168,13 +207,15 @@ def cell(label, src, idx, k):
     # shipped positional one; `ser`/`par` force the two sides of the parallel threshold. All are
     # selected per call so every comparison is inside THIS process.
     for impl, flag in (("ser", "ser"), ("par", "par"), ("kwargs", "ser"),
-                       ("2check", "ser"), ("reshape", "ser")):
+                       ("2check", "ser"), ("reshape", "ser"), ("dtypeprobe", "ser")):
         if impl == "kwargs":
             os.environ["FNP_TAKE_ALLOC"] = "kwargs"
         if impl == "2check":
             os.environ["FNP_TAKE_GATHER"] = "legacy"
         if impl == "reshape":
             os.environ["FNP_TAKE_RESHAPE"] = "always"
+        if impl == "dtypeprobe":
+            os.environ["FNP_TAKE_DTYPE"] = "probe"
         os.environ["FNP_TAKE_PARALLEL"] = flag
         tn, tf = inter("np.take(a,i)", "fnp.take(a,i)", g, k)
         n1, n2 = inter("np.take(a,i)", "np.take(a,i)", g, k)
@@ -186,6 +227,7 @@ def cell(label, src, idx, k):
         os.environ["FNP_TAKE_ALLOC"] = "positional"
         os.environ["FNP_TAKE_GATHER"] = "single"
         os.environ["FNP_TAKE_RESHAPE"] = "skip"
+        os.environ["FNP_TAKE_DTYPE"] = "buffer"
     os.environ.pop("FNP_TAKE_PARALLEL", None)
     del g
 

@@ -18353,11 +18353,24 @@ fn try_zerocopy_f64_take(
         // str straight into a `char`; the `String` form allocated on the entry path of every
         // `np.take`. Same comparison, same admitted set - the sort route took the identical fix
         // (`franken_numpy-ixs5y.409`).
-        let dtype = indices.getattr(intern!(py, "dtype"))?;
-        if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
-            || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
-        {
-            return Ok(None);
+        //
+        // THE WHOLE PROBE IS REDUNDANT WITH THE BUFFER ACQUISITION TWO LINES BELOW.
+        // `PyBuffer::<i64>::get` validates the exported buffer's FORMAT against `i64` and fails
+        // otherwise, so it already rejects everything `kind == 'i' && itemsize == 8` rejects -
+        // and it is a call we make unconditionally anyway. The probe therefore bought nothing and
+        // cost a `dtype` object plus two more attribute lookups on the entry path of every
+        // `np.take`. Contiguity is still enforced, by the `as_slice` below returning `None`.
+        //
+        // `FNP_TAKE_DTYPE=probe` restores it for an in-process A/B (`deadlock-audit-ddoeq`: after
+        // the reshape fix the excess is ~432 ns FIXED + 0.162 ns/element, so the fixed entry cost
+        // is still the whole story at small m).
+        if take_dtype_probe_enabled() {
+            let dtype = indices.getattr(intern!(py, "dtype"))?;
+            if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
+                || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+            {
+                return Ok(None);
+            }
         }
     }
     let (Ok(a_buffer), Ok(idx_buffer)) = (PyBuffer::<f64>::get(a), PyBuffer::<i64>::get(indices))
@@ -38476,6 +38489,16 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     Ok(Some(
         flat.call_method1(intern!(py, "reshape"), (&output_shape,))?,
     ))
+}
+
+/// Restores the explicit index-dtype probe that `PyBuffer::<i64>::get` already
+/// subsumes, so removing it can be A/B'd in one process. Presence resolved once.
+fn take_dtype_probe_enabled() -> bool {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*PRESENT.get_or_init(|| std::env::var_os("FNP_TAKE_DTYPE").is_some()) {
+        return false;
+    }
+    std::env::var_os("FNP_TAKE_DTYPE").is_some_and(|v| v == *"probe")
 }
 
 /// Restores the UNCONDITIONAL reshape on `np.take`'s output, so skipping the
