@@ -67046,3 +67046,69 @@ float index ARRAY (`IndexError: arrays used as indices must be of integer or boo
 is exactly the asymmetry this bead's scalar/array split already demonstrated once. `'u'` keeps its
 own arm because unsigned indices must not round-trip through i64.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-31 — CLOSURE, NOT A LEVER: the survey board's last standing loss (`mean f64 2^20`, 1.461x) is NOT DECIDABLE — four measurements of the same cell span 1.094x-1.456x and every one is VOID; and bit-exactness BARS the obvious lever (`deadlock-audit-qpylx`)
+
+**Campaign result class:** maintenance-self-speedup
+
+No lever was attempted and none should be, which is the finding. Worker `hz4` (64 cores, loadavg
+~19), numpy 2.5.2 live in the same invocation,
+`bench_elf_sha256=ca470674841447899de73c77c909dfca6b935edf5e2e0d5889a168c7afec0aa5`,
+`invocation_id=hz4-4107601-1788217247`, two runs on the same ELF.
+
+### The board said one thing; the dedicated probe says another
+
+`h2h_survey` ranks `mean f64 2^20` at **1.461x** as the last decidable loss (18 of 24 cells
+decidable, everything else ≤1.036x or a win). Measuring that cell on purpose:
+
+```
+  sum  f64 2^20   1.456x VOID   1.094x VOID   1.358x VOID   1.173x VOID
+  mean f64 2^20   1.602x VOID                 1.181x VOID
+  std  f64 2^20   0.340x CLEAN                0.390x CLEAN
+```
+
+**Four measurements of the same cell, same ELF, same worker, spanning 1.094-1.456x — a 33% spread —
+and every single one fails the ±2% A/A null.** The board's 1.461x is the top of a noisy range, not a
+measurement. Two of those four are in ONE process, minutes apart.
+
+### THE TRANSFERABLE POINT, and it indicts a gate this campaign relies on
+
+The survey reported `nullFNP 1.016` for that cell — comfortably inside the ±2% gate — and the cell
+still swings 33% run to run. **A passing null in one run does not make a cell decidable.** The null
+controls WITHIN-run drift and is structurally blind to run-to-run spread; this is
+`single-run-dual-null-cannot-decide-sub-5pct` appearing at 33% rather than 5%. Any survey row whose
+rank matters should be re-measured on purpose before a campaign is aimed at it.
+
+### What the probe DID establish, both replicated
+
+**1. The route is native.** Spying `numpy.mean`, `numpy.sum` and `numpy.add` while our function
+runs: 0 calls, 0 calls, 0 calls. Whatever the residual is, it is our own kernel, not delegation.
+
+**2. We are BIT-EXACT with NumPy today** — 0 of 8 cells differ (sum and mean at n = 2^10, 2^16,
+2^20, 2^20+7). NumPy sums PAIRWISE. **This bars the obvious lever outright**: a parallel reduction,
+a re-blocked accumulator or a wider vector tree all change the summation order, and this repo's
+standing rule is that blocking is never bit-exact. Anyone reaching for "parallelise the sum across
+64 cores" would be shipping a silent numeric change, and would find that out after writing it
+rather than before.
+
+**3. The absolute headroom is small.** Against one full 8 MiB pass (`np.copyto`, 743-800 us):
+numpy.sum is 0.28-0.30 of a copy, fnp.sum 0.31-0.36. Excess 21-39 us on a ~225 us call. Both sit
+near the same memory-traffic floor.
+
+**4. "mean" was the wrong name for it.** `fnp.mean` tracks `fnp.sum` in every run — mean is sum plus
+a divide — and our `std`, which computes a mean internally, WINS 2.6-2.9x with clean nulls in both
+runs. There is no mean-specific defect.
+
+COUNTED_MECHANISM: none claimed - 3 spy probes returning 0 numpy calls each, 8 bit-exactness cells returning 0 differences, and 4 timing measurements whose 33% spread is the result. No work was added or removed by this row.
+A/A NULL CONTROLS: 12 nulls across the six timing cells; the two `std` cells pass (0.996-1.001) and
+every `sum`/`mean` cell fails (0.840-1.159). The failures ARE the finding, not a caveat on it.
+PARITY: bit-exactness checked as above, 0 of 8 differ; no code changed.
+VERIFICATION: probe-only, no source change to any shipped path. `cargo fmt --check` exit 0 and
+per-file `rustfmt --check` exit 0.
+RETRY PREDICATE: do NOT open a lever on sum/mean until the cell is decidable - both A/A nulls
+inside ±2% on at least two workers of different core counts, or a sign test over >=15 interleaved
+rounds. If it then decides above ~1.1x, the ONLY admissible levers are those preserving NumPy's
+exact pairwise order; reordering is barred while bit-exactness holds, and bit-exactness should be
+re-checked first because it is the thing that makes the cheap lever illegal. `std` is not a lever
+either - it is already a 2.6-2.9x win.
+AGENT_NAME=BlackThrush.
