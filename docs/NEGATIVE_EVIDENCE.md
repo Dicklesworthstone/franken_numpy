@@ -66478,3 +66478,75 @@ do with parallelism. Separately: **the 21 gates at `1 << 21` remain unaudited, a
 evidence that "same constant, same provenance" is a hypothesis, not a finding** - each one needs
 its own engagement-probed measurement before any claim.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — CORRECTION to my own row six hours old: the take gate switch WAS on the executed path, the instrumentation proves it, and the real finding is that PARALLELISING `np.take`'s flat gather BUYS NOTHING from 2^10 to 2^20 (`deadlock-audit-ddoeq`)
+
+**Campaign result class:** maintenance-self-speedup
+
+**This row retracts the central claim of the `NON-RESULT (premise wrong)` row above.** That row saw
+`ser` and `par` timings identical to three decimals and concluded "identical arms are the signature
+of a switch that is not on the executed path". That inference was wrong, it was mine, and direct
+instrumentation refutes it.
+
+### The instrumentation, which should have come first
+
+A one-line print at the gate (`FNP_TAKE_DEBUG`, worker `hetzner2`, 16 rayon threads, loadavg 3.81)
+reporting `count`, the gate value and the branch actually taken. Grouped over the whole run:
+
+```
+  48000  count=1024     gate=18446744073709551615  parallel=false     <- ser
+  48000  count=1024     gate=1024                  parallel=true      <- par
+  12012  count=4096     gate=...MAX                parallel=false
+  12012  count=4096     gate=1024                  parallel=true
+   5952  count=16384    (same pair)                false / true
+    720  count=65536    (same pair)                false / true
+    288  count=262144   (same pair)                false / true
+     96  count=1048576  gate=...MAX                parallel=false
+     96  count=1048576  gate=1024                  parallel=true
+```
+
+**For every timed count the two arms differ exactly as designed**: `ser` forces `usize::MAX` and
+takes the serial branch, `par` forces `1 << 10` and takes the parallel one. The switch works, the
+env override is seen, and the branch genuinely changes. The default `2097152` also appears once,
+from the un-forced engagement probe, which is the control that the shipped value is what runs when
+nothing is forced.
+
+### SO THE REAL RESULT IS THE ONE I TALKED MYSELF OUT OF
+
+**Parallelising the flat `f64` gather produces NO measurable speedup at any index count from 2^10
+to 2^20.** Sixteen timing rows across two workers (hz4/64 cores, hetzner2/16 cores), nulls clean on
+14 of 16, both cache regimes:
+
+```
+  m       ser        par        m        ser        par
+  2^10    1.493x     1.488x     2^16     1.381x     1.383x
+  2^12    1.432x     1.432x     2^18     1.262x     1.259x
+  2^14    1.374x     1.373x     2^20     1.250x     1.248x
+```
+
+That is a decidable NEGATIVE about the lever, not an absence of evidence — and it means the
+inherited `1 << 21` gate **is not costing anything in this band**, which is the opposite of the
+searchsorted story and the reason "same constant, same provenance" was only ever a hypothesis.
+
+### THE LESSON, WHICH IS THE PART WORTH KEEPING
+
+"Identical arms mean the switch is not wired up" is a plausible heuristic and it is **not sound**.
+Identical arms have two explanations — the switch does nothing, or the lever does nothing — and
+only instrumentation separates them. I reached for the flattering one (my instrument is broken)
+over the informative one (my lever is worthless), and published it. The engagement spy I added in
+the same session ruled out delegation but said nothing about WHICH of our branches ran; a route
+spy answers "is it ours", a gate print answers "which of ours", and they are different questions.
+
+COUNTED_MECHANISM: 134191 gate evaluations logged across one run; for all six timed counts the (gate, branch) pairs are exactly (18446744073709551615, false) and (1024, true), i.e. the branch differs on 100% of timed calls while the medians differ by at most 0.4%.
+A/A NULL CONTROLS: the 16 timing rows carry 32 nulls, 30 inside ±2%; the instrumentation run
+itself makes no timing claim.
+PARITY: 432 cells, 0 divergences, unchanged.
+VERIFICATION: `cargo fmt --check` exit 0 (zero bytes) and per-file `rustfmt --check` exit 0; three
+further peer-authored drift hunks in `lib.rs` were fixed to reach that and are in the same commit.
+RETRY PREDICATE: the take gate is CLOSED as a lever in [2^10, 2^20] — parallelism buys nothing
+there, so do not re-sweep it and do not "fit" it. The 1.25-1.49x loss against NumPy is real and
+untouched by any of this; it is NOT a parallelism problem, and the next attempt should profile the
+serial gather itself (bounds checks, the `numpy.empty` output allocation, the per-index
+`rem_euclid`/wraparound branch) rather than its dispatch. Above 2^21 the 2026-06-25 row's 5.2x
+still stands and is not contradicted by anything here.
+AGENT_NAME=BlackThrush.

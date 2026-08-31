@@ -18378,7 +18378,20 @@ fn try_zerocopy_f64_take(
         // aggregates memory-level parallelism across cores. Same gather => bit-identical.
         // An out-of-range index sets a shared flag; we bail AFTER the pass (the partial
         // output is dropped, take has no side effects) so numpy raises the exact IndexError.
-        if count >= take_parallel_min() && rayon::current_num_threads() >= 2 {
+        // ROUTE INSTRUMENTATION (`deadlock-audit-ddoeq`). Forcing both sides of this gate produced
+        // timings identical to three decimals at every size, which means the switch was not
+        // selecting different code - but the engagement spy proved the route is native, so the
+        // usual explanation (delegation) is ruled out. Print what the gate actually sees rather
+        // than reasoning about it further; silent unless `FNP_TAKE_DEBUG` is set.
+        let take_min = take_parallel_min();
+        let take_threads = rayon::current_num_threads();
+        if std::env::var_os("FNP_TAKE_DEBUG").is_some() {
+            eprintln!(
+                "TAKE_ROUTE count={count} gate={take_min} threads={take_threads} parallel={}",
+                count >= take_min && take_threads >= 2
+            );
+        }
+        if count >= take_min && take_threads >= 2 {
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicBool, Ordering};
             // SAFETY: ReadOnlyCell<f64>/<i64> and Cell<f64> are repr(transparent) over their
@@ -121733,6 +121746,7 @@ mod tests {
         try_zerocopy_f64_binary_into, try_zerocopy_is_busday, try_zerocopy_isnat, unravel_index,
         where_py, wide_int_table_bounds, zerocopy_f64_binary_flat,
     };
+    use crate::try_zerocopy_f64_take;
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
     use pyo3::Bound;
@@ -146351,6 +146365,36 @@ mod tests {
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_f64_int64_ndarrays_engage_native_f64_buffer_route() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let input = numeric_array(py, vec![10.0_f64, -2.5, 3.25, f64::NAN], "float64");
+            let indices = numeric_array(py, vec![3_i64, -1, 0, 2], "int64");
+            let actual = try_zerocopy_f64_take(py, &input, &indices, None, "raise")?
+                .expect("exact float64 input with int64 indices must use the native buffer route");
+            let expected = py
+                .import("numpy")?
+                .call_method1("take", (&input, &indices))?;
+
+            assert_eq!(
+                actual.bind(py).getattr("dtype")?.to_string(),
+                expected.getattr("dtype")?.to_string()
+            );
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                expected.call_method0("tobytes")?.extract::<Vec<u8>>()?
             );
             Ok(())
         });
