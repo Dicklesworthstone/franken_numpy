@@ -5525,7 +5525,17 @@ fn extract_integer_array(
         // boxing every element into a Python int via .tolist() — for a large index
         // array (e.g. np.take with millions of indices) the PyList round-trip was
         // the dominant cost. Bit-identical (same integer values).
-        'i' => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
+        // A BOOL ARRAY IS AN INTEGER INDEX ARRAY OF 0/1 HERE, NOT A MASK (`deadlock-audit-lfl05`).
+        // `np.take(a, [False, True])` gathers a[0], a[1] - it does NOT compress, and it is not
+        // boolean indexing, which is `a[mask]` and a different operation entirely. Rejecting bool
+        // made `fnp.take` raise `TypeError` where NumPy returns a gather, at every one of this
+        // helper's four callers (take, choose, unravel_index, ravel_multi_index) - all of them
+        // index contexts where NumPy applies the same 0/1 rule.
+        //
+        // `astype("int64")` on a bool array yields exactly 0/1, so the existing integer arm
+        // serves it; the scalar take path already resolved bool this way and this closes the
+        // array spelling it left behind.
+        'b' | 'i' => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
         'u' => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
         _ => {
             return Err(PyTypeError::new_err(format!(

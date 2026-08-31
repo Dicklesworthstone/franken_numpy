@@ -588,3 +588,46 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// A BOOL ARRAY IS AN INTEGER INDEX ARRAY OF 0/1, NOT A MASK (`deadlock-audit-lfl05`).
+///
+/// `np.take(a, [False, True])` gathers `a[0], a[1]`; it does not compress, and it is not boolean
+/// indexing (`a[mask]`), which is a different operation. `fnp.take` used to raise
+/// `TypeError: expected an integer index array, got dtype bool` for every bool spelling — the
+/// scalar path had been corrected but the ARRAY path had not.
+///
+/// The fix lives in the shared `extract_integer_array`, so this pins all four of its callers, not
+/// just take: a dtype-shaped fix in shared code has to be checked everywhere it reaches.
+#[test]
+fn bool_index_arrays_are_integer_zero_one_everywhere_like_numpy() -> Result<(), String> {
+    let body = r#"
+mod = MODULE
+src = np.arange(20).astype("float64")
+rows = []
+for iv in (np.array([False, True, True, False]),
+           np.array([True, True, True, True]),
+           np.zeros(4, dtype=bool),
+           np.array([[False, True], [True, False]])):
+    rows.append(np.asarray(mod.take(src, iv)).tolist())
+    rows.append(list(np.asarray(mod.take(src, iv)).shape))
+    for m in ("raise", "clip", "wrap"):
+        rows.append(np.asarray(mod.take(src, iv, mode=m)).tolist())
+flat = np.array([False, True, True, False])
+rows.append(np.asarray(mod.choose(flat, [np.arange(4) * 10, np.arange(4) * 100])).tolist())
+rows.append([np.asarray(x).tolist() for x in mod.unravel_index(flat, (2, 3))])
+rows.append(np.asarray(mod.ravel_multi_index((flat, flat), (2, 2))).tolist())
+print(rows)
+"#;
+
+    let ours = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let theirs = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        ours, theirs,
+        "a bool index array must behave as integer 0/1 for take/choose/unravel_index/ravel_multi_index"
+    );
+    Ok(())
+}

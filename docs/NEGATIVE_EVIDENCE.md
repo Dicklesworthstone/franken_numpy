@@ -66978,3 +66978,71 @@ now closed. What remains is ~1.12-1.22x, and on this run it is FLAT from m=2^14 
 per-element component, which needs a counter this fleet does not have (see the perf-unavailable
 row). Do not open another entry lever on this route without a counted attribution first.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-31 — CORRECTNESS FIX: a BOOL index array is an integer array of 0/1, not an error — `fnp.take` raised `TypeError` where NumPy gathers, at all FOUR callers of the shared helper (`deadlock-audit-lfl05`)
+
+**Campaign result class:** maintenance-self-speedup
+
+A correctness fix, not a perf row; no ratio is claimed and none was measured. Worker `hz4`,
+numpy 2.5.2 live in the same invocation,
+`bench_elf_sha256=ac5e49b3f88e71c52084b6490662e15d2e4baa06c3e966d8c2dd6dbe887abc70`,
+`invocation_id=hz4-3306002-1788209475`.
+
+### The defect
+
+```
+  src = np.arange(20).astype("float64")
+  iv  = np.array([False, True, True, False])
+  np.take(src, iv)   -> array([0., 1., 1., 0.])      # bool is an INDEX of 0/1
+  fnp.take(src, iv)  -> TypeError: take(indices): expected an integer index array, got dtype bool
+```
+
+NumPy's rule in an index context is that a bool array is an integer array of 0s and 1s. This is
+**not** boolean masking — `a[mask]` compresses, `np.take(a, mask)` does not — and the two are easy
+to conflate, which is probably why the reject looked reasonable when it was written.
+`extract_integer_array` admitted dtype kinds `'i'` and `'u'` and raised on everything else.
+
+The scalar spelling had ALREADY been corrected (`deadlock-audit-yphwc` explicitly resolves a scalar
+bool to an i64 index and its comment says so). Only the ARRAY spelling was left behind, so the
+route was internally inconsistent: `take(a, True)` worked and `take(a, np.array([True]))` raised.
+
+### The fix, and why it is at this level
+
+`'b' | 'i' => …astype("int64")` — a bool array casts to exactly 0/1, so the existing integer arm
+serves it unchanged.
+
+**The helper is SHARED, and a dtype-shaped fix in shared code has to be checked at every site it
+reaches** (`bool-dtype-gap-and-op-scoped-fixes`: a dtype-shaped defect does not license a
+dtype-shaped fix). Its four callers are `take`, `choose`, `unravel_index` and
+`ravel_multi_index` — all index contexts, all governed by the same NumPy 0/1 rule, all verified
+below rather than assumed.
+
+### Verification
+
+```
+  take parity corpus      1680 cells, 0 divergences, 0 KNOWN bool defect   (was 30 known)
+  bool-index cross-caller   21 cells, 0 divergences
+```
+
+The cross-caller probe covers take 1-D, take 2-D, take `mode=clip`, take `mode=wrap`, `choose`,
+`unravel_index` and `ravel_multi_index`, each against three bool patterns (mixed, all-true,
+all-false), comparing values AND the exception type on both sides so a divergence in either
+direction is caught. A permanent conformance test
+`bool_index_arrays_are_integer_zero_one_everywhere_like_numpy` pins the same surface, including a
+2-D bool index, by comparing fnp's and NumPy's full output under one script.
+
+COUNTED_MECHANISM: 1 dtype kind admitted where 0 were before ('b' added to the 'i' arm), turning 30 raising cells into 30 gathering cells across 4 public functions; no work is added on any previously-admitted path, since the arm is shared with 'i'.
+A/A NULL CONTROLS: not applicable and not claimed - this is a correctness change with no timing.
+PARITY: as above; the take corpus's bool column, which was the reason this bead exists, is now
+clean, and the harness's KNOWN-defect counter for `lfl05` reads 0.
+VERIFICATION: `cargo clippy -j2 -p fnp-python --lib --examples --tests -- -D warnings` exit 0;
+`cargo fmt --check` exit 0 and per-file `rustfmt --check` exit 0. The Rust conformance test could
+NOT be executed here - `cargo test -p fnp-python` does not run on the rch fleet (the workers lack
+`libpython3.14`) - so the executed evidence is the in-process harness above, and the test is landed
+unrun. Stated rather than implied.
+RETRY PREDICATE: do not extend this to other dtype kinds on the same reasoning. Float indices are
+NOT admitted here and must not be: NumPy truncates a float SCALAR index toward zero but REJECTS a
+float index ARRAY (`IndexError: arrays used as indices must be of integer or boolean type`), which
+is exactly the asymmetry this bead's scalar/array split already demonstrated once. `'u'` keeps its
+own arm because unsigned indices must not round-trip through i64.
+AGENT_NAME=BlackThrush.

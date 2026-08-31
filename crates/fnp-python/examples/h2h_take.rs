@@ -156,9 +156,56 @@ os.environ["FNP_TAKE_GATHER"] = "single"
 os.environ["FNP_TAKE_RESHAPE"] = "skip"
 os.environ["FNP_TAKE_DTYPE"] = "buffer"
 
+# EVERY CALLER OF THE SHARED HELPER, not just take. `extract_integer_array` now accepts a bool
+# array as integer 0/1 (deadlock-audit-lfl05), and it is shared by take, choose, unravel_index and
+# ravel_multi_index. A dtype-shaped fix in shared code must be checked at every site it reaches, or
+# it is exactly the "blanket dtype fix" this campaign has been burned by before.
+def bool_index_parity():
+    bad = cells = 0
+    src = np.arange(20).astype("float64")
+    cases = (
+        ("take 1-D",      lambda i: np.take(src, i),             lambda i: fnp.take(src, i)),
+        ("take 2-D",      lambda i: np.take(src, i.reshape(-1, 1)),
+                          lambda i: fnp.take(src, i.reshape(-1, 1))),
+        ("take clip",     lambda i: np.take(src, i, mode="clip"),
+                          lambda i: fnp.take(src, i, mode="clip")),
+        ("take wrap",     lambda i: np.take(src, i, mode="wrap"),
+                          lambda i: fnp.take(src, i, mode="wrap")),
+        ("choose",        lambda i: np.choose(i, [np.arange(4) * 10, np.arange(4) * 100]),
+                          lambda i: fnp.choose(i, [np.arange(4) * 10, np.arange(4) * 100])),
+        ("unravel_index", lambda i: np.unravel_index(i, (2, 3)),
+                          lambda i: fnp.unravel_index(i, (2, 3))),
+        ("ravel_multi_index",
+                          lambda i: np.ravel_multi_index((i, i), (2, 2)),
+                          lambda i: fnp.ravel_multi_index((i, i), (2, 2))),
+    )
+    for label, want_fn, got_fn in cases:
+        for iv in (np.array([False, True, True, False]),
+                   np.array([True, True, True, True]),
+                   np.zeros(4, dtype=bool)):
+            cells += 1
+            try:
+                want, werr = want_fn(iv), None
+            except Exception as e:
+                want, werr = None, type(e).__name__
+            try:
+                got, gerr = got_fn(iv), None
+            except Exception as e:
+                got, gerr = None, type(e).__name__
+            same = (werr == gerr) and (werr is not None or np.array_equal(
+                np.asarray(want, dtype=object), np.asarray(got, dtype=object)))
+            if not same:
+                bad += 1
+                out("  BOOLIDX DIVERGE %-18s numpy=%s fnp=%s"
+                    % (label, werr or np.asarray(want).tolist(),
+                       gerr or np.asarray(got).tolist()))
+    out("bool-index parity (lfl05): %d cells, %d divergences" % (cells, bad))
+    return bad
+
 if parity():
     out("ABORTING: parity failed, a ratio would be meaningless")
     raise SystemExit(1)
+BOOLIDX_BAD = bool_index_parity()
 
 # ENGAGEMENT PROBE, AND IT IS NOT OPTIONAL. A first run of this harness produced ser and par
 # timings identical to three decimals at every size - which is not "the gate does not matter", it
