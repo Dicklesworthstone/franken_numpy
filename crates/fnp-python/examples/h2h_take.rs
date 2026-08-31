@@ -86,6 +86,12 @@ def parity():
     out("take parity: %d cells, %d divergences" % (cells, bad))
     return bad
 
+# The allocation switch resolves its PRESENCE once, on the first fnp.take call - which happens
+# inside parity() - so it must be set BEFORE that or the kwargs arm can never engage. This is the
+# same first-call-wins hazard the searchsorted switches have; setting a non-"kwargs" value here
+# arms the switch while leaving the SHIPPED positional spelling in force.
+os.environ["FNP_TAKE_ALLOC"] = "positional"
+
 if parity():
     out("ABORTING: parity failed, a ratio would be meaningless")
     raise SystemExit(1)
@@ -110,7 +116,9 @@ def engagement(src, idx):
 
 _src = rng.standard_normal(1 << 22)
 _idx = rng.integers(0, 1 << 22, 1 << 16)
+os.environ["FNP_TAKE_DEBUG"] = "1"
 _n = engagement(_src, _idx)
+os.environ.pop("FNP_TAKE_DEBUG", None)
 out("engagement: fnp.take made %d numpy.take call(s) on the timed shape (0 = native route)" % _n)
 if _n:
     out("ABORTING: fnp.take DELEGATES on this shape, so the parallel gate is not on the measured")
@@ -131,7 +139,12 @@ out("%-28s%-7s%14s%14s%9s%8s%9s" % ("case","impl","numpy_ns","fnp_ns","ratio","n
 
 def cell(label, src, idx, k):
     g = {"np": np, "fnp": fnp, "a": src, "i": idx}
-    for impl, flag in (("ser", "ser"), ("par", "par")):
+    # `kwargs` restores the FORMER output-allocation spelling (a per-call PyDict) against the
+    # shipped positional one; `ser`/`par` force the two sides of the parallel threshold. All are
+    # selected per call so every comparison is inside THIS process.
+    for impl, flag in (("ser", "ser"), ("par", "par"), ("kwargs", "ser")):
+        if impl == "kwargs":
+            os.environ["FNP_TAKE_ALLOC"] = "kwargs"
         os.environ["FNP_TAKE_PARALLEL"] = flag
         tn, tf = inter("np.take(a,i)", "fnp.take(a,i)", g, k)
         n1, n2 = inter("np.take(a,i)", "np.take(a,i)", g, k)
@@ -140,6 +153,7 @@ def cell(label, src, idx, k):
         ok = abs(nn - 1) <= 0.02 and abs(nf - 1) <= 0.02
         out("%-28s%-7s%14.1f%14.1f%8.3fx%8.3f%9.3f%s"
             % (label, impl, tn, tf, tf / tn, nn, nf, "" if ok else "  VOID"))
+        os.environ["FNP_TAKE_ALLOC"] = "positional"
     os.environ.pop("FNP_TAKE_PARALLEL", None)
     del g
 

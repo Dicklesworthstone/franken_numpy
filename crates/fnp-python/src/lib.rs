@@ -18357,9 +18357,19 @@ fn try_zerocopy_f64_take(
     }
     let out_shape: Vec<usize> = idx_buffer.shape().to_vec();
     let count = idx_in.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
+    // `numpy.empty` takes dtype as its SECOND POSITIONAL parameter, so the kwargs dict this used
+    // to build was pure overhead on every call (`d16ee71a`; this ledger priced a 3-key dict at
+    // 230 ns against a 307.50 ns total output allocation). `deadlock-audit-ddoeq`.
+    //
+    // `FNP_TAKE_ALLOC=kwargs` restores the former spelling so the two can be timed against each
+    // other in ONE process; presence is resolved once, so the shipped path pays an atomic load.
+    let flat = if take_alloc_is_kwargs() {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "dtype"), "float64")?;
+        numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?
+    } else {
+        numpy.call_method1(intern!(py, "empty"), (count, "float64"))?
+    };
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -18486,9 +18496,8 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     }
     let out_shape: Vec<usize> = idx_buffer.shape().to_vec();
     let count = idx_in.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
+    // dtype positionally, as above - no per-call kwargs dict.
+    let flat = numpy.call_method1(intern!(py, "empty"), (count, dtype_name))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -38432,6 +38441,17 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     Ok(Some(
         flat.call_method1(intern!(py, "reshape"), (&output_shape,))?,
     ))
+}
+
+/// Selects the FORMER kwargs spelling of `np.take`'s output allocation, so the
+/// positional form can be A/B'd against it inside one process. Presence resolved
+/// once; the shipped path never walks `environ`.
+fn take_alloc_is_kwargs() -> bool {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*PRESENT.get_or_init(|| std::env::var_os("FNP_TAKE_ALLOC").is_some()) {
+        return false;
+    }
+    std::env::var_os("FNP_TAKE_ALLOC").is_some_and(|v| v == *"kwargs")
 }
 
 /// Index-count threshold above which `np.take`'s flat gather is split across
