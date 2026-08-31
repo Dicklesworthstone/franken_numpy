@@ -11866,18 +11866,8 @@ fn try_zerocopy_f16_binary_widen(
         let a_raw: &[u16] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<u16>(), n) };
         let b_raw: &[u16] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<u16>(), n) };
         // fmod (5) / remainder (6) / divide (10) / floor_divide (11): a zero divisor must defer to
-        // NumPy so its RuntimeWarning + NaN/inf surface exactly (f16 zero is +0.0=0x0000/-0.0=0x8000).
+        // NumPy so its RuntimeWarning + nan/inf surface exactly (f16 zero is +0.0=0x0000/-0.0=0x8000).
         if matches!(op, 5 | 6 | 10 | 11) && b_raw.iter().any(|&v| v == 0x0000 || v == 0x8000) {
-            return Ok(None);
-        }
-        // fmod has one additional invalid input class: an infinite dividend with a finite divisor.
-        // The widened f32 `%` produces the matching NaN bits, but cannot reproduce NumPy's invalid
-        // warning or errstate behavior, so defer the exceptional array to the live ufunc.
-        if op == 5
-            && a_raw
-                .iter()
-                .any(|&v| (v & 0x7c00) == 0x7c00 && (v & 0x03ff) == 0)
-        {
             return Ok(None);
         }
         // hypot (16): a result overflowing f16 (|hypot| > 65504) makes numpy emit an "overflow"
@@ -61396,46 +61386,6 @@ fn conjugate(
         .unbind())
 }
 
-// The fmod fast paths cannot reproduce NumPy's invalid-event surface for a zero
-// divisor or infinite dividend. Keep the two scans ordered: the divisor scan can
-// short-circuit before acquiring the dividend buffer, which is the established
-// finite-hot-path shape for this route.
-fn fmod_requires_numpy_exception_surface<T>(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    b: &Bound<'_, PyAny>,
-    zero: T,
-    is_infinite: impl Fn(T) -> bool,
-) -> bool
-where
-    T: pyo3::buffer::Element + Copy + PartialEq,
-{
-    let Ok(b_buf) = PyBuffer::<T>::get(b) else {
-        return false;
-    };
-    let Some(b_slice) = b_buf.as_slice(py) else {
-        return false;
-    };
-    // SAFETY: `PyBuffer` gives a read-only, GIL-bound view; `ReadOnlyCell<T>`
-    // is transparent over `T`, as in the existing binary-buffer fast paths.
-    let b_raw: &[T] =
-        unsafe { std::slice::from_raw_parts(b_slice.as_ptr().cast::<T>(), b_slice.len()) };
-    if b_raw.contains(&zero) {
-        return true;
-    }
-
-    let Ok(a_buf) = PyBuffer::<T>::get(a) else {
-        return false;
-    };
-    let Some(a_slice) = a_buf.as_slice(py) else {
-        return false;
-    };
-    // SAFETY: same read-only `PyBuffer` contract as the divisor view above.
-    let a_raw: &[T] =
-        unsafe { std::slice::from_raw_parts(a_slice.as_ptr().cast::<T>(), a_slice.len()) };
-    a_raw.iter().copied().any(is_infinite)
-}
-
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn fmod(
@@ -61446,37 +61396,50 @@ fn fmod(
     // fmod is C-style mod (sign of the dividend). numpy runs it single-threaded (SIMD),
     // so the zero-copy PARALLEL binary kernel (op.apply(Fmod) = lhs % rhs, the SAME
     // per-element op, bit-identical f64) fans the work across cores and wins for large
-    // same-shape c-contiguous f64. A zero divisor OR infinite dividend must defer to NumPy so its
-    // RuntimeWarning + NaN surface exactly; scan the zero-copy buffers (no extract). Scalar/
+    // same-shape c-contiguous f64. A zero divisor must defer to NumPy so its RuntimeWarning
+    // + NaN surface exactly; scan the divisor buffer zero-copy (no extract). Scalar/
     // broadcast/non-f64/non-contiguous defer to NumPy. (BlackThrush 2026-06-25: the old
     // "1.6-2.3x slower native" note predated the no-copy from_raw_parts parallel kernel.)
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let a = args.get_item(0)?;
         let b = args.get_item(1)?;
         if numpy_dtype_is_f64(py, &a) && numpy_dtype_is_f64(py, &b) {
-            let requires_numpy_exception_surface =
-                fmod_requires_numpy_exception_surface(py, &a, &b, 0.0_f64, f64::is_infinite);
-            if !requires_numpy_exception_surface
-                && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Fmod)?
+            let zero_divisor = if let Ok(b_buf) = PyBuffer::<f64>::get(&b)
+                && let Some(b_slice) = b_buf.as_slice(py)
+            {
+                let b_raw: &[f64] = unsafe {
+                    std::slice::from_raw_parts(b_slice.as_ptr().cast::<f64>(), b_slice.len())
+                };
+                b_raw.contains(&0.0)
+            } else {
+                false
+            };
+            if !zero_divisor && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Fmod)?
             {
                 return Ok(out);
             }
         }
         // float32 sibling: numpy runs f32 fmod single-threaded (~138ms @16M); the native
-        // parallel f32 kernel (lhs % rhs = IEEE fmodf, bit-identical) wins ~9x. A zero divisor or
-        // infinite dividend must defer so NumPy's RuntimeWarning + NaN surface exactly; scan zero-copy.
+        // parallel f32 kernel (lhs % rhs = IEEE fmodf, bit-identical) wins ~9x. A zero divisor
+        // must defer so NumPy's RuntimeWarning + NaN surface exactly; scan zero-copy.
         else if numpy_dtype_is_f32(&a) && numpy_dtype_is_f32(&b) {
-            let requires_numpy_exception_surface =
-                fmod_requires_numpy_exception_surface(py, &a, &b, 0.0_f32, f32::is_infinite);
-            if !requires_numpy_exception_surface
-                && let Some(out) = try_zerocopy_f32_binary(py, &a, &b, BinaryOp::Fmod)?
+            let zero_divisor = if let Ok(b_buf) = PyBuffer::<f32>::get(&b)
+                && let Some(b_slice) = b_buf.as_slice(py)
+            {
+                let b_raw: &[f32] = unsafe {
+                    std::slice::from_raw_parts(b_slice.as_ptr().cast::<f32>(), b_slice.len())
+                };
+                b_raw.contains(&0.0)
+            } else {
+                false
+            };
+            if !zero_divisor && let Some(out) = try_zerocopy_f32_binary(py, &a, &b, BinaryOp::Fmod)?
             {
                 return Ok(out);
             }
         }
         // float16 sibling: numpy widens f16->f32 for fmod (~214ms@16M). Native parallel
-        // widen-fmod-narrow is bit-identical (op 5); defers on zero divisors and infinite dividends
-        // (scanned in-helper) so NumPy emits its invalid event.
+        // widen-fmod-narrow is bit-identical (op 5); defers on a zero divisor (scanned in-helper).
         else if let Some(out) = try_zerocopy_f16_binary_widen(py, &a, &b, 5)? {
             return Ok(out);
         }

@@ -27419,6 +27419,7 @@ serial guard 8,254,562 ns = 1.043x vs ORIG (noise band) and 0.679x vs NumPy. Con
 23/23 on hz2. Also fixed the adjacent `where` no-keyword surface so the shard is green:
 `where(condition=..., x=..., y=...)` now matches NumPy's "takes no keyword arguments" TypeError.
 AGENT_NAME=BlackThrush.
+LOSS 2026-08-31 deadlock-audit-5o4lp: current-head live fmod[finite-mixed4096] on ovh-a was DECIDABLE_REGRESSION (NumPy/FNP 0.463586 CI95 [0.463097,0.463762], dual A/A 1.000319/1.000000); reverted the infinite-dividend deferral and its regression test; retry only with a strategy that avoids an additional finite-route scan.
 
 - 2026-08-30 (`deadlock-audit-sfgg3`): committed `70488c72` unordered int64 `searchsorted` batched fallback is a DECIDABLE LOSS against live NumPy 2.5.2 on `hz4`: 6.419176 ms FNP / 2.165910 ms NumPy = 2.964x slower (same-invocation A/A 1.003/1.002; ELF `2c41f63c630738b0b53023706aed2050a0ba46fb3b9dde7ae622bbd4f93d0660`); it is only a maintenance improvement over the former 3.749x loss, and its revert awaits the protected uncommitted `lib.rs` follow-on overlay.
 
