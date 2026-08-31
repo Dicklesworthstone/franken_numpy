@@ -18194,6 +18194,28 @@ fn take_gather_mode<T: Copy, const MODE: u8>(
     a_raw: &[T],
     n: i64,
 ) -> bool {
+    // ONE BOUNDS CHECK PER ELEMENT, NOT TWO. `resolve_take_index` proves `0 <= idx < n` and then
+    // `a_raw[i]` re-proves it, because LLVM cannot connect the `i64` bound it just tested to
+    // `a_raw.len()`. Folding both into a single `get` removes the duplicate compare-and-branch
+    // from the hot loop AND removes the panic path with it.
+    //
+    // The negative case folds in for free: an index still negative after the `+ n` wraparound
+    // casts to a huge `usize`, which `get` rejects exactly as the explicit `idx < 0` test did.
+    // That is only sound for MODE 0 (`raise`) - clip and wrap always resolve in range and keep
+    // the shared helper.
+    //
+    // `FNP_TAKE_GATHER=legacy` restores the two-check form so the pair can be timed in ONE
+    // process (`deadlock-audit-ddoeq`).
+    if MODE == 0 && !take_gather_is_legacy() {
+        for (slot, &idx0) in out_data.iter_mut().zip(idx_raw.iter()) {
+            let idx = if idx0 < 0 { idx0 + n } else { idx0 };
+            match a_raw.get(idx as usize) {
+                Some(&value) => *slot = value,
+                None => return false,
+            }
+        }
+        return true;
+    }
     for (slot, &idx0) in out_data.iter_mut().zip(idx_raw.iter()) {
         match resolve_take_index(idx0, n, MODE) {
             Some(i) => *slot = a_raw[i],
@@ -38441,6 +38463,16 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     Ok(Some(
         flat.call_method1(intern!(py, "reshape"), (&output_shape,))?,
     ))
+}
+
+/// Selects the FORMER two-bounds-check gather loop, so the single-check form can
+/// be A/B'd against it inside one process. Presence resolved once.
+fn take_gather_is_legacy() -> bool {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*PRESENT.get_or_init(|| std::env::var_os("FNP_TAKE_GATHER").is_some()) {
+        return false;
+    }
+    std::env::var_os("FNP_TAKE_GATHER").is_some_and(|v| v == *"legacy")
 }
 
 /// Selects the FORMER kwargs spelling of `np.take`'s output allocation, so the

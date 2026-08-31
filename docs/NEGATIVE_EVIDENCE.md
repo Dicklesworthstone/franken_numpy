@@ -66637,3 +66637,71 @@ loss below 2^18 is untouched and is NOT a parallelism problem; profile the seria
 (the per-element bounds check on `a_raw[i]` after `resolve_take_index` has already proven the
 bound is one concrete candidate).
 AGENT_NAME=BlackThrush.
+
+## 2026-08-30 — LANDED AS STRICTLY LESS WORK, NOT CLAIMED: one bounds check per gathered element instead of two; plus the `1<<18` take gate reconfirmed on a THIRD worker and the allocation win replicated (`deadlock-audit-ddoeq`)
+
+**Campaign result class:** maintenance-self-speedup
+
+Three things, and the first is deliberately **not** claimed as a speedup.
+
+### 1. THE GATHER LOOP: ONE BOUNDS CHECK, NOT TWO — landed on its counted mechanism only
+
+`resolve_take_index` proves `0 <= idx < n` and then `a_raw[i]` re-proves it, because LLVM cannot
+connect the `i64` bound just tested to `a_raw.len()`. Folding both into a single `a_raw.get(i)`
+removes the duplicate compare-and-branch AND the panic path. The negative case folds in for free:
+an index still negative after the `+ n` wraparound casts to a huge `usize`, which `get` rejects
+exactly as the explicit `idx < 0` test did. Sound only for MODE 0 (`raise`); clip and wrap always
+resolve in range and keep the shared helper.
+
+Measured (`fixmydocuments`, 16 cores, `bench_elf_sha256=993528ec517c2a60067cc697976410cfe5b72792bdc189e5050813b8971dde14`), single-check `ser` against the former `2check`, both in one process:
+
+```
+  m       single (shipped)      two-check (former)     delta
+  2^10    1.477x 1.003/0.993    1.519x 1.000/0.998     2.8% better
+  2^12    1.359x 1.001/1.000    1.428x 0.999/0.995     4.8% better
+  2^18    1.155x 0.997/0.997    1.171x 1.000/1.000     1.4% better
+  2^20    1.168x 1.011/1.009    1.146x 0.979/0.993     WORSE, and the 2check null is VOID
+```
+
+**NO RATIO IS CLAIMED.** Every one of those effects is 1.4-4.8%, i.e. sub-5%, and this campaign's
+own standing rule is that a single dual-null run cannot decide a sub-5% effect
+(`single-run-dual-null-cannot-decide-sub-5pct`) — within-run CI understates run-to-run spread by up
+to 35x. The sign favours the single check at three of four sizes with all eight nulls clean, and
+opposes it at the fourth where the comparison arm is VOID; an earlier, much noisier run on
+`vmi1149989` (26 of 32 rows VOID) had mixed signs and decides nothing either. **The change is
+landed because it is strictly less work for an identical result, not because these numbers say so.**
+
+COUNTED_MECHANISM: 2 bounds tests per gathered element replaced by 1 - the explicit `idx < 0 || idx >= n` pair plus the implicit slice-index check, against a single `get` - and the panic landing pad removed with them; at m=1048576 that is 1048576 removed compares per call.
+A/A NULL CONTROLS: 8 nulls across the four pairs above, all inside ±1.1% except the one marked
+VOID; they establish the arms were not drifting, NOT that a 1.4-4.8% effect is real.
+PARITY: **864 cells, 0 divergences**, run once per (parallel side x gather form) BEFORE any timing
+— 4 dtypes x 3 source sizes x 4 index counts x {random, negative, boundary, repeat}, plus
+out-of-range indices asserted to raise `IndexError`. The negative and out-of-range corpora are
+exactly where the folded form could have diverged, which is why the parity matrix was doubled to
+cover both gather forms rather than both parallel sides only.
+
+### 2. THE `1 << 18` GATE HOLDS ON A THIRD WORKER
+
+`vmi1149989` (10 cores, loadavg 3.53): m=2^18 serial 0.982x -> parallel **0.552x**; m=2^20 serial
+1.020x -> parallel **0.412x**; and parallel LOSES at every size below (18.960x at 2^10, 10.331x at
+2^12, 6.561x at 2^14, 4.045x at 2^16). Same shape as the two workers the gate was fitted on, on a
+machine with a third core count. `fixmydocuments` reconfirms in the run above: 2^18 0.349x, 2^20
+0.231x against serial 1.155x/1.168x.
+
+### 3. THE ALLOCATION WIN REPLICATES, AND MORE STRONGLY
+
+Same run, positional against the former kwargs spelling, all four nulls clean at both sizes:
+m=2^10 **1.477x against 1.566x** (5.7%), m=2^12 **1.359x against 1.480x** (8.2%). The first
+measurement of this put it at 2.8-6.0%; the sign replicates on a second ELF and the magnitude is
+now above the sub-5% threshold at m=2^12.
+
+VERIFICATION: `cargo clippy -j2 -p fnp-python --lib --examples -- -D warnings` exit 0;
+`cargo fmt --check` exit 0 and per-file `rustfmt --check` exit 0.
+RETRY PREDICATE: the bounds-check change needs **counted attribution by instruction diff**, not
+another wall-clock run — it is a sub-5% effect and this harness cannot decide one
+(`counted-attribution-by-instruction-diff` is the instrument that resolved `add.accumulate`'s
+residual where CIs could not). Do not re-run this A/B hoping for a cleaner host; run
+`perf stat -e instructions` on two matched single-arm probes instead. The remaining ~1.15-1.48x
+serial loss below 2^18 is still unexplained and is NOT the bounds check - removing it moved the
+ratio by at most 4.8%.
+AGENT_NAME=BlackThrush.

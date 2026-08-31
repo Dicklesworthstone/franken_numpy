@@ -51,7 +51,12 @@ out("dispatch_assert=passed incumbent=numpy.take candidate=fnp.take")
 # IndexError numpy raises - the one behaviour a parallel arm can get wrong.
 def parity():
     bad = cells = 0
-    for impl, flag in (("ser", "ser"), ("par", "par")):
+    # Both gather forms must be validated, not just both parallel sides: the single-check loop
+    # folds the "still negative after +n" case into `get`'s bounds rejection, so the negative and
+    # out-of-range corpora below are exactly where it could diverge from the two-check form.
+    for impl, flag, gather in (("ser", "ser", "single"), ("par", "par", "single"),
+                               ("ser-2check", "ser", "legacy"), ("par-2check", "par", "legacy")):
+        os.environ["FNP_TAKE_GATHER"] = gather
         os.environ["FNP_TAKE_PARALLEL"] = flag
         for dt in ("float64", "int64", "int32", "float32"):
             for n in (1, 17, 4096):
@@ -83,6 +88,7 @@ def parity():
                         bad += 1; out("  OOB DIVERGE impl=%s n=%d idx=%d numpy=%s fnp=%s"
                                       % (impl, n, bad_idx, w, g))
     os.environ.pop("FNP_TAKE_PARALLEL", None)
+    os.environ["FNP_TAKE_GATHER"] = "single"
     out("take parity: %d cells, %d divergences" % (cells, bad))
     return bad
 
@@ -91,6 +97,7 @@ def parity():
 # same first-call-wins hazard the searchsorted switches have; setting a non-"kwargs" value here
 # arms the switch while leaving the SHIPPED positional spelling in force.
 os.environ["FNP_TAKE_ALLOC"] = "positional"
+os.environ["FNP_TAKE_GATHER"] = "single"
 
 if parity():
     out("ABORTING: parity failed, a ratio would be meaningless")
@@ -142,9 +149,11 @@ def cell(label, src, idx, k):
     # `kwargs` restores the FORMER output-allocation spelling (a per-call PyDict) against the
     # shipped positional one; `ser`/`par` force the two sides of the parallel threshold. All are
     # selected per call so every comparison is inside THIS process.
-    for impl, flag in (("ser", "ser"), ("par", "par"), ("kwargs", "ser")):
+    for impl, flag in (("ser", "ser"), ("par", "par"), ("kwargs", "ser"), ("2check", "ser")):
         if impl == "kwargs":
             os.environ["FNP_TAKE_ALLOC"] = "kwargs"
+        if impl == "2check":
+            os.environ["FNP_TAKE_GATHER"] = "legacy"
         os.environ["FNP_TAKE_PARALLEL"] = flag
         tn, tf = inter("np.take(a,i)", "fnp.take(a,i)", g, k)
         n1, n2 = inter("np.take(a,i)", "np.take(a,i)", g, k)
@@ -154,6 +163,7 @@ def cell(label, src, idx, k):
         out("%-28s%-7s%14.1f%14.1f%8.3fx%8.3f%9.3f%s"
             % (label, impl, tn, tf, tf / tn, nn, nf, "" if ok else "  VOID"))
         os.environ["FNP_TAKE_ALLOC"] = "positional"
+        os.environ["FNP_TAKE_GATHER"] = "single"
     os.environ.pop("FNP_TAKE_PARALLEL", None)
     del g
 
