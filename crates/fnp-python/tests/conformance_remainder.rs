@@ -214,7 +214,9 @@ def observe(ufunc):
         warnings.simplefilter("always")
         result = ufunc(dividend, divisor)
     return (
-        result.view(np.uint64).tolist(),
+        result.dtype.str,
+        result.shape,
+        result.tobytes().hex(),
         [(warning.category.__name__, str(warning.message)) for warning in caught],
     )
 
@@ -226,8 +228,11 @@ def invalid_raise(ufunc):
             return (type(error).__name__, str(error))
     return None
 
-assert observe(fnp.fmod) == observe(np.fmod)
-assert invalid_raise(fnp.fmod) == invalid_raise(np.fmod)
+for dtype in (np.float64, np.float32, np.float16):
+    dividend = dividend.astype(dtype)
+    divisor = divisor.astype(dtype)
+    assert observe(fnp.fmod) == observe(np.fmod), dtype
+    assert invalid_raise(fnp.fmod) == invalid_raise(np.fmod), dtype
 "#
             ),
             Some(&globals),

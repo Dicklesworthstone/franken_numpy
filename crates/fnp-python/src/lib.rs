@@ -61331,6 +61331,46 @@ fn conjugate(
         .unbind())
 }
 
+// The fmod fast paths cannot reproduce NumPy's invalid-event surface for a zero
+// divisor or infinite dividend. Keep the two scans ordered: the divisor scan can
+// short-circuit before acquiring the dividend buffer, which is the established
+// finite-hot-path shape for this route.
+fn fmod_requires_numpy_exception_surface<T>(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    zero: T,
+    is_infinite: impl Fn(T) -> bool,
+) -> bool
+where
+    T: pyo3::buffer::Element + Copy + PartialEq,
+{
+    let Ok(b_buf) = PyBuffer::<T>::get(b) else {
+        return false;
+    };
+    let Some(b_slice) = b_buf.as_slice(py) else {
+        return false;
+    };
+    // SAFETY: `PyBuffer` gives a read-only, GIL-bound view; `ReadOnlyCell<T>`
+    // is transparent over `T`, as in the existing binary-buffer fast paths.
+    let b_raw: &[T] =
+        unsafe { std::slice::from_raw_parts(b_slice.as_ptr().cast::<T>(), b_slice.len()) };
+    if b_raw.contains(&zero) {
+        return true;
+    }
+
+    let Ok(a_buf) = PyBuffer::<T>::get(a) else {
+        return false;
+    };
+    let Some(a_slice) = a_buf.as_slice(py) else {
+        return false;
+    };
+    // SAFETY: same read-only `PyBuffer` contract as the divisor view above.
+    let a_raw: &[T] =
+        unsafe { std::slice::from_raw_parts(a_slice.as_ptr().cast::<T>(), a_slice.len()) };
+    a_raw.iter().copied().any(is_infinite)
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn fmod(
@@ -61349,26 +61389,8 @@ fn fmod(
         let a = args.get_item(0)?;
         let b = args.get_item(1)?;
         if numpy_dtype_is_f64(py, &a) && numpy_dtype_is_f64(py, &b) {
-            let requires_numpy_exception_surface = if let Ok(b_buf) = PyBuffer::<f64>::get(&b)
-                && let Some(b_slice) = b_buf.as_slice(py)
-            {
-                let b_raw: &[f64] = unsafe {
-                    std::slice::from_raw_parts(b_slice.as_ptr().cast::<f64>(), b_slice.len())
-                };
-                let infinite_dividend = if let Ok(a_buf) = PyBuffer::<f64>::get(&a)
-                    && let Some(a_slice) = a_buf.as_slice(py)
-                {
-                    let a_raw: &[f64] = unsafe {
-                        std::slice::from_raw_parts(a_slice.as_ptr().cast::<f64>(), a_slice.len())
-                    };
-                    a_raw.iter().any(|value| value.is_infinite())
-                } else {
-                    false
-                };
-                b_raw.contains(&0.0) || infinite_dividend
-            } else {
-                false
-            };
+            let requires_numpy_exception_surface =
+                fmod_requires_numpy_exception_surface(py, &a, &b, 0.0_f64, f64::is_infinite);
             if !requires_numpy_exception_surface
                 && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Fmod)?
             {
@@ -61379,26 +61401,8 @@ fn fmod(
         // parallel f32 kernel (lhs % rhs = IEEE fmodf, bit-identical) wins ~9x. A zero divisor or
         // infinite dividend must defer so NumPy's RuntimeWarning + NaN surface exactly; scan zero-copy.
         else if numpy_dtype_is_f32(&a) && numpy_dtype_is_f32(&b) {
-            let requires_numpy_exception_surface = if let Ok(b_buf) = PyBuffer::<f32>::get(&b)
-                && let Some(b_slice) = b_buf.as_slice(py)
-            {
-                let b_raw: &[f32] = unsafe {
-                    std::slice::from_raw_parts(b_slice.as_ptr().cast::<f32>(), b_slice.len())
-                };
-                let infinite_dividend = if let Ok(a_buf) = PyBuffer::<f32>::get(&a)
-                    && let Some(a_slice) = a_buf.as_slice(py)
-                {
-                    let a_raw: &[f32] = unsafe {
-                        std::slice::from_raw_parts(a_slice.as_ptr().cast::<f32>(), a_slice.len())
-                    };
-                    a_raw.iter().any(|value| value.is_infinite())
-                } else {
-                    false
-                };
-                b_raw.contains(&0.0) || infinite_dividend
-            } else {
-                false
-            };
+            let requires_numpy_exception_surface =
+                fmod_requires_numpy_exception_surface(py, &a, &b, 0.0_f32, f32::is_infinite);
             if !requires_numpy_exception_surface
                 && let Some(out) = try_zerocopy_f32_binary(py, &a, &b, BinaryOp::Fmod)?
             {
