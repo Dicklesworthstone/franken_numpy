@@ -66762,3 +66762,54 @@ be no host at all: the workers that can run the Python-linked bench are exactly 
 `perf`. If that intersection is empty, sub-5% effects on Python-entry routes are simply not
 attributable on this fleet, and rows should say so rather than quoting a wall-clock median.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-31 — UNDECIDABLE BY EVERY INSTRUMENT THIS FLEET HAS: the take bounds-check lever survives a 15-round sign test at 10/15 (p≈0.30), which is a coin flip — and that VINDICATES declining to claim it from a clean-null single run (`deadlock-audit-ddoeq`)
+
+**Campaign result class:** maintenance-self-speedup
+
+No claim, and this row is the reason there will not be one. Worker `vmi1293453` (8 cores, loadavg
+2.35), `bench_elf_sha256=847a31ac5b9df3b264392191258195283ca23f26338d7d3579f7f170051f4329`.
+
+### Three instruments, three failures to decide
+
+```
+  instrument                        result
+  dual-null median, single run      2.8% / 4.8% / 1.4% "better", all nulls clean at 3 of 4 sizes
+                                    -> sub-5%, and one run cannot decide sub-5% here
+  instruction diff (perf stat)      UNAVAILABLE - no perf on the rch workers (row above)
+  sign test, 15 interleaved rounds  m=2^12: 10/15   m=2^16: 9/15
+```
+
+Under the null the sign count is Binomial(15, 0.5), so **10/15 is p≈0.30 and 9/15 is p≈0.61** —
+both indistinguishable from a coin flip against the 13+/15 (p<0.02) the test was declared at
+*before* it ran. The median per-round deltas do favour the single-check form (+112.6 ns at m=2^12,
++1937.1 ns at m=2^16, the latter ~1.3% of the call) but a median is not evidence when the sign it
+came from is a coin flip.
+
+### THIS IS THE ROW THAT VALIDATES THE EARLIER CAUTION
+
+The single dual-null run showed the single-check form ahead at three of four sizes **with all eight
+nulls clean**, which is exactly the shape that invites a 2-5% claim. I declined it on the standing
+sub-5% rule. **A properly powered sign test then failed to confirm it.** So the clean nulls were
+telling the truth about drift and nothing about the effect — which is what
+`single-run-dual-null-cannot-decide-sub-5pct` says, now demonstrated prospectively on this campaign
+rather than reconstructed after a retraction.
+
+The change stays landed, unchanged and unclaimed, on its counted mechanism alone: two bounds tests
+per gathered element replaced by one, plus the panic landing pad removed, for an identical result.
+
+COUNTED_MECHANISM: 2 bounds tests per gathered element replaced by 1; at m=16384 that is 16384 removed compares per call, and the sign test still reads 10/15 - i.e. the removed work is real and below this fleet's decidability floor.
+A/A NULL CONTROLS: not applicable to a sign test and deliberately not quoted; the arms are
+interleaved WITHIN each of the 15 rounds, which is what stops a drifting host from manufacturing a
+sign, and the round order alternates.
+PARITY: 864 cells, 0 divergences, unchanged.
+VERIFICATION: `cargo fmt --check` exit 0; per-file `rustfmt --check` exit 0.
+RETRY PREDICATE: **do not attempt a fourth instrument on this cell.** Three have now failed to
+decide it and the reasons are structural, not incidental: the effect is sub-5% (kills the dual-null
+median), `perf` is absent from every worker that carries `libpython` (kills the instruction diff),
+and 15 rounds is underpowered for a ~1-3% effect (the sign test). If someone insists, the ONLY
+admissible next step is the same sign test at **R=51 or more** - at the observed 0.67 win rate that
+reaches p<0.01 around 40 rounds - and it is worth roughly 3% on a route whose standing loss is
+15-48%, so it is the wrong thing to spend a fleet slot on. The unexplained 1.15-1.48x is elsewhere
+and remains the real target.
+AGENT_NAME=BlackThrush.
