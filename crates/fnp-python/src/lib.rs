@@ -72374,7 +72374,33 @@ fn try_zerocopy_f64_sort_flat(
     if !f64_flat_sort_native_is_profitable() {
         return Ok(None); // avx512 host, or too few workers to beat numpy's SIMD qsort
     }
-    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    // THE SIZE FLOOR DECIDES FIRST, BECAUSE IT DECIDES MOST CALLS.
+    //
+    // This gate's floor is 1<<20 and it used to be tested LAST - after a dtype `char`
+    // read, an `ndim` read, a `flags.c_contiguous` read (which constructs a numpy flagsobj)
+    // and a FULL `PyBuffer` EXPORT. Every one of those is work done to learn something the
+    // element count already settles, and a small `np.sort` pays all of it to be declined.
+    // The int sibling `try_native_int_sort_flat` already reads its length first for exactly
+    // this reason, with the profile to back it: at n=256 that route was 3566 ns of which
+    // 2074 (58.2%) was the Python entry and only 1092 the sort itself.
+    //
+    // `len()` NOT `size`: one `PyObject_Length` against a getattr plus an extract. For any
+    // operand that could ever PASS this gate they are the same number - the gate requires
+    // `ndim == 1`, so `len(a)` IS the element count and IS `cells.len()` below - and every
+    // operand for which they differ (`ndim > 1`) is declined by the `ndim` test anyway. A
+    // 0-d array makes `len()` raise, which maps to the same decline the `ndim != 1` test
+    // gave it before.
+    const SORT_PARALLEL_MIN: usize = 1 << 20;
+    let Ok(len) = a.len() else {
+        return Ok(None);
+    };
+    if len < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    if !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
@@ -72402,8 +72428,9 @@ fn try_zerocopy_f64_sort_flat(
     // thinkstation1 at 32 workers vs live NumPy 2.4.3: 1M 10.29->5.4ms (1.91x),
     // 2M 21.10->9.4 (2.24x), 4M 43.09->18.3 (2.35x), 8M 126.07->36.6 (3.44x),
     // 16M 266.43->64.5 (4.13x). Still a win at the existing floor, so it stands.
-    const SORT_PARALLEL_MIN: usize = 1 << 20;
-    if n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    // The floor was already applied above, off the buffer path; this re-states it against
+    // the buffer's own count so the kernel below can never run under it.
+    if n < SORT_PARALLEL_MIN {
         return Ok(None);
     }
     use rayon::prelude::*;
@@ -78586,7 +78613,22 @@ fn try_zerocopy_f64_argsort_flat(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    // THE SIZE FLOOR DECIDES FIRST - the same lever as the `sort` sibling, and for the same
+    // reason: this gate declined below its floor only AFTER a dtype read, an `ndim` read, a
+    // `flags.c_contiguous` read and a full `PyBuffer` export. `len()` is one
+    // `PyObject_Length`, and for any operand that could pass this gate (`ndim == 1`) it is
+    // exactly `cells.len()`; a 0-d array raises and declines exactly as `ndim != 1` did.
+    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
+    let Ok(len) = a.len() else {
+        return Ok(None);
+    };
+    if len < ARGSORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    if !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
@@ -78604,8 +78646,7 @@ fn try_zerocopy_f64_argsort_flat(
         return Ok(None);
     };
     let n = cells.len();
-    const ARGSORT_PARALLEL_MIN: usize = ARGSORT_NATIVE_MIN_N;
-    if n < ARGSORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    if n < ARGSORT_PARALLEL_MIN {
         return Ok(None);
     }
     use rayon::prelude::*;
@@ -89753,6 +89794,30 @@ fn sum(
     }
     // Passthrough to NumPy for everything else.
     let sum_fn = numpy.getattr(intern!(py, "sum"))?;
+    // THE BARE `np.sum(a)` DELEGATES WITHOUT BUILDING A KEYWORD DICT AT ALL.
+    //
+    // Below this point every optional is folded into a fresh `PyDict` and the call is made
+    // WITH keywords - and for the commonest delegating form, `fnp.sum(a)` on an array too
+    // small for any native route, that dict is EMPTY. So the call allocated a dict, filled
+    // it with nothing, and then went through CPython's keyword-call path to pass it. This
+    // is the small-n entry tax measured at +495 ns/call on a route whose whole native
+    // decision above is two attribute reads.
+    //
+    // EXACTLY EQUIVALENT, not merely similar: each `set_item` below is already conditional
+    // on its argument being present, and `KeepdimsArg::NotGiven` already sets nothing. So
+    // when all of them are absent the dict this builds IS empty, and `f(a)` and `f(a, **{})`
+    // call the same function with the same arguments. The guard tests ABSENCE, never an
+    // explicit `None` - `fnp.sum(a, axis=None)` still takes the dict path and forwards
+    // `axis=None` verbatim, exactly as before.
+    if axis.is_none()
+        && dtype.is_none()
+        && out.is_none()
+        && initial.is_none()
+        && matches!(keepdims, KeepdimsArg::NotGiven)
+        && kwargs.is_none_or(|kw| kw.is_empty())
+    {
+        return Ok(sum_fn.call1((a.bind(py),))?.unbind());
+    }
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
         kw.set_item(intern!(py, "axis"), ax.bind(py))?;
