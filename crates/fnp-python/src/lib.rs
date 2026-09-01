@@ -35996,7 +35996,22 @@ fn hypot(
 }
 
 #[pyfunction]
-fn ldexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (x1, x2, *out))]
+fn ldexp(
+    py: Python<'_>,
+    x1: Py<PyAny>,
+    x2: Py<PyAny>,
+    out: &Bound<'_, PyTuple>,
+) -> PyResult<Py<PyAny>> {
+    // Two inputs, one positional output: `np.ldexp(x1, x2, out)`.
+    if !out.is_empty() {
+        return numpy_ufunc_with_positional_out(
+            py,
+            intern!(py, "ldexp"),
+            &[x1.bind(py), x2.bind(py)],
+            out,
+        );
+    }
     // Fast path covers the common (float64 mantissa, int32 exponent) case.
     if let Some(out) = try_zerocopy_f64_i32_ldexp(py, x1.bind(py), x2.bind(py))? {
         return Ok(out);
@@ -36439,7 +36454,14 @@ fn try_zerocopy_f16_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
 }
 
 #[pyfunction]
-fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (x, *out))]
+fn frexp(py: Python<'_>, x: Py<PyAny>, out: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+    // `np.frexp(x, mantissa_out, exponent_out)` is the ufunc convention, not a convenience
+    // (`deadlock-audit-ufunc-positional-out-refused-f3cgu`). No native path here writes into a
+    // caller's buffer, so any positional output delegates the whole call.
+    if !out.is_empty() {
+        return numpy_ufunc_with_positional_out(py, intern!(py, "frexp"), &[x.bind(py)], out);
+    }
     if let Some(out) = try_zerocopy_f64_frexp(py, x.bind(py))? {
         return Ok(out);
     }
@@ -36734,7 +36756,12 @@ fn try_zerocopy_f16_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
 }
 
 #[pyfunction]
-fn modf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (x, *out))]
+fn modf(py: Python<'_>, x: Py<PyAny>, out: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+    // Two outputs, both positional in numpy's convention: `np.modf(x, frac_out, int_out)`.
+    if !out.is_empty() {
+        return numpy_ufunc_with_positional_out(py, intern!(py, "modf"), &[x.bind(py)], out);
+    }
     if let Some(out) = try_zerocopy_f64_modf(py, x.bind(py))? {
         return Ok(out);
     }
@@ -72067,19 +72094,36 @@ fn unstack(py: Python<'_>, x: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axes))]
-fn permute_dims(py: Python<'_>, a: Py<PyAny>, axes: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, axes=None))]
+fn permute_dims(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // `axes` IS OPTIONAL IN NUMPY - `np.permute_dims(a)` reverses the axes, exactly as
+    // `np.transpose(a)` does, and we answered that call with `TypeError: permute_dims()
+    // missing 1 required positional argument: 'axes'`
+    // (`deadlock-audit-ufunc-positional-out-refused-f3cgu`). Omitting the argument entirely
+    // rather than forwarding None keeps numpy's own default, whatever it is per version.
     let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "permute_dims"))?
-        .call1((a.bind(py), axes.bind(py)))?
-        .unbind())
+    let permute = numpy.getattr(intern!(py, "permute_dims"))?;
+    Ok(match axes {
+        Some(axes) => permute.call1((a.bind(py), axes.bind(py)))?,
+        None => permute.call1((a.bind(py),))?,
+    }
+    .unbind())
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2, /, *, axis=-1_i64))]
-fn vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (x1, x2, *out, axis=-1_i64))]
+fn vecdot(
+    py: Python<'_>,
+    x1: Py<PyAny>,
+    x2: Py<PyAny>,
+    out: &Bound<'_, PyTuple>,
+    axis: i64,
+) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    // numpy's gufunc signature is `vecdot(x1, x2, /, out=None, *, axis=-1, ...)`, so the third
+    // POSITIONAL argument is `out` and our fixed arity refused it
+    // (`deadlock-audit-ufunc-positional-out-refused-f3cgu`). This whole function already
+    // delegates, so forwarding the outputs positionally is the entire fix.
     let kwargs = PyDict::new(py);
     // Same empirically-confirmed default as `linalg_vecdot` above: numpy's vecdot
     // defaults to axis=-1, and `inspect.signature` cannot say so because it is a gufunc
@@ -72087,9 +72131,11 @@ fn vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<P
     if axis != -1 {
         kwargs.set_item(intern!(py, "axis"), axis)?;
     }
+    let mut arguments: Vec<Bound<'_, PyAny>> = vec![x1.bind(py).clone(), x2.bind(py).clone()];
+    arguments.extend(out.iter());
     Ok(numpy
         .getattr(intern!(py, "vecdot"))?
-        .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
+        .call(PyTuple::new(py, arguments)?, Some(&kwargs))?
         .unbind())
 }
 
@@ -89451,6 +89497,31 @@ fn core_numpy_passthrough_interned(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
+}
+
+/// Delegates a ufunc call that carries POSITIONAL OUTPUTS, forwarding them verbatim.
+///
+/// NumPy's ufunc calling convention takes outputs positionally after the inputs -
+/// `np.frexp(x, out1, out2)`, `np.divmod(a, b, out1, out2)`, `np.bitwise_count(x, out)` -
+/// and ours were `#[pyfunction]`s of fixed arity, so every such call answered with
+/// `TypeError: frexp() takes 1 positional arguments but 2 were given` on a call numpy
+/// performs (`deadlock-audit-ufunc-positional-out-refused-f3cgu`). None of our native paths
+/// writes into a caller-supplied buffer, so the whole call delegates: numpy owns `out`'s
+/// semantics - the write, the dtype/shape checking, and returning `out` itself - and gets
+/// them exactly right.
+fn numpy_ufunc_with_positional_out(
+    py: Python<'_>,
+    name: &Bound<'_, PyString>,
+    inputs: &[&Bound<'_, PyAny>],
+    out: &Bound<'_, PyTuple>,
+) -> PyResult<Py<PyAny>> {
+    let mut arguments: Vec<Bound<'_, PyAny>> =
+        inputs.iter().map(|input| (*input).clone()).collect();
+    arguments.extend(out.iter());
+    Ok(cached_numpy(py)?
+        .getattr(name)?
+        .call1(PyTuple::new(py, arguments)?)?
+        .unbind())
 }
 
 /// Generates a cached accessor for one `numpy` attribute.
@@ -108447,14 +108518,29 @@ fn try_zerocopy_bitwise_count(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, **kwargs))]
+#[pyo3(signature = (x, *out, **kwargs))]
 fn bitwise_count(
     py: Python<'_>,
     x: Py<PyAny>,
+    out: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Fast path: use native implementation for integer types
     let numpy = cached_numpy(py)?;
+
+    // One input, one positional output: `np.bitwise_count(x, out)`. The kwargs bail-out below
+    // already covered `out=`; only the POSITIONAL form raised. Forwarded WITH kwargs, since
+    // the two can be combined.
+    if !out.is_empty() {
+        let mut arguments: Vec<Bound<'_, PyAny>> = vec![x.bind(py).clone()];
+        arguments.extend(out.iter());
+        return core_numpy_passthrough_interned(
+            py,
+            intern!(py, "bitwise_count"),
+            &PyTuple::new(py, arguments)?,
+            kwargs,
+        );
+    }
 
     // Fall back if kwargs are provided
     if kwargs.is_some_and(|k| !k.is_empty()) {
@@ -112995,8 +113081,22 @@ fn try_zerocopy_f64_divmod(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn divmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (x1, x2, *out))]
+fn divmod(
+    py: Python<'_>,
+    x1: Py<PyAny>,
+    x2: Py<PyAny>,
+    out: &Bound<'_, PyTuple>,
+) -> PyResult<Py<PyAny>> {
+    // Two inputs, two positional outputs: `np.divmod(a, b, quotient_out, remainder_out)`.
+    if !out.is_empty() {
+        return numpy_ufunc_with_positional_out(
+            py,
+            intern!(py, "divmod"),
+            &[x1.bind(py), x2.bind(py)],
+            out,
+        );
+    }
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(numpy
@@ -146495,7 +146595,12 @@ mod tests {
 
             let x1 = numeric_array(py, vec![0.5, 1.5, -2.0], "float64");
             let x2 = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
-            let actual = ldexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = ldexp(
+                py,
+                x1.clone().unbind(),
+                x2.clone().unbind(),
+                &PyTuple::empty(py),
+            )?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("ldexp")?.call1((x1, x2))?;
@@ -146520,7 +146625,12 @@ mod tests {
 
             let x1 = numeric_array(py, vec![vec![0.0, -0.0], vec![0.5, -1.5]], "float64");
             let x2 = numeric_array(py, vec![1_i64, 2_i64], "int64");
-            let actual = ldexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = ldexp(
+                py,
+                x1.clone().unbind(),
+                x2.clone().unbind(),
+                &PyTuple::empty(py),
+            )?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("ldexp")?.call1((x1, x2))?;
@@ -146547,7 +146657,12 @@ mod tests {
             let x1 = numeric_array(py, vec![1.0], "float64");
             let x2 = numeric_array(py, vec![1.5], "float64");
 
-            let actual = ldexp(py, x1.clone().unbind(), x2.clone().unbind());
+            let actual = ldexp(
+                py,
+                x1.clone().unbind(),
+                x2.clone().unbind(),
+                &PyTuple::empty(py),
+            );
             assert!(actual.is_err(), "ldexp should reject float exponents");
 
             let numpy = py.import("numpy")?;
@@ -146744,7 +146859,7 @@ mod tests {
             }
 
             let x = numeric_array(py, vec![0.0, 1.0, -2.5, 8.0], "float64");
-            let actual = frexp(py, x.clone().unbind())?;
+            let actual = frexp(py, x.clone().unbind(), &PyTuple::empty(py))?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("frexp")?.call1((x,))?;
@@ -146801,7 +146916,7 @@ mod tests {
                 vec![vec![0.0, -0.0], vec![f64::INFINITY, f64::NAN]],
                 "float64",
             );
-            let actual = frexp(py, x.clone().unbind())?;
+            let actual = frexp(py, x.clone().unbind(), &PyTuple::empty(py))?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("frexp")?.call1((x,))?;
@@ -146852,7 +146967,7 @@ mod tests {
             }
 
             let x = numeric_array(py, vec![0.0, -0.0, 1.5, -2.5], "float64");
-            let actual = modf(py, x.clone().unbind())?;
+            let actual = modf(py, x.clone().unbind(), &PyTuple::empty(py))?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("modf")?.call1((x,))?;
@@ -146890,7 +147005,7 @@ mod tests {
                 vec![vec![f64::INFINITY, f64::NEG_INFINITY], vec![f64::NAN, -0.0]],
                 "float64",
             );
-            let actual = modf(py, x.clone().unbind())?;
+            let actual = modf(py, x.clone().unbind(), &PyTuple::empty(py))?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("modf")?.call1((x,))?;
@@ -146939,7 +147054,7 @@ mod tests {
                 "int64",
             ] {
                 let x = numeric_array(py, vec![1.5_f64, 2.5, 3.0, 6.25], dtype);
-                let actual = modf(py, x.clone().unbind())?;
+                let actual = modf(py, x.clone().unbind(), &PyTuple::empty(py))?;
                 let expected = numpy.getattr("modf")?.call1((x,))?;
                 let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
                 let expected_tuple = expected.cast::<PyTuple>()?;
@@ -146965,7 +147080,7 @@ mod tests {
                 "int64",
             ] {
                 let x = numeric_array(py, vec![1.5_f64, 2.5, 3.0, 6.25], dtype);
-                let actual = frexp(py, x.clone().unbind())?;
+                let actual = frexp(py, x.clone().unbind(), &PyTuple::empty(py))?;
                 let expected = numpy.getattr("frexp")?.call1((x,))?;
                 let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
                 let expected_tuple = expected.cast::<PyTuple>()?;
