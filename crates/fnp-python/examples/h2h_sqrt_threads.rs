@@ -61,8 +61,8 @@ out("host", os.uname().nodename, "| loadavg", [round(x, 2) for x in os.getloadav
 out("cpus", os.cpu_count(), "| RAYON_NUM_THREADS env", os.environ.get("RAYON_NUM_THREADS", "(unset)"))
 out("NOTE thread count is set by an installed rayon ThreadPool, not by the environment.")
 rng = np.random.default_rng(SEED)
-BASE = np.abs(rng.standard_normal(1 << 24)) + 0.5
-SIZES = [1 << 20, 1 << 21, 1 << 22, 1 << 23, 1 << 24]
+BASE = np.abs(rng.standard_normal(1 << 21)) + 0.5
+SIZES = [1 << 17, 1 << 18, 1 << 19, 1 << 20, 1 << 21]
 
 def inter(sa, sb, g, k, rounds=4):
     ta, tb = [], []
@@ -149,7 +149,7 @@ fn main() -> PyResult<()> {
     // not reproduce. `fnp.sqrt(np.abs(a))` won at every thread count from 1 to 64 (0.61x-0.92x),
     // and the single row that read as a loss (1.125x) was the FIRST cell of the process, whose
     // numpy arm ran 35% faster than that same arm's steady state in all 20 later rows.
-    let mut threads: Vec<usize> = vec![cores, 8, 1];
+    let mut threads: Vec<usize> = vec![cores, 16, 8, 4, 2, 1];
     threads.dedup();
     threads.retain(|&t| t <= cores);
     let globals: Py<PyDict> = Python::attach(|py| -> PyResult<Py<PyDict>> {
