@@ -78239,6 +78239,20 @@ fn sort(
         let mut axis_spec: Option<Option<isize>> = None; // outer None = "axis" kwarg missing
         let mut kind_spec: Option<String> = None;
         let mut order_spec: Option<Bound<'_, PyAny>> = None;
+        // THE SAME CLASSIFICATION, RUN TWICE PER CALL. `numeric_operand_facts` is the entry
+        // classifier for BOTH gate families below - the structured-dtype pair reads `kind == 'V'`
+        // and the fifteen dtype-specific gates read the same (kind, itemsize, rank) - and each
+        // block called it for itself. On the commonest operand, a plain contiguous numeric array,
+        // that is two `is_exact_instance` checks and two `ndim`/`dtype` reads to learn one set of
+        // facts. Holding the first block's answer lets the second reuse it. `argsort`'s twin has
+        // no structured-dtype block and so calls the classifier once already.
+        //
+        // REUSED ONLY WHEN IT STILL DESCRIBES THE OPERAND. The second block may replace `a` with
+        // a RAVEL of itself for the `axis=None` form, and that changes `rank` - so the reuse is
+        // conditioned on the ravel not having fired, and the ravelled array is re-classified as
+        // before. `None` here means the first block never ran (an unrecognised kwarg), in which
+        // case nothing is cached and the second block classifies exactly as it did.
+        let mut struct_gate_facts: Option<Option<NumericOperandFacts>> = None;
         if let Some(kw) = kwargs {
             for (k, v) in kw.iter() {
                 if k.extract::<String>().ok().as_deref() == Some("axis") {
@@ -78283,8 +78297,9 @@ fn sort(
             // float keys); all-integer records fall through to the fast numpy.lexsort radix path below.
             // Both struct gates require a STRUCTURED dtype (kind 'V'); one classification
             // keeps a plain numeric operand out of them (`deadlock-audit-gxmih`).
-            let struct_possible =
-                numeric_operand_facts(py, &a)?.is_none_or(|facts| facts.kind == 'V');
+            let facts = numeric_operand_facts(py, &a)?;
+            struct_gate_facts = Some(facts);
+            let struct_possible = facts.is_none_or(|facts| facts.kind == 'V');
             if struct_possible
                 && order_spec.is_none()
                 && let Some(out) = try_native_struct_sort_valuelex(py, numpy, &a, axis_spec)?
@@ -78310,13 +78325,13 @@ fn sort(
             // byte-exact by construction: numpy's axis=None result IS its result on
             // the ravel, engaged natively or delegated. (Input-form audit: this form
             // previously delegated wholesale - flat kernels enforce ndim == 1.)
-            let a = if matches!(axis_spec, Some(None))
+            let ravelled = matches!(axis_spec, Some(None))
                 && a.is_exact_instance(cached_ndarray_type(py)?)
                 && a.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
                 && a.getattr(intern!(py, "flags"))?
                     .getattr(intern!(py, "c_contiguous"))?
-                    .extract::<bool>()?
-            {
+                    .extract::<bool>()?;
+            let a = if ravelled {
                 a.call_method1(intern!(py, "reshape"), (-1,))?
             } else {
                 a
@@ -78333,7 +78348,10 @@ fn sort(
             //
             // `None` means "not an exact ndarray" - every gate declines those anyway, but
             // the classifier cannot prove it, so those operands walk the chain unchanged.
-            let facts = numeric_operand_facts(py, &a)?;
+            let facts = match struct_gate_facts {
+                Some(cached) if !ravelled => cached,
+                _ => numeric_operand_facts(py, &a)?,
+            };
             let kind_is = |k: char| facts.is_none_or(|f| f.kind == k);
             let float_of = |size: usize| facts.is_none_or(|f| f.kind == 'f' && f.itemsize == size);
             let complex_of =
