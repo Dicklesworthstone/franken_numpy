@@ -23667,8 +23667,16 @@ fn vectorize(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, bins, right=false))]
-fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (x, bins, right=None))]
+fn digitize(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    bins: Py<PyAny>,
+    right: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // numpy reads `right` for TRUTHINESS
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let right = truthy_flag(right)?;
     // Fast branchless binary-search path for an increasing-bins, matched-dtype
     // array x — skips the cold extract→UFuncArray path (~1.4-2.3x slower).
     if let Some(out) = try_zerocopy_digitize(py, x.bind(py), bins.bind(py), right)? {
@@ -27478,13 +27486,16 @@ fn expand_dims(py: Python<'_>, a: Py<PyAny>, axis: Py<PyAny>) -> PyResult<Py<PyA
 }
 
 #[pyfunction]
-#[pyo3(signature = (array, shape, subok=false))]
+#[pyo3(signature = (array, shape, subok=None))]
 fn broadcast_to(
     py: Python<'_>,
     array: Py<PyAny>,
     shape: Py<PyAny>,
-    subok: bool,
+    subok: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy reads `subok` for TRUTHINESS
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let subok = truthy_flag(subok)?;
     // Delegate to NumPy so broadcasting rules, readonly-view behavior,
     // dtype preservation, and incompatible-shape errors all match exactly.
     let numpy = cached_numpy(py)?;
@@ -46248,19 +46259,25 @@ fn cov_gram_should_delegate(
 #[pyfunction]
 // `dtype` is KEYWORD-ONLY in numpy (it sits after the `*`), so it takes the same
 // spelling here rather than becoming an eighth positional slot.
-#[pyo3(signature = (m, y=None, rowvar=true, bias=false, ddof=None, fweights=None, aweights=None, *, dtype=None))]
+#[pyo3(signature = (m, y=None, rowvar=true, bias=None, ddof=None, fweights=None, aweights=None, *, dtype=None))]
 #[allow(clippy::too_many_arguments)]
 fn cov(
     py: Python<'_>,
     m: Py<PyAny>,
     y: Option<Py<PyAny>>,
     rowvar: bool,
-    bias: bool,
+    bias: Option<&Bound<'_, PyAny>>,
     ddof: Option<Py<PyAny>>,
     fweights: Option<Py<PyAny>>,
     aweights: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy reads `bias` for TRUTHINESS
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`). `rowvar` DEFAULTS TO TRUE and
+    // therefore cannot take this treatment: PyO3 collapses an omitted argument and an explicit
+    // `None` into the same value, and numpy reads an explicit `None` as falsy, so matching it
+    // needs a distinct sentinel rather than a wider type.
+    let bias = truthy_flag(bias)?;
     let numpy = cached_numpy(py)?;
     // INT/BOOL input (dtype-gap audit): numpy's cov converts to
     // result_type(m, f64) BEFORE any arithmetic, so astype(f64) first is
@@ -57204,9 +57221,9 @@ fn try_native_datetime_setop(
     let ib = ar2.call_method1(intern!(py, "view"), ("int64",))?.unbind();
     let r = match op {
         DtSetOp::Union => union1d(py, ia, ib)?,
-        DtSetOp::Intersect => intersect1d(py, ia, ib, false, false)?,
-        DtSetOp::Setdiff => setdiff1d(py, ia, ib, false)?,
-        DtSetOp::Setxor => setxor1d(py, ia, ib, false)?,
+        DtSetOp::Intersect => intersect1d(py, ia, ib, None, None)?,
+        DtSetOp::Setdiff => setdiff1d(py, ia, ib, None)?,
+        DtSetOp::Setxor => setxor1d(py, ia, ib, None)?,
     };
     // View the int64 sorted-unique result back to the original M8/m8[unit].
     Ok(Some(
@@ -57239,14 +57256,18 @@ fn setop_flatten_view<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (ar1, ar2, assume_unique=false, return_indices=false))]
+#[pyo3(signature = (ar1, ar2, assume_unique=None, return_indices=None))]
 fn intersect1d(
     py: Python<'_>,
     ar1: Py<PyAny>,
     ar2: Py<PyAny>,
-    assume_unique: bool,
-    return_indices: bool,
+    assume_unique: Option<&Bound<'_, PyAny>>,
+    return_indices: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy reads both flags for TRUTHINESS
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let assume_unique = truthy_flag(assume_unique)?;
+    let return_indices = truthy_flag(return_indices)?;
     // Native intersect1d via UFuncArray::intersect1d for matched-dtype
     // real numeric inputs with assume_unique=false and
     // return_indices=false. Falls back to np.intersect1d when either
@@ -57424,13 +57445,16 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
-#[pyo3(signature = (ar1, ar2, assume_unique=false))]
+#[pyo3(signature = (ar1, ar2, assume_unique=None))]
 fn setdiff1d(
     py: Python<'_>,
     ar1: Py<PyAny>,
     ar2: Py<PyAny>,
-    assume_unique: bool,
+    assume_unique: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy reads `assume_unique` for TRUTHINESS
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let assume_unique = truthy_flag(assume_unique)?;
     // Native setdiff1d via UFuncArray::setdiff1d. Falls back to numpy
     // when assume_unique=true (subtly different semantics preserving
     // order) or for complex / mixed-dtype / integer-sidecar inputs.
@@ -57521,13 +57545,16 @@ fn setdiff1d(
 }
 
 #[pyfunction]
-#[pyo3(signature = (ar1, ar2, assume_unique=false))]
+#[pyo3(signature = (ar1, ar2, assume_unique=None))]
 fn setxor1d(
     py: Python<'_>,
     ar1: Py<PyAny>,
     ar2: Py<PyAny>,
-    assume_unique: bool,
+    assume_unique: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy reads `assume_unique` for TRUTHINESS
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let assume_unique = truthy_flag(assume_unique)?;
     // Native setxor1d via UFuncArray::setxor1d. Falls back to numpy
     // when assume_unique=true or when dtype coercion/error behavior
     // belongs to numpy's object/string/complex dispatch.
@@ -57616,15 +57643,19 @@ fn setxor1d(
 }
 
 #[pyfunction]
-#[pyo3(signature = (element, test_elements, assume_unique=false, invert=false, kind=None))]
+#[pyo3(signature = (element, test_elements, assume_unique=None, invert=None, kind=None))]
 fn isin(
     py: Python<'_>,
     element: Py<PyAny>,
     test_elements: Py<PyAny>,
-    assume_unique: bool,
-    invert: bool,
+    assume_unique: Option<&Bound<'_, PyAny>>,
+    invert: Option<&Bound<'_, PyAny>>,
     kind: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy reads both flags for TRUTHINESS
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let assume_unique = truthy_flag(assume_unique)?;
+    let invert = truthy_flag(invert)?;
     // Native isin via UFuncArray::isin for matched-dtype real numeric
     // inputs with assume_unique=false and kind=None. Falls back to numpy
     // for complex / integer-sidecar / mixed-dtype inputs and for the
@@ -59333,15 +59364,18 @@ fn try_native_c128_intersect_setdiff(
 // through our native isin on a raveled ar1: isin preserves the operand shape, so
 // a 1-D input yields the exact 1-D in1d result while reusing isin's fast paths.
 #[pyfunction]
-#[pyo3(signature = (ar1, ar2, assume_unique=false, invert=false, kind=None))]
+#[pyo3(signature = (ar1, ar2, assume_unique=None, invert=None, kind=None))]
 fn in1d(
     py: Python<'_>,
     ar1: Py<PyAny>,
     ar2: Py<PyAny>,
-    assume_unique: bool,
-    invert: bool,
+    assume_unique: Option<&Bound<'_, PyAny>>,
+    invert: Option<&Bound<'_, PyAny>>,
     kind: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // The flags are forwarded to `isin` UNINTERPRETED, so in1d inherits numpy's truthiness
+    // rule from the one place that applies it
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
     let numpy = cached_numpy(py)?;
     let ar1_flat = numpy
         .getattr(intern!(py, "asarray"))?
@@ -59881,9 +59915,17 @@ fn try_zerocopy_f64_vander(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, N=None, increasing=false))]
+#[pyo3(signature = (x, N=None, increasing=None))]
 #[allow(non_snake_case)]
-fn vander(py: Python<'_>, x: Py<PyAny>, N: Option<usize>, increasing: bool) -> PyResult<Py<PyAny>> {
+fn vander(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    N: Option<usize>,
+    increasing: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    // numpy reads `increasing` for TRUTHINESS
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let increasing = truthy_flag(increasing)?;
     // Native fused cumulative-product path for f64 1-D x; numpy's broadcast +
     // multiply.accumulate is far slower. Other dtypes/shapes fall through so width
     // selection, increasing-order columns, int64 dtype preservation, and 1-D
@@ -61635,8 +61677,10 @@ fn try_zerocopy_complex_angle(
 }
 
 #[pyfunction]
-#[pyo3(signature = (z, deg=false))]
-fn angle(py: Python<'_>, z: Py<PyAny>, deg: bool) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (z, deg=None))]
+fn angle(py: Python<'_>, z: Py<PyAny>, deg: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+    // numpy reads `deg` for TRUTHINESS (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let deg = truthy_flag(deg)?;
     let numpy = cached_numpy(py)?;
     // Native zero-copy parallel path for complex128 ndarrays (arctan2 stencil); other
     // dtypes / scalars / 0-d / non-contiguous defer to numpy below.
@@ -64391,13 +64435,16 @@ fn tile(py: Python<'_>, A: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a1, a2, equal_nan=false))]
+#[pyo3(signature = (a1, a2, equal_nan=None))]
 fn array_equal(
     py: Python<'_>,
     a1: Py<PyAny>,
     a2: Py<PyAny>,
-    equal_nan: bool,
+    equal_nan: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy reads `equal_nan` for TRUTHINESS - `np.array_equal(a, b, 0)` is an ordinary call
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let equal_nan = truthy_flag(equal_nan)?;
     // Native array_equal via UFuncArray::array_equal_nan. Falls back to
     // numpy for complex / integer-sidecar / mixed-dtype / non-numeric
     // inputs so numpy's dispatch surface (object arrays, strings, etc.)
@@ -76570,7 +76617,10 @@ fn try_native_datetime_isin(
         .call_method1(intern!(py, "view"), ("int64",))?
         .unbind();
     let it = test.call_method1(intern!(py, "view"), ("int64",))?.unbind();
-    Ok(Some(isin(py, ie, it, false, invert, None)?))
+    // `isin`'s flags now take numpy's truthiness rule, so a Rust bool is handed over as the
+    // Python object it means (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let invert_flag = PyBool::new(py, invert).to_owned().into_any();
+    Ok(Some(isin(py, ie, it, None, Some(&invert_flag), None)?))
 }
 
 // float16 unique/isin/searchsorted via EXACT float32 widening. numpy has no f16 SIMD -> it converts f16 per
@@ -76718,7 +76768,8 @@ fn try_native_f16_isin(
     let t32 = test
         .call_method1(intern!(py, "astype"), ("float32",))?
         .unbind();
-    Ok(Some(isin(py, e32, t32, false, invert, None)?))
+    let invert_flag = PyBool::new(py, invert).to_owned().into_any();
+    Ok(Some(isin(py, e32, t32, None, Some(&invert_flag), None)?))
 }
 
 fn try_native_f16_searchsorted(
@@ -76950,9 +77001,9 @@ fn try_native_f16_setop(
         .unbind();
     let r = match op {
         DtSetOp::Union => union1d(py, a32, b32)?,
-        DtSetOp::Intersect => intersect1d(py, a32, b32, false, false)?,
-        DtSetOp::Setdiff => setdiff1d(py, a32, b32, false)?,
-        DtSetOp::Setxor => setxor1d(py, a32, b32, false)?,
+        DtSetOp::Intersect => intersect1d(py, a32, b32, None, None)?,
+        DtSetOp::Setdiff => setdiff1d(py, a32, b32, None)?,
+        DtSetOp::Setxor => setxor1d(py, a32, b32, None)?,
     };
     Ok(Some(
         r.bind(py)
@@ -89497,6 +89548,27 @@ fn core_numpy_passthrough_interned(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
+}
+
+/// Reads a flag argument the way NumPy does: by TRUTHINESS, not by type.
+///
+/// `np.array_equal(a, b, 0)`, `np.isin(a, b, 0)` and `np.broadcast_to(a, 3, 0)` are ordinary
+/// calls - numpy writes `if equal_nan:`, never `isinstance(equal_nan, bool)` - and a `bool`
+/// parameter answered all of them with `TypeError: argument 'equal_nan': 'int' object is not
+/// an instance of 'bool'` (`deadlock-audit-strict-scalar-argument-typing-soeis`, 55 measured
+/// cells). `is_truthy` reproduces numpy's rule exactly, including its ValueError on a
+/// multi-element array ("truth value of an array ... is ambiguous").
+///
+/// ONLY FOR FLAGS WHOSE DEFAULT IS FALSE. PyO3 collapses an omitted argument and an
+/// explicitly passed `None` into the same `Option::None`, and numpy treats an explicit `None`
+/// as FALSY - so a flag defaulting to TRUE (`rowvar`, `copy`) cannot be expressed this way
+/// without a distinct sentinel, and keeps its strict parameter until it gets the three-state
+/// treatment.
+fn truthy_flag(value: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+    match value {
+        Some(value) => value.is_truthy(),
+        None => Ok(false),
+    }
 }
 
 /// Delegates a ufunc call that carries POSITIONAL OUTPUTS, forwarding them verbatim.
@@ -134335,7 +134407,7 @@ mod tests {
             let values = numeric_array(py, vec![0.2, 6.4, 3.0, 1.6], "float64");
             let bins = numeric_array(py, vec![0.0, 1.0, 2.5, 4.0, 10.0], "float64");
 
-            let actual = digitize(py, values.clone().unbind(), bins.clone().unbind(), false)?;
+            let actual = digitize(py, values.clone().unbind(), bins.clone().unbind(), None)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("digitize")?.call1((values, bins))?;
 
@@ -134365,7 +134437,12 @@ mod tests {
             let values = numeric_array(py, vec![9.0, 5.0, 0.5], "float64");
             let bins = numeric_array(py, vec![10.0, 6.0, 3.0, 0.0], "float64");
 
-            let actual = digitize(py, values.clone().unbind(), bins.clone().unbind(), true)?;
+            let actual = digitize(
+                py,
+                values.clone().unbind(),
+                bins.clone().unbind(),
+                Some(&pyo3::types::PyBool::new(py, true).to_owned().into_any()),
+            )?;
             let numpy = py.import("numpy")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("right", true)?;
@@ -134490,7 +134567,7 @@ mod tests {
             let values = numeric_array(py, vec![large, large + 1], "uint64");
             let bins = numeric_array(py, vec![large - 1, large, large + 2], "uint64");
 
-            let actual = digitize(py, values.clone().unbind(), bins.clone().unbind(), false)?;
+            let actual = digitize(py, values.clone().unbind(), bins.clone().unbind(), None)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("digitize")?.call1((values, bins))?;
 
