@@ -12,6 +12,14 @@
 //! fix from too few cells, and the same trap is open here in the op dimension.
 //!
 //! Sizes are dense between 2^8 and 2^15 because that is where the sweep put the crossings.
+//!
+//! SIZES and OPS are meant to be RETARGETED per question - this file has already been pointed at
+//! the small-n unary band, at the large-n predicate band, and at the sum/mean crossover, and the
+//! committed configuration is just the broadest of those. `rounds=8` is the default because the
+//! 8 MiB band needs it: at exactly 2^20 f64, `sum`'s own incumbent arm measured a 268.5% spread
+//! on an otherwise quiet hz4, so cells there are not decidable at any round count and must not be
+//! ranked (`deadlock-audit-qpylx` reached the same conclusion about the same cell by a different
+//! route).
 
 use pyo3::prelude::*;
 use std::ffi::CString;
@@ -29,7 +37,7 @@ out("python", sys.version.split()[0], "| numpy", np.__version__)
 out("in-process ELF sha256", hashlib.sha256(open(EXE_PATH, "rb").read()).hexdigest())
 out("host", os.uname().nodename, "| loadavg", [round(x, 2) for x in os.getloadavg()])
 
-def inter(sa, sb, g, k, rounds=4):
+def inter(sa, sb, g, k, rounds=8):
     ta, tb = [], []
     for r in range(rounds):
         for w in (("a","b","b","a") if r % 2 == 0 else ("b","a","a","b")):
@@ -43,15 +51,25 @@ def spread(s):
 def K(n):
     return int(max(3, min(6000, 3e7 // max(n, 1))))
 
-SIZES = (13, 15, 18, 20, 22)
+SIZES = (3, 8, 11, 13, 15, 18)
 # family tag, name, expression. The tag is the SHARED HELPER a gate would sit in.
 OPS = [
-    ("pred", "isnan",      "M.isnan(a)"),
-    ("pred", "isinf",      "M.isinf(a)"),
-    ("pred", "isfinite",   "M.isfinite(a)"),
-    ("pred", "signbit",    "M.signbit(a)"),
-    ("uny",  "abs",        "M.abs(a)"),
-    ("uny",  "sqrt",       "M.sqrt(a)"),
+    ("pred", "isnan", "M.isnan(a)"),
+    ("pred", "isinf", "M.isinf(a)"),
+    ("pred", "isfinite", "M.isfinite(a)"),
+    ("pred", "signbit", "M.signbit(a)"),
+    ("uny", "abs", "M.abs(a)"),
+    ("uny", "negative", "M.negative(a)"),
+    ("uny", "square", "M.square(a)"),
+    ("uny", "floor", "M.floor(a)"),
+    ("uny", "sign", "M.sign(a)"),
+    ("uny", "reciprocal", "M.reciprocal(a)"),
+    ("uny", "sqrt", "M.sqrt(a)"),
+    ("uny", "cbrt", "M.cbrt(a)"),
+    ("uny", "exp", "M.exp(a)"),
+    ("uny", "log", "M.log(a)"),
+    ("uny", "sin", "M.sin(a)"),
+    ("uny", "tanh", "M.tanh(a)"),
 ]
 
 out("")
