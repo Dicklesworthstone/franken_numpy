@@ -126,6 +126,58 @@ out("one full pass over 8 MiB (np.copyto, read+write) = %.1f ns" % one_pass)
 sn, sf = cell("sum f64 2^20 (repeat for headroom)", "M.sum(f)")
 out("numpy.sum = %.2f x one copy;  fnp.sum = %.2f x one copy;  fnp excess = %.1f ns"
     % (sn / one_pass, sf / one_pass, sf - sn))
+
+# ---- 5. THE SIGN TEST, which is what makes this cell DECIDABLE ------------------------------
+# `deadlock-audit-qpylx` measured this cell four times and got 1.094x-1.456x, every one VOID:
+# the A/A null controls WITHIN-run drift and is blind to run-to-run spread. A sign test is not.
+# Each round times both arms ADJACENTLY and keeps only which was faster, so a slow drift that
+# moves both arms together cancels instead of adding noise, and the statistic is exact rather
+# than an assumption about the distribution: under "no difference" the wins are Binomial(n, 1/2).
+#
+# The A/A control matters as much as the test. If numpy-vs-numpy also comes out decisive, the
+# instrument is measuring order and not the routes, and the result is discarded.
+import math
+
+def sign_test(statement_a, statement_b, g, calls, rounds):
+    wins, deltas, a_times = 0, [], []
+    for round_index in range(rounds):
+        # Alternate which arm runs first so a per-round warm-up cost cannot masquerade as a win.
+        order = ("a", "b") if round_index % 2 == 0 else ("b", "a")
+        timings = {}
+        for arm in order:
+            statement = statement_a if arm == "a" else statement_b
+            timings[arm] = timeit.timeit(statement, globals=g, number=calls) / calls * 1e9
+        deltas.append(timings["b"] - timings["a"])
+        a_times.append(timings["a"])
+        wins += timings["b"] > timings["a"]
+    return wins, deltas, statistics.median(a_times)
+
+def two_sided_p(wins, rounds):
+    extreme = max(wins, rounds - wins)
+    tail = sum(math.comb(rounds, k) for k in range(extreme, rounds + 1))
+    return min(1.0, 2.0 * tail / (2 ** rounds))
+
+ROUNDS = 21
+out("")
+out("%-22s%9s%12s%14s%11s%s" % ("sign test", "b>a", "p", "median_dns", "median_%", "verdict"))
+for label, expression in (("sum f64 2^20", "M.sum(f)"),
+                          ("mean f64 2^20", "M.mean(f)"),
+                          ("std f64 2^20", "M.std(f)")):
+    numpy_statement = expression.replace("M.", "np.")
+    fnp_statement = expression.replace("M.", "fnp.")
+    wins, deltas, numpy_median = sign_test(numpy_statement, fnp_statement, g, 30, ROUNDS)
+    control_wins, _, _ = sign_test(numpy_statement, numpy_statement, g, 30, ROUNDS)
+    p_value, control_p = two_sided_p(wins, ROUNDS), two_sided_p(control_wins, ROUNDS)
+    median_delta = statistics.median(deltas)
+    decided = p_value < 0.01 and control_p >= 0.01
+    out("%-22s%6d/%-3d%12.5f%13.1f%10.2f%%   %s"
+        % (label, wins, ROUNDS, p_value, median_delta,
+           100.0 * median_delta / numpy_median,
+           ("DECIDED: fnp SLOWER" if wins > ROUNDS / 2 else "DECIDED: fnp FASTER")
+           if decided else "not decided"))
+    out("    A/A control: %d/%d wins, p=%.5f%s"
+        % (control_wins, ROUNDS, control_p,
+           "  <-- CONTROL IS DECISIVE, DISCARD THE ROW" if control_p < 0.01 else ""))
 "#;
 
 fn main() -> PyResult<()> {
