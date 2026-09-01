@@ -29720,6 +29720,77 @@ fn concat_copy_blocks_parallel<T: Copy>(
 // instruction saving is real and buys nothing a caller can observe.
 const CONCAT_PARALLEL_MIN_BYTES: usize = 1 << 23; // 8MB output -> parallelize the block copy
 
+/// Whether a `concatenate` is worth attempting natively at all, decided BEFORE either
+/// zero-copy helper touches the operands (`deadlock-audit-66w2d`).
+///
+/// THE NATIVE ROUTES HAVE A CROSSOVER AND NOTHING MARKED IT. Both helpers engaged at EVERY size,
+/// so a small concatenate paid the whole native entry - iterate the sequence, classify each
+/// operand, export a `PyBuffer` per input, allocate the output, export ITS buffer - to produce a
+/// result NumPy produces faster. Measured on hz4 against numpy 2.5.2 live in the same invocation,
+/// two arrays, two seeds, interleaved with dual A/A nulls, at n = 64 per input:
+///
+///     f64  1.63x (+800 ns)    f32  4.65x (+4620)   i64  4.68x (+4670)   c128 7.69x (+9255)
+///     c64  4.62x (+4705)      f16  4.68x (+4675)   i32  4.69x (+4722)   i16  4.71x (+4641)
+///     i8   4.70x (+4623)      u8   4.72x (+4620)   bool 4.72x (+4638)
+///
+/// EVERY dtype except f64 loses 4.6-7.7x, and they all lose by the SAME ~4650 ns, which is what
+/// identifies it as the `try_zerocopy_bytes_concatenate` entry rather than any dtype's kernel.
+///
+/// THE CROSSOVER IS IN OUTPUT BYTES, NOT ELEMENTS, and that is why the gate is stated in bytes:
+/// across eleven dtypes with itemsizes 1, 2, 4, 8 and 16, the sign flips at the same 8 MiB of
+/// output every time - f64/f32/i64 lose at 4 MiB and win at 8; i32/i8/u8/bool lose at 2 MiB and
+/// win at 8; f16/i16/c64 lose at 4 MiB and win at 16. An element count would have needed a
+/// different constant per itemsize; the byte count needs one.
+///
+/// complex128 IS EXCLUDED OUTRIGHT because it has no winning regime: 1.202x at 2 MiB, 1.107x at
+/// 4 MiB, 1.101x at 8 MiB, 1.032x at 16 MiB, 1.017x at 32 MiB - six sizes, two seeds, not one of
+/// them a win. A floor alone would leave it engaged and losing above 8 MiB.
+///
+/// FAIL-SAFE IN BOTH DIRECTIONS. Anything that is not an exact `ndarray` returns `true` and walks
+/// the gates exactly as before - this decides only what it can measure. And `false` means
+/// "delegate to NumPy", which is the reference implementation, so being wrong here costs speed,
+/// never correctness.
+///
+/// SCOPE, and it is narrower than the first version of this gate. This governs ONLY the routes
+/// BELOW the f64 helper - the byte mover and the cold extract/rebuild. f64 keeps its own helper
+/// at every size because delegating it is measurably WORSE (+803 ns native vs +1094 ns delegated
+/// at n=64 on hz4): the delegate still pays this function's argument handling plus NumPy's call,
+/// so for the one route that is already cheap, the floor was a regression. Measured, then moved.
+///
+/// `stack` reaches `try_zerocopy_f64_concatenate` by its own route and was NOT measured here, so
+/// it is deliberately left alone rather than gated on this evidence.
+fn concatenate_native_is_profitable(
+    py: Python<'_>,
+    arrays_seq: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    // The output of a concatenate is its inputs end to end, so the input bytes ARE the output
+    // bytes and the running sum can short-circuit as soon as it clears the floor.
+    const CONCAT_NATIVE_MIN_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+    let Ok(iter) = arrays_seq.try_iter() else {
+        return Ok(true);
+    };
+    let ndarray_type = cached_ndarray_type(py)?.clone();
+    let mut total: usize = 0;
+    for item in iter {
+        let item = item?;
+        if !item.is_exact_instance(&ndarray_type) {
+            return Ok(true);
+        }
+        if let Some(known) = cached_sniff_dtypes(py)
+            && item
+                .getattr(intern!(py, "dtype"))?
+                .is(known.complex128.bind(py))
+        {
+            return Ok(false);
+        }
+        total = total.saturating_add(item.getattr(intern!(py, "nbytes"))?.extract::<usize>()?);
+        if total >= CONCAT_NATIVE_MIN_OUTPUT_BYTES {
+            return Ok(true);
+        }
+    }
+    Ok(total >= CONCAT_NATIVE_MIN_OUTPUT_BYTES)
+}
+
 fn try_zerocopy_f64_concatenate(
     py: Python<'_>,
     arrays_seq: &Bound<'_, PyAny>,
@@ -30141,8 +30212,23 @@ fn concatenate(
     // common case); collapses the per-input extract + concat build + copy-back
     // into contiguous block copies. Bit-identical; other dtypes / shape mismatches
     // fall through.
+    //
+    // DELIBERATELY AHEAD OF THE CROSSOVER GATE, and that ordering is measured, not tidy. The
+    // f64 helper is the CHEAP one: at n=64 per input it costs +803 ns over NumPy, while
+    // DELEGATING the same call costs +1094 ns, because the delegate still pays this function's
+    // own argument handling and then NumPy's call on top. Gating f64 by the floor therefore made
+    // small f64 concatenates 291 ns SLOWER, measured on hz4 with NumPy live in the same
+    // invocation (1.632x -> 1.862x). The floor exists for the routes below, which are six to
+    // eleven times more expensive than this one on the same operand.
     if let Some(out) = try_zerocopy_f64_concatenate(py, &arrays_seq, axis)? {
         return Ok(out);
+    }
+    // THE CROSSOVER GATE. Everything past this point - the byte-mover route and the cold
+    // extract/rebuild below it - loses to NumPy on small operands by a wide margin, and neither
+    // marked a floor. See `concatenate_native_is_profitable` for the eleven-dtype measurement
+    // and for why the floor is stated in output BYTES rather than elements.
+    if !concatenate_native_is_profitable(py, &arrays_seq)? {
+        return fallback();
     }
     // Byte-level concat for other same-dtype numeric/bool/complex inputs (int all
     // widths, float32, complex); skips the cold extract. Mixed dtypes (which promote)

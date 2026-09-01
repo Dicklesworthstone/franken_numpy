@@ -42,15 +42,47 @@ def spread(s):
 def K(n):
     return int(max(3, min(8000, 4e7 // max(n, 1))))
 
+# THE FLOOR HAS TO SIT ABOVE BOTH HELPERS, SO IT CANNOT BE FITTED ON f64 ALONE.
+# try_zerocopy_f64_concatenate is not the only native route: try_zerocopy_bytes_concatenate
+# accepts kind 'f' at itemsize 8 too, so a floor placed inside the f64 helper would merely
+# REROUTE a small f64 concat into the bytes helper rather than delegate it. The floor belongs in
+# `concatenate` itself, ahead of both - and a gate placed there is paid by EVERY dtype the bytes
+# helper serves (kinds b/i/u/f/c at itemsize 1/2/4/8), so every one of them has to be measured.
+# This repo's own rule: a dtype-shaped defect does not license a dtype-shaped fix, and dtype
+# behaviour here has diverged by 460x before.
+#
+# THE NARROW DTYPES ARE THE ONES A BYTES FLOOR COULD ROB. A 1-byte dtype needs n = 2^22 per input
+# to reach an 8 MiB output, so a floor stated in BYTES delegates every realistic bool/int8 concat.
+# If any of them WINS below that, the floor destroys a live win - and this repo has banked
+# narrow-int and bool wins elsewhere. So they are measured out to 2^22 rather than assumed.
+WIDE = (6, 12, 16, 17, 18, 19, 20)
+NARROW = (6, 16, 20, 22)
+MAKERS = [
+    ("f64",  WIDE,   lambda rng, n: rng.standard_normal(n)),
+    ("f32",  WIDE,   lambda rng, n: rng.standard_normal(n).astype(np.float32)),
+    ("i64",  WIDE,   lambda rng, n: rng.integers(0, 1 << 40, n)),
+    ("c128", WIDE,   lambda rng, n: rng.standard_normal(n) + 1j * rng.standard_normal(n)),
+    ("c64",  NARROW, lambda rng, n: (rng.standard_normal(n)
+                                     + 1j * rng.standard_normal(n)).astype(np.complex64)),
+    ("f16",  NARROW, lambda rng, n: rng.standard_normal(n).astype(np.float16)),
+    ("i32",  NARROW, lambda rng, n: rng.integers(0, 1 << 20, n).astype(np.int32)),
+    ("i16",  NARROW, lambda rng, n: rng.integers(0, 1 << 10, n).astype(np.int16)),
+    ("i8",   NARROW, lambda rng, n: rng.integers(0, 100, n).astype(np.int8)),
+    ("u8",   NARROW, lambda rng, n: rng.integers(0, 250, n).astype(np.uint8)),
+    ("bool", NARROW, lambda rng, n: rng.integers(0, 2, n).astype(bool)),
+]
 out("")
-out("%-6s%-8s%13s%13s%9s%13s%8s%9s%9s"
-    % ("seed", "n", "numpy_ns", "fnp_ns", "ratio", "excess_ns", "nullNP", "nullFNP", "incSprd"))
+out("%-6s%-6s%-8s%10s%13s%13s%9s%13s%8s%9s%9s"
+    % ("seed", "dtype", "n", "out_MiB", "numpy_ns", "fnp_ns", "ratio", "excess_ns", "nullNP",
+       "nullFNP", "incSprd"))
 for seed in (SEED, SEED + 222):
-    rng = np.random.default_rng(seed)
-    for lg in range(3, 22):
+  rng = np.random.default_rng(seed)
+  for dname, sizes, make in MAKERS:
+    for lg in sizes:
         n = 1 << lg
-        a = rng.standard_normal(n)
-        b = rng.standard_normal(n)
+        a = make(rng, n)
+        b = make(rng, n)
+        out_mib = 2 * n * a.dtype.itemsize / (1 << 20)
         g = {"np": np, "fnp": fnp, "a": a, "b": b}
         sa, sb = "np.concatenate([a, b])", "fnp.concatenate([a, b])"
         wv, gv = np.asarray(eval(sa, g)), np.asarray(eval(sb, g))
@@ -67,8 +99,9 @@ for seed in (SEED, SEED + 222):
             flag += "  BYTES DIFFER"
         if ok and abs(tf / tn - 1.0) <= isp:
             flag += "  NOISE>EFFECT"
-        out("%-6d%-8s%13.1f%13.1f%8.3fx%13.1f%8.3f%9.3f%8.1f%%%s"
-            % (seed, "2^%d" % lg, tn, tf, tf / tn, tf - tn, nn, nf, 100 * isp, flag))
+        out("%-6d%-6s%-8s%10.2f%13.1f%13.1f%8.3fx%13.1f%8.3f%9.3f%8.1f%%%s"
+            % (seed, dname, "2^%d" % lg, out_mib, tn, tf, tf / tn, tf - tn, nn, nf,
+               100 * isp, flag))
 "#;
 
 fn main() -> PyResult<()> {
