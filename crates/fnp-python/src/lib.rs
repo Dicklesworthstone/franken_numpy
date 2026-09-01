@@ -9049,8 +9049,40 @@ fn zerocopy_f64_unary_flat<'py>(
                 }
             };
             const SQRT_PARALLEL_MIN: usize = 1 << 17;
-            if n >= SQRT_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-                let chunk = n.div_ceil(rayon::current_num_threads());
+            // EVERY CHUNK IS ITSELF AT LEAST SQRT_PARALLEL_MIN (`deadlock-audit-iwt3o`).
+            //
+            // This used to hand `par_chunks_mut` a chunk of `n / current_num_threads()`, which
+            // on a 64-core host is 16 KiB of f64 at n=2^17 and 128 KiB at n=2^20 - far below
+            // the 1 MiB at which this very function has decided parallelism is worth doing.
+            // The result was that `fnp.sqrt` LOST to numpy across the whole band just above its
+            // own parallel floor. Measured on hz4 (64 cores), numpy 2.5.2 live in the same
+            // invocation, thread count set by an INSTALLED rayon pool so n and T move
+            // independently, interleaved AB/BA with dual A/A nulls, both sweep directions:
+            //
+            //   n      T=64 (chunk)        best small T          ratio vs numpy, sqrt(np.abs(a))
+            //   2^17   16 KiB   3.82x/5.34x   T=1   0.592x/0.588x
+            //   2^18   32 KiB   5.22x/2.67x   T=2   0.962x/0.938x
+            //   2^19   64 KiB   2.11x/2.09x   T=4   0.944x/1.087x
+            //   2^20  128 KiB   1.26x/1.31x   T=8   1.126x/0.735x
+            //   2^21  256 KiB   0.945x/0.947x T=16  0.838x/0.757x
+            //
+            // and on a settled (not freshly written) input the same shape holds - at 2^17,
+            // T=64 is 0.501x where T=4 is 0.195x, a 2.6x gap on a cell that was already winning.
+            //
+            // WHY THE FLOOR IS THE RIGHT CONSTANT, and not a tuned one. `SQRT_PARALLEL_MIN` is
+            // already this function's answer to "how much work justifies a rayon fan-out". A
+            // chunk is exactly one thread's share of the work, so a chunk below that floor is a
+            // fan-out this function has ALREADY judged not worth doing - just spelled per-thread
+            // instead of per-call. Reusing the constant makes the two decisions consistent
+            // rather than inventing a second number to keep in sync.
+            //
+            // THE CHANGE CANNOT REGRESS A LARGE BUFFER. `threads` only ever falls BELOW
+            // `current_num_threads()` while n < threads * SQRT_PARALLEL_MIN (2^23 elements on a
+            // 64-core host); at and above that every thread already has a chunk over the floor
+            // and the expression is the identity. Measured 2^22-2^24 rows are unchanged by it.
+            let threads = rayon::current_num_threads().min(n / SQRT_PARALLEL_MIN);
+            if n >= SQRT_PARALLEL_MIN && threads >= 2 {
+                let chunk = n.div_ceil(threads);
                 out_data
                     .par_chunks_mut(chunk)
                     .zip(in_data.par_chunks(chunk))

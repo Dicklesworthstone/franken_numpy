@@ -61,8 +61,8 @@ out("host", os.uname().nodename, "| loadavg", [round(x, 2) for x in os.getloadav
 out("cpus", os.cpu_count(), "| RAYON_NUM_THREADS env", os.environ.get("RAYON_NUM_THREADS", "(unset)"))
 out("NOTE thread count is set by an installed rayon ThreadPool, not by the environment.")
 rng = np.random.default_rng(SEED)
-BASE = np.abs(rng.standard_normal(1 << 21)) + 0.5
-SIZES = [1 << 17, 1 << 18, 1 << 19, 1 << 20, 1 << 21]
+BASE = np.abs(rng.standard_normal(1 << 23)) + 0.5
+SIZES = [1 << 17, 1 << 19, 1 << 21, 1 << 23]
 
 def inter(sa, sb, g, k, rounds=4):
     ta, tb = [], []
@@ -80,6 +80,27 @@ CELLS = (
     ("settled",    "np.sqrt(pre)",       "fnp.sqrt(pre)"),
     ("np-written", "np.sqrt(np.abs(a))", "fnp.sqrt(np.abs(a))"),
 )
+
+# VALUE PARITY FIRST, at the sizes where the chunk gate actually changes the thread count.
+# The conformance_sqrt suite cannot cover this here: it dlopens libfnp_python.so as a sibling
+# of its own test binary, which only exists in a normal target/debug/deps layout, and every
+# case in it is a 2-5 element array that takes the serial branch anyway. RAW BYTES, not
+# allclose - a re-chunked elementwise map must be bit-identical, nan payloads and signed zeros
+# included, and only tobytes() can see those (f64 is not the longdouble exception of
+# `deadlock-audit-6cukd`).
+bad = 0
+for n in SIZES:
+    a = BASE[:n].copy()
+    a[0] = -0.0
+    a[1] = np.inf
+    a[2] = np.nan
+    for producer, x in (("settled", np.abs(a)), ("np-written", np.abs(a))):
+        ours, theirs = fnp.sqrt(x), np.sqrt(x)
+        same = ours.tobytes() == theirs.tobytes() and ours.dtype == theirs.dtype
+        bad += 0 if same else 1
+        if not same:
+            out("PARITY FAIL n=2^%d %s" % (n.bit_length() - 1, producer))
+out("value parity over %d cells: %s" % (2 * len(SIZES), "ALL BIT-IDENTICAL" if not bad else "%d FAILED" % bad))
 
 out("")
 out("%-5s%-6s%-13s%-7s%10s%12s%12s%9s%12s%8s%9s%9s%7s%s"
@@ -149,7 +170,7 @@ fn main() -> PyResult<()> {
     // not reproduce. `fnp.sqrt(np.abs(a))` won at every thread count from 1 to 64 (0.61x-0.92x),
     // and the single row that read as a loss (1.125x) was the FIRST cell of the process, whose
     // numpy arm ran 35% faster than that same arm's steady state in all 20 later rows.
-    let mut threads: Vec<usize> = vec![cores, 16, 8, 4, 2, 1];
+    let mut threads: Vec<usize> = vec![cores, 8, 1];
     threads.dedup();
     threads.retain(|&t| t <= cores);
     let globals: Py<PyDict> = Python::attach(|py| -> PyResult<Py<PyDict>> {

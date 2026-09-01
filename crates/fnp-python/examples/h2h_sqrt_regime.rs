@@ -72,7 +72,7 @@ for n in SIZES:
     g = {"np": np, "fnp": fnp, "a": a, "pre": pre}
     k = int(max(3, min(2000, 4e7 // n)))
     out("%-8s%14.1f%14.1f%14.1f%14.1f%14d"
-        % ("2^%d" % n.bit_length(),
+        % ("2^%d" % (n.bit_length() - 1),
            faults_per_call("np.sqrt(np.abs(a))", g, k),
            faults_per_call("fnp.sqrt(np.abs(a))", g, k),
            faults_per_call("np.sqrt(pre)", g, k),
@@ -89,8 +89,8 @@ def sweep(tag):
         g = {"np": np, "fnp": fnp, "a": a, "pre": pre}
         k = int(max(3, min(2000, 4e7 // n)))
         for label, sa, sb in (
-            ("compose 2^%d" % n.bit_length(), "np.sqrt(np.abs(a))", "fnp.sqrt(np.abs(a))"),
-            ("settled 2^%d" % n.bit_length(), "np.sqrt(pre)",       "fnp.sqrt(pre)"),
+            ("compose 2^%d" % (n.bit_length() - 1), "np.sqrt(np.abs(a))", "fnp.sqrt(np.abs(a))"),
+            ("settled 2^%d" % (n.bit_length() - 1), "np.sqrt(pre)",       "fnp.sqrt(pre)"),
         ):
             tn, tf, sn, _ = inter(sa, sb, g, k, rounds=6)
             n1, n2, na, nb = inter(sa, sa, g, k, rounds=6)
