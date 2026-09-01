@@ -62,7 +62,7 @@ out("cpus", os.cpu_count(), "| RAYON_NUM_THREADS env", os.environ.get("RAYON_NUM
 out("NOTE thread count is set by an installed rayon ThreadPool, not by the environment.")
 rng = np.random.default_rng(SEED)
 BASE = np.abs(rng.standard_normal(1 << 23)) + 0.5
-SIZES = [1 << 17, 1 << 19, 1 << 21, 1 << 23]
+SIZES = [1 << 21, 1 << 22, 1 << 23]
 
 def inter(sa, sb, g, k, rounds=4):
     ta, tb = [], []
@@ -76,10 +76,11 @@ def spread(s):
     return (max(s) - min(s)) / statistics.median(s)
 
 CELLS = (
-    # label           numpy arm               fnp arm                what the input is
-    ("settled",    "np.sqrt(pre)",       "fnp.sqrt(pre)"),
-    ("np-written", "np.sqrt(np.abs(a))", "fnp.sqrt(np.abs(a))"),
+    # label           numpy arm                     fnp arm                       input provenance
+    ("settled",    "np.%s(pre)" % OP,          "fnp.%s(pre)" % OP),
+    ("np-written", "np.%s(np.abs(a))" % OP,    "fnp.%s(np.abs(a))" % OP),
 )
+out("op", OP)
 
 # VALUE PARITY FIRST, at the sizes where the chunk gate actually changes the thread count.
 # The conformance_sqrt suite cannot cover this here: it dlopens libfnp_python.so as a sibling
@@ -95,7 +96,7 @@ for n in SIZES:
     a[1] = np.inf
     a[2] = np.nan
     for producer, x in (("settled", np.abs(a)), ("np-written", np.abs(a))):
-        ours, theirs = fnp.sqrt(x), np.sqrt(x)
+        ours, theirs = getattr(fnp, OP)(x), getattr(np, OP)(x)
         same = ours.tobytes() == theirs.tobytes() and ours.dtype == theirs.dtype
         bad += 0 if same else 1
         if not same:
@@ -143,6 +144,12 @@ fn main() -> PyResult<()> {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(555);
+    // The op is an argument because `deadlock-audit-try99` is a 95-site vein and every family
+    // needs the same (n x T) grid. Only ops whose fnp route is a chunk-by-thread-count parallel
+    // map belong here; anything else measures the delegate and says nothing.
+    let op: String = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "sqrt".to_string());
 
     let cores = std::thread::available_parallelism()
         .map(|c| c.get())
@@ -170,13 +177,14 @@ fn main() -> PyResult<()> {
     // not reproduce. `fnp.sqrt(np.abs(a))` won at every thread count from 1 to 64 (0.61x-0.92x),
     // and the single row that read as a loss (1.125x) was the FIRST cell of the process, whose
     // numpy arm ran 35% faster than that same arm's steady state in all 20 later rows.
-    let mut threads: Vec<usize> = vec![cores, 8, 1];
+    let mut threads: Vec<usize> = vec![cores, 16, 8, 4, 2, 1];
     threads.dedup();
     threads.retain(|&t| t <= cores);
     let globals: Py<PyDict> = Python::attach(|py| -> PyResult<Py<PyDict>> {
         let g = PyDict::new(py);
         g.set_item("EXE_PATH", exe.to_string_lossy().as_ref())?;
         g.set_item("SEED", seed)?;
+        g.set_item("OP", &op)?;
         py.run(&CString::new(SETUP).unwrap(), Some(&g), None)?;
         Ok(g.unbind())
     })?;
