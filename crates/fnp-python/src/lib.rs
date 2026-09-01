@@ -5384,11 +5384,24 @@ fn numpy_bool_to_vec(py: Python<'_>, flat: &Bound<'_, PyAny>) -> PyResult<Vec<bo
         .collect())
 }
 
-fn extract_numeric_array(
+/// `extract_numeric_array`'s DECLINING form: `Ok(None)` exactly where the raising form
+/// produces its "expected a bool/int/uint/float array" TypeError.
+///
+/// A dtype our kernels cannot own - object, string, datetime, void - is not a user error, it
+/// is a route we do not serve, and the right answer is NumPy's own. NumPy computes
+/// `np.left_shift(object_array, ...)`, `np.logical_not(object_array)` and
+/// `np.digitize(object_array, bins)` perfectly well; a gate that declines by RAISING is both
+/// wrong and slower than the delegate it should have reached
+/// (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`, and `deadlock-audit-nq438`
+/// before it). Callers that have a delegate to fall back to use this; `extract_numeric_array`
+/// keeps the raise for callers that do not.
+///
+/// The success path is byte-for-byte the raising form's: same `asarray`, same `kind` read,
+/// same storage. Only the failure arm differs.
+fn try_extract_numeric_array(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<UFuncArray> {
+) -> PyResult<Option<UFuncArray>> {
     let numpy = cached_numpy(py)?;
     let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
     let shape = array
@@ -5396,12 +5409,11 @@ fn extract_numeric_array(
         .extract::<Vec<usize>>()?;
     let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
     let dtype = array.getattr(intern!(py, "dtype"))?;
-    // `kind` as a char, and the dtype's NAME read only on the failure path. `str(dtype)` is
-    // 1639.2 ns against `dtype.kind` at 20.2 ns (timeit, numpy 2.4.3, installed interpreter) -
-    // it is not a C getset, it runs numpy's pure-Python name machinery - and the value it
-    // produces was consumed by the `_` arm alone, so every SUCCEEDING call bought a string it
-    // never read. Reading it inside the arm that formats it costs the error path nothing it
-    // was not already paying. `extract::<char>()` also drops a heap String per call.
+    // `kind` as a char. `str(dtype)` is 1639.2 ns against `dtype.kind` at 20.2 ns (timeit,
+    // numpy 2.4.3, installed interpreter) - it is not a C getset, it runs numpy's pure-Python
+    // name machinery - so the name is read only where it is formatted, on the raising
+    // wrapper's failure path, and a succeeding call never buys a string it does not read.
+    // `extract::<char>()` also drops a heap String per call.
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
 
     let storage = match kind {
@@ -5413,15 +5425,33 @@ fn extract_numeric_array(
         'i' => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
         'u' => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
         'f' => ArrayStorage::F64(numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")?),
-        _ => {
-            return Err(PyTypeError::new_err(format!(
-                "{context}: expected a bool/int/uint/float array, got dtype {}",
-                dtype.str()?.extract::<String>()?,
-            )));
-        }
+        _ => return Ok(None),
     };
 
-    UFuncArray::from_storage(shape, storage).map_err(map_ufunc_error)
+    UFuncArray::from_storage(shape, storage)
+        .map(Some)
+        .map_err(map_ufunc_error)
+}
+
+fn extract_numeric_array(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    context: &str,
+) -> PyResult<UFuncArray> {
+    match try_extract_numeric_array(py, value)? {
+        Some(array) => Ok(array),
+        // The dtype's NAME is read only here, on the failure path. `str(dtype)` is 1639.2 ns
+        // against `dtype.kind` at 20.2 ns - it runs numpy's pure-Python name machinery - and
+        // a succeeding call must never buy a string it does not read.
+        None => Err(PyTypeError::new_err(format!(
+            "{context}: expected a bool/int/uint/float array, got dtype {}",
+            cached_numpy(py)?
+                .call_method1(intern!(py, "asarray"), (value,))?
+                .getattr(intern!(py, "dtype"))?
+                .str()?
+                .extract::<String>()?,
+        ))),
+    }
 }
 
 fn extract_precise_numeric_array(
@@ -23644,9 +23674,20 @@ fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyRes
     if let Some(out) = try_zerocopy_digitize(py, x.bind(py), bins.bind(py), right)? {
         return Ok(out);
     }
-    let x = extract_numeric_array(py, x.bind(py), "digitize(x)")?;
-    let bins = extract_numeric_array(py, bins.bind(py), "digitize(bins)")?;
-    let result = x.digitize_right(&bins, right).map_err(map_ufunc_error)?;
+    // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
+    // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). `np.digitize(obj, bins)`
+    // is `array([1, 2, 3])` in numpy; we answered it with a TypeError.
+    let (Some(x_values), Some(bin_values)) = (
+        try_extract_numeric_array(py, x.bind(py))?,
+        try_extract_numeric_array(py, bins.bind(py))?,
+    ) else {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "digitize"), (x, bins, right))?
+            .unbind());
+    };
+    let result = x_values
+        .digitize_right(&bin_values, right)
+        .map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
 }
 
@@ -24899,13 +24940,33 @@ fn trapezoid_impl(
     {
         return Ok(out);
     }
-    let y = extract_numeric_array(py, y.bind(py), &format!("{name}(y)"))?;
-    let result = match x {
-        Some(x) => {
-            let x = extract_numeric_array(py, x.bind(py), &format!("{name}(x)"))?;
-            y.trapezoid_x(&x, Some(axis))
+    // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
+    // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). `np.trapezoid` of an
+    // object array is 4.0 - it sums Python objects - and we answered that call with
+    // `TypeError: trapezoid(y): expected a bool/int/uint/float array`. The delegate is the
+    // same one the non-contiguous and axis bail-outs above already use.
+    let delegate = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(x_value) = x.as_ref() {
+            kwargs.set_item(intern!(py, "x"), x_value.bind(py))?;
         }
-        None => y.trapezoid(dx, Some(axis)),
+        kwargs.set_item(intern!(py, "dx"), dx)?;
+        kwargs.set_item(intern!(py, "axis"), axis)?;
+        Ok(numpy_trapezoid_delegate(numpy, name)?
+            .call((y.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+    let Some(y_values) = try_extract_numeric_array(py, y.bind(py))? else {
+        return delegate();
+    };
+    let result = match x.as_ref() {
+        Some(x_value) => {
+            let Some(x_values) = try_extract_numeric_array(py, x_value.bind(py))? else {
+                return delegate();
+            };
+            y_values.trapezoid_x(&x_values, Some(axis))
+        }
+        None => y_values.trapezoid(dx, Some(axis)),
     }
     .map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array_from_ufunc(py, &result)
@@ -43370,9 +43431,17 @@ fn put(
         return Ok(py.None());
     }
 
-    let mut array = extract_numeric_array(py, a, "put(a)")?;
+    // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
+    // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). `np.put` scatters into an
+    // object array fine; we answered that call with `TypeError: put(a): expected a
+    // bool/int/uint/float array`. Same `fallback` the 'wrap'/'clip' modes already use.
+    let Some(mut array) = try_extract_numeric_array(py, a)? else {
+        return fallback();
+    };
     let (_, indices) = extract_take_indices(py, ind.bind(py), "put(ind)")?;
-    let values = extract_numeric_array(py, v.bind(py), "put(v)")?;
+    let Some(values) = try_extract_numeric_array(py, v.bind(py))? else {
+        return fallback();
+    };
 
     // numpy.put raises IndexError (not ValueError) on out-of-bounds index.
     // Our ufunc layer returns Msg which map_ufunc_error flattens to
@@ -43663,11 +43732,27 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
         }
     }
 
-    let mut array = extract_numeric_array(py, arr, "place(arr)")?;
-    let mask = extract_numeric_array(py, mask.bind(py), "place(mask)")?;
-    let values = extract_numeric_array(py, vals.bind(py), "place(vals)")?;
+    // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
+    // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). `np.place` writes into an
+    // object array, and into a STRUCTURED dtype with an object field, fine; we answered both
+    // with `TypeError: place(arr): expected a bool/int/uint/float array`. The delegate is the
+    // one the complex-dtype bail-out above already uses, and it performs the in-place write.
+    let (Some(mut array), Some(mask_values), Some(values)) = (
+        try_extract_numeric_array(py, arr)?,
+        try_extract_numeric_array(py, mask.bind(py))?,
+        try_extract_numeric_array(py, vals.bind(py))?,
+    ) else {
+        py.import("numpy")?.getattr(intern!(py, "place"))?.call1((
+            arr,
+            mask.bind(py),
+            vals.bind(py),
+        ))?;
+        return Ok(py.None());
+    };
 
-    array.place(&mask, &values).map_err(map_ufunc_error)?;
+    array
+        .place(&mask_values, &values)
+        .map_err(map_ufunc_error)?;
     copy_result_into_numpy_array(py, arr, &array)?;
     Ok(py.None())
 }
@@ -43745,11 +43830,24 @@ fn putmask(
         }
     }
 
-    let mut array = extract_numeric_array(py, a, "putmask(a)")?;
-    let mask = extract_numeric_array(py, mask.bind(py), "putmask(mask)")?;
-    let values = extract_numeric_array(py, values.bind(py), "putmask(values)")?;
+    // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
+    // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`), exactly as in `place`
+    // above: object and object-carrying structured dtypes both took a TypeError from us on a
+    // call numpy performs.
+    let (Some(mut array), Some(mask_values), Some(value_values)) = (
+        try_extract_numeric_array(py, a)?,
+        try_extract_numeric_array(py, mask.bind(py))?,
+        try_extract_numeric_array(py, values.bind(py))?,
+    ) else {
+        py.import("numpy")?
+            .getattr(intern!(py, "putmask"))?
+            .call1((a, mask.bind(py), values.bind(py)))?;
+        return Ok(py.None());
+    };
 
-    array.putmask(&mask, &values).map_err(map_ufunc_error)?;
+    array
+        .putmask(&mask_values, &value_values)
+        .map_err(map_ufunc_error)?;
     copy_result_into_numpy_array(py, a, &array)?;
     Ok(py.None())
 }
@@ -62914,7 +63012,12 @@ fn native_unary_logical_not_or_passthrough(
         if noncontiguous_ndarray(cached_numpy(py)?, &arg)? {
             return core_numpy_passthrough_interned(py, intern!(py, "logical_not"), args, kwargs);
         }
-        let x = extract_numeric_array(py, &arg, "logical_not(x)")?;
+        // Declines an operand we cannot own to the delegate: `np.logical_not` on an object
+        // array is `array([False, False, False], dtype=object)`, not a TypeError
+        // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`).
+        let Some(x) = try_extract_numeric_array(py, &arg)? else {
+            return core_numpy_passthrough_interned(py, intern!(py, "logical_not"), args, kwargs);
+        };
         let result = ufunc_logical_not(&x).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
@@ -63311,8 +63414,18 @@ fn native_binary_left_shift_or_passthrough(
         if let Some(out) = try_zerocopy_narrow_shift(py, &a, &b, true)? {
             return Ok(out);
         }
-        let x1 = extract_numeric_array(py, &a, "left_shift(x1)")?;
-        let x2 = extract_numeric_array(py, &b, "left_shift(x2)")?;
+        // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
+        // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). NumPy shifts an
+        // object array element by element - `np.left_shift(np.array([1,2,3], dtype=object),
+        // [1,2,3])` is `array([2, 8, 24], dtype=object)` - and we used to answer that call
+        // with `TypeError: left_shift(x1): expected a bool/int/uint/float array`. The
+        // declining classifier costs the succeeding path nothing; it is the same read.
+        let Some(x1) = try_extract_numeric_array(py, &a)? else {
+            return core_numpy_passthrough_interned(py, intern!(py, "left_shift"), args, kwargs);
+        };
+        let Some(x2) = try_extract_numeric_array(py, &b)? else {
+            return core_numpy_passthrough_interned(py, intern!(py, "left_shift"), args, kwargs);
+        };
         let result = ufunc_left_shift(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
@@ -63334,8 +63447,13 @@ fn native_binary_right_shift_or_passthrough(
         if let Some(out) = try_zerocopy_narrow_shift(py, &a, &b, false)? {
             return Ok(out);
         }
-        let x1 = extract_numeric_array(py, &a, "right_shift(x1)")?;
-        let x2 = extract_numeric_array(py, &b, "right_shift(x2)")?;
+        // Declines an operand we cannot own to the delegate, exactly as `left_shift` above.
+        let Some(x1) = try_extract_numeric_array(py, &a)? else {
+            return core_numpy_passthrough_interned(py, intern!(py, "right_shift"), args, kwargs);
+        };
+        let Some(x2) = try_extract_numeric_array(py, &b)? else {
+            return core_numpy_passthrough_interned(py, intern!(py, "right_shift"), args, kwargs);
+        };
         let result = ufunc_right_shift(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
