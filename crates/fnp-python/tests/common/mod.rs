@@ -564,6 +564,18 @@ fn compare_strict(
     CaseOutcome::Pass
 }
 
+/// VALUE equality (repr plus `array_equal(equal_nan=True)`), and it is worth being explicit
+/// about what that cannot see: a NaN's SIGN BIT or payload, and `-0.0` against `0.0`. Those
+/// are real defect classes this campaign has shipped fixes for, which is why the byte-level
+/// probes exist alongside this matrix.
+///
+/// IF YOU EVER UPGRADE THIS TO A RAW-BYTE COMPARISON, it needs exactly two exceptions
+/// (`deadlock-audit-6cukd`): `longdouble`/`clongdouble`, where x86 stores an 80-bit value in a
+/// 16-byte slot and the remaining 6 bytes are UNINITIALISED and differ between two
+/// independently allocated results - a byte probe once reported 34 phantom divergences from
+/// that alone - and `object`/`hasobject` dtypes, whose bytes are pointers. Both compare by
+/// value. `support::fnp_script` already exposes that predicate as `parity_equal` for the
+/// suites that drive a real interpreter.
 fn values_equivalent(
     py: Python<'_>,
     a: &Bound<'_, pyo3::types::PyAny>,

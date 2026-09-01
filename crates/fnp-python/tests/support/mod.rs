@@ -97,7 +97,36 @@ pub fn extension_module_path() -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Wraps a Python snippet so it runs against the built extension with `fnp` and `np` bound.
+/// The parity predicate every suite should use instead of a hand-rolled `tobytes()`.
+///
+/// THE RULE, and its one dtype exception (`deadlock-audit-6cukd`): compare RAW BYTES, because
+/// a value comparison cannot see a NaN's SIGN BIT or its payload and this campaign has shipped
+/// fixes for exactly that class - EXCEPT for
+///
+///   * `longdouble` / `clongdouble` (dtype char 'g' / 'G'). x86 stores an 80-bit value in a
+///     16-byte slot; the remaining 6 bytes are NOT initialised and differ between two
+///     independently allocated results. A raw-byte probe over 23 unary ops x 15 dtypes
+///     reported 34 phantom divergences on longdouble alone, every one of them padding.
+///   * `object` and any dtype with `hasobject`, which have no byte representation at all -
+///     the bytes are pointers, and two correct results hold different ones.
+///
+/// Both fall back to a VALUE comparison. Relaxing the byte comparison everywhere would be the
+/// wrong repair: it would blind the suites to the NaN sign-bit class they exist to catch.
+const PARITY_PREDICATE: &str = "\
+def parity_equal(ours, theirs):\n\
+\x20   import numpy as _np\n\
+\x20   if type(ours) is not type(theirs):\n\
+\x20       return False\n\
+\x20   if not isinstance(ours, _np.ndarray):\n\
+\x20       return ours == theirs or (ours != ours and theirs != theirs)\n\
+\x20   if ours.dtype != theirs.dtype or ours.shape != theirs.shape:\n\
+\x20       return False\n\
+\x20   if ours.dtype.hasobject or ours.dtype.char in 'gG':\n\
+\x20       return bool(_np.array_equal(ours, theirs, equal_nan=ours.dtype.kind == 'f'))\n\
+\x20   return ours.tobytes() == theirs.tobytes()\n";
+
+/// Wraps a Python snippet so it runs against the built extension with `fnp` and `np` bound,
+/// and `parity_equal` available.
 ///
 /// This is the shared form of the `fnp_script` each suite used to carry its own copy of.
 pub fn fnp_script(body: String) -> String {
@@ -108,6 +137,7 @@ pub fn fnp_script(body: String) -> String {
          spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
          fnp = importlib.util.module_from_spec(spec)\n\
          spec.loader.exec_module(fnp)\n\
+         {PARITY_PREDICATE}\
          {body}"
     )
 }
