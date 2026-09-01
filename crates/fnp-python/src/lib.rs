@@ -15999,16 +15999,47 @@ fn try_zerocopy_any_dtype_where(
     if !matches!(itemsize, 1 | 2 | 4 | 8 | 16) {
         return Ok(None);
     }
+    // A DTYPE THAT HOLDS PyObject REFERENCES IS NOT A BYTE SELECT (`deadlock-audit-nq438`).
+    // `object_` has itemsize 8 on this target, so it walks straight through the width gate
+    // above and used to reach the `.view(uint8)` below, where NumPy raised
+    //     TypeError: Cannot change data-type for array of references.
+    // and the `?` carried that out of `np.where` - a MUST clause of the searching
+    // conformance matrix, since numpy itself answers the same call fine. A gate that
+    // declines by RAISING is both slower than the delegate and wrong.
+    //
+    // The check is `hasobject`, not `kind == 'O'`, because it must also catch a STRUCTURED
+    // dtype with an embedded object field, which reports kind 'V' and is equally
+    // unviewable. Both are barred for the same second reason regardless of the view: the
+    // element bytes are borrowed pointers, so copying them verbatim would hand out a fresh
+    // array of references NumPy never incref'd. Nothing here can be fixed by a wider
+    // kernel; the delegate is the right answer, and this returns None to reach it.
+    //
+    // Placed AFTER the width gate so the extra attribute read is paid only by operands
+    // that already matched on dtype, shape and itemsize - everything else declines before
+    // reaching it.
+    if x_dtype
+        .getattr(intern!(py, "hasobject"))?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
     let count: usize = shape.iter().product();
 
     // The bool buffer's format is '?', which `PyBuffer::<u8>` rejects, so the condition is
     // viewed as uint8 - its bytes are 0x00/0x01. The value buffers are viewed the same way
     // because their own formats are arbitrary; the pointer is then read at the element
     // width, which is sound since NumPy aligns each array to its itemsize.
+    //
+    // A FAILED VIEW DECLINES, IT DOES NOT RAISE. `hasobject` above names the one dtype
+    // class known to make `.view(uint8)` throw; this `.ok()` is the standing guarantee for
+    // any other - `np.where` must never surface an error numpy would not have surfaced,
+    // so an unviewable operand falls through to the delegate instead (`deadlock-audit-nq438`).
     let uint8 = numpy.getattr(intern!(py, "uint8"))?;
     let as_bytes = |operand: &Bound<'_, PyAny>| -> PyResult<Option<PyBuffer<u8>>> {
         let flat = operand.call_method1(intern!(py, "reshape"), (-1i64,))?;
-        let viewed = flat.call_method1(intern!(py, "view"), (&uint8,))?;
+        let Ok(viewed) = flat.call_method1(intern!(py, "view"), (&uint8,)) else {
+            return Ok(None);
+        };
         Ok(PyBuffer::<u8>::get(&viewed).ok())
     };
     let (Some(cond_buffer), Some(x_buffer), Some(y_buffer)) =
