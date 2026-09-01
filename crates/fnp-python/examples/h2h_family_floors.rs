@@ -43,7 +43,7 @@ def spread(s):
 def K(n):
     return int(max(3, min(6000, 3e7 // max(n, 1))))
 
-SIZES = (3, 8, 11, 13, 15, 18)
+SIZES = (13, 15, 18, 20, 22)
 # family tag, name, expression. The tag is the SHARED HELPER a gate would sit in.
 OPS = [
     ("pred", "isnan",      "M.isnan(a)"),
@@ -51,17 +51,7 @@ OPS = [
     ("pred", "isfinite",   "M.isfinite(a)"),
     ("pred", "signbit",    "M.signbit(a)"),
     ("uny",  "abs",        "M.abs(a)"),
-    ("uny",  "negative",   "M.negative(a)"),
-    ("uny",  "square",     "M.square(a)"),
-    ("uny",  "floor",      "M.floor(a)"),
-    ("uny",  "sign",       "M.sign(a)"),
-    ("uny",  "reciprocal", "M.reciprocal(a)"),
     ("uny",  "sqrt",       "M.sqrt(a)"),
-    ("uny",  "cbrt",       "M.cbrt(a)"),
-    ("uny",  "exp",        "M.exp(a)"),
-    ("uny",  "log",        "M.log(a)"),
-    ("uny",  "sin",        "M.sin(a)"),
-    ("uny",  "tanh",       "M.tanh(a)"),
 ]
 
 out("")

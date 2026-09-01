@@ -33046,7 +33046,87 @@ fn isneginf(
     }
 }
 
+/// Whether the zero-copy f64 PREDICATE route is worth taking for this operand and this op.
+///
+/// `zerocopy_f64_predicate_flat` runs a scalar closure per element, and NumPy's own
+/// isinf/isfinite/signbit kernels are vectorised - so for three of the four predicates the native
+/// route is simply slower, and stays slower as n grows. `isnan` is the exception because it does
+/// NOT use this generic closure: it has its own `try_zerocopy_f64_isnan` with a SIMD
+/// unordered-comparison mask, which is why it alone reaches parity and then wins.
+///
+/// MEASURED on hz4 against numpy 2.5.2 live in the same invocation, f64, interleaved ABBAABBA
+/// with dual A/A nulls, spreads 0.8-3.3% (`h2h_family_floors`, `deadlock-audit-zsn2y`):
+///
+///   n        2^13    2^15    2^18    2^20    2^22      excess at the worst size
+///   signbit  1.532   1.475   1.446   1.439   1.030     +87373 ns at 2^20   NEVER WINS
+///   isinf    1.283   1.148   1.088   1.071   1.063    +220656 ns at 2^22   NEVER WINS
+///   isfinite 1.287   1.149   1.090   1.083   0.948     +16677 ns at 2^20   wins only at 2^22
+///   isnan    1.222   1.075   1.003   0.974   0.916       +497 ns at 2^13   wins from ~2^20
+///
+/// So the thresholds are PER OP and not a shared floor: a single gate would either keep signbit's
+/// 1.44x loss or throw away isnan's win. Nine sizes across two runs agree on the ordering.
+///
+/// WHY A FLOOR IS THE RIGHT TOOL HERE AND WAS NOT FOR THE UNARY FAMILY: delegating is not free -
+/// our wrapper still pays its own argument handling plus NumPy's call, roughly 700-1450 ns on
+/// this host. The f64 unary family's whole small-n excess was +530 to +1025 ns, so a floor there
+/// had nothing to recover and was reverted. These excesses run from +4700 to +220000 ns, which is
+/// 3x to 150x the wrapper floor.
+fn f64_predicate_route_is_profitable(kind: F64PredicateKind, nbytes: usize) -> bool {
+    match kind {
+        // No winning regime measured anywhere in 2^3..2^22.
+        F64PredicateKind::Signbit | F64PredicateKind::Isinf => false,
+        // Loses to 8 MiB, wins at 32 MiB. Gated at the size that was measured to win rather than
+        // at an interpolated one - the fail-safe direction is delegating, which is NumPy's own
+        // answer.
+        F64PredicateKind::Isfinite => nbytes >= 32 * 1024 * 1024,
+        // Parity at 2 MiB and a win above it.
+        F64PredicateKind::Isnan => nbytes >= 2 * 1024 * 1024,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum F64PredicateKind {
+    Isnan,
+    Isinf,
+    Isfinite,
+    Signbit,
+}
+
+/// Delegate this f64 predicate to NumPy when the native route is not profitable for it.
+///
+/// Returns `Some(result)` when it has delegated. Declining to the caller's own chain is NOT an
+/// option here: for an f64 operand every gate below the f64 predicate declines on dtype and the
+/// call lands in `extract_numeric_array`, the cold path, which is far worse than NumPy.
+fn f64_predicate_delegate_if_unprofitable(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    kind: F64PredicateKind,
+    name: &Bound<'_, PyString>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !x.is_exact_instance(cached_ndarray_type(py)?)
+        || !x
+            .getattr(intern!(py, "dtype"))?
+            .is(cached_float64_dtype(py)?)
+    {
+        return Ok(None);
+    }
+    let nbytes = x.getattr(intern!(py, "nbytes"))?.extract::<usize>()?;
+    if f64_predicate_route_is_profitable(kind, nbytes) {
+        return Ok(None);
+    }
+    let numpy = cached_numpy(py)?;
+    Ok(Some(numpy.getattr(name)?.call1((x,))?.unbind()))
+}
+
 fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = f64_predicate_delegate_if_unprofitable(
+        py,
+        x,
+        F64PredicateKind::Signbit,
+        intern!(py, "signbit"),
+    )? {
+        return Ok(out);
+    }
     if let Some(out) = try_zerocopy_f64_predicate(py, x, f64::is_sign_negative)? {
         return Ok(out);
     }
@@ -33116,6 +33196,14 @@ fn signbit(
 }
 
 fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = f64_predicate_delegate_if_unprofitable(
+        py,
+        x,
+        F64PredicateKind::Isnan,
+        intern!(py, "isnan"),
+    )? {
+        return Ok(out);
+    }
     if let Some(out) = try_zerocopy_f64_isnan(py, x)? {
         return Ok(out);
     }
@@ -33177,6 +33265,14 @@ fn isnan(
 }
 
 fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = f64_predicate_delegate_if_unprofitable(
+        py,
+        x,
+        F64PredicateKind::Isinf,
+        intern!(py, "isinf"),
+    )? {
+        return Ok(out);
+    }
     if let Some(out) = try_zerocopy_f64_predicate(py, x, f64::is_infinite)? {
         return Ok(out);
     }
@@ -33232,6 +33328,14 @@ fn isinf(
 }
 
 fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = f64_predicate_delegate_if_unprofitable(
+        py,
+        x,
+        F64PredicateKind::Isfinite,
+        intern!(py, "isfinite"),
+    )? {
+        return Ok(out);
+    }
     if let Some(out) = try_zerocopy_f64_predicate(py, x, f64::is_finite)? {
         return Ok(out);
     }
