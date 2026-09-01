@@ -4,8 +4,8 @@
 
 use std::process::Command;
 
-mod common;
-use common::fnp_script;
+mod support;
+use support::fnp_script;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
     let output = Command::new("python3")
