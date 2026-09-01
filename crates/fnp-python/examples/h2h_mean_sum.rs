@@ -178,6 +178,32 @@ for label, expression in (("sum f64 2^20", "M.sum(f)"),
     out("    A/A control: %d/%d wins, p=%.5f%s"
         % (control_wins, ROUNDS, control_p,
            "  <-- CONTROL IS DECISIVE, DISCARD THE ROW" if control_p < 0.01 else ""))
+
+# ---- 6. THE SIZE LADDER ACROSS THE PARALLEL FLOOR -------------------------------------------
+# `try_zerocopy_float_sum_flat` admits the exact-tree parallel route at
+# F64_SUM_PARALLEL_MIN_ELEMENTS = 1_000_000, i.e. 8_000_000 bytes. 2^20 elements is 8_388_608
+# bytes, so the route is ADMITTED at the very cell that measures slower. This ladder decides
+# whether the loss belongs to that route WITHOUT touching the source: below the floor the
+# native path declines and the call falls through, above it the native path runs. If the sign
+# is a loss only ABOVE the floor, the route the floor admits is the thing that is losing.
+out("")
+out("%-30s%9s%12s%13s   %s" % ("size ladder (sum f64)", "b>a", "p", "median_dns", "verdict"))
+LADDER = (1 << 18, 1 << 19, 1 << 20, 1_100_000, 1_250_000, 1_500_000, 1_750_000,
+          2_000_000, 1 << 21, 1 << 22)
+for count in LADDER:
+    ladder_globals = {"np": np, "fnp": fnp, "f": rng.standard_normal(count)}
+    calls = max(4, min(30, (1 << 22) // count))
+    wins, deltas, numpy_median = sign_test("np.sum(f)", "fnp.sum(f)", ladder_globals,
+                                           calls, ROUNDS)
+    control_wins, _, _ = sign_test("np.sum(f)", "np.sum(f)", ladder_globals, calls, ROUNDS)
+    p_value, control_p = two_sided_p(wins, ROUNDS), two_sided_p(control_wins, ROUNDS)
+    verdict = "not decided"
+    if p_value < 0.01 and control_p >= 0.01:
+        verdict = "DECIDED: fnp SLOWER" if wins > ROUNDS / 2 else "DECIDED: fnp FASTER"
+    out("%9d elem %10d B %6d/%-3d%12.5f%13.1f   %s%s"
+        % (count, count * 8, wins, ROUNDS, p_value, statistics.median(deltas), verdict,
+           "" if control_p >= 0.01 else "  (control decisive, discard)"))
+out("the parallel exact-tree route is ADMITTED from 1000000 elements / 8000000 bytes upward")
 "#;
 
 fn main() -> PyResult<()> {
