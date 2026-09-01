@@ -67112,3 +67112,70 @@ exact pairwise order; reordering is barred while bit-exactness holds, and bit-ex
 re-checked first because it is the thing that makes the cheap lever illegal. `std` is not a lever
 either - it is already a 2.6-2.9x win.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-31 — REJECT of a STALE-CONSTANT hypothesis I raised myself: `searchsorted`'s `MERGE_MIN_*` were fitted against a path I deleted this session, and the sort+merge route is STILL the better one (11% faster on sorted needles, both nulls clean) (`deadlock-audit-sfgg3`)
+
+**Campaign result class:** maintenance-self-speedup
+
+A negative result on a hypothesis with a good pedigree, checked before anything shipped. Worker
+`hz4` (64 cores, **loadavg 31.87 — busy, and it shows**), numpy 2.5.2 live in the same invocation,
+`bench_elf_sha256=b2b290f8fe86ff9586cd0205d8ce2b7ecf30a63bdcae9162408e48ec1fa6a9d6`,
+`invocation_id=hz4-911691-1788224124`.
+
+### The hypothesis, and why it looked strong
+
+`searchsorted_int_merge_typed` is admitted by `MERGE_MIN_HAYSTACK`/`MERGE_MIN_QUERIES`, both
+`1 << 19`. Those thresholds were fitted when the path the sort+merge route BEATS was a **serial
+per-query bisection**. This session deleted that path: the fallback is now a batched
+(level-transposed) search with a parallel arm above `1 << 12`. **A threshold is only as good as the
+alternative it was measured against**, and this one's alternative got much faster — the exact shape
+that made the three `1 << 21` parallel gates worth 5-15x earlier today.
+
+So the prediction was that at n, m >= 2^19 the router now prefers a route that is no longer best.
+
+### It does not reproduce
+
+`nosortmerge` forces the sort+merge route to decline so the two run in ONE process on one worker:
+
+```
+  cell                        impl          numpy_ns        fnp_ns    ratio  nullNP  nullFNP
+  2^20 hay, 2^20 RANDOM q     sortmerge   109251420.5    30578965.2   0.280x   0.978   1.003  VOID
+  2^20 hay, 2^20 RANDOM q     nosortmerge 111302113.2    29604949.5   0.266x   0.999   0.975  VOID
+  2^20 hay, 2^20 sorted q     sortmerge    33025862.2    15464544.0   0.468x   1.016   0.983
+  2^20 hay, 2^20 sorted q     nosortmerge  29928187.7    17195789.3   0.575x   0.995   0.997
+```
+
+- **Sorted needles: the shipped sort+merge is FASTER — 15.46 ms against 17.20 ms, 11%** — and both
+  A/A nulls are clean on both arms. The decisive comparison here is the ours-against-ours pair, not
+  the ratio column, because NumPy's own arm drifted 10% between the two impls (33.03 vs 29.93 ms)
+  on a host at loadavg 31.87; a ratio built on a drifting denominator is not evidence.
+- **Random needles: 30.58 ms against 29.60 ms, 3.2%, and BOTH cells VOID.** Undecidable, so no
+  basis to move the gate in either direction.
+
+**The constant is not stale in the harmful direction, and the route stays as it is.**
+
+### Why the prediction failed, which is worth more than the prediction
+
+The new fallback did not overtake sort+merge because the two are not the alternatives I assumed.
+For an ORDERED batch the parallel arm deliberately declines — the `!ordered_batch` guard added
+earlier today exists precisely so widening the parallel gate cannot steal ordered needles from the
+merge — so at m = 2^20 a sorted batch does not meet a parallel search at all. It meets the SERIAL
+span-gated merge, and sort+merge beats that because `par_sort_unstable` on already-sorted input is
+nearly free while its own merge walk is the same O(n + m) walk. **The guard I added to protect one
+win is what makes this hypothesis wrong**, and I would not have known that without forcing both
+sides.
+
+COUNTED_MECHANISM: 2 routes, 1 process, 4 timed cells; the shipped route is 1729245 ns FASTER on sorted needles (15464544 vs 17195789) and 974016 ns slower on random ones (30578965 vs 29604949), the latter inside a VOID null. No work was added or removed by this row.
+A/A NULL CONTROLS: 8 nulls; the two sorted-needle pairs are clean (0.983-1.016) and carry the
+reject, both random-needle pairs are VOID and carry nothing.
+PARITY: 11074 integer cells + 176 f32 cells, 0 divergences, run before any timing.
+VERIFICATION: `cargo fmt --check` exit 0 and per-file `rustfmt --check` exit 0. The `nosortmerge`
+switch is retained: it costs one relaxed atomic load on an already-admitted call and it is the
+instrument any re-check needs.
+RETRY PREDICATE: do NOT re-raise the stale-constant hypothesis for `MERGE_MIN_*` on the reasoning
+that the fallback improved — that reasoning is now measured and wrong, because the ordered-batch
+guard keeps the parallel arm out of exactly the regime where sort+merge is admitted. Re-open ONLY
+if that guard is removed, or on a QUIET host for the random-needle cell, which is the one this row
+leaves undecided at 3.2%. Note also that both routes are 3.6-2.1x FASTER than NumPy here, so this
+is a choice between two wins, not a loss to recover.
+AGENT_NAME=BlackThrush.

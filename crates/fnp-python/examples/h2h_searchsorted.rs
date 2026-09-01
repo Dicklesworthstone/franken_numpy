@@ -266,6 +266,30 @@ del f32_hay
 # pointer cross the whole array where the bisection pays 64*23 probes. `merge` must decline here
 # and land on `bisect`; `force` bypasses the span gate and prices what declining is worth.
 out("")
+# STALE-CONSTANT CHECK: the sort+merge route's MERGE_MIN_* thresholds (both 1<<19) were fitted when
+# the path they beat was a SERIAL per-query bisection. That path is gone - the fallback is now a
+# batched search with a parallel arm above 1<<12. A threshold is only as good as the alternative it
+# was measured against, so compare the two directly at a size where sort+merge is admitted
+# (n, m >= 2^19). `nosortmerge` forces the sort+merge route to decline; `merge` is the shipped
+# default and takes it. Both in ONE process, against the same live numpy.
+out("")
+sm_hay = np.sort(rng.integers(0, 1 << 40, 1 << 20))
+for lbl, q in (("2^20 hay, 2^20 RANDOM q", rng.integers(0, 1 << 40, 1 << 20)),
+               ("2^20 hay, 2^20 sorted q", np.sort(rng.integers(0, 1 << 40, 1 << 20)))):
+    g = {"np": np, "fnp": fnp, "h": sm_hay, "q": q}
+    for impl, flag in (("sortmerge", "1"), ("nosortmerge", "nosortmerge")):
+        os.environ["FNP_SEARCHSORTED_MERGE"] = flag
+        tn, tf = inter("np.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, 3)
+        n1, n2 = inter("np.searchsorted(h,q)", "np.searchsorted(h,q)", g, 3)
+        c1, c2 = inter("fnp.searchsorted(h,q)", "fnp.searchsorted(h,q)", g, 3)
+        nn, nf = n2 / n1, c2 / c1
+        ok = abs(nn - 1) <= 0.02 and abs(nf - 1) <= 0.02
+        out("%-30s%-9s%14.1f%14.1f%8.3fx%8.3f%9.3f%s"
+            % (lbl, impl, tn, tf, tf / tn, nn, nf, "" if ok else "  VOID"))
+    os.environ.pop("FNP_SEARCHSORTED_MERGE", None)
+    del g
+del sm_hay
+
 big = np.sort(rng.integers(0, 1 << 30, 1 << 22))
 for label, q in (("2^22 hay, 64 spread q", np.sort(rng.integers(0, 1 << 30, 64))),
                  ("2^22 hay, 64 clustered q", np.sort(rng.integers(0, 1 << 12, 64)))):

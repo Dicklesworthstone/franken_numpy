@@ -38000,9 +38000,21 @@ fn try_zerocopy_f64_searchsorted_merge(
     let n = a_s.len();
     let m = v_s.len();
     // Only the cache-miss regime: a haystack too big for cache AND enough queries to amortize the sort.
+    //
+    // STALE-CONSTANT WATCH (`deadlock-audit-sfgg3`). These thresholds were fitted when the path
+    // this one BEATS was a serial per-query bisection. That path no longer exists: the fallback is
+    // now a batched (level-transposed) search with a parallel arm above `1 << 12`. A threshold is
+    // only as good as the alternative it was measured against, so `nosortmerge` forces this route
+    // to decline and lets the two be compared in ONE process.
     const MERGE_MIN_HAYSTACK: usize = 1 << 19;
     const MERGE_MIN_QUERIES: usize = 1 << 19;
-    if n < MERGE_MIN_HAYSTACK || m < MERGE_MIN_QUERIES || rayon::current_num_threads() < 2 {
+    if n < MERGE_MIN_HAYSTACK
+        || m < MERGE_MIN_QUERIES
+        || rayon::current_num_threads() < 2
+        || searchsorted_mode_override()
+            .as_deref()
+            .is_some_and(|mode| mode == std::ffi::OsStr::new("nosortmerge"))
+    {
         return Ok(None);
     }
     // Byte order, which `numpy_dtype_is_f64` above is blind to by design: the raw reinterpretation
