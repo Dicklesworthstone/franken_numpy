@@ -44202,28 +44202,36 @@ fn try_zerocopy_tri(
 #[allow(non_snake_case)]
 fn tri(
     py: Python<'_>,
-    N: usize,
+    N: &Bound<'_, PyAny>,
     M: Option<usize>,
     k: i64,
     dtype: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    // An `N` numpy converts but we cannot DELEGATES rather than raising
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`). Read BEFORE the `like` branch
+    // below so both bail-outs share one shape, and a negative `N` goes to numpy too - its
+    // empty-grid behaviour is its own. `M` and `k` carry defaults and therefore stay strict.
+    let Some(rows) = integer_argument(N).filter(|value| *value >= 0) else {
+        return delegate_tri(py, numpy, N, M, k, dtype.as_ref());
+    };
+    let (rows, columns, offset) = (rows as usize, M, k);
     // `like` is keyword-only in numpy and selects __array_function__ dispatch,
     // which only numpy can perform; delegate the whole call when it is given.
     if like.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
         let kwargs = PyDict::new(py);
-        if let Some(columns) = M {
+        if let Some(columns) = columns {
             kwargs.set_item("M", columns)?;
         }
-        kwargs.set_item(intern!(py, "k"), k)?;
+        kwargs.set_item(intern!(py, "k"), offset)?;
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "like"), like.as_ref().map(|v| v.bind(py)))?;
         return Ok(numpy
             .getattr(intern!(py, "tri"))?
-            .call((N,), Some(&kwargs))?
+            .call((rows,), Some(&kwargs))?
             .unbind());
     }
     // `N` / `M` carry numpy's capital spelling: np.tri(N=3, M=2) is the documented
@@ -44231,29 +44239,45 @@ fn tri(
     // Native parallel per-row fill for the large fresh (N,M) grid (page-fault wall). Resolve the dtype
     // (default float64, matching numpy.tri) then fan the rows across the pool. Small / unusual dtypes fall
     // through to the numpy delegate below (whose serial build was 18-178x slower for the old native path).
-    let mm = M.unwrap_or(N);
+    let mm = columns.unwrap_or(rows);
     let dt_obj: Bound<'_, PyAny> = match dtype.as_ref() {
         Some(d) if !d.bind(py).is_none() => {
             numpy.getattr(intern!(py, "dtype"))?.call1((d.bind(py),))?
         }
         _ => numpy.getattr(intern!(py, "dtype"))?.call1(("float64",))?,
     };
-    if let Some(out) = try_zerocopy_tri(py, numpy, N, mm, k, &dt_obj)? {
+    if let Some(out) = try_zerocopy_tri(py, numpy, rows, mm, offset, &dt_obj)? {
         return Ok(out);
     }
     // numpy.tri creates the boolean/typed lower-triangle directly; the native
     // UFuncArray build-then-convert path was 18-178x slower (int8 178x). Delegate.
+    delegate_tri(py, numpy, N, M, k, dtype.as_ref())
+}
+
+/// Hands `np.tri` back to numpy with its arguments EXACTLY as they arrived.
+///
+/// Three call sites share it: an argument we cannot convert, a `like=` that only numpy's
+/// __array_function__ dispatch can honour, and the dtype/width combinations where numpy's own
+/// builder is 18-178x faster than a native build-then-convert.
+fn delegate_tri(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    n: &Bound<'_, PyAny>,
+    m: Option<usize>,
+    k: i64,
+    dtype: Option<&Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "k"), k)?;
-    if let Some(columns) = M {
+    if let Some(columns) = m {
         kwargs.set_item("M", columns)?;
     }
-    if let Some(dtype_val) = dtype.as_ref() {
+    if let Some(dtype_val) = dtype {
         kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
     }
     Ok(numpy
         .getattr(intern!(py, "tri"))?
-        .call((N,), Some(&kwargs))?
+        .call((n,), Some(&kwargs))?
         .unbind())
 }
 
@@ -61703,44 +61727,76 @@ fn angle(py: Python<'_>, z: Py<PyAny>, deg: Option<&Bound<'_, PyAny>>) -> PyResu
 #[pyfunction]
 #[pyo3(signature = (M,))]
 #[allow(non_snake_case)]
-fn bartlett(py: Python<'_>, M: i64) -> PyResult<Py<PyAny>> {
+fn bartlett(py: Python<'_>, M: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    // A length numpy accepts but we cannot convert DELEGATES
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`): numpy answers
+    // `np.bartlett(np.array(7, dtype=object))` in OBJECT dtype, which this kernel cannot.
+    let Some(length) = integer_argument(M) else {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "bartlett"), (M,))?
+            .unbind());
+    };
     // Rust-owned port of np.bartlett. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
     // emits the triangular Bartlett window.
-    let result = UFuncArray::bartlett(M.max(0) as usize);
+    let result = UFuncArray::bartlett(length.max(0) as usize);
     build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (M,))]
 #[allow(non_snake_case)]
-fn hanning(py: Python<'_>, M: i64) -> PyResult<Py<PyAny>> {
+fn hanning(py: Python<'_>, M: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    // A length numpy accepts but we cannot convert DELEGATES
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`): numpy answers
+    // `np.hanning(np.array(7, dtype=object))` in OBJECT dtype, which this kernel cannot.
+    let Some(length) = integer_argument(M) else {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "hanning"), (M,))?
+            .unbind());
+    };
     // Rust-owned port of np.hanning. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
     // emits the Hann window.
-    let result = UFuncArray::hanning(M.max(0) as usize);
+    let result = UFuncArray::hanning(length.max(0) as usize);
     build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (M,))]
 #[allow(non_snake_case)]
-fn hamming(py: Python<'_>, M: i64) -> PyResult<Py<PyAny>> {
+fn hamming(py: Python<'_>, M: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    // A length numpy accepts but we cannot convert DELEGATES
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`): numpy answers
+    // `np.hamming(np.array(7, dtype=object))` in OBJECT dtype, which this kernel cannot.
+    let Some(length) = integer_argument(M) else {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "hamming"), (M,))?
+            .unbind());
+    };
     // Rust-owned port of np.hamming. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
     // emits the Hamming window.
-    let result = UFuncArray::hamming(M.max(0) as usize);
+    let result = UFuncArray::hamming(length.max(0) as usize);
     build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 #[pyo3(signature = (M,))]
 #[allow(non_snake_case)]
-fn blackman(py: Python<'_>, M: i64) -> PyResult<Py<PyAny>> {
+fn blackman(py: Python<'_>, M: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    // A length numpy accepts but we cannot convert DELEGATES
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`): numpy answers
+    // `np.blackman(np.array(7, dtype=object))` in OBJECT dtype, which this kernel cannot.
+    let Some(length) = integer_argument(M) else {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "blackman"), (M,))?
+            .unbind());
+    };
     // Rust-owned port of np.blackman. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
     // emits the Blackman window.
-    let result = UFuncArray::blackman(M.max(0) as usize);
+    let result = UFuncArray::blackman(length.max(0) as usize);
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -70744,12 +70800,15 @@ fn polyfit(
     py: Python<'_>,
     x: Py<PyAny>,
     y: Py<PyAny>,
-    deg: i64,
+    deg: &Bound<'_, PyAny>,
     rcond: Option<Py<PyAny>>,
     full: bool,
     w: Option<Py<PyAny>>,
     cov: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // `deg` IS FORWARDED UNINTERPRETED, as in polyder/polyint: this is a passthrough, so an
+    // i64 parameter could only reject calls numpy accepts
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
     // Passthrough to np.polyfit. Least-squares polynomial fit of degree
     // `deg`. Matches numpy for scalar/array rcond, the `full` residual
     // tuple surface, optional weights, and cov ∈ {False, True, 'unscaled'}.
@@ -88473,8 +88532,17 @@ fn try_zerocopy_unravel_c(
 
 #[pyfunction]
 #[pyo3(signature = (n, ndim=2))]
-fn diag_indices(py: Python<'_>, n: usize, ndim: usize) -> PyResult<Py<PyAny>> {
-    build_diag_indices_tuple(py, n, ndim)
+fn diag_indices(py: Python<'_>, n: &Bound<'_, PyAny>, ndim: usize) -> PyResult<Py<PyAny>> {
+    // An `n` numpy converts but we cannot DELEGATES rather than raising
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`): `np.diag_indices(np.array(2,
+    // dtype=object))` answers, in object dtype, which this builder cannot produce. `ndim`
+    // carries a default and therefore stays strict - see `integer_argument`.
+    let Some(size) = integer_argument(n).filter(|value| *value >= 0) else {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "diag_indices"), (n, ndim))?
+            .unbind());
+    };
+    build_diag_indices_tuple(py, size as usize, ndim)
 }
 
 fn build_diag_indices_tuple(py: Python<'_>, n: usize, ndim: usize) -> PyResult<Py<PyAny>> {
@@ -88519,11 +88587,29 @@ fn diag_indices_from(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 #[pyo3(signature = (n, k=0, m=None))]
-fn tril_indices(py: Python<'_>, n: usize, k: i64, m: Option<usize>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = build_tri_indices(py, n, m.unwrap_or(n), k, false)? {
+fn tril_indices(
+    py: Python<'_>,
+    n: &Bound<'_, PyAny>,
+    k: i64,
+    m: Option<usize>,
+) -> PyResult<Py<PyAny>> {
+    // An `n` numpy converts but we cannot DELEGATES the whole call
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`). `k` and `m` carry defaults and
+    // therefore stay strict - see `integer_argument`.
+    let Some(rows_count) = integer_argument(n).filter(|value| *value >= 0) else {
+        let kwargs = PyDict::new(py);
+        if let Some(columns) = m {
+            kwargs.set_item(intern!(py, "m"), columns)?;
+        }
+        return Ok(cached_numpy(py)?
+            .call_method(intern!(py, "tril_indices"), (n, k), Some(&kwargs))?
+            .unbind());
+    };
+    let rows_count = rows_count as usize;
+    if let Some(out) = build_tri_indices(py, rows_count, m.unwrap_or(rows_count), k, false)? {
         return Ok(out);
     }
-    let (rows, cols) = UFuncArray::tril_indices(n, m.unwrap_or(n), k);
+    let (rows, cols) = UFuncArray::tril_indices(rows_count, m.unwrap_or(rows_count), k);
     build_numpy_tuple_from_ufuncs(py, &[rows, cols])
 }
 
@@ -88544,11 +88630,28 @@ fn tril_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAn
 
 #[pyfunction]
 #[pyo3(signature = (n, k=0, m=None))]
-fn triu_indices(py: Python<'_>, n: usize, k: i64, m: Option<usize>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = build_tri_indices(py, n, m.unwrap_or(n), k, true)? {
+fn triu_indices(
+    py: Python<'_>,
+    n: &Bound<'_, PyAny>,
+    k: i64,
+    m: Option<usize>,
+) -> PyResult<Py<PyAny>> {
+    // Same shape as `tril_indices` above: only `n` can be widened, because `k` and `m` carry
+    // defaults (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+    let Some(rows_count) = integer_argument(n).filter(|value| *value >= 0) else {
+        let kwargs = PyDict::new(py);
+        if let Some(columns) = m {
+            kwargs.set_item(intern!(py, "m"), columns)?;
+        }
+        return Ok(cached_numpy(py)?
+            .call_method(intern!(py, "triu_indices"), (n, k), Some(&kwargs))?
+            .unbind());
+    };
+    let rows_count = rows_count as usize;
+    if let Some(out) = build_tri_indices(py, rows_count, m.unwrap_or(rows_count), k, true)? {
         return Ok(out);
     }
-    let (rows, cols) = UFuncArray::triu_indices(n, m.unwrap_or(n), k);
+    let (rows, cols) = UFuncArray::triu_indices(rows_count, m.unwrap_or(rows_count), k);
     build_numpy_tuple_from_ufuncs(py, &[rows, cols])
 }
 
@@ -89569,6 +89672,21 @@ fn truthy_flag(value: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
         Some(value) => value.is_truthy(),
         None => Ok(false),
     }
+}
+
+/// Reads an integer argument, or returns `None` so the caller can DELEGATE the whole call.
+///
+/// numpy accepts anything that converts where we declared an `i64`: a 0-d object array, a
+/// float, a numpy scalar. `np.bartlett(np.array(7, dtype=object))` answers - and answers in
+/// OBJECT dtype - while ours said `TypeError: argument 'M': only integer scalar arrays can be
+/// converted to a scalar index` (`deadlock-audit-strict-scalar-argument-typing-soeis`).
+///
+/// Widening the CONVERSION would be the wrong fix: numpy's answer for the exotic cases is not
+/// merely "the same result from a converted integer", it can carry the operand's dtype into
+/// the output. So the conversion stays strict and its failure becomes a decline, exactly as
+/// `try_extract_numeric_array` does for operands.
+fn integer_argument(value: &Bound<'_, PyAny>) -> Option<i64> {
+    value.extract::<i64>().ok()
 }
 
 /// Delegates a ufunc call that carries POSITIONAL OUTPUTS, forwarding them verbatim.
@@ -149318,8 +149436,9 @@ mod tests {
                 return Ok(());
             }
 
-            let actual_default = diag_indices(py, 4, 2)?;
-            let actual_ndim = diag_indices(py, 2, 3)?;
+            let int_arg = |value: i64| value.into_pyobject(py).unwrap().into_any();
+            let actual_default = diag_indices(py, &int_arg(4), 2)?;
+            let actual_ndim = diag_indices(py, &int_arg(2), 3)?;
             let numpy = py.import("numpy")?;
             let expected_default = numpy.call_method1("diag_indices", (4,))?;
             let expected_ndim = numpy.call_method1("diag_indices", (2, 3))?;
@@ -149366,13 +149485,14 @@ mod tests {
 
             let numpy = py.import("numpy")?;
 
-            let actual_default = tri(py, 3, None, 0, None, None)?;
+            let int_arg = |value: i64| value.into_pyobject(py).unwrap().into_any();
+            let actual_default = tri(py, &int_arg(3), None, 0, None, None)?;
             let expected_default = numpy.call_method1("tri", (3,))?;
             assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
 
             let actual_neg = tri(
                 py,
-                3,
+                &int_arg(3),
                 Some(5),
                 -1,
                 Some(numpy.getattr("int32")?.unbind()),
@@ -149392,7 +149512,7 @@ mod tests {
 
             let actual_pos = tri(
                 py,
-                4,
+                &int_arg(4),
                 Some(2),
                 1,
                 Some(numpy.getattr("bool_")?.unbind()),
@@ -149725,7 +149845,8 @@ mod tests {
                 return Ok(());
             }
 
-            let actual = tril_indices(py, 4, 2, Some(5))?;
+            let int_arg = |value: i64| value.into_pyobject(py).unwrap().into_any();
+            let actual = tril_indices(py, &int_arg(4), 2, Some(5))?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("tril_indices", (4, 2, 5))?;
 
@@ -149741,7 +149862,8 @@ mod tests {
                 return Ok(());
             }
 
-            let actual = triu_indices(py, 4, 2, Some(5))?;
+            let int_arg = |value: i64| value.into_pyobject(py).unwrap().into_any();
+            let actual = triu_indices(py, &int_arg(4), 2, Some(5))?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("triu_indices", (4, 2, 5))?;
 
