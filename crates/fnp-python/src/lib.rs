@@ -91710,6 +91710,19 @@ fn try_zerocopy_f64_arg_extremum_flat(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
+    // THE SIZE FLOOR IS READ FIRST, because it is what decides almost every call. This chain is
+    // a disjunction of side-effect-free attribute reads, so its order is free to choose - and it
+    // was ordered worst-first: an operand below the floor paid a `dtype` fetch, a `kind` read
+    // whose `extract::<String>()` HEAP-ALLOCATES a Rust String to compare one byte, an
+    // `itemsize`, an `isnative`, and a `flags.c_contiguous` (which builds a numpy flagsobj)
+    // before reaching the one term that was going to reject it. The floor is 16 MiB, so
+    // essentially every real call is below it: measured on hz4 against numpy 2.5.2 live in the
+    // same invocation, `np.max` on f64 costs +448 ns at n=8, +626 at n=256, +1706 at n=4096 and
+    // +2199 at n=65536 - all of it entry, because the native route cannot engage until 2^21.
+    // `nbytes` is one getattr and one integer extract, and it is exact rather than an estimate.
+    if a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLOAT_EXTREMA_PARALLEL_MIN_BYTES {
+        return Ok(None);
+    }
     let dtype = a.getattr(intern!(py, "dtype"))?;
     if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
@@ -91718,7 +91731,6 @@ fn try_zerocopy_f64_arg_extremum_flat(
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
-        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLOAT_EXTREMA_PARALLEL_MIN_BYTES
     {
         return Ok(None);
     }
@@ -91874,6 +91886,19 @@ fn try_zerocopy_f64_extremum_flat(
     if !a.is_exact_instance(cached_ndarray_type(py)?) || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
+    // THE SIZE FLOOR IS READ FIRST, because it is what decides almost every call. This chain is
+    // a disjunction of side-effect-free attribute reads, so its order is free to choose - and it
+    // was ordered worst-first: an operand below the floor paid a `dtype` fetch, a `kind` read
+    // whose `extract::<String>()` HEAP-ALLOCATES a Rust String to compare one byte, an
+    // `itemsize`, an `isnative`, and a `flags.c_contiguous` (which builds a numpy flagsobj)
+    // before reaching the one term that was going to reject it. The floor is 16 MiB, so
+    // essentially every real call is below it: measured on hz4 against numpy 2.5.2 live in the
+    // same invocation, `np.max` on f64 costs +448 ns at n=8, +626 at n=256, +1706 at n=4096 and
+    // +2199 at n=65536 - all of it entry, because the native route cannot engage until 2^21.
+    // `nbytes` is one getattr and one integer extract, and it is exact rather than an estimate.
+    if a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLOAT_EXTREMA_PARALLEL_MIN_BYTES {
+        return Ok(None);
+    }
     let dtype = a.getattr(intern!(py, "dtype"))?;
     if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
@@ -91882,7 +91907,6 @@ fn try_zerocopy_f64_extremum_flat(
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
-        || a.getattr(intern!(py, "nbytes"))?.extract::<usize>()? < FLOAT_EXTREMA_PARALLEL_MIN_BYTES
     {
         return Ok(None);
     }
@@ -91962,7 +91986,6 @@ fn py_min(
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
-    let min_fn = numpy.getattr(intern!(py, "min"))?;
 
     let a_for_fallback = a.clone_ref(py);
     let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
@@ -91970,7 +91993,13 @@ fn py_min(
     let initial_for_fallback = initial.as_ref().map(|v| v.clone_ref(py));
     let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
+    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.min` was resolved off the live module
+    // before any gate had run, so every call that engages natively paid a `getattr` for a
+    // callable it never invokes. Moving it inside the closure keeps the property that matters -
+    // a monkeypatched `numpy.min` is still honoured, because the lookup still happens against
+    // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
+        let min_fn = numpy.getattr(intern!(py, "min"))?;
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
@@ -92181,7 +92210,6 @@ fn py_max(
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
-    let max_fn = numpy.getattr(intern!(py, "max"))?;
 
     let a_for_fallback = a.clone_ref(py);
     let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
@@ -92189,7 +92217,13 @@ fn py_max(
     let initial_for_fallback = initial.as_ref().map(|v| v.clone_ref(py));
     let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
+    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.max` was resolved off the live module
+    // before any gate had run, so every call that engages natively paid a `getattr` for a
+    // callable it never invokes. Moving it inside the closure keeps the property that matters -
+    // a monkeypatched `numpy.max` is still honoured, because the lookup still happens against
+    // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
+        let max_fn = numpy.getattr(intern!(py, "max"))?;
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
@@ -95411,13 +95445,18 @@ fn argmax(
 ) -> PyResult<Py<PyAny>> {
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = cached_numpy(py)?;
-    let argmax_fn = numpy.getattr(intern!(py, "argmax"))?;
 
     let a_for_fallback = a.clone_ref(py);
     let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
     let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
 
+    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.argmax` was resolved off the live module
+    // before any gate had run, so every call that engages natively paid a `getattr` for a
+    // callable it never invokes. Moving it inside the closure keeps the property that matters -
+    // a monkeypatched `numpy.argmax` is still honoured, because the lookup still happens against
+    // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
+        let argmax_fn = numpy.getattr(intern!(py, "argmax"))?;
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
@@ -95627,13 +95666,18 @@ fn argmin(
 ) -> PyResult<Py<PyAny>> {
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = cached_numpy(py)?;
-    let argmin_fn = numpy.getattr(intern!(py, "argmin"))?;
 
     let a_for_fallback = a.clone_ref(py);
     let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
     let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
 
+    // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.argmin` was resolved off the live module
+    // before any gate had run, so every call that engages natively paid a `getattr` for a
+    // callable it never invokes. Moving it inside the closure keeps the property that matters -
+    // a monkeypatched `numpy.argmin` is still honoured, because the lookup still happens against
+    // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
+        let argmin_fn = numpy.getattr(intern!(py, "argmin"))?;
         let kw = clone_py_kwargs(py, kwargs)?;
         if let Some(ax) = axis_for_fallback.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
