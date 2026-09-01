@@ -29825,7 +29825,10 @@ fn try_zerocopy_f64_concatenate(
     // array owning its data (deadlock-audit-concatenate-base-attribute-st00f).
     // The fill below is untouched - PyBuffer gives the same flat contiguous
     // slice for an N-D C-contiguous array as for a 1-D one.
-    let flat = numpy.call_method1(intern!(py, "empty"), (&output_shape, cached_float64_type(py)?))?;
+    let flat = numpy.call_method1(
+        intern!(py, "empty"),
+        (&output_shape, cached_float64_type(py)?),
+    )?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -78437,20 +78440,32 @@ fn sort(
                     return Ok(out);
                 }
             }
-            if float_of(8)
+            // RANK IS ONE OF THE FACTS, AND IT PARTITIONS THIS CHAIN EXACTLY AS DTYPE DOES.
+            //
+            // Every gate below this point requires `ndim >= 2` (the mid-axis pair require 3),
+            // and each one re-derived that for itself - after `is_exact_instance`, a dtype
+            // `char` read and a profitability check, all of which a 1-D operand paid at EVERY
+            // gate before being declined on rank. The classifier already holds `rank`; using it
+            // here is the same lever as `float_of`/`complex_of`, applied to the other axis of
+            // the partition. `None` (not an exact ndarray) keeps every gate live, unchanged.
+            let ranked = facts.is_none_or(|f| f.rank >= 2);
+            if ranked
+                && float_of(8)
                 && let Some(out) =
                     try_zerocopy_f64_sort_lastaxis(py, numpy, &a, axis_spec, require_distinct)?
             {
                 return Ok(out);
             }
             // complex128 per-lane last-axis value sort (lexicographic; NaN/-0.0 defer, byte-exact).
-            if complex_of(16)
+            if ranked
+                && complex_of(16)
                 && let Some(out) = try_zerocopy_c128_sort_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // complex64 per-lane last-axis value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-            if complex_of(8)
+            if ranked
+                && complex_of(8)
                 && let Some(out) = try_zerocopy_c64_sort_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
@@ -78469,47 +78484,56 @@ fn sort(
                 return Ok(out);
             }
             // integer per-lane last-axis sort (byte-exact for any kind; numpy sorts lanes serially).
-            if integral_any
+            if ranked
+                && integral_any
                 && let Some(out) = try_native_int_sort_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // fixed-width string per-lane last-axis sort (Latin-1 memcmp == codepoint
             // order; numpy's per-record comparator runs lanes serially).
-            if kind_is('U')
+            if ranked
+                && kind_is('U')
                 && let Some(out) = try_native_string_sort_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
-            if float_of(8)
+            if ranked
+                && float_of(8)
                 && let Some(out) = try_zerocopy_f64_sort_axis0(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // integer axis-0 (column) sort (byte-exact any kind; numpy sorts columns serially).
-            if integral_any && let Some(out) = try_native_int_sort_axis0(py, numpy, &a, axis_spec)?
+            if ranked
+                && integral_any
+                && let Some(out) = try_native_int_sort_axis0(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // complex128 per-column axis-0 value sort (lexicographic; NaN/-0.0 defer, byte-exact).
-            if complex_of(16)
+            if ranked
+                && complex_of(16)
                 && let Some(out) = try_zerocopy_c128_sort_axis0(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // complex64 per-column axis-0 value sort (f32 mirror; NaN/-0.0 defer, byte-exact).
-            if complex_of(8)
+            if ranked
+                && complex_of(8)
                 && let Some(out) = try_zerocopy_c64_sort_axis0(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
-            if float_of(8)
+            if ranked
+                && float_of(8)
                 && let Some(out) = try_zerocopy_f64_sort_midaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // integer per-lane middle-axis sort (byte-exact any kind; numpy sorts strided lanes serially).
-            if integral_any
+            if ranked
+                && integral_any
                 && let Some(out) = try_native_int_sort_midaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
@@ -80317,6 +80341,20 @@ fn try_native_float_argsort_default_radix(
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
+    // THE SIZE FLOOR DECIDES FIRST. It was tested after an `ndim` read, a
+    // `flags.c_contiguous` read, a `dtype` read and a `kind` read whose `extract::<String>()`
+    // HEAP-ALLOCATES a Rust String to compare against one byte - seven CPython operations plus
+    // an allocation, all to reach a floor that `len()` settles on its own. `np.argsort` on a
+    // small array is this route's commonest form and paid every one of them to be declined.
+    //
+    // Equivalent for anything that could pass: the `ndim == 1` test below means `len(a)` IS the
+    // element count for every operand this gate can accept, and an operand where they differ is
+    // declined by that test anyway. `len()` raises on a 0-d array and `?` propagates that
+    // exactly as it did when this line sat lower down.
+    let n = a.len()?;
+    if n < MIN || rayon::current_num_threads() < 2 {
+        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+    }
     if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !a
             .getattr(intern!(py, "flags"))?
@@ -80327,10 +80365,6 @@ fn try_native_float_argsort_default_radix(
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
     if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f" {
-        return Ok(FloatArgsortRadixOutcome::NotApplicable);
-    }
-    let n = a.len()?;
-    if n < MIN || rayon::current_num_threads() < 2 {
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
     match dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
@@ -82461,7 +82495,14 @@ fn argsort(
             }
             // kind='stable'/'mergesort' per-lane int/float last-axis argsort handles TIES byte-exactly (the
             // default-kind last-axis paths below defer on ties). numpy per-lane stable sort (~0.3-0.4s @8M dense).
-            if stable_numeric
+            // RANK PARTITIONS THIS CHAIN EXACTLY AS DTYPE DOES - the same lever `sort` takes.
+            // Every gate from here down requires `ndim >= 2` (the mid-axis ones, 3), and each
+            // re-derived that for itself behind an `is_exact_instance` and a dtype read, so a
+            // 1-D operand paid all of it at EVERY gate before being declined on rank. The
+            // classifier already holds `rank`. `None` keeps every gate live, unchanged.
+            let ranked = facts.is_none_or(|f| f.rank >= 2);
+            if ranked
+                && stable_numeric
                 && matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                 && let Some(out) = try_native_argsort_stable_lastaxis(py, numpy, &a, axis_spec)?
             {
@@ -82469,72 +82510,84 @@ fn argsort(
             }
             // fixed-width string non-last-axis STABLE argsort (strided lane gather;
             // ties keep ascending in-lane index == numpy's stable contract).
-            if facts.is_none_or(|f| matches!(f.kind, 'U' | 'S'))
+            if ranked
+                && facts.is_none_or(|f| matches!(f.kind, 'U' | 'S'))
                 && matches!(kind_spec.as_deref(), Some("stable") | Some("mergesort"))
                 && let Some(out) =
                     try_native_string_argsort_stable_nonlast(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
-            if float_of(8)
+            if ranked
+                && float_of(8)
                 && let Some(out) = try_zerocopy_f64_argsort_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // integer per-lane last-axis argsort (numpy introsort per lane; defer on ties).
-            if integral_any
+            if ranked
+                && integral_any
                 && let Some(out) = try_native_int_argsort_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // f32 per-lane last-axis argsort (numpy index-introsort; NaN/tie defer, byte-exact).
-            if float_of(4)
+            if ranked
+                && float_of(4)
                 && let Some(out) = try_zerocopy_f32_argsort_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // complex128 per-lane last-axis argsort (lexicographic; NaN/tie defer, byte-exact).
-            if complex_of(16)
+            if ranked
+                && complex_of(16)
                 && let Some(out) = try_zerocopy_c128_argsort_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // complex64 per-lane last-axis argsort (f32 mirror; NaN/tie defer, byte-exact).
-            if complex_of(8)
+            if ranked
+                && complex_of(8)
                 && let Some(out) = try_zerocopy_c64_argsort_lastaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
-            if float_of(8)
+            if ranked
+                && float_of(8)
                 && let Some(out) = try_zerocopy_f64_argsort_axis0(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // integer per-column axis-0 argsort (numpy introsort per column; defer on ties).
-            if integral_any
+            if ranked
+                && integral_any
                 && let Some(out) = try_native_int_argsort_axis0(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // f32 per-column axis-0 argsort (numpy index-introsort; NaN/tie defer, byte-exact).
-            if float_of(4)
+            if ranked
+                && float_of(4)
                 && let Some(out) = try_zerocopy_f32_argsort_axis0(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // complex128 per-column axis-0 argsort (lexicographic; NaN/tie defer, byte-exact).
-            if complex_of(16)
+            if ranked
+                && complex_of(16)
                 && let Some(out) = try_zerocopy_c128_argsort_axis0(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
             // complex64 per-column axis-0 argsort (f32 mirror; NaN/tie defer, byte-exact).
-            if complex_of(8)
+            if ranked
+                && complex_of(8)
                 && let Some(out) = try_zerocopy_c64_argsort_axis0(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
             }
-            if float_of(8)
+            if ranked
+                && float_of(8)
                 && let Some(out) = try_zerocopy_f64_argsort_midaxis(py, numpy, &a, axis_spec)?
             {
                 return Ok(out);
