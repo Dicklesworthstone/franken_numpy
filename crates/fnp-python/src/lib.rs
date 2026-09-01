@@ -42245,9 +42245,27 @@ fn histogram_bin_edges(
     {
         // Must be array-like. numpy.asarray to enforce dtype coercion.
         // Weights are ignored with explicit edges (documented).
-        return Ok(numpy
-            .call_method1(intern!(py, "asarray"), (bins_val,))?
-            .unbind());
+        //
+        // NOT EVERYTHING asarray ACCEPTS IS A VALID `bins`
+        // (`deadlock-audit-inverse-cell-and-exception-type-parity`). numpy requires an
+        // integer, a string, or a 1-D array of edges, and refuses a 0-d operand
+        // ("`bins` must be an integer, a string, or an array") or one whose dtype it cannot
+        // order ("ufunc 'greater' did not contain a loop" for a structured dtype). This
+        // shortcut returned both verbatim, answering four calls numpy rejects. Anything that
+        // is not a >=1-D orderable array goes to numpy so its own message is the one raised.
+        let edges = numpy.call_method1(intern!(py, "asarray"), (bins_val,))?;
+        let edges_dtype = edges.getattr(intern!(py, "dtype"))?;
+        let orderable = !edges_dtype
+            .getattr(intern!(py, "hasobject"))?
+            .extract::<bool>()?
+            && edges_dtype
+                .getattr(intern!(py, "kind"))?
+                .extract::<char>()?
+                != 'V';
+        if orderable && edges.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1 {
+            return Ok(edges.unbind());
+        }
+        return fallback(py);
     }
 
     // Case 2: int bins (default 10 when bins is None or missing) with
@@ -61834,7 +61852,12 @@ fn heaviside(
         // bandwidth. A fused single-pass parallel map with the scalar h wins. A multi-element array
         // b won't extract to an f64 scalar (so it stays with the array path above); a Python/numpy
         // scalar or 0-d array coerces here.
+        // A 0-d OBJECT array extracts to f64 through `__float__`, and numpy does NOT have a
+        // heaviside loop for it - it raises `ufunc 'heaviside' not supported for the input
+        // types` (`deadlock-audit-inverse-cell-and-exception-type-parity`). Answering there
+        // is a silent divergence, so an object-carrying step value declines to the delegate.
         if numpy_dtype_is_f64(py, &a)
+            && !ndarray_carries_objects(py, &b)?
             && let Ok(h) = b.extract::<f64>()
         {
             let numpy = cached_numpy(py)?;
@@ -89679,6 +89702,23 @@ fn truthy_flag(value: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
         Some(value) => value.is_truthy(),
         None => Ok(false),
     }
+}
+
+/// True when `value` is an ndarray whose dtype carries PyObject references.
+///
+/// `hasobject` rather than `kind == 'O'`, so a STRUCTURED dtype with an object field (kind
+/// 'V') is caught by the same test. Non-ndarrays answer false: a Python float or int is not
+/// the hazard here. Used where OUR conversion succeeds and numpy's would not - a 0-d object
+/// array extracts to f64 through `__float__`, and answering there is a silent divergence
+/// (`deadlock-audit-inverse-cell-and-exception-type-parity`).
+fn ndarray_carries_objects(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !value.is_exact_instance(&cached_ndarray_type(py)?.clone()) {
+        return Ok(false);
+    }
+    value
+        .getattr(intern!(py, "dtype"))?
+        .getattr(intern!(py, "hasobject"))?
+        .extract::<bool>()
 }
 
 /// Reads an integer argument, or returns `None` so the caller can DELEGATE the whole call.
