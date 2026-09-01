@@ -67179,3 +67179,81 @@ if that guard is removed, or on a QUIET host for the random-needle cell, which i
 leaves undecided at 3.2%. Note also that both routes are 3.6-2.1x FASTER than NumPy here, so this
 is a choice between two wins, not a loss to recover.
 AGENT_NAME=BlackThrush.
+
+## 2026-08-31 — THE INCUMBENT-SPREAD CRITERION, IMPLEMENTED AND APPLIED: the survey board collapses from 18 "decidable" cells to 8 ACTIONABLE, and every remaining LOSS disappears — the previous "worst standing loss" carries a 198.8% incumbent spread (`deadlock-audit-qpylx`)
+
+**Campaign result class:** maintenance-self-speedup
+
+No lever; this row changes which cells anyone is allowed to act on. Worker `hz4` (64 cores,
+loadavg 23.6), numpy 2.5.2 live in the same invocation,
+in-process ELF `cfdaedbcb145b08e076a8aade4aea6535fbee6a4e6f42d0a708fd783c97741d4`.
+
+### The criterion, and why the A/A null was never enough
+
+A dual A/A null says the two arms did not DRIFT apart. It says nothing about how much the
+INCUMBENT bounces within the same run, and a ratio is only meaningful if the effect exceeds that
+bounce. `h2h_survey` now records the numpy arm's own per-round samples — from the effect
+measurement AND from its own A/A — takes the largest min-to-max spread of the three, and marks a
+cell **actionable only if the A/A nulls are clean AND `|ratio - 1|` exceeds that spread.**
+
+### The board, re-read
+
+```
+  cell                   ratio   nullNP  nullFNP  incSprd
+  mean f64 2^20          0.891x   1.001    0.968   198.8%  VOID          <- the old "worst loss"
+  dot f64 2^20           0.721x   1.000    0.981   102.6%  NOISE>EFFECT
+  take f64 2^20          0.111x   0.906    0.955    91.8%  VOID
+  clip f64 2^20          0.889x   1.093    1.089    38.6%  VOID
+  sort f64 2^16          0.992x   1.001    1.010    35.1%  NOISE>EFFECT
+  isnan f64 2^20         0.988x   1.001    0.998    31.0%  NOISE>EFFECT
+  sqrt f64 2^20          1.229x   0.996    1.008    30.8%  NOISE>EFFECT
+  add f64 2^20           1.005x   0.998    1.022    28.2%  VOID
+  repeat f64 2^16        1.009x   1.002    1.003    15.3%  NOISE>EFFECT
+  where f64 2^20         1.036x   1.001    1.001     4.2%  NOISE>EFFECT
+  ...
+  ACTIONABLE (8 of 24):
+     1.017x  argmin f64 2^20        incumbent_spread  0.8%
+     0.628x  count_nonzero 2^20     incumbent_spread  2.0%   win
+     0.515x  std f64 2^20           incumbent_spread 34.9%   win
+     0.362x  concatenate f64 2^20   incumbent_spread 14.5%   win
+     0.330x  cumsum f64 2^20        incumbent_spread  2.3%   win
+     0.283x  cumprod f64 2^16       incumbent_spread  1.1%   win
+     0.161x  searchsorted 2^16      incumbent_spread  0.7%   win
+     0.074x  unique i64 2^16        incumbent_spread  0.5%   win
+```
+
+**Seven of the eight actionable cells are WINS. The only non-win is `argmin` at 1.017x — a 1.7%
+effect over a 0.8% spread — and 1.7% is not a campaign.** There is no actionable loss left on this
+surface, and that is the verdict of this lane.
+
+### It independently confirms yesterday's closure, by a different route
+
+`deadlock-audit-qpylx` closed `mean f64 2^20` as not decidable after four dedicated measurements
+spanning 1.094-1.456x. The criterion reaches the same conclusion in ONE run and says why: **the
+incumbent's own arm varied 198.8% within that run.** The cell that headed the loss map for this
+whole campaign was measuring the host. The slow route (re-measure four times) and the fast route
+(record the incumbent's spread) agree, which is the check that matters.
+
+Nine further cells the old board ranked are now marked `NOISE>EFFECT` — `sqrt` at 1.229x against a
+30.8% spread, `dot` at 0.721x against 102.6%, `sort` at 0.992x against 35.1%. **Every one of those
+would have been a plausible lane to open yesterday**, and each would have been an effect smaller
+than the noise it was measured in.
+
+COUNTED_MECHANISM: 24 cells, 3 numpy sample sets each (effect arm + both A/A arms, 8 samples per set), largest min-to-max spread taken per cell; 18 cells passed the old null-only gate and 8 pass the null-plus-spread gate, so 10 previously-ranked cells are withdrawn.
+A/A NULL CONTROLS: unchanged and still enforced - the new criterion is applied ON TOP of them, not
+instead. Six cells remain VOID on nulls alone.
+PARITY: each cell still compares values before timing (`np.allclose` rtol 1e-12, shape-equal); a
+`VALUES DIFFER` flag is printed and excludes the row.
+VERIFICATION: `cargo fmt --check` exit 0 and per-file `rustfmt --check` exit 0. Harness-only
+change; no shipped path touched.
+KNOWN CONSERVATISM, STATED: the criterion uses full min-to-max spread, not a CI, so it is strict by
+construction and excludes cells that are probably real wins — `take f64 2^20` at 0.111x and `clip`
+at 0.889x are almost certainly genuine (both are banked wins elsewhere) but fail here on a noisy
+host. **It errs toward INACTION, which is the safe direction for a board whose only job is to
+choose what to work on next.** A cell excluded here is not disproved; it is unranked.
+RETRY PREDICATE: do not open a lever on any cell this board marks `NOISE>EFFECT` or `VOID` without
+first re-measuring it on a quiet host - that is the whole point of the column. `argmin` at 1.017x
+is the only actionable non-win and is too small to be worth a slot. The next real perf work on this
+project needs a WIDER board (f32, complex, 2-D axis reductions, strided inputs, small-n entry
+costs), not another pass over these 24 cells.
+AGENT_NAME=BlackThrush.

@@ -38,7 +38,14 @@ def inter(sa, sb, g, k, rounds=4):
         for w in (("a","b","b","a") if r % 2 == 0 else ("b","a","a","b")):
             t = timeit.timeit(sa if w == "a" else sb, globals=g, number=k) / k * 1e9
             (ta if w == "a" else tb).append(t)
-    return statistics.median(ta), statistics.median(tb)
+    # Return the per-round samples too: the median alone cannot tell you whether an effect is
+    # bigger than the noise the INCUMBENT arm carries within this very run.
+    return statistics.median(ta), statistics.median(tb), ta, tb
+
+def spread(samples):
+    """Within-run spread of one arm, as a fraction of its own median."""
+    lo, hi = min(samples), max(samples)
+    return (hi - lo) / statistics.median(samples)
 
 N  = 1 << 20
 NS = 1 << 16          # sorts and set ops: smaller, they are O(n log n)
@@ -79,7 +86,8 @@ CASES = [
 ]
 
 out("")
-out("%-24s%14s%14s%9s%8s%9s" % ("case","numpy_ns","fnp_ns","ratio","nullNP","nullFNP"))
+out("%-24s%14s%14s%9s%8s%9s%9s"
+    % ("case","numpy_ns","fnp_ns","ratio","nullNP","nullFNP","incSprd"))
 rows = []
 for label, expr, base in CASES:
     gn = dict(base); gn["M"] = np
@@ -94,24 +102,37 @@ for label, expr, base in CASES:
     except Exception as e:
         out("%-24s  SKIPPED (%s)" % (label, type(e).__name__)); continue
     k = max(3, int(2e7 // N))
-    tn, tf = inter(sa, sb, g, k)
-    n1, n2 = inter(sa, sa, g, k)
-    c1, c2 = inter(sb, sb, g, k)
+    tn, tf, sn, sf = inter(sa, sb, g, k)
+    n1, n2, na, nb = inter(sa, sa, g, k)
+    c1, c2, _, _ = inter(sb, sb, g, k)
     nn, nf = n2 / n1, c2 / c1
     ok = abs(nn - 1) <= 0.02 and abs(nf - 1) <= 0.02
+    # LEDGER-293 CRITERION, applied here rather than left to the reader. An A/A null says the two
+    # arms did not DRIFT apart; it says nothing about how much the incumbent bounces WITHIN the
+    # run. Take the largest spread the numpy arm showed across its own samples in this cell - both
+    # from the effect measurement and from its own A/A - and require the effect to exceed it.
+    # Otherwise the row is noise wearing a ratio, and this campaign has ranked cells on exactly
+    # that before (a neighbouring cell was later shown to swing 33% run to run).
+    inc_spread = max(spread(sn), spread(na), spread(nb))
+    effect = abs(tf / tn - 1.0)
+    actionable = ok and agree and effect > inc_spread
     flag = "" if ok else "  VOID"
     if not agree:
         flag += "  VALUES DIFFER"
-    if ok and agree:
-        rows.append((tf / tn, label, tn, tf))
-    out("%-24s%14.1f%14.1f%8.3fx%8.3f%9.3f%s" % (label, tn, tf, tf / tn, nn, nf, flag))
+    if ok and agree and not actionable:
+        flag += "  NOISE>EFFECT"
+    if actionable:
+        rows.append((tf / tn, label, tn, tf, inc_spread))
+    out("%-24s%14.1f%14.1f%8.3fx%8.3f%9.3f%8.1f%%%s"
+        % (label, tn, tf, tf / tn, nn, nf, 100 * inc_spread, flag))
 
 out("")
-out("DECIDABLE cells ranked by ratio (worst first):")
-for r, label, tn, tf in sorted(rows, reverse=True):
+out("ACTIONABLE cells - A/A nulls clean AND |effect| exceeds the incumbent's within-run spread:")
+for r, label, tn, tf, isp in sorted(rows, reverse=True):
     marker = "  <-- LOSS" if r > 1.10 else ("  win" if r < 0.90 else "")
-    out("  %8.3fx  %-24s numpy %12.1f  fnp %12.1f%s" % (r, label, tn, tf, marker))
-out("%d of %d cells decidable" % (len(rows), len(CASES)))
+    out("  %8.3fx  %-24s numpy %12.1f  fnp %12.1f  incumbent_spread %5.1f%%%s"
+        % (r, label, tn, tf, 100 * isp, marker))
+out("%d of %d cells ACTIONABLE (nulls clean AND effect > incumbent spread)" % (len(rows), len(CASES)))
 "#;
 
 fn main() -> PyResult<()> {
