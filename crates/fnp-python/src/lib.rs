@@ -29737,14 +29737,29 @@ fn try_zerocopy_f64_concatenate(
     let mut buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(items.len());
     let mut shapes: Vec<Vec<usize>> = Vec::with_capacity(items.len());
     for item in &items {
-        if !item.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, item) {
+        if !item.is_exact_instance(&ndarray_type) {
             return Ok(None);
         }
-        // BYTE ORDER MUST BE CHECKED AT THE BUFFER SITE. `numpy_dtype_is_f64` is deliberately
-        // byte-order BLIND - its own comment says so, because its other callers need a `>f8`
-        // operand to still take a delegate - so a reader like this one has to ask separately.
-        // Without it `PyBuffer::<f64>::get` happily accepts a byte-swapped array and its bytes
-        // were copied VERBATIM into a native-f64 output:
+        // ONE dtype READ ANSWERING BOTH QUESTIONS, BY IDENTITY.
+        //
+        // This loop asked two separate questions and paid a `getattr("dtype")` for EACH, per
+        // input array: `numpy_dtype_is_f64` (which reads the operand's dtype for itself) and
+        // then `dtype_is_native_order` on a second, independently fetched dtype. A two-array
+        // concatenate therefore fetched FOUR dtypes to learn two facts.
+        //
+        // BOTH questions are answered by ONE pointer compare against the interned descriptor,
+        // and that is not a coincidence: `np.dtype('float64')` IS the native-order float64
+        // descriptor, so identity with it means f64 AND native order at once. This is the
+        // same test `zerocopy_f64_unary_flat` already uses at its own buffer site, for
+        // exactly this reason.
+        //
+        // BYTE ORDER MUST BE CHECKED AT THE BUFFER SITE, and it still is - the identity
+        // compare is STRICTLY stronger than the pair it replaces, never weaker.
+        // `numpy_dtype_is_f64` is deliberately byte-order BLIND - its own comment says so,
+        // because its other callers need a `>f8` operand to still take a delegate - so a
+        // reader like this one has to ask separately. Without it `PyBuffer::<f64>::get`
+        // happily accepts a byte-swapped array and its bytes were copied VERBATIM into a
+        // native-f64 output:
         //
         //   np.concatenate([np.array([1.,2.,3.]).astype('>f8'), np.array([9.,8.])])
         //     numpy -> [1. 2. 3. 9. 8.]
@@ -29752,8 +29767,13 @@ fn try_zerocopy_f64_concatenate(
         //
         // Declining sends mixed-order input to the by-itemsize helper, which already refuses
         // mixed dtypes and defers to numpy, and sends an all-`>f8` concat there too - where a
-        // byte-preserving copy into a `>f8` output is correct.
-        if !dtype_is_native_order(&item.getattr(intern!(py, "dtype"))?) {
+        // byte-preserving copy into a `>f8` output is correct. An exotic f64 descriptor that
+        // is not the singleton (one carrying `metadata=`, say) now declines here instead of
+        // engaging; that is the fail-safe direction - it delegates to NumPy and stays correct.
+        if !item
+            .getattr(intern!(py, "dtype"))?
+            .is(cached_float64_dtype(py)?)
+        {
             return Ok(None);
         }
         let Ok(buffer) = PyBuffer::<f64>::get(item) else {
@@ -29791,14 +29811,21 @@ fn try_zerocopy_f64_concatenate(
     let mut out_shape = shapes[0].clone();
     out_shape[ax] = out_axis;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
+    // POSITIONAL dtype, HELD TYPE OBJECT, NO kwargs DICT. This allocation used to build a
+    // `PyDict`, put the `&str` `"float64"` in it, and call `empty` with keywords - so every
+    // native concatenate paid a dict allocation AND made NumPy resolve a freshly built
+    // `PyString` through its dtype-from-object machinery. The f64 unary family took exactly
+    // this lever and priced it with `timeit` against the installed interpreter:
+    // `np.empty(n, "uint8")` 217.3 ns vs `np.empty(n, u8)` 166.7 ns with the type object
+    // held. `numpy.empty`'s second POSITIONAL parameter is `dtype`, and NumPy resolves the
+    // string spelling to exactly this descriptor, so this is the same request with the
+    // lookup and the dict removed.
     // Allocate at the FINAL shape, not flat-then-reshape: the trailing reshape
     // set `.base` to the flat temporary, where numpy's concatenate returns an
     // array owning its data (deadlock-audit-concatenate-base-attribute-st00f).
     // The fill below is untouched - PyBuffer gives the same flat contiguous
     // slice for an N-D C-contiguous array as for a 1-D one.
-    let flat = numpy.call_method(intern!(py, "empty"), (&output_shape,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (&output_shape, cached_float64_type(py)?))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -30050,8 +30077,14 @@ fn concatenate(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let concatenate_fn = numpy.getattr(intern!(py, "concatenate"))?;
+    // THE `getattr` BELONGS TO THE FALLBACK, NOT TO EVERY CALL. `np.concatenate` was
+    // resolved off the live module before any gate had run, so the native zero-copy path -
+    // the one this function exists for - paid a `getattr` for a callable it never invokes.
+    // Moving it inside the closure keeps the liveness property intact (a monkeypatched
+    // `numpy.concatenate` is still honoured, because the lookup still happens against the
+    // live module at the moment of delegation) and removes it from the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
+        let concatenate_fn = numpy.getattr(intern!(py, "concatenate"))?;
         let call_kwargs = PyDict::new(py);
         if let Some(kw) = kwargs {
             for (key, value) in kw.iter() {
@@ -100620,6 +100653,42 @@ fn numeric_operand_facts(
     }
     let rank = value.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     let dtype = value.getattr(intern!(py, "dtype"))?;
+    // IDENTITY-FIRST, the same substitution `PyUFunc::__call__` already measured at 388.7
+    // insns/call (593.5 -> 204.8) on the sniff it hoisted. This classifier is the entry gate
+    // for matmul, dot, sort (TWICE per call) and both native unary families, and it answers
+    // (kind, itemsize) with TWO `getattr`s plus TWO heap-free extracts where ONE pointer
+    // compare answers it for the dtype every one of those routes is actually built for.
+    //
+    // NumPy interns its builtin descriptors, so `a.dtype is np.dtype(np.float64)` is True and
+    // stable across separately created arrays. `np.dtype('float64').kind` is `'f'` and its
+    // `.itemsize` is 8 by definition, so the returned facts are IDENTICAL to what the
+    // getattr path below would have produced - this is the same answer with the lookup
+    // removed, not a narrower one.
+    //
+    // EXACTLY TWO COMPARES, f64 first. A miss costs a handful of instructions and then takes
+    // the unchanged path, so no operand can be made slower in any way that matters; adding
+    // int64/uint8/... would tax every f64 call to speed up dtypes whose gates are not the hot
+    // ones here. A BYTE-SWAPPED `>f8` is a DIFFERENT object and therefore misses, falls
+    // through, and is classified `('f', 8)` exactly as before - the identity compare is used
+    // here only to answer faster, never to route.
+    if let Ok(f64_dtype) = cached_float64_dtype(py)
+        && dtype.is(f64_dtype)
+    {
+        return Ok(Some(NumericOperandFacts {
+            rank,
+            kind: 'f',
+            itemsize: 8,
+        }));
+    }
+    if let Ok(f32_dtype) = cached_float32_dtype(py)
+        && dtype.is(f32_dtype)
+    {
+        return Ok(Some(NumericOperandFacts {
+            rank,
+            kind: 'f',
+            itemsize: 4,
+        }));
+    }
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     Ok(Some(NumericOperandFacts {
