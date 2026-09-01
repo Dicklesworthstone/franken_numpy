@@ -8,7 +8,7 @@
 //! the 2x2 against the live incumbent:
 //!
 //!     ours raised / theirs raised  -> fine (exception type diffs reported separately)
-//!     ours ok     / theirs ok      -> fine (values compared)
+//!     ours ok     / theirs ok      -> fine (results compared)
 //!     ours RAISED / theirs OK      -> DEFECT, this class
 //!     ours OK     / theirs raised  -> a different defect, also reported
 //!
@@ -25,10 +25,9 @@ use std::ffi::CString;
 use fnp_python::fnp_python;
 
 const HARNESS: &str = r#"
-import faulthandler, hashlib, itertools, os, resource, sys
+import faulthandler, hashlib, itertools, json, os, resource, signal, sys
 
 # A sweep that dies mid-way exits 139 with an EMPTY report and no indication of where it was.
-# One numpy-vs-numpy null run of this probe did exactly that on a loaded box; the next did not.
 faulthandler.enable()
 
 def out(*items):
@@ -77,7 +76,12 @@ FILLERS = (
     ("int1", lambda: 1),
 )
 
-TRACE = os.environ.get("FNP_PROBE_TRACE") == "1"
+# Two calls to these return DIFFERENT BYTES by contract - the buffer is uninitialised - so
+# their results are not compared. Their raise/no-raise cells still count, which is the whole
+# point of the sweep.
+NONDETERMINISTIC = {"empty", "empty_like"}
+
+CHILD_TIMEOUT_SECONDS = 120
 
 def call(function, arguments):
     # BaseException, not Exception: a callee that raises SystemExit would otherwise unwind the
@@ -92,7 +96,7 @@ def call(function, arguments):
 
 def describe(exception):
     text = str(exception).replace("\n", " ")
-    return "%s: %s" % (type(exception).__name__, text[:120])
+    return "%s: %s" % (type(exception).__name__, text[:110])
 
 def values_agree(left, right):
     # NaN EQUALS NaN here. Position 1 of a unary ufunc is `out`, so the sweep legitimately
@@ -162,80 +166,114 @@ def shapes():
                 for combination in itertools.product(FILLERS, repeat=arity - 1):
                     yield probe_name, probe_make, arity, position, combination
 
-cells = {"both_ok": 0, "both_raise": 0, "ours_raise_theirs_ok": 0, "ours_ok_theirs_raise": 0}
-defects, inverse, value_diffs, exc_type_diffs = [], [], [], []
-covered_names, admissible_calls = set(), 0
-entry_count = 0
+def sweep_one(name, ours, theirs, write):
+    # Runs in a FORKED CHILD. One admissible call and one inadmissible call per
+    # (probe, arity, position) is enough: the fillers only exist to get numpy to accept or
+    # refuse the call at all, and both outcomes are informative - numpy accepting opens the
+    # DEFECT cell, numpy refusing opens the INVERSE cell.
+    seen_ok, seen_raise = set(), set()
+    for probe_name, probe_make, arity, position, combination in shapes():
+        key = (probe_name, arity, position)
+        if key in seen_ok and key in seen_raise:
+            continue
+        row = [name, probe_name, arity, position,
+               "+".join(label for label, _ in combination) or "-"]
+        write({"kind": "begin", "row": row})
+        arguments = [maker() for _, maker in combination]
+        arguments.insert(position, probe_make())
+        their_kind, their_result = call(theirs, arguments)
+        if key in (seen_ok if their_kind == "ok" else seen_raise):
+            continue
+        arguments = [maker() for _, maker in combination]
+        arguments.insert(position, probe_make())
+        our_kind, our_result = call(ours, arguments)
+        if their_kind == "ok":
+            seen_ok.add(key)
+            if our_kind == "raise":
+                write({"kind": "defect", "row": row, "note": describe(our_result)})
+            elif name in NONDETERMINISTIC:
+                write({"kind": "both_ok", "row": row, "note": ""})
+            else:
+                agree, why = same(their_result, our_result)
+                write({"kind": "both_ok", "row": row, "note": "" if agree else why})
+        else:
+            seen_raise.add(key)
+            if our_kind == "ok":
+                write({"kind": "inverse", "row": row, "note": describe(their_result)})
+            else:
+                differ = type(our_result) is not type(their_result)
+                write({"kind": "both_raise", "row": row,
+                       "note": "theirs %s / ours %s" % (type(their_result).__name__,
+                                                        type(our_result).__name__)
+                               if differ else ""})
+
+def run_isolated(name, ours, theirs):
+    # NUMPY ITSELF SEGFAULTS on some of these operands: `np.all` on an object operand took the
+    # whole sweep down on numpy 2.5.2 at the THIRD entry point, which would have hidden every
+    # entry point after it - the same green-by-absence hazard a panicking MUST clause creates.
+    # Each entry point therefore runs in a forked child, and a child that dies by signal costs
+    # one name instead of the report. The parent never calls fnp itself, so the child inherits
+    # no live rayon pool to deadlock on.
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            signal.alarm(CHILD_TIMEOUT_SECONDS)
+            stream = os.fdopen(write_fd, "w")
+            def write(record):
+                stream.write(json.dumps(record) + "\n")
+                stream.flush()
+            sweep_one(name, ours, theirs, write)
+            stream.flush()
+        except BaseException:
+            pass
+        finally:
+            os._exit(0)
+    os.close(write_fd)
+    records = []
+    with os.fdopen(read_fd, "r") as stream:
+        for line in stream:
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                pass
+    _, status = os.waitpid(pid, 0)
+    return records, status
+
+cells = {"both_ok": 0, "both_raise": 0, "defect": 0, "inverse": 0}
+defects, inverse, value_diffs, exc_type_diffs, crashes = [], [], [], [], []
+covered_names, entry_count = set(), 0
 
 for name, ours, theirs in entry_points():
     entry_count += 1
-    if TRACE:
-        out("trace ok-sweep", name)
-    settled = set()
-    for probe_name, probe_make, arity, position, combination in shapes():
-        # One admissible call per (probe, arity, position) is enough: the fillers only exist
-        # to get numpy to accept the call at all.
-        key = (probe_name, arity, position)
-        if key in settled:
+    records, status = run_isolated(name, ours, theirs)
+    last_begin = None
+    for record in records:
+        kind, row, note = record["kind"], tuple(record["row"]), record.get("note", "")
+        if kind == "begin":
+            last_begin = row
             continue
-        arguments = [maker() for _, maker in combination]
-        arguments.insert(position, probe_make())
-        their_kind, their_result = call(theirs, arguments)
-        if their_kind != "ok":
-            continue
-        settled.add(key)
-        arguments = [maker() for _, maker in combination]
-        arguments.insert(position, probe_make())
-        our_kind, our_result = call(ours, arguments)
-        admissible_calls += 1
+        cells[kind] += 1
         covered_names.add(name)
-        row = (name, probe_name, arity, position,
-               "+".join(label for label, _ in combination) or "-")
-        if our_kind == "raise":
-            cells["ours_raise_theirs_ok"] += 1
-            defects.append(row + (describe(our_result),))
-        else:
-            cells["both_ok"] += 1
-            agree, why = same(their_result, our_result)
-            if not agree:
-                value_diffs.append(row + (why,))
-
-# The inverse cell needs numpy to RAISE, so it is swept separately: above, a numpy raise meant
-# the call was inadmissible and the sweep moved on.
-for name, ours, theirs in entry_points():
-    if TRACE:
-        out("trace raise-sweep", name)
-    settled = set()
-    for probe_name, probe_make, arity, position, combination in shapes():
-        key = (probe_name, arity, position)
-        if key in settled:
-            continue
-        arguments = [maker() for _, maker in combination]
-        arguments.insert(position, probe_make())
-        their_kind, their_result = call(theirs, arguments)
-        if their_kind != "raise":
-            continue
-        settled.add(key)
-        arguments = [maker() for _, maker in combination]
-        arguments.insert(position, probe_make())
-        our_kind, our_result = call(ours, arguments)
-        row = (name, probe_name, arity, position,
-               "+".join(label for label, _ in combination) or "-")
-        if our_kind == "ok":
-            cells["ours_ok_theirs_raise"] += 1
-            inverse.append(row + (describe(their_result),))
-        else:
-            cells["both_raise"] += 1
-            if type(our_result) is not type(their_result):
-                exc_type_diffs.append(row + ("theirs %s / ours %s" % (
-                    type(their_result).__name__, type(our_result).__name__),))
+        if kind == "defect":
+            defects.append(row + (note,))
+        elif kind == "inverse":
+            inverse.append(row + (note,))
+        elif kind == "both_ok" and note:
+            value_diffs.append(row + (note,))
+        elif kind == "both_raise" and note:
+            exc_type_diffs.append(row + (note,))
+    if os.WIFSIGNALED(status):
+        crashes.append((last_begin or (name, "-", 0, 0, "-")) + ("child died on signal %d"
+                                                                % os.WTERMSIG(status),))
 
 out("")
-out("entry points swept: %d | reached by an admissible call: %d | admissible calls: %d"
-    % (entry_count, len(covered_names), admissible_calls))
+out("entry points swept: %d | reached by a call: %d | ok-cells %d | raise-cells %d"
+    % (entry_count, len(covered_names), cells["both_ok"] + cells["defect"],
+       cells["both_raise"] + cells["inverse"]))
 out("2x2: both_ok %d | both_raise %d | OURS RAISED/theirs ok %d | ours ok/theirs raised %d"
-    % (cells["both_ok"], cells["both_raise"],
-       cells["ours_raise_theirs_ok"], cells["ours_ok_theirs_raise"]))
+    % (cells["both_ok"], cells["both_raise"], cells["defect"], cells["inverse"]))
 
 def report(title, rows, limit=300):
     out("")
@@ -248,6 +286,7 @@ def report(title, rows, limit=300):
 report("DEFECT - ours RAISED where numpy answered", defects)
 report("INVERSE - ours answered where numpy RAISED", inverse)
 report("VALUE DIVERGENCE - both answered, results differ", value_diffs)
+report("CALLEE CRASHED the child (numpy or fnp died on a signal)", crashes)
 report("exception TYPE differs (both raised; informational)", exc_type_diffs)
 "#;
 
