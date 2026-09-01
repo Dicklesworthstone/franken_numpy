@@ -61,7 +61,8 @@ out("host", os.uname().nodename, "| loadavg", [round(x, 2) for x in os.getloadav
 out("cpus", os.cpu_count(), "| RAYON_NUM_THREADS env", os.environ.get("RAYON_NUM_THREADS", "(unset)"))
 out("NOTE thread count is set by an installed rayon ThreadPool, not by the environment.")
 rng = np.random.default_rng(SEED)
-BASE = np.abs(rng.standard_normal(1 << 22)) + 0.5
+BASE = np.abs(rng.standard_normal(1 << 24)) + 0.5
+SIZES = [1 << 20, 1 << 21, 1 << 22, 1 << 23, 1 << 24]
 
 def inter(sa, sb, g, k, rounds=4):
     ta, tb = [], []
@@ -75,21 +76,19 @@ def spread(s):
     return (max(s) - min(s)) / statistics.median(s)
 
 CELLS = (
-    # label            numpy arm                  fnp arm                   what the input is
-    ("np-written",  "np.sqrt(np.abs(a))",  "fnp.sqrt(np.abs(a))"),
-    ("settled",     "np.sqrt(pre)",        "fnp.sqrt(pre)"),
-    ("fnp-written", "np.sqrt(fnp.abs(a))", "fnp.sqrt(fnp.abs(a))"),
+    # label           numpy arm               fnp arm                what the input is
+    ("settled",    "np.sqrt(pre)",       "fnp.sqrt(pre)"),
+    ("np-written", "np.sqrt(np.abs(a))", "fnp.sqrt(np.abs(a))"),
 )
 
 out("")
-out("%-5s%-6s%-13s%-7s%10s%12s%12s%9s%12s%8s%9s%9s%s"
+out("%-5s%-6s%-13s%-7s%10s%12s%12s%9s%12s%8s%9s%9s%7s%s"
     % ("pass", "T", "cell", "n", "chunkKiB", "numpy_ns", "fnp_ns", "ratio", "excess_ns",
-       "nullNP", "nullFNP", "incSprd", "  flag"))
+       "nullNP", "nullFNP", "incSprd", "load1", "  flag"))
 "#;
 
 const MEASURE: &str = r#"
-sizes = [1 << 21] + ([1 << 22] if T in WIDE_T else [])
-for n in sizes:
+for n in SIZES:
     a = BASE[:n].copy()
     pre = np.abs(a)
     g = {"np": np, "fnp": fnp, "a": a, "pre": pre}
@@ -104,11 +103,14 @@ for n in sizes:
         flag = "" if ok else "  VOID"
         if ok and abs(tf / tn - 1.0) <= isp:
             flag += "  NOISE>EFFECT"
-        # `chunk = n.div_ceil(current_num_threads())` in the kernel, so this column is the
-        # actual per-thread working set - the quantity a minimum-chunk-size gate would read.
-        out("%-5d%-6d%-13s%-7s%10.0f%12.1f%12.1f%8.3fx%12.1f%8.3f%9.3f%8.1f%%%s"
+        # `chunk = n.div_ceil(current_num_threads())` in the kernel, so chunkKiB is the actual
+        # per-thread working set - the quantity a minimum-chunk-size gate would read. load1 is
+        # sampled per row because oversubscription is the one confound the A/A null cannot see:
+        # it biases the 64-thread arm and leaves the 1-thread arm alone, and an fnp-vs-fnp null
+        # passes either way.
+        out("%-5d%-6d%-13s%-7s%10.0f%12.1f%12.1f%8.3fx%12.1f%8.3f%9.3f%8.1f%%%7.1f%s"
             % (PASS, T, label, "2^%d" % (n.bit_length() - 1), -(-n // T) * 8 / 1024,
-               tn, tf, tf / tn, tf - tn, nn, nf, 100 * isp, flag))
+               tn, tf, tf / tn, tf - tn, nn, nf, 100 * isp, os.getloadavg()[0], flag))
 "#;
 
 fn main() -> PyResult<()> {
@@ -124,26 +126,36 @@ fn main() -> PyResult<()> {
     let cores = std::thread::available_parallelism()
         .map(|c| c.get())
         .unwrap_or(8);
-    // Geometric ladder down from the machine's own width to the serial branch. T=1 is not a
-    // decoration: `n >= SQRT_PARALLEL_MIN && current_num_threads() >= 2` is false there, so it
-    // measures the SERIAL kernel reading a buffer the previous call just wrote from this very
-    // core - the one configuration in which the coherence hypothesis predicts no loss at all.
-    let mut threads: Vec<usize> = Vec::new();
-    let mut t = cores;
-    while t > 1 {
-        threads.push(t);
-        t /= 2;
-    }
-    threads.push(1);
-    // The 2^22 rows cost as much as the 2^21 rows, so the second size runs only at the ends and
-    // the middle of the ladder - enough to replicate a trend without doubling the whole sweep.
-    let wide: Vec<usize> = vec![cores, 4, 1];
-
+    // ROUND 2 collapses the ladder to three levels and spends the budget on SIZE instead. Round
+    // 1's full geometric ladder (64/32/16/8/4/2/1 at n = 2^21) already answered the shape
+    // question on hz4 with nulls at 1.000-1.005 and incumbent spreads of 1-9%: the optimum is
+    // T = 8 (0.168-0.189x settled), T = 64 is 1.26x WORSE than that optimum, and T = 1 is worse
+    // still - so nothing between 4 and 16 needs re-measuring. T=1 stays because
+    // `n >= SQRT_PARALLEL_MIN && current_num_threads() >= 2` is false there, which makes it the
+    // serial reference AND the proof that `pool.install` reaches the kernel at all (its settled
+    // ratio jumps 0.17x -> 0.57x).
+    //
+    // WHAT ROUND 2 IS FOR. Round 1 cannot tell 'chunks below ~1 MiB are bad for this kernel'
+    // apart from 'this 64-core host was at loadavg 48 and 64 threads were oversubscribed'. A
+    // dual A/A null is blind to that: it compares fnp to fnp, so a bias that hits the 64-thread
+    // arm and spares the 1-thread arm passes it perfectly. THE TWO STORIES DIFFER IN n. Sweeping
+    // n from 2^20 to 2^24 at fixed T moves T=64's chunk from 128 KiB to 2 MiB:
+    //   chunk-size story  -> (T=64 / T=8) is > 1 at small n and CROSSES BELOW 1 as n grows
+    //   oversubscription  -> (T=64 / T=8) stays > 1 at EVERY n
+    // Only the first predicts a sign change, and no amount of constant host load can manufacture
+    // one. The crossover, if it exists, also LOCATES the gate constant directly.
+    //
+    // Round 1's other result is already banked and not re-measured: the bead's compose LOSS did
+    // not reproduce. `fnp.sqrt(np.abs(a))` won at every thread count from 1 to 64 (0.61x-0.92x),
+    // and the single row that read as a loss (1.125x) was the FIRST cell of the process, whose
+    // numpy arm ran 35% faster than that same arm's steady state in all 20 later rows.
+    let mut threads: Vec<usize> = vec![cores, 8, 1];
+    threads.dedup();
+    threads.retain(|&t| t <= cores);
     let globals: Py<PyDict> = Python::attach(|py| -> PyResult<Py<PyDict>> {
         let g = PyDict::new(py);
         g.set_item("EXE_PATH", exe.to_string_lossy().as_ref())?;
         g.set_item("SEED", seed)?;
-        g.set_item("WIDE_T", wide.clone())?;
         py.run(&CString::new(SETUP).unwrap(), Some(&g), None)?;
         Ok(g.unbind())
     })?;
