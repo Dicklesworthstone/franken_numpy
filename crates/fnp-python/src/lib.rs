@@ -42631,11 +42631,18 @@ fn vstack(
 fn row_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy so 1-D row promotion, 2-D preservation, object
     // handling, and incompatible-width validation stay exact.
+    //
+    // NUMPY 2.5.2 REMOVED `row_stack` and this raised its AttributeError on every worker
+    // (`deadlock-audit-libtests-red-on-numpy-2-5-2`). `row_stack` was only ever an ALIAS of
+    // `vstack` - deprecated in 2.0, removed since - so falling back to `vstack` is the same
+    // function, not an approximation, and it keeps `fnp.row_stack` working on both the 2.4.3
+    // that still has it and the 2.5.2 that does not.
     let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "row_stack"))?
-        .call1((tup.bind(py),))?
-        .unbind())
+    let stack = match numpy.getattr(intern!(py, "row_stack")) {
+        Ok(function) => function,
+        Err(_) => numpy.getattr(intern!(py, "vstack"))?,
+    };
+    Ok(stack.call1((tup.bind(py),))?.unbind())
 }
 
 #[pyfunction]
@@ -122412,8 +122419,18 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if dtypes_module.getattr(intern!(py, "__all__")).is_err() {
             dtypes_module.setattr("__all__", PyList::new(py, dtypes_fallback_all)?)?;
         }
+        // THE LAZY FALLBACK FORWARDS WHATEVER numpy.dtypes HAS, and is not a name list.
+        //
+        // It used to gate on a hard-coded frozenset of the 33 DType classes, which pinned the
+        // submodule to the numpy that was current when it was written: numpy 2.5.2 added
+        // `register_dlpack_dtype` to `numpy.dtypes.__all__`, the eager copy above picked it up
+        // from `__all__`, and the lazy path then refused it -
+        // `AttributeError('register_dlpack_dtype')` (`deadlock-audit-libtests-red-on-numpy-2-5-2`).
+        // A name list can only ever be as new as the release it was typed against; asking the
+        // live numpy is version-proof, and it is also the honest contract - this submodule's
+        // whole promise is that `fnp.dtypes.X is numpy.dtypes.X`.
         let dtypes_getattr_src = pyo3::ffi::c_str!(
-            "_DTYPES_NAMES = frozenset(('BoolDType','Int8DType','ByteDType','UInt8DType','UByteDType','Int16DType','ShortDType','UInt16DType','UShortDType','Int32DType','IntDType','UInt32DType','UIntDType','Int64DType','LongDType','UInt64DType','ULongDType','LongLongDType','ULongLongDType','Float16DType','Float32DType','Float64DType','LongDoubleDType','Complex64DType','Complex128DType','CLongDoubleDType','ObjectDType','BytesDType','StrDType','VoidDType','DateTime64DType','TimeDelta64DType','StringDType'))\ndef __getattr__(name):\n    if name in _DTYPES_NAMES:\n        import numpy.dtypes as _dt\n        return getattr(_dt, name)\n    raise AttributeError(name)\n"
+            "def __getattr__(name):\n    if name.startswith('__'):\n        raise AttributeError(name)\n    try:\n        import numpy.dtypes as _dt\n    except ImportError:\n        raise AttributeError(name)\n    try:\n        return getattr(_dt, name)\n    except AttributeError:\n        raise AttributeError(name)\n"
         );
         let dtypes_dict = dtypes_module.dict();
         py.run(dtypes_getattr_src, Some(&dtypes_dict), None)?;
@@ -145080,7 +145097,15 @@ mod tests {
             fnp_python(&module)?;
             let row_stack_fn = module.getattr("row_stack")?;
             let numpy = py.import("numpy")?;
-            let numpy_row_stack = numpy.getattr("row_stack")?;
+            // NUMPY 2.5.2 REMOVED `row_stack`; 2.4.3, the installed interpreter, still has it.
+            // The oracle is therefore `np.row_stack` where it exists and `np.vstack` where it
+            // does not - which is not a weakening, because `row_stack` was only ever an alias
+            // of `vstack`. We keep exporting `fnp.row_stack` so the surface still matches the
+            // numpy a caller is most likely to have (`deadlock-audit-libtests-red-on-numpy-2-5-2`).
+            let numpy_row_stack = match numpy.getattr("row_stack") {
+                Ok(function) => function,
+                Err(_) => numpy.getattr("vstack")?,
+            };
 
             // 1-D inputs are promoted to rows.
             let first = numeric_array(py, vec![1_i64, 2, 3], "int64");
