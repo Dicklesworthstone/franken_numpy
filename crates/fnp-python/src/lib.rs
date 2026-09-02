@@ -165995,11 +165995,37 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                         .getattr("array_equal")?
                         .call1((&expected_bits, &actual_bits))?
                         .extract::<bool>()?;
-                    assert!(
-                        bit_equal,
-                        "{name}({operands:?}): output BITS differ from NumPy - numpy={} fnp={}",
-                        expected_bits, actual_bits
-                    );
+                    // A BIT COMPARISON THAT FAILS MUST NAME THE HOST IT FAILED ON
+                    // (`deadlock-audit-log-nan-sign-differs-by-worker`). This assertion is
+                    // GREEN on hz2 and hz4 and RED on ovh-a with no source difference - six
+                    // clean-baseline runs, perfect split - because `log(-1.0)` comes back as a
+                    // NaN whose SIGN BIT differs there. Without the environment in the message
+                    // the next reader sees only "fnp is wrong" and goes hunting through a diff
+                    // that cannot explain it; the whole diagnosis cost a cycle for exactly
+                    // that reason. numpy's build identity is what separates version drift
+                    // from ISA dispatch, so it is printed where the failure is.
+                    if !bit_equal {
+                        let environment = || -> PyResult<String> {
+                            let umath = numpy.getattr("_core")?.getattr("_multiarray_umath")?;
+                            Ok(format!(
+                                "host={} numpy={} umath={} baseline={:?}",
+                                py.import("os")?
+                                    .call_method0("uname")?
+                                    .getattr("nodename")?,
+                                numpy.getattr("__version__")?,
+                                umath.getattr("__file__")?,
+                                umath.getattr("__cpu_baseline__")?,
+                            ))
+                        };
+                        panic!(
+                            "{name}({operands:?}): output BITS differ from NumPy - numpy={} fnp={}\n    {}",
+                            expected_bits,
+                            actual_bits,
+                            environment().unwrap_or_else(|error| format!(
+                                "environment unavailable: {error}"
+                            ))
+                        );
+                    }
                 }
             }
             Ok(())
