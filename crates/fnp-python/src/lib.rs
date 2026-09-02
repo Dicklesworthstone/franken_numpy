@@ -85824,6 +85824,16 @@ fn cross(
     {
         return fallback();
     }
+    // A 2-VECTOR CROSS IS NUMPY'S CALL TO MAKE, NOT OURS. numpy 2.4.3 computes it - the scalar
+    // z component, `np.cross([1,2],[3,4]) == -2` - and numpy 2.5.2 REMOVED it, raising
+    // `ValueError: Both input arrays must be (arrays of) 3-dimensional vectors`. Our kernel
+    // still computes it, so `fnp.cross` answered a call the live incumbent refuses - found the
+    // moment conformance_cross could run under rch again
+    // (`deadlock-audit-propagate-extension-resolver-to-135-suites`). Delegating tracks whichever
+    // numpy is installed instead of pinning us to the one this kernel was written against.
+    if a.shape().last() == Some(&2) || b.shape().last() == Some(&2) {
+        return fallback();
+    }
 
     let result = match a.cross(&b) {
         Ok(result) => result,
