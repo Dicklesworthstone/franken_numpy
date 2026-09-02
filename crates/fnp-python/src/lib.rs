@@ -61258,16 +61258,17 @@ fn ascontiguousarray(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, tol=100.0))]
-fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    // Delegate to NumPy to preserve scalar return type for scalar inputs.
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "tol"), tol)?;
-    Ok(numpy
-        .getattr(intern!(py, "real_if_close"))?
-        .call((a.bind(py),), Some(&kwargs))?
-        .unbind())
+#[pyo3(signature = (*args, **kwargs))]
+fn real_if_close(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Delegate to NumPy to preserve scalar return type for scalar inputs - and forward the
+    // caller's arguments VERBATIM, which is what makes `np.real_if_close(a, <array>)` work
+    // (5 measured cells; `tol: f64` refused it while numpy returns early for a non-complex
+    // operand and never reads `tol` at all).
+    core_numpy_passthrough_interned(py, intern!(py, "real_if_close"), args, kwargs)
 }
 
 // Complex binary ops fnp runs natively in parallel (numpy runs them single-threaded).
@@ -64416,34 +64417,33 @@ fn unwrap(
 }
 
 #[pyfunction]
-#[pyo3(signature = (p, m=1))]
-fn polyder(py: Python<'_>, p: Py<PyAny>, m: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn polyder(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyder. Returns the m-th derivative of the
     // polynomial p (decreasing-power coefficients). m=0 returns the
     // input unchanged; m>0 reduces the polynomial degree by m.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "polyder"))?
-        .call1((p.bind(py), m))?
-        .unbind())
+    // Arguments are forwarded VERBATIM so `m`'s three states reach numpy intact.
+    core_numpy_passthrough_interned(py, intern!(py, "polyder"), args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (p, m=1, k=None))]
-fn polyint(py: Python<'_>, p: Py<PyAny>, m: i64, k: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn polyint(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // Passthrough to np.polyint. Returns the m-th antiderivative of the
     // polynomial p (decreasing-power coefficients). `k` may be None (all
     // zeros), a scalar (reused for every integration), or a rank-1 array
-    // of length 1 or >= m (per NumPy's documented broadcasting rule).
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    if let Some(k) = k {
-        kwargs.set_item(intern!(py, "k"), k.bind(py))?;
-    }
-    Ok(numpy
-        .getattr(intern!(py, "polyint"))?
-        .call((p.bind(py), m), Some(&kwargs))?
-        .unbind())
+    // of length 1 or >= m (per NumPy's documented broadcasting rule) - and
+    // forwarding VERBATIM is what keeps that distinction, since an explicitly
+    // passed `k=None` and an omitted one are the same value to a typed parameter.
+    core_numpy_passthrough_interned(py, intern!(py, "polyint"), args, kwargs)
 }
 
 #[pyfunction]
@@ -72319,21 +72319,24 @@ fn get_printoptions(py: Python<'_>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (typechars, typeset="GDFgdf", default="d"))]
+#[pyo3(signature = (*args, **kwargs))]
 fn mintypecode(
     py: Python<'_>,
-    typechars: Py<PyAny>,
-    typeset: &str,
-    default: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "typeset"), typeset)?;
-    kwargs.set_item(intern!(py, "default"), default)?;
-    Ok(numpy
-        .getattr(intern!(py, "mintypecode"))?
-        .call((typechars.bind(py),), Some(&kwargs))?
-        .unbind())
+    // FORWARDED VERBATIM, and that is the whole fix
+    // (`deadlock-audit-defaulted-argument-three-state-parse`). The typed signature declared
+    // `typeset: &str`, so `np.mintypecode(t, 0)` - which numpy answers by its own rules - came
+    // back as `TypeError: argument 'typeset': 'int' object is not an instance of 'str'`, 11
+    // measured cells. Widening the parameter could not fix it: PyO3 collapses an omitted
+    // argument into an explicitly passed `None`, and numpy treats those differently.
+    //
+    // A PURE PASSTHROUGH DOES NOT HAVE THAT PROBLEM. Forwarding the caller's own `args` and
+    // `kwargs` gives numpy exactly what was written - omitted stays omitted, `None` stays
+    // `None` - so all three states survive by construction. It is also strictly LESS work than
+    // before: the kwargs dict this used to build for every call is gone.
+    core_numpy_passthrough_interned(py, intern!(py, "mintypecode"), args, kwargs)
 }
 
 // Zero-copy float64 np.eye(n, m, k): an n x m matrix of zeros with ones on the
