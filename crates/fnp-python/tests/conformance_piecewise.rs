@@ -18,26 +18,8 @@ fn numpy_oracle(script: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn fnp_script(body: String) -> String {
-    let library_name = format!(
-        "{}fnp_python{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    );
-    let module_path = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(&library_name)))
-        .unwrap_or_else(|| library_name.into());
-    let module_literal = format!("{module_path:?}");
-    format!(
-        "import importlib.util\n\
-         import numpy as np\n\
-         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
-         fnp = importlib.util.module_from_spec(spec)\n\
-         spec.loader.exec_module(fnp)\n\
-         {body}"
-    )
-}
+mod support;
+use support::fnp_script;
 
 fn outcome_body(setup: &str, call_expr: &str) -> String {
     format!(

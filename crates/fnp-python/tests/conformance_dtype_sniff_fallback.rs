@@ -32,17 +32,15 @@ fn numpy_oracle(script: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+mod support;
+
 fn fnp_script(body: &str) -> String {
-    let library_name = format!(
-        "{}fnp_python{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    );
-    let module_path = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(&library_name)))
-        .unwrap_or_else(|| library_name.into());
-    let module_literal = format!("{module_path:?}");
+    // THIS SUITE KEEPS ITS OWN SCRIPT: its prologue defines a `check(label, got, want)` helper
+    // and its epilogue prints the accumulated mismatches, so only the module PATH is shared
+    // (`deadlock-audit-propagate-extension-resolver-to-135-suites`). Taking the whole shared
+    // script here dropped both and every case died with `NameError: check is not defined` -
+    // which is why the conversion is per-shape and not a blanket substitution.
+    let module_literal = format!("{:?}", support::extension_module_path());
     format!(
         "import importlib.util\n\
          import numpy as np\n\

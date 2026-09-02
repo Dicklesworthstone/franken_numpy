@@ -130,12 +130,31 @@ def parity_equal(ours, theirs):\n\
 ///
 /// This is the shared form of the `fnp_script` each suite used to carry its own copy of.
 pub fn fnp_script(body: String) -> String {
+    fnp_script_with("", false, body)
+}
+
+/// `fnp_script` with EXTRA IMPORTS and optional `sys.modules` registration.
+///
+/// Nine suites need slightly more than `np` in scope - `numpy.ma`, `io`, `BytesIO`/`StringIO` -
+/// and the re-export suites need the module registered in `sys.modules` BEFORE `exec_module`
+/// runs, because that is the behaviour they assert on. Those were the only differences between
+/// their local `fnp_script` copies and this one, so they keep a one-line wrapper and their call
+/// sites are untouched, rather than each carrying a duplicated resolver
+/// (`deadlock-audit-propagate-extension-resolver-to-135-suites`).
+pub fn fnp_script_with(extra_imports: &str, register_in_sys_modules: bool, body: String) -> String {
     let module_literal = format!("{:?}", extension_module_path());
+    let registration = if register_in_sys_modules {
+        "sys.modules[spec.name] = fnp\n"
+    } else {
+        ""
+    };
     format!(
         "import importlib.util\n\
          import numpy as np\n\
+         {extra_imports}\
          spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
          fnp = importlib.util.module_from_spec(spec)\n\
+         {registration}\
          spec.loader.exec_module(fnp)\n\
          {PARITY_PREDICATE}\
          {body}"
