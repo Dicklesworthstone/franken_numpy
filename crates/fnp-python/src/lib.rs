@@ -116951,10 +116951,74 @@ fn try_native_int_convolve(
     }
 }
 
+/// Splits `(a, v, mode)` out of a verbatim `*args` / `**kwargs` call, or answers `None` when
+/// the call is one we do not model natively and must forward untouched.
+///
+/// WHY THE ENTRY POINTS TAKE `*args` AT ALL
+/// (`deadlock-audit-defaulted-argument-three-state-parse`): `mode: &str` refused
+/// `np.convolve(a, v, 0)`, which numpy answers - 0/1/2 are its documented legacy mode codes -
+/// and widening the parameter could not fix it, because PyO3 collapses an omitted argument
+/// into an explicitly passed `None` while numpy treats those differently. Taking the call
+/// verbatim is what keeps all three states distinguishable: ABSENT here is `None` from both
+/// lookups, and an explicit `None` is a `Some` holding Python's `None`, which is not a `str`
+/// and therefore delegates.
+///
+/// The mode is mapped onto a `&'static str` rather than copied, so a call that reaches the
+/// native path allocates nothing for it. An unrecognised mode string declines here instead of
+/// three gates later - the same observable, since every native gate already refused it and the
+/// call ended at the same numpy delegate.
+fn parse_conv_corr_args(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    default_mode: &'static str,
+) -> PyResult<Option<(Py<PyAny>, Py<PyAny>, &'static str)>> {
+    if args.len() < 2 || args.len() > 3 {
+        return Ok(None);
+    }
+    let supplied = match args.get_item(2) {
+        Ok(value) => Some(value),
+        Err(_) => match kwargs {
+            Some(kwargs) if kwargs.len() == 1 => kwargs.get_item(intern!(py, "mode"))?,
+            Some(kwargs) if !kwargs.is_empty() => return Ok(None),
+            _ => None,
+        },
+    };
+    // A mode supplied BOTH positionally and by keyword is numpy's error to raise, not ours.
+    if args.len() == 3 && kwargs.is_some_and(|kwargs| !kwargs.is_empty()) {
+        return Ok(None);
+    }
+    let mode = match supplied {
+        None => default_mode,
+        Some(value) => match value.extract::<&str>() {
+            Ok("full") => "full",
+            Ok("same") => "same",
+            Ok("valid") => "valid",
+            _ => return Ok(None),
+        },
+    };
+    Ok(Some((
+        args.get_item(0)?.unbind(),
+        args.get_item(1)?.unbind(),
+        mode,
+    )))
+}
+
 // Convolution / correlation / isclose (3).
 #[pyfunction]
-#[pyo3(signature = (a, v, mode="full"))]
-fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn convolve(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((a, v, mode)) = parse_conv_corr_args(py, args, kwargs, "full")? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "convolve"), args, kwargs);
+    };
+    convolve_impl(py, a, v, mode)
+}
+
+fn convolve_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let convolve_fn = numpy.getattr(intern!(py, "convolve"))?;
     let a_for_fallback = a.clone_ref(py);
@@ -117053,8 +117117,20 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, v, mode="valid"))]
-fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn correlate(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Same shape as `convolve` above, with numpy's different default mode.
+    let Some((a, v, mode)) = parse_conv_corr_args(py, args, kwargs, "valid")? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "correlate"), args, kwargs);
+    };
+    correlate_impl(py, a, v, mode)
+}
+
+fn correlate_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let a_for_fallback = a.clone_ref(py);
     let v_for_fallback = v.clone_ref(py);
