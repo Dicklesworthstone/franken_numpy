@@ -16,26 +16,8 @@ fn numpy_oracle(script: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn fnp_script(body: String) -> String {
-    let library_name = format!(
-        "{}fnp_python{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    );
-    let module_path = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join(&library_name)))
-        .unwrap_or_else(|| library_name.into());
-    let module_literal = format!("{module_path:?}");
-    format!(
-        "import importlib.util\n\
-         import numpy as np\n\
-         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
-         fnp = importlib.util.module_from_spec(spec)\n\
-         spec.loader.exec_module(fnp)\n\
-         {body}"
-    )
-}
+mod support;
+use support::fnp_script;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // dot
@@ -288,14 +270,24 @@ fn cross_2d() -> Result<(), String> {
         r#"
 a = np.array([1, 2])
 b = np.array([3, 4])
-result = fnp.cross(a, b)
-expected = np.cross(a, b)
-print(result == expected)
+# numpy 2.4.3 computes the scalar z component; 2.5.2 REMOVED the 2-vector cross and raises.
+# The contract is "whatever numpy does", so compare BEHAVIOUR - same as the copy of this case
+# in conformance_cross.rs, which is where the divergence was first caught.
+def attempt(module):
+    try:
+        return ("ok", module.cross(a, b))
+    except Exception as exception:
+        return ("raise", type(exception).__name__)
+ours, theirs = attempt(fnp), attempt(np)
+print(ours[0] == theirs[0] and (ours[0] == "raise" or ours[1] == theirs[1]), ours, theirs)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cross 2d should match numpy");
+    assert!(
+        result.trim().starts_with("True"),
+        "cross of 2-vectors must do what the installed numpy does: {result}"
+    );
     Ok(())
 }
 
