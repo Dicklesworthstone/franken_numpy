@@ -35575,8 +35575,14 @@ fn fft_pow2_butterflies<const FINITE: bool>(
 /// Fill `out[i] = np.interp(x[i], xp, fp)` for the whole query slice `x`, writing
 /// directly into a caller-provided output buffer. `xp` must be ascending (numpy's
 /// contract); `left`/`right` default to `fp[0]`/`fp[n-1]` for out-of-range queries.
-/// Each query point is an independent binary-search + linear blend, so the parallel
-/// and serial fills are bit-identical for any thread count. Shared by `interp_lr`
+/// Each query point is an independent binary search followed by numpy's own
+/// arithmetic from `arr_interp` (compiled_base.c): an exact grid hit returns `fp[j]`
+/// verbatim, otherwise `slope * (x - xp[j]) + fp[j]` with
+/// `slope = (fp[j+1] - fp[j]) / (xp[j+1] - xp[j])`, retried from the right endpoint
+/// when that is NaN. The operation order matters: the previous lerp
+/// `fp[j]*(1-t) + fp[j+1]*t` rounds differently and was 1 ulp off numpy on ordinary
+/// inputs (deadlock-audit-7evbk). The parallel and serial fills are bit-identical
+/// for any thread count. Shared by `interp_lr`
 /// (which allocates + returns a UFuncArray) and the fnp-python zero-copy interp
 /// wrapper, which writes straight into the NumPy output buffer — skipping the
 /// extract-x and build-result copies the UFuncArray path otherwise pays.
@@ -35614,6 +35620,11 @@ pub fn interp_fill(
             }
             return fp[0];
         }
+        // numpy: a NaN query is returned as-is before any search (n >= 2 only; the
+        // one-point branch above returns fp[0] for NaN exactly as numpy does).
+        if xi.is_nan() {
+            return xi;
+        }
         if xi < xp[0] {
             return left_val;
         }
@@ -35630,8 +35641,24 @@ pub fn interp_fill(
                 hi = mid;
             }
         }
-        let t = (xi - xp[lo]) / (xp[hi] - xp[lo]);
-        fp[lo] * (1.0 - t) + fp[hi] * t
+        // numpy's `dx[j] == x_val` and `j == lenxp - 1` branches: an exact grid hit
+        // returns the sample verbatim instead of interpolating to it.
+        if xp[lo] == xi {
+            return fp[lo];
+        }
+        if xp[hi] == xi {
+            return fp[hi];
+        }
+        let slope = (fp[hi] - fp[lo]) / (xp[hi] - xp[lo]);
+        let mut value = slope * (xi - xp[lo]) + fp[lo];
+        if value.is_nan() {
+            // "If we get nan in one direction, try the other" (arr_interp).
+            value = slope * (xi - xp[hi]) + fp[hi];
+            if value.is_nan() && fp[lo] == fp[hi] {
+                value = fp[lo];
+            }
+        }
+        value
     };
     const INTERP_PARALLEL_MIN_ELEMS: usize = 1 << 12;
     if x.len() >= INTERP_PARALLEL_MIN_ELEMS && n >= 2 && rayon::current_num_threads() >= 2 {
@@ -52334,8 +52361,22 @@ print(json.dumps(payload))
                         hi = mid;
                     }
                 }
-                let t = (xi - xp[lo]) / (xp[hi] - xp[lo]);
-                fp[lo] * (1.0 - t) + fp[hi] * t
+                // numpy's arr_interp arithmetic, spelled out independently of the kernel.
+                if xp[lo] == xi {
+                    return fp[lo];
+                }
+                if xp[hi] == xi {
+                    return fp[hi];
+                }
+                let slope = (fp[hi] - fp[lo]) / (xp[hi] - xp[lo]);
+                let mut value = slope * (xi - xp[lo]) + fp[lo];
+                if value.is_nan() {
+                    value = slope * (xi - xp[hi]) + fp[hi];
+                    if value.is_nan() && fp[lo] == fp[hi] {
+                        value = fp[lo];
+                    }
+                }
+                value
             })
             .collect();
         assert_eq!(
@@ -58183,6 +58224,30 @@ print(json.dumps(payload))
             hex, "fc28f9dc80351f18b98ebd5936e81ed30bb1fa16fc6f8b3d7ebcbde863433448",
             "bincount small-range output golden SHA-256 changed"
         );
+    }
+
+    /// numpy's `arr_interp` returns a NaN query as-is (n >= 2) and returns `fp[j]`
+    /// verbatim on an exact grid hit instead of interpolating to it. With the slope
+    /// form `slope * (x - xp[j]) + fp[j]` the right endpoint is NOT reproduced exactly
+    /// in general, so both branches are observable, not stylistic.
+    #[test]
+    fn interp_nan_query_and_exact_grid_hits_follow_numpy() {
+        let xp = UFuncArray::new(vec![3], vec![0.0, 0.1, 0.7], DType::F64).unwrap();
+        let fp = UFuncArray::new(vec![3], vec![1.0, 3.0, 0.2], DType::F64).unwrap();
+        let x = UFuncArray::new(vec![4], vec![f64::NAN, 0.1, 0.7, 0.4], DType::F64).unwrap();
+        let r = UFuncArray::interp(&x, &xp, &fp).unwrap();
+        assert!(r.values()[0].is_nan(), "NaN query must pass through");
+        assert_eq!(r.values()[1].to_bits(), 3.0f64.to_bits());
+        assert_eq!(r.values()[2].to_bits(), 0.2f64.to_bits());
+        // Interior point, numpy's arithmetic spelled out: slope*(x - xp[j]) + fp[j].
+        let slope = (0.2f64 - 3.0) / (0.7f64 - 0.1);
+        assert_eq!(
+            r.values()[3].to_bits(),
+            (slope * (0.4f64 - 0.1) + 3.0).to_bits()
+        );
+        // The slope form does not land on fp[2] by itself; that is why the exact-hit
+        // branch exists.
+        assert_ne!((slope * (0.7f64 - 0.1) + 3.0).to_bits(), 0.2f64.to_bits());
     }
 
     #[test]
