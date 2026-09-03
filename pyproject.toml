@@ -1,0 +1,41 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "frankennumpy"
+description = "A memory-safe, clean-room reimplementation of NumPy in Rust, exposed as the fnp_python extension module"
+readme = "README.md"
+license = { file = "LICENSE" }
+# The extension uses interpreter symbols first exported in CPython 3.13
+# (PyType_GetModuleName); a 3.12 build does not link.
+requires-python = ">=3.13"
+# fnp_python re-exports the installed numpy for every surface without an engine
+# substitute and uses it as the fallback oracle; the parity floor is NumPy 2.3
+# (see README "Supported NumPy oracle").
+dependencies = ["numpy>=2.3"]
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Repository = "https://github.com/Dicklesworthstone/franken_numpy"
+
+[tool.maturin]
+# The crate is a workspace member; its [lib] is named fnp_python with
+# crate-type = ["cdylib", "rlib"], and `python-extension` turns on
+# pyo3/extension-module so the cdylib does not link libpython.
+manifest-path = "crates/fnp-python/Cargo.toml"
+# The compiled extension lives inside the python/fnp_python package; that
+# package's __init__ re-exports the extension's whole namespace (maturin's
+# default wrapper only re-exports __all__, which mirrors numpy.__all__ and
+# would drop the native classes and the version attributes).
+python-source = "python"
+module-name = "fnp_python.fnp_python"
+features = ["python-extension"]
+strip = true
