@@ -55993,11 +55993,17 @@ print(json.dumps(payload))
 
     #[test]
     fn matmul_accumulate_serial_single_input_row_matches_dot_order() {
+        // rhs is k×n row-major per the contract: rows [13,-17], [19,23], [-29,31].
+        // Column 0: 1 + 2·13 + (-3)·19 + 4·(-29) = -146; column 1: 1 + 2·(-17) +
+        // (-3)·23 + 4·31 = 22. numpy: `[[2,-3,4]] @ rhs.reshape(3,2) + 1` = [-146, 22].
+        // The expectation this test carried from 2026-08-15 to 2026-09-03, [154, 258],
+        // is the answer for rhs read as n×k (transposed); the function was right and
+        // the test was wrong, and no G2 run had executed it since it landed.
         let lhs = [2.0, -3.0, 4.0];
         let rhs = [13.0, -17.0, 19.0, 23.0, -29.0, 31.0];
         let mut out = [1.0, 1.0];
         matmul_accumulate_serial(&lhs, &rhs, 1, 3, 2, &mut out);
-        assert_eq!(out, [154.0, 258.0]);
+        assert_eq!(out, [-146.0, 22.0]);
     }
 
     #[test]
