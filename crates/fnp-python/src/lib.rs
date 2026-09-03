@@ -115121,6 +115121,9 @@ fn try_native_int_convolve(
     }
 }
 
+/// `(a, v, mode)` as `parse_conv_corr_args` hands it to the native convolve/correlate gates.
+type ConvCorrArgs = (Py<PyAny>, Py<PyAny>, &'static str);
+
 /// Splits `(a, v, mode)` out of a verbatim `*args` / `**kwargs` call, or answers `None` when
 /// the call is one we do not model natively and must forward untouched.
 ///
@@ -115142,7 +115145,7 @@ fn parse_conv_corr_args(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
     default_mode: &'static str,
-) -> PyResult<Option<(Py<PyAny>, Py<PyAny>, &'static str)>> {
+) -> PyResult<Option<ConvCorrArgs>> {
     if args.len() < 2 || args.len() > 3 {
         return Ok(None);
     }
