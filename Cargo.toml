@@ -6,6 +6,7 @@ members = [
   "crates/fnp-iter",
   "crates/fnp-ufunc",
   "crates/fnp-linalg",
+  "crates/fnp-random-core",
   "crates/fnp-random",
   "crates/fnp-io",
   "crates/fnp-conformance",
