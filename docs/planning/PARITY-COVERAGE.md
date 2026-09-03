@@ -1,6 +1,6 @@
 # PARITY-COVERAGE.md
 
-Rigorous upstream coverage audit completed 2026-05-25.
+Rigorous upstream coverage audit completed 2026-05-25. Counts below were refreshed on 2026-09-02 from the live tree; the surface percentages are unchanged (they are structural), the test and bead figures had drifted.
 
 ## Summary
 
@@ -14,17 +14,17 @@ Rigorous upstream coverage audit completed 2026-05-25.
 
 ## Conformance Test Coverage
 
-- **Total workspace tests**: 7,355 test functions
+- **Total workspace tests**: 8,688 `#[test]` functions (2026-09-02; 7,355 at the 05-25 audit)
 - **Conformance tests**: 2,350 test functions across 168 test files
 - **Test result**: 0 failures
-- **fnp-python tests**: All pass (2,127 in fnp-python crate)
+- **fnp-python tests**: 3,635 `#[test]` functions (2026-09-02). "All pass" has not been observed on CI since 2026-02-26 (the only green run of the gate topology); the 191 conformance shards were import-failing under the rch build route until 2026-09-01, when the extension resolver in `tests/support/mod.rs` was propagated to all of them
 
 ## Bead Tracker Status
 
-- **Total beads**: 1,577
-- **Closed**: 1,577 (100%)
-- **Open**: 0
-- **In Progress**: 0
+- **Total beads**: 2,818 (2026-09-02; 1,577 at the 05-25 audit)
+- **Closed**: 2,782
+- **Open**: 4
+- **In Progress**: 31
 - **Blocked**: 0
 - **Avg lead time**: 4.2 hours
 
@@ -86,7 +86,12 @@ This is by design (DISC-009 acceptance) — the passthrough ensures correctness 
 
 ## Gaps Found
 
-**None.** All NumPy public API surface is covered and all conformance tests pass.
+**Surface gaps: none** (every `numpy.__all__` name resolves). **Behavioural gaps: yes**, tracked elsewhere and listed here so this file does not read as a clean bill:
+
+- `PARAMETER_PARITY_TODO.md` carries six open `[D]`/`[A]` rows (`dtype=` on reductions, `out=` on array functions, `order` on sort/partition, `overwrite_input`, `kind=` verification).
+- Bead `deadlock-audit-7evbk` (2026-09-02 probes): `Generator.bit_generator` is a string rather than a BitGenerator; `interp` and f32 `cumsum`/`cumprod` differ from numpy by 1 ulp; the 22 arithmetic ufuncs are a PyO3 mimic that fails `isinstance(x, np.ufunc)` and 83 ufunc names have no `reduce`/`at`/`nin`/`nout`.
+- Bead `deadlock-audit-defaulted-argument-three-state-parse-kqn3n`: 70 argument cells blocked by PyO3 defaulted parameters that cannot distinguish an omitted argument from an explicit `None`.
+- Non-native byte order was silently misread by 15 ops on `>f8` until 2026-09-02; now guarded at the buffer and the op entry and locked by `crates/fnp-python/tests/conformance_byteorder.rs` (522 cells).
 
 ## Audit Method
 
