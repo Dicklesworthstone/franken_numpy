@@ -1,0 +1,79 @@
+name: Finalize Random Core
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/finalize-random-core.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: finalize-random-core
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install repository toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-08-25 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
+          rustup override set nightly-2026-08-25
+
+      - name: Verify deterministic core on native and wasm32
+        shell: bash
+        env:
+          RUSTFLAGS: "-D warnings -C target-feature=+avx2"
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check -p fnp-random-core --all-targets
+          cargo test -p fnp-random-core
+          cargo clippy -p fnp-random-core --all-targets -- -D warnings
+          RUSTFLAGS="-D warnings" cargo check --target wasm32-unknown-unknown -p fnp-random-core
+          cargo metadata --format-version 1 --no-deps > "${RUNNER_TEMP}/metadata.json"
+          python3 - "${RUNNER_TEMP}/metadata.json" <<'PY'
+          import json
+          import sys
+
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          matches = [package for package in payload["packages"] if package["name"] == "fnp-random-core"]
+          if len(matches) != 1:
+              raise SystemExit(f"expected one fnp-random-core package, found {len(matches)}")
+          dependencies = matches[0].get("dependencies", [])
+          if dependencies:
+              raise SystemExit(f"fnp-random-core must remain dependency-free: {dependencies}")
+          print("fnp-random-core dependency census: 0")
+          PY
+          git diff --check
+
+      - name: Commit generated lock state on unchanged main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add Cargo.lock
+          if git diff --cached --quiet; then
+            echo "Cargo.lock already contains fnp-random-core"
+            exit 0
+          fi
+          git config user.name "FrankenNumPy Random Core"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "build(random-core): lock the dependency-free package" -m "Record fnp-random-core in Cargo.lock after native, wasm32, Clippy, vector, and zero-dependency checks passed on the exact source tree."
+          git fetch origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "main moved after verification; refusing to publish lock data for an untested tree" >&2
+            exit 4
+          fi
+          git push origin HEAD:main
