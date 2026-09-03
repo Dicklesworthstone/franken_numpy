@@ -63,6 +63,45 @@ jobs:
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  g9-wheel:
+    # Packaging is a deliverable (README Installation, Roadmap item 1): build the
+    # wheel with maturin from pyproject.toml, install it into a clean interpreter and
+    # check that the installed package exposes the WHOLE extension namespace. The
+    # namespace assertion exists because maturin's default wrapper silently dropped
+    # 247 names (Nditer, __version__, ...) on 2026-09-03; python/fnp_python/__init__.py
+    # is the fix and this job is its gate. Runs off G1 so a red G2-G8 does not hide it.
+    name: "G9: wheel builds and imports"
+    needs: g1-fmt-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: Swatinem/rust-cache@v2
+      - run: python -m pip install --upgrade pip maturin
+      - run: maturin build --release --out dist
+      - run: python -m pip install dist/*.whl
+      - run: |
+          cd /tmp
+          python - <<'PY'
+          import fnp_python as pkg
+          import fnp_python.fnp_python as ext
+          import fnp_python.linalg as la
+          import numpy as np
+          missing = sorted(n for n in dir(ext) if not hasattr(pkg, n))
+          assert not missing, f"{len(missing)} extension names missing from the package: {missing[:10]}"
+          assert la is pkg.linalg, "dotted submodule import does not resolve to the package attribute"
+          assert pkg.__version__ and pkg.__numpy_version__ == np.__version__
+          assert (pkg.random.default_rng(12345).standard_normal(3) == np.random.default_rng(12345).standard_normal(3)).all()
+          assert isinstance(pkg.allclose(np.arange(3.0), np.arange(3.0)), bool)
+          print("wheel ok:", pkg.__version__, "numpy", np.__version__)
+          PY
+
   g2-unit-property:
     name: "G2: unit + property"
     needs: g1-fmt-lint
