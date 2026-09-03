@@ -1,0 +1,546 @@
+{
+ "date": "2026-09-03",
+ "context": "Reality-check G2 campaign: the ledger_hygiene offender set was reduced from 216 rows to 85 by truthful transcription (77 unmeasured-by-design rows annotated, 93 worker=/harness= lines pasted from row-own measurement context, 5 canonical campaign-class markers, 1 wrapped COUNTED_MECHANISM line reflowed). The remaining 85 rows cannot be repaired by editing because the data was never recorded in the row; they need their authors' session logs or re-measurement.",
+ "gates": {
+  "new_measured_rows_name_their_worker": 41,
+  "new_measured_rows_name_their_harness": 79,
+  "new_keep_rows_carry_an_executing_elf_sha256": 12,
+  "new_keep_rows_declare_one_campaign_result_class": 12,
+  "union_rows": 85
+ },
+ "note": "class offenders == ELF offenders (same 12 rows). Row line numbers refer to docs/NEGATIVE_EVIDENCE.md at the commit that added this file.",
+ "worker": [
+  {
+   "line": 4005,
+   "h": "2026-08-16 - RETRY PREDICATE DISCHARGED, AND THE CONTENTION MECHANISM IS NOW DEMONSTRATED:"
+  },
+  {
+   "line": 47295,
+   "h": "2026-08-17 - THE BINARY FLOOR IS ATTRIBUTED, and the 48 ns block-entry cost is CONFIRMED B"
+  },
+  {
+   "line": 47751,
+   "h": "2026-08-17 - REJECT the \"same_kind\" lever: it is worth +10 insns/call, i.e. NOTHING, and m"
+  },
+  {
+   "line": 47845,
+   "h": "2026-08-17 - REVERTED the \"same_kind\" lever, and the revert exposed the instrument's NOISE"
+  },
+  {
+   "line": 51729,
+   "h": "2026-08-17 \u2014 THE MULTIPLY EXCESS IS DIFFUSE: no single symbol carries it, only ~26% lives "
+  },
+  {
+   "line": 51829,
+   "h": "2026-08-17 \u2014 I CORRECT MY OWN HEADLINE: PyO3 keyword binding is 831.6 insns/call, my regis"
+  },
+  {
+   "line": 51925,
+   "h": "2026-08-17 \u2014 I RETRACT LAST ROW'S RECONCILIATION: I converted instructions to ns with a ra"
+  },
+  {
+   "line": 52006,
+   "h": "2026-08-17 \u2014 THE ns SPLIT IS UNDECIDABLE: choosing MEDIAN vs MIN moves the wrapper/probe r"
+  },
+  {
+   "line": 52362,
+   "h": "2026-08-17 - THE GATE QUESTION IS NOW FULLY MEASURED, no size left to inference: native CO"
+  },
+  {
+   "line": 52514,
+   "h": "2026-08-17 \u2014 COMPLETING THE PARTITION BREAKS IT: with pyo3's keyword-binding term included"
+  },
+  {
+   "line": 52728,
+   "h": "2026-08-17 \u2014 MY REGISTERED MECHANISM IS REFUTED: `Instant::now()` overhead is 20.0 ns, not"
+  },
+  {
+   "line": 52908,
+   "h": "2026-08-17 \u2014 STOP RULE INVOKED, and the test I registered to trigger it was MIS-DESIGNED. "
+  },
+  {
+   "line": 53297,
+   "h": "2026-08-18 \u2014 THE DIRECT A/B REFUTES ei9jz's SPLIT: the probe chain is 660.9 insns/call, no"
+  },
+  {
+   "line": 53391,
+   "h": "2026-08-18 \u2014 NATIVE f64 MULTIPLY AT n=256 IS 5.63x WORSE, NOT BETTER: my registered sign p"
+  },
+  {
+   "line": 53713,
+   "h": "2026-08-18 \u2014 MEASURED CONFIRMATION that neither probe body executes for f64 multiply: all "
+  },
+  {
+   "line": 53792,
+   "h": "2026-08-18 \u2014 THE DTYPE SNIFF IS 593.5 INSNS/CALL: 90% of the decision section and 32% of t"
+  },
+  {
+   "line": 53882,
+   "h": "2026-08-18 \u2014 THE DTYPE-IDENTITY LEVER SAVES 388.7 INSNS/CALL, inside its pre-registered ba"
+  },
+  {
+   "line": 54103,
+   "h": "2026-08-18 \u2014 SHIPPED-STATE CERTIFICATION: the route excess is 1478.0 insns/call, 352.5 rem"
+  },
+  {
+   "line": 54308,
+   "h": "2026-08-18 \u2014 ONE CPython ATTRIBUTE ENTRY COSTS 201.7 INSNS, MEASURED: the linear model hol"
+  },
+  {
+   "line": 54824,
+   "h": "2026-08-18 \u2014 `sort`'s ndarray-cache conversion measures -33,489 insns/call against a null "
+  },
+  {
+   "line": 54896,
+   "h": "2026-08-18 \u2014 THE \"BEFORE ARM HAS THE WIDER SPREAD\" PATTERN I DISCLOSED TWICE IS REFUTED: a"
+  },
+  {
+   "line": 55143,
+   "h": "2026-08-18 \u2014 WALL CLOCK, measured at last by artifact reuse: the levers DO save time (-2,5"
+  },
+  {
+   "line": 55211,
+   "h": "2026-08-18 \u2014 the divergence GENERALISES to the delegating route and is WORSE there: instru"
+  },
+  {
+   "line": 55375,
+   "h": "2026-08-18 \u2014 THE 13.2 insns/ns CONVERSION RATE DOES NOT TRANSFER ACROSS LEVERS: the predic"
+  },
+  {
+   "line": 55693,
+   "h": "2026-08-18 \u2014 CORRECTION OF YESTERDAY'S CORRECTION: every per-call figure I published carri"
+  },
+  {
+   "line": 55883,
+   "h": "2026-08-18 \u2014 THE MULTIPLY ROUTE FLOOR HAS COLLAPSED 15x SINCE `v46rn` WAS FILED: 2,044 ns "
+  },
+  {
+   "line": 55948,
+   "h": "2026-08-18 \u2014 `6y5wp`'s premise is NOT stale (unlike `v46rn`'s), and I nearly banked the op"
+  },
+  {
+   "line": 57329,
+   "h": "2026-08-26 \u2014 SHIP: a SCALAR index made `fnp.take` copy the WHOLE source; 191.87x slower th"
+  },
+  {
+   "line": 57460,
+   "h": "2026-08-26 \u2014 SHIP: `append`'s parallel byte-copy gate fired at 64 KiB where its own commen"
+  },
+  {
+   "line": 57563,
+   "h": "2026-08-26 \u2014 SHIP: `sqrt` threw away a COMPLETED CORRECT BUFFER to buy FP-event parity it "
+  },
+  {
+   "line": 57683,
+   "h": "2026-08-26 \u2014 SHIP: `meshgrid`'s cold Rust branch captured the ORDINARY dtypes and shadowed"
+  },
+  {
+   "line": 57801,
+   "h": "2026-08-26 \u2014 SHIP: ONE out-of-domain element flipped `arccosh` from an 11x WIN to a loss; "
+  },
+  {
+   "line": 58047,
+   "h": "2026-08-26 \u2014 AMENDMENT to the log-family row above: MY THREAD-COUNT JUSTIFICATION WAS WRON"
+  },
+  {
+   "line": 58119,
+   "h": "2026-08-26 \u2014 SHIP: the transcendental chunker spawned `num_threads` tasks regardless of n;"
+  },
+  {
+   "line": 58299,
+   "h": "2026-08-26 \u2014 REJECT: removing `fmod`'s O(n) divisor pre-scan buys NOTHING MEASURABLE; thre"
+  },
+  {
+   "line": 58497,
+   "h": "2026-08-26 \u2014 SHIP + NEW VEIN: the loss sweep's operand ladder is ALL C-CONTIGUOUS, and a s"
+  },
+  {
+   "line": 58657,
+   "h": "2026-08-26 \u2014 SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 1"
+  },
+  {
+   "line": 58728,
+   "h": "2026-08-26 \u2014 SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1."
+  },
+  {
+   "line": 65495,
+   "h": "2026-08-28 - NO MEASURABLE EFFECT (kept, not claimed) + a CORRECTION to the row above: fol"
+  },
+  {
+   "line": 65578,
+   "h": "2026-08-28 - REJECT: force-inlining `transform_field` makes lexsort 20-30% SLOWER - the sa"
+  },
+  {
+   "line": 65645,
+   "h": "2026-08-28 - REJECT x2, and the standing lexsort loss is now bounded from BOTH sides: neit"
+  }
+ ],
+ "harness": [
+  {
+   "line": 619,
+   "h": "2026-08-16 - CAPABILITY LANDED (interned ufunc name), and the worst cell now reads 2.079x "
+  },
+  {
+   "line": 676,
+   "h": "2026-08-16 - POOL-SIZING CHECKED AND REFUTED HERE: the interference SURVIVES a 1-thread ra"
+  },
+  {
+   "line": 859,
+   "h": "2026-08-16 - ARM PLACEMENT AUDITED AND IT IS UNPINNED: the bench thread MIGRATES across 53"
+  },
+  {
+   "line": 924,
+   "h": "2026-08-16 - FLEET CPU-SPREAD FINDING VERIFIED EXACTLY (2.882x), PER-ARM MHz NOW RECORDED "
+  },
+  {
+   "line": 3156,
+   "h": "2026-08-16 - RETRY PREDICATE DISCHARGED: `add` DOES reach parity at 2^24 - the earlier `at"
+  },
+  {
+   "line": 3542,
+   "h": "2026-08-16 - CONFLICT, DO NOT DROP THE NATIVE DIVIDE PATH YET: two same-host runs with cle"
+  },
+  {
+   "line": 3687,
+   "h": "2026-08-16 - MEASURED, BOTH INSTRUMENT REPAIRS WORK - the partition no longer panics and i"
+  },
+  {
+   "line": 3936,
+   "h": "2026-08-16 - MEASURED, THREE SIZES POST-FIX: the native f64 divide is at its WORST just ab"
+  },
+  {
+   "line": 4005,
+   "h": "2026-08-16 - RETRY PREDICATE DISCHARGED, AND THE CONTENTION MECHANISM IS NOW DEMONSTRATED:"
+  },
+  {
+   "line": 46553,
+   "h": "2026-08-17 - PREDICTION REFUTED: the arity branch bought `at` only 55 ns, not the ~190 pre"
+  },
+  {
+   "line": 46925,
+   "h": "2026-08-17 - CERTIFIED: the wrapper class pays 925-1944 ns per call for a re-import, non-i"
+  },
+  {
+   "line": 47295,
+   "h": "2026-08-17 - THE BINARY FLOOR IS ATTRIBUTED, and the 48 ns block-entry cost is CONFIRMED B"
+  },
+  {
+   "line": 47751,
+   "h": "2026-08-17 - REJECT the \"same_kind\" lever: it is worth +10 insns/call, i.e. NOTHING, and m"
+  },
+  {
+   "line": 47845,
+   "h": "2026-08-17 - REVERTED the \"same_kind\" lever, and the revert exposed the instrument's NOISE"
+  },
+  {
+   "line": 48075,
+   "h": "2026-08-17 - CERTIFIED: not raising to decide is worth 390-574 ns per call, MORE than the "
+  },
+  {
+   "line": 48814,
+   "h": "2026-08-17 - REFUTED, and this one is a plain mistake: my `searchsorted` needle pre-check "
+  },
+  {
+   "line": 49235,
+   "h": "2026-08-17 - UNDECIDED: the `asarray` skip moves `searchsorted` +1.6% and +4.5%, but a CON"
+  },
+  {
+   "line": 49417,
+   "h": "2026-08-17 - THE DESIGNED CONTROL WORKS: with a LIST-haystack cell that cannot take the le"
+  },
+  {
+   "line": 49473,
+   "h": "2026-08-17 - CERTIFIED, and it is the largest single move of the campaign on this cell: `s"
+  },
+  {
+   "line": 49542,
+   "h": "2026-08-17 - PRE-REGISTRATION, not a result: the `out=` divide route now has a DELEGATION "
+  },
+  {
+   "line": 49723,
+   "h": "2026-08-17 - CERTIFIED: the 136-probe import sweep takes two-sided `clip` from 1.6791x to "
+  },
+  {
+   "line": 50032,
+   "h": "2026-08-17 - CERTIFIED, quoted at its WORST cell: the dispatcher-body lever is worth +0.6%"
+  },
+  {
+   "line": 50187,
+   "h": "2026-08-17 - THE BUFFER FIX WORKED AND EXTENDED THE USABLE BAND TO 2^19 (18,840 ns -> ~600"
+  },
+  {
+   "line": 50481,
+   "h": "2026-08-17 - CERTIFIED, and it is a SHIPPABLE LEVER: the `out=` native divide route is NOT"
+  },
+  {
+   "line": 50695,
+   "h": "2026-08-17 - THE SHIPPED BAND IS VERIFIED END-TO-END THROUGH THE REAL ROUTE: inside it `di"
+  },
+  {
+   "line": 50988,
+   "h": "2026-08-17 - THE BUFFER ARTIFACT IS A NEAR-CACHE-SIZE PHENOMENON, NOT A \"BIGGER IS WORSE\" "
+  },
+  {
+   "line": 51222,
+   "h": "2026-08-17 - THE CERTIFIED `out=` CELLS SURVIVE: on five QUALIFYING runs the separate-vs-s"
+  },
+  {
+   "line": 51426,
+   "h": "2026-08-17 - RE-DECIDED ON THE CORRECTED INSTRUMENT: the FE-hazard classifier COSTS 7.9%, "
+  },
+  {
+   "line": 51641,
+   "h": "2026-08-17 - CERTIFIED AND SHIPPABLE: the bitmask classifier is a 4.04% win, 5/5 runs, and"
+  },
+  {
+   "line": 51729,
+   "h": "2026-08-17 \u2014 THE MULTIPLY EXCESS IS DIFFUSE: no single symbol carries it, only ~26% lives "
+  },
+  {
+   "line": 51829,
+   "h": "2026-08-17 \u2014 I CORRECT MY OWN HEADLINE: PyO3 keyword binding is 831.6 insns/call, my regis"
+  },
+  {
+   "line": 51925,
+   "h": "2026-08-17 \u2014 I RETRACT LAST ROW'S RECONCILIATION: I converted instructions to ns with a ra"
+  },
+  {
+   "line": 52006,
+   "h": "2026-08-17 \u2014 THE ns SPLIT IS UNDECIDABLE: choosing MEDIAN vs MIN moves the wrapper/probe r"
+  },
+  {
+   "line": 52089,
+   "h": "2026-08-17 - POST-SHIP VERIFICATION: the gate's ROUTING is confirmed on the real allocatin"
+  },
+  {
+   "line": 52178,
+   "h": "2026-08-17 - `F64_DIV_NATIVE_MIN_LEN` = 1<<19 IS SET TOO LOW, and it is now decided rather"
+  },
+  {
+   "line": 52362,
+   "h": "2026-08-17 - THE GATE QUESTION IS NOW FULLY MEASURED, no size left to inference: native CO"
+  },
+  {
+   "line": 52514,
+   "h": "2026-08-17 \u2014 COMPLETING THE PARTITION BREAKS IT: with pyo3's keyword-binding term included"
+  },
+  {
+   "line": 52728,
+   "h": "2026-08-17 \u2014 MY REGISTERED MECHANISM IS REFUTED: `Instant::now()` overhead is 20.0 ns, not"
+  },
+  {
+   "line": 52811,
+   "h": "2026-08-17 - THE RAISE IS VERIFIED END-TO-END: divide now TRACKS the delegating control at"
+  },
+  {
+   "line": 52908,
+   "h": "2026-08-17 \u2014 STOP RULE INVOKED, and the test I registered to trigger it was MIS-DESIGNED. "
+  },
+  {
+   "line": 53297,
+   "h": "2026-08-18 \u2014 THE DIRECT A/B REFUTES ei9jz's SPLIT: the probe chain is 660.9 insns/call, no"
+  },
+  {
+   "line": 53391,
+   "h": "2026-08-18 \u2014 NATIVE f64 MULTIPLY AT n=256 IS 5.63x WORSE, NOT BETTER: my registered sign p"
+  },
+  {
+   "line": 53713,
+   "h": "2026-08-18 \u2014 MEASURED CONFIRMATION that neither probe body executes for f64 multiply: all "
+  },
+  {
+   "line": 53792,
+   "h": "2026-08-18 \u2014 THE DTYPE SNIFF IS 593.5 INSNS/CALL: 90% of the decision section and 32% of t"
+  },
+  {
+   "line": 53882,
+   "h": "2026-08-18 \u2014 THE DTYPE-IDENTITY LEVER SAVES 388.7 INSNS/CALL, inside its pre-registered ba"
+  },
+  {
+   "line": 54103,
+   "h": "2026-08-18 \u2014 SHIPPED-STATE CERTIFICATION: the route excess is 1478.0 insns/call, 352.5 rem"
+  },
+  {
+   "line": 54308,
+   "h": "2026-08-18 \u2014 ONE CPython ATTRIBUTE ENTRY COSTS 201.7 INSNS, MEASURED: the linear model hol"
+  },
+  {
+   "line": 54824,
+   "h": "2026-08-18 \u2014 `sort`'s ndarray-cache conversion measures -33,489 insns/call against a null "
+  },
+  {
+   "line": 54896,
+   "h": "2026-08-18 \u2014 THE \"BEFORE ARM HAS THE WIDER SPREAD\" PATTERN I DISCLOSED TWICE IS REFUTED: a"
+  },
+  {
+   "line": 55143,
+   "h": "2026-08-18 \u2014 WALL CLOCK, measured at last by artifact reuse: the levers DO save time (-2,5"
+  },
+  {
+   "line": 55211,
+   "h": "2026-08-18 \u2014 the divergence GENERALISES to the delegating route and is WORSE there: instru"
+  },
+  {
+   "line": 55375,
+   "h": "2026-08-18 \u2014 THE 13.2 insns/ns CONVERSION RATE DOES NOT TRANSFER ACROSS LEVERS: the predic"
+  },
+  {
+   "line": 55693,
+   "h": "2026-08-18 \u2014 CORRECTION OF YESTERDAY'S CORRECTION: every per-call figure I published carri"
+  },
+  {
+   "line": 55948,
+   "h": "2026-08-18 \u2014 `6y5wp`'s premise is NOT stale (unlike `v46rn`'s), and I nearly banked the op"
+  },
+  {
+   "line": 57329,
+   "h": "2026-08-26 \u2014 SHIP: a SCALAR index made `fnp.take` copy the WHOLE source; 191.87x slower th"
+  },
+  {
+   "line": 57460,
+   "h": "2026-08-26 \u2014 SHIP: `append`'s parallel byte-copy gate fired at 64 KiB where its own commen"
+  },
+  {
+   "line": 57563,
+   "h": "2026-08-26 \u2014 SHIP: `sqrt` threw away a COMPLETED CORRECT BUFFER to buy FP-event parity it "
+  },
+  {
+   "line": 57683,
+   "h": "2026-08-26 \u2014 SHIP: `meshgrid`'s cold Rust branch captured the ORDINARY dtypes and shadowed"
+  },
+  {
+   "line": 57801,
+   "h": "2026-08-26 \u2014 SHIP: ONE out-of-domain element flipped `arccosh` from an 11x WIN to a loss; "
+  },
+  {
+   "line": 58047,
+   "h": "2026-08-26 \u2014 AMENDMENT to the log-family row above: MY THREAD-COUNT JUSTIFICATION WAS WRON"
+  },
+  {
+   "line": 58119,
+   "h": "2026-08-26 \u2014 SHIP: the transcendental chunker spawned `num_threads` tasks regardless of n;"
+  },
+  {
+   "line": 58299,
+   "h": "2026-08-26 \u2014 REJECT: removing `fmod`'s O(n) divisor pre-scan buys NOTHING MEASURABLE; thre"
+  },
+  {
+   "line": 58497,
+   "h": "2026-08-26 \u2014 SHIP + NEW VEIN: the loss sweep's operand ladder is ALL C-CONTIGUOUS, and a s"
+  },
+  {
+   "line": 58657,
+   "h": "2026-08-26 \u2014 SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 1"
+  },
+  {
+   "line": 58728,
+   "h": "2026-08-26 \u2014 SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1."
+  },
+  {
+   "line": 61512,
+   "h": "2026-08-27 - A DTYPE-ONLY AUDIT OF 1800 CELLS FOUND ONE MORE DEFECT, AND THE OBVIOUS FIX F"
+  },
+  {
+   "line": 61802,
+   "h": "2026-08-27 - THE OBVIOUS FIX WOULD HAVE THROWN AWAY A 395x WIN: bool `abs`/`square` fell i"
+  },
+  {
+   "line": 62169,
+   "h": "2026-08-27 - REJECT: numpy SHORTCUTS ASCENDING ONLY, so widening the ascending guard to de"
+  },
+  {
+   "line": 63171,
+   "h": "2026-08-27 - REJECT: a branchless compaction for `compress`/`extract` wins the unpredictab"
+  },
+  {
+   "line": 64505,
+   "h": "2026-08-27 - WIN (SHIP): `repeat`'s parallel arm burned 64.59 INSTRUCTIONS PER OUTPUT ELEM"
+  },
+  {
+   "line": 65495,
+   "h": "2026-08-28 - NO MEASURABLE EFFECT (kept, not claimed) + a CORRECTION to the row above: fol"
+  },
+  {
+   "line": 65578,
+   "h": "2026-08-28 - REJECT: force-inlining `transform_field` makes lexsort 20-30% SLOWER - the sa"
+  },
+  {
+   "line": 65645,
+   "h": "2026-08-28 - REJECT x2, and the standing lexsort loss is now bounded from BOTH sides: neit"
+  },
+  {
+   "line": 66046,
+   "h": "2026-08-30 \u2014 WIN (maintenance): the unordered-batch fallback was m SERIAL bisections; tran"
+  },
+  {
+   "line": 66449,
+   "h": "2026-08-30 \u2014 REJECT: lowering the searchsorted parallel gates BELOW 2^12 \u2014 the [2^10, 2^12"
+  },
+  {
+   "line": 66515,
+   "h": "2026-08-30 \u2014 STRENGTHENING THE BAND REJECT: below 2^12 the parallel arm's sign is HOST-DIV"
+  },
+  {
+   "line": 66569,
+   "h": "2026-08-30 \u2014 NON-RESULT (premise wrong) on `np.take`'s 1<<21 parallel gate, and a NEWLY PR"
+  },
+  {
+   "line": 66646,
+   "h": "2026-08-30 \u2014 CORRECTION to my own row six hours old: the take gate switch WAS on the execu"
+  },
+  {
+   "line": 67287,
+   "h": "2026-08-31 \u2014 REJECT of a STALE-CONSTANT hypothesis I raised myself: `searchsorted`'s `MERG"
+  }
+ ],
+ "elf": [
+  {
+   "line": 52089,
+   "h": "2026-08-17 - POST-SHIP VERIFICATION: the gate's ROUTING is confirmed on the real allocatin"
+  },
+  {
+   "line": 56451,
+   "h": "2026-08-22 \u2014 MEASURED: corrected bench_maximum_arms_vs_numpy under the fixed allocation-sy"
+  },
+  {
+   "line": 57329,
+   "h": "2026-08-26 \u2014 SHIP: a SCALAR index made `fnp.take` copy the WHOLE source; 191.87x slower th"
+  },
+  {
+   "line": 57801,
+   "h": "2026-08-26 \u2014 SHIP: ONE out-of-domain element flipped `arccosh` from an 11x WIN to a loss; "
+  },
+  {
+   "line": 57907,
+   "h": "2026-08-26 \u2014 SHIP: the log family was 56% of ALL remaining headroom, hidden by ratio-ranki"
+  },
+  {
+   "line": 58119,
+   "h": "2026-08-26 \u2014 SHIP: the transcendental chunker spawned `num_threads` tasks regardless of n;"
+  },
+  {
+   "line": 58220,
+   "h": "2026-08-26 \u2014 SHIP: `vander` spawned one rayon task PER ROW; blocking rows into 65536-eleme"
+  },
+  {
+   "line": 58393,
+   "h": "2026-08-26 \u2014 SHIP: `nanargmax`/`nanargmin`'s cold-extract residual, 7.365x on a STRIDED op"
+  },
+  {
+   "line": 58497,
+   "h": "2026-08-26 \u2014 SHIP + NEW VEIN: the loss sweep's operand ladder is ALL C-CONTIGUOUS, and a s"
+  },
+  {
+   "line": 58599,
+   "h": "2026-08-26 \u2014 SHIP (2nd from the strided vein): `isposinf`/`isneginf`/`logical_not`, 35.343"
+  },
+  {
+   "line": 58657,
+   "h": "2026-08-26 \u2014 SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 1"
+  },
+  {
+   "line": 58728,
+   "h": "2026-08-26 \u2014 SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1."
+  }
+ ]
+}

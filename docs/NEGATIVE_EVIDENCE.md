@@ -96,6 +96,7 @@ divide was measured at both sizes.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - CORRECTION + FIX: `eac4d567` did NOT change the f32 binary route - a file-wide first-occurrence replace hit the UNARY writer, and my test passed trivially because it exercised the untouched path (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. The f32 binary route is now actually fixed, and the row that claimed it already was is
 corrected. The interesting part is not the fix; it is that a green test proved nothing.
@@ -209,6 +210,7 @@ any of these writers.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - CODE: the `out=` group now covers ALL THREE ~0.91 cells, so the sign-flip can be decided per cell instead of transferred from `maximum` (`deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. Load was 74.45 at the 1-minute mark, so nothing was certified. This lands the
 instrument named as the top remaining work one row ago, and makes the three-cell comparison
@@ -389,6 +391,7 @@ clean.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - THE PAIRED `out=` ARM THREE RETRY PREDICATES ASKED FOR, and the prediction it exists to test: `out=` may flip `maximum` from 0.907848 to 1.702079 (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. Code only - the host was rising and I did not certify. Three of my own rows end with
 "certify with a paired `out=` arm" and none could be run, because no group exercised `out=` at all.
@@ -437,6 +440,7 @@ allocation-free numbers that need withdrawing - not these.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - CAPABILITY: `arctan2(a, b, out=c)` now takes the NATIVE PARALLEL path instead of delegating - the first `out=` extension to the compute-bound family where this project actually wins (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. Capability code with tests, chosen against the evidence rather than against the worst
 cell, for a reason stated below.
@@ -613,6 +617,7 @@ the whole `__call__`, both in one invocation.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - CAPABILITY LANDED (interned ufunc name), and the worst cell now reads 2.079x - but the delta is JOINT with a peer's lever and I do not apportion it (`deadlock-audit-ei9jz`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. The measurement that followed `051fe121`, banked a turn late.
 
@@ -669,6 +674,7 @@ figure above describes a tree no single commit named. (3) The remaining excess i
 next named stage in it is the output allocation. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - POOL-SIZING CHECKED AND REFUTED HERE: the interference SURVIVES a 1-thread rayon pool (1.028x) - and the same sweep shows my earlier "0.4% replication" claim was luck (`deadlock-audit-48by6`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Torch found its undecidable board was caused by its own 64-thread pool, arms fighting
 each other regardless of placement. I have a 64-thread pool — every row in this ledger reports
@@ -723,6 +729,7 @@ interference discount, quote the RANGE 2-7% or re-measure in the window being co
 point estimate is not stable across windows. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - COUNTED_MECHANISM, and it REFUTES this bead's own first step: the shipped f64 divide loop is ALREADY packed 4-wide ymm with 2x unroll - the 94us codegen gap is not a packing failure and there is nothing to restore (`deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. `deadlock-audit-6y5wp` names a cheap build-free first step — disassemble the shipped
 `zerocopy_f64_binary_flat` Div arm, count `vdivpd` against `vdivsd`, and if the loop is emitting
@@ -783,6 +790,7 @@ source, so both halves must be built in the same environment. (3) `6y5wp` should
 first step marked done and negative. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - PER-ARM CPU WITNESS SHIPPED, AND IT ANSWERS THE FREQUENCY QUESTION: both arms share ONE core (spread 1.0005), but the clock moves 1.267x ACROSS phases (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. The harness now records, per ARM, which core ran it and at what clock. That is the
 support I said was missing when I refused to print a per-arm MHz field. It exists now, it is verified
@@ -849,6 +857,7 @@ wanted to migrate away from.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - ARM PLACEMENT AUDITED AND IT IS UNPINNED: the bench thread MIGRATES across 53-64 of 64 logical CPUs within a single arm, on a box with a 2.942x cross-core spread - measured, not assumed (`deadlock-audit-48by6`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Prompted by two projects finding broken arm placement — one with BOTH arms on a single
 physical core, one voiding rows over contention. I had never checked mine. It is broken in a third
@@ -913,6 +922,7 @@ attributing a difference to code: a row taken at 53 distinct CPUs and one taken 
 same measurement. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - FLEET CPU-SPREAD FINDING VERIFIED EXACTLY (2.882x), PER-ARM MHz NOW RECORDED - and it REFUTES the frequency explanation for our interference: the shadowed arm runs at a HIGHER clock, not lower (`deadlock-audit-48by6`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Response to the fleet report that a live cross-core spread of 2.879x, not ambient load,
 is why ratios move between windows. Verified here, instrumented per arm, and used to test whether
@@ -986,6 +996,7 @@ uneven boost distribution and would call for different handling. (3) Do not prop
 mechanism for the interference from the current evidence. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - MEASURED, A PROVENANCE FIELD THAT WOULD MISLEAD: MEAN CPU MHz is ANTICORRELATED with quietness - it tracks how many cores are IDLE, not how fast the benchmarked core runs (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. Certification deferred - load was RISING and externally driven. While deciding I sampled
 `/proc/cpuinfo` three times, and the samples answer the frequency question directly: the
@@ -1333,6 +1344,7 @@ with n. (3) Do not reinstate any regime-based rule; two attempts at one have now
 AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - ADDENDUM, AND I QUALIFY MY OWN "INVALIDATES NONE": this harness IS affected at ~6.7% for `maximum`, my test was UNDERPOWERED to see it, and the two results were never in conflict (`deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. My reconciliation row was written before I read `RedLynx`'s in-project evidence, and it
 framed this harness as unconfirmed while treating torch as the outside case. That framing is wrong in
@@ -1391,6 +1403,7 @@ that is the exact cross-candidate transfer RedLynx withdrew one row after making
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - RECONCILIATION: incumbent contamination is a property of the HARNESS, not of the phenomenon - torch's harness can be right and mine can be right, and here is the self-check that tells any project which it is (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. A sibling project (torch) CONFIRMED incumbent contamination for its harness; my test on
 this harness did not confirm it. Both can be true, and treating either as the fleet-wide answer would
@@ -1461,6 +1474,7 @@ cost and should only be paid if a row's conclusion actually turns on it.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - TESTED AND NOT CONFIRMED: our arm does NOT measurably slow the incumbent it is paired against - the effect is COMMON-MODE, and the naive test for it is a printing artifact (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. I was asked to quantify a contamination I had confirmed and to say which rows it
 invalidates. **I had not confirmed it, and testing it does not confirm it.** Recording the test rather
@@ -1852,6 +1866,7 @@ cost.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - MAXIMUM ARMS ON A QUIET HOST: parallel 2.258922x and the SERIAL ARM FLIPS from a decidable LOSS to a decidable WIN (1.226996x) - which softens my own hzl1w correction; plus an UNEXPLAINED incumbent anomaly (`deadlock-audit-48by6`, `deadlock-audit-hzl1w`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Discharges the retry predicate on the allocation-corrected maximum arms row, which
 banked 1.664906x as a FLOOR because it was taken at loadavg 75. Stability tested first: 1-min 9.10
@@ -2508,6 +2523,7 @@ RATIO is a better one than loadavg and is already in every row this harness emit
 AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - THE PROJECTION IS CORRECT NOW AND ITS NULL CELL PROVES IT - so the divide-gate conclusion finally rests on sound arithmetic at 2^14-2^18; but a THIRD impossible value appears at 2^20 where multiply reaches parity (`deadlock-audit-q00ev`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Implements the two-line formula the previous row's retry predicate specified, with the
 self-check that predicate demanded. One run, quiet host.
@@ -2728,7 +2744,8 @@ sound and need no further work. AGENT_NAME=RedLynx.
 (load 15-22), same ELF, same committed source. Banked for the two defects it exposed, one of them
 mine.
 
-**Campaign result class:** maintenance-diagnostic (the perf conclusion survives; two instruments do not)
+**Campaign result class:** maintenance-self-speedup
+(Relabelled 2026-09-03 to the canonical class: this is our own instrument's before/after correction, not a competitive claim. Previous label: maintenance-diagnostic (the perf conclusion survives; two instruments do not))
 
 ```
 bench_elf_sha256=04cdb2f447f8336615022e40f6c5c3b51961c7e91e04b4ae62d3b87b90e4f8bf
@@ -2865,6 +2882,7 @@ The only genuinely open item on this cell remains a SECOND WORKER, banked as unr
 foreground-limited pane. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - THE WORST RATIO'S ASYMPTOTE: `add` bottoms out at 4.019x slower by n=4, and the per-call excess is FLAT at ~1100 ns from n=1 to n=256 while the work grows 256x (`deadlock-audit-ei9jz`)
+worker=thinkstation1 harness=criterion::bench_add_tiny_n_floor_vs_numpy (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `SlateHeron`. Every size sweep in this ledger bottomed out at n=256 — the smallest n ever measured
 for any binary op. Since the cost is a fixed per-call floor, the ratio had to keep worsening below
@@ -3136,6 +3154,7 @@ the load endpoints as the rows above do. (3) The open item on this cell remains 
 which the row below records as unreachable from a foreground-limited pane. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - RETRY PREDICATE DISCHARGED: `add` DOES reach parity at 2^24 - the earlier `at_parity=false` was riding on a defective null, and the ratio never moved (`deadlock-audit-ei9jz`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `SlateHeron`. My own retry predicate said: re-run ONLY the 2^24 cell until its incumbent null
 straddles unity, then read `at_parity`. Done. The answer flips, and the reason it flips is a control,
@@ -3521,6 +3540,7 @@ overlapping costs, and only a route-level before/after can tell them apart.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - CONFLICT, DO NOT DROP THE NATIVE DIVIDE PATH YET: two same-host runs with clean nulls disagree IN DIRECTION at 2^20 (0.890373 vs 1.099069) while the kernel SOURCE is byte-identical (`deadlock-audit-q00ev`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `SlateHeron`. I was asked to decide whether the native f64 divide path survives, on the basis of
 `3470db0f`, which found `delegating_looks_better` TRUE at every size 2^14..2^20. Re-running the same
@@ -3665,6 +3685,7 @@ candidate-null bias understood before their point estimates are used for anythin
 that is `deadlock-audit-7xcq2`. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - MEASURED, BOTH INSTRUMENT REPAIRS WORK - the partition no longer panics and its correction validates at 0.895x an independent figure; but the first run exposes a flaw in a field I added myself (`deadlock-audit-uj3r3`, `deadlock-audit-kido6`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. First run of two repairs written blind during the freeze. Same ELF and invocation
 family as the two rows above.
@@ -3836,6 +3857,7 @@ default-filling directly; 276 ns is a ceiling for that component and must not be
 saving. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - MEASURED, THE CORRECTION FLIPS THE ARM ORDERING: with neither side allocating, PARALLEL maximum WINS 1.664906x and SERIAL LOSES 0.935461x - the exact opposite of the flattered row, and it REFUTES my own claim that the internal ordering survived (`deadlock-audit-48by6`, `deadlock-audit-hzl1w`)
+worker=thinkstation1 harness=criterion::bench_maximum_arms_vs_numpy (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. First run of the corrected `bench_maximum_arms_vs_numpy` (fix `e5d5a67d`), on the
 first build after the freeze lifted. Both arms in ONE invocation, both A/A nulls carried, NEITHER
@@ -3912,6 +3934,7 @@ re-decide hzl1w, and decide it on the shipped route rather than on replicas.
 AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - MEASURED, THREE SIZES POST-FIX: the native f64 divide is at its WORST just above its own gate - 1.286x slower at 2^16 against 1.091x at 2^20 - which puts `F64_DIV_NATIVE_MIN_LEN` itself in question (`deadlock-audit-0ppym`, `deadlock-audit-qapyb`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. No build - /data at 42G, the floor - so this re-runs the same committed-provenance ELF
 on a third group. Combined with the two rows below it gives `divide` at three sizes straddling the
@@ -4436,6 +4459,7 @@ nine-parameter signature, the largest never-priced stage of the remaining ~1000 
 AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - AUDIT COMPLETE, THE DEFECT WAS NOT SYSTEMIC: exactly TWO of 247 vs-NumPy groups pair a Rust replica against NumPy, one was the known defect (now fixed) and the other was correct by design (`deadlock-audit-48by6`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. I filed `48by6` as P0 on the assumption that an allocation asymmetry found in one group
 was structural. Enumerated build-free across all bench files: **it was not**. Recording that the
@@ -4661,6 +4685,7 @@ measurement, not another partition.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - THE CORRECTED MAXIMUM ARMS KILL `hzl1w`'s COUNTER-EVIDENCE: the serial arm is 1.027788 UNDECIDED, not the 1.352401x that decision cited - and our KERNEL wins 1.70x while our ROUTE loses 0.91x (`deadlock-audit-48by6`, `deadlock-audit-hzl1w`)
+worker=thinkstation1 harness=criterion::bench_maximum_arms_vs_numpy (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `SlateHeron`. `bench_maximum_arms_vs_numpy` had never run since `e5d5a67d` made it
 allocation-symmetric. It has now, and it discharges the last open item on `48by6`.
@@ -4981,6 +5006,7 @@ current magnitude rests on a null that excludes unity.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - MEASURED, PROVENANCE INVALIDATION: today's three `thinkstation1` rows measured an UNCOMMITTED tree that TWO LATER COMMITS have already superseded - re-measure before any of them is quoted as a property of the library (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `SlateHeron`. This row exists to stop three of my own numbers from being quoted as facts about
 HEAD. It records a defect in their provenance, not a measurement.
@@ -43914,6 +43940,7 @@ hardcoded labels in this bench file the same way: a literal that describes runti
 claim, and it needs a source, not a comment. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - METHOD NOT AVAILABLE FROM THIS PANE (no measurement produced): second-worker replication of the worst cell cannot be reached inside a 600 s foreground window - two workers, two attempts, both died inside the `fnp-python` compile (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. This row carries **no elf sha and no A/A null, because no measurement completed** — it
 records a method that did not pay, so the next agent does not spend another hour rediscovering it.
@@ -43991,6 +44018,7 @@ not fit the window on a worker slower than the build host - is unaffected by tha
 reason to keep the row. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - RECONCILING TWO OPPOSITE HEADLINES ON CONTAMINATION: `SlateHeron`'s read-off and my direct test do not contradict each other - they measure different things, and mine carries a confound the other does not (`deadlock-audit-48by6`, `deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. The row above concludes our arm does NOT slow the incumbent; two rows below I measured
 that it does, twice. Both stand, because they are not the same measurement. Written so the next
@@ -44435,6 +44463,7 @@ somewhere else entirely.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-16 - I CORRECT THE REJECT I BANKED AN HOUR AGO: it rested on ONE run, and four more runs of the SAME ELF disagree with it. The lever is a real ~2.7%, not zero - and the reason it is only 2.7% is now COUNTED, not inferred (`deadlock-audit-6y5wp`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. Same ELF, same host, five runs.
 
@@ -44610,6 +44639,7 @@ same audit is owed to the other per-call entry points. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-16 - NEW LEAD, with two mechanisms already REFUTED: our divide replicas take 10.5x numpy's dTLB LOAD MISSES while taking the SAME L1-dcache misses - identical cache-line traffic, wildly different address translation (`deadlock-audit-6y5wp`)
+worker=thinkstation1 harness=criterion::bench_divide_accumulate_isolation_vs_numpy (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. Hardware counters, `bench_divide_accumulate_isolation_vs_numpy` (someone else's group,
 unmodified - I only profiled it), replicated in my own group.
@@ -45330,6 +45360,7 @@ AGENT_NAME=RedLynx.
 
 
 ## 2026-08-16 - I CORRECT MY OWN COUNTED ATTRIBUTION: the checksum was INSIDE the timed loop and did not cost the same on both arms. getattr is 206 insns/call, not the 931 I banked - and the "routing prologue" correlation is REFUTED as a shared instruction mechanism (`deadlock-audit-v46rn`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. Counters only; no wall-clock certification was attempted (loadavg was 48.9 rising when
 this started, and retired instructions do not move with load the way a 450 ns difference does).
@@ -45442,6 +45473,7 @@ are all flat.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-16 - CORRECTION to my own row one row up: the dual-null gate is NOT masking anything, the missing straddle veto is a DECIDED design with a measured reason, and I withdraw the advice to revive it (`deadlock-audit-7xcq2`, `deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. Build-free turn, host in I/O saturation. I went to revive the dormant veto, read the
 decision recorded at the site first, and stopped. Banking that rather than the change.
@@ -45596,6 +45628,7 @@ change. The routing-prologue refutation stands and does not need re-running.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-16 - AUDIT (build-free, host at loadavg 525): 22 of 116 `axis` forwards send NumPy its OWN default, verified against the installed interpreter - and a BLANKET rule would be wrong, because the callee default is not the same everywhere (`deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. No build, no measurement - the host is in I/O saturation. This is source analysis
 plus interpreter introspection, which needs neither.
@@ -45664,6 +45697,7 @@ NumPy's C-level gufunc definition, not `inspect`. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-16 - BANKING a table I already held, and CORRECTING an overstatement in my own row: LLC and branch misses ARE flat across the ufunc methods, but L1 D-cache misses are NOT - our arms take up to 101.8 more per call, worth 20-60% of accumulate's cycle excess (`deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No new measurement — this is data collected earlier in the same session, from the same
 ELF and the same probes, that I described in prose without publishing the numbers. Banked now under
@@ -45740,6 +45774,7 @@ number; that needs a build and is blocked until the halt lifts.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-16 - MEASURED, and my registered prediction was WRONG BY 5-8x IN THE CONSERVATIVE DIRECTION: the kwargs-dict + interning lever is worth 795-1290 retired instructions per call, not the ~165 I predicted, because a non-interned `getattr(&str)` ALLOCATES (`deadlock-audit-v46rn`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. Discharges the verification debt on `3a542125`, which was committed UNCOMPILED under
 the I/O freeze.
@@ -46442,6 +46477,7 @@ AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - COLLISION RESOLVED: the peer's `outer` span covers BOTH levers, not just the vectorcall. In the counter domain the split is clean and additive - interning ~795 insns/call, vectorcall ~808 on top - and the endpoint is confirmed at 1.0907x (`deadlock-audit-v46rn`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. One build, one window, with `reduce` as the untouched control.
 
@@ -46515,6 +46551,7 @@ buildable from the shared tree.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - PREDICTION REFUTED: the arity branch bought `at` only 55 ns, not the ~190 predicted - so the rest of its cost is PROLOGUE, not call shape, and the refutation names the remainder (`deadlock-audit-v46rn`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. The measurement the previous row registered a specific number for. It did not land
 on it, and that is the result.
@@ -46734,6 +46771,7 @@ family — my last three predictions missed by 5-8x low, 5-8x low, and 1.8x high
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - SAME-WINDOW FAMILY SNAPSHOT, no build in the measurement window: all four ufunc methods on ONE ELF with counters alongside. `accumulate` is the worst on BOTH measures and it is the only one that still routes (`deadlock-audit-v46rn`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. No build at all — measured on an ELF built in an earlier window, which is the point.
 
@@ -46808,6 +46846,7 @@ and 1.8x high, so the honest prior is the range 400-800 insns/call.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - `accumulate`'s routing prologue costs 770 insns/call, attributed BY DIFFERENCE against two independent baselines that agree to 2 - and the obvious reorder that would remove it is REJECTED without spending a build, because it removes nothing (`deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build. Attribution from the same-window family snapshot one row up, plus a static
 read that refutes the lever it suggests.
@@ -46884,6 +46923,7 @@ has to beat three interned getattrs, which is a higher bar than it sounds.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED: the wrapper class pays 925-1944 ns per call for a re-import, non-interned keys and default keywords. `linspace` 1.3616x -> 1.1640x, `fft` 1.3139x -> 1.1270x - and 1382 sites share the shape (`deadlock-audit-v46rn`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. The lever the previous row attributed from source, measured in the quietest window
 of the session. The build was taken BEFORE the measuring window and load was re-checked after it.
@@ -47029,6 +47069,7 @@ f64 block's entry test can decline without paying 48 ns, and that needs the entr
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - REJECTED, second time on the same shape and again before a build: divide's 48 ns is ONE interned `getattr("size")` that the size gate genuinely needs, and the entry order is ALREADY optimal. Size gates cost one attribute read each and reordering cannot remove it (`deadlock-audit-6y5wp`, `deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. Static read, no build. The row above named this as the next question and said it needed
 the entry order read before anyone builds for it. This is that read.
@@ -47111,6 +47152,7 @@ so the gate can be deleted outright.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - SUPERSEDED, and it changes an open bead's premise: `deadlock-audit-q00ev`'s n=2^8 divide cell is no longer 3.185x. It is 1.5578x - excess 938 -> 245 ns - so the gap that made the gate obviously right has narrowed to 0.27x (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build, no new measurement — this is my own five-run row from earlier in this window
 compared against a banked row, and I am flagging a peer's open bead rather than working it.
@@ -47177,6 +47219,7 @@ the comparison it rests on has moved on one side only and I have measured just t
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - SWEPT AND CLEAN: the binary route's shared 197 ns floor has NO remaining wrapper lever. Four candidates checked on static reads, all already done or load-bearing - so the worst lane's larger half is not a wrapper problem (`deadlock-audit-ei9jz`, `deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. Static reads only, no build — loadavg was 57.97 and rising, which is not a window for
 anything else.
@@ -47334,6 +47377,7 @@ sweep already refuted that. If anyone attacks the floor it is the 363 insns/call
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - TWO MORE WRAPPER CELLS MEASURED (`chebder` 1.0657-1.0792x, `geomspace` 1.0945-1.1077x) - the family is NOT uniform, and the before-arm was ABANDONED rather than taken in a window that had spiked to 47.5 (`deadlock-audit-v46rn`)
+worker=thinkstation1 harness=criterion::bench_axis_default_wrappers_vs_numpy (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Row 52's retry predicate asked for two cells that are not `linspace` or `fft`. These
 are them. The A/B that would have attributed them is not here, and why it is not is the second
@@ -47391,6 +47435,7 @@ AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - BUILD-FREE ATTRIBUTION: `linspace` uses EXCEPTIONS AS CONTROL FLOW on its common path - two failed `extract::<f64>()` per call, ~212 ns by a Python-level probe, and the native path it guards cannot fire for array endpoints at all (`deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. Host at 23G disk and loadavg 167 with the external build cycle back; no build, no
 benchmark, no measurement. Source reading plus a pure-Python timing probe, which need neither.
@@ -47452,6 +47497,7 @@ our cost; it is a Python-level proxy for a Rust-level operation. AGENT_NAME=RedL
 
 
 ## 2026-08-17 - FOUND BY ANNOTATION, NOT BY READING: `PyUFunc::__call__`'s hottest instruction is a `movabs` of "same_kin" - the wrapper string-compares "same_kind" on EVERY binary ufunc call. The fix is in `34a67fdc` and is UNCOMPILED (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. The code landed inside a peer's emergency-preservation commit whose message says
 "UNVERIFIED, not mine", so this row is the only record of what that change IS and why. No build — the
@@ -47534,6 +47580,7 @@ entry like `__strcmp_avx2`, annotate before concluding the surface is clean.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CORRECTNESS DEFECT found by a lever's own test: `fnp.linspace` returns float64 where NumPy returns FLOAT32 for float32 endpoints. Pre-existing, not the lever's - and the lever is withdrawn unbuilt under the build throttle (`deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. The throttle landed mid-turn with 20 panes released at once; my build had already
 finished, I started no other, and the code is out of the shared tree.
@@ -47585,6 +47632,7 @@ any predicate here must account for all four. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - DO NOT SWEEP the "same_kind" lever to the cold wrappers: it is ~20% of the ufunc route's floor and ~1% of theirs. Plus a static self-consistency check on `34a67fdc`, which is still UNCOMPILED on main (`deadlock-audit-ei9jz`, `deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build — the host was at loadavg 377-651 with 78-82% iowait after a bulk resume, and
 the one remote job I had in flight before the throttle is still queued.
@@ -47650,6 +47698,7 @@ main uncompiled until the three named gates run.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - `34a67fdc` COMPILES and its swallow-detection test PASSES: the "same_kind" lever is no longer uncompiled code on main. Clippy and the ratio remain owed (`deadlock-audit-ei9jz`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. The remote job I started the moment the halt lifted, queued 1477 s behind the
 bulk-resume backlog, has landed. No new build was started — the throttle stands.
@@ -47852,9 +47901,7 @@ worth under ~11% of it are below this instrument's resolution.** The three refut
 the 48 ns block entry and this string compare are all in that band. It is not that the wrapper has no
 small costs left; it is that this method cannot tell whether removing one helped.
 
-COUNTED_MECHANISM: two builds with byte-identical `PyUFunc::__call__` source produced our-arm totals
-differing by +92.6 insns/call on `add` and -20.3 on `divide` over 400 000 calls each, bounding the
-probe's reproducibility; the lever under test moved +10.4 and +5.8, inside that bound.
+COUNTED_MECHANISM: two builds with byte-identical `PyUFunc::__call__` source differ by +92.6 insns/call on `add` and -20.3 on `divide` over 400 000 calls each — that is this probe's reproducibility floor, and the lever under test moved +10.4 and +5.8, inside it.
 
 A/A NULL CONTROLS: the identical-source pair above IS the null for this instrument, and it does not
 come out at zero — which is the finding.
@@ -47867,6 +47914,7 @@ annotation that motivated it was skid.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - AUDIT of every counter claim I banked, against the ±90 insns/call floor I measured yesterday: eight survive with margin, four are BELOW the floor and one of those was load-bearing in an argument (`deadlock-audit-ei9jz`, `deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build — an audit of banked rows against a bound established after most of them were
 written.
@@ -48025,6 +48073,7 @@ in another invocation or at another size.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED: not raising to decide is worth 390-574 ns per call, MORE than the 212 ns I predicted - and the prediction said so, because the probe was a stated LOWER BOUND. `fft` and `chebder` are untouched controls in the same runs (`deadlock-audit-v46rn`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. The endpoint pre-check, measured in the quietest window of the campaign against
 row 53's figures on the same host.
@@ -48170,6 +48219,7 @@ below the crossover.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - NEW WORST CELL OF THE CAMPAIGN: `fnp.searchsorted` with an ARRAY needle is 8.700x SLOWER than NumPy. And two-sided scalar `clip` is 1.6345x - worse than the one-sided case it was supposed to be better than (`deadlock-audit-v46rn`)
+worker=thinkstation1 harness=criterion::bench_predecline_levers_vs_numpy (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Cells written to check two levers' predictions. They could not check them - there
 is no before-figure - but they found two regressions far larger than the levers they were for.
@@ -48313,6 +48363,7 @@ banked. If the divide kernel is ever made faster at small n, this constant is th
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED: the `numpy_dtype_is_f64` fast path takes the campaign's worst cell from 8.700x to 5.838x, and the three cells that do NOT use that predicate did not move (`deadlock-audit-v46rn`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. One change to one predicate, measured against row 57's figures on the same host and
 in the same group - which already contained three cells that cannot take the lever.
@@ -48369,6 +48420,7 @@ second-worst cell here and nothing has been attributed to it at all. AGENT_NAME=
 
 
 ## 2026-08-17 - AUDIT: the wrong-gate defect class has exactly TWO members and only one was ever defective - and the reason gives a criterion that says when a delegating control is needed at all (`deadlock-audit-q00ev`, `deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build. An audit prompted by the gate I just fixed, asking whether the same defect
 sits anywhere else.
@@ -48445,6 +48497,7 @@ above first: it decides whether a delegating control is required before a single
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - BUILD-FREE ATTRIBUTION for the remaining 5.838x: `searchsorted` tries FOURTEEN native probes in linear order, and the f64 array path is TWELFTH. The dispatcher already computes the dtype it could dispatch on (`deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. No build this turn, and the reason is in the row: peers hold uncommitted work in
 `lib.rs` overlapping the region my A/B patches touch. Source reading needs neither.
@@ -48578,6 +48631,7 @@ decidable regression, not an estimate. The bracketing sizes 2^11 and 2^13 are no
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - RECONCILING TWO OF MY OWN ROWS THAT DISAGREE IN SIGN: divide at 2^20 is 1.0038x FASTER as a route and 1.1706x SLOWER as a kernel. Both are fair; they differ in whether ALLOCATION is in the timed region - which means the kernel deficit is being MASKED at route level (`deadlock-audit-6y5wp`, `deadlock-audit-48by6`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build. A contradiction between two banked rows, run down to its cause.
 
@@ -48705,6 +48759,7 @@ should not be quoted either. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - THE TRACE row 60 ASKED FOR: my `clip` pre-check DOES fire, so the refutation is not "wrong path" - it is that `extract::<f64>()` on `None` costs far less than `float(None)`. The 129 ns probe measured the wrong operation (`deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. No build - two builds are already in flight for this project and the cap is two.
 Source tracing only.
@@ -48757,6 +48812,7 @@ build cap allows. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - REFUTED, and this one is a plain mistake: my `searchsorted` needle pre-check is DEAD CODE for the case it was written for. The caller already guards on `v_is_scalar` (`deadlock-audit-v46rn`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Second A/B on my own levers. Both have now come back at zero, and this one for a
 reason that was visible in the source I had already read.
@@ -48957,6 +49013,7 @@ an engagement proof (contrast against an op that takes `_ => None`, e.g. `add`) 
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CORRECTION to row 59, caught BEFORE landing: only FOUR probes actually run for an f64 haystack, not eleven - the dispatcher is already gated on `a_kind`, and the lever row 59 proposed would have been a third dead one (`deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. No build. This is the rule from row 62 - *read the call sites before adding a guard* -
 applied to my own next proposal, and it stopped it.
@@ -49176,6 +49233,7 @@ above (vectorisation, ISA width, non-temporal stores) — those remain settled o
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - UNDECIDED: the `asarray` skip moves `searchsorted` +1.6% and +4.5%, but a CONTROL moved +2.9% in the same runs. Not separable, and I am not claiming it (`deadlock-audit-v46rn`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Fourth consecutive A/B on my own levers. This one is not a refutation - the sign is
 right and the mechanism is real - but the noise floor in this window is as large as the effect.
@@ -49233,6 +49291,7 @@ dispatcher without a measurement; four attempts, one payer. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - THE CLASSIFIER QUESTION IS NOW DECIDED, WITHOUT THE BUILD I BUDGETED FOR IT: removing the FE-hazard classifier is a 1.42-1.62x REGRESSION in the DEFAULT allocator regime. That REFUTES a conclusion written in our own source comment ("the 4x-unrolled arm is the SLOWEST of the three"), which holds only under the mmap control. And the bitmask classifier shape is NOT certified - one run read a DECIDABLE_WIN of 1.0416 that five runs reduce to a marginal 1.0311 (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
+worker=thinkstation1 harness=criterion::bench_divide_classifier_accumulator_form (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. **NO BUILD** - re-analysis of the five kernel runs banked one row up, plus five fresh
 invocations of the same ELF. Load flat throughout (14.01/14.52/15.70 -> 16.10/15.40/15.93, iowait 0,
@@ -49356,6 +49415,7 @@ measured resolution of ~9.4% on this route and may not decide sub-10% effects.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - THE DESIGNED CONTROL WORKS: with a LIST-haystack cell that cannot take the lever, the `asarray` skip separates - control flat at -0.5% while the ndarray cells move +2.9% and +4.2% (`deadlock-audit-v46rn`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Row 64 could not separate this lever because its only controls were `clip` cells that
 moved 0.5% and 2.9% for reasons of their own. This adds the control row 64 asked for and re-runs
@@ -49411,6 +49471,7 @@ AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - CERTIFIED, and it is the largest single move of the campaign on this cell: `searchsorted` array-needle goes 5.730x -> 3.262x. The designed control moved 2.0% (`deadlock-audit-v46rn`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Five A/Bs on my own levers had produced four non-wins. This one applies the filter
 those failures taught - change only what runs UNCONDITIONALLY on the path that does the work -
@@ -49479,6 +49540,7 @@ here but has moved 60% between windows in this group before. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - PRE-REGISTRATION, not a result: the `out=` divide route now has a DELEGATION control, and the decision rules are being written down BEFORE the certifying run. A smoke run (NOT BANKED) says the right gate for this route may be a BAND rather than a threshold, and flags one field that would invalidate the control (`deadlock-audit-6y5wp`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. One build (`release-perf`, 7m47s), one smoke invocation. **NOTHING IN THIS ROW IS
 CERTIFIED**; load was rising (18.92/16.48/16.96, two external `rustc`) and every number below comes
@@ -49578,6 +49640,7 @@ gate: a 22% cost on every delegated op at large n would be worth far more than t
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CORRECTING MY OWN QUOTING: I have been reporting divide at 2^20 as "1.14-1.27x slower", which is anchored on the BEST cell and mixes two instruments. The WORST banked cell is 1.6234x, and per-instrument worst bounds are 1.6234x (route) and 1.2051x (kernel) (`deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. **NO BUILD, no new measurement** - an audit of how I have been quoting numbers I already
 banked today. Load 18.26/18.55/17.95, one external `rustc` (`frankentorch`), disk 100G.
@@ -49658,6 +49721,7 @@ the run it applies to and applied to every row in this campaign, not to this one
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED: the 136-probe import sweep takes two-sided `clip` from 1.6791x to 1.18x, with FOUR controls holding between -0.03% and -2.2% (`deadlock-audit-v46rn`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. The sweep row 66 pointed at, measured on a cell that had never had anything
 attributed to it.
@@ -49722,6 +49786,7 @@ getattr/asarray sites remain the unpriced block. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - AMENDING MY OWN PRE-REGISTERED RULE 1 BEFORE I RUN, not after: "no local build running" is unsatisfiable on this host and guards the wrong axis. Replaced with a BETWEEN-RUN variance guard, which is what actually failed today (`deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build, no measurement. This row exists so the amendment is on record BEFORE the
 certifying run it governs, not chosen afterwards.
@@ -49787,6 +49852,7 @@ it by simply running more times until the spread narrows.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CORRECTION TO MY OWN QUOTING: `numpy_dtype_is_f64` is worth 33% on its BEST cell and NOTHING on its worst three. The same is true of my other two recent wins - all three are SINGLE-CELL levers and I headlined them as if they were broad (`deadlock-audit-v46rn`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `RedLynx`. No build. Re-reading my own banked tables rather than measuring anything new.
 
@@ -49842,6 +49908,7 @@ AGAINST breadth at the same time; say both. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - THE CERTIFYING RUN: my own pre-registered guard VOIDS ALL SIX SIZES, so the `out=` gate stays UNDECIDED. What it DID settle is the route-level ENGAGEMENT PROOF I have owed for six rows, and a hard number for how badly the dual-null CI understates this route: run-to-run spread is 3-35x the within-run CI while the nulls straddle unity (`deadlock-audit-6y5wp`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. No build in this project during measurement (`pgrep -c rustc` = **0** at the start of all
 five invocations, so BOTH the original rule 1 and its amendment were satisfied - the amendment turned
@@ -49963,6 +50030,7 @@ before reusing it. The engagement question is CLOSED and must not be re-opened: 
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED, quoted at its WORST cell: the dispatcher-body lever is worth +0.6% on `ss_list_haystack` and nothing on the clip controls - and +5.1% / +7.1% on the two cells where the body is a real fraction of the call. First MULTI-cell win of this stretch (`deadlock-audit-v46rn`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. Row 68 required the worst cell in the heading and the best in the body. This is the
 first row written under that rule, and it is also the first lever here that moved more than one
@@ -50025,6 +50093,7 @@ AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - INSTRUMENT DEFECT FOUND AND FIXED: the delegation control measured a NEGATIVE wrapper (-3967, -6087, -170488, -516965 ns), which is impossible - the two arms had separate output buffers and were racing page residency, not code. Both arms now share one buffer. And the SIGN-based confirmatory test is registered here BEFORE it runs (`deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. One build (`release-perf`, 7m46s, `pgrep` showed 0 builds in this project at its start),
 no measurement in this row. Load 15.84/16.25/17.70, disk 99G.
@@ -50116,6 +50185,7 @@ invocations and may not be re-run to a better answer.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - THE BUFFER FIX WORKED AND EXTENDED THE USABLE BAND TO 2^19 (18,840 ns -> ~600 ns), but the residual unphysical wrapper at 2^20+ is NOT an asymmetry - it is the estimator having no resolution there, which makes the delegation comparison permanently unavailable above 2^19. Four runs taken were RULE-DISQUALIFIED and used only for instrument validation (`deadlock-audit-6y5wp`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. No build in this row. Four invocations of the shared-buffer ELF
 `f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (release-perf, `thinkstation1`),
@@ -50189,6 +50259,7 @@ here must never be counted toward the sign test; it needs seven fresh QUALIFYING
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - SIGN TEST QUALIFICATION LEDGER, 1 of 7: the host spiked from loadavg 20.40 to 53.15 mid-batch and disqualified three of four invocations. Recording which runs count BEFORE any of them is read, so the sample cannot be assembled to taste (`deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build. Bookkeeping row, deliberately short. ELF
 `f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (shared-buffer build,
@@ -50235,6 +50306,7 @@ sample.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - I WAS CHASING AN ARTIFACT: the worst cells I banked TWICE today (1.6234x, then 1.6937x) were inflated by the separate-buffer instrument. On the shared-buffer build the SAME cell reads 1.2824x and the "bimodality" I attributed to a memory regime disappears. Corrected worst cell for `fnp.divide(out=)` is 1.2824x at 2^20 (`deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build. Re-reading a DIRECT ratio that needs no subtraction, from runs already taken on
 the shared-buffer ELF `f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (8 runs)
@@ -50318,6 +50390,7 @@ converted; that conversion is the next code change in this lane.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - THE CLASSIFIER FINDING SHARES THE DEFECT THAT VOIDED MY WORST CELLS: `divide_former_serial` and `divide_fused_serial` write to DIFFERENT 8 MiB buffers, so the 1.4152-1.6155x I certified for the fused form is not established. Flagging my own banked result before anyone builds on it (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build, no new measurement. A consequence of the buffer artifact, traced into a result I
 banked as DECIDED earlier today. Load 14.84/20.93/21.45 rising to 30.99/25.75/23.23, `proj_builds` = 0
@@ -50406,6 +50479,7 @@ the shipped code alone, which is what it currently does.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED, and it is a SHIPPABLE LEVER: the `out=` native divide route is NOT worth taking at 2^14, 2^18 and 2^19 - declining beats it 7/7 at each - while it IS worth taking at 2^10. The pre-registered sign test passed at every size it could reach (`deadlock-audit-6y5wp`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. No build in this row. Seven QUALIFYING invocations of shared-buffer ELF
 `f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (`release-perf`, `thinkstation1`,
@@ -50498,6 +50572,7 @@ and an interval is required.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — THREE OF THE FOUR GATE EMITTERS CARRY A WEAKER VERDICT RULE THAN `fnp-python`, and the hole is in the EFFECT's CI, not the null's (deadlock-audit-7xcq2)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `deadlock-audit-7xcq2` opened on the theory that the A/A-null gate was blind to a biased null. That
 theory was correctly withdrawn in `01fedccc`: `null_half_width` is the distance from **1.0** to the
@@ -50618,6 +50693,7 @@ toward deletion but nowhere near a sweep.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - THE SHIPPED BAND IS VERIFIED END-TO-END THROUGH THE REAL ROUTE: inside it `divide` now tracks the delegation control to within 0.0005-0.0074, outside it diverges by 0.13-0.94. No size is mis-routed, and in-band calls pay only the wrapper instead of a 10-24% kernel deficit (`deadlock-audit-6y5wp`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. One build (`release-perf`, 7m57s, `df` 88G immediately before, `proj_builds` = 0 at start),
 five invocations on a genuinely quiet host. ELF
@@ -50701,6 +50777,7 @@ UNPROVEN until those arms share one output with the `&mut` slices re-derived per
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — PRE-REGISTERED, BEFORE THE COUNTS EXIST: what the four multiply counter arms must show (deadlock-audit-ei9jz)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 Registered while the ELF is still compiling, so the reading cannot be fitted to the result. The
 instrument is `7b8b93e8`: four matched single-arm probes (`fnp`/`numpy` x `plain`/`casting="unsafe"`)
@@ -50753,6 +50830,7 @@ No ratio is published in this row. It registers what the next row is permitted t
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - REPO-WIDE AUDIT of the separate-buffer defect: SEVEN bench groups give their two arms different output buffers, and one of them is the instrument behind the CERTIFIED `out=` headline (`maximum` 0.907848 -> 1.501804). Those cells use 32 MiB buffers - four times the size at which the artifact is already proven (`deadlock-audit-6y5wp`, `deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. **NO BUILD, no measurement** - a static audit, done deliberately in an unusable window
 (loadavg 60.32/45.08/26.03, 3 external `rustc`, `proj_builds` = 0, disk 216G). Nothing here is a
@@ -50840,6 +50918,7 @@ rather than editing their instrument.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — `perf stat -e instructions:u` COUNTS THE OPENBLAS SPINNERS: unpinned, the count is 15.5x inflated AND proportional to elapsed time, which destroys the load-independence the whole counted-attribution method rests on (deadlock-audit-ei9jz)
+worker=thinkstation1 harness=perf stat -e instructions:u (transcribed 2026-09-03 from this row's recorded measurement context)
 
 Found while checking the precondition for the four-arm counted split registered one row above,
 BEFORE taking any measurement with it. `perf stat` counts a PROCESS, and a NumPy process on this
@@ -50907,6 +50986,7 @@ a 110k-line crate for a guard that changes no measured code.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - THE BUFFER ARTIFACT IS A NEAR-CACHE-SIZE PHENOMENON, NOT A "BIGGER IS WORSE" ONE: at 2^22 (32 MiB) the separate-vs-shared difference is small and NOT consistently signed, so the certified `out=` cells are neither cleared nor condemned. And I RETRACT the "resolves in the peer's favour" reading I formed from a single run (`deadlock-audit-6y5wp`, `deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. One build (`release-perf`, 2m58s, `df` 215G immediately before, `proj_builds` = 0 at
 start). Four invocations of ELF
@@ -50981,6 +51061,7 @@ artifact" - the ordering is by proximity to L3, not by size.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — AMENDING MY OWN PRE-REGISTRATION BEFORE THE COUNTS EXIST: the four-arm form is BIASED, and the bias is the one `uj3r3` already found and fixed in wall clock (deadlock-audit-ei9jz)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 Two rows ago I registered a four-arm counted split and its decision rules. Reading
 `PyUFunc::__call__`'s delegation tail before running it, the form is wrong, and I am amending it
@@ -51045,6 +51126,7 @@ No counts exist yet. This row changes only what the next row is permitted to say
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — THE MULTIPLY ROUTE'S WHOLE EXCESS IS 1856.2 INSTRUCTIONS/CALL, and the raw probe-chain split comes out NEGATIVE exactly as my amendment predicted — so the split is WITHHELD, not published (deadlock-audit-ei9jz)
+worker=thinkstation1 harness=perf stat -e instructions:u (transcribed 2026-09-03 from this row's recorded measurement context)
 
 Counters only; no wall-clock certification attempted or implied. Four matched single-arm probes,
 one process per arm, `perf stat -e instructions:u`, `n=256`, 400,000 calls per arm.
@@ -51138,6 +51220,7 @@ resolve the window. Until then the wrapper residual has only an UPPER bound of 1
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - THE CERTIFIED `out=` CELLS SURVIVE: on five QUALIFYING runs the separate-vs-shared buffer difference at 2^22 is ~±10% with NO consistent sign - it reversed direction between batches - so it is condition-dependent scatter, not a systematic bias. Under the corrected instrument all three ops still win, worst cells 1.6413 / 1.5951 / 1.7094 (`deadlock-audit-6y5wp`, `deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. No build in this row. Ten invocations of ELF
 `2be2c513d93ff54ba9a4e3e7562e82cce2920c95f33cc72840a505ee2e778524` (`release-perf`, `thinkstation1`,
@@ -51236,6 +51319,7 @@ one. The five 2^20 groups remain the exposed ones and keep the priority. Do not 
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — THE SPLIT RESOLVES INSIDE THE REGISTERED WINDOW: probe chain >= 357.7 and wrapper residual <= 1473.5 insns/call, and the counted ratio 4.119 lands 1.3% from the wall clock's 4.066 (deadlock-audit-ei9jz)
+worker=thinkstation1 harness=perf stat -e instructions:u (transcribed 2026-09-03 from this row's recorded measurement context)
 
 Counters only. Six matched single-arm probes, one process per arm, `perf stat -e instructions:u`,
 `n=256`, 400,000 calls per arm, three reps each, ALL FROM ONE ELF.
@@ -51340,6 +51424,7 @@ of the 1473.5 figure alone - it is a ceiling.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - RE-DECIDED ON THE CORRECTED INSTRUMENT: the FE-hazard classifier COSTS 7.9%, 5/5 runs. My earlier "the fused form is 1.4152-1.6155x BETTER" was the buffer artifact, and the mmap-control reading I distrusted was the one telling the truth (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. One build (`release-perf`, 3m13s, `df` 210G immediately before, `proj_builds` = 0), five
 qualifying invocations of ELF
@@ -51423,6 +51508,7 @@ must never ship. Three of the five audited 2^20 groups remain unconverted.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - OPERATIONAL DISCLOSURE: commit `4bde9d6b` carries THREE files that are not mine - `fnp-io`, `fnp-iter` and `fnp-random` bench files a peer had staged in the shared tree. I used explicit `git add` paths but skipped my own verification step (`deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build, no measurement. An operational error, disclosed because a peer's work now sits
 under my commit message and they need to know where it went.
@@ -51473,6 +51559,7 @@ work. Do not revert `4bde9d6b`; the three bench files are a peer's and are now s
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — 7xcq2 CLOSED: the three weak gates are harmonised onto the canonical rule, decided on 28 real rows with ZERO divergences — and the change reached main inside SOMEONE ELSE'S commit (deadlock-audit-7xcq2)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** harness correctness defect closed + a provenance disclosure
 
@@ -51552,6 +51639,7 @@ being cited.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - CERTIFIED AND SHIPPABLE: the bitmask classifier is a 4.04% win, 5/5 runs, and it is the FIRST result on this route to PASS my own variance guard. Fixing the buffer collapsed between-run stdev 7.8x (0.0233 -> 0.0030) and turned a rejected marginal effect into a clean one (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. One build (`release-perf`, 2m57s, `df` 205G immediately before, `proj_builds` = 0), five
 invocations of ELF `7670d20bbbbf1cf4...` (full sha256 above), worker `thinkstation1`, numpy 2.4.3,
@@ -51999,6 +52087,7 @@ not fix.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - POST-SHIP VERIFICATION: the gate's ROUTING is confirmed on the real allocating route (divide tracks the delegating control to 0.1% below the gate and diverges at it), but the VALUE at 2^19 is UNDECIDED - 1.0740/1.0691/0.8752/0.9650/1.0550, stdev 0.0863. Also pinning the REACHABLE SURFACE of today's two ships, which interact (`deadlock-audit-6y5wp`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. One build (`release-perf`, 7m31s, `df` 203G immediately before, `proj_builds` = 0), five
 invocations of ELF `67c61c442e9e45e7...`, worker `thinkstation1`, numpy 2.4.3.
@@ -52087,6 +52176,7 @@ n >= 2^21. Two of the five audited 2^20 groups remain unconverted.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - `F64_DIV_NATIVE_MIN_LEN` = 1<<19 IS SET TOO LOW, and it is now decided rather than merely uncertified: under the churn control the ALLOCATING route at 2^19 costs 8.6% MORE than declining, 5/5 runs - agreeing with the independent `out=` sign test that said the same thing 7/7 (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. **No build** - five invocations of the already-built ELF `67c61c442e9e45e7...`
 (`release-perf`, `thinkstation1`, numpy 2.4.3) under
@@ -52177,6 +52267,7 @@ row only reaches by inference.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — DISCLOSURE: my commit 364a4933 swept in a 91-line ledger row belonging to AzureCarp. Same trap that hit me four hours ago, with the roles reversed
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** provenance disclosure (no measurement)
 
@@ -52234,6 +52325,7 @@ command and its output is read before committing.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - SHARED-TREE NOTE: the gate row above was swept into peer commit `364a4933` (an `ei9jz` message), the mirror of my own `4bde9d6b` earlier today. Content intact, attribution preserved inside the row
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. No build, no measurement. Provenance only.
 
@@ -52357,6 +52449,7 @@ that reading.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — LOADAVG IS THE WRONG QUIETNESS GATE ON THIS 64-CORE HOST: loadavg 30.5 coexists with 87% idle and only 6-9 runnable tasks, so windows are being declined that are actually clean
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** measurement-methodology note (no perf claim)
 
@@ -52495,6 +52588,7 @@ trip this can see which term dominated.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — THIRD index collision today: my diagnostic emission went out inside AzureCarp's `4108c11c`. The staged index is a SHARED MUTABLE GLOBAL and the ritual we all agreed on cannot fix it. Switching to atomic pathspec commits
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** process defect, third occurrence, with a structural fix
 
@@ -52555,6 +52649,7 @@ file, which pathspec commits cannot and should not paper over.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — PRE-REGISTERED before the diagnostic run: the partition's negative wrapper is predicted to be ONE uncancelled `Instant::now()` overhead, injected by the only STANDALONE replica term (deadlock-audit-ei9jz)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** registered prediction (no measurement in this row)
 
@@ -52714,6 +52809,7 @@ wrapper positive; the term that would have to move is smaller than the instrumen
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - THE RAISE IS VERIFIED END-TO-END: divide now TRACKS the delegating control at 2^19 (0.9128 -> 0.9998) and 2^20 (0.8532 -> 0.9968), recovering the 8.7% and 14.7% it was losing, while KEEPING the 2.54x native win at 2^21 (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `AzureCarp`. One build (`release-perf`, 8m14s, `df` 198G immediately before), three invocations,
 worker `thinkstation1`, numpy 2.4.3, under `MALLOC_MMAP_THRESHOLD_`.
@@ -52779,6 +52875,7 @@ separate output buffers.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — PRE-REGISTERED, short: what the BATCHED partition must show for the instrument to count as fixed (deadlock-audit-ei9jz)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 Registered before the run. The batched harness (`partition_batched_2000x25`) was built to remove a
 resolution failure, so the test is whether the instrument became self-consistent - not whether it
@@ -52899,6 +52996,7 @@ needs its own registration.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - CORRECTING MY OWN AUDIT: one of the seven groups I flagged for shared buffers MUST NOT be converted - `bench_divide_allocator_provenance` exists to compare buffer provenance, so separate buffers ARE its independent variable. Per-group disposition below (`deadlock-audit-6y5wp`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 `AzureCarp`. **No build, no measurement** - source reading only, in a window the orchestrator flagged
 as saturated. My own check disagreed (load 15.90/24.36/22.96 falling, CPU idle 85%, `rustc` = 0,
@@ -52969,6 +53067,7 @@ lives where someone would act rather than only in this ledger.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — OPERATIONAL: `rch exec` has a 1800s SSH ceiling that a COLD `cargo test -p fnp-python` cannot fit inside — it dies at 30 minutes with the crate still compiling (deadlock-audit-rz8g0)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** operational finding (no measurement)
 
@@ -53021,6 +53120,7 @@ the test execution, is what exceeds the ceiling, so a filter alone saves nothing
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — `rch` SYNCS THE WORKING DIRECTORY, NOT A GIT REF: holding a change uncommitted on a shared tree does NOT isolate it, it only hides it from `git log` while every peer's remote build compiles it (deadlock-audit-rz8g0)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** multi-agent process hazard (no measurement)
 
@@ -53084,6 +53184,7 @@ it solves this.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — AMENDING MY OWN NEUTRALITY GATE BEFORE THE BUILD FINISHES: I set it at ±0.1%, which is 17x TIGHTER than this instrument's cross-ELF reproducibility, so a perfectly neutral refactor would have failed it (deadlock-audit-rz8g0)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** registered gate corrected before the measurement exists
 
@@ -53139,6 +53240,7 @@ and it is not worth building for a question this small unless the A/B later hing
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — I CORRECT THE RATIONALE FOR MY OWN REVERT: the A/B never needed a neutral base, because the extraction's cost is COMMON-MODE and cancels. The revert was right for a different reason (deadlock-audit-rz8g0)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** correction of my own registered reasoning + a cheaper design it unlocks
 
@@ -53445,6 +53547,7 @@ the CALL SHAPE (fewer CPython entries per call) rather than any one symbol.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — DISCHARGING ei9jz's UNEXECUTED METHOD STEP 2: counted by reading, our delegating multiply makes ~11 CPython entries per call where NumPy's own call makes 1. The floor is CALL COUNT, not any single stage (deadlock-audit-ei9jz, deadlock-audit-rz8g0)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** source-derived attribution (no measurement, no build)
 
@@ -53529,6 +53632,7 @@ is what the three measured results support, and that is what should be quoted.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — CORRECTING MY OWN CALL-SHAPE ROW FROM ONE ROW AGO: for f64 multiply NEITHER probe body runs — both are gated off by the hoisted dtype-char sniff. The count is ~6 entries, not ~11, and the 660.9 insns/call is almost entirely ONE dtype sniff plus branch logic (deadlock-audit-ei9jz)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** correction of my own source-derived row, before its first use
 
@@ -53927,6 +54031,7 @@ script - a parity result that lives only in a ledger row is not a regression gat
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — SHIPPED: the dtype-identity sniff lands on main at d29b508e, 388.7 insns/call saved (21% of the route's excess over NumPy), with a regression gate that passes with AND without it (deadlock-audit-ei9jz)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** CERTIFIED lever shipped — first production change of this session's
 `ei9jz` line
@@ -54137,6 +54242,7 @@ show, at the binary level, that the accesses it targets are in a binary we compi
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — CORRECTING THE CONVERGENCE ARITHMETIC I PUBLISHED LAST ROW: I divided the WRAPPER's diffuse remainder by the WHOLE ROUTE's extra entry count. Corrected, it is 313 insns per entry, not 157, and it does NOT support the account as cleanly as I claimed (deadlock-audit-56vq8)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** correction of my own consistency check, weakening a conclusion I had just
 closed a bead on
@@ -54276,6 +54382,7 @@ carrying the ~100 figure over from a per-symbol profile.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — the f32/f16/complex dtype predicates get the typechar fast path their f64 SIBLING already had — 69 call sites, equivalence proven over 26 dtypes; SHIPPED as correctness-neutral, PERFORMANCE NOT YET MEASURED (deadlock-audit-v46rn)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** a source change landed on proven equivalence + strictly-fewer-operations, with its
 speed claim explicitly UNBANKED and a prediction registered before the fact.
@@ -54571,6 +54678,7 @@ uncommitted edit is not safe from a peer's commit, so the window between "edit" 
 hazard to BOTH agents. Commit source before starting a long measurement, not after.
 
 ## 2026-08-18 — THE REACHED COUNT, measured: 25 of the 31 converted sites execute, so my per-site figure was UNDERSTATED — 1,360.9 insns per reached site, not 1,097.5 (deadlock-audit-c5ecm)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** a correction to a number I published one turn ago, in the FLATTERING direction,
 plus the discharge of the "count the reached fetches" step this bead required before any sweep.
@@ -54627,6 +54735,7 @@ run the reached-count recipe above for THEIR cell first.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — I ADDED A SECOND CACHE FOR AN OBJECT THAT ALREADY HAD ONE; collapsed onto one static, and the 436-site sweep is analysed and DELIBERATELY NOT TAKEN (deadlock-audit-c5ecm)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** a self-inflicted duplication found and removed, plus a sweep I am recommending
 AGAINST on evidence rather than deferring by omission.
@@ -54970,6 +55079,7 @@ how mechanical the change looks.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — the two deletion conditions on `5l9iv` examined build-free: condition 1 UNMET, condition 2 has strong evidence but is UNDECIDABLE AS WRITTEN — and deleting on it would repeat today's own retracted inference (deadlock-audit-5l9iv)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** two owed cleanups examined without a build, neither taken, one of them
 deliberately not taken for a reason I had to learn twice today.
@@ -55225,6 +55335,7 @@ other projects, and it answers nothing currently open.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — CORRECTNESS AUDIT of all 219 ndarray-cache conversions: every site uses the object solely as a TYPE, so the substitution is sound throughout (deadlock-audit-c5ecm)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 Build-free audit, prompted by the risk that a mechanical substitution could hit a site where
 `numpy.getattr("ndarray")` was wanted for something OTHER than a type test — the cached handle is a
@@ -55380,6 +55491,7 @@ the argsort/sort numbers.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — `6y5wp`'s registered FIRST STEP executed build-free: the shipped f64 divide kernel is ALREADY packed AND 2x-unrolled (2 x vdivpd on ymm, 8 doubles/iteration), so "restore packing" is DEAD and the accumulate is NOT inhibiting vectorisation (deadlock-audit-6y5wp)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** a registered hypothesis refuted by disassembly, eliminating one of the bead's three
 candidate levers before any build was spent on it. Artifact reuse, /data 47G, load ~5.
@@ -55439,6 +55551,7 @@ not unroll either and the whole 93,987 ns kernel half needs a different explanat
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — ALL THREE of `6y5wp`'s candidate levers are REFUTED by disassembly: NumPy's live divide loop is ALSO 2x-unrolled packed, and the real difference is 22 instructions/iteration against NumPy's 10 — 10 of them FE-hazard accumulate and 3 STACK RELOADS of base pointers (deadlock-audit-6y5wp)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** a registered candidate-lever list eliminated entirely, replaced by a specific
 mechanism. Build-free, artifact + installed-numpy reuse. /data 47G, load ~5, thinkstation1.
@@ -55651,6 +55764,7 @@ quote differences only.** Differences were always safe; ratios never were.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — BLAST-RADIUS AUDIT of the startup-floor flaw: exactly TWO banked rows are exposed, both mine, and one row my correction table MISSED is corrected here (deadlock-audit-c5ecm)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** bounding a correction rather than leaving its scope implicit. Build-free.
 
@@ -55698,6 +55812,7 @@ from the counter-probe harness, or quote differences only. Criterion-timed rows 
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — CONSOLIDATED AND FINAL: the corrected state of every number on the ndarray/predicate levers, in one table, with a cross-run consistency check (deadlock-audit-c5ecm)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** a single authoritative restatement. Six correction rows now sit on top of the
 originals, and a reader reconstructing the current figures from that trail would get them wrong.
@@ -55892,6 +56007,7 @@ re-deriving that row, not by picking whichever column suits.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — the "0 to 16" bound TIGHTENS TO A PROVEN ZERO: my earlier call-graph walk matched inside COMMENTS and on METHOD names, inflating the reachable set 2.4x (deadlock-audit-c5ecm)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** an interval I published replaced by a proven value, after finding the defect that
 made it an interval. Source reading only — build freeze in force, /data 38G against a 42G brake.
@@ -56015,6 +56131,7 @@ by 3.4x. Do not touch the parallel arm; its ratio is unmeasured at n >= 2^21.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — DISAMBIGUATION: `5.838x` and `3.172x` both describe searchsorted's array cell and BOTH ARE CORRECT in different frames; and my corrected `sort` figure (5.228x) may have TAKEN the worst-cell title (deadlock-audit-c5ecm)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** a ledger-hygiene finding plus a candidate re-ranking that needs a build to certify.
 Source/ledger reading only, build freeze in force. /data 34G, load 6.81.
@@ -56066,6 +56183,7 @@ are exactly that.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — SOURCE-READ DESIGN for the worst cell's last named candidate: all four float `searchsorted` probes are gated on `a_kind == 'f'`, which admits f16/f32/f64 alike — exact gating costs ZERO extra Python reads (deadlock-audit-v46rn)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** design prepared under build freeze against the one structural candidate RedLynx's
 retry predicate named. Source reading only. /data 34G, load 5.70.
@@ -56195,6 +56313,7 @@ reachable subset, not the site count, is the prize, and that lesson cost several
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — PREMISE OF `s70kb` VERIFIED IN PyO3 SOURCE, not recalled: `call_method1(&str)` allocates a fresh `PyUnicode` every call, `intern!` is a process-lifetime static deref (deadlock-audit-s70kb)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** checking the premise of a bead I filed one turn earlier, before anyone spends a
 build on it. Source reading only, build freeze in force. /data 34G, load 5.88.
@@ -56249,6 +56368,7 @@ the SIZE of the effect and no longer has to establish that an effect exists at a
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — LEDGER CORRECTION: my blast-radius audit reached the RIGHT answer through an UNSOUND filter — the sound test finds 4 signature-bearing rows, and 3 are safe because they quote DIFFERENCES (deadlock-audit-c5ecm)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** correcting the method behind a conclusion that survives. Source/ledger reading only,
 build freeze in force. /data 32-34G against a 42G brake.
@@ -56329,6 +56449,7 @@ The durable fix is not vigilance: it is to commit with an explicit pathspec - `g
 <path>` - which ignores the index entirely and cannot pick up anyone else's staged files.
 
 ## 2026-08-22 — MEASURED: corrected bench_maximum_arms_vs_numpy under the fixed allocation-symmetric harness - serial native is a DECIDABLE_REGRESSION at 0.9315x, parallel a DECIDABLE_WIN at 1.5326x; the withdrawn 1.352x serial "win" was the buffer artifact, now confirmed by direct re-measurement (deadlock-audit-48by6)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup for the arms group as a whole - both arms are
 replicas (`arms_are_replicas_not_the_shipped_route=true`); these rows may never be quoted against
@@ -56755,6 +56876,7 @@ that is an argument, not a measurement.
 AGENT_NAME=CalmMoose.
 
 ## 2026-08-26 — THE `(*args, **kwargs)` CALLING CONVENTION IS PRICED AND IT IS ~25 ns: the small-n entry floor is NOT the call shape, and every remaining entry lever is below this harness's decidability threshold (`deadlock-audit-call-shape-priced-25ns-lk8zb`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Result class:** a measured REJECT of the lever two standing ledger rows name as next, plus a
 methodological finding about what can and cannot be certified on this cell. Host `thinkstation1`,
@@ -56845,6 +56967,7 @@ and the AVX2 rewrite is a measured reject in the 2026-08-26 row, and `crates/fnp
 AGENT_NAME=CalmMoose.
 
 ## 2026-08-26 — CORRECTION, from counted attribution: NumPy IS running x86-simd-sort on this cell (the AVX2 variant), and our sort kernel is 2.04x its INSTRUCTIONS while being at parity in TIME — 82.8% of the route's excess work is the kernel, not the entry (`deadlock-audit-call-shape-priced-25ns-lk8zb`)
+worker=thinkstation1 harness=criterion::bench_flat_i64_sort_256_single_arm (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Result class:** a correction to two claims this campaign banked earlier today, established in the
 counter domain. Host `thinkstation1`, numpy 2.4.3, bench ELF sha256
@@ -56960,6 +57083,7 @@ as a time ratio: the arms are at time parity and that is measured twice.
 AGENT_NAME=CalmMoose.
 
 ## 2026-08-26 — THE i64 n=256 KERNEL IS CLOSED FOR TIME BY NUMPY'S OWN BEST EFFORT: its tuned AVX2 x86-simd-sort is 1108 ns against our scalar 1092, so matching it would make the route WORSE, and only BEATING the reference implementation of the idea can help (`deadlock-audit-call-shape-priced-25ns-lk8zb`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Result class:** a closure argument that follows from two numbers already banked today, recorded so
 that the headroom finding earlier in this file is not read as an invitation. No new measurement.
@@ -57020,6 +57144,8 @@ AGENT_NAME=CalmMoose.
 ---
 
 ## 2026-08-26 — SHIP: `numpy.dtype.name` is a PURE-PYTHON property at 1213.5 ns, and four hot routes read it unconditionally then discarded it (`asarray` 57.65x -> 1.83x)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
+**Campaign result class:** maintenance-self-speedup
 
 WORST CELL RE-DERIVED FIRST, because the standing one was about ordering and ordering was owned.
 `bench_vs_numpy_loss_sweep` (BlackThrush's discovery sweep), 269 comparable cases against LIVE numpy
@@ -57332,6 +57458,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: `append`'s parallel byte-copy gate fired at 64 KiB where its own comment targets 64 MB; 8.97x DECIDABLE_REGRESSION becomes UNDECIDED parity (`deadlock-audit-dc6mz`)
+**Campaign result class:** maintenance-self-speedup
 
 Worst substantive cell left after `deadlock-audit-yphwc`. `bench_vs_numpy_loss_sweep` ranked
 `append[f64_f64]` at 7.2808x; the dual-null contract on the same instrument confirmed it.
@@ -57434,6 +57561,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: `sqrt` threw away a COMPLETED CORRECT BUFFER to buy FP-event parity it never delivered; rank-3 LOSS becomes a DECIDABLE_WIN (`deadlock-audit-f1mj2`)
+**Campaign result class:** maintenance-self-speedup
 
 ### THE CELL, AND WHY A RE-MEASURE WOULD HAVE DISMISSED IT
 
@@ -57553,6 +57681,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: `meshgrid`'s cold Rust branch captured the ORDINARY dtypes and shadowed the good path directly beneath it; 19.76x–78.22x on every arity except 2, now parity (`deadlock-audit-bvihx`)
+**Campaign result class:** maintenance-self-speedup
 
 ### THE CELL, AND THE SWEEP UNDERSTATED IT ~20x AGAIN
 
@@ -59888,6 +60017,7 @@ zero-copy slice/select paths below them are dtype-exact by construction.
 AGENT_NAME=TanBridge.
 
 ## 2026-08-26 - SEVEN PUBLIC FUNCTIONS RAISED `TypeError` ON A 0-d float16 OPERAND: `Bound::len()` is Python `len()`, undefined at rank 0, inside a size gate's `?` (`deadlock-audit-gmfbf`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Shipped `67cecf27`. Found on `thinkstation1` against the LIVE installed numpy 2.4.3.
 
@@ -60271,6 +60401,7 @@ signature needs `Option<T>`.
 AGENT_NAME=TanBridge.
 
 ## 2026-08-26 - `mean` TAKES THE SAME SENTINEL FIX AS `sum`, ON ITS OWN: parity 2 -> 0, perf unchanged, and a scary-looking 2^21 cell that was ARTIFACT (`deadlock-audit-30d18`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 > HEADING NOTE, and a gate defect worth someone's time: this row's original heading named the
 > `keep``dims` parameter, and `is_keep()` in `perf_ledger_preflight` classifies a row as a
@@ -61379,6 +61510,7 @@ wrappers, the `nan*` family) - none of which has been checked this way.
 AGENT_NAME=TanBridge.
 
 ## 2026-08-27 - A DTYPE-ONLY AUDIT OF 1800 CELLS FOUND ONE MORE DEFECT, AND THE OBVIOUS FIX FOR IT COSTS 432 INSTRUCTIONS PER CALL WHILE THE RIGHT ONE COSTS 23 (`franken_numpy-dtype-promotion-audit`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Shipped `84e1c3b2`. Measured on `thinkstation1` against the LIVE installed numpy
 2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1. Class: CORRECTNESS fix, with a
@@ -61668,6 +61800,7 @@ applies to any predicate named for one dtype family that guards a claim about a 
 AGENT_NAME=TanBridge.
 
 ## 2026-08-27 - THE OBVIOUS FIX WOULD HAVE THROWN AWAY A 395x WIN: bool `abs`/`square` fell into the generic extract (11.17x), but `signbit` on bool beats numpy 0.0026x, so the gate is TWO OPS and not one dtype (`franken_numpy-bool-unary-gap`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Shipped `6b6c7205`. Measured on `thinkstation1` against the LIVE installed numpy
 2.4.3 in the SAME invocation, median of 7, OPENBLAS_NUM_THREADS=1. Perf figures are PRICING
@@ -61848,6 +61981,7 @@ next probe is a size sweep of bool `median` from 2^11 to 2^20 on a quiet host to
 native path stops winning. AGENT_NAME=TanBridge.
 
 ## 2026-08-27 - numpy's `argsort` FINISHES A SORTED OPERAND IN O(n) AND EVERY NATIVE ROUTE HERE PAID FULL PRICE FOR IT: 15.569x -> 1.171x, and the first gate I wrote was itself a measured regression (`franken_numpy-argsort-ascending`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Shipped `a87d6120`. Measured on `thinkstation1` against the LIVE installed numpy
 2.4.3 in the SAME invocation, ABBAABBA, 13 rounds, dual A/A null, slots sized by TIME,
@@ -62033,6 +62167,7 @@ estimated at ~67% of the full cost and is UNMEASURED - that is the next probe, a
 compared against simply widening the birthday threshold, which is free.
 
 ## 2026-08-27 - REJECT: numpy SHORTCUTS ASCENDING ONLY, so widening the ascending guard to descending forfeits a real win - and a 15.81x INSTRUCTION gap turned out to be a design trade, not a defect (`franken_numpy-argsort-descending`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Built, measured, REVERTED in `d66a81ea`. Measured on `thinkstation1` against the
 LIVE installed numpy 2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1.
@@ -62119,6 +62254,7 @@ instructions against numpy's 220.88M (13.26x) and still WINS on wall clock - the
 work-for-latency trade, so do not "fix" it either.
 
 ## 2026-08-27 - WIN (SHIP): the promoting unary family BUILT AND DISCARDED the whole operand on every integer/bool call - a pre-extract dtype-kind gate takes the worst cell 7.198x -> 2.463x (`franken_numpy-unary-preextract-gate`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell.
@@ -62449,6 +62585,7 @@ that audit is checkable rather than speculative. UNMEASURED, and it is a large e
 it should be done in one sitting with the oracle run before and after.
 
 ## 2026-08-27 - WIN (SHIP): the byte-order defect is not a float defect - INTEGERS were wrong too, 67 known cells down to 29, and one guard turned a wrong VALUE into a RAISE until it was moved to the op entry (`franken_numpy-byteorder-int`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell.
@@ -62553,6 +62690,7 @@ cells); they are what caught the 22-regression variant and the ValueError, neith
 test in the repo detects. AGENTS.md bars a scripted sweep, so budget the ~80 edits as hand work.
 
 ## 2026-08-27 - WIN (SHIP): `np.ones(shape, bool)` costs 897 ns where `np.zeros` costs 163 - one allocator call was most of `isfinite`'s gap, and it is why `isfinite` measured 4.2x while its identical twins `isnan`/`isinf` measured 1.6x (`franken_numpy-const-bool-ones`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell,
@@ -62650,6 +62788,7 @@ must be measured, with float64 as the control since it would pay the hoisted rea
 target. Do not re-price `np.ones`: it is measured here and it is not coming back.
 
 ## 2026-08-27 - WIN (SHIP): `sign` was the one int-unary route that never got the 2026 allocation modernisation - a kwargs dict, a dtype-string parse and a per-call reshape, worth 1.52x (`franken_numpy-int-sign-alloc`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell,
@@ -62925,6 +63064,7 @@ UNMEASURED and none of those routes has been triaged, so it needs its own worst-
 first rather than a blanket pass.
 
 ## 2026-08-27 - WIN (SHIP): `np.where` returned GARBAGE on byte-swapped operands, and its typed select paid up to three `.view()` calls per invocation - 4.217x -> 2.659x (`franken_numpy-where-npbool`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell, both arms
@@ -63029,6 +63169,7 @@ blindly** - this row is the evidence that the lever only pays where a cell's exc
 same order as 171.9 ns, which at 65536 it never is.
 
 ## 2026-08-27 - REJECT: a branchless compaction for `compress`/`extract` wins the unpredictable mask and LOSES 2.2x on a sparse one - plus a correction to the 2026-06-21 "branchless already" premise (`franken_numpy-compress-branchless`)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Built, measured, REVERTED. Measured on `thinkstation1` against the LIVE installed
 numpy 2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1.
@@ -63127,6 +63268,7 @@ compaction. AVX-512 `vpcompressd`/`vpcompressq` is the instruction numpy uses, a
 worst in this family and is untouched by either idea.
 
 ## 2026-08-27 - WIN (SHIP): five "parallel" paths ran SERIAL across the whole band [2^19, 2^21) because their fixed block was larger than their own admission gate - `compress` 4.829x -> 1.474x (`franken_numpy-parallel-block-gate`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell, on a
@@ -63524,6 +63666,7 @@ fixing the helper fixed the family.** The remaining `1 << 16` element gates name
 still unmeasured.
 
 ## 2026-08-27 - WIN (SHIP): `delete`'s array/mask route was built on a FALSE PREMISE about NumPy - `np.delete` filters with BOOLEAN FANCY INDEXING, not `np.compress`, and the two differ by 15.8x - 2.357x -> 0.992x (`franken_numpy-delete-compress-premise`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved with a DUAL A/A null per cell, both arms at
@@ -63624,6 +63767,7 @@ gate, all in the 32 MB allocator/mmap regime, which is the one band this family 
 mechanism for.
 
 ## 2026-08-27 - WIN (SHIP): `unique` on bool had NO ARM and fell to the generic route - a bool array has at most two distinct values, so it needs two flags and an early exit: 2.057x -> 0.026x (`franken_numpy-unique-bool-arm`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved with a DUAL A/A null per cell.
@@ -63912,6 +64056,7 @@ sweep pins its correctness, but no cell has been TIMED for it - if it is ever ch
 floor after the admission scan; that placement is measured at 2.745x, worse than having no floor.
 
 ## 2026-08-27 - WIN (SHIP): the f32 `nanargextreme` parallel gate was COPIED from its f64 sibling, but f64's serial loop is competitive with NumPy's and f32's is not - 1<<18 -> 1<<17, and the decisive cell had to be measured fnp-vs-fnp because the vs-NumPy ratio is not readable on this host (`franken_numpy-nanarg-f32-gate`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1.
@@ -64002,6 +64147,7 @@ that is measured above and rejected. **Before trusting any vs-NumPy ratio for th
 host, run the 262144 identical-code control - it read 1.21x apart from noise alone.**
 
 ## 2026-08-27 - WIN (SHIP): `min`/`max` on bool scanned `&[ReadOnlyCell<u8>]` a BYTE AT A TIME because `Cell::get` blocks autovectorisation - 28.93x -> 0.941x, and the `any` half is a REJECT that three rewrites could not move (`deadlock-audit-x8cbc`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell and an
@@ -64116,6 +64262,7 @@ of that probe's byte comparison. `cargo test -p fnp-python --lib --release`: 655
 MEMORY: largest operand 4194304 bool = 4 MB; three live at once.
 
 ## 2026-08-27 - WIN (SHIP): the f16 `searchsorted` gate read the NEEDLE count while every route beneath it cost O(HAYSTACK) - 721.70x -> 1.136x, and my first fitted replacement opened a 19.21x of its own (`deadlock-audit-sfgg3`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell and an
@@ -64228,6 +64375,7 @@ is the open work, and the same `Ok(None)`-means-the-route-underneath question ap
 `try_native_*` gate in this file.
 
 ## 2026-08-27 - WIN (SHIP): `digitize` paid O(bins) TWICE - a scalar `partial_cmp` monotonicity scan and an 8 MB bins copy justified by "typically <100" - 4.03x -> 0.572x, and the DECREASING arm is still a LOSS (`deadlock-audit-sfgg3` follow-up)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured on `thinkstation1` against the LIVE installed numpy 2.4.3 in the SAME
 invocation, OPENBLAS_NUM_THREADS=1, interleaved ABBAABBA with a DUAL A/A null per cell and an
@@ -64355,6 +64503,7 @@ out correctly (count 0, matching `n - n`). Also note 2^21 reads 0.98x against 0.
 is the 16 MB allocator band this campaign has repeatedly seen, not this gate.
 
 ## 2026-08-27 - WIN (SHIP): `repeat`'s parallel arm burned 64.59 INSTRUCTIONS PER OUTPUT ELEMENT against NumPy's 3.47 - a million 8-byte memcpys plus rayon fan-out on a BANDWIDTH-BOUND fill - 18.61x -> 0.43x counted (`deadlock-audit-hzl1w` rule, `deadlock-audit-sfgg3` audit)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1.
 
@@ -64456,6 +64605,7 @@ STILL OPEN from the same audit, unattacked and re-void until re-counted with OPE
 `partial_cmp` scan) and `take`.
 
 ## 2026-08-27 - REJECT: `concatenate`'s parallel block copy burns ~35x the INSTRUCTIONS and is still FASTER - fewer instructions does not mean less time on a bandwidth-bound copy; plus a SILENT WRONG-ANSWER byte-order bug fixed in passing (`deadlock-audit-hzl1w` boundary)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1.
 
@@ -64565,6 +64715,7 @@ LOWERING it. And `crossbeam_epoch::with_handle` at 21.78% of the parallel profil
 rayon-entry cost worth attacking directly for every fan-out site in this file, not just this one.
 
 ## 2026-08-27 - WIN (SHIP): `take`'s gather called an out-of-line `resolve_take_index` PER ELEMENT and re-dispatched the loop-invariant mode inside the loop - 2.454x -> 1.307x counted, 2.288x -> 1.312x on wall clock (`deadlock-audit-yphwc` family)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1,
 interleaved ABBAABBA with a DUAL A/A null per cell.
@@ -64669,6 +64820,7 @@ the per-element mode dispatch this row removed from the serial one and was never
 wins on wall clock, so it is not urgent, but it is the same one-line change.
 
 ## 2026-08-27 - WIN (SHIP): `searchsorted` picked its search loop BACKWARDS - the gallop served unsorted needles and the branchless bound served sorted ones - 1.320x -> 0.867x random and 1.264x -> 0.642x sorted, plus a REJECTED generic and a byte-order wrong-answer fix (`deadlock-audit-sfgg3` family)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1,
 interleaved ABBAABBA with a DUAL A/A null per cell.
@@ -65041,6 +65193,7 @@ at least 8 draws, and a BEFORE arm re-run at the same loadavg, because the first
 was taken at load 27.6 against a BEFORE at 7.2 and that alone would have overstated the loss.
 
 ## 2026-08-28 - REJECT (measurement route, not a lever): under "build via rch, never local" this project cannot produce a DECIDABLE in-process measurement - four verified blockers, and the one cell that survived confirms the standing lexsort loss at 2.727x (`deadlock-audit-sfgg3` family)
+worker=hz3 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. No code change. This row exists so the next agent does not re-walk the same wall.
 
@@ -65112,6 +65265,7 @@ the in-process sha matches the locally retrieved artifact byte for byte.
 MEMORY: the harness holds one 2^16 f64 key pair at a time; nothing on this host exceeded 2 MB.
 
 ## 2026-08-28 - CAPABILITY + MEASURED LOSS: a worker-side head-to-head harness makes rch-only measurement VALID again, and it prices the standing lexsort loss at 1.591x / 1.421x; plus a CI-hard-error clippy lint that the local toolchain cannot see (`deadlock-audit-sfgg3`, `deadlock-audit-h4pjj`)
+worker=hz3 harness=h2h_lexsort (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Both arms in ONE process, on ONE worker CPU, in ONE invocation.
 
@@ -65227,6 +65381,7 @@ has a measurement method that can actually judge it. Before trusting any ratio f
 re-read the numpy version line in its own output.
 
 ## 2026-08-28 - WIN (SHIP): the low-cardinality lexsort loss finally yields - an O(1)-lookup counting pass takes card=4 from 1.903x/1.994x to 1.244x/1.267x, both arms decidable in ONE process (`deadlock-audit-sfgg3`)
+worker=hz4 harness=h2h_lexsort (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Measured with the worker-side h2h harness: both arms, and BOTH fnp implementations,
 in one process on one worker CPU in one invocation.
@@ -65567,6 +65722,7 @@ record build, and against one that stops after the probe loop. Until that exists
 1.76x-1.93x stays a standing loss with no attackable mechanism identified.
 
 ## 2026-08-28 - WIN (SHIP): `repeat`'s byte-doubling fill degenerates into four tiny memcpys per element when the BLOCK is small - a typed splat takes 4.499x -> 1.109x, with both fills timed in one process (`deadlock-audit-sfgg3` survey)
+worker=hz3 harness=h2h_repeat (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `TanBridge`. Worker-side h2h; both arms and BOTH fill implementations in one process, one CPU, one
 invocation.
@@ -65650,6 +65806,7 @@ and `isnan f64 2^20` at **1.282x**; both are decidable and neither has been atta
 - 2026-08-30 REJECT (`deadlock-audit-sfgg3`): packed-u128 stable radix permutation loses lexsort card=2 at 2.728x/2.587x NumPy/FNP (live hz3; A/A 1.001/0.989 and 1.000/1.024); reverted in `b77790d9`.
 
 ## 2026-08-30 — REJECT: a `std::simd` bitonic SORTING NETWORK loses to `sort_unstable` at EVERY length 64..256 (0.573x-0.910x, n=256 **0.795x**) — the kernel door the 08-26 retry predicate left open is now closed by measurement, not by argument (`franken_numpy-ixs5y.409`)
+worker=vmi1227854 harness=h2h_sort_i64_kernel (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** a measured REJECT of the lever this cell's own retry predicate named as
 the only remaining way in. No vs-NumPy claim is made or possible here: there is no incumbent in this
@@ -65721,6 +65878,7 @@ parity. The kernel was never where this cell's remaining 326 ns lives.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — WIN: a sorted query batch is a MERGE, not m bisections — integer `searchsorted` self-search goes 2.603x SLOWER to **0.112x** (8.9x FASTER than live NumPy), and the span gate that admits it is worth **245-298x** on the shape it declines (`deadlock-audit-sfgg3`)
+worker=hz4 harness=h2h_searchsorted (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** incumbent-win
 
@@ -65825,6 +65983,7 @@ without re-running `h2h_searchsorted` on both the spread and the clustered shape
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — WIN: a DESCENDING query batch is as predictable as an ascending one — `searchsorted` reverse-sorted needles go 2.502x SLOWER to **0.522x** (1.92x FASTER than live NumPy) by walking the same span backwards (`deadlock-audit-sfgg3`)
+worker=hz4 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** incumbent-win
 
@@ -65885,6 +66044,7 @@ ordered batches: ascending, descending and clustered are all now measured wins.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — WIN (maintenance): the unordered-batch fallback was m SERIAL bisections; transposing it to a batched search takes our own arm 1.023x -> 0.796x in ONE process — and the vs-NumPy verdict for this cell turns out to depend on the WORKER'S NUMPY VERSION (`deadlock-audit-sfgg3`)
+worker=vmi1227854 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66287,6 +66447,7 @@ supply.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — REJECT: lowering the searchsorted parallel gates BELOW 2^12 — the [2^10, 2^12) band is a decidable LOSS on f32 at both 2^10 and 2^11, and the crossover is HOST-DEPENDENT as predicted (`deadlock-audit-sfgg3`)
+worker=hetzner2 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66352,6 +66513,7 @@ that survives the host dependence demonstrated here.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — STRENGTHENING THE BAND REJECT: below 2^12 the parallel arm's sign is HOST-DIVERGENT, not merely negative — the same f32 m=2^11 cell reads 2.419x on one worker and 0.632x on another (`deadlock-audit-sfgg3`)
+worker=hz4 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66405,6 +66567,7 @@ rather than on a bare element count if it ever succeeds.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — NON-RESULT (premise wrong) on `np.take`'s 1<<21 parallel gate, and a NEWLY PRICED standing loss: `fnp.take` is 1.25-1.49x SLOWER than NumPy on a route the spy proves is NATIVE (`deadlock-audit-sfgg3`)
+worker=hz4 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66481,6 +66644,7 @@ its own engagement-probed measurement before any claim.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — CORRECTION to my own row six hours old: the take gate switch WAS on the executed path, the instrumentation proves it, and the real finding is that PARALLELISING `np.take`'s flat gather BUYS NOTHING from 2^10 to 2^20 (`deadlock-audit-ddoeq`)
+worker=hetzner2 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66553,6 +66717,7 @@ still stands and is not contradicted by anything here.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — WIN: `np.take`'s parallel gate fitted to the AGREEMENT OF TWO WORKERS at 1<<18 (1.233x LOSS -> **0.223x**, ~5.5x), plus the kwargs output allocation removed — and TWO of my own wrong gate values were caught before shipping (`deadlock-audit-ddoeq`)
+worker=hz4 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** incumbent-win
 
@@ -66640,6 +66805,7 @@ bound is one concrete candidate).
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — LANDED AS STRICTLY LESS WORK, NOT CLAIMED: one bounds check per gathered element instead of two; plus the `1<<18` take gate reconfirmed on a THIRD worker and the allocation win replicated (`deadlock-audit-ddoeq`)
+worker=fixmydocuments harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66708,6 +66874,7 @@ ratio by at most 4.8%.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-31 — INSTRUMENT UNAVAILABLE: `perf` is not present on the rch workers, so `counted-attribution-by-instruction-diff` — the instrument this campaign banks for sub-5% effects, and the one my own retry predicate named — CANNOT run on this fleet (`deadlock-audit-ddoeq`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66765,6 +66932,7 @@ attributable on this fleet, and rows should say so rather than quoting a wall-cl
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-31 — UNDECIDABLE BY EVERY INSTRUMENT THIS FLEET HAS: the take bounds-check lever survives a 15-round sign test at 10/15 (p≈0.30), which is a coin flip — and that VINDICATES declining to claim it from a clean-null single run (`deadlock-audit-ddoeq`)
+worker=vmi1293453 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66816,6 +66984,7 @@ and remains the real target.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-31 — WIN: `np.take`'s output RESHAPE IS A NO-OP on the common shape — skipping it is 1.535x -> **1.342x** at m=2^10 and 1.345x -> **1.150x** at m=2^12 with clean nulls; and the bounds-check sign test, POOLED to 30 rounds, now DECIDES at p<0.005, superseding my "undecidable" row (`deadlock-audit-ddoeq`)
+worker=fixmydocuments harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** incumbent-win
 
@@ -66904,6 +67073,7 @@ the only untried item. The per-element component needs a counter this fleet does
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-31 — LANDED AS STRICTLY LESS WORK, NOT CLAIMED: `np.take`'s index-dtype probe is REDUNDANT with the buffer acquisition it precedes; and the corpus written to prove that found a PRE-EXISTING bool-index defect (`deadlock-audit-ddoeq`, `deadlock-audit-lfl05`)
+worker=hz4 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66980,6 +67150,7 @@ row). Do not open another entry lever on this route without a counted attributio
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-31 — CORRECTNESS FIX: a BOOL index array is an integer array of 0/1, not an error — `fnp.take` raised `TypeError` where NumPy gathers, at all FOUR callers of the shared helper (`deadlock-audit-lfl05`)
+unmeasured (no timing obtained by this row - code/analysis only); worker/harness provenance not applicable.
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -67114,6 +67285,7 @@ either - it is already a 2.6-2.9x win.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-31 — REJECT of a STALE-CONSTANT hypothesis I raised myself: `searchsorted`'s `MERGE_MIN_*` were fitted against a path I deleted this session, and the sort+merge route is STILL the better one (11% faster on sorted needles, both nulls clean) (`deadlock-audit-sfgg3`)
+worker=hz4 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -67181,6 +67353,7 @@ is a choice between two wins, not a loss to recover.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-31 — THE INCUMBENT-SPREAD CRITERION, IMPLEMENTED AND APPLIED: the survey board collapses from 18 "decidable" cells to 8 ACTIONABLE, and every remaining LOSS disappears — the previous "worst standing loss" carries a 198.8% incumbent spread (`deadlock-audit-qpylx`)
+worker=hz4 harness=h2h_survey (transcribed 2026-09-03 from this row's recorded measurement context)
 
 **Campaign result class:** maintenance-self-speedup
 
