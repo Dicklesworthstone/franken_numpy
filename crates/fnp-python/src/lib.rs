@@ -27355,7 +27355,10 @@ fn clip(
     // dispatch is reproduced. Otherwise collapse to a single effective lo/hi.
     let legacy_used = a_min.is_some() || a_max.is_some();
     let new_used = min.is_some() || max.is_some();
-    if legacy_used && new_used {
+    // An ndarray subclass (np.matrix, user subclasses) is also handed over verbatim:
+    // numpy preserves the subclass on clip's result and every native branch below
+    // rebuilds a base ndarray (`deadlock-audit-7evbk`).
+    if (legacy_used && new_used) || ndarray_subclass_needs_numpy(py, a.bind(py))? {
         let ckw = PyDict::new(py);
         if let Some(v) = a_min.as_ref() {
             ckw.set_item(intern!(py, "a_min"), v.bind(py))?;
@@ -31496,8 +31499,18 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         // Batched (stacked) square real inputs: one det per lane via the parallel
         // batch_det, instead of passing the whole stack through to numpy. Output
         // shape is the batch dims (the two matrix axes are reduced). On any Err
-        // (shape mismatch) fall through to the numpy passthrough below.
-        if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real {
+        // (shape mismatch) fall through to the numpy passthrough below. The lane
+        // kernel computes and returns f64, which is numpy's result dtype for int,
+        // bool and f64 input but NOT for f32/f16 (numpy keeps float32), so narrow
+        // floats take the passthrough (`deadlock-audit-7evbk`). Read the dtype from
+        // the numpy object: `extract_numeric_array` has already widened the values to
+        // f64 and reports F64 for a float32 input.
+        let widens_to_f64 = !(numpy_dtype_is_f32(bound) || numpy_dtype_is_f16(bound));
+        if shape.len() >= 3
+            && shape[shape.len() - 1] == shape[shape.len() - 2]
+            && real
+            && widens_to_f64
+        {
             let owned_shape = shape.to_vec();
             if let Ok(values) = fnp_linalg::batch_det(array.values(), &owned_shape) {
                 let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
