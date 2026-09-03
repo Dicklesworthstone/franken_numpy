@@ -11,7 +11,7 @@
   ![Tests](https://img.shields.io/badge/tests-8%2C688%20%23%5Btest%5D-blue)
   ![Surface](https://img.shields.io/badge/numpy.__all__-499%2F499%20(100%25)-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-confined%20to%20fnp--python-blue)
-  ![CI Gates](https://img.shields.io/badge/CI%20gates-G1%E2%80%93G8%20(red%20since%202026--02--26)-red)
+  ![CI Gates](https://img.shields.io/badge/CI%20gates-G1%20green%20%C2%B7%20G2%20red%20(ledger%20hygiene)%20%C2%B7%20G3%E2%80%93G8%20blocked-orange)
   ![License](https://img.shields.io/badge/license-MIT%2BRider-green)
 </div>
 
@@ -83,7 +83,7 @@ This is the wrong tool if your bottleneck is large dense matmul on >2,000×2,000
 | Runtime modes | Single | Strict (max compat) + Hardened (safety guards) with evidence ledger |
 | Conformance | Self-referential | Differential oracle against real NumPy on every CI build |
 | Input hardening | Best-effort | Bounded resource limits + fail-closed on unknown semantics |
-| Test coverage | pytest suite | 8,688 Rust `#[test]` functions across 10 crates + 8-gate CI topology + 30 fuzz targets (the CI topology has not completed green since 2026-02-26; see [CI Gate Topology](#ci-gate-topology)) |
+| Test coverage | pytest suite | 8,688 Rust `#[test]` functions across 10 crates + 8-gate CI topology + 30 fuzz targets (the CI topology has not completed green since 2026-02-26: as of 2026-09-03 G1 passes in CI and G2 fails on five ledger-hygiene tests, which blocks G3–G8 there; see [CI Gate Topology](#ci-gate-topology)) |
 | Format durability | None | RaptorQ erasure-coded sidecars + scrub + decode-proof for every artifact bundle |
 
 ---
@@ -1795,7 +1795,7 @@ On top of these four layers, `crates/fnp-python/tests/e2e_workflow.rs` exercises
 
 ## CI Gate Topology
 
-**Status (2026-09-02).** The workflow has completed green exactly once, on 2026-02-26; every run since has failed or been cancelled. From 2026-08-27 G1 failed on a `clippy::manual_contains` lint fixed on 2026-09-02, and behind it G2 fails on the `no_allow_unused_in_library_code` hygiene ceiling, which the same pass repairs; G3-G8 have not executed in that window. Until a run reaches G8, "locked", "green" and "passing" in this README describe the intended gate topology, not a CI-verified state.
+**Status (2026-09-03).** The workflow has completed green exactly once, on 2026-02-26. On 2026-09-03 (run 33719040154, commit b049c562) G1 passed in CI for the first time since then, the wheel job G9 passed, and G2 failed on five tests in `crates/fnp-conformance/tests/ledger_hygiene.rs`: 216 rows of `docs/NEGATIVE_EVIDENCE.md` dated 2026-08-16 to 2026-08-31 lack the machine-checkable `host=`/`worker=`, `harness=`, campaign-class or executing-ELF markers that those gates (landed 2026-08-15) require, so G3–G8 are skipped in CI until the rows' authors transcribe their harness output. Run locally on the same commit with the CI environment, G3 (381/381 differential against numpy 2.4.3), G4, G5, G6, G8 and the nine P2C packets pass; G7 fails its 7% p99 budget on two `reduce_sum` cells against a baseline captured 2026-04-08, a same-host sub-millisecond comparison that is not decidable on a loaded box. Before this pass G3 could not fail at all (`run_ufunc_differential` exited 0 with 17 diverging cases), two of those cases were a real executor/engine layout mismatch for complex operands, and the committed RaptorQ sidecar no longer matched the fixtures. "Locked", "green" and "passing" elsewhere in this README describe gates that have been run locally as stated here, not a CI run that reached G8.
 
 Eight ordered gates run from fast to heavy, defined in `.github/workflows/ci.yml`. The workflow triggers on push to `main`, pull-request to `main`, and manual `workflow_dispatch`; a concurrency group cancels in-progress runs when a new commit lands on the same ref (`concurrency.cancel-in-progress: true`). Ordering is enforced by GitHub Actions `needs:` chaining — `g2-unit-property` declares `needs: g1-fmt-lint`, `g3-differential` declares `needs: g2-unit-property`, and so on through `g8-durability-decode`, so a failure at any gate aborts every downstream gate. All 8 are also runnable locally as a single command via `scripts/e2e/run_ci_gate_topology.sh`, which orchestrates the same sequence + a closing `validate_phase2c_packet` sweep over the 9 P2C packets:
 
