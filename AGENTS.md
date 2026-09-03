@@ -67,13 +67,13 @@ success** — one line, revert, next lever, no retraction narrative.
 
 ---
 
-## Current state (2026-05-16)
+## Current state (2026-09-03)
 
-- `fnp_python` covers **100% of `numpy.__all__`** (499/499 names) — see [`docs/planning/audit_numpy_reality.md`](docs/planning/audit_numpy_reality.md) for architecture + coverage progression.
+- `fnp_python` covers **100% of `numpy.__all__`** (499/499 names on the `numpy<2.5` CI oracle, i.e. numpy 2.4.x; the lock test iterates whichever live numpy the build host has) — see [`docs/planning/audit_numpy_reality.md`](docs/planning/audit_numpy_reality.md) for architecture + coverage progression.
 - Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
-- Workspace runs 6,392 tests across 10 crates (see [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,575 `pub fn` declarations across `crates/*/src/**/*.rs`.
-- Bead tracker stands at ~1,417 closed beads as of 2026-05-19; live count via `br list --status=closed --limit 10000 --json | jq length`.
-- No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (8 #[test] functions fail CI on stub markers); per-site analysis in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
+- Workspace runs 8,691 tests across 10 crates (see [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,626 `pub fn` declarations across `crates/*/src/**/*.rs`.
+- Bead tracker stands at 2,786 closed beads as of 2026-09-03; live count via `br list --status=closed --limit 10000 --json | jq '.issues | length'`.
+- No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (13 #[test] functions fail CI on stub/integrity markers); per-site analysis in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
 - Active tracked divergences: 0 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
 
 ## Toolchain: Rust & Cargo
@@ -215,7 +215,7 @@ cargo test -p fnp-runtime
 cargo test --workspace --all-features
 ```
 
-Cost note: `fnp-ufunc` (2,191 tests, ~60k LOC) and `fnp-python` (2,127 tests) dominate workspace test time. When iterating on a focused change in another crate, prefer the targeted `-p` invocation. See [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the live per-crate test counts.
+Cost note: `fnp-ufunc` (2,472 tests, ~84k src LOC) and `fnp-python` (3,637 tests) dominate workspace test time. When iterating on a focused change in another crate, prefer the targeted `-p` invocation. See [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the live per-crate test counts.
 
 ### Test Categories
 
@@ -229,7 +229,7 @@ Cost note: `fnp-ufunc` (2,191 tests, ~60k LOC) and `fnp-python` (2,127 tests) do
 | `fnp-random` | 5 production bit generators (PCG64, PCG64DXSM, MT19937, Philox, SFC64) + an internal `DeterministicRng` for tests, full `SeedSequence` / `SeedMaterial` hierarchy with spawn lineage, pickle payload round-trip, `RandomState` legacy wrapper, 40+ oracle-verified distributions with bit-exact PCG64DXSM parity vs NumPy |
 | `fnp-io` | npy/npz parser/writer, hardened boundary checks, adversarial input fuzzing |
 | `fnp-conformance` | Fixture-driven differential suites, oracle capture, adversarial/security policy harnesses, benchmark baselines, RaptorQ sidecar/scrub/decode proofs, workflow scenario gates |
-| `fnp-python` | PyO3 bindings exposing 100% of `numpy.__all__` (499/499 names) structurally locked by `fnp_python_covers_full_numpy_all`, plus 133 dedicated `conformance_*.rs` parity shards under `crates/fnp-python/tests/` |
+| `fnp-python` | PyO3 bindings exposing 100% of `numpy.__all__` (499/499 names) structurally locked by `fnp_python_covers_full_numpy_all`, plus 192 dedicated `conformance_*.rs` parity shards under `crates/fnp-python/tests/` |
 | `fnp-runtime` | Strict/hardened mode split, fail-closed wire decoding, override-audit gate, decision/evidence ledger |
 
 ### Conformance and Artifact Commands
@@ -544,7 +544,7 @@ bv --robot-insights | jq '.Cycles'                         # Circular deps (must
 ## Performance Ledger — preflight before you optimize, evidence before you reject
 
 `docs/NEGATIVE_EVIDENCE.md` is the append-only record of every performance
-hypothesis: wins, losses, and the retry predicate for each. It is 1,000+ entries
+hypothesis: wins, losses, and the retry predicate for each. It is 1,400+ entries
 and it is the authoritative record — not `cass`, not memory, not the commit log.
 
 **Ledger integrity decays.** The corrected 2026-07-27 hand audit classified 109

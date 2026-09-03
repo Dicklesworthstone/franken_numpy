@@ -4,11 +4,11 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy — memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **A memory-safe, clean-room reimplementation of NumPy in Rust.**<br>
-  100% of `numpy.__all__` (499/499) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression. The 9 numeric-core crates declare `#![forbid(unsafe_code)]` and hold zero hand-written `unsafe`; `fnp-python`, the PyO3 boundary, confines hand-written `unsafe` to layout-checked zero-copy buffer views. 8,688 `#[test]` functions (2026-09-02 count). Bit-exact PCG64DXSM RNG parity for explicit seeds; no-seed constructors source OS entropy like NumPy.
+  100% of `numpy.__all__` (499/499 against the CI oracle, pinned `numpy<2.5` → 2.4.3) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression; the lock iterates whichever live numpy the build host has (on numpy 2.3.x the oracle's `__all__` is 501 names — the deprecated `in1d`/`trapz` aliases upstream removed in 2.4 — and fnp re-exports them the same way). The 9 numeric-core crates declare `#![forbid(unsafe_code)]` and hold zero hand-written `unsafe`; `fnp-python`, the PyO3 boundary, confines hand-written `unsafe` to layout-checked zero-copy buffer views. 8,691 `#[test]` functions (2026-09-03 count). Bit-exact PCG64DXSM RNG parity for explicit seeds; no-seed constructors source OS entropy like NumPy.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202026--08--25-orange)
   ![Edition](https://img.shields.io/badge/edition-2024-blue)
-  ![Tests](https://img.shields.io/badge/tests-8%2C688%20%23%5Btest%5D-blue)
+  ![Tests](https://img.shields.io/badge/tests-8%2C691%20%23%5Btest%5D-blue)
   ![Surface](https://img.shields.io/badge/numpy.__all__-499%2F499%20(100%25)-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-confined%20to%20fnp--python-blue)
   ![CI Gates](https://img.shields.io/badge/CI%20gates-G1%20green%20%C2%B7%20G2%20red%20(ledger%20hygiene)%20%C2%B7%20G3%E2%80%93G8%20blocked-orange)
@@ -83,7 +83,7 @@ This is the wrong tool if your bottleneck is large dense matmul on >2,000×2,000
 | Runtime modes | Single | Strict (max compat) + Hardened (safety guards) with evidence ledger |
 | Conformance | Self-referential | Differential oracle against real NumPy on every CI build |
 | Input hardening | Best-effort | Bounded resource limits + fail-closed on unknown semantics |
-| Test coverage | pytest suite | 8,688 Rust `#[test]` functions across 10 crates + 8-gate CI topology + 30 fuzz targets (the CI topology has not completed green since 2026-02-26: as of 2026-09-03 G1 passes in CI and G2 fails on five ledger-hygiene tests, which blocks G3–G8 there; see [CI Gate Topology](#ci-gate-topology)) |
+| Test coverage | pytest suite | 8,691 Rust `#[test]` functions across 10 crates + 8-gate CI topology + 30 fuzz targets (the CI topology has not completed green since 2026-02-26: as of 2026-09-03 G1 passes in CI and G2 fails on five ledger-hygiene tests, which blocks G3–G8 there; see [CI Gate Topology](#ci-gate-topology)) |
 | Format durability | None | RaptorQ erasure-coded sidecars + scrub + decode-proof for every artifact bundle |
 
 ---
@@ -322,7 +322,7 @@ If you need `fnp-runtime`'s optional `asupersync` async integration or `frankent
 
 ## API Surface
 
-**1,575 public Rust functions across the 10 library crates** (verified live count of `pub fn ` declarations under `crates/*/src/**/*.rs`, excluding the `src/bin/` binary entry-points), exposing **100% of `numpy.__all__` (499/499 names)** through the `fnp_python` Python module. Coverage is enforced by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`, which iterates `numpy.__all__` at run time against the live numpy on the build host. The per-function `crates/fnp-python/tests/conformance_*.rs` shards add another **191 dedicated parity files** on top of the surface lock (plus 3 sibling `conformance_*.rs` files in the Rust-side crates: `fnp-dtype/tests/conformance_dtype.rs`, `fnp-linalg/tests/conformance_linalg.rs`, `fnp-ndarray/tests/conformance_broadcast.rs` — Rust-level conformance shards that don't go through the PyO3 surface). The companion `run_fnp_python_api_coverage` gate independently tracks the Python-visible surface (`exports=633 covered=599 missing=0` as of 2026-05-13), of which the PyO3 wrappers and identity-equal numpy re-exports together hit every name in `numpy.__all__`.
+**1,626 public Rust functions across the 10 library crates** (verified live count of `pub fn ` declarations under `crates/*/src/**/*.rs`, excluding the `src/bin/` binary entry-points; 2026-09-03 count), exposing **100% of `numpy.__all__` (499/499 names)** through the `fnp_python` Python module. Coverage is enforced by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`, which iterates `numpy.__all__` at run time against the live numpy on the build host. The per-function `crates/fnp-python/tests/conformance_*.rs` shards add another **192 dedicated parity files** on top of the surface lock (plus 3 sibling `conformance_*.rs` files in the Rust-side crates: `fnp-dtype/tests/conformance_dtype.rs`, `fnp-linalg/tests/conformance_linalg.rs`, `fnp-ndarray/tests/conformance_broadcast.rs` — Rust-level conformance shards that don't go through the PyO3 surface). The companion `run_fnp_python_api_coverage` gate independently tracks the Python-visible surface (`exports=633 covered=599 missing=0` as of 2026-05-13), of which the PyO3 wrappers and identity-equal numpy re-exports together hit every name in `numpy.__all__`.
 
 `fnp_python` also registers **12 PyO3 classes**: `Nditer` / `NditerStep` (iterator state machine), `FromPyFunc` / `Vectorize` (callable wrappers), and the `random` submodule's `SeedSequence`, `Generator`, `RandomState`, plus the 5 bit-generator classes `MT19937`, `PCG64`, `PCG64DXSM`, `Philox`, `SFC64`. The `mgrid`, `ogrid`, `r_`, and `c_` NumPy-style index objects are exposed as live singleton instances.
 
@@ -400,22 +400,22 @@ See [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the
 
 10 implementation crates, all under `crates/fnp-*`. 9 of the 10 declare `#![forbid(unsafe_code)]` and stay entirely on the safe-Rust path (enforced by `no_unsafe_code_blocks_or_items` in `codebase_hygiene.rs`). `fnp-python` is the lone exception: PyO3's procedural macros may expand into unsafe, and its source additionally uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes) for the zero-copy fast paths — confined to `fnp-python` and excluded from the hygiene scan.
 
-External crate dependencies are pinned at the workspace root in `[workspace.dependencies]`: `serde 1.0.228` (3 consumer crates), `serde_json 1.0.149` (3 consumers), `criterion 0.6 with html_reports` (7 consumer bench crates), and `pyo3 0.28.3 with auto-initialize` (1 consumer — `fnp-python`). Each consumer references the pin via `.workspace = true`. Verified 2026-05-20 — no dead workspace deps.
+External crate dependencies are pinned at the workspace root in `[workspace.dependencies]`: `serde 1.0.229` (3 consumer crates), `serde_json 1.0.151` (3 consumers), `criterion 0.8.2 with html_reports` (9 consumer bench crates — every crate except `fnp-runtime`), and `pyo3 0.28.3 with auto-initialize` (1 consumer — `fnp-python`). Each consumer references the pin via `.workspace = true`. Verified 2026-09-03 against the root manifest.
 
 | Crate | Lines (src/) | Purpose |
 |---|---:|---|
 | `fnp-dtype` | 4,697 | 18 dtype variants, deterministic `const fn` promotion table covering all 324 pairs, 5 cast policies, `ArrayStorage` taxonomy. (The `IntegerSidecar` mentioned later in this README lives in `fnp-ufunc`, not here, because it travels with `UFuncArray`.) |
 | `fnp-ndarray` | 2,079 | Stride Calculus Engine: shape→element_count, shape+order→strides, broadcast legality, reshape with `-1` inference, alias-sensitive transitions |
 | `fnp-iter` | 4,030 | Transfer-loop selector, overlap detection, `Nditer` / `NditerPlan` / `NditerStep` state machine with `iterindex` / `multi_index` / reset / seek / external-loop chunks, `nditer_python*` parity bridge |
-| `fnp-ufunc` | 83,499 | Largest crate. 35 binary ops, 43 unary ops, 30+ reduction methods, masked arrays, string arrays, datetime arrays, polynomial families, FFT primitives, einsum (`einsum`, `einsum_path`, `einsum_optimized`), float error state machine, NaN-correct reductions |
+| `fnp-ufunc` | 83,570 | Largest crate. 35 binary ops, 43 unary ops, 30+ reduction methods, masked arrays, string arrays, datetime arrays, polynomial families, FFT primitives, einsum (`einsum`, `einsum_path`, `einsum_optimized`), float error state machine, NaN-correct reductions |
 | `fnp-linalg` | 23,865 | ~100 public functions: 2×2 fast paths, NxN decompositions (QR, SVD, eig, eigh, Cholesky, LU), spectral methods (`expm`, `sqrtm`, `logm`, `funm`, `polar`, `schur`), least-squares, 14 batch operations, complex variants |
 | `fnp-random` | 21,056 | 5 production bit generators (PCG64, PCG64DXSM, MT19937, Philox, SFC64) + an internal `DeterministicRng` for tests, full `SeedSequence` / `SeedMaterial` hierarchy with spawn lineage, pickle payload round-trip, `RandomState` legacy wrapper, 40+ oracle-verified distributions |
 | `fnp-io` | 12,353 | NPY 1.0 / 2.0 read & write, NPZ stored + DEFLATE, text I/O (`loadtxt`, `savetxt`, `genfromtxt`), binary I/O (`fromfile`, `tofile`, `fromstring`), memmap, structured dtype I/O, hardened bounds: `MAX_HEADER_BYTES = 65,536`, `MAX_ARCHIVE_MEMBERS = 4,096`, `MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 GiB`, `MAX_TEXT_ELEMENTS = 16,777,216` |
 | `fnp-runtime` | 1,672 | `RuntimeMode` (Strict / Hardened), `CompatibilityClass`, `DecisionAction`, risk-aware decision engine with posterior estimation, `DecisionLossModel`, `EvidenceLedger`, `OverrideAuditEvent`, optional `asupersync` / `frankentui` integration |
-| `fnp-conformance` | 67,084 | Differential harness, metamorphic identities, adversarial fuzzing, witness stability, oracle capture, diagnostic-oracle harness, divergence ledger checker, cross-version drift matrix, RaptorQ sidecar / scrub / decode-proof tooling, 48 CLI binaries under `src/bin/` |
-| `fnp-python` | 182,027 | PyO3 (`pyo3 = "0.28.3"` pinned) bindings exposing 100% of `numpy.__all__`. 13 registered classes, native fast-paths for hot operations, identity-equal numpy fallback for surfaces with no engine substitute, 191 dedicated `conformance_*.rs` test files |
+| `fnp-conformance` | 67,162 | Differential harness, metamorphic identities, adversarial fuzzing, witness stability, oracle capture, diagnostic-oracle harness, divergence ledger checker, cross-version drift matrix, RaptorQ sidecar / scrub / decode-proof tooling, 48 CLI binaries under `src/bin/` |
+| `fnp-python` | 180,259 | PyO3 (`pyo3 = "0.28.3"` pinned) bindings exposing 100% of `numpy.__all__`. 12 registered classes, native fast-paths for hot operations, identity-equal numpy fallback for surfaces with no engine substitute, 192 dedicated `conformance_*.rs` test files |
 
-Total: roughly **402k lines of Rust** in the implementation crates (2026-09-02 count; all but `fnp-python` unsafe-free), plus seven fuzz crates and an extensive `tests/` tree.
+Total: roughly **401k lines of Rust** in the implementation crates (2026-09-03 count; all but `fnp-python` unsafe-free), plus seven fuzz crates and an extensive `tests/` tree.
 
 ---
 
@@ -571,7 +571,7 @@ Eigenvalue sort order is ascending to match NumPy. Singularity checks use exact 
 
 ### Random Number Generation (`fnp-random`)
 
-The RNG crate achieves **bit-exact parity with NumPy** by porting every algorithm from NumPy's C source code. `fnp-random` keeps a deliberately small dependency graph: `fnp-ndarray` within the workspace plus `getrandom` for NumPy-compatible no-seed OS entropy.
+The RNG crate achieves **bit-exact parity with NumPy** by porting every algorithm from NumPy's C source code. `fnp-random` keeps a deliberately small dependency graph: intra-workspace `fnp-ndarray`, `getrandom` for NumPy-compatible no-seed OS entropy, and default-on `rayon` for data-parallel jump-ahead fills — all three optional, and `default-features = false` strips all of them for consumers that want only the generator + `SeedSequence` core.
 
 **5 production bit generators**, enumerated under `pub enum BitGeneratorKind`:
 
@@ -1672,12 +1672,12 @@ Each packet produces 8 artifact files: `legacy_anchor_map.md`, `contract_table.m
 
 ## Test Coverage
 
-Live counts as of 2026-09-02 (`rg -c '#\[test\]'` over `crates/*/src` and `crates/*/tests`; [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) still carries the 2026-05-17 inventory). The 8,688 count below is split across **236 integration test files** (via `find crates -path '*/tests/*.rs'`): `fnp-python` 137 (133 conformance shards + `metamorphic_array_ops` + `e2e_workflow` + `golden_native_functions` + 1 helper), `fnp-ufunc` 9 (concurrency_safety, fuzz_regression, golden_histogram, isclose_bugs, metamorphic_math, public_api_golden, test_nansum_empty, test_nat, test_strided), `fnp-conformance` 5 (codebase_hygiene, concurrency_safety, numpy_reference_ops, profiling_baseline, smoke), `fnp-io` 5 (fuzz_regression_header, golden_text_io, metamorphic_io, npy_npz_diagnostic, npy_numpy_conformance), `fnp-dtype` 4, `fnp-ndarray` 4, `fnp-linalg` 4, `fnp-iter` 3, `fnp-random` 2, `fnp-runtime` 2 (golden_runtime, runtime_comprehensive); plus inline `#[cfg(test)]` blocks in each crate's `src/lib.rs`:
+Live counts as of 2026-09-03 (`rg -c '#\[test\]'` over `crates/*/src` and `crates/*/tests`; [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) still carries the 2026-05-17 inventory). The 8,691 count below is split across **240 integration test files** (via `find crates -path '*/tests/*.rs'`): `fnp-python` 198 (192 conformance shards + `metamorphic_array_ops` + `e2e_workflow` + `golden_native_functions` + 3 helper files under `tests/common/` and `tests/support/`), `fnp-ufunc` 10 (concurrency_safety, fuzz_regression, golden_histogram, isclose_bugs, metamorphic_math, metamorphic_proptest, public_api_golden, test_nansum_empty, test_nat, test_strided), `fnp-conformance` 6 (codebase_hygiene, concurrency_safety, ledger_hygiene, numpy_reference_ops, profiling_baseline, smoke), `fnp-io` 6 (fuzz_regression_header, golden_text_io, metamorphic_io, npy_npz_diagnostic, npy_numpy_conformance, savetxt_printf_conformance), `fnp-dtype` 4, `fnp-ndarray` 4, `fnp-linalg` 4, `fnp-iter` 3, `fnp-random` 2, `fnp-runtime` 3 (golden_runtime, runtime_comprehensive, worker_isa_probe); plus inline `#[cfg(test)]` blocks in each crate's `src/lib.rs`:
 
 | Crate | Tests | Focus |
 |---|---:|---|
-| `fnp-ufunc` | 2,471 | Core array ops, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), masked cov/corrcoef, gufunc validation, parameter parity, einsum, NaN/Inf/signed-zero edge cases |
-| `fnp-python` | 3,635 | PyO3 surface parity across all 499 `numpy.__all__` names + 191 dedicated conformance shards covering live callable parity, sorter/side bridging, in-place mutation, generator rejection, dtype preservation, etc. |
+| `fnp-ufunc` | 2,472 | Core array ops, math, sorting, polynomials, reductions, oracle tests, linalg bridge, FFT (hfft/ihfft), masked cov/corrcoef, gufunc validation, parameter parity, einsum, NaN/Inf/signed-zero edge cases |
+| `fnp-python` | 3,637 | PyO3 surface parity across all 499 `numpy.__all__` names + 192 dedicated conformance shards covering live callable parity, sorter/side bridging, in-place mutation, generator rejection, dtype preservation, etc. |
 | `fnp-conformance` | 395 | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, matmul conformance |
 | `fnp-random` | 477 | RNG distributions with statistical conformance, `permuted` (1D/2D/axis/deterministic), seeding, reproducibility, large-n binomial/multinomial |
 | `fnp-linalg` | 459 | Decompositions, solvers, norms, batch ops, 16 NumPy oracle tests, extreme-scale regression, non-finite parity |
@@ -1685,8 +1685,8 @@ Live counts as of 2026-09-02 (`rg -c '#\[test\]'` over `crates/*/src` and `crate
 | `fnp-dtype` | 276 | Dtype taxonomy, all 324 promotion pairs explicit, cast policy primitives, NumPy byte-width parsing |
 | `fnp-ndarray` | 231 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, F-order, `required_view_nbytes` |
 | `fnp-iter` | 203 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, stateful `Nditer` (`iterindex`/`multi_index`/reset/seek/external-loop), flatiter, ndindex |
-| `fnp-runtime` | 134 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger. The 131-test count comes mainly from `tests/runtime_comprehensive.rs` (which closes the historical 0-tests-for-1527-LOC gap that was flagged in the tick-26 project analysis): covers `RuntimeMode` parsing/serialization, `CompatibilityClass` parsing/serialization, `DecisionAction` selection logic, `decide_compatibility()` Strict-vs-Hardened branching, `EvidenceLedger` recording, policy-override evaluation, probability clamping, and malformed-input handling. |
-| **Total** | **8,688** | `#[test]` functions across all 10 crates, 2026-09-02 count |
+| `fnp-runtime` | 134 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger. The 134-test count comes mainly from `tests/runtime_comprehensive.rs` (which closes the historical 0-tests-for-1527-LOC gap that was flagged in the tick-26 project analysis): covers `RuntimeMode` parsing/serialization, `CompatibilityClass` parsing/serialization, `DecisionAction` selection logic, `decide_compatibility()` Strict-vs-Hardened branching, `EvidenceLedger` recording, policy-override evaluation, probability clamping, and malformed-input handling. |
+| **Total** | **8,691** | `#[test]` functions across all 10 crates, 2026-09-03 count |
 
 ### Oracle Test Strategy
 
@@ -1797,7 +1797,7 @@ On top of these four layers, `crates/fnp-python/tests/e2e_workflow.rs` exercises
 
 **Status (2026-09-03).** The workflow has completed green exactly once, on 2026-02-26. On 2026-09-03 (run 33719040154, commit b049c562) G1 passed in CI for the first time since then, the wheel job G9 passed, and G2 failed on five tests in `crates/fnp-conformance/tests/ledger_hygiene.rs`: 216 rows of `docs/NEGATIVE_EVIDENCE.md` dated 2026-08-16 to 2026-08-31 lack the machine-checkable `host=`/`worker=`, `harness=`, campaign-class or executing-ELF markers that those gates (landed 2026-08-15) require, so G3–G8 are skipped in CI until the rows' authors transcribe their harness output. Run locally on the same commit with the CI environment, G3 (381/381 differential against numpy 2.4.3), G4, G5, G6, G8 and the nine P2C packets pass; G7 fails its 7% p99 budget on two `reduce_sum` cells against a baseline captured 2026-04-08, a same-host sub-millisecond comparison that is not decidable on a loaded box. Before this pass G3 could not fail at all (`run_ufunc_differential` exited 0 with 17 diverging cases), two of those cases were a real executor/engine layout mismatch for complex operands, and the committed RaptorQ sidecar no longer matched the fixtures. "Locked", "green" and "passing" elsewhere in this README describe gates that have been run locally as stated here, not a CI run that reached G8.
 
-Eight ordered gates run from fast to heavy, defined in `.github/workflows/ci.yml`. The workflow triggers on push to `main`, pull-request to `main`, and manual `workflow_dispatch`; a concurrency group cancels in-progress runs when a new commit lands on the same ref (`concurrency.cancel-in-progress: true`). Ordering is enforced by GitHub Actions `needs:` chaining — `g2-unit-property` declares `needs: g1-fmt-lint`, `g3-differential` declares `needs: g2-unit-property`, and so on through `g8-durability-decode`, so a failure at any gate aborts every downstream gate. All 8 are also runnable locally as a single command via `scripts/e2e/run_ci_gate_topology.sh`, which orchestrates the same sequence + a closing `validate_phase2c_packet` sweep over the 9 P2C packets:
+Eight ordered gates run from fast to heavy, defined in `.github/workflows/ci.yml`. The workflow triggers on push to `main`, pull-request to `main`, and manual `workflow_dispatch`; a concurrency group cancels in-progress runs for non-push events only (`concurrency.cancel-in-progress: ${{ github.event_name != 'push' }}`) — pushes to `main` get their own SHA-keyed group and are never cancelled. Ordering is enforced by GitHub Actions `needs:` chaining — `g2-unit-property` declares `needs: g1-fmt-lint`, `g3-differential` declares `needs: g2-unit-property`, and so on through `g8-durability-decode`, so a failure at any gate aborts every downstream gate. All 8 are also runnable locally as a single command via `scripts/e2e/run_ci_gate_topology.sh`, which orchestrates the same sequence + a closing `validate_phase2c_packet` sweep over the 9 P2C packets:
 
 ```
 G1  fmt + lint           cargo fmt --check && cargo check --workspace --all-targets && cargo clippy --workspace --all-targets -- -D warnings
@@ -1810,7 +1810,7 @@ G7  performance budget   run_performance_budget_gate.sh
 G8  durability/decode    cargo run -p fnp-conformance --bin run_raptorq_gate -- --retries 1 --flake-budget 0 --coverage-floor 1.0  (scripts/e2e/run_raptorq_gate.sh wraps this for local use)
 ```
 
-G3 enforces a real-numpy oracle via `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects `pure_python_fallback` output. CI explicitly sets up Python 3.12 + `pip install --upgrade pip numpy` before running `capture_numpy_oracle` (so the oracle's numpy version is whatever is current on PyPI at the time the job runs); local invocations use `FNP_ORACLE_PYTHON` to point at any NumPy-bearing interpreter. After G8 the topology script also runs `validate_phase2c_packet --packet-id FNP-P2C-{001..009}` to confirm every P2C packet's readiness contract still passes — this is the durability-tail step that catches packet-contract drift.
+G3 enforces a real-numpy oracle via `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects `pure_python_fallback` output. CI explicitly sets up Python 3.12 + `pip install --upgrade pip "numpy<2.5"` before the G2/G3 oracle steps, pinning the oracle to the 2.4.x line (currently 2.4.3 — the version the 499/499 surface count is measured against); local invocations use `FNP_ORACLE_PYTHON` to point at any NumPy-bearing interpreter. After G8 the topology script also runs `validate_phase2c_packet --packet-id FNP-P2C-{001..009}` to confirm every P2C packet's readiness contract still passes — this is the durability-tail step that catches packet-contract drift.
 
 Several gates accept environment-variable tuning. `.github/workflows/ci.yml` pins the strict CI values for G6 and G7 explicitly: G6 sets `FNP_WORKFLOW_RETRIES=0`, `FNP_WORKFLOW_FLAKE_BUDGET=0`, `FNP_WORKFLOW_COVERAGE_FLOOR=1.0`; G7 sets `FNP_PERF_CANDIDATE_BASELINE=/tmp/perf_candidate.json`, `FNP_PERF_MAX_P99_REGRESSION_RATIO=0.07`, `FNP_PERF_COVERAGE_FLOOR=1.0`. G4 (security), G5 (test contract), and G8 (raptorq) accept the same family of env vars under their own prefixes (`FNP_SECURITY_*`, `FNP_TEST_CONTRACT_*`, `FNP_RAPTORQ_*`, each supporting `RETRIES` / `FLAKE_BUDGET` / `COVERAGE_FLOOR`; raptorq additionally has `FNP_RAPTORQ_PARALLELISM`) but CI does not pin those — they fall through to script defaults (`*_RETRIES=1`, `*_FLAKE_BUDGET=0`, `*_COVERAGE_FLOOR=1.0`). Local runs can override any of these.
 
@@ -1948,7 +1948,7 @@ as the parity-era snapshot of the delegated engine.
 - **Horner's method.** Polynomial evaluation uses Horner form for numerical stability and minimal multiplications. The Stirling-series helpers in `fnp-random` (`logfactorial` for `k > 125` and the binomial BTPE acceptance path) use the same evaluation style.
 - **Ziggurat sampling.** Normal and exponential random variates use Ziggurat (same as NumPy), which accepts ~97% of samples on the first try.
 
-The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy. A complementary per-crate Criterion layer also exists — 7 bench files (alphabetical by crate: `fnp-conformance/benches/criterion_core_ops.rs`, `fnp-dtype/benches/dtype_ops.rs`, `fnp-io/benches/criterion_io.rs`, `fnp-linalg/benches/criterion_linalg.rs`, `fnp-ndarray/benches/criterion_ndarray.rs`, `fnp-random/benches/random_ops.rs`, `fnp-ufunc/benches/elementwise.rs`) runnable via `cargo bench -p <crate>` for tracking within-FrankenNumPy regressions without going through NumPy. The naming is bimodal for historical reasons (4 `criterion_*` files vs 3 area-named like `elementwise`/`dtype_ops`/`random_ops`); when adding a new bench, prefer the `criterion_<area>` form to match the more recent files. HTML reports (Criterion's `html_reports` feature, lifted to `[workspace.dependencies]`) are emitted under `target/criterion/<bench>/report/index.html` for every benched operation — verified 2026-05-20 against `fnp-dtype/benches/dtype_ops.rs`.
+The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy. A complementary per-crate Criterion layer also exists — **66 bench files across 9 crates as of 2026-09-03** (every crate except `fnp-runtime`; the largest lane is `fnp-python/benches/` with 25 `criterion_python_<area>.rs` targets plus the shared `common/mod.rs` dual-null median-CI harness that also prints `bench_elf_sha256`; other crates carry one to seven targets each — `fnp-conformance/benches/criterion_core_ops.rs`, `fnp-dtype/benches/dtype_ops.rs`, `fnp-io/benches/criterion_io.rs`, `fnp-iter/benches/criterion_iter.rs`, `fnp-linalg/benches/` (7, incl. `criterion_linalg`, `gemm_microkernel`, `tsqr`), `fnp-ndarray/benches/criterion_ndarray.rs`, `fnp-random/benches/` (2), `fnp-ufunc/benches/` (21, incl. `elementwise`, `transcendental`, `take_axis`)) runnable via `cargo bench -p <crate>` for tracking within-FrankenNumPy regressions without going through NumPy. When adding a new bench, prefer the `criterion_<area>` form to match the more recent files. HTML reports (Criterion's `html_reports` feature, lifted to `[workspace.dependencies]`) are emitted under `target/criterion/<bench>/report/index.html` for every benched operation.
 
 **2026-05-25 cross-engine snapshot** (13 workloads at 1M-element scale, 10 runs each, p50 ratios):
 
@@ -2036,17 +2036,17 @@ cargo run -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
 
 ## Fuzzing
 
-The workspace ships **7 fuzz crates** with **27 fuzz targets** and **~200 curated seed-corpus files** as of 2026-05-16. Every fuzz crate is excluded from the main workspace (see `Cargo.toml` `[workspace] exclude`) so normal `cargo` commands don't pull in `libfuzzer-sys`. Full inventory in [`docs/FUZZING.md`](docs/FUZZING.md).
+The workspace ships **7 fuzz crates** with **30 fuzz targets** and **261 curated seed-corpus files** as of 2026-09-03. Every fuzz crate is excluded from the main workspace (see `Cargo.toml` `[workspace] exclude`) so normal `cargo` commands don't pull in `libfuzzer-sys`. Full inventory in [`docs/FUZZING.md`](docs/FUZZING.md).
 
 | Crate | Path | Targets |
 |---|---|---|
 | `fnp-dtype` | `crates/fnp-dtype/fuzz` | `fuzz_dtype_parse`, `fuzz_min_scalar_type`, `fuzz_can_cast`, `fuzz_result_type` |
 | `fnp-io` | `crates/fnp-io/fuzz` | `fuzz_npy`, `fuzz_npz`, `fuzz_load_auto`, `fuzz_header`, `fuzz_fromstring`, `fuzz_loadtxt`, `fuzz_fromfile` |
 | `fnp-iter` | `crates/fnp-iter/fuzz` | `fuzz_ndindex`, `fuzz_flatiter_indices`, `fuzz_nditer_plan`, `fuzz_transfer_class` |
-| `fnp-linalg` | `crates/fnp-linalg/fuzz` | `fuzz_cholesky_nxn`, `fuzz_det_nxn`, `fuzz_qr_mxn` |
+| `fnp-linalg` | `crates/fnp-linalg/fuzz` | `fuzz_cholesky_nxn`, `fuzz_det_nxn`, `fuzz_inv_nxn`, `fuzz_qr_mxn`, `fuzz_svd_mxn` |
 | `fnp-ndarray` | `crates/fnp-ndarray/fuzz` | `fuzz_broadcast_shape`, `fuzz_fix_unknown_dim`, `fuzz_as_strided`, `fuzz_sliding_window` |
 | `fnp-random` | `crates/fnp-random/fuzz` | `fuzz_from_u64_seed`, `fuzz_seed_sequence` |
-| `fnp-ufunc` | `crates/fnp-ufunc/fuzz` | `fuzz_parse_gufunc_signature`, `fuzz_datetime_unit_parse`, `fuzz_parse_fixed_signature` |
+| `fnp-ufunc` | `crates/fnp-ufunc/fuzz` | `fuzz_parse_gufunc_signature`, `fuzz_datetime_unit_parse`, `fuzz_parse_fixed_signature`, `fuzz_einsum_subscripts` |
 
 ```bash
 cargo install cargo-fuzz
@@ -2062,7 +2062,7 @@ Every feature family is `parity_green`:
 
 | Feature family | Status |
 |---|---|
-| `numpy.__all__` Python surface (499/499 names) | parity_green (structurally locked) |
+| `numpy.__all__` Python surface (499/499 names on the `numpy<2.5` CI oracle) | parity_green (structurally locked) |
 | NumPy 2.0+ API (`unique_all/counts/inverse/values`, `cumulative_sum/prod`, `matrix_transpose`, `vecdot`, `permuted`, `trapezoid`, `unstack`) | parity_green |
 | Shape/stride/view semantics | parity_green |
 | Broadcasting legality | parity_green |
@@ -2143,10 +2143,10 @@ franken_numpy/
 
 What doesn't work today.
 
-- **No PyPI release yet.** `pip install .` and `maturin build --release` produce a working wheel from the checkout (added 2026-09-03, verified on Linux / CPython 3.13), but nothing is published to PyPI and no macOS or Windows wheels have been built or tested. The `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked.
+- **No PyPI release yet.** `pip install .` and `maturin build --release` produce a working wheel from the checkout (added 2026-09-03, verified on Linux / CPython 3.13), but nothing is published to PyPI and no macOS or Windows wheels have been built or tested. The `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names against the `numpy<2.5` CI oracle — see [Supported NumPy oracle](#supported-numpy-oracle-2-3-or-newer)), structurally locked.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub–Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Optional BLAS linkage is a Phase 3 work-stream (ADR-001).
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac−bd)+(ad+bc)i`, but the interleaved representation adds overhead vs native complex types.
-- **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` keeps only intra-workspace `fnp-ndarray` plus `getrandom` for OS entropy).
+- **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` keeps only intra-workspace `fnp-ndarray`, `getrandom` for OS entropy, and default-on `rayon` for data-parallel jump-ahead fills — all three optional behind features).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
 - **Parallelism is per-op, not blanket.** Array operations are `rayon`-parallel where measurement showed it pays and deliberately serial where it did not — the policy is explicit in `UFuncBinaryOp::is_parallel_worth` / `UFuncUnaryOp::is_parallel_worth` and in per-op size gates. Compute-heavy ops (`power`, `hypot`, `arctan2`, `logaddexp`, the transcendental unaries, reductions, sorts, set-ops, GEMM) parallelize; `add`/`sub`/`mul`/`div` stay serial because they are memory-bandwidth-bound, where extra threads buy nothing. The `asupersync` integration is separate and orchestrates conformance pipelines, not array computation.
 - **f64 internal representation for `UFuncArray`.** Numeric values are stored as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, `IntegerSidecar` preserves exact integer values through storage round-trips; ten integer binary ops recompute exactly on the sidecar and every other operation on such values rounds through f64. Typed storage inside `UFuncArray` is a Phase 3 work-stream; the `fnp_python` fast paths already compute integers in their native width.
@@ -2255,20 +2255,20 @@ If you want to understand how FrankenNumPy works at the source level, here are t
 
 | To understand... | Start at |
 |---|---|
-| Shape and stride arithmetic | `crates/fnp-ndarray/src/lib.rs` (1,531 lines). Small enough to read in one sitting. |
+| Shape and stride arithmetic | `crates/fnp-ndarray/src/lib.rs` (2,079 lines). Small enough to read in one sitting. |
 | Dtype promotion rules | `crates/fnp-dtype/src/lib.rs` around `pub const fn promote(...)`. The whole 324-entry table is in one match expression. |
 | The transfer-loop selector | `crates/fnp-iter/src/lib.rs` around `TransferClass`, `TransferSelectorInput`, and `Nditer`. |
-| A representative ufunc | `crates/fnp-ufunc/src/lib.rs`: `elementwise_binary` (around line 5920) for the broadcast skeleton, `reduce_sum_values` (around line 25684) for the compensated-summation logic. |
+| A representative ufunc | `crates/fnp-ufunc/src/lib.rs`: `elementwise_binary` (around line 6390) for the broadcast skeleton, `reduce_sum_values` (around line 32277) for the compensated-summation logic. |
 | Eigenvalue and SVD algorithms | `crates/fnp-linalg/src/lib.rs`: `svd_mxn`, `eig_nxn`, `qr_mxn` are stand-alone implementations of the Householder / Golub–Kahan / Francis machinery. |
 | RNG bit generators | `crates/fnp-random/src/lib.rs`: search for `Pcg64DxsmRng`, `Mt19937Rng`, `PhiloxRng`, `Sfc64Rng`, each in its own struct. The `Generator` API is in the second half of the file. |
 | NPY/NPZ binary format | `crates/fnp-io/src/lib.rs`: `pub fn save` and `pub fn load` are entry points; the header parser and writer sit next to them. |
 | The runtime decision engine | `crates/fnp-runtime/src/lib.rs` is the smallest crate (1,672 lines); reading it end-to-end is a complete tour of the strict/hardened mode split and the evidence ledger. |
 | How parity is verified | `crates/fnp-conformance/src/lib.rs` plus the 48 binaries under `crates/fnp-conformance/src/bin/`. Start with `capture_numpy_oracle.rs` and `run_ufunc_differential.rs`. |
-| The PyO3 surface | `crates/fnp-python/src/lib.rs`: single 182k-line file because PyO3 wants all `#[pymodule]` bindings co-located. The structural lock-in test is at `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs::fnp_python_covers_full_numpy_all`. |
+| The PyO3 surface | `crates/fnp-python/src/lib.rs`: single ~180k-line file because PyO3 wants all `#[pymodule]` bindings co-located. The structural lock-in test is at `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs::fnp_python_covers_full_numpy_all`. |
 
 The largest engine crate (`fnp-ufunc` at 83k lines) sits in one file because the ufunc dispatch table is centralized; splitting it would scatter the dispatcher and obscure the structure.
 
-**Finding a function fast.** With 1,575 `pub fn` declarations across the workspace's library code (`crates/*/src/**/*.rs`, excluding `src/bin/`), ripgrep is the navigation tool of choice:
+**Finding a function fast.** With 1,626 `pub fn` declarations across the workspace's library code (`crates/*/src/**/*.rs`, excluding `src/bin/`; 2026-09-03 count), ripgrep is the navigation tool of choice:
 
 ```bash
 # Find a pub fn by name (across all crates):
@@ -2412,14 +2412,14 @@ Major milestones in the order they landed. For the full per-commit history, see 
 | 2026-05-18 | Test-infrastructure surface wave: 5 beads. Surfaced `fnp-python/tests/common/mod.rs` 28KB shared harness (RequirementLevel + comparison modes); documented `fuzz_regression*.rs` as the third leg of the fuzz workflow; added `e2e_workflow.rs` as multi-function-pipeline test layer. |
 | 2026-05-19 | Ongoing daily docs-precision sweeps. Numbers below refreshed; see commit log for the per-day bead trail. |
 
-In quantitative terms: **~650 commits in May 2026 alone**, **~1,880 commits since 2026-04-01**, **2,782 closed beads** as of 2026-09-02 (7,300+ commits in total), all under a single git author working with a multi-agent swarm. (These are live numbers; the repository keeps moving.)
+In quantitative terms: **1,379 commits in May 2026 alone**, **7,012 commits since 2026-04-01**, **2,786 closed beads** as of 2026-09-03 (7,338 commits in total), all under a single git author working with a multi-agent swarm. (These are live numbers; the repository keeps moving.)
 
 ---
 
 ## FAQ
 
 **Is this a drop-in replacement for NumPy?**
-Surface-wise yes: `fnp-python` exposes **100% of `numpy.__all__`** (499/499 names), structurally locked by `fnp_python_covers_full_numpy_all`. Distribution-wise: `pip install .` from the checkout builds and installs a wheel (Linux / CPython 3.13 verified); there is no PyPI release yet. See Installation and Limitations.
+Surface-wise yes: `fnp-python` exposes **100% of `numpy.__all__`** (499/499 names on the `numpy<2.5` CI oracle), structurally locked by `fnp_python_covers_full_numpy_all`. Distribution-wise: `pip install .` from the checkout builds and installs a wheel (Linux / CPython 3.13 verified); there is no PyPI release yet. See Installation and Limitations.
 
 **How do you verify parity with NumPy?**
 Oracle tests. We run the same operations with the same inputs in both NumPy and FrankenNumPy and compare outputs to floating-point tolerance. For RNG, the comparison is bit-exact. The G3 CI gate enforces `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects pure-Python fallback oracle output.
@@ -2434,7 +2434,7 @@ Memory safety is a core value. 9 of the 10 implementation crates declare `#![for
 The 2026-05-25 snapshot timed NumPy behind a passthrough for its winning rows and is not an engine measurement (see Performance). The contract-grade whole-job results are 2.7-4.8x faster than NumPy on the int64 and f16 workloads in `docs/PERF_RELEASE_READINESS_SCORECARD.md`; the families where NumPy has no fast path (f16, integer GEMM, hashed `isin`, wide-key strings) are where the large ratios live. Small-n calls pay a 700-1,450 ns wrapper floor and run 1.1-3.6x slower than NumPy below roughly 2^16 elements, and f64 `add`/`subtract`/`multiply`/`divide` delegate to NumPy at every size. Large dense square GEMM above roughly 2,000×2,000 remains slower than NumPy linked to OpenBLAS. Campaign wins require NumPy and FrankenNumPy end-to-end in the same invocation; within-FrankenNumPy self-speedups are maintenance results.
 
 **Can I use just the RNG crate?**
-Yes. `fnp-random` keeps dependencies minimal (`fnp-ndarray` plus `getrandom` for no-seed OS entropy) and produces bit-exact NumPy-compatible random sequences from a given explicit seed.
+Yes. `fnp-random` keeps dependencies minimal (`fnp-ndarray`, `getrandom` for no-seed OS entropy, and default-on `rayon` for data-parallel jump-ahead fills — all three optional behind features) and produces bit-exact NumPy-compatible random sequences from a given explicit seed.
 
 **What's the difference between `fnp_python` and just calling numpy?**
 `fnp_python` is the parity oracle surface. Hot operations execute on the Rust engine for native speed; everything else falls back to numpy verbatim so behavior is identical (including version-gated and deprecation paths). You get one drop-in module, with Rust under the hood where it matters.

@@ -1,12 +1,12 @@
 [toolchain]
-# Pinned to match .github/workflows/ci.yml env.RUST_TOOLCHAIN (line 24) and
+# Pinned to match .github/workflows/ci.yml env.RUST_TOOLCHAIN (line 47) and
 # the 7 sibling rust-toolchain.toml files under crates/<c>/fuzz/ (workspace-
 # excluded fuzz crates that can't inherit this pin automatically). README,
 # AGENTS.md, and docs/FUZZING.md also quote the channel string; bump all
 # 12 living file locations together when updating the workspace nightly:
 #   1 root file (this one)
 #   7 fuzz files (crates/fnp-{dtype,io,iter,linalg,ndarray,random,ufunc}/fuzz/rust-toolchain.toml)
-#   1 CI env var (.github/workflows/ci.yml line 24)
+#   1 CI env var (.github/workflows/ci.yml line 47)
 #   3 doc files (README.md, AGENTS.md, docs/FUZZING.md)
 # Frozen historical records — DO NOT rewrite these on a bump:
 #   CHANGELOG.md, UPGRADE_LOG.md, tests/artifacts/perf/baseline_2026-05-05.md

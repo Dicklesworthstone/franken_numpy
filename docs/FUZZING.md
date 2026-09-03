@@ -1,6 +1,6 @@
 # Fuzzing FrankenNumPy
 
-The workspace ships **7 fuzz crates** with **27 fuzz targets** and **200 curated seed corpus files** (re-verified 2026-05-17 via `find crates/*/fuzz/corpus -name 'seed_*' -type f | wc -l`, unchanged from the 2026-05-16 baseline). Every fuzz crate is excluded from the main workspace (see `Cargo.toml` `[workspace] exclude`) so normal `cargo` commands don't pull in `libfuzzer-sys`.
+The workspace ships **7 fuzz crates** with **30 fuzz targets** and **261 curated seed corpus files** (re-verified 2026-09-03 via `git ls-files 'crates/*/fuzz/fuzz_targets/*.rs' | wc -l` and `git ls-files 'crates/*/fuzz/corpus/*' | wc -l`; the 2026-05-16 baseline was 27 targets / 200 files — `fuzz_inv_nxn`, `fuzz_svd_mxn`, and `fuzz_einsum_subscripts` landed since). Every fuzz crate is excluded from the main workspace (see `Cargo.toml` `[workspace] exclude`) so normal `cargo` commands don't pull in `libfuzzer-sys`.
 
 ## Prerequisites
 
@@ -19,10 +19,10 @@ The fuzz crates require nightly Rust pinned to `nightly-2026-08-25` (matching `r
 | `fnp-dtype` | `crates/fnp-dtype/fuzz` | `fuzz_dtype_parse`, `fuzz_min_scalar_type`, `fuzz_can_cast`, `fuzz_result_type` |
 | `fnp-io` | `crates/fnp-io/fuzz` | `fuzz_npy`, `fuzz_npz`, `fuzz_load_auto`, `fuzz_header`, `fuzz_fromstring`, `fuzz_loadtxt`, `fuzz_fromfile` |
 | `fnp-iter` | `crates/fnp-iter/fuzz` | `fuzz_ndindex`, `fuzz_flatiter_indices`, `fuzz_nditer_plan`, `fuzz_transfer_class` |
-| `fnp-linalg` | `crates/fnp-linalg/fuzz` | `fuzz_cholesky_nxn`, `fuzz_det_nxn`, `fuzz_qr_mxn` |
+| `fnp-linalg` | `crates/fnp-linalg/fuzz` | `fuzz_cholesky_nxn`, `fuzz_det_nxn`, `fuzz_inv_nxn`, `fuzz_qr_mxn`, `fuzz_svd_mxn` |
 | `fnp-ndarray` | `crates/fnp-ndarray/fuzz` | `fuzz_broadcast_shape`, `fuzz_fix_unknown_dim`, `fuzz_as_strided`, `fuzz_sliding_window` |
 | `fnp-random` | `crates/fnp-random/fuzz` | `fuzz_from_u64_seed`, `fuzz_seed_sequence` |
-| `fnp-ufunc` | `crates/fnp-ufunc/fuzz` | `fuzz_parse_gufunc_signature`, `fuzz_datetime_unit_parse`, `fuzz_parse_fixed_signature` |
+| `fnp-ufunc` | `crates/fnp-ufunc/fuzz` | `fuzz_parse_gufunc_signature`, `fuzz_datetime_unit_parse`, `fuzz_parse_fixed_signature`, `fuzz_einsum_subscripts` |
 
 ## Running a target
 
