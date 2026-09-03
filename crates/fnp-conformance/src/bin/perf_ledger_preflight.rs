@@ -336,7 +336,7 @@ fn is_keep(entry: &LedgerEntry) -> bool {
         .split(|character: char| !character.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
         .collect();
-    if heading_tokens.iter().any(|&token| token == "KEEP")
+    if heading_tokens.contains(&"KEEP")
         || heading.contains("WIN (SHIP")
         || heading.contains("WIN:")
     {
