@@ -5,6 +5,9 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/finalize-random-core.yml"
+      - "crates/fnp-random-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
   workflow_dispatch:
 
 permissions:
