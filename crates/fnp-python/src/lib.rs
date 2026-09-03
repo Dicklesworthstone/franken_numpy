@@ -23541,7 +23541,7 @@ fn interp(
     if let Some(p) = period.as_ref().filter(|p| !p.bind(py).is_none()) {
         // Native periodic interp: numpy's period path is preprocessing (x%P, xp%P, argsort, wrap-augment)
         // followed by the SAME compiled_interp. Replicate the preprocessing with numpy's own ops (so it is
-        // byte-identical) then run the zero-copy interp kernel (bit-exact to compiled_interp) over the 8M
+        // byte-identical) then run the zero-copy interp kernel (numpy's own arr_interp operation order) over the 8M
         // query points in parallel. Real f64 fp only; anything else falls back.
         let period_val = match p.bind(py).extract::<f64>() {
             Ok(v) if v != 0.0 => v.abs(),
@@ -29002,9 +29002,11 @@ const CONCAT_PARALLEL_MIN_BYTES: usize = 1 << 23; // 8MB output -> parallelize t
 /// result NumPy produces faster. Measured on hz4 against numpy 2.5.2 live in the same invocation,
 /// two arrays, two seeds, interleaved with dual A/A nulls, at n = 64 per input:
 ///
-///     f64  1.63x (+800 ns)    f32  4.65x (+4620)   i64  4.68x (+4670)   c128 7.69x (+9255)
-///     c64  4.62x (+4705)      f16  4.68x (+4675)   i32  4.69x (+4722)   i16  4.71x (+4641)
-///     i8   4.70x (+4623)      u8   4.72x (+4620)   bool 4.72x (+4638)
+/// ```text
+/// f64  1.63x (+800 ns)    f32  4.65x (+4620)   i64  4.68x (+4670)   c128 7.69x (+9255)
+/// c64  4.62x (+4705)      f16  4.68x (+4675)   i32  4.69x (+4722)   i16  4.71x (+4641)
+/// i8   4.70x (+4623)      u8   4.72x (+4620)   bool 4.72x (+4638)
+/// ```
 ///
 /// EVERY dtype except f64 loses 4.6-7.7x, and they all lose by the SAME ~4650 ns, which is what
 /// identifies it as the `try_zerocopy_bytes_concatenate` entry rather than any dtype's kernel.
@@ -118340,7 +118342,9 @@ const ARRAY_STR_NATIVE_ROUTE_BEATS_NUMPY: bool = false;
 /// The incumbent is an `@array_function_dispatch` wrapper around a Python function whose
 /// entire non-0-d body is one call to the PUBLIC `array2string`:
 ///
-///     return array2string(a, max_line_width, precision, suppress_small, ' ', "")
+/// ```text
+/// return array2string(a, max_line_width, precision, suppress_small, ' ', "")
+/// ```
 ///
 /// So this route needs no numpy internals - it makes that same public call and skips the
 /// dispatcher and a Python frame. Checked against the incumbent across 1-d, 2-d, int, empty,
@@ -118349,8 +118353,10 @@ const ARRAY_STR_NATIVE_ROUTE_BEATS_NUMPY: bool = false;
 ///
 /// A 0-d OPERAND MUST DECLINE, and this is not a formality - the two disagree:
 ///
-///     array_str(np.array(5.0))   == '5.0'      array2string(...) == '5.'
-///     array_str(np.array('hi'))  == 'hi'       array2string(...) == "'hi'"
+/// ```text
+/// array_str(np.array(5.0))   == '5.0'      array2string(...) == '5.'
+/// array_str(np.array('hi'))  == 'hi'       array2string(...) == "'hi'"
+/// ```
 ///
 /// NumPy's 0-d branch returns the str of the SCALAR, so floats are not truncated by
 /// `precision` and strings are not quoted. Reproducing that means `_guarded_repr_or_str` and
@@ -133043,6 +133049,59 @@ mod tests {
                 actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
                 vec![2, 2]
             );
+            assert_eq!(
+                repr_string(&actual.bind(py).call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    /// Bit-equality against the installed numpy on a random monotone grid. `tolist()`
+    /// reprs are shortest-round-trip floats, so equal reprs mean equal bits. The previous
+    /// lerp formulation passed the hand-picked cases around it and was still 1 ulp off on
+    /// ordinary inputs; only a dense random comparison catches an operation-order bug.
+    #[test]
+    fn interp_matches_numpy_bitwise_on_random_grid() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            // Deterministic xorshift so the case is reproducible without a rand dependency.
+            let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+            let mut next_unit = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 11) as f64 / (1u64 << 53) as f64
+            };
+            let mut xp = Vec::with_capacity(257);
+            let mut acc = -3.0;
+            for _ in 0..257 {
+                acc += 0.01 + next_unit() * 0.7;
+                xp.push(acc);
+            }
+            let fp: Vec<f64> = (0..257).map(|_| (next_unit() - 0.5) * 2.0e3).collect();
+            let lo = xp[0] - 1.0;
+            let span = xp[256] - xp[0] + 2.0;
+            let mut x: Vec<f64> = (0..4096).map(|_| lo + next_unit() * span).collect();
+            // Exact grid hits and a NaN query exercise numpy's verbatim-return branches.
+            x.extend_from_slice(&[xp[0], xp[17], xp[256], f64::NAN]);
+
+            let x_arr = numeric_array(py, x, "float64");
+            let xp_arr = numeric_array(py, xp, "float64");
+            let fp_arr = numeric_array(py, fp, "float64");
+            let actual = interp(
+                py,
+                x_arr.clone().unbind(),
+                xp_arr.clone().unbind(),
+                fp_arr.clone().unbind(),
+                None,
+                None,
+                None,
+            )?;
+            let numpy = py.import("numpy")?;
+            let expected = numpy.getattr("interp")?.call1((x_arr, xp_arr, fp_arr))?;
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
