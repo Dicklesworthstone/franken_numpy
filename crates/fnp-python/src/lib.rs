@@ -24,7 +24,7 @@
 
 mod searchsorted_array_needle;
 
-use fnp_dtype::{ArrayStorage, DType, f16, promote};
+use fnp_dtype::{ArrayStorage, DType, f16};
 use fnp_io::{
     IOSupportedDType, load as io_load, save as io_save, savez as io_savez,
     savez_compressed as io_savez_compressed,
@@ -40,22 +40,68 @@ use fnp_random::{
 use fnp_ufunc::{
     BinaryOp, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
     FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
-    MaskedArray, UFuncArray, UnaryOp, bitwise_and as ufunc_bitwise_and,
-    bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
-    bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide, divmod_arrays as ufunc_divmod,
-    equal as ufunc_equal, fmax as ufunc_fmax, fmin as ufunc_fmin, frexp as ufunc_frexp,
-    greater as ufunc_greater, greater_equal as ufunc_greater_equal, hermeder as ufunc_hermeder,
+    MaskedArray, UFuncArray, UnaryOp, bitwise_count as ufunc_bitwise_count,
+    divmod_arrays as ufunc_divmod, frexp as ufunc_frexp, hermeder as ufunc_hermeder,
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
-    left_shift as ufunc_left_shift, less as ufunc_less, less_equal as ufunc_less_equal,
-    logaddexp2 as ufunc_logaddexp2, logical_and as ufunc_logical_and,
-    logical_not as ufunc_logical_not, logical_or as ufunc_logical_or,
-    logical_xor as ufunc_logical_xor, ma_is_masked, ma_make_mask, ma_mask_or,
-    matmul_accumulate_serial, maximum as ufunc_maximum, minimum as ufunc_minimum,
-    modf as ufunc_modf, not_equal as ufunc_not_equal, power as ufunc_power,
-    reduce_frompyfunc_values, remainder as ufunc_remainder, right_shift as ufunc_right_shift,
-    signbit as ufunc_signbit, spacing as ufunc_spacing, take_float_error_events,
+    left_shift as ufunc_left_shift, logaddexp2 as ufunc_logaddexp2,
+    logical_not as ufunc_logical_not, ma_is_masked, ma_make_mask, ma_mask_or,
+    matmul_accumulate_serial, modf as ufunc_modf, reduce_frompyfunc_values,
+    right_shift as ufunc_right_shift, signbit as ufunc_signbit, spacing as ufunc_spacing,
+    take_float_error_events,
 };
-use pyo3::buffer::PyBuffer;
+/// Crate-local shadow of `pyo3::buffer::PyBuffer` whose `get` REFUSES a buffer whose
+/// element byte order is not the host's.
+///
+/// Every zero-copy route in this crate reads operand bytes through `PyBuffer::<T>::get`
+/// and interprets them as native-order `T`. pyo3 0.28.3's `is_matching_endian` accepts a
+/// leading `>` in the buffer format on little-endian hosts, so a big-endian numpy array
+/// (`dtype='>f8'`) passes the typed-buffer check and its bytes are read raw: measured
+/// 2026-09-02 on a HEAD build, 15 of 65 ops returned WRONG VALUES for `>f8` input
+/// (`std` -> inf, `max`/`min`/`argmax`/`argmin`, `cumsum`, `cumprod`, `all`, ...) and
+/// `sort` on `>i8` returned garbage, with no error raised. Only 38 of the 798 sites had
+/// their own `isnative` check.
+///
+/// Rejecting here covers all 798 sites with one change. Sites that pattern-match on the
+/// result (`let Ok(buf) = PyBuffer::<f64>::get(x) else { return Ok(None) }`, the
+/// dominant shape) decline to numpy exactly as they do for any other non-owned operand,
+/// which is the correct behaviour: numpy handles non-native byte order itself. Sites that
+/// propagate with `?` now raise `BufferError` instead of computing a wrong answer; those
+/// are the residual to convert to declines (bead deadlock-audit-2kqw3).
+///
+/// Single-byte elements (`u8`, bool `?`) have no byte order and always pass. `Deref`
+/// exposes the whole pyo3 `PyBuffer` API so call sites are unchanged.
+struct PyBuffer<T>(pyo3::buffer::PyBuffer<T>);
+
+impl<T: pyo3::buffer::Element> PyBuffer<T> {
+    fn get(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let inner = pyo3::buffer::PyBuffer::<T>::get(obj)?;
+        if inner.item_size() > 1 && !buffer_format_is_native_order(inner.format()) {
+            return Err(pyo3::exceptions::PyBufferError::new_err(
+                "buffer element byte order is not native; fnp_python zero-copy routes decline non-native arrays",
+            ));
+        }
+        Ok(Self(inner))
+    }
+}
+
+impl<T> std::ops::Deref for PyBuffer<T> {
+    type Target = pyo3::buffer::PyBuffer<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// `true` when a struct-module format string describes host byte order: no prefix,
+/// `@`, `=`, or the explicit marker for this host. `>`/`!` are big-endian and `<` is
+/// little-endian in the buffer protocol regardless of what pyo3 accepts.
+fn buffer_format_is_native_order(format: &std::ffi::CStr) -> bool {
+    match format.to_bytes().first() {
+        Some(b'>') | Some(b'!') => cfg!(target_endian = "big"),
+        Some(b'<') => cfg!(target_endian = "little"),
+        _ => true,
+    }
+}
 use pyo3::exceptions::{
     PyDeprecationWarning, PyMemoryError, PyOSError, PyOverflowError, PyTypeError, PyValueError,
     PyZeroDivisionError,
@@ -141,33 +187,6 @@ impl UFuncKind {
             Self::GreaterEqual => "greater_equal",
             Self::Less => "less",
             Self::LessEqual => "less_equal",
-        }
-    }
-
-    #[allow(dead_code)]
-    fn binary_op(self) -> BinaryOp {
-        match self {
-            Self::Add => BinaryOp::Add,
-            Self::Subtract => BinaryOp::Sub,
-            Self::Multiply => BinaryOp::Mul,
-            Self::Divide => BinaryOp::Div,
-            Self::FloorDivide => BinaryOp::FloorDivide,
-            Self::Remainder => BinaryOp::Remainder,
-            Self::Power => BinaryOp::Power,
-            Self::Maximum => BinaryOp::Maximum,
-            Self::Minimum => BinaryOp::Minimum,
-            Self::BitwiseAnd => BinaryOp::BitwiseAnd,
-            Self::BitwiseOr => BinaryOp::BitwiseOr,
-            Self::BitwiseXor => BinaryOp::BitwiseXor,
-            Self::LogicalAnd => BinaryOp::LogicalAnd,
-            Self::LogicalOr => BinaryOp::LogicalOr,
-            Self::LogicalXor => BinaryOp::LogicalXor,
-            Self::Equal => BinaryOp::Equal,
-            Self::NotEqual => BinaryOp::NotEqual,
-            Self::Greater => BinaryOp::Greater,
-            Self::GreaterEqual => BinaryOp::GreaterEqual,
-            Self::Less => BinaryOp::Less,
-            Self::LessEqual => BinaryOp::LessEqual,
         }
     }
 
@@ -3685,14 +3704,6 @@ impl StackHelperKind {
             Self::Horizontal => "hstack",
         }
     }
-
-    #[allow(dead_code)]
-    fn rust_default(self, arrays: &[UFuncArray]) -> Result<UFuncArray, fnp_ufunc::UFuncError> {
-        match self {
-            Self::Vertical => UFuncArray::vstack(arrays),
-            Self::Horizontal => UFuncArray::hstack(arrays),
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -3712,22 +3723,6 @@ impl SplitHelperKind {
             Self::Horizontal => "hsplit",
             Self::Vertical => "vsplit",
             Self::Depth => "dsplit",
-        }
-    }
-
-    #[allow(dead_code)]
-    fn rust_sections(
-        self,
-        array: &UFuncArray,
-        sections: usize,
-        axis: isize,
-    ) -> Result<Vec<UFuncArray>, fnp_ufunc::UFuncError> {
-        match self {
-            Self::Equal => array.split(sections, axis),
-            Self::Flexible => array.array_split(sections, axis),
-            Self::Horizontal => array.hsplit(sections),
-            Self::Vertical => array.vsplit(sections),
-            Self::Depth => array.dsplit(sections),
         }
     }
 }
@@ -5751,32 +5746,6 @@ fn symmetric_matrix_from_selected_triangle(
     UFuncArray::new(vec![n, n], values, DType::F64)
 }
 
-#[allow(dead_code)]
-fn extract_condition_mask(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<Vec<bool>> {
-    // Boolean masks are the overwhelmingly common condition for compress/extract/
-    // where/place. Read them straight from the uint8 buffer into Vec<bool> instead
-    // of routing through extract_numeric_array, which materialises a full-width f64
-    // values array (16 MB for a 2M mask) only to map it back to bools. Non-bool
-    // conditions (int/float truthiness) keep the general `!= 0` path.
-    let numpy = cached_numpy(py)?;
-    let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
-    if array
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        == "b"
-    {
-        let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
-        return numpy_bool_to_vec(py, &flat);
-    }
-    let mask = extract_numeric_array(py, value, context)?;
-    Ok(mask.values().iter().map(|&value| value != 0.0).collect())
-}
-
 fn extract_ravel_multi_index_inputs(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -5853,43 +5822,6 @@ fn extract_numeric_array_sequence(
         .collect()
 }
 
-#[allow(dead_code)]
-fn extract_stack_sequence_items(
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<Vec<Py<PyAny>>> {
-    if !value.hasattr("__getitem__")? {
-        return Err(PyTypeError::new_err(format!(
-            "{context}: arrays to stack must be passed as a \"sequence\" type such as list or tuple."
-        )));
-    }
-
-    value.try_iter()?.map(|item| Ok(item?.unbind())).collect()
-}
-
-#[allow(dead_code)]
-fn extract_stack_numeric_arrays(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    kind: StackHelperKind,
-) -> PyResult<Option<Vec<UFuncArray>>> {
-    let items = extract_stack_sequence_items(value, kind.context())?;
-    let mut arrays = Vec::with_capacity(items.len());
-
-    for (index, item) in items.into_iter().enumerate() {
-        match extract_precise_numeric_array(
-            py,
-            item.bind(py),
-            &format!("{}(tup[{index}])", kind.context()),
-        ) {
-            Ok(array) => arrays.push(array),
-            Err(_) => return Ok(None),
-        }
-    }
-
-    Ok(Some(arrays))
-}
-
 fn stack_helper_numpy_fallback(
     py: Python<'_>,
     kind: StackHelperKind,
@@ -5933,52 +5865,15 @@ fn stack_helper_default(
     // is a typed concatenate that owns the exact shape/dtype/promotion surface, so
     // delegate.
     //
-    // CORRECTED 2026-08-18: the previous sentence here read "vstack/hstack/column_stack/
-    // dstack hit try_zerocopy_reshaped_concat first for the cases it covers; this is only
-    // the residual." THAT WAS FALSE and it was dangerous. `try_zerocopy_reshaped_concat`
-    // has NO call sites - it is `#[allow(dead_code)]` and deliberately so, because
-    // `a22ada4e` measured it at 4-15x SLOWER than numpy (column_stack(int8) 14.7x) and
-    // unwired it. `vstack`/`hstack` do have zero-copy paths, but they are
-    // `try_zerocopy_f64_concatenate` / `try_zerocopy_bytes_concatenate`, not that helper;
-    // `column_stack`/`dstack` delegate outright.
-    //
-    // Why this mattered enough to correct: an audit for implemented-but-unwired kernels
-    // lands on `reshaped_concat` immediately, and this comment was the evidence that it
-    // SHOULD be reachable. Acting on it would have re-introduced a measured 4-15x
-    // regression. The reject is recorded at the helper itself now, so the next reader
-    // finds it there rather than inferring reachability from here.
+    // `vstack`/`hstack` have zero-copy paths (`try_zerocopy_f64_concatenate` /
+    // `try_zerocopy_bytes_concatenate`); `column_stack`/`dstack` delegate outright.
+    // A reshape-to-(n,1)-then-concatenate helper for column_stack/dstack was measured
+    // at 4-15x SLOWER than numpy (`a22ada4e`, column_stack(int8) 14.7x): reshaping each
+    // input to a thin slice makes the concatenate strided, interleaving columns instead
+    // of copying runs. It sat unwired behind an allow(dead_code) until 2026-09-02 and was
+    // then removed; the reject lives in docs/NEGATIVE_EVIDENCE.md, and re-wiring that
+    // shape needs a measurement that beats those numbers, not a reading of the code.
     stack_helper_numpy_fallback(py, kind, tup, None, None)
-}
-
-#[allow(dead_code)]
-fn extract_split_sections(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
-    let numpy = cached_numpy(py)?;
-    let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
-    if array.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 0 {
-        return Ok(None);
-    }
-
-    let kind = array
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if !matches!(kind.as_str(), "b" | "i" | "u" | "f") {
-        return Ok(None);
-    }
-
-    let sections = array
-        .call_method1(intern!(py, "astype"), ("int64",))?
-        .call_method0(intern!(py, "item"))?
-        .extract::<i64>()?;
-    if sections < 0 {
-        return Err(PyValueError::new_err(
-            "number sections must be larger than 0.",
-        ));
-    }
-
-    usize::try_from(sections)
-        .map(Some)
-        .map_err(|_| PyValueError::new_err("number sections must be larger than 0."))
 }
 
 fn split_helper_numpy_fallback(
@@ -6093,48 +5988,6 @@ fn try_normalize_axis(axis: isize, ndim: usize) -> Option<usize> {
 
 /// Extract and validate axes for tensorsolve permutation.
 /// Reserved for numpy.linalg.tensorsolve support.
-#[allow(dead_code)]
-fn extract_tensorsolve_axes(
-    py: Python<'_>,
-    axes: Option<Py<PyAny>>,
-    ndim: usize,
-) -> PyResult<Option<Vec<usize>>> {
-    let Some(axes) = axes else {
-        return Ok(None);
-    };
-
-    let axes = axes.bind(py);
-    if axes.is_none() {
-        return Ok(None);
-    }
-
-    let iter = axes.try_iter()?;
-    let permutation = PyList::new(py, 0..ndim)?;
-    for axis in iter {
-        let axis = axis?;
-        permutation.call_method1(intern!(py, "remove"), (axis.clone(),))?;
-        permutation.call_method1(intern!(py, "insert"), (ndim, axis))?;
-    }
-
-    let mut normalized = Vec::with_capacity(ndim);
-    for axis in permutation.iter() {
-        if axis.cast::<PyBool>().is_ok() {
-            return Err(PyTypeError::new_err("an integer is required"));
-        }
-        match axis.extract::<usize>() {
-            Ok(value) => normalized.push(value),
-            Err(_) => {
-                let type_name = axis.get_type().name()?;
-                return Err(PyTypeError::new_err(format!(
-                    "'{type_name}' object cannot be interpreted as an integer"
-                )));
-            }
-        }
-    }
-
-    Ok(Some(normalized))
-}
-
 fn require_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>, context: &str) -> PyResult<()> {
     let builtins = py.import("builtins")?;
     let is_ndarray = builtins
@@ -6151,40 +6004,6 @@ fn require_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>, context: &str
             "{context}: argument 1 must be numpy.ndarray",
         )))
     }
-}
-
-#[allow(dead_code)]
-fn reshape_with_leading_singletons(
-    array: UFuncArray,
-    target_ndim: usize,
-    context: &str,
-) -> PyResult<UFuncArray> {
-    if array.shape().len() >= target_ndim {
-        return Ok(array);
-    }
-
-    let mut reshaped = Vec::with_capacity(target_ndim);
-    reshaped.extend(std::iter::repeat_n(
-        1_isize,
-        target_ndim - array.shape().len(),
-    ));
-    reshaped.extend(
-        array
-            .shape()
-            .iter()
-            .map(|&dim| {
-                isize::try_from(dim).map_err(|_| {
-                    PyValueError::new_err(format!(
-                        "{context}: dimension {dim} exceeds signed pointer range",
-                    ))
-                })
-            })
-            .collect::<PyResult<Vec<_>>>()?,
-    );
-
-    array
-        .reshape(&reshaped)
-        .map_err(|err| map_ufunc_error(format!("{context}: {err}")))
 }
 
 fn copy_result_into_numpy_array(
@@ -6743,52 +6562,6 @@ fn extract_python_dtype(
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
 
-#[allow(dead_code)]
-fn collect_fromiter_values<T, F>(
-    source: &Bound<'_, PyAny>,
-    scalar_type: &Bound<'_, PyAny>,
-    count: i64,
-    mut convert: F,
-) -> PyResult<Vec<T>>
-where
-    F: FnMut(&Bound<'_, PyAny>) -> PyResult<T>,
-{
-    let limit = if count == -1 {
-        None
-    } else if count < -1 {
-        Some(0_usize)
-    } else {
-        Some(count as usize)
-    };
-
-    if limit == Some(0) {
-        return Ok(Vec::new());
-    }
-
-    let mut values = Vec::new();
-    for item in source.try_iter()? {
-        if let Some(limit) = limit
-            && values.len() == limit
-        {
-            break;
-        }
-
-        let scalar = scalar_type.call1((item?,))?;
-        values.push(convert(&scalar)?);
-    }
-
-    if let Some(limit) = limit
-        && values.len() < limit
-    {
-        return Err(PyValueError::new_err(format!(
-            "iterator too short: Expected {limit} but iterator had only {} items.",
-            values.len()
-        )));
-    }
-
-    Ok(values)
-}
-
 fn dtype_item_size(dtype: DType) -> Option<usize> {
     match dtype {
         DType::Bool | DType::I8 | DType::U8 => Some(1),
@@ -6943,29 +6716,6 @@ fn savez_impl(
         }
         Err(_) => fallback(),
     }
-}
-
-#[allow(dead_code)]
-fn collect_frombuffer_bytes(
-    py: Python<'_>,
-    buffer: &Bound<'_, PyAny>,
-    offset: i64,
-) -> PyResult<Vec<u8>> {
-    let builtins = py.import("builtins")?;
-    let view = builtins
-        .getattr(intern!(py, "memoryview"))?
-        .call1((buffer,))?;
-    let len = view.getattr(intern!(py, "nbytes"))?.extract::<usize>()?;
-
-    if offset < 0 || offset as usize > len {
-        return Err(PyValueError::new_err(format!(
-            "offset must be non-negative and no greater than buffer length ({len})"
-        )));
-    }
-
-    let raw = view.call_method0(intern!(py, "tobytes"))?;
-    let bytes = raw.extract::<Vec<u8>>()?;
-    Ok(bytes[offset as usize..].to_vec())
 }
 
 fn collect_frombuffer_values<T, F>(
@@ -7260,518 +7010,10 @@ fn python_is_complex_obj(value: &Bound<'_, PyAny>) -> PyResult<bool> {
 
 /// Extract typed storage from a flattened numpy array.
 /// Reserved for structured array support (structured_to_unstructured, unstructured_to_structured).
-#[allow(dead_code)]
-fn extract_storage_from_flat_array(
-    flat: &Bound<'_, PyAny>,
-    parsed_dtype: DType,
-    context: &str,
-) -> PyResult<ArrayStorage> {
-    match parsed_dtype {
-        DType::Bool => Ok(ArrayStorage::Bool(
-            flat.call_method0("tolist")?.extract::<Vec<bool>>()?,
-        )),
-        DType::I8 => Ok(ArrayStorage::I8(
-            flat.call_method1("astype", ("int8",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i8>>()?,
-        )),
-        DType::I16 => Ok(ArrayStorage::I16(
-            flat.call_method1("astype", ("int16",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i16>>()?,
-        )),
-        DType::I32 => Ok(ArrayStorage::I32(
-            flat.call_method1("astype", ("int32",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i32>>()?,
-        )),
-        DType::I64 => Ok(ArrayStorage::I64(
-            flat.call_method1("astype", ("int64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i64>>()?,
-        )),
-        DType::U8 => Ok(ArrayStorage::U8(
-            flat.call_method1("astype", ("uint8",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u8>>()?,
-        )),
-        DType::U16 => Ok(ArrayStorage::U16(
-            flat.call_method1("astype", ("uint16",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u16>>()?,
-        )),
-        DType::U32 => Ok(ArrayStorage::U32(
-            flat.call_method1("astype", ("uint32",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u32>>()?,
-        )),
-        DType::U64 => Ok(ArrayStorage::U64(
-            flat.call_method1("astype", ("uint64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u64>>()?,
-        )),
-        // f16: zero-copy uint16 view -> f16::from_bits (the astype->tolist->Vec<f32>
-        // path boxed one Python float per element, ~2500x slower than numpy on abs).
-        DType::F16 => Ok(ArrayStorage::F16(
-            numpy_cast_contiguous_to_vec::<u16>(
-                flat.py(),
-                &flat.call_method1("view", ("uint16",))?,
-                "uint16",
-            )?
-            .into_iter()
-            .map(f16::from_bits)
-            .collect(),
-        )),
-        DType::F32 => Ok(ArrayStorage::F32(
-            flat.call_method1("astype", ("float32",))?
-                .call_method0("tolist")?
-                .extract::<Vec<f32>>()?,
-        )),
-        DType::F64 => Ok(ArrayStorage::F64(
-            flat.call_method1("astype", ("float64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<f64>>()?,
-        )),
-        DType::Complex64 => {
-            let complex = flat.call_method1("astype", ("complex64",))?;
-            let real = complex
-                .getattr("real")?
-                .call_method0("tolist")?
-                .extract::<Vec<f32>>()?;
-            let imag = complex
-                .getattr("imag")?
-                .call_method0("tolist")?
-                .extract::<Vec<f32>>()?;
-            Ok(ArrayStorage::Complex64(
-                real.into_iter().zip(imag).collect(),
-            ))
-        }
-        DType::Complex128 => {
-            let complex = flat.call_method1("astype", ("complex128",))?;
-            let real = complex
-                .getattr("real")?
-                .call_method0("tolist")?
-                .extract::<Vec<f64>>()?;
-            let imag = complex
-                .getattr("imag")?
-                .call_method0("tolist")?
-                .extract::<Vec<f64>>()?;
-            Ok(ArrayStorage::Complex128(
-                real.into_iter().zip(imag).collect(),
-            ))
-        }
-        DType::Str => Ok(ArrayStorage::String(
-            flat.call_method0("tolist")?.extract::<Vec<String>>()?,
-        )),
-        unsupported => Err(PyTypeError::new_err(format!(
-            "{context}: unsupported structured field dtype {}",
-            unsupported.name()
-        ))),
-    }
-}
-
 /// Recursively extract leaf columns from a structured numpy array.
 /// Reserved for structured array support (structured_to_unstructured).
-#[allow(dead_code)]
-fn extract_structured_leaf_columns(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    base_ndim: usize,
-    context: &str,
-) -> PyResult<Vec<(DType, ArrayStorage, usize)>> {
-    let numpy = cached_numpy(py)?;
-    let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
-    let dtype = array.getattr(intern!(py, "dtype"))?;
-    let names = dtype.getattr(intern!(py, "names"))?;
-
-    if names.is_none() {
-        let dtype_name = dtype.getattr(intern!(py, "name"))?.extract::<String>()?;
-        let parsed_dtype = DType::parse(&dtype_name).ok_or_else(|| {
-            PyTypeError::new_err(format!(
-                "{context}: unsupported structured field dtype {dtype_name}"
-            ))
-        })?;
-        let shape = array
-            .getattr(intern!(py, "shape"))?
-            .extract::<Vec<usize>>()?;
-        let width = shape
-            .iter()
-            .skip(base_ndim)
-            .copied()
-            .product::<usize>()
-            .max(1);
-        let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
-        let storage = extract_storage_from_flat_array(&flat, parsed_dtype, context)?;
-        return Ok(vec![(parsed_dtype, storage, width)]);
-    }
-
-    let field_names = names.extract::<Vec<String>>()?;
-    let mut columns = Vec::new();
-    for field_name in field_names {
-        let field_array = array.get_item(field_name.as_str())?;
-        columns.extend(extract_structured_leaf_columns(
-            py,
-            &field_array,
-            base_ndim,
-            context,
-        )?);
-    }
-    Ok(columns)
-}
-
 /// Promote a slice of dtypes to their common type. Reserved for structured array support.
-#[allow(dead_code)]
-fn promote_structured_leaf_dtypes(dtypes: &[DType]) -> Option<DType> {
-    let mut iter = dtypes.iter().copied();
-    let first = iter.next()?;
-    Some(iter.fold(first, promote))
-}
-
 /// Build a numpy array from interleaved column storage. Reserved for unstructured_to_structured.
-#[allow(dead_code)]
-fn build_numpy_array_from_interleaved_storage(
-    py: Python<'_>,
-    shape: &[usize],
-    columns: &[(ArrayStorage, usize)],
-    num_records: usize,
-    target_dtype: DType,
-) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let total_width = columns.iter().map(|(_, width)| *width).sum::<usize>();
-    let total_len = num_records.saturating_mul(total_width);
-    let kwargs = PyDict::new(py);
-
-    let array = match target_dtype {
-        DType::Bool => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::Bool(column_values) = column else {
-                        unreachable!("bool target must use bool storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "bool_")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::I8 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::I8(column_values) = column else {
-                        unreachable!("int8 target must use int8 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "int8")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::I16 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::I16(column_values) = column else {
-                        unreachable!("int16 target must use int16 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "int16")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::I32 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::I32(column_values) = column else {
-                        unreachable!("int32 target must use int32 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "int32")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::I64 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::I64(column_values) = column else {
-                        unreachable!("int64 target must use int64 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "int64")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::U8 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::U8(column_values) = column else {
-                        unreachable!("uint8 target must use uint8 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::U16 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::U16(column_values) = column else {
-                        unreachable!("uint16 target must use uint16 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "uint16")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::U32 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::U32(column_values) = column else {
-                        unreachable!("uint32 target must use uint32 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "uint32")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::U64 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::U64(column_values) = column else {
-                        unreachable!("uint64 target must use uint64 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "uint64")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::F16 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::F16(column_values) = column else {
-                        unreachable!("float16 target must use float16 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(f32::from(column_values[base + component]));
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "float16")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::F32 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::F32(column_values) = column else {
-                        unreachable!("float32 target must use float32 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "float32")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::F64 => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::F64(column_values) = column else {
-                        unreachable!("float64 target must use float64 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component]);
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "float64")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(py, values.iter().copied())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::Complex64 => {
-            let builtins = py.import("builtins")?;
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::Complex64(column_values) = column else {
-                        unreachable!("complex64 target must use complex64 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        let (re, im) = column_values[base + component];
-                        values.push(
-                            builtins
-                                .getattr(intern!(py, "complex"))?
-                                .call1((re, im))?
-                                .unbind(),
-                        );
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "complex64")?;
-            numpy.call_method(
-                intern!(py, "array"),
-                (PyList::new(py, values.iter())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::Complex128 => {
-            let builtins = py.import("builtins")?;
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::Complex128(column_values) = column else {
-                        unreachable!("complex128 target must use complex128 storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        let (re, im) = column_values[base + component];
-                        values.push(
-                            builtins
-                                .getattr(intern!(py, "complex"))?
-                                .call1((re, im))?
-                                .unbind(),
-                        );
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "complex128")?;
-            numpy.call_method(
-                intern!(py, "array"),
-                (PyList::new(py, values.iter())?,),
-                Some(&kwargs),
-            )?
-        }
-        DType::Str => {
-            let mut values = Vec::with_capacity(total_len);
-            for record in 0..num_records {
-                for (column, width) in columns {
-                    let ArrayStorage::String(column_values) = column else {
-                        unreachable!("str target must use string storage");
-                    };
-                    let base = record * *width;
-                    for component in 0..*width {
-                        values.push(column_values[base + component].clone());
-                    }
-                }
-            }
-            kwargs.set_item(intern!(py, "dtype"), "str")?;
-            numpy.call_method(
-                intern!(py, "array"),
-                (PyList::new(py, values.iter())?,),
-                Some(&kwargs),
-            )?
-        }
-        unsupported => {
-            return Err(PyTypeError::new_err(format!(
-                "structured_to_unstructured: unsupported output dtype {}",
-                unsupported.name()
-            )));
-        }
-    };
-
-    let mut output_shape = shape.to_vec();
-    output_shape.push(total_width);
-    let output_shape = PyTuple::new(py, output_shape.iter().copied())?;
-    Ok(array
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind())
-}
-
 fn validate_cpu_device_kwarg(py: Python<'_>, device: Option<Py<PyAny>>) -> PyResult<()> {
     let Some(device) = device else {
         return Ok(());
@@ -22501,116 +21743,6 @@ fn build_numpy_masked_array(py: Python<'_>, array: &MaskedArray) -> PyResult<Py<
         .unbind())
 }
 
-// Retained for a future robust native eigvals; `eigvals` currently delegates to
-// NumPy's LAPACK geev because the native QR solver did not reliably converge.
-#[allow(dead_code)]
-fn build_numpy_eigvals_vector_from_flat_interleaved(
-    py: Python<'_>,
-    values: &[f64],
-    input_dtype: DType,
-) -> PyResult<Py<PyAny>> {
-    if !values.len().is_multiple_of(2) {
-        return Err(PyTypeError::new_err(
-            "complex output must contain flat interleaved real/imag pairs",
-        ));
-    }
-
-    let numpy = py.import("numpy")?;
-    let values_as_pairs = values.as_chunks::<2>().0;
-    let all_real = values_as_pairs.iter().all(|chunk| chunk[1] == 0.0);
-    if all_real {
-        let kwargs = PyDict::new(py);
-        match input_dtype {
-            DType::F32 => {
-                let real_values = values_as_pairs
-                    .iter()
-                    .map(|chunk| chunk[0] as f32)
-                    .collect::<Vec<_>>();
-                kwargs.set_item(intern!(py, "dtype"), numpy.getattr(intern!(py, "float32"))?)?;
-                return Ok(numpy
-                    .getattr(intern!(py, "array"))?
-                    .call(
-                        (PyList::new(py, real_values.iter().copied())?,),
-                        Some(&kwargs),
-                    )?
-                    .unbind());
-            }
-            _ => {
-                let real_values = values_as_pairs
-                    .iter()
-                    .map(|chunk| chunk[0])
-                    .collect::<Vec<_>>();
-                kwargs.set_item(intern!(py, "dtype"), numpy.getattr(intern!(py, "float64"))?)?;
-                return Ok(numpy
-                    .getattr(intern!(py, "array"))?
-                    .call(
-                        (PyList::new(py, real_values.iter().copied())?,),
-                        Some(&kwargs),
-                    )?
-                    .unbind());
-            }
-        }
-    }
-
-    let builtins = py.import("builtins")?;
-    let complex_values = values_as_pairs
-        .iter()
-        .map(|chunk| {
-            builtins
-                .getattr(intern!(py, "complex"))?
-                .call1((chunk[0], chunk[1]))
-        })
-        .collect::<PyResult<Vec<_>>>()?;
-    let kwargs = PyDict::new(py);
-    let complex_dtype = match input_dtype {
-        DType::F32 => numpy.getattr(intern!(py, "complex64"))?,
-        _ => numpy.getattr(intern!(py, "complex128"))?,
-    };
-    kwargs.set_item(intern!(py, "dtype"), complex_dtype)?;
-    Ok(numpy
-        .getattr(intern!(py, "array"))?
-        .call((PyList::new(py, complex_values.iter())?,), Some(&kwargs))?
-        .unbind())
-}
-
-#[allow(dead_code)]
-fn extract_complex_interleaved_array(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<UFuncArray> {
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(
-        intern!(py, "dtype"),
-        numpy.getattr(intern!(py, "complex128"))?,
-    )?;
-    let array = numpy.call_method(intern!(py, "asarray"), (value,), Some(&kwargs))?;
-    let shape = array
-        .getattr(intern!(py, "shape"))?
-        .extract::<Vec<usize>>()?;
-    if shape.len() != 1 {
-        return Err(PyTypeError::new_err(format!(
-            "{context}: expected a 1-D complex array"
-        )));
-    }
-    let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
-    let real = flat
-        .getattr(intern!(py, "real"))?
-        .call_method0(intern!(py, "tolist"))?
-        .extract::<Vec<f64>>()?;
-    let imag = flat
-        .getattr(intern!(py, "imag"))?
-        .call_method0(intern!(py, "tolist"))?
-        .extract::<Vec<f64>>()?;
-    let mut values = Vec::with_capacity(real.len() * 2);
-    for (&re, &im) in real.iter().zip(&imag) {
-        values.push(re);
-        values.push(im);
-    }
-    UFuncArray::new(vec![shape[0], 2], values, DType::F64).map_err(map_ufunc_error)
-}
-
 fn build_numpy_tuple_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyResult<Py<PyAny>> {
     let arrays = arrays
         .iter()
@@ -22627,17 +21759,6 @@ fn build_numpy_scalar_or_array_tuple(py: Python<'_>, arrays: &[UFuncArray]) -> P
         .map(|array| build_numpy_scalar_or_array(py, array))
         .collect::<PyResult<Vec<_>>>()?;
     Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
-        .into_any()
-        .unbind())
-}
-
-#[allow(dead_code)]
-fn build_numpy_list_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyResult<Py<PyAny>> {
-    let arrays = arrays
-        .iter()
-        .map(|array| build_numpy_array_from_ufunc(py, array))
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok(PyList::new(py, arrays.iter().map(|array| array.bind(py)))?
         .into_any()
         .unbind())
 }
@@ -42972,80 +42093,6 @@ fn try_zerocopy_f64_histogramdd(
     Ok(Some(out.unbind()))
 }
 
-// Zero-copy column_stack / dstack: both are a per-input reshape (adding a trailing or
-// leading singleton axis) followed by a concatenate, so once the inputs are reshaped
-// (a view for contiguous data) the now-fast all-dtype concatenate does the work.
-//   column_stack: 1-D -> (n,1), 2-D kept; concatenate axis=1.
-//   dstack (atleast_3d): 1-D -> (1,n,1), 2-D -> (r,c,1), 3-D kept; concatenate axis=2.
-// Mismatched off-axis shapes / dtypes / non-contiguous inputs fall through to numpy.
-//
-// DEAD ON PURPOSE - DO NOT WIRE THIS UP. `#[allow(dead_code)]` below is not an oversight
-// and not a TODO. `a22ada4e` measured this path at 4-15x SLOWER than numpy and removed
-// its call sites: reshaping each input to a thin (n,1)/(n,1,1) slice makes the following
-// concatenate strided along axis 1 or 2, which interleaves columns instead of copying
-// runs. numpy's column_stack/dstack do the same job at memcpy speed.
-//
-//   column_stack/dstack @2M, np/fnp after delegating: 0.79-1.14x across f64/f32/int32/int8
-//   the same cells through THIS helper:               4-15x SLOWER (column_stack(int8) 14.7x)
-//
-// It is retained only as a record of the shape that was tried. An audit for
-// implemented-but-unwired kernels will land here - that is expected, and the answer is
-// that the kernel works and is simply slower than the incumbent. Re-wiring it needs a
-// measurement that beats those numbers, not a reading of the code.
-#[allow(dead_code)]
-fn try_zerocopy_reshaped_concat(
-    py: Python<'_>,
-    tup: &Bound<'_, PyAny>,
-    depth: bool,
-) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    let Ok(iter) = tup.try_iter() else {
-        return Ok(None);
-    };
-    let items: Vec<Bound<'_, PyAny>> = iter.collect::<PyResult<Vec<_>>>()?;
-    if items.is_empty() {
-        return Ok(None);
-    }
-    let reshaped = pyo3::types::PyList::empty(py);
-    for item in &items {
-        if !item.is_exact_instance(&ndarray_type) {
-            return Ok(None);
-        }
-        let nd = item.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
-        let r = if depth {
-            match nd {
-                1 => {
-                    let s: Vec<usize> = item.getattr(intern!(py, "shape"))?.extract()?;
-                    item.call_method1(intern!(py, "reshape"), ((1usize, s[0], 1usize),))?
-                }
-                2 => {
-                    let s: Vec<usize> = item.getattr(intern!(py, "shape"))?.extract()?;
-                    item.call_method1(intern!(py, "reshape"), ((s[0], s[1], 1usize),))?
-                }
-                3 => item.clone(),
-                _ => return Ok(None),
-            }
-        } else {
-            match nd {
-                1 => item.call_method1(intern!(py, "reshape"), ((-1isize, 1isize),))?,
-                2 => item.clone(),
-                _ => return Ok(None),
-            }
-        };
-        reshaped.append(r)?;
-    }
-    let axis = if depth { 2 } else { 1 };
-    let seq = reshaped.as_any();
-    if let Some(out) = try_zerocopy_f64_concatenate(py, seq, axis)? {
-        return Ok(Some(out));
-    }
-    if let Some(out) = try_zerocopy_bytes_concatenate(py, seq, axis)? {
-        return Ok(Some(out));
-    }
-    Ok(None)
-}
-
 #[pyfunction]
 fn dstack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
@@ -60548,125 +59595,6 @@ fn parse_shape_override(shape: &Bound<'_, PyAny>, context: &str) -> PyResult<Vec
     }
 }
 
-#[allow(dead_code)]
-enum LikeFill<'py> {
-    Zeros,
-    Ones,
-    Empty,
-    Full(&'py Bound<'py, PyAny>),
-}
-
-// Native creation of *_like outputs for the common numeric dtypes. Returns
-// Ok(None) whenever a parameter combination (F-contiguous multi-D input with
-// default order='K', unsupported dtypes, subclass preservation via subok, or
-// explicit device targets) cannot be matched by the native UFuncArray path;
-// callers fall back to numpy in that case so the full numpy surface is still
-// exercised. Shape and dtype inheritance, dtype overrides, shape overrides,
-// and zero-sized inputs are handled natively.
-//
-// NOTE: currently unused — the *_like callers delegate to numpy because this
-// UFuncArray-build-then-convert path was catastrophically slow (empty_like ~240000x,
-// zeros/ones_like ~90x for narrow ints). Retained for a future fast native rewrite
-// (np.empty/zeros/ones/full of the resolved dtype directly, no UFuncArray).
-#[allow(dead_code)]
-#[allow(clippy::too_many_arguments)]
-fn native_like_array(
-    py: Python<'_>,
-    source: &Bound<'_, PyAny>,
-    dtype: Option<&Bound<'_, PyAny>>,
-    order: &str,
-    subok: bool,
-    shape: Option<&Bound<'_, PyAny>>,
-    device: Option<&Bound<'_, PyAny>>,
-    fill: &LikeFill<'_>,
-    context: &str,
-) -> PyResult<Option<Py<PyAny>>> {
-    if device.is_some_and(|value| !value.is_none()) {
-        return Ok(None);
-    }
-    if !matches!(order, "K" | "C") {
-        return Ok(None);
-    }
-
-    let numpy = cached_numpy(py)?;
-    let source_array = numpy.call_method1(intern!(py, "asanyarray"), (source,))?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if subok && !source_array.is_exact_instance(&ndarray_type) {
-        return Ok(None);
-    }
-    let source_shape: Vec<usize> = source_array.getattr(intern!(py, "shape"))?.extract()?;
-
-    let target_dtype = match dtype {
-        Some(dtype_val) if !dtype_val.is_none() => {
-            let parsed = numpy.getattr(intern!(py, "dtype"))?.call1((dtype_val,))?;
-            let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
-            match DType::parse(&name) {
-                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
-                _ => return Ok(None),
-            }
-        }
-        _ => {
-            let source_dtype_name = source_array
-                .getattr(intern!(py, "dtype"))?
-                .getattr(intern!(py, "name"))?
-                .extract::<String>()?;
-            match DType::parse(&source_dtype_name) {
-                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
-                _ => return Ok(None),
-            }
-        }
-    };
-
-    let shape_overridden = shape.is_some_and(|value| !value.is_none());
-    let target_shape = if shape_overridden {
-        parse_shape_override(shape.expect("checked above"), context)?
-    } else {
-        source_shape.clone()
-    };
-
-    // With order='K' and no shape override, numpy preserves the input's
-    // memory layout. For multi-D F-contiguous inputs that means we need
-    // to emit an F-contiguous output via the fortran export bridge.
-    let mut emit_fortran = false;
-    if order == "K" && !shape_overridden && source_shape.len() >= 2 {
-        let flags = source_array.getattr(intern!(py, "flags"))?;
-        let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
-        let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
-        if f_contig && !c_contig {
-            emit_fortran = true;
-        }
-    }
-
-    let result = match fill {
-        LikeFill::Zeros | LikeFill::Empty => match UFuncArray::zeros(target_shape, target_dtype) {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        },
-        LikeFill::Ones => match UFuncArray::ones(target_shape, target_dtype) {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        },
-        LikeFill::Full(value) => {
-            let fill_scalar = match value.extract::<f64>() {
-                Ok(scalar) if scalar.is_finite() => scalar,
-                Ok(scalar) => scalar,
-                Err(_) => return Ok(None),
-            };
-            match UFuncArray::full(target_shape, fill_scalar, target_dtype) {
-                Ok(value) => value,
-                Err(_) => return Ok(None),
-            }
-        }
-    };
-
-    let output = if emit_fortran {
-        build_numpy_array_from_ufunc_fortran(py, &result)?
-    } else {
-        build_numpy_array_from_ufunc(py, &result)?
-    };
-    Ok(Some(output))
-}
-
 #[pyfunction]
 #[pyo3(signature = (a, fill_value, dtype=None, order="K", subok=true, shape=None, *, device=None))]
 #[allow(clippy::too_many_arguments)]
@@ -62584,140 +61512,6 @@ fn native_binary_arctan2_or_passthrough(
 // Retained for reference / potential reuse once a SIMD f64 path exists (bead
 // 8vdtg); the python `fmax` binding now passes straight through to numpy because
 // this native path was 60-72x slower. Matches the maximum/minimum convention below.
-#[allow(dead_code)]
-fn native_binary_fmax_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let numpy = cached_numpy(py)?;
-        let arr1 = numpy.call_method1(intern!(py, "asarray"), (&args.get_item(0)?,))?;
-        let arr2 = numpy.call_method1(intern!(py, "asarray"), (&args.get_item(1)?,))?;
-        let dtype1_kind = arr1
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        let dtype2_kind = arr2
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        if dtype1_kind == "c" || dtype2_kind == "c" {
-            return core_numpy_passthrough_interned(py, intern!(py, "fmax"), args, kwargs);
-        }
-        // fmax preserves the input dtype exactly; the f64 kernel widens narrow
-        // ints/floats, so defer anything but float64 to numpy.
-        if !numpy_dtype_is_f64(py, &args.get_item(0)?)
-            || !numpy_dtype_is_f64(py, &args.get_item(1)?)
-        {
-            return core_numpy_passthrough_interned(py, intern!(py, "fmax"), args, kwargs);
-        }
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "fmax(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "fmax(x2)")?;
-        let result = ufunc_fmax(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "fmax"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_fmin_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let numpy = cached_numpy(py)?;
-        let arr1 = numpy.call_method1(intern!(py, "asarray"), (&args.get_item(0)?,))?;
-        let arr2 = numpy.call_method1(intern!(py, "asarray"), (&args.get_item(1)?,))?;
-        let dtype1_kind = arr1
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        let dtype2_kind = arr2
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        if dtype1_kind == "c" || dtype2_kind == "c" {
-            return core_numpy_passthrough_interned(py, intern!(py, "fmin"), args, kwargs);
-        }
-        // fmin preserves the input dtype exactly; the f64 kernel widens narrow
-        // ints/floats, so defer anything but float64 to numpy.
-        if !numpy_dtype_is_f64(py, &args.get_item(0)?)
-            || !numpy_dtype_is_f64(py, &args.get_item(1)?)
-        {
-            return core_numpy_passthrough_interned(py, intern!(py, "fmin"), args, kwargs);
-        }
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "fmin(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "fmin(x2)")?;
-        let result = ufunc_fmin(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "fmin"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_maximum_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let numpy = cached_numpy(py)?;
-        let arr1 = numpy.call_method1(intern!(py, "asarray"), (&args.get_item(0)?,))?;
-        let arr2 = numpy.call_method1(intern!(py, "asarray"), (&args.get_item(1)?,))?;
-        let dtype1_kind = arr1
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        let dtype2_kind = arr2
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        if dtype1_kind == "c" || dtype2_kind == "c" {
-            return core_numpy_passthrough_interned(py, intern!(py, "maximum"), args, kwargs);
-        }
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "maximum(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "maximum(x2)")?;
-        let result = ufunc_maximum(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "maximum"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_minimum_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let numpy = cached_numpy(py)?;
-        let arr1 = numpy.call_method1(intern!(py, "asarray"), (&args.get_item(0)?,))?;
-        let arr2 = numpy.call_method1(intern!(py, "asarray"), (&args.get_item(1)?,))?;
-        let dtype1_kind = arr1
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        let dtype2_kind = arr2
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        if dtype1_kind == "c" || dtype2_kind == "c" {
-            return core_numpy_passthrough_interned(py, intern!(py, "minimum"), args, kwargs);
-        }
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "minimum(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "minimum(x2)")?;
-        let result = ufunc_minimum(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "minimum"), args, kwargs)
-    }
-}
-
 fn native_binary_gcd_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -62782,301 +61576,6 @@ fn native_binary_float_power_or_passthrough(
         return Ok(out);
     }
     core_numpy_passthrough_interned(py, intern!(py, "float_power"), args, kwargs)
-}
-
-fn native_binary_remainder_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        // mod/remainder preserve the input dtype; the f64 kernel widens narrow
-        // ints/floats, so defer anything but float64 to numpy.
-        if !numpy_dtype_is_f64(py, &args.get_item(0)?)
-            || !numpy_dtype_is_f64(py, &args.get_item(1)?)
-        {
-            return core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs);
-        }
-        let numpy = cached_numpy(py)?;
-        if noncontiguous_ndarray(numpy, &args.get_item(0)?)?
-            || noncontiguous_ndarray(numpy, &args.get_item(1)?)?
-        {
-            return core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs);
-        }
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "remainder(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "remainder(x2)")?;
-        if contains_zero_divisor(&x2) {
-            return core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs);
-        }
-        let result = ufunc_remainder(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "remainder"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_equal_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "equal(x1)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "equal"), args, kwargs);
-            }
-        };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "equal(x2)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "equal"), args, kwargs);
-            }
-        };
-        let result = match ufunc_equal(&x1, &x2) {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "equal"), args, kwargs);
-            }
-        };
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "equal"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_not_equal_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "not_equal(x1)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "not_equal"), args, kwargs);
-            }
-        };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "not_equal(x2)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "not_equal"), args, kwargs);
-            }
-        };
-        let result = match ufunc_not_equal(&x1, &x2) {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "not_equal"), args, kwargs);
-            }
-        };
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "not_equal"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_greater_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "greater(x1)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "greater"), args, kwargs);
-            }
-        };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "greater(x2)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "greater"), args, kwargs);
-            }
-        };
-        let result = match ufunc_greater(&x1, &x2) {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "greater"), args, kwargs);
-            }
-        };
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "greater"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_greater_equal_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "greater_equal(x1)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(
-                    py,
-                    intern!(py, "greater_equal"),
-                    args,
-                    kwargs,
-                );
-            }
-        };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "greater_equal(x2)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(
-                    py,
-                    intern!(py, "greater_equal"),
-                    args,
-                    kwargs,
-                );
-            }
-        };
-        let result = match ufunc_greater_equal(&x1, &x2) {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(
-                    py,
-                    intern!(py, "greater_equal"),
-                    args,
-                    kwargs,
-                );
-            }
-        };
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "greater_equal"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_less_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "less(x1)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "less"), args, kwargs);
-            }
-        };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "less(x2)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "less"), args, kwargs);
-            }
-        };
-        let result = match ufunc_less(&x1, &x2) {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "less"), args, kwargs);
-            }
-        };
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "less"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_less_equal_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "less_equal(x1)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(
-                    py,
-                    intern!(py, "less_equal"),
-                    args,
-                    kwargs,
-                );
-            }
-        };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "less_equal(x2)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(
-                    py,
-                    intern!(py, "less_equal"),
-                    args,
-                    kwargs,
-                );
-            }
-        };
-        let result = match ufunc_less_equal(&x1, &x2) {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(
-                    py,
-                    intern!(py, "less_equal"),
-                    args,
-                    kwargs,
-                );
-            }
-        };
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "less_equal"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_logical_and_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "logical_and(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "logical_and(x2)")?;
-        let result = ufunc_logical_and(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "logical_and"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_logical_or_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "logical_or(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "logical_or(x2)")?;
-        let result = ufunc_logical_or(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "logical_or"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_logical_xor_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "logical_xor(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "logical_xor(x2)")?;
-        let result = ufunc_logical_xor(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "logical_xor"), args, kwargs)
-    }
 }
 
 // Zero-copy logical_not for an exact bool C-contiguous ndarray: read the byte
@@ -63180,54 +61679,6 @@ fn native_unary_logical_not_or_passthrough(
         build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough_interned(py, intern!(py, "logical_not"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_bitwise_and_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "bitwise_and(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "bitwise_and(x2)")?;
-        let result = ufunc_bitwise_and(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "bitwise_and"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_bitwise_or_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "bitwise_or(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "bitwise_or(x2)")?;
-        let result = ufunc_bitwise_or(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "bitwise_or"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_bitwise_xor_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "bitwise_xor(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "bitwise_xor(x2)")?;
-        let result = ufunc_bitwise_xor(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "bitwise_xor"), args, kwargs)
     }
 }
 
@@ -63721,80 +62172,6 @@ fn native_unary_invert_or_passthrough(
     }
 }
 
-#[allow(dead_code)]
-fn native_binary_power_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "power(x1)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "power"), args, kwargs);
-            }
-        };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "power(x2)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "power"), args, kwargs);
-            }
-        };
-        let result = match ufunc_power(&x1, &x2) {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "power"), args, kwargs);
-            }
-        };
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "power"), args, kwargs)
-    }
-}
-
-#[allow(dead_code)]
-fn native_binary_divide_or_passthrough(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // Use precise dtype extraction for correct promotion
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "divide(x1)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs);
-            }
-        };
-        let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "divide(x2)") {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs);
-            }
-        };
-        if contains_zero_divisor(&x2) {
-            return core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs);
-        }
-        let result = match ufunc_divide(&x1, &x2) {
-            Ok(value) => value,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs);
-            }
-        };
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough_interned(py, intern!(py, "divide"), args, kwargs)
-    }
-}
-
-fn is_zero_divisor_value(value: f64) -> bool {
-    (value.to_bits() & (u64::MAX >> 1)) == 0
-}
-
-fn contains_zero_divisor(array: &UFuncArray) -> bool {
-    array.values().iter().copied().any(is_zero_divisor_value)
-}
-
 fn contains_nan_value(array: &UFuncArray) -> bool {
     array.values().iter().copied().any(f64::is_nan)
 }
@@ -64134,47 +62511,6 @@ fn try_zerocopy_f64_floor_divide(
         return Ok(None);
     }
     Ok(Some(out.unbind()))
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn floor_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(numpy
-            .getattr(intern!(py, "floor_divide"))?
-            .call1((x1.bind(py), x2.bind(py)))?
-            .unbind())
-    };
-
-    // Zero-copy parallel same-shape f64 fast path (exact npy_floor_divide
-    // replication; non-finite / zero-divisor inputs defer inside for numpy's
-    // warning surface). Runs BEFORE the cold whole-array extract below.
-    if let Some(result) = try_zerocopy_f64_floor_divide(py, x1.bind(py), x2.bind(py))? {
-        return Ok(result);
-    }
-
-    let a = match extract_numeric_array(py, x1.bind(py), "floor_divide(x1)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    let b = match extract_numeric_array(py, x2.bind(py), "floor_divide(x2)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    if a.has_integer_sidecar() || b.has_integer_sidecar() {
-        return fallback();
-    }
-    // Fall back to NumPy if divisor contains zero so RuntimeWarning is emitted
-    if b.values().contains(&0.0) {
-        return fallback();
-    }
-    let result = match a.elementwise_binary(&b, BinaryOp::FloorDivide) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -67122,75 +65458,6 @@ fn absolute(
         intern!(py, "absolute"),
         "absolute(x)",
     )
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
-)]
-fn add(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "add"), args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
-)]
-fn subtract(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    // Fast path for simple two-arg calls - use precise dtype extraction for correct promotion
-    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
-        let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "subtract(x1)") {
-            Ok(arr) => arr,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs);
-            }
-        };
-        let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "subtract(x2)") {
-            Ok(arr) => arr,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs);
-            }
-        };
-        if x1.has_integer_sidecar() || x2.has_integer_sidecar() {
-            return core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs);
-        }
-        let result = match x1.elementwise_binary(&x2, BinaryOp::Sub) {
-            Ok(r) => r,
-            Err(_) => {
-                return core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs);
-            }
-        };
-        return build_numpy_scalar_or_array(py, &result);
-    }
-    core_numpy_passthrough_interned(py, intern!(py, "subtract"), args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
-#[pyo3(
-    signature = (*args, **kwargs),
-    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
-)]
-fn multiply(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough_interned(py, intern!(py, "multiply"), args, kwargs)
 }
 
 #[pyfunction]
@@ -108392,28 +106659,6 @@ fn conj(
 // hunting the live 1.16-1.22x `fnp.divide` deficit against `numpy.divide`
 // (`deadlock-audit-su0i6`), whose remaining gap is in the zero-copy kernel's
 // result-buffer classifier, not here. Tracked by `deadlock-audit-uxkqi`.
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn divide(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_divide_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn power(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_power_or_passthrough(py, args, kwargs)
-}
-
 #[pyfunction]
 #[pyo3(
     signature = (*args, **kwargs),
@@ -108647,17 +106892,6 @@ fn tan(
 }
 
 // Bitwise (11) — Array-API names + numpy legacy names.
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn bitwise_and(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_bitwise_and_or_passthrough(py, args, kwargs)
-}
-
 // Zero-copy popcount for a contiguous integer ndarray. np.bitwise_count is a ~1-cycle
 // POPCNT per element, so the cost is dominated by data movement: the generic path
 // extracts the input into fnp's f64-values + i64/u64-sidecar dual representation
@@ -108958,17 +107192,6 @@ fn bitwise_not(
     native_unary_invert_or_passthrough(py, args, kwargs)
 }
 
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn bitwise_or(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_bitwise_or_or_passthrough(py, args, kwargs)
-}
-
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn bitwise_right_shift(
@@ -108977,17 +107200,6 @@ fn bitwise_right_shift(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     native_binary_right_shift_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn bitwise_xor(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_bitwise_xor_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -109031,84 +107243,7 @@ fn lcm(
 }
 
 // Comparison (6) — ufunc-style element-wise comparisons.
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn equal(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_equal_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn not_equal(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_not_equal_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn greater(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_greater_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn greater_equal(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_greater_equal_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn less(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_less_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn less_equal(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_less_equal_or_passthrough(py, args, kwargs)
-}
-
 // Logical (4).
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn logical_and(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_logical_and_or_passthrough(py, args, kwargs)
-}
-
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn logical_not(
@@ -109117,28 +107252,6 @@ fn logical_not(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     native_unary_logical_not_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn logical_or(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_logical_or_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn logical_xor(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_logical_xor_or_passthrough(py, args, kwargs)
 }
 
 // Elementwise min/max and float-typed arithmetic (5).
@@ -109184,28 +107297,6 @@ fn fmin(
     // Passthrough: native f64 path was 59-61x SLOWER than numpy's in-place SIMD
     // fmin for zero benefit (numpy 43us vs native 3081us @131k). Byte-identical.
     core_numpy_passthrough_interned(py, intern!(py, "fmin"), args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn maximum(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_maximum_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn minimum(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_minimum_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -113399,28 +111490,6 @@ fn divmod(
 }
 
 // `mod` is a reserved word in Rust — use py_mod with name override.
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(name = "mod", signature = (*args, **kwargs))]
-fn py_mod(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_remainder_or_passthrough(py, args, kwargs)
-}
-
-#[allow(dead_code)]
-#[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn remainder(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    native_binary_remainder_or_passthrough(py, args, kwargs)
-}
-
 // Datetime-aware ufunc (1).
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
