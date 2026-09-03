@@ -2769,10 +2769,60 @@ pub fn compare_against_oracle(
     })
 }
 
+/// Builds an engine operand from a fixture's logical shape and values.
+///
+/// Fixtures and the oracle carry complex data as REAL PARTS ONLY with the logical shape
+/// (`capture_numpy_oracle` writes `arr.astype(np.float64)`), while `UFuncArray` stores a
+/// complex array as interleaved `(re, im)` pairs with a trailing axis of 2, exactly as
+/// the engine's own tests build them (`UFuncArray::new(vec![2, 2], [1, 2, 3, 4],
+/// Complex128)` is two complex numbers). Passing the logical form straight to `new`
+/// silently built ONE complex number from a two-element fixture, which is why
+/// `add_scalar_bool_plus_complex128` and `add_scalar_complex64_plus_i32` reported
+/// `[2, 2]`/`[2, 0]` against numpy's `[2, 3]`/`[2, 1]` (deadlock-audit-r5fy8).
+fn engine_operand(
+    shape: Vec<usize>,
+    values: Vec<f64>,
+    dtype: DType,
+) -> Result<UFuncArray, fnp_ufunc::UFuncError> {
+    if matches!(dtype, DType::Complex64 | DType::Complex128) {
+        let mut interleaved = Vec::with_capacity(values.len() * 2);
+        for value in values {
+            interleaved.push(value);
+            interleaved.push(0.0);
+        }
+        let mut engine_shape = shape;
+        engine_shape.push(2);
+        UFuncArray::new(engine_shape, interleaved, dtype)
+    } else {
+        UFuncArray::new(shape, values, dtype)
+    }
+}
+
+/// The inverse of [`engine_operand`] for a result: a complex output comes back as
+/// interleaved pairs with a trailing axis of 2, and the oracle stores real parts with
+/// the logical shape, so compare on that form. Non-complex results pass through.
+fn logical_output(out: &UFuncArray) -> (Vec<usize>, Vec<f64>, String) {
+    let dtype_name = out.dtype().name().to_string();
+    if matches!(out.dtype(), DType::Complex64 | DType::Complex128)
+        && out.shape().last() == Some(&2)
+        && out.values().len() == element_count_of(out.shape())
+    {
+        let mut logical_shape = out.shape().to_vec();
+        logical_shape.pop();
+        let real_parts = out.values().iter().copied().step_by(2).collect();
+        return (logical_shape, real_parts, dtype_name);
+    }
+    (out.shape().to_vec(), out.values().to_vec(), dtype_name)
+}
+
+fn element_count_of(shape: &[usize]) -> usize {
+    shape.iter().product()
+}
+
 pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>, String), String> {
     validate_signature_keywords(case)?;
     let lhs_dtype = parse_dtype(&case.lhs_dtype)?;
-    let lhs = UFuncArray::new(case.lhs_shape.clone(), case.lhs_values.clone(), lhs_dtype)
+    let lhs = engine_operand(case.lhs_shape.clone(), case.lhs_values.clone(), lhs_dtype)
         .map_err(|err| format!("lhs array error: {err}"))?;
     let multi_axes = resolve_multi_axes(case)?;
 
@@ -2822,7 +2872,7 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
                 .ok_or_else(|| "binary op requires rhs_values".to_string())?;
             let rhs_dtype_name = case.rhs_dtype.as_deref().unwrap_or("f64");
             let rhs_dtype = parse_dtype(rhs_dtype_name)?;
-            let rhs = UFuncArray::new(rhs_shape, rhs_values, rhs_dtype)
+            let rhs = engine_operand(rhs_shape, rhs_values, rhs_dtype)
                 .map_err(|err| format!("rhs array error: {err}"))?;
 
             let op = match case.op {
@@ -3147,11 +3197,7 @@ pub fn execute_input_case(case: &UFuncInputCase) -> Result<(Vec<usize>, Vec<f64>
         UFuncOperation::Arctanh => lhs.elementwise_unary(UnaryOp::Arctanh),
     };
 
-    Ok((
-        out.shape().to_vec(),
-        out.values().to_vec(),
-        out.dtype().name().to_string(),
-    ))
+    Ok(logical_output(&out))
 }
 
 fn parse_dtype(name: &str) -> Result<DType, String> {
