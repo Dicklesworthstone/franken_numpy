@@ -67,7 +67,7 @@ FrankenNumPy is not trying to replace NumPy for every workload tomorrow. It targ
 | **Embedded / kiosk-style Rust deployments** that want NumPy-shaped APIs without dragging a Python interpreter into the build. |
 | **Library authors writing differential-test oracles** against their own numerical code. The `fnp-conformance` crate is a reusable oracle harness; it captures NumPy reference output and compares against any implementation, not just FrankenNumPy. |
 | **Researchers studying NumPy semantics.** Every shape transformation, dtype promotion, and ufunc dispatch decision is implemented as a small, readable, fully tested Rust function. The codebase is a legible specification of NumPy's actual behavior. |
-| **NumPy users who want a drop-in Python module** with native-speed hot paths and numpy fallback everywhere else. (Caveat: no pip wheel yet; you build locally for now. See Limitations.) |
+| **NumPy users who want a drop-in Python module** with native-speed hot paths and numpy fallback everywhere else. (Caveat: no PyPI release yet; `pip install .` builds the wheel locally. See Installation.) |
 
 This is the wrong tool if your bottleneck is large dense matmul on >2,000×2,000 matrices with OpenBLAS already linked, or if you need GPU acceleration today. Those gaps are documented in Limitations and tracked in the Roadmap.
 
@@ -294,7 +294,17 @@ np.__numpy_version__        # version of numpy used as fallback oracle
 np.linalg.solve([[3, 1], [1, 2]], [9, 8])
 ```
 
-There is **no `pip install frankennumpy` wheel/PyPI flow yet**; packaging is the only residual gap (see the FAQ and the Limitations section). The Python surface itself is complete and CI-locked.
+A wheel is one command (added 2026-09-03; `pyproject.toml` at the repo root drives [maturin](https://github.com/PyO3/maturin)):
+
+```bash
+pip install maturin
+maturin build --release          # -> target/wheels/frankennumpy-0.2.0-cp313-*.whl
+pip install target/wheels/frankennumpy-*.whl
+# or, in one step from the checkout:
+pip install .
+```
+
+The installed package re-exports the whole extension namespace (`python/fnp_python/__init__.py`), so `import fnp_python`, `fnp_python.Nditer`, `import fnp_python.linalg` and `fnp_python.__numpy_version__` all resolve exactly as they do from the bare cdylib. Verified on Linux / CPython 3.13 / numpy 2.5.2 in a fresh venv: the 381-cell behavioural smoke suite scores the same 371 bit-exact cells against the installed wheel as against the raw build. There is **no PyPI publish yet**, and no macOS/Windows wheels have been built; `requires-python` is `>=3.13` because the extension uses interpreter symbols first exported in 3.13.
 
 If you need `fnp-runtime`'s optional `asupersync` async integration or `frankentui` terminal dashboards (both default off), see the Optional features table immediately below for the per-feature cargo invocations.
 
@@ -2133,7 +2143,7 @@ franken_numpy/
 
 What doesn't work today.
 
-- **No `pip install frankennumpy` packaging story yet.** The Python surface is reached today by building the `fnp-python` PyO3 extension and putting the renamed cdylib on `PYTHONPATH`. The pyproject.toml + wheel + PyPI publishing flow is future work. The `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked.
+- **No PyPI release yet.** `pip install .` and `maturin build --release` produce a working wheel from the checkout (added 2026-09-03, verified on Linux / CPython 3.13), but nothing is published to PyPI and no macOS or Windows wheels have been built or tested. The `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub–Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Optional BLAS linkage is a Phase 3 work-stream (ADR-001).
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac−bd)+(ad+bc)i`, but the interleaved representation adds overhead vs native complex types.
 - **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` keeps only intra-workspace `fnp-ndarray` plus `getrandom` for OS entropy).
@@ -2149,7 +2159,7 @@ What doesn't work today.
 
 [`docs/adr/ADR-001-parity-pivot.md`](docs/adr/ADR-001-parity-pivot.md) records the proposal to pivot from parity grinding to performance/distribution work now that the `numpy.__all__` surface is complete and structurally locked. The active candidates:
 
-1. **Python packaging.** Build out the `pyproject.toml` + wheel + PyPI flow so `pip install frankennumpy` works on Linux, macOS, and Windows.
+1. **Python packaging.** `pyproject.toml` + maturin landed 2026-09-03 (`pip install .` works on Linux / CPython 3.13). Remaining: PyPI publish, macOS and Windows wheels, a CI packaging job.
 2. **BLAS / LAPACK backend.** Feature-gated `blas` linkage in `fnp-linalg`, dispatch large matrices to BLAS, keep pure-Rust for small.
 3. **SIMD vectorization.** Landed during the v0.2.0 campaign: `core::simd` kernels in `fnp-ufunc` and `fnp-python` plus `+avx2` codegen (no `+fma`, to keep bit parity). What remains is per-op work tracked in the ledger, not a roadmap stream.
 4. **Multi-threading.** Landed, but not as ADR-001 proposed: `rayon` is an unconditional workspace dependency with per-op size gates (`is_parallel_worth` and family floors) rather than a feature-gated `parallel` flag.
@@ -2409,7 +2419,7 @@ In quantitative terms: **~650 commits in May 2026 alone**, **~1,880 commits sinc
 ## FAQ
 
 **Is this a drop-in replacement for NumPy?**
-Surface-wise yes: `fnp-python` exposes **100% of `numpy.__all__`** (499/499 names), structurally locked by `fnp_python_covers_full_numpy_all`. Distribution-wise not yet: there is no pip wheel today. See the Limitations section for the full packaging gap discussion.
+Surface-wise yes: `fnp-python` exposes **100% of `numpy.__all__`** (499/499 names), structurally locked by `fnp_python_covers_full_numpy_all`. Distribution-wise: `pip install .` from the checkout builds and installs a wheel (Linux / CPython 3.13 verified); there is no PyPI release yet. See Installation and Limitations.
 
 **How do you verify parity with NumPy?**
 Oracle tests. We run the same operations with the same inputs in both NumPy and FrankenNumPy and compare outputs to floating-point tolerance. For RNG, the comparison is bit-exact. The G3 CI gate enforces `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects pure-Python fallback oracle output.
