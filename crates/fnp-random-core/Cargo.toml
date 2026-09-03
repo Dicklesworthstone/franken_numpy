@@ -9,6 +9,3 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Dependency-free NumPy-compatible SeedSequence and PCG64DXSM core"
-
-[lints]
-workspace = true
