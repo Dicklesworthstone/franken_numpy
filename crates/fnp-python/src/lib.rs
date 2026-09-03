@@ -61066,9 +61066,24 @@ fn native_unary_elementwise(
     // the generic f64 bridge, which rejects wrapped uint64 values as unrepresentable.
     // This rank check is deliberately limited to the affected op/dtype; the ranked uint64
     // fast path below remains engaged.
+    // A numpy unsigned SCALAR (`np.uint64(5)`, not an ndarray) has no `facts` and used to
+    // fall through to the same bridge, which raised `cannot be represented exactly as u64`
+    // where numpy wraps to 18446744073709551611 (`deadlock-audit-7evbk`); it takes the
+    // same delegate.
+    let unsigned_operand = facts.map_or_else(
+        || {
+            x.getattr(intern!(py, "dtype"))
+                .and_then(|dtype| dtype.getattr(intern!(py, "kind")))
+                .and_then(|kind| kind.extract::<char>())
+                .is_ok_and(|kind| kind == 'u')
+        },
+        |f| f.kind == 'u' && f.itemsize == 8,
+    );
     if matches!(op, UnaryOp::Negative)
-        && facts.is_some_and(|f| f.kind == 'u' && f.itemsize == 8)
-        && x.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0
+        && unsigned_operand
+        && x.getattr(intern!(py, "ndim"))
+            .and_then(|ndim| ndim.extract::<usize>())
+            .is_ok_and(|ndim| ndim == 0)
     {
         return fallback(py);
     }
