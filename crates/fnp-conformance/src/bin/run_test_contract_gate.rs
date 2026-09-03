@@ -496,6 +496,20 @@ fn validate_runtime_policy_log(path: &Path) -> Result<SuiteReport, String> {
                                 .all(|item| item.as_str().is_some_and(|s| !s.trim().is_empty()))
                     }),
                 "seed" => obj.get(*field).is_some_and(Value::is_u64),
+                // The runtime ledger records the wire mode VERBATIM: sibling lines carry
+                // "mystery_mode", "STRICT", "  strict  " and an injection string. The
+                // adversarial fixture `wire_empty_mode_known_compat_fail_closed` therefore
+                // produces a line whose mode is legitimately empty, and since that fixture
+                // landed (3a057aa7, 2026-04-18) this gate has rejected the very line that
+                // proves the empty wire mode failed closed. Exactly that reason-coded shape
+                // is admitted; an empty mode on any other line is still a contract failure.
+                "mode" => obj.get(*field).and_then(Value::as_str).is_some_and(|s| {
+                    !s.trim().is_empty()
+                        || obj
+                            .get("reason_code")
+                            .and_then(Value::as_str)
+                            .is_some_and(|reason| reason == "empty_runtime_mode")
+                }),
                 _ => obj
                     .get(*field)
                     .and_then(Value::as_str)
