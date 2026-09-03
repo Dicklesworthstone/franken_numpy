@@ -169,10 +169,7 @@ impl Pcg64Dxsm {
     pub const fn split_state(&self) -> ([u64; 2], [u64; 2]) {
         (
             [(self.state >> 64) as u64, self.state as u64],
-            [
-                (self.increment >> 64) as u64,
-                self.increment as u64,
-            ],
+            [(self.increment >> 64) as u64, self.increment as u64],
         )
     }
 
