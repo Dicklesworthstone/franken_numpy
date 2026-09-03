@@ -1,0 +1,103 @@
+name: Canonical Branch Policy
+
+on:
+  push:
+  create:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 5 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: canonical-branch-policy
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: >-
+      github.repository == 'Dicklesworthstone/franken_numpy' &&
+      (github.event_name != 'create' || github.event.ref_type == 'branch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Reconcile canonical refs without losing work
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
+          main_ref=refs/remotes/origin/main
+          git show-ref --verify --quiet "$main_ref" || {
+            echo 'canonical branch policy: origin/main is missing' >&2
+            exit 2
+          }
+          main_sha="$(git rev-parse "$main_ref")"
+
+          if git show-ref --verify --quiet refs/remotes/origin/master; then
+            if ! git merge-base --is-ancestor refs/remotes/origin/master "$main_sha"; then
+              echo 'canonical branch policy: master contains commits not reachable from main' >&2
+              git log --oneline --decorate "$main_sha"..refs/remotes/origin/master >&2
+              exit 3
+            fi
+          fi
+
+          safe_to_delete=()
+          branch_only=()
+          while IFS= read -r branch; do
+            case "$branch" in
+              HEAD|main|master) continue ;;
+            esac
+            ref="refs/remotes/origin/$branch"
+            if git merge-base --is-ancestor "$ref" "$main_sha"; then
+              safe_to_delete+=("$branch")
+            else
+              branch_only+=("$branch")
+            fi
+          done < <(
+            git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin |
+              sort
+          )
+
+          if (( ${#branch_only[@]} != 0 )); then
+            echo 'canonical branch policy: refusing to delete branches with commits absent from main:' >&2
+            for branch in "${branch_only[@]}"; do
+              echo "  $branch" >&2
+              git log --oneline --decorate "$main_sha".."refs/remotes/origin/$branch" >&2
+            done
+            exit 4
+          fi
+
+          git push origin "$main_sha:refs/heads/master"
+          for branch in "${safe_to_delete[@]}"; do
+            git push origin --delete "$branch"
+          done
+
+          mapfile -t live_heads < <(
+            git ls-remote --heads origin |
+              awk '{name=$2; sub("^refs/heads/", "", name); print name}' |
+              sort
+          )
+          expected=(main master)
+          if [[ "${live_heads[*]}" != "${expected[*]}" ]]; then
+            printf 'canonical branch policy: unexpected live refs after reconciliation:\n' >&2
+            printf '  %s\n' "${live_heads[@]}" >&2
+            exit 5
+          fi
+
+          remote_main="$(git ls-remote --heads origin refs/heads/main | awk '{print $1}')"
+          remote_master="$(git ls-remote --heads origin refs/heads/master | awk '{print $1}')"
+          if [[ -z "$remote_main" || "$remote_main" != "$remote_master" ]]; then
+            echo "canonical branch policy: main/master mismatch: main=$remote_main master=$remote_master" >&2
+            exit 6
+          fi
+
+          echo "canonical branch policy: PASS; main and master both point to $remote_main"
