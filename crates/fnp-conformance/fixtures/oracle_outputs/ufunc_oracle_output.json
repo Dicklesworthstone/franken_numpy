@@ -2,7 +2,7 @@
   "schema_version": 1,
   "oracle_source": "system",
   "oracle_diagnostics": "legacy import failed: ImportError(\"cannot import name 'version' from partially initialized module 'numpy' (most likely due to a circular import) (/data/projects/franken_numpy/crates/fnp-conformance/../../legacy_numpy_code/numpy/numpy/__init__.py)\")",
-  "generated_at_unix_ms": 1775432960550,
+  "generated_at_unix_ms": 1788409832768,
   "cases": [
     {
       "id": "add_broadcast_2x3_plus_3",
@@ -2224,7 +2224,7 @@
       ],
       "values": [
         2.220446049250313e-16,
-        1.9073486328125e-06,
+        1.9073486328125e-6,
         1.2924697071141056e-26,
         5e-324
       ],
@@ -2716,7 +2716,7 @@
       ],
       "values": [
         0.0,
-        1.3169578969248166,
+        1.3169578969248168,
         2.993222846126381
       ],
       "dtype": "float64"
@@ -2745,8 +2745,8 @@
       ],
       "values": [
         0.0,
-        0.5493061443340548,
-        -0.5493061443340548
+        0.5493061443340549,
+        -0.5493061443340549
       ],
       "dtype": "float64"
     },
@@ -3577,16 +3577,6 @@
       "dtype": "float64"
     },
     {
-      "id": "add_scalar_i32_plus_f64",
-      "status": "ok",
-      "error": null,
-      "shape": [],
-      "values": [
-        5.25
-      ],
-      "dtype": "float64"
-    },
-    {
       "id": "mul_scalar_u16_by_i16",
       "status": "ok",
       "error": null,
@@ -3637,6 +3627,46 @@
       "dtype": "float64"
     },
     {
+      "id": "add_scalar_f64_plus_f32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        2.0
+      ],
+      "dtype": "float64"
+    },
+    {
+      "id": "add_scalar_u16_plus_i32",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        64990.0
+      ],
+      "dtype": "int32"
+    },
+    {
+      "id": "minimum_scalar_f32_with_u16",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        2.0
+      ],
+      "dtype": "float32"
+    },
+    {
+      "id": "add_scalar_i32_plus_f64",
+      "status": "ok",
+      "error": null,
+      "shape": [],
+      "values": [
+        5.25
+      ],
+      "dtype": "float64"
+    },
+    {
       "id": "sub_scalar_u64_minus_i32",
       "status": "ok",
       "error": null,
@@ -3667,26 +3697,6 @@
       "dtype": "float64"
     },
     {
-      "id": "add_scalar_f64_plus_f32",
-      "status": "ok",
-      "error": null,
-      "shape": [],
-      "values": [
-        2.0
-      ],
-      "dtype": "float64"
-    },
-    {
-      "id": "add_scalar_u16_plus_i32",
-      "status": "ok",
-      "error": null,
-      "shape": [],
-      "values": [
-        64990.0
-      ],
-      "dtype": "int32"
-    },
-    {
       "id": "power_scalar_f64_to_i32",
       "status": "ok",
       "error": null,
@@ -3707,16 +3717,6 @@
       "dtype": "float64"
     },
     {
-      "id": "minimum_scalar_f32_with_u16",
-      "status": "ok",
-      "error": null,
-      "shape": [],
-      "values": [
-        2.0
-      ],
-      "dtype": "float32"
-    },
-    {
       "id": "add_scalar_bool_plus_complex128",
       "status": "ok",
       "error": null,
@@ -3725,7 +3725,7 @@
       ],
       "values": [
         2.0,
-        2.0
+        3.0
       ],
       "dtype": "complex128"
     },
@@ -3748,7 +3748,7 @@
       ],
       "values": [
         2.0,
-        0.0
+        1.0
       ],
       "dtype": "complex128"
     },
@@ -3894,153 +3894,123 @@
     },
     {
       "id": "left_shift_i32_by_4",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: left_shift",
       "shape": [],
-      "values": [
-        16.0
-      ],
-      "dtype": "int32"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "left_shift_i64_by_62",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: left_shift",
       "shape": [],
-      "values": [
-        4.611686018427388e+18
-      ],
-      "dtype": "int64"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "left_shift_uint8_by_7",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: left_shift",
       "shape": [],
-      "values": [
-        128.0
-      ],
-      "dtype": "uint8"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "left_shift_uint16_by_4",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: left_shift",
       "shape": [],
-      "values": [
-        4080.0
-      ],
-      "dtype": "uint16"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "left_shift_int8_by_6",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: left_shift",
       "shape": [],
-      "values": [
-        64.0
-      ],
-      "dtype": "int8"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "left_shift_uint32_by_31",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: left_shift",
       "shape": [],
-      "values": [
-        2147483648.0
-      ],
-      "dtype": "uint32"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "left_shift_uint8_by_i32",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: left_shift",
       "shape": [],
-      "values": [
-        48.0
-      ],
-      "dtype": "int32"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "left_shift_zero_i32",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: left_shift",
       "shape": [],
-      "values": [
-        0.0
-      ],
-      "dtype": "int32"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "left_shift_uint64_by_63",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: left_shift",
       "shape": [],
-      "values": [
-        9.223372036854776e+18
-      ],
-      "dtype": "uint64"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "right_shift_i32_by_4",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: right_shift",
       "shape": [],
-      "values": [
-        16.0
-      ],
-      "dtype": "int32"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "right_shift_i64_neg_by_2",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: right_shift",
       "shape": [],
-      "values": [
-        -32.0
-      ],
-      "dtype": "int64"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "right_shift_uint8_by_4",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: right_shift",
       "shape": [],
-      "values": [
-        15.0
-      ],
-      "dtype": "uint8"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "right_shift_uint32_by_16",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: right_shift",
       "shape": [],
-      "values": [
-        65535.0
-      ],
-      "dtype": "uint32"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "right_shift_int8_neg1_by_1",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: right_shift",
       "shape": [],
-      "values": [
-        -1.0
-      ],
-      "dtype": "int8"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "right_shift_zero_i32",
-      "status": "ok",
-      "error": null,
+      "status": "error",
+      "error": "unsupported op: right_shift",
       "shape": [],
-      "values": [
-        0.0
-      ],
-      "dtype": "int32"
+      "values": [],
+      "dtype": "unknown"
     },
     {
       "id": "equal_i32_true",
@@ -4050,7 +4020,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "equal_i32_false",
@@ -4060,7 +4030,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "less_i64_true",
@@ -4070,7 +4040,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "less_i64_false",
@@ -4080,7 +4050,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "greater_equal_u8",
@@ -4090,7 +4060,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "equal_i32_f64",
@@ -4100,7 +4070,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "less_u8_i16",
@@ -4110,7 +4080,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "not_equal_f32_i64",
@@ -4120,7 +4090,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "equal_nan_nan",
@@ -4130,7 +4100,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "not_equal_nan_nan",
@@ -4140,7 +4110,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "less_inf_neg_inf",
@@ -4150,7 +4120,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "less_equal_neg_zero",
@@ -4160,7 +4130,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "equal_bool_true",
@@ -4170,7 +4140,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "greater_bool",
@@ -4180,7 +4150,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "less_equal_bool_f64",
@@ -4190,7 +4160,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "sum_axes_02_keepdims_rank3",
@@ -4332,7 +4302,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "max_bool_array",
@@ -4342,7 +4312,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "sum_with_nan_propagates",
@@ -4858,7 +4828,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "isnan_f64_normal",
@@ -4870,7 +4840,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "isinf_f64_inf",
@@ -4882,7 +4852,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "isinf_f64_normal",
@@ -4894,7 +4864,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "isfinite_f64_nan",
@@ -4906,7 +4876,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "isfinite_f64_inf",
@@ -4918,7 +4888,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "isfinite_f64_normal",
@@ -4930,7 +4900,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "ldexp_normal",
@@ -5170,7 +5140,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "bitwise_and_bool_false",
@@ -5180,7 +5150,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "bitwise_and_cross_u8_i32",
@@ -5220,7 +5190,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "bitwise_or_bool_false",
@@ -5230,7 +5200,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "bitwise_xor_u8",
@@ -5260,7 +5230,7 @@
       "values": [
         1.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "bitwise_xor_bool_same",
@@ -5270,7 +5240,7 @@
       "values": [
         0.0
       ],
-      "dtype": "bool_"
+      "dtype": "bool"
     },
     {
       "id": "bitwise_xor_all_ones_u8",

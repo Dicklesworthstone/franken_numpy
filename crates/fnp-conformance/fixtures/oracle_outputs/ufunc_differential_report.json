@@ -1,11 +1,328 @@
 {
   "schema_version": 1,
   "oracle_source": "system",
-  "generated_at_unix_ms": 1775432960550,
+  "generated_at_unix_ms": 1788409832768,
   "abs_tol": 1e-9,
   "rel_tol": 1e-9,
   "total_cases": 381,
-  "passed_cases": 381,
-  "failed_cases": 0,
-  "failures": []
+  "passed_cases": 364,
+  "failed_cases": 17,
+  "failures": [
+    {
+      "id": "add_scalar_bool_plus_complex128",
+      "seed": 6502,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-cross-dtype",
+      "artifact_refs": [
+        "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": 1.0,
+      "expected_shape": [
+        2
+      ],
+      "actual_shape": [
+        2
+      ],
+      "expected_dtype": "complex128",
+      "actual_dtype": "complex128",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "value mismatch at index 1: expected=3 actual=2 abs_err=1 threshold=0.000000004"
+    },
+    {
+      "id": "add_scalar_complex64_plus_i32",
+      "seed": 6502,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-cross-dtype",
+      "artifact_refs": [
+        "artifacts/phase2c/FNP-P2C-005/contract_table.md",
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": 1.0,
+      "expected_shape": [
+        2
+      ],
+      "actual_shape": [
+        2
+      ],
+      "expected_dtype": "complex128",
+      "actual_dtype": "complex128",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "value mismatch at index 1: expected=1 actual=0 abs_err=1 threshold=0.000000002"
+    },
+    {
+      "id": "left_shift_i32_by_4",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "i32",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: left_shift' but execution succeeded"
+    },
+    {
+      "id": "left_shift_i64_by_62",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "i64",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: left_shift' but execution succeeded"
+    },
+    {
+      "id": "left_shift_uint8_by_7",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "uint8",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: left_shift' but execution succeeded"
+    },
+    {
+      "id": "left_shift_uint16_by_4",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "u16",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: left_shift' but execution succeeded"
+    },
+    {
+      "id": "left_shift_int8_by_6",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "int8",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: left_shift' but execution succeeded"
+    },
+    {
+      "id": "left_shift_uint32_by_31",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "u32",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: left_shift' but execution succeeded"
+    },
+    {
+      "id": "left_shift_uint8_by_i32",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "i32",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: left_shift' but execution succeeded"
+    },
+    {
+      "id": "left_shift_zero_i32",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "i32",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: left_shift' but execution succeeded"
+    },
+    {
+      "id": "left_shift_uint64_by_63",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "u64",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: left_shift' but execution succeeded"
+    },
+    {
+      "id": "right_shift_i32_by_4",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "i32",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: right_shift' but execution succeeded"
+    },
+    {
+      "id": "right_shift_i64_neg_by_2",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "i64",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: right_shift' but execution succeeded"
+    },
+    {
+      "id": "right_shift_uint8_by_4",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "uint8",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: right_shift' but execution succeeded"
+    },
+    {
+      "id": "right_shift_uint32_by_16",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "u32",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: right_shift' but execution succeeded"
+    },
+    {
+      "id": "right_shift_int8_neg1_by_1",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "int8",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: right_shift' but execution succeeded"
+    },
+    {
+      "id": "right_shift_zero_i32",
+      "seed": 6503,
+      "mode": "strict",
+      "env_fingerprint": "fnp-conformance-shift-ops",
+      "artifact_refs": [
+        "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+      ],
+      "pass": false,
+      "max_abs_error": null,
+      "expected_shape": [],
+      "actual_shape": [],
+      "expected_dtype": "unknown",
+      "actual_dtype": "i32",
+      "expected_reason_code": "ufunc_dispatch_resolution_failed",
+      "actual_reason_code": "ufunc_dispatch_resolution_failed",
+      "reason": "oracle expected error 'unsupported op: right_shift' but execution succeeded"
+    }
+  ]
 }
