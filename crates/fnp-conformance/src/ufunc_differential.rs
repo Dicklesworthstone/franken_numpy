@@ -203,6 +203,10 @@ def py_binary(lhs_vals, lhs_shape, rhs_vals, rhs_shape, op):
             out_vals.append(float(int(l) | int(r)))
         elif op == 'bitwise_xor':
             out_vals.append(float(int(l) ^ int(r)))
+        elif op == 'left_shift':
+            out_vals.append(float(int(l) << int(r)))
+        elif op == 'right_shift':
+            out_vals.append(float(int(l) >> int(r)))
         elif op == 'equal':
             out_vals.append(1.0 if l == r else 0.0)
         elif op == 'not_equal':
@@ -1092,6 +1096,10 @@ for case in cases:
                     out = np.bitwise_or(lhs, rhs, **kwargs)
                 elif op == 'bitwise_xor':
                     out = np.bitwise_xor(lhs, rhs, **kwargs)
+                elif op == 'left_shift':
+                    out = np.left_shift(lhs, rhs, **kwargs)
+                elif op == 'right_shift':
+                    out = np.right_shift(lhs, rhs, **kwargs)
             elif op == 'matmul':
                 rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
                 rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
