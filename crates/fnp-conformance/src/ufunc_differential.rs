@@ -1026,7 +1026,7 @@ for case in cases:
             lhs_dtype = normalize_dtype_name(case.get('lhs_dtype', 'float64'))
             lhs = np.array(case['lhs_values'], dtype=lhs_dtype).reshape(tuple(case['lhs_shape']))
 
-            if op in ('add', 'sub', 'mul', 'div', 'power', 'remainder', 'minimum', 'maximum', 'arctan2', 'fmod', 'copysign', 'fmax', 'fmin', 'heaviside', 'nextafter', 'logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'hypot', 'logaddexp', 'logaddexp2', 'ldexp', 'floor_divide', 'float_power', 'bitwise_and', 'bitwise_or', 'bitwise_xor'):
+            if op in ('add', 'sub', 'mul', 'div', 'power', 'remainder', 'minimum', 'maximum', 'arctan2', 'fmod', 'copysign', 'fmax', 'fmin', 'heaviside', 'nextafter', 'logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'hypot', 'logaddexp', 'logaddexp2', 'ldexp', 'floor_divide', 'float_power', 'bitwise_and', 'bitwise_or', 'bitwise_xor', 'left_shift', 'right_shift'):
                 rhs_dtype = normalize_dtype_name(case.get('rhs_dtype', 'float64'))
                 rhs = np.array(case['rhs_values'], dtype=rhs_dtype).reshape(tuple(case['rhs_shape']))
                 kwargs = build_ufunc_kwargs(case)
@@ -1294,7 +1294,7 @@ for case in cases:
             lhs_shape = case['lhs_shape']
             lhs_vals = [float(v) for v in case['lhs_values']]
             lhs_dtype = normalize_fallback_dtype(case.get('lhs_dtype', 'f64'))
-            if op in ('add', 'sub', 'mul', 'div', 'power', 'remainder', 'minimum', 'maximum', 'arctan2', 'fmod', 'copysign', 'fmax', 'fmin', 'heaviside', 'nextafter', 'logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'hypot', 'logaddexp', 'logaddexp2', 'ldexp', 'floor_divide', 'float_power', 'bitwise_and', 'bitwise_or', 'bitwise_xor'):
+            if op in ('add', 'sub', 'mul', 'div', 'power', 'remainder', 'minimum', 'maximum', 'arctan2', 'fmod', 'copysign', 'fmax', 'fmin', 'heaviside', 'nextafter', 'logical_and', 'logical_or', 'logical_xor', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'hypot', 'logaddexp', 'logaddexp2', 'ldexp', 'floor_divide', 'float_power', 'bitwise_and', 'bitwise_or', 'bitwise_xor', 'left_shift', 'right_shift'):
                 rhs_shape = case['rhs_shape']
                 rhs_vals = [float(v) for v in case['rhs_values']]
                 rhs_dtype = normalize_fallback_dtype(case.get('rhs_dtype', 'f64'))
