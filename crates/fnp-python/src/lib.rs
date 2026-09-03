@@ -23530,6 +23530,14 @@ fn interp(
             .unbind())
     };
 
+    // Non-native byte order on any operand delegates whole (`deadlock-audit-2kqw3`).
+    if ndarray_is_byteswapped(py, x.bind(py))
+        || ndarray_is_byteswapped(py, xp.bind(py))
+        || ndarray_is_byteswapped(py, fp.bind(py))
+    {
+        return fallback();
+    }
+
     if let Some(p) = period.as_ref().filter(|p| !p.bind(py).is_none()) {
         // Native periodic interp: numpy's period path is preprocessing (x%P, xp%P, argsort, wrap-augment)
         // followed by the SAME compiled_interp. Replicate the preprocessing with numpy's own ops (so it is
@@ -25209,6 +25217,12 @@ fn take(
             )?
             .unbind())
     };
+
+    // Non-native byte order delegates whole: numpy preserves the input's byte order on the
+    // gathered result, every native gather rebuilds native order (`deadlock-audit-2kqw3`).
+    if ndarray_is_byteswapped(py, a.bind(py)) {
+        return fallback();
+    }
 
     // No native gather here writes into a caller-supplied buffer, so an out=
     // delegates whole, the way the nan reductions do.
@@ -35955,6 +35969,24 @@ fn nan_to_num(
         let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "copy"), false)?;
+        kwargs.set_item(intern!(py, "nan"), nan)?;
+        if let Some(p) = posinf {
+            kwargs.set_item(intern!(py, "posinf"), p)?;
+        }
+        if let Some(n) = neginf {
+            kwargs.set_item(intern!(py, "neginf"), n)?;
+        }
+        return Ok(numpy
+            .getattr(intern!(py, "nan_to_num"))?
+            .call((x.bind(py),), Some(&kwargs))?
+            .unbind());
+    }
+    // Non-native byte order delegates whole: the f16 and complex routes reinterpret a
+    // native-dtype view of the bytes, which no buffer-level guard can see
+    // (`deadlock-audit-2kqw3`).
+    if ndarray_is_byteswapped(py, x.bind(py)) {
+        let numpy = cached_numpy(py)?;
+        let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "nan"), nan)?;
         if let Some(p) = posinf {
             kwargs.set_item(intern!(py, "posinf"), p)?;
@@ -56776,7 +56808,12 @@ fn isin(
             )?
             .unbind())
     };
-    if assume_unique || kind.as_ref().is_some_and(|v| !v.bind(py).is_none()) {
+    // Non-native byte order on either operand delegates whole (`deadlock-audit-2kqw3`).
+    if assume_unique
+        || kind.as_ref().is_some_and(|v| !v.bind(py).is_none())
+        || ndarray_is_byteswapped(py, element.bind(py))
+        || ndarray_is_byteswapped(py, test_elements.bind(py))
+    {
         return fallback();
     }
     // Fast hashed-set membership for matched integer dtypes — runs BEFORE the cold
@@ -61419,6 +61456,14 @@ fn native_unary_elementwise_or_passthrough(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x = args.get_item(0)?;
+        // A non-native byte order is an operand we cannot own. The zero-copy routes now
+        // decline it at the buffer, but the storage bridge underneath them raises
+        // (`cannot be represented exactly as u64 through the temporary Vec<f64>`) where
+        // numpy simply answers, so the whole op hands it to numpy here
+        // (`deadlock-audit-2kqw3`).
+        if ndarray_is_byteswapped(py, &x) {
+            return core_numpy_passthrough_interned(py, numpy_name, args, kwargs);
+        }
         native_unary_elementwise(py, &x, op, numpy_name, context)
     } else {
         core_numpy_passthrough_interned(py, numpy_name, args, kwargs)
@@ -62017,6 +62062,12 @@ fn native_binary_left_shift_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let a = args.get_item(0)?;
         let b = args.get_item(1)?;
+        // Non-native byte order: the zero-copy shifts decline at the buffer and the f64
+        // storage bridge underneath refuses uint64, so the op delegates whole
+        // (`deadlock-audit-2kqw3`).
+        if ndarray_is_byteswapped(py, &a) || ndarray_is_byteswapped(py, &b) {
+            return core_numpy_passthrough_interned(py, intern!(py, "left_shift"), args, kwargs);
+        }
         if let Some(out) = try_zerocopy_i64_shift(py, &a, &b, true)? {
             return Ok(out);
         }
@@ -62050,6 +62101,10 @@ fn native_binary_right_shift_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let a = args.get_item(0)?;
         let b = args.get_item(1)?;
+        // Non-native byte order delegates whole, as in `left_shift` (`deadlock-audit-2kqw3`).
+        if ndarray_is_byteswapped(py, &a) || ndarray_is_byteswapped(py, &b) {
+            return core_numpy_passthrough_interned(py, intern!(py, "right_shift"), args, kwargs);
+        }
         if let Some(out) = try_zerocopy_i64_shift(py, &a, &b, false)? {
             return Ok(out);
         }
@@ -64898,21 +64953,17 @@ fn allclose(
     };
 
     // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar.
+    // numpy.allclose returns a Python bool (`bool(all(isclose(...)))`), not numpy.bool_;
+    // verified on numpy 2.4.3 (`deadlock-audit-7evbk`).
     if let Some(verdict) =
         try_zerocopy_f64_allclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
     {
-        return Ok(numpy
-            .getattr(intern!(py, "bool_"))?
-            .call1((verdict,))?
-            .unbind());
+        return Ok(PyBool::new(py, verdict).to_owned().into_any().unbind());
     }
     if let Some(verdict) =
         try_zerocopy_f32_allclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
     {
-        return Ok(numpy
-            .getattr(intern!(py, "bool_"))?
-            .call1((verdict,))?
-            .unbind());
+        return Ok(PyBool::new(py, verdict).to_owned().into_any().unbind());
     }
     // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
     if noncontiguous_ndarray(numpy, a.bind(py))? || noncontiguous_ndarray(numpy, b.bind(py))? {
@@ -64937,12 +64988,8 @@ fn allclose(
         Ok(value) => value,
         Err(_) => return fallback(),
     };
-    // numpy.allclose returns a numpy.bool_ scalar, not Python bool; route
-    // through np.bool_ so the return type matches the passthrough surface.
-    Ok(numpy
-        .getattr(intern!(py, "bool_"))?
-        .call1((verdict,))?
-        .unbind())
+    // numpy.allclose returns a Python bool, not numpy.bool_ (`deadlock-audit-7evbk`).
+    Ok(PyBool::new(py, verdict).to_owned().into_any().unbind())
 }
 
 #[pyfunction]
@@ -91344,6 +91391,11 @@ fn all(
         Ok(all_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
     };
 
+    // Non-native byte order delegates whole (`deadlock-audit-2kqw3`).
+    if ndarray_is_byteswapped(py, a.bind(py)) {
+        return fallback();
+    }
+
     // Fallback for out, keepdims, or where parameters
     if has_unrecognized_kwargs(kwargs, &["where"])?
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
@@ -92999,6 +93051,13 @@ fn cumsum(
             .unbind())
     };
 
+    // Non-native byte order delegates whole: the zero-copy scan declines at the buffer
+    // and the storage bridge underneath accumulates in f64, which is not numpy's f32
+    // accumulator (`deadlock-audit-2kqw3`).
+    if ndarray_is_byteswapped(py, a.bind(py)) {
+        return fallback();
+    }
+
     // Fallback for `out` buffer or explicit dtype (conversion not native)
     if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
@@ -93200,6 +93259,12 @@ fn cumprod(
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
     };
+
+    // Non-native byte order delegates whole: the storage bridge underneath the declined
+    // zero-copy scan raises on integer overflow where numpy wraps (`deadlock-audit-2kqw3`).
+    if ndarray_is_byteswapped(py, a.bind(py)) {
+        return fallback();
+    }
 
     // Fallback for `out` buffer or explicit dtype (conversion not native)
     if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
@@ -104175,7 +104240,13 @@ fn unique(
     // axis routes. Every native branch below rebuilds a base ndarray, so route
     // subclasses through NumPy before selecting a fast path
     // (`deadlock-audit-30d18`).
-    if args.len() == 1 && ndarray_subclass_needs_numpy(py, &args.get_item(0)?)? {
+    // A non-native byte order is an operand we cannot own: every native branch reads
+    // host-order bytes and rebuilds a native-order result, while numpy preserves the
+    // input's byte order on the output (`deadlock-audit-2kqw3`).
+    if args.len() == 1
+        && (ndarray_subclass_needs_numpy(py, &args.get_item(0)?)?
+            || ndarray_is_byteswapped(py, &args.get_item(0)?))
+    {
         return core_numpy_passthrough_interned(py, intern!(py, "unique"), args, kwargs);
     }
 
@@ -113840,7 +113911,9 @@ fn around(
             .unbind())
     };
 
-    if out.as_ref().is_some_and(|v| !v.bind(py).is_none()) {
+    // out= and non-native byte order both delegate whole (`deadlock-audit-2kqw3`).
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none()) || ndarray_is_byteswapped(py, a.bind(py))
+    {
         return fallback();
     }
 
