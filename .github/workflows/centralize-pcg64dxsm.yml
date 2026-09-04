@@ -1,0 +1,367 @@
+name: Centralize PCG64DXSM
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/centralize-pcg64dxsm.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: centralize-pcg64dxsm
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install repository toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-08-25 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown
+          rustup override set nightly-2026-08-25
+
+      - name: Centralize deterministic PCG64DXSM state transitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          core_path = Path("crates/fnp-random-core/src/lib.rs")
+          core = core_path.read_text(encoding="utf-8")
+
+          pool_anchor = "    /// Generate NumPy-compatible 64-bit state words, pairing low word first.\n"
+          pool_marker = "    /// Return the canonical four-word entropy pool.\n"
+          if pool_marker not in core:
+              insert_at = core.index("}\n\n/// NumPy-compatible `PCG64DXSM` bit generator.")
+              core = core[:insert_at] + (
+                  "    /// Return the canonical four-word entropy pool.\n"
+                  "    #[must_use]\n"
+                  "    pub const fn pool_words(&self) -> [u32; POOL_SIZE] {\n"
+                  "        self.pool\n"
+                  "    }\n"
+              ) + core[insert_at:]
+          assert pool_anchor in core
+
+          advance_marker = "    /// Advance the generator by `delta` raw outputs in logarithmic time.\n"
+          if advance_marker not in core:
+              insert_at = core.index("}\n\nfn entropy_words(seed: u64)")
+              core = core[:insert_at] + (
+                  "    /// Advance the generator by `delta` raw outputs in logarithmic time.\n"
+                  "    pub fn advance(&mut self, delta: u128) {\n"
+                  "        self.state = pcg_advance_128(\n"
+                  "            self.state,\n"
+                  "            delta,\n"
+                  "            u128::from(CHEAP_MULTIPLIER),\n"
+                  "            self.increment,\n"
+                  "        );\n"
+                  "    }\n"
+              ) + core[insert_at:]
+
+          advance_fn_marker = "fn pcg_advance_128("
+          if advance_fn_marker not in core:
+              insert_at = core.index("fn entropy_words(seed: u64)")
+              core = core[:insert_at] + (
+                  "fn pcg_advance_128(\n"
+                  "    state: u128,\n"
+                  "    mut delta: u128,\n"
+                  "    multiplier: u128,\n"
+                  "    increment: u128,\n"
+                  ") -> u128 {\n"
+                  "    let mut current_multiplier = multiplier;\n"
+                  "    let mut current_increment = increment;\n"
+                  "    let mut accumulated_multiplier = 1_u128;\n"
+                  "    let mut accumulated_increment = 0_u128;\n"
+                  "    while delta != 0 {\n"
+                  "        if delta & 1 != 0 {\n"
+                  "            accumulated_multiplier =\n"
+                  "                accumulated_multiplier.wrapping_mul(current_multiplier);\n"
+                  "            accumulated_increment = accumulated_increment\n"
+                  "                .wrapping_mul(current_multiplier)\n"
+                  "                .wrapping_add(current_increment);\n"
+                  "        }\n"
+                  "        delta >>= 1;\n"
+                  "        current_increment = current_multiplier\n"
+                  "            .wrapping_add(1)\n"
+                  "            .wrapping_mul(current_increment);\n"
+                  "        current_multiplier = current_multiplier.wrapping_mul(current_multiplier);\n"
+                  "    }\n"
+                  "    accumulated_multiplier\n"
+                  "        .wrapping_mul(state)\n"
+                  "        .wrapping_add(accumulated_increment)\n"
+                  "}\n\n"
+              ) + core[insert_at:]
+
+          test_marker = "    fn logarithmic_advance_matches_repeated_steps()"
+          if test_marker not in core:
+              insert_at = core.rfind("}\n")
+              core = core[:insert_at] + (
+                  "    #[test]\n"
+                  "    fn logarithmic_advance_matches_repeated_steps() {\n"
+                  "        for steps in [0_u128, 1, 2, 17, 257, 65_537] {\n"
+                  "            let mut repeated = Pcg64Dxsm::from_seed(0x0123_4567_89ab_cdef);\n"
+                  "            for _ in 0..steps {\n"
+                  "                let _ = repeated.next_u64();\n"
+                  "            }\n"
+                  "            let mut advanced = Pcg64Dxsm::from_seed(0x0123_4567_89ab_cdef);\n"
+                  "            advanced.advance(steps);\n"
+                  "            assert_eq!(advanced.raw_state(), repeated.raw_state());\n"
+                  "            assert_eq!(advanced.next_u64(), repeated.next_u64());\n"
+                  "        }\n"
+                  "    }\n\n"
+              ) + core[insert_at:]
+          core_path.write_text(core, encoding="utf-8")
+
+          manifest_path = Path("crates/fnp-random/Cargo.toml")
+          manifest = manifest_path.read_text(encoding="utf-8")
+          dependency = 'fnp-random-core = { path = "../fnp-random-core" }\n'
+          if dependency not in manifest:
+              marker = "[dependencies]\n"
+              assert marker in manifest
+              manifest = manifest.replace(marker, marker + dependency, 1)
+          manifest_path.write_text(manifest, encoding="utf-8")
+
+          random_path = Path("crates/fnp-random/src/lib.rs")
+          random = random_path.read_text(encoding="utf-8")
+
+          old_pool = "        let pool = mix_entropy_pool(&assembled, pool_size);"
+          new_pool = (
+              "        let pool = if pool_size == DEFAULT_SEED_SEQUENCE_POOL_SIZE {\n"
+              "            fnp_random_core::SeedSequence::from_entropy_words(entropy, spawn_key)\n"
+              "                .pool_words()\n"
+              "                .to_vec()\n"
+              "        } else {\n"
+              "            mix_entropy_pool(&assembled, pool_size)\n"
+              "        };"
+          )
+          if old_pool in random:
+              random = random.replace(old_pool, new_pool, 1)
+          elif new_pool not in random:
+              raise SystemExit("SeedSequence pool authority anchor drifted")
+
+          state_fast_path = (
+              "        if self.pool_size == DEFAULT_SEED_SEQUENCE_POOL_SIZE {\n"
+              "            return Ok(\n"
+              "                fnp_random_core::SeedSequence::from_entropy_words(\n"
+              "                    &self.entropy,\n"
+              "                    &self.spawn_key,\n"
+              "                )\n"
+              "                .generate_state(words),\n"
+              "            );\n"
+              "        }\n\n"
+          )
+          state_anchor = "        if words == 0 {\n            return Ok(Vec::new());\n        }\n\n"
+          if state_fast_path not in random:
+              location = random.index(state_anchor, random.index("pub fn generate_state_u32"))
+              location += len(state_anchor)
+              random = random[:location] + state_fast_path + random[location:]
+
+          start_marker = "/// NumPy-compatible PCG64-DXSM bit generator.\n"
+          end_marker = "/// PCG advance formula: compute state after `delta` steps.\n"
+          start = random.index(start_marker)
+          end = random.index(end_marker, start)
+          wrapper = '''/// NumPy-compatible PCG64-DXSM bit generator.
+///
+/// The primitive state transition, output permutation, floating conversion,
+/// and jump-ahead algebra are owned by the dependency-free `fnp-random-core`.
+/// This wrapper retains the established full-crate API and state schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pcg64DxsmRng {
+    core: fnp_random_core::Pcg64Dxsm,
+}
+
+impl Pcg64DxsmRng {
+    /// Create from a SeedSequence using NumPy's four-word initialization.
+    pub fn from_seed_sequence(ss: &SeedSequence) -> Result<Self, SeedSequenceError> {
+        let words = ss.generate_state_u64(4)?;
+        let initial_state = (u128::from(words[0]) << 64) | u128::from(words[1]);
+        let initial_sequence = (u128::from(words[2]) << 64) | u128::from(words[3]);
+        Ok(Self::seed(initial_state, initial_sequence))
+    }
+
+    /// Create from a u64 seed through the public SeedSequence path.
+    pub fn from_u64_seed(seed: u64) -> Result<Self, SeedSequenceError> {
+        let entropy = if seed <= u64::from(u32::MAX) {
+            vec![seed as u32]
+        } else {
+            vec![seed as u32, (seed >> 32) as u32]
+        };
+        let sequence = SeedSequence::new(&entropy)?;
+        Self::from_seed_sequence(&sequence)
+    }
+
+    /// Create from explicit 128-bit initialization values.
+    #[must_use]
+    pub fn seed(initial_state: u128, initial_sequence: u128) -> Self {
+        Self {
+            core: fnp_random_core::Pcg64Dxsm::seed(initial_state, initial_sequence),
+        }
+    }
+
+    /// Restore an exact raw state without applying the seeding transform.
+    #[must_use]
+    pub const fn from_raw_state(state: u128, increment: u128) -> Self {
+        Self {
+            core: fnp_random_core::Pcg64Dxsm::from_raw_state(state, increment),
+        }
+    }
+
+    /// Return the exact `(state, increment)` pair.
+    #[must_use]
+    pub const fn raw_state(&self) -> (u128, u128) {
+        self.core.raw_state()
+    }
+
+    pub fn to_state_entries(&self) -> Vec<(String, u64)> {
+        let (state, increment) = self.raw_state();
+        vec![
+            ("pcg64_state_hi".to_string(), (state >> 64) as u64),
+            ("pcg64_state_lo".to_string(), state as u64),
+            ("pcg64_inc_hi".to_string(), (increment >> 64) as u64),
+            ("pcg64_inc_lo".to_string(), increment as u64),
+        ]
+    }
+
+    pub fn from_state_entries(entries: &[(String, u64)]) -> Option<Self> {
+        let mut state_high = None;
+        let mut state_low = None;
+        let mut increment_high = None;
+        let mut increment_low = None;
+        for (key, value) in entries {
+            match key.trim() {
+                "pcg64_state_hi" => state_high = Some(*value),
+                "pcg64_state_lo" => state_low = Some(*value),
+                "pcg64_inc_hi" => increment_high = Some(*value),
+                "pcg64_inc_lo" => increment_low = Some(*value),
+                _ => {}
+            }
+        }
+        Some(Self::from_raw_state(
+            (u128::from(state_high?) << 64) | u128::from(state_low?),
+            (u128::from(increment_high?) << 64) | u128::from(increment_low?),
+        ))
+    }
+
+    /// Generate the next random u64.
+    pub fn next_u64(&mut self) -> u64 {
+        self.core.next_u64()
+    }
+
+    /// Generate the next random f64 in `[0, 1)`.
+    pub fn next_f64(&mut self) -> f64 {
+        self.core.next_f64()
+    }
+
+    /// Generate a bounded random u64 in `[0, upper_bound)`.
+    pub fn bounded_u64(&mut self, upper_bound: u64) -> Result<u64, RandomError> {
+        if upper_bound == 0 {
+            return Err(RandomError::InvalidUpperBound);
+        }
+        let threshold = u64::MAX - u64::MAX % upper_bound;
+        loop {
+            let candidate = self.next_u64();
+            if candidate < threshold {
+                return Ok(candidate % upper_bound);
+            }
+        }
+    }
+
+    /// Fill a vector while preserving the serial stream exactly.
+    #[must_use]
+    pub fn fill_u64(&mut self, len: usize) -> Vec<u64> {
+        parallel_pcg_u64_words(self, len)
+    }
+
+    /// Advance by `delta` raw outputs in logarithmic time.
+    pub fn advance(&mut self, delta: u128) {
+        self.core.advance(delta);
+    }
+}
+
+'''
+          random = random[:start] + wrapper + random[end:]
+          random_path.write_text(random, encoding="utf-8")
+
+          changelog_path = Path("CHANGELOG.md")
+          changelog = changelog_path.read_text(encoding="utf-8")
+          changelog_marker = "### PCG64DXSM single authority (2026-09-03)"
+          if changelog_marker not in changelog:
+              insertion = (
+                  "\n" + changelog_marker + "\n\n"
+                  "- Added dependency-free `fnp-random-core` as the canonical NumPy-compatible `SeedSequence`/`PCG64DXSM` primitive.\n"
+                  "- Routed the default four-word `SeedSequence` path and the full `Pcg64DxsmRng` implementation through that core while preserving public APIs, state schemas, parallel fills, and exact streams.\n"
+                  "- Added native, wasm32, jump-ahead, state-round-trip, and zero-dependency gates for the shared authority.\n"
+              )
+              first_break = changelog.find("\n", changelog.find("#"))
+              changelog = changelog[: first_break + 1] + insertion + changelog[first_break + 1 :]
+              changelog_path.write_text(changelog, encoding="utf-8")
+
+          readme_path = Path("README.md")
+          readme = readme_path.read_text(encoding="utf-8")
+          readme_marker = "### Deterministic random core"
+          if readme_marker not in readme:
+              section = (
+                  "\n" + readme_marker + "\n\n"
+                  "`fnp-random-core` is the dependency-free authority for NumPy-compatible default-pool `SeedSequence` and `PCG64DXSM`. The full `fnp-random` crate preserves distributions, entropy acquisition, state schemas, and parallel fills, but delegates the deterministic primitive so downstream certified consumers can share exactly the same stream without importing ndarray, OS entropy, or rayon.\n"
+              )
+              architecture = readme.find("\n## Architecture")
+              insertion = architecture if architecture >= 0 else readme.find("\n## ")
+              if insertion < 0:
+                  insertion = len(readme)
+              readme = readme[:insertion] + section + readme[insertion:]
+              readme_path.write_text(readme, encoding="utf-8")
+          PY
+
+      - name: Format and verify all affected production surfaces
+        shell: bash
+        env:
+          RUSTFLAGS: "-D warnings -C target-feature=+avx2"
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo check -p fnp-random-core --all-targets
+          cargo test -p fnp-random-core
+          cargo check -p fnp-random --all-targets
+          cargo test -p fnp-random
+          cargo check -p fnp-python
+          cargo test -p fnp-python --lib random
+          cargo clippy -p fnp-random-core -p fnp-random --all-targets -- -D warnings
+          RUSTFLAGS="-D warnings" cargo check --target wasm32-unknown-unknown -p fnp-random-core
+          cargo metadata --format-version 1 --no-deps > "${RUNNER_TEMP}/metadata.json"
+          python3 - "${RUNNER_TEMP}/metadata.json" <<'PY'
+          import json
+          import sys
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          core = [package for package in payload["packages"] if package["name"] == "fnp-random-core"]
+          if len(core) != 1 or core[0].get("dependencies"):
+              raise SystemExit(f"fnp-random-core dependency contract violated: {core}")
+          PY
+          git diff --check
+
+      - name: Commit the tested migration directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/centralize-pcg64dxsm.yml
+          git add Cargo.toml Cargo.lock CHANGELOG.md README.md crates/fnp-random-core crates/fnp-random
+          git config user.name "FrankenNumPy RNG Migration"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "refactor(random): centralize PCG64DXSM in fnp-random-core" -m "Route default SeedSequence pool generation and the full Pcg64DxsmRng state machine through the dependency-free authority. Preserve APIs, state serialization, parallel stream partitioning, and NumPy vectors; prove native, wasm32, jump-ahead, and downstream Python compilation before landing."
+          git fetch origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "main moved after verification; refusing to publish an untested rebased tree" >&2
+            exit 4
+          fi
+          git push origin HEAD:main
