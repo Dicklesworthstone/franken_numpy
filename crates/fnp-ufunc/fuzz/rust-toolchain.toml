@@ -4,5 +4,5 @@
 # pin does not reach them; this file makes `cargo fuzz run` use the right
 # nightly without requiring an explicit `+nightly-2026-08-25` on every call.
 # Bump together with /rust-toolchain.toml.
-channel = "nightly-2026-08-25"
+channel = "nightly-2026-08-31"
 components = ["rustfmt", "clippy"]
