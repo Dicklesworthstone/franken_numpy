@@ -1,12 +1,12 @@
 {
- "date": "2026-09-03 (final, after three recovery passes)",
- "trajectory": "216 -> 85 (main transcription pass) -> 78 (cited-bead mining + cross-row) -> 73 (row-body + cited-bead harness harvest)",
- "context": "Terminal for text-recovery methods: the remaining rows have no worker/harness/ELF record in the row text, the cited beads, or .rch-bench-replay logs. Each needs its author's session logs or a re-measurement.",
+ "date": "2026-09-03 (final, after four recovery passes)",
+ "trajectory": "216 -> 85 (main transcription pass) -> 78 (cited-bead mining + cross-row) -> 73 (row-body harness harvest) -> 67 (session-log bench-elf recovery x6 + class markers x11)",
+ "context": "Terminal for text/log-recovery on this host. Remaining rows: (a) 6 KEEP rows whose executing-ELF hash exists nowhere recoverable (L52101, L56478, L57356 carry only .so cdylib hashes - NOT bench ELFs; L58641/L58699/L58771 name no ELF) - they also lack class markers pending that recovery; (b) 15 measured rows with no host recorded anywhere; (c) 56 rows with no named harness. Each needs its author's session logs or a re-measurement. Original invocation logs WERE found and used for 6 rows: ~/.claude/projects/-data-projects-franken-numpy/ddc07e24-1a51-4ec6-b13c-b85f8f372fc2.jsonl and Codex rollouts of 2026-08-25/29/30.",
  "gates": {
   "new_measured_rows_name_their_worker": 15,
   "new_measured_rows_name_their_harness": 56,
-  "new_keep_rows_carry_an_executing_elf_sha256": 12,
-  "new_keep_rows_declare_one_campaign_result_class": 12
+  "new_keep_rows_carry_an_executing_elf_sha256": 6,
+  "new_keep_rows_declare_one_campaign_result_class": 6
  },
  "worker_rows": [
   {
@@ -54,19 +54,19 @@
    "heading": "2026-08-18 \u2014 `6y5wp`'s premise is NOT stale (unlike `v46rn`'s), and I nearly banked the opposite off"
   },
   {
-   "line": 58333,
+   "line": 58337,
    "heading": "2026-08-26 \u2014 REJECT: removing `fmod`'s O(n) divisor pre-scan buys NOTHING MEASURABLE; three variants"
   },
   {
-   "line": 65533,
+   "line": 65539,
    "heading": "2026-08-28 - NO MEASURABLE EFFECT (kept, not claimed) + a CORRECTION to the row above: folding the c"
   },
   {
-   "line": 65616,
+   "line": 65622,
    "heading": "2026-08-28 - REJECT: force-inlining `transform_field` makes lexsort 20-30% SLOWER - the same `#[inli"
   },
   {
-   "line": 65683,
+   "line": 65689,
    "heading": "2026-08-28 - REJECT x2, and the standing lexsort loss is now bounded from BOTH sides: neither the pe"
   }
  ],
@@ -240,59 +240,59 @@
    "heading": "2026-08-18 \u2014 THE 13.2 insns/ns CONVERSION RATE DOES NOT TRANSFER ACROSS LEVERS: the predicate lever "
   },
   {
-   "line": 61550,
+   "line": 61556,
    "heading": "2026-08-27 - A DTYPE-ONLY AUDIT OF 1800 CELLS FOUND ONE MORE DEFECT, AND THE OBVIOUS FIX FOR IT COST"
   },
   {
-   "line": 61840,
+   "line": 61846,
    "heading": "2026-08-27 - THE OBVIOUS FIX WOULD HAVE THROWN AWAY A 395x WIN: bool `abs`/`square` fell into the ge"
   },
   {
-   "line": 62207,
+   "line": 62213,
    "heading": "2026-08-27 - REJECT: numpy SHORTCUTS ASCENDING ONLY, so widening the ascending guard to descending f"
   },
   {
-   "line": 63209,
+   "line": 63215,
    "heading": "2026-08-27 - REJECT: a branchless compaction for `compress`/`extract` wins the unpredictable mask an"
   },
   {
-   "line": 64543,
+   "line": 64549,
    "heading": "2026-08-27 - WIN (SHIP): `repeat`'s parallel arm burned 64.59 INSTRUCTIONS PER OUTPUT ELEMENT agains"
   },
   {
-   "line": 65533,
+   "line": 65539,
    "heading": "2026-08-28 - NO MEASURABLE EFFECT (kept, not claimed) + a CORRECTION to the row above: folding the c"
   },
   {
-   "line": 65616,
+   "line": 65622,
    "heading": "2026-08-28 - REJECT: force-inlining `transform_field` makes lexsort 20-30% SLOWER - the same `#[inli"
   },
   {
-   "line": 65683,
+   "line": 65689,
    "heading": "2026-08-28 - REJECT x2, and the standing lexsort loss is now bounded from BOTH sides: neither the pe"
   },
   {
-   "line": 66084,
+   "line": 66090,
    "heading": "2026-08-30 \u2014 WIN (maintenance): the unordered-batch fallback was m SERIAL bisections; transposing it"
   },
   {
-   "line": 66487,
+   "line": 66493,
    "heading": "2026-08-30 \u2014 REJECT: lowering the searchsorted parallel gates BELOW 2^12 \u2014 the [2^10, 2^12) band is "
   },
   {
-   "line": 66553,
+   "line": 66559,
    "heading": "2026-08-30 \u2014 STRENGTHENING THE BAND REJECT: below 2^12 the parallel arm's sign is HOST-DIVERGENT, no"
   },
   {
-   "line": 66607,
+   "line": 66613,
    "heading": "2026-08-30 \u2014 NON-RESULT (premise wrong) on `np.take`'s 1<<21 parallel gate, and a NEWLY PRICED stand"
   },
   {
-   "line": 66684,
+   "line": 66690,
    "heading": "2026-08-30 \u2014 CORRECTION to my own row six hours old: the take gate switch WAS on the executed path, "
   },
   {
-   "line": 67325,
+   "line": 67331,
    "heading": "2026-08-31 \u2014 REJECT of a STALE-CONSTANT hypothesis I raised myself: `searchsorted`'s `MERGE_MIN_*` w"
   }
  ],
@@ -310,39 +310,15 @@
    "heading": "2026-08-26 \u2014 SHIP: a SCALAR index made `fnp.take` copy the WHOLE source; 191.87x slower than NumPy a"
   },
   {
-   "line": 57832,
-   "heading": "2026-08-26 \u2014 SHIP: ONE out-of-domain element flipped `arccosh` from an 11x WIN to a loss; the sqrt p"
-  },
-  {
-   "line": 57939,
-   "heading": "2026-08-26 \u2014 SHIP: the log family was 56% of ALL remaining headroom, hidden by ratio-ranking; ONE ba"
-  },
-  {
-   "line": 58152,
-   "heading": "2026-08-26 \u2014 SHIP: the transcendental chunker spawned `num_threads` tasks regardless of n; flooring "
-  },
-  {
-   "line": 58254,
-   "heading": "2026-08-26 \u2014 SHIP: `vander` spawned one rayon task PER ROW; blocking rows into 65536-element tasks t"
-  },
-  {
-   "line": 58428,
-   "heading": "2026-08-26 \u2014 SHIP: `nanargmax`/`nanargmin`'s cold-extract residual, 7.365x on a STRIDED operand the "
-  },
-  {
-   "line": 58532,
-   "heading": "2026-08-26 \u2014 SHIP + NEW VEIN: the loss sweep's operand ladder is ALL C-CONTIGUOUS, and a strided swe"
-  },
-  {
-   "line": 58635,
+   "line": 58641,
    "heading": "2026-08-26 \u2014 SHIP (2nd from the strided vein): `isposinf`/`isneginf`/`logical_not`, 35.343x strided "
   },
   {
-   "line": 58693,
+   "line": 58699,
    "heading": "2026-08-26 \u2014 SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 19.793x bec"
   },
   {
-   "line": 58765,
+   "line": 58771,
    "heading": "2026-08-26 \u2014 SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1.011x; and "
   }
  ]
