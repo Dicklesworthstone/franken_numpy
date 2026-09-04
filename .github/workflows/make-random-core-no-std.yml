@@ -1,0 +1,133 @@
+name: Make Random Core no_std
+
+on:
+  workflow_run:
+    workflows: ["Centralize PCG64DXSM"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: make-random-core-no-std
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    if: >-
+      github.repository == 'Dicklesworthstone/franken_numpy' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install repository and portability targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install nightly-2026-08-25 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown,thumbv7em-none-eabihf
+          rustup override set nightly-2026-08-25
+
+      - name: Remove the accidental std dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .github/workflows/centralize-pcg64dxsm.yml
+          grep -Fq 'core: fnp_random_core::Pcg64Dxsm' crates/fnp-random/src/lib.rs
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("crates/fnp-random-core/src/lib.rs")
+          source = path.read_text(encoding="utf-8")
+          marker = "#![no_std]\n\nextern crate alloc;\n\nuse alloc::{vec, vec::Vec};\n"
+          if marker not in source:
+              old = "#![forbid(unsafe_code)]\n"
+              new = (
+                  "#![no_std]\n"
+                  "#![forbid(unsafe_code)]\n\n"
+                  "extern crate alloc;\n\n"
+                  "use alloc::{vec, vec::Vec};\n"
+              )
+              if source.count(old) != 1:
+                  raise SystemExit("random-core crate-attribute anchor drifted")
+              source = source.replace(old, new, 1)
+          path.write_text(source, encoding="utf-8")
+          PY
+          cargo fmt --all
+
+      - name: Prove native, wasm, bare-metal, and full-crate compatibility
+        shell: bash
+        env:
+          RUSTFLAGS: "-D warnings -C target-feature=+avx2"
+        run: |
+          set -euo pipefail
+          cargo check -p fnp-random-core --all-targets
+          cargo test -p fnp-random-core
+          cargo clippy -p fnp-random-core --all-targets -- -D warnings
+          RUSTFLAGS="-D warnings" cargo check --target wasm32-unknown-unknown -p fnp-random-core
+          RUSTFLAGS="-D warnings" cargo check --target thumbv7em-none-eabihf -p fnp-random-core
+          cargo check -p fnp-random --all-targets
+          cargo test -p fnp-random
+          cargo check -p fnp-python
+          git diff --check
+
+      - name: Update documentation after the proof is earned
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          changelog_path = Path("CHANGELOG.md")
+          changelog = changelog_path.read_text(encoding="utf-8")
+          marker = "### no_std deterministic random core (2026-09-03)"
+          if marker not in changelog:
+              entry = (
+                  "\n" + marker + "\n\n"
+                  "- Converted `fnp-random-core` to `#![no_std]` with explicit `alloc` use; no APIs or streams changed.\n"
+                  "- Added a bare-metal `thumbv7em-none-eabihf` compile gate alongside native and wasm32 checks, while the full `fnp-random` and Python consumers remain green.\n"
+              )
+              first_break = changelog.find("\n", changelog.find("#"))
+              changelog = changelog[: first_break + 1] + entry + changelog[first_break + 1 :]
+              changelog_path.write_text(changelog, encoding="utf-8")
+
+          readme_path = Path("README.md")
+          readme = readme_path.read_text(encoding="utf-8")
+          sentence = "The deterministic core is `no_std + alloc` and is continuously checked on native, wasm32, and a bare-metal ARM target."
+          if sentence not in readme:
+              anchor = "### Deterministic random core"
+              location = readme.find(anchor)
+              if location < 0:
+                  raise SystemExit("deterministic random core README section is absent")
+              paragraph_end = readme.find("\n\n", location)
+              paragraph_end = readme.find("\n\n", paragraph_end + 2)
+              if paragraph_end < 0:
+                  paragraph_end = len(readme)
+              readme = readme[:paragraph_end] + "\n\n" + sentence + readme[paragraph_end:]
+              readme_path.write_text(readme, encoding="utf-8")
+          PY
+          git diff --check
+
+      - name: Commit the tested no_std implementation directly to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/make-random-core-no-std.yml
+          git add -A
+          git config user.name "FrankenNumPy no_std RNG"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat(random-core): support no_std plus alloc" -m "Remove the deterministic core's accidental std-prelude dependency without changing streams or APIs. Prove native tests, warning-denied Clippy, wasm32, bare-metal ARM, full fnp-random, and Python consumer compilation before landing."
+          git fetch origin main
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            git rebase origin/main
+            cargo test -p fnp-random-core
+            RUSTFLAGS="-D warnings" cargo check --target thumbv7em-none-eabihf -p fnp-random-core
+            cargo test -p fnp-random
+          fi
+          git push origin HEAD:main
