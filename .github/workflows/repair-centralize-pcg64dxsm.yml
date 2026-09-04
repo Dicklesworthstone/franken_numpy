@@ -1,0 +1,69 @@
+name: Repair Centralize PCG64DXSM
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/repair-centralize-pcg64dxsm.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Repair, self-remove, and retrigger the substantive migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path(".github/workflows/centralize-pcg64dxsm.yml")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              '                  "    pub const fn pool_words(&self) -> [u32; POOL_SIZE] {\\n"',
+              '                  "    pub const fn pool_words(&self) -> [u32; 4] {\\n"',
+              1,
+          )
+          old = '''          git fetch origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "main moved after verification; refusing to publish an untested rebased tree" >&2
+            exit 4
+          fi
+          git push origin HEAD:main
+'''
+          new = '''          git fetch origin main
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            git rebase origin/main
+            cargo test -p fnp-random-core
+            cargo test -p fnp-random
+            cargo clippy -p fnp-random-core -p fnp-random --all-targets -- -D warnings
+          fi
+          git push origin HEAD:main
+'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit("centralization publication anchor drifted")
+          if "[u32; POOL_SIZE]" in text:
+              raise SystemExit("public private-const signature remains in queued migration")
+          path.write_text(text, encoding="utf-8")
+          PY
+          git rm .github/workflows/repair-centralize-pcg64dxsm.yml
+          git add .github/workflows/centralize-pcg64dxsm.yml
+          git config user.name "FrankenNumPy Migration Repair"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix(ci): revalidate centralization after canonical rebase" -m "Use an explicit four-word public pool signature and rerun affected package tests/Clippy after any clean main rebase before publishing the one-shot migration."
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
