@@ -3154,6 +3154,7 @@ the load endpoints as the rows above do. (3) The open item on this cell remains 
 which the row below records as unreachable from a foreground-limited pane. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - RETRY PREDICATE DISCHARGED: `add` DOES reach parity at 2^24 - the earlier `at_parity=false` was riding on a defective null, and the ratio never moved (`deadlock-audit-ei9jz`)
+harness=ROUTE_FLOOR_SWEEP (transcribed 2026-09-03 from this row's own recorded instrument name)
 worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `SlateHeron`. My own retry predicate said: re-run ONLY the 2^24 cell until its incumbent null
@@ -53311,6 +53312,7 @@ merge it at all.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE DIRECT A/B REFUTES ei9jz's SPLIT: the probe chain is 660.9 insns/call, not 1189.4, and the ordering REVERSES — the wrapper is the larger half after all (deadlock-audit-rz8g0)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 harness=criterion (transcribed 2026-09-03 from this row's own recorded harness context)
 
 **Campaign result class:** a banked conclusion of mine refuted by a simpler instrument, exactly as pre-registered
@@ -53406,6 +53408,7 @@ standalone replicas.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — NATIVE f64 MULTIPLY AT n=256 IS 5.63x WORSE, NOT BETTER: my registered sign prediction is REFUTED and the lane CLOSES. The "SIMD-bound, no parallel win" exclusion holds at small n too, for a different reason than it was written for (deadlock-audit-sjpmo)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 harness=criterion (transcribed 2026-09-03 from this row's own recorded harness context)
 
 **Campaign result class:** REJECT — a lead I filed and argued for, killed by its own first measurement
@@ -54331,6 +54334,7 @@ is real or whether part of the 939.9 is something else.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — ONE CPython ATTRIBUTE ENTRY COSTS 201.7 INSNS, MEASURED: the linear model holds (two estimates 3.4% apart), and it accounts for only 64% of the diffuse remainder — so my inferred 313 was 1.6x too high and the entry-count account is PARTIAL (deadlock-audit-56vq8)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 
 **Campaign result class:** a quotient I published replaced by a measurement, which weakens the
 account it was defending
@@ -54847,6 +54851,7 @@ NOT register a magnitude band derived from 23 x a per-site figure.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — `sort`'s ndarray-cache conversion measures -33,489 insns/call against a null 14,218x smaller; 1,456.0 per site, independently agreeing with argsort's 1,360.9 — AND the reached-count recipe I registered last turn is UNSOUND (deadlock-audit-c5ecm)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 
 **Result class:** a pre-registered sign test that passed, plus the retraction of a METHOD I put on
 the bead one turn ago and told others to use.
@@ -54919,6 +54924,7 @@ derived from GUARDS, not from symbol presence.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE "BEFORE ARM HAS THE WIDER SPREAD" PATTERN I DISCLOSED TWICE IS REFUTED: at 5 reps the ordering REVERSES, so it was a 3-rep artifact — and the allocation hypothesis for the getattr cost is refuted too (minor faults flat to 0.13%) (deadlock-audit-c5ecm)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 
 **Result class:** a disclosed anomaly investigated and found NOT to exist, plus an independent
 replication of the effect it was attached to.
@@ -55166,6 +55172,7 @@ above, or someone's explicit decision to adopt it.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — WALL CLOCK, measured at last by artifact reuse: the levers DO save time (-2,584 and -2,528 ns/call) but my INSTRUCTION ROWS OVERSTATE THE SAVING BY 13-28% — and they also OVERSTATE how far behind NumPy we are (deadlock-audit-c5ecm)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 
 **Result class:** a currency check that corrects my own prior rows in BOTH directions. No build:
 existing ELFs only, /data at 50G against a 42G brake.
@@ -55234,6 +55241,7 @@ of the error is not constant (0.782 vs 0.866 on two cells of the same lever).
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — the divergence GENERALISES to the delegating route and is WORSE there: instructions say we are 18.29% behind NumPy on multiply, time says ~9.3% — plus the first MEASURED conversion rates, 13.2 insns/ns for redundant getattrs (two cells, 0.5% apart) (deadlock-audit-c5ecm)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 
 **Result class:** a generality check that strengthens yesterday's correction and produces the first
 conversion factor in this campaign that is measured rather than assumed. Artifact reuse, no build,
@@ -55398,6 +55406,7 @@ and costs nothing.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE 13.2 insns/ns CONVERSION RATE DOES NOT TRANSFER ACROSS LEVERS: the predicate lever converts at ~18 (95% [14.3, 25.0]), and the predicted 1,076 ns lies OUTSIDE the measured interval (deadlock-audit-c5ecm)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 
 **Result class:** a pre-registered cross-lever test of my own newest constant, which it FAILED — the
 outcome I said would be the more useful one. Artifact reuse, no build, /data 47G.
@@ -55716,6 +55725,7 @@ measure the real route directly. Do NOT derive it from the 352.5 insns/call the 
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — CORRECTION OF YESTERDAY'S CORRECTION: every per-call figure I published carries ~1,281 ns/call of PROCESS STARTUP, so all my RATIOS were diluted toward 1.0 — we are FURTHER behind NumPy than I said, and the multiply cell's headline REVERSES (deadlock-audit-c5ecm)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 harness=criterion (transcribed 2026-09-03 from this row's own recorded harness context)
 
 **Result class:** a measurement-design flaw in my own harness usage, found by chasing a discrepancy
@@ -55907,6 +55917,7 @@ narrative but their ratio columns are superseded here.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE MULTIPLY ROUTE FLOOR HAS COLLAPSED 15x SINCE `v46rn` WAS FILED: 2,044 ns -> 136 ns at n=256, and at n>=2^20 we are AT OR SLIGHTLY AHEAD OF PARITY. Also independently confirms the startup-floor correction to 1.4% (deadlock-audit-v46rn)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 
 **Result class:** a stale premise found by re-running a registered group that was already compiled
 into a preserved ELF. No build. /data 47G, load 5.0-5.7, idle 91%.
@@ -55972,6 +55983,7 @@ close it - and if anyone wants the credit assignment for the 15x, that is a bise
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — `6y5wp`'s premise is NOT stale (unlike `v46rn`'s), and I nearly banked the opposite off ONE run: two runs of one ELF gave DISJOINT CIs, and five runs put the banked figure inside the range — plus the banked row's fused line is internally INCONSISTENT (deadlock-audit-6y5wp)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's own recorded harness context)
 
 **Result class:** a staleness hypothesis tested and NOT confirmed, after a single-run result that
