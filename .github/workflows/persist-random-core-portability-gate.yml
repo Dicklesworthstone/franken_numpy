@@ -1,0 +1,57 @@
+name: Persist Random Core Portability Gate
+
+on:
+  workflow_run:
+    workflows: ["Make Random Core no_std"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  persist:
+    if: >-
+      github.repository == 'Dicklesworthstone/franken_numpy' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Extend the standing verifier and self-remove
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .github/workflows/make-random-core-no-std.yml
+          grep -Fq '#![no_std]' crates/fnp-random-core/src/lib.rs
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path(".github/workflows/finalize-random-core.yml")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              "--target wasm32-unknown-unknown",
+              "--target wasm32-unknown-unknown,thumbv7em-none-eabihf",
+              1,
+          )
+          command = '          RUSTFLAGS="-D warnings" cargo check --target thumbv7em-none-eabihf -p fnp-random-core\n'
+          if command not in text:
+              anchor = '          RUSTFLAGS="-D warnings" cargo check --target wasm32-unknown-unknown -p fnp-random-core\n'
+              if text.count(anchor) != 1:
+                  raise SystemExit("standing wasm random-core gate anchor drifted")
+              text = text.replace(anchor, anchor + command, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+          git rm .github/workflows/persist-random-core-portability-gate.yml
+          git add .github/workflows/finalize-random-core.yml
+          git config user.name "FrankenNumPy Portability Gate"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "ci(random-core): permanently gate bare-metal no_std" -m "Extend the standing native/wasm/zero-dependency verifier with thumbv7em-none-eabihf compilation after the no_std migration passed."
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
