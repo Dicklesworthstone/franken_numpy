@@ -809,6 +809,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fnp-random-core"
+version = "0.2.0"
+
+[[package]]
 name = "fnp-runtime"
 version = "0.2.0"
 dependencies = [
