@@ -3685,6 +3685,7 @@ candidate-null bias understood before their point estimates are used for anythin
 that is `deadlock-audit-7xcq2`. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - MEASURED, BOTH INSTRUMENT REPAIRS WORK - the partition no longer panics and its correction validates at 0.895x an independent figure; but the first run exposes a flaw in a field I added myself (`deadlock-audit-uj3r3`, `deadlock-audit-kido6`)
+harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. First run of two repairs written blind during the freeze. Same ELF and invocation
@@ -3934,6 +3935,7 @@ re-decide hzl1w, and decide it on the shipped route rather than on replicas.
 AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - MEASURED, THREE SIZES POST-FIX: the native f64 divide is at its WORST just above its own gate - 1.286x slower at 2^16 against 1.091x at 2^20 - which puts `F64_DIV_NATIVE_MIN_LEN` itself in question (`deadlock-audit-0ppym`, `deadlock-audit-qapyb`)
+harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
 
 `RedLynx`. No build - /data at 42G, the floor - so this re-runs the same committed-provenance ELF
@@ -4003,6 +4005,7 @@ existing REJECT of a gate move was measured on other sizes and does not cover th
 Filed as its own bead. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - RETRY PREDICATE DISCHARGED, AND THE CONTENTION MECHANISM IS NOW DEMONSTRATED: the same ELF reads 4.107x under load 98 and 6.994x under load 33, because OUR arm is parallel and NumPy's is serial (`deadlock-audit-322j4`)
+worker=thinkstation1 (transcribed 2026-09-03; this row states its measurement shares 'same commit, same host, same group' with the row below, which records worker=thinkstation1)
 
 `RedLynx`. No build - /data at 42G, at the hard stop. Same committed-provenance ELF as the row
 below, same commit, same host, same group, run twice about twenty minutes apart as the machine
@@ -47293,6 +47296,7 @@ what it might contain.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - THE BINARY FLOOR IS ATTRIBUTED, and the 48 ns block-entry cost is CONFIRMED BY A SECOND INSTRUMENT at 49 ns: ~929 insns/call is our own wrapper code and ~564 is CPython attribute machinery (`deadlock-audit-ei9jz`, `deadlock-audit-6y5wp`)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 `AzureCarp`. New counter probes for the binary route, built in one window and measured in another.
 
@@ -47749,6 +47753,7 @@ needs a build window this pane does not currently have.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - REJECT the "same_kind" lever: it is worth +10 insns/call, i.e. NOTHING, and my prediction was wrong in SIGN. The cause is that I read SAMPLING SKID as cost - a `movabs` of an immediate cannot be 17.93% of a function (`deadlock-audit-ei9jz`)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 `AzureCarp`. One build, controlled A/B, and the refutation is of my own reasoning.
 
@@ -47843,6 +47848,7 @@ was spent finding that out. When an effect is under ~200 insns/call, measure OUR
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - REVERTED the "same_kind" lever, and the revert exposed the instrument's NOISE FLOOR: identical source reproduces to only +92.6 insns/call, so the "+10.4" I quoted for the lever was never measurable (`deadlock-audit-ei9jz`)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 `AzureCarp`. One build. The revert was planned; what it measured was not.
 
@@ -51727,6 +51733,7 @@ buffer-provenance tax. Two of the five audited 2^20 groups remain unconverted.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — THE MULTIPLY EXCESS IS DIFFUSE: no single symbol carries it, only ~26% lives in code that exists solely on our path, and that is WHY seven named stage-levers all failed (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** attribution of an already-measured cost + a negative result that closes a
 line of attack
@@ -51827,6 +51834,7 @@ another stage.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — I CORRECT MY OWN HEADLINE: PyO3 keyword binding is 831.6 insns/call, my registered SIGN TEST is REFUTED, and the "two instruments agree to 1.3%" claim was two instruments sharing ONE OMISSION (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** refutation of my own registered prediction + correction of a banked
 partition that other rows rest on
@@ -51923,6 +51931,7 @@ without the kb correction, and do not quote my 4.119 ratio at all.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — I RETRACT LAST ROW'S RECONCILIATION: I converted instructions to ns with a rate built from ANOTHER HOST'S wall-clock number, which my own standing orders forbid. Measured directly, kb is 86.5 ns not 209.3 (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** retraction of my own correction + a measured route rate that replaces it
 
@@ -52004,6 +52013,7 @@ route rate is 6.99 and it is not constant across components.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — THE ns SPLIT IS UNDECIDABLE: choosing MEDIAN vs MIN moves the wrapper/probe ratio from 1.57 to 4.68 on the same nine runs, so the split stays in INSTRUCTIONS (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** UNDECIDED — a registered retry predicate attempted and honestly failed
 
@@ -52360,6 +52370,7 @@ inside every ledger row and source comment; that is what makes the shared-index 
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - THE GATE QUESTION IS NOW FULLY MEASURED, no size left to inference: native COSTS 8.7% at 2^19 and 14.7% at 2^20, and WINS 2.70x at 2^21. `F64_DIV_NATIVE_MIN_LEN` should be 1<<21. Ship deferred deliberately - the raise silently changes which ARM four existing tests exercise (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 `AzureCarp`. One build (`release-perf`, 3m05s, `df` 201G immediately before, `proj_builds` = 0 at
 start) to add 2^20 and 2^21 to the sweep, then five invocations of ELF `74f03412955b45be...` under
@@ -52512,6 +52523,7 @@ window may genuinely be bad - check `ps -eo state=` before concluding either way
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — COMPLETING THE PARTITION BREAKS IT: with pyo3's keyword-binding term included, `wrapper_residual_ns` goes NEGATIVE (-80.0 ns) and the group refuses to publish. The banked 91/370 was positive only because a real term was MISSING (deadlock-audit-ei9jz)
+worker=thinkstation1 harness=criterion (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** the method is REFUTED for this decomposition (not merely imprecise)
 
@@ -52726,6 +52738,7 @@ convenient, which is the failure this bead has already recorded twice today.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — MY REGISTERED MECHANISM IS REFUTED: `Instant::now()` overhead is 20.0 ns, not the 100-200 ns I predicted. The real diagnosis is that the partition's terms are 2-12 timer-ticks large, so the -80 ns wrapper is BELOW the instrument's resolution (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** my own registered prediction refuted, replaced by a measured diagnosis
 
@@ -52906,6 +52919,7 @@ stands on its own and is already banked; it does not need a time-domain twin.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — STOP RULE INVOKED, and the test I registered to trigger it was MIS-DESIGNED. The deeper answer: retired instructions are additively decomposable, wall-clock time is NOT — which explains all five refusals at once (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** registered stop rule honoured + my own acceptance test refuted + the
 mechanism that ends the line
@@ -53711,6 +53725,7 @@ integer. The integer has now been wrong once and is still read rather than measu
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — MEASURED CONFIRMATION that neither probe body executes for f64 multiply: all three skip-deltas are inside the noise floor, so the 660.9 insns/call is the DECISION MACHINERY, not the probes (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** a source claim of mine converted into a measured one — and it re-labels a
 banked quantity
@@ -53790,6 +53805,7 @@ executes.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE DTYPE SNIFF IS 593.5 INSNS/CALL: 90% of the decision section and 32% of the whole route excess, corroborated by an independent symbol cluster to 12.8%. The lever now has a measured target (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** a quantified, corroborated lever target
 
@@ -53880,6 +53896,7 @@ must be measured on the multiply arm where the sniff's cost is established rathe
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE DTYPE-IDENTITY LEVER SAVES 388.7 INSNS/CALL, inside its pre-registered band, cutting the sniff from 593.5 to 204.8 — and my own cross-check "failed" because I made the within-ELF/cross-ELF conflation AGAIN (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** lever measured and inside its registered band + a repeated methodological
 error of mine, caught by the control rather than by luck
@@ -54101,6 +54118,7 @@ fresh ELF off `d29b508e` is being measured to confirm it. That comparison is CRO
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — SHIPPED-STATE CERTIFICATION: the route excess is 1478.0 insns/call, 352.5 removed (19.3%) — and my pre-registered band MISSED by 4 insns/call because I built it too tight (deadlock-audit-ei9jz)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** shipped improvement certified at its WORST measured value + a registered
 band failed and is corrected
@@ -57327,6 +57345,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: a SCALAR index made `fnp.take` copy the WHOLE source; 191.87x slower than NumPy at n=2^20 becomes 7.2x FASTER (`deadlock-audit-yphwc`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 The `as*array` ship earlier today left `take[f64_scalar]` as `bench_vs_numpy_loss_sweep`'s worst
 cell at 21.1050x. That figure UNDERSTATES it, because the sweep measures one size. NumPy's cost
@@ -57458,6 +57477,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: `append`'s parallel byte-copy gate fired at 64 KiB where its own comment targets 64 MB; 8.97x DECIDABLE_REGRESSION becomes UNDECIDED parity (`deadlock-audit-dc6mz`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 **Campaign result class:** maintenance-self-speedup
 
 Worst substantive cell left after `deadlock-audit-yphwc`. `bench_vs_numpy_loss_sweep` ranked
@@ -57561,6 +57581,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: `sqrt` threw away a COMPLETED CORRECT BUFFER to buy FP-event parity it never delivered; rank-3 LOSS becomes a DECIDABLE_WIN (`deadlock-audit-f1mj2`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 **Campaign result class:** maintenance-self-speedup
 
 ### THE CELL, AND WHY A RE-MEASURE WOULD HAVE DISMISSED IT
@@ -57681,6 +57702,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: `meshgrid`'s cold Rust branch captured the ORDINARY dtypes and shadowed the good path directly beneath it; 19.76x–78.22x on every arity except 2, now parity (`deadlock-audit-bvihx`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 **Campaign result class:** maintenance-self-speedup
 
 ### THE CELL, AND THE SWEEP UNDERSTATED IT ~20x AGAIN
@@ -57799,6 +57821,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: ONE out-of-domain element flipped `arccosh` from an 11x WIN to a loss; the sqrt pay-twice deferral again, in the shared transcendental helper (`deadlock-audit-2qjj3`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 ### THE CELL
 
@@ -58045,6 +58068,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — AMENDMENT to the log-family row above: MY THREAD-COUNT JUSTIFICATION WAS WRONG, and the win is regime-dependent
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 I quoted the log family as three DECIDABLE_WINs from contracts run at `RAYON_NUM_THREADS=16`, and
 justified excluding the default (64) with "this box is noise-dominated at 64, per
@@ -58117,6 +58141,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: the transcendental chunker spawned `num_threads` tasks regardless of n; flooring work-per-task at the measured 8192 turns the default-thread log loss into parity/win (`deadlock-audit-w9po3`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 Taken directly from the corrected retry predicate of amendment `062e58d8`.
 
@@ -58495,6 +58520,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP + NEW VEIN: the loss sweep's operand ladder is ALL C-CONTIGUOUS, and a strided sweep finds losses it structurally cannot see (`deadlock-audit-0iwez`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 ### THE INSTRUMENT HAD A BLIND AXIS
 
@@ -58655,6 +58681,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 19.793x becomes 1.047x (`deadlock-audit-0iwez`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 Third and final ship from the operand axis opened in `b47125ed`, taking the remaining cells worst
 ratio first. Same mechanism in all five: the zero-copy path needs a contiguous buffer, a strided
@@ -58726,6 +58753,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1.011x; and the triage misled a THIRD time (`deadlock-audit-0iwez`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 ### THE TRIAGE RANKING FAILED AGAIN — half the candidate list was not real
 
