@@ -106,7 +106,9 @@ impl SeedSequence {
             .expect("SeedSequence u64 output word count overflow");
         let words = self.generate_state(state_word_count);
         words
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u64::from(pair[0]) | (u64::from(pair[1]) << 32))
             .collect()
     }
