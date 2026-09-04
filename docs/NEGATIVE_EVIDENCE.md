@@ -4005,6 +4005,7 @@ existing REJECT of a gate move was measured on other sizes and does not cover th
 Filed as its own bead. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - RETRY PREDICATE DISCHARGED, AND THE CONTENTION MECHANISM IS NOW DEMONSTRATED: the same ELF reads 4.107x under load 98 and 6.994x under load 33, because OUR arm is parallel and NumPy's is serial (`deadlock-audit-322j4`)
+harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's own recorded harness context)
 worker=thinkstation1 (transcribed 2026-09-03; this row states its measurement shares 'same commit, same host, same group' with the row below, which records worker=thinkstation1)
 
 `RedLynx`. No build - /data at 42G, at the hard stop. Same committed-provenance ELF as the row
@@ -47296,6 +47297,7 @@ what it might contain.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - THE BINARY FLOOR IS ATTRIBUTED, and the 48 ns block-entry cost is CONFIRMED BY A SECOND INSTRUMENT at 49 ns: ~929 insns/call is our own wrapper code and ~564 is CPython attribute machinery (`deadlock-audit-ei9jz`, `deadlock-audit-6y5wp`)
+harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's own recorded harness context)
 worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 `AzureCarp`. New counter probes for the binary route, built in one window and measured in another.
@@ -53309,6 +53311,7 @@ merge it at all.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE DIRECT A/B REFUTES ei9jz's SPLIT: the probe chain is 660.9 insns/call, not 1189.4, and the ordering REVERSES — the wrapper is the larger half after all (deadlock-audit-rz8g0)
+harness=criterion (transcribed 2026-09-03 from this row's own recorded harness context)
 
 **Campaign result class:** a banked conclusion of mine refuted by a simpler instrument, exactly as pre-registered
 
@@ -53403,6 +53406,7 @@ standalone replicas.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — NATIVE f64 MULTIPLY AT n=256 IS 5.63x WORSE, NOT BETTER: my registered sign prediction is REFUTED and the lane CLOSES. The "SIMD-bound, no parallel win" exclusion holds at small n too, for a different reason than it was written for (deadlock-audit-sjpmo)
+harness=criterion (transcribed 2026-09-03 from this row's own recorded harness context)
 
 **Campaign result class:** REJECT — a lead I filed and argued for, killed by its own first measurement
 
@@ -53725,6 +53729,7 @@ integer. The integer has now been wrong once and is still read rather than measu
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — MEASURED CONFIRMATION that neither probe body executes for f64 multiply: all three skip-deltas are inside the noise floor, so the 660.9 insns/call is the DECISION MACHINERY, not the probes (deadlock-audit-ei9jz)
+harness=criterion (transcribed 2026-09-03 from this row's own recorded harness context)
 worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** a source claim of mine converted into a measured one — and it re-labels a
@@ -53805,6 +53810,7 @@ executes.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE DTYPE SNIFF IS 593.5 INSNS/CALL: 90% of the decision section and 32% of the whole route excess, corroborated by an independent symbol cluster to 12.8%. The lever now has a measured target (deadlock-audit-ei9jz)
+harness=criterion (transcribed 2026-09-03 from this row's own recorded harness context)
 worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** a quantified, corroborated lever target
@@ -53896,6 +53902,7 @@ must be measured on the multiply arm where the sniff's cost is established rathe
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE DTYPE-IDENTITY LEVER SAVES 388.7 INSNS/CALL, inside its pre-registered band, cutting the sniff from 593.5 to 204.8 — and my own cross-check "failed" because I made the within-ELF/cross-ELF conflation AGAIN (deadlock-audit-ei9jz)
+harness=criterion (transcribed 2026-09-03 from this row's own recorded harness context)
 worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 **Campaign result class:** lever measured and inside its registered band + a repeated methodological
@@ -55709,6 +55716,7 @@ measure the real route directly. Do NOT derive it from the 352.5 insns/call the 
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — CORRECTION OF YESTERDAY'S CORRECTION: every per-call figure I published carries ~1,281 ns/call of PROCESS STARTUP, so all my RATIOS were diluted toward 1.0 — we are FURTHER behind NumPy than I said, and the multiply cell's headline REVERSES (deadlock-audit-c5ecm)
+harness=criterion (transcribed 2026-09-03 from this row's own recorded harness context)
 
 **Result class:** a measurement-design flaw in my own harness usage, found by chasing a discrepancy
 rather than by being told. Build-free. /data 47G, load ~6, idle 91%.
@@ -55964,6 +55972,7 @@ close it - and if anyone wants the credit assignment for the 15x, that is a bise
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — `6y5wp`'s premise is NOT stale (unlike `v46rn`'s), and I nearly banked the opposite off ONE run: two runs of one ELF gave DISJOINT CIs, and five runs put the banked figure inside the range — plus the banked row's fused line is internally INCONSISTENT (deadlock-audit-6y5wp)
+harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's own recorded harness context)
 
 **Result class:** a staleness hypothesis tested and NOT confirmed, after a single-run result that
 would have confirmed it. Build-free, group already compiled into a preserved ELF. /data 47G, load
@@ -58322,6 +58331,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — REJECT: removing `fmod`'s O(n) divisor pre-scan buys NOTHING MEASURABLE; three variants (`deadlock-audit-5o4lp`)
+harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's own recorded harness context)
 
 **NOTHING SHIPPED. The tree is at `abdf2d33` and the experiment is reverted.** This row exists so the
 design is not re-attempted.

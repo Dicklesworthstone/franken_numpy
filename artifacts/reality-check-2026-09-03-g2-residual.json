@@ -1,71 +1,72 @@
 {
- "date": "2026-09-03 (second pass)",
- "context": "After the main transcription pass (216->85) plus cited-bead description mining (27 rows) and one explicit cross-row same-host transcription (1 row), the ledger_hygiene residual stands at the rows below. They cannot be completed from the row text, the cited beads, or the retained .rch-bench-replay logs (17 entries, none hash-matching); each needs its author's session logs or a re-measurement.",
+ "date": "2026-09-03 (final, after three recovery passes)",
+ "trajectory": "216 -> 85 (main transcription pass) -> 78 (cited-bead mining + cross-row) -> 73 (row-body + cited-bead harness harvest)",
+ "context": "Terminal for text-recovery methods: the remaining rows have no worker/harness/ELF record in the row text, the cited beads, or .rch-bench-replay logs. Each needs its author's session logs or a re-measurement.",
  "gates": {
   "new_measured_rows_name_their_worker": 15,
-  "new_measured_rows_name_their_harness": 66,
+  "new_measured_rows_name_their_harness": 56,
   "new_keep_rows_carry_an_executing_elf_sha256": 12,
   "new_keep_rows_declare_one_campaign_result_class": 12
  },
  "worker_rows": [
   {
-   "line": 53311,
+   "line": 53313,
    "heading": "2026-08-18 \u2014 THE DIRECT A/B REFUTES ei9jz's SPLIT: the probe chain is 660.9 insns/call, not 1189.4, "
   },
   {
-   "line": 53405,
+   "line": 53408,
    "heading": "2026-08-18 \u2014 NATIVE f64 MULTIPLY AT n=256 IS 5.63x WORSE, NOT BETTER: my registered sign prediction "
   },
   {
-   "line": 54326,
+   "line": 54333,
    "heading": "2026-08-18 \u2014 ONE CPython ATTRIBUTE ENTRY COSTS 201.7 INSNS, MEASURED: the linear model holds (two es"
   },
   {
-   "line": 54842,
+   "line": 54849,
    "heading": "2026-08-18 \u2014 `sort`'s ndarray-cache conversion measures -33,489 insns/call against a null 14,218x sm"
   },
   {
-   "line": 54914,
+   "line": 54921,
    "heading": "2026-08-18 \u2014 THE \"BEFORE ARM HAS THE WIDER SPREAD\" PATTERN I DISCLOSED TWICE IS REFUTED: at 5 reps t"
   },
   {
-   "line": 55161,
+   "line": 55168,
    "heading": "2026-08-18 \u2014 WALL CLOCK, measured at last by artifact reuse: the levers DO save time (-2,584 and -2,"
   },
   {
-   "line": 55229,
+   "line": 55236,
    "heading": "2026-08-18 \u2014 the divergence GENERALISES to the delegating route and is WORSE there: instructions say"
   },
   {
-   "line": 55393,
+   "line": 55400,
    "heading": "2026-08-18 \u2014 THE 13.2 insns/ns CONVERSION RATE DOES NOT TRANSFER ACROSS LEVERS: the predicate lever "
   },
   {
-   "line": 55711,
+   "line": 55718,
    "heading": "2026-08-18 \u2014 CORRECTION OF YESTERDAY'S CORRECTION: every per-call figure I published carries ~1,281 "
   },
   {
-   "line": 55901,
+   "line": 55909,
    "heading": "2026-08-18 \u2014 THE MULTIPLY ROUTE FLOOR HAS COLLAPSED 15x SINCE `v46rn` WAS FILED: 2,044 ns -> 136 ns "
   },
   {
-   "line": 55966,
+   "line": 55974,
    "heading": "2026-08-18 \u2014 `6y5wp`'s premise is NOT stale (unlike `v46rn`'s), and I nearly banked the opposite off"
   },
   {
-   "line": 58324,
+   "line": 58333,
    "heading": "2026-08-26 \u2014 REJECT: removing `fmod`'s O(n) divisor pre-scan buys NOTHING MEASURABLE; three variants"
   },
   {
-   "line": 65523,
+   "line": 65533,
    "heading": "2026-08-28 - NO MEASURABLE EFFECT (kept, not claimed) + a CORRECTION to the row above: folding the c"
   },
   {
-   "line": 65606,
+   "line": 65616,
    "heading": "2026-08-28 - REJECT: force-inlining `transform_field` makes lexsort 20-30% SLOWER - the same `#[inli"
   },
   {
-   "line": 65673,
+   "line": 65683,
    "heading": "2026-08-28 - REJECT x2, and the standing lexsort loss is now bounded from BOTH sides: neither the pe"
   }
  ],
@@ -95,293 +96,253 @@
    "heading": "2026-08-16 - CONFLICT, DO NOT DROP THE NATIVE DIVIDE PATH YET: two same-host runs with clean nulls d"
   },
   {
-   "line": 4007,
-   "heading": "2026-08-16 - RETRY PREDICATE DISCHARGED, AND THE CONTENTION MECHANISM IS NOW DEMONSTRATED: the same "
-  },
-  {
-   "line": 46556,
+   "line": 46557,
    "heading": "2026-08-17 - PREDICTION REFUTED: the arity branch bought `at` only 55 ns, not the ~190 predicted - s"
   },
   {
-   "line": 46928,
+   "line": 46929,
    "heading": "2026-08-17 - CERTIFIED: the wrapper class pays 925-1944 ns per call for a re-import, non-interned ke"
   },
   {
-   "line": 47298,
-   "heading": "2026-08-17 - THE BINARY FLOOR IS ATTRIBUTED, and the 48 ns block-entry cost is CONFIRMED BY A SECOND"
-  },
-  {
-   "line": 47755,
+   "line": 47757,
    "heading": "2026-08-17 - REJECT the \"same_kind\" lever: it is worth +10 insns/call, i.e. NOTHING, and my predicti"
   },
   {
-   "line": 47850,
+   "line": 47852,
    "heading": "2026-08-17 - REVERTED the \"same_kind\" lever, and the revert exposed the instrument's NOISE FLOOR: id"
   },
   {
-   "line": 48081,
+   "line": 48083,
    "heading": "2026-08-17 - CERTIFIED: not raising to decide is worth 390-574 ns per call, MORE than the 212 ns I p"
   },
   {
-   "line": 48820,
+   "line": 48822,
    "heading": "2026-08-17 - REFUTED, and this one is a plain mistake: my `searchsorted` needle pre-check is DEAD CO"
   },
   {
-   "line": 49241,
+   "line": 49243,
    "heading": "2026-08-17 - UNDECIDED: the `asarray` skip moves `searchsorted` +1.6% and +4.5%, but a CONTROL moved"
   },
   {
-   "line": 49423,
+   "line": 49425,
    "heading": "2026-08-17 - THE DESIGNED CONTROL WORKS: with a LIST-haystack cell that cannot take the lever, the `"
   },
   {
-   "line": 49479,
+   "line": 49481,
    "heading": "2026-08-17 - CERTIFIED, and it is the largest single move of the campaign on this cell: `searchsorte"
   },
   {
-   "line": 49548,
+   "line": 49550,
    "heading": "2026-08-17 - PRE-REGISTRATION, not a result: the `out=` divide route now has a DELEGATION control, a"
   },
   {
-   "line": 49729,
+   "line": 49731,
    "heading": "2026-08-17 - CERTIFIED: the 136-probe import sweep takes two-sided `clip` from 1.6791x to 1.18x, wit"
   },
   {
-   "line": 50038,
+   "line": 50040,
    "heading": "2026-08-17 - CERTIFIED, quoted at its WORST cell: the dispatcher-body lever is worth +0.6% on `ss_li"
   },
   {
-   "line": 50193,
+   "line": 50195,
    "heading": "2026-08-17 - THE BUFFER FIX WORKED AND EXTENDED THE USABLE BAND TO 2^19 (18,840 ns -> ~600 ns), but "
   },
   {
-   "line": 50487,
+   "line": 50489,
    "heading": "2026-08-17 - CERTIFIED, and it is a SHIPPABLE LEVER: the `out=` native divide route is NOT worth tak"
   },
   {
-   "line": 50701,
+   "line": 50703,
    "heading": "2026-08-17 - THE SHIPPED BAND IS VERIFIED END-TO-END THROUGH THE REAL ROUTE: inside it `divide` now "
   },
   {
-   "line": 50994,
+   "line": 50996,
    "heading": "2026-08-17 - THE BUFFER ARTIFACT IS A NEAR-CACHE-SIZE PHENOMENON, NOT A \"BIGGER IS WORSE\" ONE: at 2^"
   },
   {
-   "line": 51228,
+   "line": 51230,
    "heading": "2026-08-17 - THE CERTIFIED `out=` CELLS SURVIVE: on five QUALIFYING runs the separate-vs-shared buff"
   },
   {
-   "line": 51432,
+   "line": 51434,
    "heading": "2026-08-17 - RE-DECIDED ON THE CORRECTED INSTRUMENT: the FE-hazard classifier COSTS 7.9%, 5/5 runs. "
   },
   {
-   "line": 51647,
+   "line": 51649,
    "heading": "2026-08-17 - CERTIFIED AND SHIPPABLE: the bitmask classifier is a 4.04% win, 5/5 runs, and it is the"
   },
   {
-   "line": 51735,
+   "line": 51737,
    "heading": "2026-08-17 \u2014 THE MULTIPLY EXCESS IS DIFFUSE: no single symbol carries it, only ~26% lives in code th"
   },
   {
-   "line": 51836,
+   "line": 51838,
    "heading": "2026-08-17 \u2014 I CORRECT MY OWN HEADLINE: PyO3 keyword binding is 831.6 insns/call, my registered SIGN"
   },
   {
-   "line": 51933,
+   "line": 51935,
    "heading": "2026-08-17 \u2014 I RETRACT LAST ROW'S RECONCILIATION: I converted instructions to ns with a rate built f"
   },
   {
-   "line": 52015,
+   "line": 52017,
    "heading": "2026-08-17 \u2014 THE ns SPLIT IS UNDECIDABLE: choosing MEDIAN vs MIN moves the wrapper/probe ratio from "
   },
   {
-   "line": 52099,
+   "line": 52101,
    "heading": "2026-08-17 - POST-SHIP VERIFICATION: the gate's ROUTING is confirmed on the real allocating route (d"
   },
   {
-   "line": 52188,
+   "line": 52190,
    "heading": "2026-08-17 - `F64_DIV_NATIVE_MIN_LEN` = 1<<19 IS SET TOO LOW, and it is now decided rather than mere"
   },
   {
-   "line": 52372,
+   "line": 52374,
    "heading": "2026-08-17 - THE GATE QUESTION IS NOW FULLY MEASURED, no size left to inference: native COSTS 8.7% a"
   },
   {
-   "line": 52740,
+   "line": 52742,
    "heading": "2026-08-17 \u2014 MY REGISTERED MECHANISM IS REFUTED: `Instant::now()` overhead is 20.0 ns, not the 100-2"
   },
   {
-   "line": 52824,
+   "line": 52826,
    "heading": "2026-08-17 - THE RAISE IS VERIFIED END-TO-END: divide now TRACKS the delegating control at 2^19 (0.9"
   },
   {
-   "line": 52921,
+   "line": 52923,
    "heading": "2026-08-17 \u2014 STOP RULE INVOKED, and the test I registered to trigger it was MIS-DESIGNED. The deeper"
   },
   {
-   "line": 53311,
-   "heading": "2026-08-18 \u2014 THE DIRECT A/B REFUTES ei9jz's SPLIT: the probe chain is 660.9 insns/call, not 1189.4, "
-  },
-  {
-   "line": 53405,
-   "heading": "2026-08-18 \u2014 NATIVE f64 MULTIPLY AT n=256 IS 5.63x WORSE, NOT BETTER: my registered sign prediction "
-  },
-  {
-   "line": 53727,
-   "heading": "2026-08-18 \u2014 MEASURED CONFIRMATION that neither probe body executes for f64 multiply: all three skip"
-  },
-  {
-   "line": 53807,
-   "heading": "2026-08-18 \u2014 THE DTYPE SNIFF IS 593.5 INSNS/CALL: 90% of the decision section and 32% of the whole r"
-  },
-  {
-   "line": 53898,
-   "heading": "2026-08-18 \u2014 THE DTYPE-IDENTITY LEVER SAVES 388.7 INSNS/CALL, inside its pre-registered band, cuttin"
-  },
-  {
-   "line": 54120,
+   "line": 54127,
    "heading": "2026-08-18 \u2014 SHIPPED-STATE CERTIFICATION: the route excess is 1478.0 insns/call, 352.5 removed (19.3"
   },
   {
-   "line": 54326,
+   "line": 54333,
    "heading": "2026-08-18 \u2014 ONE CPython ATTRIBUTE ENTRY COSTS 201.7 INSNS, MEASURED: the linear model holds (two es"
   },
   {
-   "line": 54842,
+   "line": 54849,
    "heading": "2026-08-18 \u2014 `sort`'s ndarray-cache conversion measures -33,489 insns/call against a null 14,218x sm"
   },
   {
-   "line": 54914,
+   "line": 54921,
    "heading": "2026-08-18 \u2014 THE \"BEFORE ARM HAS THE WIDER SPREAD\" PATTERN I DISCLOSED TWICE IS REFUTED: at 5 reps t"
   },
   {
-   "line": 55161,
+   "line": 55168,
    "heading": "2026-08-18 \u2014 WALL CLOCK, measured at last by artifact reuse: the levers DO save time (-2,584 and -2,"
   },
   {
-   "line": 55229,
+   "line": 55236,
    "heading": "2026-08-18 \u2014 the divergence GENERALISES to the delegating route and is WORSE there: instructions say"
   },
   {
-   "line": 55393,
+   "line": 55400,
    "heading": "2026-08-18 \u2014 THE 13.2 insns/ns CONVERSION RATE DOES NOT TRANSFER ACROSS LEVERS: the predicate lever "
   },
   {
-   "line": 55711,
-   "heading": "2026-08-18 \u2014 CORRECTION OF YESTERDAY'S CORRECTION: every per-call figure I published carries ~1,281 "
-  },
-  {
-   "line": 55966,
-   "heading": "2026-08-18 \u2014 `6y5wp`'s premise is NOT stale (unlike `v46rn`'s), and I nearly banked the opposite off"
-  },
-  {
-   "line": 58324,
-   "heading": "2026-08-26 \u2014 REJECT: removing `fmod`'s O(n) divisor pre-scan buys NOTHING MEASURABLE; three variants"
-  },
-  {
-   "line": 61540,
+   "line": 61550,
    "heading": "2026-08-27 - A DTYPE-ONLY AUDIT OF 1800 CELLS FOUND ONE MORE DEFECT, AND THE OBVIOUS FIX FOR IT COST"
   },
   {
-   "line": 61830,
+   "line": 61840,
    "heading": "2026-08-27 - THE OBVIOUS FIX WOULD HAVE THROWN AWAY A 395x WIN: bool `abs`/`square` fell into the ge"
   },
   {
-   "line": 62197,
+   "line": 62207,
    "heading": "2026-08-27 - REJECT: numpy SHORTCUTS ASCENDING ONLY, so widening the ascending guard to descending f"
   },
   {
-   "line": 63199,
+   "line": 63209,
    "heading": "2026-08-27 - REJECT: a branchless compaction for `compress`/`extract` wins the unpredictable mask an"
   },
   {
-   "line": 64533,
+   "line": 64543,
    "heading": "2026-08-27 - WIN (SHIP): `repeat`'s parallel arm burned 64.59 INSTRUCTIONS PER OUTPUT ELEMENT agains"
   },
   {
-   "line": 65523,
+   "line": 65533,
    "heading": "2026-08-28 - NO MEASURABLE EFFECT (kept, not claimed) + a CORRECTION to the row above: folding the c"
   },
   {
-   "line": 65606,
+   "line": 65616,
    "heading": "2026-08-28 - REJECT: force-inlining `transform_field` makes lexsort 20-30% SLOWER - the same `#[inli"
   },
   {
-   "line": 65673,
+   "line": 65683,
    "heading": "2026-08-28 - REJECT x2, and the standing lexsort loss is now bounded from BOTH sides: neither the pe"
   },
   {
-   "line": 66074,
+   "line": 66084,
    "heading": "2026-08-30 \u2014 WIN (maintenance): the unordered-batch fallback was m SERIAL bisections; transposing it"
   },
   {
-   "line": 66477,
+   "line": 66487,
    "heading": "2026-08-30 \u2014 REJECT: lowering the searchsorted parallel gates BELOW 2^12 \u2014 the [2^10, 2^12) band is "
   },
   {
-   "line": 66543,
+   "line": 66553,
    "heading": "2026-08-30 \u2014 STRENGTHENING THE BAND REJECT: below 2^12 the parallel arm's sign is HOST-DIVERGENT, no"
   },
   {
-   "line": 66597,
+   "line": 66607,
    "heading": "2026-08-30 \u2014 NON-RESULT (premise wrong) on `np.take`'s 1<<21 parallel gate, and a NEWLY PRICED stand"
   },
   {
-   "line": 66674,
+   "line": 66684,
    "heading": "2026-08-30 \u2014 CORRECTION to my own row six hours old: the take gate switch WAS on the executed path, "
   },
   {
-   "line": 67315,
+   "line": 67325,
    "heading": "2026-08-31 \u2014 REJECT of a STALE-CONSTANT hypothesis I raised myself: `searchsorted`'s `MERGE_MIN_*` w"
   }
  ],
  "elf_rows": [
   {
-   "line": 52099,
+   "line": 52101,
    "heading": "2026-08-17 - POST-SHIP VERIFICATION: the gate's ROUTING is confirmed on the real allocating route (d"
   },
   {
-   "line": 56469,
+   "line": 56478,
    "heading": "2026-08-22 \u2014 MEASURED: corrected bench_maximum_arms_vs_numpy under the fixed allocation-symmetric ha"
   },
   {
-   "line": 57347,
+   "line": 57356,
    "heading": "2026-08-26 \u2014 SHIP: a SCALAR index made `fnp.take` copy the WHOLE source; 191.87x slower than NumPy a"
   },
   {
-   "line": 57823,
+   "line": 57832,
    "heading": "2026-08-26 \u2014 SHIP: ONE out-of-domain element flipped `arccosh` from an 11x WIN to a loss; the sqrt p"
   },
   {
-   "line": 57930,
+   "line": 57939,
    "heading": "2026-08-26 \u2014 SHIP: the log family was 56% of ALL remaining headroom, hidden by ratio-ranking; ONE ba"
   },
   {
-   "line": 58143,
+   "line": 58152,
    "heading": "2026-08-26 \u2014 SHIP: the transcendental chunker spawned `num_threads` tasks regardless of n; flooring "
   },
   {
-   "line": 58245,
+   "line": 58254,
    "heading": "2026-08-26 \u2014 SHIP: `vander` spawned one rayon task PER ROW; blocking rows into 65536-element tasks t"
   },
   {
-   "line": 58418,
+   "line": 58428,
    "heading": "2026-08-26 \u2014 SHIP: `nanargmax`/`nanargmin`'s cold-extract residual, 7.365x on a STRIDED operand the "
   },
   {
-   "line": 58522,
+   "line": 58532,
    "heading": "2026-08-26 \u2014 SHIP + NEW VEIN: the loss sweep's operand ladder is ALL C-CONTIGUOUS, and a strided swe"
   },
   {
-   "line": 58625,
+   "line": 58635,
    "heading": "2026-08-26 \u2014 SHIP (2nd from the strided vein): `isposinf`/`isneginf`/`logical_not`, 35.343x strided "
   },
   {
-   "line": 58683,
+   "line": 58693,
    "heading": "2026-08-26 \u2014 SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 19.793x bec"
   },
   {
-   "line": 58755,
+   "line": 58765,
    "heading": "2026-08-26 \u2014 SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1.011x; and "
   }
  ]
