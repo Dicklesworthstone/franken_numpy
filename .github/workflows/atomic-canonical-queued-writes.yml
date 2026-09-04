@@ -1,0 +1,61 @@
+name: Atomic Canonical Queued Writes
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/atomic-canonical-queued-writes.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Patch queued writers, self-remove, and mirror atomically
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          paths = [
+              Path(".github/workflows/centralize-pcg64dxsm.yml"),
+              Path(".github/workflows/make-random-core-no-std.yml"),
+              Path(".github/workflows/persist-random-core-portability-gate.yml"),
+              Path(".github/workflows/repair-centralize-pcg64dxsm.yml"),
+              Path(".github/workflows/finalize-random-core.yml"),
+          ]
+          changed = []
+          for path in paths:
+              if not path.exists():
+                  continue
+              text = path.read_text(encoding="utf-8")
+              updated = text.replace(
+                  "git push origin HEAD:main",
+                  "git push --atomic origin HEAD:main HEAD:master",
+              )
+              if updated != text:
+                  path.write_text(updated, encoding="utf-8")
+                  changed.append(str(path))
+              if "git push origin HEAD:main" in updated:
+                  raise SystemExit(f"unpatched canonical write remains in {path}")
+          print("patched queued writers:", ", ".join(changed) if changed else "already canonical")
+          PY
+          git rm .github/workflows/atomic-canonical-queued-writes.yml
+          git add .github/workflows
+          git config user.name "FrankenNumPy Canonical Writes"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix(ci): atomically publish queued changes to main and master" -m "GITHUB_TOKEN pushes do not recursively trigger the mirror workflow. Every queued implementation writer now fast-forwards both canonical refs in one atomic operation, failing without mutation if either ref cannot advance."
+          git fetch origin main master
+          git rebase origin/main
+          git push --atomic origin HEAD:main HEAD:master
