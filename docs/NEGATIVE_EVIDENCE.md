@@ -57830,6 +57830,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: ONE out-of-domain element flipped `arccosh` from an 11x WIN to a loss; the sqrt pay-twice deferral again, in the shared transcendental helper (`deadlock-audit-2qjj3`)
+**Campaign result class:** maintenance-self-speedup
 worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 ### THE CELL
@@ -57937,6 +57938,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: the log family was 56% of ALL remaining headroom, hidden by ratio-ranking; ONE bad element flipped a 3.5–5.6x WIN into a ~3x loss (`deadlock-audit-7kcz8`)
+**Campaign result class:** maintenance-self-speedup
 
 ### RANKING BY RATIO HID THE BIGGEST CELL ON THE BOARD
 
@@ -58150,6 +58152,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: the transcendental chunker spawned `num_threads` tasks regardless of n; flooring work-per-task at the measured 8192 turns the default-thread log loss into parity/win (`deadlock-audit-w9po3`)
+**Campaign result class:** maintenance-self-speedup
 worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 Taken directly from the corrected retry predicate of amendment `062e58d8`.
@@ -58252,6 +58255,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: `vander` spawned one rayon task PER ROW; blocking rows into 65536-element tasks turns a 1.86x loss into a 4.6x WIN (`deadlock-audit-wnpqg`)
+**Campaign result class:** maintenance-self-speedup
 
 ### THE CELL
 
@@ -58426,6 +58430,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP: `nanargmax`/`nanargmin`'s cold-extract residual, 7.365x on a STRIDED operand the sweep cannot see (`deadlock-audit-0e1q5`)
+**Campaign result class:** maintenance-self-speedup
 
 ### FIRST, A CORRECTION TO THE INSTRUMENT: MOST OF THE SWEEP'S REMAINING "LOSSES" ARE NOT REAL
 
@@ -58530,6 +58535,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — SHIP + NEW VEIN: the loss sweep's operand ladder is ALL C-CONTIGUOUS, and a strided sweep finds losses it structurally cannot see (`deadlock-audit-0iwez`)
+**Campaign result class:** maintenance-self-speedup
 worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
 
 ### THE INSTRUMENT HAD A BLIND AXIS
