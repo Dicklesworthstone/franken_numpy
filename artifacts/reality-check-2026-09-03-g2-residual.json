@@ -274,5 +274,6 @@
    "heading": "2026-08-26 \u2014 SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1.011x; and "
   }
  ],
- "union_rows": 61
+ "union_rows": 61,
+ "verification_2026_09_04": "Re-verified after syncing to tip 43a73e3d (fleet rng-migration in flight): the 61-row residual is unchanged and confirmed terminal on this host. Refreshed session trees (Claude projects 397M, Codex rollouts 2026-08/*, omp sessions) re-searched: L57368's only full hashes anywhere remain the .so cdylib pair; L52102 has no full hash; the strided-vein rows name no ELF; the worker-4 rows have zero host tokens within \u00b13000 chars of their measurement phrases in any transcript. Only re-banking or re-measurement can clear them."
 }
