@@ -1,0 +1,111 @@
+name: Dispatch RNG Migration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/dispatch-rng-migration.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Normalize queued stages and choose the earliest unfinished one
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          workflow_paths = [
+              Path(".github/workflows/centralize-pcg64dxsm.yml"),
+              Path(".github/workflows/make-random-core-no-std.yml"),
+              Path(".github/workflows/persist-random-core-portability-gate.yml"),
+              Path(".github/workflows/finalize-random-core.yml"),
+          ]
+          for path in workflow_paths:
+              if not path.exists():
+                  continue
+              text = path.read_text(encoding="utf-8")
+              text = text.replace("git push origin HEAD:main", "git push --atomic origin HEAD:main HEAD:master")
+              if path.name == "centralize-pcg64dxsm.yml":
+                  text = text.replace("[u32; POOL_SIZE]", "[u32; 4]")
+                  old = '''          git fetch origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "main moved after verification; refusing to publish an untested rebased tree" >&2
+            exit 4
+          fi
+          git push --atomic origin HEAD:main HEAD:master
+'''
+                  new = '''          git fetch origin main master
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            git rebase origin/main
+            cargo test -p fnp-random-core
+            cargo test -p fnp-random
+            cargo clippy -p fnp-random-core -p fnp-random --all-targets -- -D warnings
+          fi
+          git push --atomic origin HEAD:main HEAD:master
+'''
+                  if old in text:
+                      text = text.replace(old, new, 1)
+              path.write_text(text, encoding="utf-8")
+          PY
+
+          stage=""
+          if [[ -e .github/workflows/centralize-pcg64dxsm.yml ]]; then
+            stage="centralize-pcg64dxsm.yml"
+          elif [[ -e .github/workflows/make-random-core-no-std.yml ]] && ! grep -Fq '#![no_std]' crates/fnp-random-core/src/lib.rs; then
+            stage="make-random-core-no-std.yml"
+          elif [[ -e .github/workflows/persist-random-core-portability-gate.yml ]] && ! grep -Fq 'thumbv7em-none-eabihf' .github/workflows/finalize-random-core.yml; then
+            stage="persist-random-core-portability-gate.yml"
+          fi
+          echo "name=$stage" >> "$GITHUB_OUTPUT"
+
+      - name: Publish coordinator cleanup and normalized workflow definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/dispatch-rng-migration.yml
+          for obsolete in \
+            .github/workflows/repair-centralize-pcg64dxsm.yml \
+            .github/workflows/atomic-canonical-queued-writes.yml; do
+            [[ -e "$obsolete" ]] && git rm "$obsolete" || true
+          done
+          git add .github/workflows
+          if git diff --cached --quiet; then
+            echo "no coordinator cleanup changes"
+          else
+            git config user.name "FrankenNumPy RNG Coordinator"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "fix(ci): explicitly coordinate the RNG migration chain" -m "Normalize atomic canonical publication, remove superseded repair helpers, and prepare the earliest unfinished stage for an explicit workflow dispatch."
+            git fetch origin main master
+            git rebase origin/main
+            git push --atomic origin HEAD:main HEAD:master
+          fi
+
+      - name: Dispatch the earliest unfinished stage
+        if: steps.stage.outputs.name != ''
+        shell: bash
+        env:
+          STAGE: ${{ steps.stage.outputs.name }}
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${STAGE}/dispatches" \
+            -f ref=main
+          echo "dispatched ${STAGE} on canonical main"
