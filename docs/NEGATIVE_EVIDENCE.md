@@ -57882,7 +57882,7 @@ free, and `v < 1.0` correctly does not flag `arccosh(+inf) = +inf`.
 ### RESULT — AND IT IS THREAD-COUNT DEPENDENT, WHICH IS DISCLOSED RATHER THAN AVERAGED AWAY
 
 Dual-null contract, incumbent = numpy live in the same invocation, bench elf
-`8b2871e0364d0acb4a92bd39c35795836b84e4d5bdc8010cc61682ea41054267`, on the SWEEP's operand:
+bench_elf_sha256=8b2871e0364d0acb4a92bd39c35795836b84e4d5bdc8010cc61682ea41054267, on the SWEEP's operand:
 
 ```
   RAYON_NUM_THREADS=16   verdict=DECIDABLE_WIN  ratio 2.537597 ci95=[2.270379,2.682593]
@@ -58022,7 +58022,7 @@ path — and the test now asserts BIT equality through a `uint64` view rather th
 
 ### RESULT — dual-null contract, incumbent = numpy LIVE in the same invocation
 
-bench elf `c207ae1348369ac1c2adf4c76b33f6ccf158244bf6897d343c7334e356776f77`, `RAYON_NUM_THREADS=16`
+bench_elf_sha256=c207ae1348369ac1c2adf4c76b33f6ccf158244bf6897d343c7334e356776f77, `RAYON_NUM_THREADS=16`
 (this box is noise-dominated at 64, per `deadlock-audit-2qjj3`):
 
 ```
@@ -58207,7 +58207,7 @@ The serial rows matching between builds is what licenses reading the rest.
 
 ### RESULT — dual-null contract at the DEFAULT thread count, which is the regime this targets
 
-bench elf `e279ce8cfd086a9597258c66673f90724a87cd8291608ab232f7a773dea0ebb6`; the BEFORE pair is from
+bench_elf_sha256=e279ce8cfd086a9597258c66673f90724a87cd8291608ab232f7a773dea0ebb6; the BEFORE pair is from
 `c207ae13…6f77` and is the pair banked in amendment `062e58d8`.
 
 ```
@@ -58295,7 +58295,7 @@ is the third cell this session where a tight loop would have hidden the defect e
 
 ### RESULT — dual-null contract at the DEFAULT thread count
 
-bench elf `9a63ceaecdf6f115798862aa98df5851f2dcb3a87339db90d7b47178d3481e65`:
+bench_elf_sha256=9a63ceaecdf6f115798862aa98df5851f2dcb3a87339db90d7b47178d3481e65:
 
 ```
   run 1  DECIDABLE_WIN  ratio 4.605964 [4.594179,4.613354]  incumbent 203219.0  candidate 44279.0
@@ -58500,7 +58500,7 @@ Same-session A/B, dual nulls, all PASS:
   strided n=2^16    7.365x     1.022x
 ```
 
-Dual-null contract, bench elf `4d7dc759fbbced944361aec778d0cb3858f7906a59300870cc90a04a0e4064b4`:
+Dual-null contract, bench_elf_sha256=4d7dc759fbbced944361aec778d0cb3858f7906a59300870cc90a04a0e4064b4:
 
 ```
   nanargmax  DECIDABLE_REGRESSION  0.944235 [0.940218,0.949695]  numpy 44610.0  fnp 47355.0
@@ -58580,7 +58580,7 @@ Same-session A/B, dual nulls, all PASS:
 
 **The contiguous control is the load-bearing row** — the guard must not cost the existing ~10x win,
 and it does not. Confirmed by contract, bench elf
-`ffca1e85613a25c87e9199aa9616015888e39cefbad0482961bbc8505353c318`:
+bench_elf_sha256=ffca1e85613a25c87e9199aa9616015888e39cefbad0482961bbc8505353c318:
 
 ```
   deg2rad[f64]  DECIDABLE_WIN  ratio 4.030984 [3.873075,4.186619]
