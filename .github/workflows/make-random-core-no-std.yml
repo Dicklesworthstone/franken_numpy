@@ -31,8 +31,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup toolchain install nightly-2026-08-25 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown,thumbv7em-none-eabihf
-          rustup override set nightly-2026-08-25
+          rustup toolchain install nightly-2026-08-31 --profile minimal --component clippy,rustfmt --target wasm32-unknown-unknown,thumbv7em-none-eabihf
+          rustup override set nightly-2026-08-31
 
       - name: Remove the accidental std dependency
         shell: bash
