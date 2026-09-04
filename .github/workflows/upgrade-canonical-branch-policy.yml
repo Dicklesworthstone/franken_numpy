@@ -1,0 +1,198 @@
+name: Upgrade Canonical Branch Policy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/upgrade-canonical-branch-policy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install the lossless two-branch policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > .github/workflows/canonical-branches.yml <<'YAML'
+          name: Canonical Branch Policy
+
+          on:
+            push:
+            create:
+            workflow_dispatch:
+            schedule:
+              - cron: "41 5 * * *"
+
+          permissions:
+            contents: write
+
+          concurrency:
+            group: canonical-branch-policy
+            cancel-in-progress: false
+
+          jobs:
+            reconcile:
+              if: >-
+                github.repository == 'Dicklesworthstone/franken_numpy' &&
+                (github.event_name != 'create' || github.event.ref_type == 'branch')
+              runs-on: ubuntu-24.04
+              timeout-minutes: 10
+              steps:
+                - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+                  with:
+                    ref: main
+                    fetch-depth: 0
+                    persist-credentials: true
+
+                - name: Preserve unique tips and restore the canonical branch set
+                  shell: bash
+                  run: |
+                    set -euo pipefail
+                    export LC_ALL=C
+                    git config user.name "FrankenNumPy Branch Archive"
+                    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                    git fetch origin '+refs/heads/*:refs/remotes/origin/*' --prune
+
+                    main_ref=refs/remotes/origin/main
+                    git show-ref --verify --quiet "$main_ref" || {
+                      echo 'canonical branch policy: origin/main is missing' >&2
+                      exit 2
+                    }
+                    main_sha="$(git rev-parse "$main_ref")"
+                    archived=()
+
+                    archive_tip() {
+                      local original="$1"
+                      local tip="$2"
+                      local safe tag peeled
+                      safe="$(printf '%s' "$original" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
+                      [[ -n "$safe" ]] || safe=unnamed
+                      tag="branch-archive/${safe}-${tip}"
+                      if git show-ref --verify --quiet "refs/tags/$tag"; then
+                        peeled="$(git rev-parse "refs/tags/$tag^{}")"
+                        [[ "$peeled" == "$tip" ]] || {
+                          echo "archive tag collision: $tag points to $peeled, expected $tip" >&2
+                          exit 3
+                        }
+                      else
+                        git tag -a "$tag" "$tip" -m "Archived branch $original before canonical cleanup; main was $main_sha."
+                        git push origin "refs/tags/$tag"
+                      fi
+                      peeled="$(git ls-remote origin "refs/tags/$tag^{}" | awk '{print $1}')"
+                      [[ "$peeled" == "$tip" ]] || {
+                        echo "remote archive verification failed: $tag peeled to $peeled, expected $tip" >&2
+                        exit 3
+                      }
+                      archived+=("$original -> $tag")
+                    }
+
+                    if git show-ref --verify --quiet refs/remotes/origin/master; then
+                      master_sha="$(git rev-parse refs/remotes/origin/master)"
+                      if [[ "$master_sha" != "$main_sha" ]] && ! git merge-base --is-ancestor "$master_sha" "$main_sha"; then
+                        archive_tip master-drift "$master_sha"
+                      fi
+                    else
+                      master_sha=""
+                    fi
+
+                    while IFS= read -r branch; do
+                      case "$branch" in
+                        HEAD|main|master) continue ;;
+                      esac
+                      ref="refs/remotes/origin/$branch"
+                      tip="$(git rev-parse "$ref")"
+                      if ! git merge-base --is-ancestor "$tip" "$main_sha"; then
+                        archive_tip "$branch" "$tip"
+                      fi
+                      git push origin --delete "$branch"
+                    done < <(
+                      git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin |
+                        sort
+                    )
+
+                    current_main="$(git ls-remote --heads origin refs/heads/main | awk '{print $1}')"
+                    [[ "$current_main" =~ ^[0-9a-f]{40}$ ]] || {
+                      echo 'canonical branch policy: remote main disappeared during reconciliation' >&2
+                      exit 4
+                    }
+                    current_master="$(git ls-remote --heads origin refs/heads/master | awk '{print $1}')"
+                    if [[ -n "$current_master" ]]; then
+                      git push --force-with-lease="refs/heads/master:${current_master}" \
+                        origin "${current_main}:refs/heads/master"
+                    else
+                      git push origin "${current_main}:refs/heads/master"
+                    fi
+
+                    mapfile -t live_heads < <(
+                      git ls-remote --heads origin |
+                        awk '{name=$2; sub("^refs/heads/", "", name); print name}' |
+                        sort
+                    )
+                    expected=(main master)
+                    [[ "${live_heads[*]}" == "${expected[*]}" ]] || {
+                      printf 'canonical branch policy: unexpected live refs:\n' >&2
+                      printf '  %s\n' "${live_heads[@]}" >&2
+                      exit 5
+                    }
+                    remote_main="$(git ls-remote --heads origin refs/heads/main | awk '{print $1}')"
+                    remote_master="$(git ls-remote --heads origin refs/heads/master | awk '{print $1}')"
+                    [[ "$remote_main" == "$remote_master" ]] || {
+                      echo "canonical branch policy: main/master mismatch: $remote_main $remote_master" >&2
+                      exit 6
+                    }
+
+                    if (( ${#archived[@]} != 0 )); then
+                      printf 'canonical branch policy: preserved unique branch history for harmonization:\n' >&2
+                      printf '  %s\n' "${archived[@]}" >&2
+                      exit 7
+                    fi
+                    echo "canonical branch policy: PASS; main and master both point to $remote_main"
+          YAML
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          agents_path = Path("AGENTS.md")
+          agents = agents_path.read_text(encoding="utf-8")
+          marker = "## Lossless canonical branch invariant"
+          if marker not in agents:
+              agents += (
+                  "\n" + marker + "\n\n"
+                  "`main` is the sole writable source-of-truth branch and `master` is its exact mirror. No other branch may persist. The canonical-branch workflow deletes an already-reachable tip directly; a divergent tip is first preserved under an immutable `branch-archive/<name>-<full-sha>` annotated tag and remotely verified, then the branch is removed and the run fails loudly so a later agent can inspect and harmonize that archived lineage into `main`. Never force-resolve code conflicts merely to make the branch set look clean.\n"
+              )
+              agents_path.write_text(agents, encoding="utf-8")
+
+          changelog_path = Path("CHANGELOG.md")
+          changelog = changelog_path.read_text(encoding="utf-8")
+          heading = "### Lossless canonical branch enforcement (2026-09-03)"
+          if heading not in changelog:
+              entry = (
+                  "\n" + heading + "\n\n"
+                  "- Enforced `main` plus exact `master` mirror as the only live branches.\n"
+                  "- Divergent noncanonical tips are now preserved and remotely verified as immutable archive tags before branch deletion, preventing both branch sprawl and silent loss of accretive work.\n"
+              )
+              first_break = changelog.find("\n", changelog.find("#"))
+              changelog = changelog[: first_break + 1] + entry + changelog[first_break + 1 :]
+              changelog_path.write_text(changelog, encoding="utf-8")
+          PY
+
+          git rm .github/workflows/upgrade-canonical-branch-policy.yml
+          git add .github/workflows/canonical-branches.yml AGENTS.md CHANGELOG.md
+          git config user.name "FrankenNumPy Branch Policy"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix(repo): archive divergent tips before branch cleanup" -m "Keep only main and its master mirror without discarding unique history. Every divergent noncanonical tip is now preserved under a remotely verified immutable archive tag before the branch is removed and the run reports required harmonization."
+          git fetch origin main master
+          git rebase origin/main
+          git push --atomic origin HEAD:main HEAD:master
