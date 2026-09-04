@@ -161,3 +161,8 @@ Two later pushes on 2026-09-03 (33784210979, 33785824930) also conclude `failure
 ## Beads Filed
 
 See `br` titles prefixed `[reality-check]` created 2026-09-03 (GAP-001 … GAP-012 mapping listed in each bead body). No files were deleted; the only new file is this artifact.
+
+## Corrections (same day, post-publication)
+
+1. **"Stray tracked file `crates/bench_identity.rs`" — WRONG, retracted.** The file is the shared bench-identity module, path-included via `#[path] mod bench_identity;` by **33 bench files across 6 crates** (fnp-conformance, fnp-dtype, fnp-linalg ×7, fnp-ndarray, fnp-random, fnp-ufunc ×21). The audit's grep keyed on the function name (`report_bench_identity`) and missed the `mod` wiring. Based on that wrong finding, the file was deleted with owner approval; the deletion broke G1 `cargo fmt --check` on main within the hour (mod resolution failure). Restored same day in `6cdb836b`, `cargo fmt --check` verified exit 0, bead `rc-stray-bench-identity` reopened and corrected. Lesson recorded: absence from a function-name grep is not absence of wiring — check `mod`/`#[path]`/`include!` declarations before calling any file dead.
+2. **G2 progress (later the same day):** the ledger-hygiene offender set was reduced 216 → 85 by truthful provenance transcription; see the README CI-status update and [`reality-check-2026-09-03-g2-residual.json`](reality-check-2026-09-03-g2-residual.json). Bead `rc-g2-residual-85` tracks the irreducible remainder.
