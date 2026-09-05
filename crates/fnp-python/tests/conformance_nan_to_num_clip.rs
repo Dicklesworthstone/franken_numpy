@@ -623,3 +623,63 @@ print(h.hexdigest())
     );
     Ok(())
 }
+
+/// Locks the THREE-STATE argument forms for nan_to_num
+/// (`deadlock-audit-defaulted-argument-three-state-parse-kqn3n`): an omitted
+/// `copy`, `copy=None`, `copy=0`, `copy=1`, a positional `copy`, an explicit
+/// `nan=None`, `x=` as a keyword and an unknown keyword must all behave EXACTLY
+/// like numpy - including the IN-PLACE mutation of the INPUT for a falsy copy
+/// and numpy's own error type for unrepresentable values. The identical script
+/// body runs against both modules and every output line must match.
+#[test]
+fn nan_to_num_three_state_argument_forms_match_numpy() -> Result<(), String> {
+    let make_script = |module: &str| {
+        format!(
+            r#"
+import numpy as np
+x_src = [0.0, np.nan, np.inf, -np.inf, 1.0]
+results = []
+def run(label, fn):
+    try:
+        results.append(label + "=" + repr(list(np.asarray(fn()).flatten())))
+    except Exception as e:
+        results.append(label + "=" + type(e).__name__)
+def run_inplace(label, fn):
+    try:
+        arr = np.array(x_src)
+        fn(arr)
+        results.append(label + "=" + repr(list(arr.flatten())))
+    except Exception as e:
+        results.append(label + "=" + type(e).__name__)
+run("omitted", lambda: {module}.nan_to_num(np.array(x_src)))
+run_inplace("copy_none", lambda a: {module}.nan_to_num(a, copy=None))
+run_inplace("copy_zero", lambda a: {module}.nan_to_num(a, copy=0))
+run("copy_one", lambda: {module}.nan_to_num(np.array(x_src), copy=1))
+run_inplace("positional_zero", lambda a: {module}.nan_to_num(a, 0))
+run("nan_none", lambda: {module}.nan_to_num(np.array(x_src), nan=None))
+run("x_kw", lambda: {module}.nan_to_num(x=[0.0, np.nan]))
+run("bogus", lambda: {module}.nan_to_num(np.array(x_src), bogus=1))
+for r in results:
+    print(r)
+"#
+        )
+    };
+    let numpy_lines: Vec<String> = numpy_oracle(&make_script("np"))?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let fnp_lines: Vec<String> = fnp_script(make_script("fnp_python"))
+        .lines()
+        .map(str::to_string)
+        .collect();
+
+    assert_eq!(
+        numpy_lines.len(),
+        fnp_lines.len(),
+        "case count diverged\nnumpy: {numpy_lines:?}\nfnp: {fnp_lines:?}"
+    );
+    for (np_line, fnp_line) in numpy_lines.iter().zip(fnp_lines.iter()) {
+        assert_eq!(np_line.trim(), fnp_line.trim(), "three-state form mismatch");
+    }
+    Ok(())
+}

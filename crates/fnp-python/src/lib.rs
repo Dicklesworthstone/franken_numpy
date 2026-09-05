@@ -35971,7 +35971,7 @@ fn nan_to_num(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let Some(args) = parse_nan_to_num_args(py, args, kwargs)? else {
+    let Some(args) = parse_nan_to_num_args(args, kwargs)? else {
         return core_numpy_passthrough_interned(py, intern!(py, "nan_to_num"), args, kwargs);
     };
     nan_to_num_impl(py, args.x, args.copy, args.nan, args.posinf, args.neginf)
@@ -35988,7 +35988,6 @@ fn nan_to_num(
 /// parameter supplied both positionally and by keyword, a missing `x` - declines
 /// to the verbatim numpy delegate so NUMPY raises its own error.
 fn parse_nan_to_num_args(
-    py: Python<'_>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Option<NanToNumArgs>> {
@@ -121185,7 +121184,7 @@ mod tests {
         flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name,
         interp, is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native,
         isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
-        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num,
+        masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num_impl,
         narrow_bitmap_setop, native_apply_along_axis, native_apply_over_axes, native_array_str,
         native_atleast, native_base_repr, native_binary_repr, native_format_float, native_isdtype,
         native_scimath_fix_unary, native_scimath_logn, native_scimath_power, nextafter,
@@ -145815,7 +145814,7 @@ mod tests {
                 vec![vec![f64::NAN, f64::INFINITY], vec![f64::NEG_INFINITY, 5.0]],
                 "float64",
             );
-            let actual_float = nan_to_num(
+            let actual_float = nan_to_num_impl(
                 py,
                 float_values.clone().unbind(),
                 true,
