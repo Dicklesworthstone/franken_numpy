@@ -668,7 +668,7 @@ for r in results:
         .lines()
         .map(str::to_string)
         .collect();
-    let fnp_lines: Vec<String> = fnp_script(make_script("fnp_python"))
+    let fnp_lines: Vec<String> = numpy_oracle(&fnp_script(make_script("fnp")))?
         .lines()
         .map(str::to_string)
         .collect();
