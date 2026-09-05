@@ -87025,8 +87025,8 @@ fn diag_indices(
     match integer_argument(&n).filter(|value| *value >= 0) {
         Some(size) => match ndim.as_ref().map(|value| value.extract::<i64>()) {
             None => build_diag_indices_tuple(py, size as usize, 2),
-            Some(Ok(ndim)) if *ndim >= 0 => {
-                build_diag_indices_tuple(py, size as usize, *ndim as usize)
+            Some(Ok(ndim)) if ndim >= 0 => {
+                build_diag_indices_tuple(py, size as usize, ndim as usize)
             }
             // An `ndim` numpy cannot multiply with the index tuple stays NUMPY's
             // error to raise ("can't multiply sequence by non-int ...").
@@ -87049,11 +87049,11 @@ fn diag_indices(
 /// = numpy's default 2); any non-int value, unknown keyword, duplicate
 /// positional+keyword or a missing `n` returns `None` so the caller delegates
 /// VERBATIM and numpy raises/answers with exactly what it was given.
-fn parse_diag_indices_args(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Option<(Bound<'_, PyAny>, Option<Bound<'_, PyAny>>)>> {
+fn parse_diag_indices_args<'py>(
+    _py: Python<'py>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<(Bound<'py, PyAny>, Option<Bound<'py, PyAny>>)>> {
     const NAMES: [&str; 2] = ["n", "ndim"];
     if args.len() > 2 {
         return Ok(None);
@@ -87074,7 +87074,7 @@ fn parse_diag_indices_args(
                         // "got multiple values for argument" error.
                         return Ok(None);
                     }
-                    slots[index] = Some(kwargs.get_item(name.as_str())?);
+                    slots[index] = kwargs.get_item(name.as_str())?;
                 }
                 None => return Ok(None),
             }
