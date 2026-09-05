@@ -35965,8 +35965,101 @@ fn modf(py: Python<'_>, x: Py<PyAny>, out: &Bound<'_, PyTuple>) -> PyResult<Py<P
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, copy=true, nan=0.0, posinf=None, neginf=None))]
+#[pyo3(signature = (*args, **kwargs))]
 fn nan_to_num(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some(args) = parse_nan_to_num_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "nan_to_num"), args, kwargs);
+    };
+    nan_to_num_impl(py, args.x, args.copy, args.nan, args.posinf, args.neginf)
+}
+
+/// The three-state reader for `np.nan_to_num(x, copy=True, nan=0.0, posinf=None, neginf=None)`
+/// (`deadlock-audit-defaulted-argument-three-state-parse-kqn3n`). PyO3's typed
+/// `copy: bool` collapsed an omitted `copy`, an explicit `copy=None` and a legacy
+/// `copy=0` into errors or one value; numpy itself treats omitted as `copy=True`
+/// and reads a supplied flag by TRUTHINESS (`if not copy:`), so `copy=None` and
+/// `copy=0` both mean IN PLACE. `nan` accepts int or float; `posinf`/`neginf`
+/// treat an explicit `None` exactly like their `None` defaults, so only values a
+/// plain `f64` cannot represent decline. Anything else - unknown keywords, a
+/// parameter supplied both positionally and by keyword, a missing `x` - declines
+/// to the verbatim numpy delegate so NUMPY raises its own error.
+fn parse_nan_to_num_args(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<NanToNumArgs>> {
+    const NAMES: [&str; 5] = ["x", "copy", "nan", "posinf", "neginf"];
+    if args.len() > 5 {
+        return Ok(None);
+    }
+    let mut slots: [Option<Bound<'_, PyAny>>; 5] = [None, None, None, None, None];
+    for (index, value) in args.iter().enumerate() {
+        slots[index] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for key in kwargs.keys() {
+            let Ok(name) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            match NAMES.iter().position(|candidate| *candidate == name) {
+                Some(index) => {
+                    if slots[index].is_some() {
+                        // Supplied both ways: numpy raises its own
+                        // "got multiple values for argument" error.
+                        return Ok(None);
+                    }
+                    slots[index] = kwargs.get_item(name.as_str())?;
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+    let Some(x) = slots[0].take() else {
+        return Ok(None);
+    };
+    let copy = match slots[1].take() {
+        None => true,
+        Some(value) => truthy_flag(Some(&value))?,
+    };
+    let nan = match slots[2].take() {
+        None => 0.0,
+        Some(value) => match value.extract::<f64>() {
+            Ok(nan) => nan,
+            Err(_) => return Ok(None),
+        },
+    };
+    let optional_float = |slot: Option<Bound<'_, PyAny>>| -> PyResult<Option<f64>> {
+        match slot {
+            None => Ok(None),
+            Some(value) if value.is_none() => Ok(None),
+            Some(value) => value.extract::<f64>().map(Some).or(Ok(None)),
+        }
+    };
+    let posinf = optional_float(slots[3].take())?;
+    let neginf = optional_float(slots[4].take())?;
+    Ok(Some(NanToNumArgs {
+        x: x.unbind(),
+        copy,
+        nan,
+        posinf,
+        neginf,
+    }))
+}
+
+struct NanToNumArgs {
+    x: Py<PyAny>,
+    copy: bool,
+    nan: f64,
+    posinf: Option<f64>,
+    neginf: Option<f64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nan_to_num_impl(
     py: Python<'_>,
     x: Py<PyAny>,
     copy: bool,
@@ -145697,7 +145790,7 @@ mod tests {
                 vec![0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
                 "float64",
             );
-            let actual = nan_to_num(py, x.clone().unbind(), true, 0.0, None, None)?;
+            let actual = nan_to_num_impl(py, x.clone().unbind(), true, 0.0, None, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("nan_to_num")?.call1((x,))?;
@@ -145753,7 +145846,7 @@ mod tests {
             );
 
             let int_values = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
-            let actual_int = nan_to_num(py, int_values.clone().unbind(), true, 0.0, None, None)?;
+            let actual_int = nan_to_num_impl(py, int_values.clone().unbind(), true, 0.0, None, None)?;
             let expected_int = numpy.getattr("nan_to_num")?.call1((int_values,))?;
 
             assert_eq!(
