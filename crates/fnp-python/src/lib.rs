@@ -87010,12 +87010,86 @@ fn try_zerocopy_unravel_c(
 }
 
 #[pyfunction]
-#[pyo3(signature = (n, ndim=2))]
-fn diag_indices(py: Python<'_>, n: &Bound<'_, PyAny>, ndim: usize) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn diag_indices(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((n, ndim)) = parse_diag_indices_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "diag_indices"), args, kwargs);
+    };
+    // `n` numpy converts but we cannot DELEGATES rather than raising
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`): `np.diag_indices(np.array(2,
+    // dtype=object))` answers, in object dtype, which this builder cannot produce.
+    match integer_argument(&n).filter(|value| *value >= 0) {
+        Some(size) => match ndim.as_ref().map(|value| value.extract::<i64>()) {
+            None => build_diag_indices_tuple(py, size as usize, 2),
+            Some(Ok(ndim)) if *ndim >= 0 => {
+                build_diag_indices_tuple(py, size as usize, *ndim as usize)
+            }
+            // An `ndim` numpy cannot multiply with the index tuple stays NUMPY's
+            // error to raise ("can't multiply sequence by non-int ...").
+            _ => Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "diag_indices"), (n, ndim))?
+                .unbind()),
+        },
+        None => Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "diag_indices"), (n, ndim))?
+            .unbind()),
+    }
+}
+
+/// The three-state reader for `np.diag_indices(n, ndim=2)`
+/// (`deadlock-audit-defaulted-argument-three-state-parse-kqn3n`). The old
+/// `ndim: usize` rejected an explicit `ndim=None` with PyO3's own TypeError
+/// while numpy raises "can't multiply sequence by non-int of type 'NoneType'"
+/// from `ndim * (arange(n),)` - different error surface for the same call.
+/// Returns `(n, Some(ndim))` when both read as ints (`ndim` `None` means ABSENT
+/// = numpy's default 2); any non-int value, unknown keyword, duplicate
+/// positional+keyword or a missing `n` returns `None` so the caller delegates
+/// VERBATIM and numpy raises/answers with exactly what it was given.
+fn parse_diag_indices_args(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<(Bound<'_, PyAny>, Option<Bound<'_, PyAny>>)>> {
+    const NAMES: [&str; 2] = ["n", "ndim"];
+    if args.len() > 2 {
+        return Ok(None);
+    }
+    let mut slots: [Option<Bound<'_, PyAny>>; 2] = [None, None];
+    for (index, value) in args.iter().enumerate() {
+        slots[index] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for key in kwargs.keys() {
+            let Ok(name) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            match NAMES.iter().position(|candidate| *candidate == name) {
+                Some(index) => {
+                    if slots[index].is_some() {
+                        // Supplied both ways: numpy raises its own
+                        // "got multiple values for argument" error.
+                        return Ok(None);
+                    }
+                    slots[index] = Some(kwargs.get_item(name.as_str())?);
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+    let Some(n) = slots[0].take() else {
+        return Ok(None);
+    };
+    Ok(Some((n, slots[1].take())))
+}
+
+fn diag_indices_impl(py: Python<'_>, n: &Bound<'_, PyAny>, ndim: usize) -> PyResult<Py<PyAny>> {
     // An `n` numpy converts but we cannot DELEGATES rather than raising
     // (`deadlock-audit-strict-scalar-argument-typing-soeis`): `np.diag_indices(np.array(2,
-    // dtype=object))` answers, in object dtype, which this builder cannot produce. `ndim`
-    // carries a default and therefore stays strict - see `integer_argument`.
+    // dtype=object))` answers, in object dtype, which this builder cannot produce.
     let Some(size) = integer_argument(n).filter(|value| *value >= 0) else {
         return Ok(cached_numpy(py)?
             .call_method1(intern!(py, "diag_indices"), (n, ndim))?
@@ -147915,8 +147989,8 @@ mod tests {
             }
 
             let int_arg = |value: i64| value.into_pyobject(py).unwrap().into_any();
-            let actual_default = diag_indices(py, &int_arg(4), 2)?;
-            let actual_ndim = diag_indices(py, &int_arg(2), 3)?;
+            let actual_default = diag_indices_impl(py, &int_arg(4), 2)?;
+            let actual_ndim = diag_indices_impl(py, &int_arg(2), 3)?;
             let numpy = py.import("numpy")?;
             let expected_default = numpy.call_method1("diag_indices", (4,))?;
             let expected_ndim = numpy.call_method1("diag_indices", (2, 3))?;
