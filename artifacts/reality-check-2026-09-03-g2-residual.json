@@ -276,5 +276,48 @@
  ],
  "union_rows": 61,
  "verification_2026_09_04": "Re-verified after syncing to tip 43a73e3d (fleet rng-migration in flight): the 61-row residual is unchanged and confirmed terminal on this host. Refreshed session trees (Claude projects 397M, Codex rollouts 2026-08/*, omp sessions) re-searched: L57368's only full hashes anywhere remain the .so cdylib pair; L52102 has no full hash; the strided-vein rows name no ELF; the worker-4 rows have zero host tokens within \u00b13000 chars of their measurement phrases in any transcript. Only re-banking or re-measurement can clear them.",
- "ci_corroboration_2026_09_04": "CI Gate Topology run 33927286584 on tip 64a3c704 (first full G2 execution since the campaign + under the completed nightly-2026-08-31 toolchain): G1 fmt+lint SUCCESS, G9 wheel SUCCESS, G2 fails ONLY on ledger_hygiene with EXACTLY these counts - 6 KEEP rows lacking executing-ELF, 6 KEEP rows lacking the canonical class marker, 4 measured rows lacking worker, 55 measured rows lacking harness - digit-for-digit identical to this worklist, and every other test binary in the workspace passed (the fleet's in-flight rng-migration introduced zero regressions). Final fragment re-verification across all retained stores: L57368's only full hashes are its .so cdylib pair (refused as bench-ELF masquerade); L52102/L56490/L58653/L58711/L58783 have no recoverable hash. Terminal on this host."
+ "ci_corroboration_2026_09_04": "CI Gate Topology run 33927286584 on tip 64a3c704 (first full G2 execution since the campaign + under the completed nightly-2026-08-31 toolchain): G1 fmt+lint SUCCESS, G9 wheel SUCCESS, G2 fails ONLY on ledger_hygiene with EXACTLY these counts - 6 KEEP rows lacking executing-ELF, 6 KEEP rows lacking the canonical class marker, 4 measured rows lacking worker, 55 measured rows lacking harness - digit-for-digit identical to this worklist, and every other test binary in the workspace passed (the fleet's in-flight rng-migration introduced zero regressions). Final fragment re-verification across all retained stores: L57368's only full hashes are its .so cdylib pair (refused as bench-ELF masquerade); L52102/L56490/L58653/L58711/L58783 have no recoverable hash. Terminal on this host.",
+ "verification_2026_09_05": {
+  "by": "BlackThrush",
+  "method": "session-log re-banking per the bead fix path: five author campaigns mined (RedLynx 677c8cd1, AzureCarp c4f18848, SlateFinch df1ce346 + SlateHeron e8ce998c, TanBridge ddc07e24, PinkWolf NOT FOUND/purged) plus the author's own session 4651b537 for the six BlackThrush rows",
+  "result": "61 -> 6 offending rows; worker gate 4->0, harness gate 55->0, class gate 6->0, elf gate 6->6 (terminal)",
+  "transcribed_rows": 55,
+  "terminal_elf_rows": [
+   {
+    "line": 52102,
+    "heading": "2026-08-17 - POST-SHIP VERIFICATION: the gate's ROUTING is confirmed on the real allocating route (divide trac",
+    "reason": "bench_elf_sha256 exists only as a 16-hex prefix (session truncated by construction; scratchpad s1-s5.txt deleted; bench binary overwritten) - needs a bench_divide_size_gate_vs_numpy re-run to re-verify routing on the current gate"
+   },
+   {
+    "line": 56494,
+    "heading": "2026-08-22 \u2014 MEASURED: corrected bench_maximum_arms_vs_numpy under the fixed allocation-symmetric harness - se",
+    "reason": "PinkWolf session purged (no agent registration or message survives in mail DB); no artifact carries the bench line-one output - needs a local thinkstation1 bench_maximum_arms_vs_numpy re-run (numpy 2.4.3 incumbent)"
+   },
+   {
+    "line": 57373,
+    "heading": "2026-08-26 \u2014 SHIP: a SCALAR index made `fnp.take` copy the WHOLE source; 191.87x slower than NumPy at n=2^20 b",
+    "reason": "strided-vein take ship: measured by scratchpad python dual-null harness (take_price.py) importing the cdylib in-process; NO bench ELF exists - needs strided-capable bench cells"
+   },
+   {
+    "line": 58666,
+    "heading": "2026-08-26 \u2014 SHIP (2nd from the strided vein): `isposinf`/`isneginf`/`logical_not`, 35.343x strided becomes 1.",
+    "reason": "strided-vein ship 2 (isposinf/isneginf/logical_not): boolp_ab.py python harness; NO bench ELF exists"
+   },
+   {
+    "line": 58731,
+    "heading": "2026-08-26 \u2014 SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 19.793x becomes 1.047",
+    "reason": "strided-vein ship 3 (all/any/ediff1d/frexp/modf): v5_ab.py python harness; NO bench ELF exists"
+   },
+   {
+    "line": 58810,
+    "heading": "2026-08-26 \u2014 SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1.011x; and the triage",
+    "reason": "strided-vein ship 4 (sinc/append): v7_verify.py + sinc_focus.py python harness; NO bench ELF exists"
+   }
+  ],
+  "notes": [
+   "All harness= transcriptions carry source citations (session id + line) and confidence levels in-row; nothing fabricated. AzureCarp/SlateFinch/RedLynx instruments are the criterion_python_elementwise bench (dual-null contract) and its counter probes; TanBridge 08-26 ships used scratchpad python harnesses - their in-row 2026-09-03 harness= attributions to common::run_dual_null_median_ci_contract were CORRECTED in-row to the true instruments.",
+   "Class markers made exact on the five KEEP rows previously failing the class gate; the four 08-26 strided/take ships declared maintenance-self-speedup with in-row evidence notes (vs-NumPy figures kept as context; Gate-5 incumbent-win bits unrecoverable for the original runs).",
+   "unworkered_incumbent_win_budget gate untouched at == 39."
+  ]
+ }
 }

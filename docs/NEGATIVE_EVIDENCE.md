@@ -617,7 +617,7 @@ the whole `__call__`, both in one invocation.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - CAPABILITY LANDED (interned ufunc name), and the worst cell now reads 2.079x - but the delta is JOINT with a peer's lever and I do not apportion it (`deadlock-audit-ei9jz`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_percall_floor_across_ops_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); instrument pinned by group+cells+ELF+host, exact invocation line not isolated in-session; confidence medium)
 
 `RedLynx`. The measurement that followed `051fe121`, banked a turn late.
 
@@ -674,7 +674,7 @@ figure above describes a tree no single commit named. (3) The remaining excess i
 next named stage in it is the output allocation. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - POOL-SIZING CHECKED AND REFUTED HERE: the interference SURVIVES a 1-thread rayon pool (1.028x) - and the same sweep shows my earlier "0.4% replication" claim was luck (`deadlock-audit-48by6`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_incumbent_interference_from_candidate (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); instrument pinned by group+cells+ELF+host, exact invocation line not isolated in-session; confidence medium)
 
 `RedLynx`. Torch found its undecidable board was caused by its own 64-thread pool, arms fighting
 each other regardless of placement. I have a 64-thread pool — every row in this ledger reports
@@ -857,7 +857,7 @@ wanted to migrate away from.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - ARM PLACEMENT AUDITED AND IT IS UNPINNED: the bench thread MIGRATES across 53-64 of 64 logical CPUs within a single arm, on a box with a 2.942x cross-core spread - measured, not assumed (`deadlock-audit-48by6`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_incumbent_interference_from_candidate (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); producing run at session line 2418-2419; confidence high)
 
 `RedLynx`. Prompted by two projects finding broken arm placement — one with BOTH arms on a single
 physical core, one voiding rows over contention. I had never checked mine. It is broken in a third
@@ -922,7 +922,7 @@ attributing a difference to code: a row taken at 53 distinct CPUs and one taken 
 same measurement. AGENT_NAME=RedLynx.
 
 ## 2026-08-16 - FLEET CPU-SPREAD FINDING VERIFIED EXACTLY (2.882x), PER-ARM MHz NOW RECORDED - and it REFUTES the frequency explanation for our interference: the shadowed arm runs at a HIGHER clock, not lower (`deadlock-audit-48by6`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_incumbent_interference_from_candidate (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); producing run at session line 2388-2391; confidence high)
 
 `RedLynx`. Response to the fleet report that a live cross-core spread of 2.879x, not ambient load,
 is why ratios move between windows. Verified here, instrumented per arm, and used to test whether
@@ -3541,7 +3541,7 @@ overlapping costs, and only a route-level before/after can tell them apart.
 AGENT_NAME=SlateHeron.
 
 ## 2026-08-16 - CONFLICT, DO NOT DROP THE NATIVE DIVIDE PATH YET: two same-host runs with clean nulls disagree IN DIRECTION at 2^20 (0.890373 vs 1.099069) while the kernel SOURCE is byte-identical (`deadlock-audit-q00ev`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_percall_floor_across_sizes_vs_numpy (criterion_python_elementwise) (transcribed 2026-09-05 from session e8ce998c-5a39-4a14-bdcb-a66bf87766fb (author SlateHeron), producing runs at lines 1501-1507; confidence high)
 
 `SlateHeron`. I was asked to decide whether the native f64 divide path survives, on the basis of
 `3470db0f`, which found `delegating_looks_better` TRUE at every size 2^14..2^20. Re-running the same
@@ -46556,7 +46556,7 @@ buildable from the shared tree.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - PREDICTION REFUTED: the arity branch bought `at` only 55 ns, not the ~190 predicted - so the rest of its cost is PROLOGUE, not call shape, and the refutation names the remainder (`deadlock-audit-v46rn`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_ufunc_at_percall_floor_vs_numpy + bench_reduceat_percall_floor_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); producing runs at session lines 5101-5102 and 5171-5172; confidence high)
 
 `RedLynx`. The measurement the previous row registered a specific number for. It did not land
 on it, and that is the result.
@@ -46928,7 +46928,7 @@ has to beat three interned getattrs, which is a higher bar than it sounds.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED: the wrapper class pays 925-1944 ns per call for a re-import, non-interned keys and default keywords. `linspace` 1.3616x -> 1.1640x, `fft` 1.3139x -> 1.1270x - and 1382 sites share the shape (`deadlock-audit-v46rn`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_axis_default_wrappers_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); instrument pinned by group+cells+ELF+host, exact invocation line not isolated in-session; confidence medium)
 
 `RedLynx`. The lever the previous row attributed from source, measured in the quietest window
 of the session. The build was taken BEFORE the measuring window and load was re-checked after it.
@@ -47756,7 +47756,7 @@ needs a build window this pane does not currently have.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - REJECT the "same_kind" lever: it is worth +10 insns/call, i.e. NOTHING, and my prediction was wrong in SIGN. The cause is that I read SAMPLING SKID as cost - a `movabs` of an immediate cannot be 17.93% of a function (`deadlock-audit-ei9jz`)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=perf stat -e instructions:u,cycles:u over bench_binary_counter_{add,divide}_{fnp,numpy} probes of the criterion_python_elementwise bench (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), producing command at session line 2539)
 
 `AzureCarp`. One build, controlled A/B, and the refutation is of my own reasoning.
 
@@ -47851,7 +47851,7 @@ was spent finding that out. When an effect is under ~200 insns/call, measure OUR
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - REVERTED the "same_kind" lever, and the revert exposed the instrument's NOISE FLOOR: identical source reproduces to only +92.6 insns/call, so the "+10.4" I quoted for the lever was never measurable (`deadlock-audit-ei9jz`)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=perf stat -e instructions:u,cycles:u over bench_binary_counter_{add,divide}_{fnp,numpy} probes of the criterion_python_elementwise bench (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), producing command at session line 2605)
 
 `AzureCarp`. One build. The revert was planned; what it measured was not.
 
@@ -48082,7 +48082,7 @@ in another invocation or at another size.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED: not raising to decide is worth 390-574 ns per call, MORE than the 212 ns I predicted - and the prediction said so, because the probe was a stated LOWER BOUND. `fft` and `chebder` are untouched controls in the same runs (`deadlock-audit-v46rn`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_axis_default_wrappers_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); instrument pinned by group+cells+ELF+host, exact invocation line not isolated in-session; confidence medium)
 
 `RedLynx`. The endpoint pre-check, measured in the quietest window of the campaign against
 row 53's figures on the same host.
@@ -48821,7 +48821,7 @@ build cap allows. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - REFUTED, and this one is a plain mistake: my `searchsorted` needle pre-check is DEAD CODE for the case it was written for. The caller already guards on `v_is_scalar` (`deadlock-audit-v46rn`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_predecline_levers_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); instrument pinned by group+cells+ELF+host, exact invocation line not isolated in-session; confidence medium)
 
 `RedLynx`. Second A/B on my own levers. Both have now come back at zero, and this one for a
 reason that was visible in the source I had already read.
@@ -49242,7 +49242,7 @@ above (vectorisation, ISA width, non-temporal stores) — those remain settled o
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - UNDECIDED: the `asarray` skip moves `searchsorted` +1.6% and +4.5%, but a CONTROL moved +2.9% in the same runs. Not separable, and I am not claiming it (`deadlock-audit-v46rn`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_predecline_levers_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); producing run at session line 6023-6024; confidence high)
 
 `RedLynx`. Fourth consecutive A/B on my own levers. This one is not a refutation - the sign is
 right and the mechanism is real - but the noise floor in this window is as large as the effect.
@@ -49424,7 +49424,7 @@ measured resolution of ~9.4% on this route and may not decide sub-10% effects.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - THE DESIGNED CONTROL WORKS: with a LIST-haystack cell that cannot take the lever, the `asarray` skip separates - control flat at -0.5% while the ndarray cells move +2.9% and +4.2% (`deadlock-audit-v46rn`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_predecline_levers_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); producing run at session line 6054-6055, 6070-6071; confidence high)
 
 `RedLynx`. Row 64 could not separate this lever because its only controls were `clip` cells that
 moved 0.5% and 2.9% for reasons of their own. This adds the control row 64 asked for and re-runs
@@ -49480,7 +49480,7 @@ AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - CERTIFIED, and it is the largest single move of the campaign on this cell: `searchsorted` array-needle goes 5.730x -> 3.262x. The designed control moved 2.0% (`deadlock-audit-v46rn`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_predecline_levers_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); producing run at session line 6141-6142; confidence high)
 
 `RedLynx`. Five A/Bs on my own levers had produced four non-wins. This one applies the filter
 those failures taught - change only what runs UNCONDITIONALLY on the path that does the work -
@@ -49549,7 +49549,7 @@ here but has moved 60% between windows in this group before. AGENT_NAME=RedLynx.
 
 
 ## 2026-08-17 - PRE-REGISTRATION, not a result: the `out=` divide route now has a DELEGATION control, and the decision rules are being written down BEFORE the certifying run. A smoke run (NOT BANKED) says the right gate for this route may be a BAND rather than a threshold, and flags one field that would invalidate the control (`deadlock-audit-6y5wp`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_out_route_delegation_sweep (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 3702)
 
 `AzureCarp`. One build (`release-perf`, 7m47s), one smoke invocation. **NOTHING IN THIS ROW IS
 CERTIFIED**; load was rising (18.92/16.48/16.96, two external `rustc`) and every number below comes
@@ -49730,7 +49730,7 @@ the run it applies to and applied to every row in this campaign, not to this one
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED: the 136-probe import sweep takes two-sided `clip` from 1.6791x to 1.18x, with FOUR controls holding between -0.03% and -2.2% (`deadlock-audit-v46rn`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_predecline_levers_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); producing run at session line 6208-6209; confidence high)
 
 `RedLynx`. The sweep row 66 pointed at, measured on a cell that had never had anything
 attributed to it.
@@ -50039,7 +50039,7 @@ before reusing it. The engagement question is CLOSED and must not be re-opened: 
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED, quoted at its WORST cell: the dispatcher-body lever is worth +0.6% on `ss_list_haystack` and nothing on the clip controls - and +5.1% / +7.1% on the two cells where the body is a real fraction of the call. First MULTI-cell win of this stretch (`deadlock-audit-v46rn`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via fnp-group=bench_predecline_levers_vs_numpy (criterion_python_elementwise bench) (transcribed 2026-09-05 from session 677c8cd1-b5b1-46d8-a1a2-a026f1636957 (author RedLynx); producing run at session line 6285-6286; confidence high)
 
 `RedLynx`. Row 68 required the worst cell in the heading and the best in the body. This is the
 first row written under that rule, and it is also the first lever here that moved more than one
@@ -50194,7 +50194,7 @@ invocations and may not be re-run to a better answer.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - THE BUFFER FIX WORKED AND EXTENDED THE USABLE BAND TO 2^19 (18,840 ns -> ~600 ns), but the residual unphysical wrapper at 2^20+ is NOT an asymmetry - it is the estimator having no resolution there, which makes the delegation comparison permanently unavailable above 2^19. Four runs taken were RULE-DISQUALIFIED and used only for instrument validation (`deadlock-audit-6y5wp`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_out_route_delegation_sweep (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 3702)
 
 `AzureCarp`. No build in this row. Four invocations of the shared-buffer ELF
 `f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (release-perf, `thinkstation1`),
@@ -50488,7 +50488,7 @@ the shipped code alone, which is what it currently does.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - CERTIFIED, and it is a SHIPPABLE LEVER: the `out=` native divide route is NOT worth taking at 2^14, 2^18 and 2^19 - declining beats it 7/7 at each - while it IS worth taking at 2^10. The pre-registered sign test passed at every size it could reach (`deadlock-audit-6y5wp`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_out_route_delegation_sweep (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 3702)
 
 `AzureCarp`. No build in this row. Seven QUALIFYING invocations of shared-buffer ELF
 `f9b2f096c246833547d3c77d9644a80598647ad063fc01ca9fdf366e35778c29` (`release-perf`, `thinkstation1`,
@@ -50702,7 +50702,7 @@ toward deletion but nowhere near a sweep.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - THE SHIPPED BAND IS VERIFIED END-TO-END THROUGH THE REAL ROUTE: inside it `divide` now tracks the delegation control to within 0.0005-0.0074, outside it diverges by 0.13-0.94. No size is mis-routed, and in-band calls pay only the wrapper instead of a 10-24% kernel deficit (`deadlock-audit-6y5wp`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_out_route_delegation_sweep (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 3702)
 
 `AzureCarp`. One build (`release-perf`, 7m57s, `df` 88G immediately before, `proj_builds` = 0 at start),
 five invocations on a genuinely quiet host. ELF
@@ -50995,7 +50995,7 @@ a 110k-line crate for a guard that changes no measured code.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - THE BUFFER ARTIFACT IS A NEAR-CACHE-SIZE PHENOMENON, NOT A "BIGGER IS WORSE" ONE: at 2^22 (32 MiB) the separate-vs-shared difference is small and NOT consistently signed, so the certified `out=` cells are neither cleared nor condemned. And I RETRACT the "resolves in the peer's favour" reading I formed from a single run (`deadlock-audit-6y5wp`, `deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_out_kwarg_shared_buffer_control (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 4260)
 
 `AzureCarp`. One build (`release-perf`, 2m58s, `df` 215G immediately before, `proj_builds` = 0 at
 start). Four invocations of ELF
@@ -51229,7 +51229,7 @@ resolve the window. Until then the wrapper residual has only an UPPER bound of 1
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - THE CERTIFIED `out=` CELLS SURVIVE: on five QUALIFYING runs the separate-vs-shared buffer difference at 2^22 is ~±10% with NO consistent sign - it reversed direction between batches - so it is condition-dependent scatter, not a systematic bias. Under the corrected instrument all three ops still win, worst cells 1.6413 / 1.5951 / 1.7094 (`deadlock-audit-6y5wp`, `deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_out_kwarg_shared_buffer_control (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 4260)
 
 `AzureCarp`. No build in this row. Ten invocations of ELF
 `2be2c513d93ff54ba9a4e3e7562e82cce2920c95f33cc72840a505ee2e778524` (`release-perf`, `thinkstation1`,
@@ -51433,7 +51433,7 @@ of the 1473.5 figure alone - it is a ceiling.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - RE-DECIDED ON THE CORRECTED INSTRUMENT: the FE-hazard classifier COSTS 7.9%, 5/5 runs. My earlier "the fused form is 1.4152-1.6155x BETTER" was the buffer artifact, and the mmap-control reading I distrusted was the one telling the truth (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_kernel_on_numpy_buffers (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 1099)
 
 `AzureCarp`. One build (`release-perf`, 3m13s, `df` 210G immediately before, `proj_builds` = 0), five
 qualifying invocations of ELF
@@ -51648,7 +51648,7 @@ being cited.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - CERTIFIED AND SHIPPABLE: the bitmask classifier is a 4.04% win, 5/5 runs, and it is the FIRST result on this route to PASS my own variance guard. Fixing the buffer collapsed between-run stdev 7.8x (0.0233 -> 0.0030) and turned a rejected marginal effect into a clean one (`deadlock-audit-6y5wp`, `deadlock-audit-vqxoa`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_classifier_accumulator_form (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 269)
 
 `AzureCarp`. One build (`release-perf`, 2m57s, `df` 205G immediately before, `proj_builds` = 0), five
 invocations of ELF `7670d20bbbbf1cf4...` (full sha256 above), worker `thinkstation1`, numpy 2.4.3,
@@ -51736,7 +51736,7 @@ buffer-provenance tax. Two of the five audited 2^20 groups remain unconverted.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 — THE MULTIPLY EXCESS IS DIFFUSE: no single symbol carries it, only ~26% lives in code that exists solely on our path, and that is WHY seven named stage-levers all failed (deadlock-audit-ei9jz)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=criterion_python_elementwise counter probes (bench_binary_counter_multiply_fnp_plain/numpy_plain) under perf record -e instructions:u, per-symbol attribution via session symdiff scripts (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 1059-1107; confidence high)
 
 **Campaign result class:** attribution of an already-measured cost + a negative result that closes a
 line of attack
@@ -51837,7 +51837,7 @@ another stage.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — I CORRECT MY OWN HEADLINE: PyO3 keyword binding is 831.6 insns/call, my registered SIGN TEST is REFUTED, and the "two instruments agree to 1.3%" claim was two instruments sharing ONE OMISSION (deadlock-audit-ei9jz)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=criterion_python_elementwise::bench_counter_kwbind_keyword (+ sibling bench_counter_kwbind_positional) counter probes (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 1194-1195; confidence high)
 
 **Campaign result class:** refutation of my own registered prediction + correction of a banked
 partition that other rows rest on
@@ -51934,7 +51934,7 @@ without the kb correction, and do not quote my 4.119 ratio at all.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — I RETRACT LAST ROW'S RECONCILIATION: I converted instructions to ns with a rate built from ANOTHER HOST'S wall-clock number, which my own standing orders forbid. Measured directly, kb is 86.5 ns not 209.3 (deadlock-audit-ei9jz)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=criterion_python_elementwise kwbind/multiply counter arms, timed via per-rep elapsed (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 1238-1247; confidence high)
 
 **Campaign result class:** retraction of my own correction + a measured route rate that replaces it
 
@@ -52016,7 +52016,7 @@ route rate is 6.99 and it is not constant across components.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — THE ns SPLIT IS UNDECIDABLE: choosing MEDIAN vs MIN moves the wrapper/probe ratio from 1.57 to 4.68 on the same nine runs, so the split stays in INSTRUCTIONS (deadlock-audit-ei9jz)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=criterion_python_elementwise six-arm counter groups, wall clock via per-arm elapsed (nssplit) (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 1282-1293; confidence high)
 
 **Campaign result class:** UNDECIDED — a registered retry predicate attempted and honestly failed
 
@@ -52100,7 +52100,7 @@ not fix.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - POST-SHIP VERIFICATION: the gate's ROUTING is confirmed on the real allocating route (divide tracks the delegating control to 0.1% below the gate and diverges at it), but the VALUE at 2^19 is UNDECIDED - 1.0740/1.0691/0.8752/0.9650/1.0550, stdev 0.0863. Also pinning the REACHABLE SURFACE of today's two ships, which interact (`deadlock-audit-6y5wp`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_size_gate_vs_numpy (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 2725)
 
 `AzureCarp`. One build (`release-perf`, 7m31s, `df` 203G immediately before, `proj_builds` = 0), five
 invocations of ELF `67c61c442e9e45e7...`, worker `thinkstation1`, numpy 2.4.3.
@@ -52117,7 +52117,11 @@ invocations of ELF `67c61c442e9e45e7...`, worker `thinkstation1`, numpy 2.4.3.
 runs. The routing conclusion below rests on a WITHIN-invocation comparison, which that instability
 cannot reach; the magnitude conclusion is explicitly left undecided because it cannot.
 
-**Campaign result class:** routing VERIFIED, magnitude UNDECIDED, plus a scope correction on my own ship
+**Campaign result class:** maintenance-self-speedup
+routing VERIFIED, magnitude UNDECIDED, plus a scope correction on my own ship. Class made exact
+2026-09-05 from session c4f18848 evidence: this row verifies the routing of the author's own shipped
+gate, no NumPy win is claimed, and the author's same-day precedent for identical post-ship routing
+verification declares maintenance-self-speedup deliberately rather than incumbent-win.
 
 ### THE REACHABLE SURFACE, because my two ships interact
 
@@ -52189,7 +52193,7 @@ n >= 2^21. Two of the five audited 2^20 groups remain unconverted.
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - `F64_DIV_NATIVE_MIN_LEN` = 1<<19 IS SET TOO LOW, and it is now decided rather than merely uncertified: under the churn control the ALLOCATING route at 2^19 costs 8.6% MORE than declining, 5/5 runs - agreeing with the independent `out=` sign test that said the same thing 7/7 (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_size_gate_vs_numpy (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 2725)
 
 `AzureCarp`. **No build** - five invocations of the already-built ELF `67c61c442e9e45e7...`
 (`release-perf`, `thinkstation1`, numpy 2.4.3) under
@@ -52373,7 +52377,7 @@ inside every ledger row and source comment; that is what makes the shared-index 
 AGENT_NAME=AzureCarp.
 
 ## 2026-08-17 - THE GATE QUESTION IS NOW FULLY MEASURED, no size left to inference: native COSTS 8.7% at 2^19 and 14.7% at 2^20, and WINS 2.70x at 2^21. `F64_DIV_NATIVE_MIN_LEN` should be 1<<21. Ship deferred deliberately - the raise silently changes which ARM four existing tests exercise (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_size_gate_vs_numpy (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 2725)
 
 `AzureCarp`. One build (`release-perf`, 3m05s, `df` 201G immediately before, `proj_builds` = 0 at
 start) to add 2^20 and 2^21 to the sweep, then five invocations of ELF `74f03412955b45be...` under
@@ -52741,7 +52745,7 @@ convenient, which is the failure this bead has already recorded twice today.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — MY REGISTERED MECHANISM IS REFUTED: `Instant::now()` overhead is 20.0 ns, not the 100-200 ns I predicted. The real diagnosis is that the partition's terms are 2-12 timer-ticks large, so the -80 ns wrapper is BELOW the instrument's resolution (deadlock-audit-ei9jz)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=criterion_python_elementwise partition-group diagnostics + standalone scratchpad timer_probe rustc binary (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 1571-1582; confidence high)
 
 **Campaign result class:** my own registered prediction refuted, replaced by a measured diagnosis
 
@@ -52825,7 +52829,7 @@ wrapper positive; the term that would have to move is smaller than the instrumen
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 - THE RAISE IS VERIFIED END-TO-END: divide now TRACKS the delegating control at 2^19 (0.9128 -> 0.9998) and 2^20 (0.8532 -> 0.9968), recovering the 8.7% and 14.7% it was losing, while KEEPING the 2.54x native win at 2^21 (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_size_gate_vs_numpy (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 2725)
 
 `AzureCarp`. One build (`release-perf`, 8m14s, `df` 198G immediately before), three invocations,
 worker `thinkstation1`, numpy 2.4.3, under `MALLOC_MMAP_THRESHOLD_`.
@@ -52922,7 +52926,7 @@ stands on its own and is already banked; it does not need a time-domain twin.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-17 — STOP RULE INVOKED, and the test I registered to trigger it was MIS-DESIGNED. The deeper answer: retired instructions are additively decomposable, wall-clock time is NOT — which explains all five refusals at once (deadlock-audit-ei9jz)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=criterion_python_elementwise::partition_batched_2000x25 (ELF from committed fbfc16cc) (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 1633-1674; confidence high)
 
 **Campaign result class:** registered stop rule honoured + my own acceptance test refuted + the
 mechanism that ends the line
@@ -54128,7 +54132,7 @@ fresh ELF off `d29b508e` is being measured to confirm it. That comparison is CRO
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — SHIPPED-STATE CERTIFICATION: the route excess is 1478.0 insns/call, 352.5 removed (19.3%) — and my pre-registered band MISSED by 4 insns/call because I built it too tight (deadlock-audit-ei9jz)
-worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from the cited bead's recorded measurement context) harness=criterion_python_elementwise::bench_binary_counter_multiply_fnp_plain|numpy_plain (shipped-ELF certification, HEAD dea8c832) (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 3262-3266; confidence high)
 
 **Campaign result class:** shipped improvement certified at its WORST measured value + a registered
 band failed and is corrected
@@ -54334,7 +54338,7 @@ is real or whether part of the 939.9 is something else.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — ONE CPython ATTRIBUTE ENTRY COSTS 201.7 INSNS, MEASURED: the linear model holds (two estimates 3.4% apart), and it accounts for only 64% of the diffuse remainder — so my inferred 313 was 1.6x too high and the entry-count account is PARTIAL (deadlock-audit-56vq8)
-worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1) harness=criterion_python_elementwise entry-cost counter probe (getattrs=0/1/2 arms, target-probe ELF) (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), author's own in-session bank summary at line 4023; confidence medium)
 
 **Campaign result class:** a quotient I published replaced by a measurement, which weakens the
 account it was defending
@@ -54851,7 +54855,7 @@ NOT register a magnitude band derived from 23 x a per-site figure.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — `sort`'s ndarray-cache conversion measures -33,489 insns/call against a null 14,218x smaller; 1,456.0 per site, independently agreeing with argsort's 1,360.9 — AND the reached-count recipe I registered last turn is UNSOUND (deadlock-audit-c5ecm)
-worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1) harness=criterion_python_elementwise::bench_sort_counter_fnp_i64|bench_sort_counter_numpy_i64 (ELF pair 10bd19b2/f73349a7) (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 4595-4632; confidence high)
 
 **Result class:** a pre-registered sign test that passed, plus the retraction of a METHOD I put on
 the bead one turn ago and told others to use.
@@ -54924,7 +54928,7 @@ derived from GUARDS, not from symbol presence.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE "BEFORE ARM HAS THE WIDER SPREAD" PATTERN I DISCLOSED TWICE IS REFUTED: at 5 reps the ordering REVERSES, so it was a 3-rep artifact — and the allocation hypothesis for the getattr cost is refuted too (minor faults flat to 0.13%) (deadlock-audit-c5ecm)
-worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1) harness=criterion_python_elementwise::bench_sort_counter_fnp_i64 under perf stat -e instructions:u,minor-faults,dTLB-load-misses (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 4647-4655; confidence high)
 
 **Result class:** a disclosed anomaly investigated and found NOT to exist, plus an independent
 replication of the effect it was attached to.
@@ -55172,7 +55176,7 @@ above, or someone's explicit decision to adopt it.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — WALL CLOCK, measured at last by artifact reuse: the levers DO save time (-2,584 and -2,528 ns/call) but my INSTRUCTION ROWS OVERSTATE THE SAVING BY 13-28% — and they also OVERSTATE how far behind NumPy we are (deadlock-audit-c5ecm)
-worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1) harness=criterion_python_elementwise::bench_sort_counter_*|bench_argsort_counter_* under perf stat -e task-clock,instructions:u (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 4999-5018; confidence high)
 
 **Result class:** a currency check that corrects my own prior rows in BOTH directions. No build:
 existing ELFs only, /data at 50G against a 42G brake.
@@ -55241,7 +55245,7 @@ of the error is not constant (0.782 vs 0.866 on two cells of the same lever).
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — the divergence GENERALISES to the delegating route and is WORSE there: instructions say we are 18.29% behind NumPy on multiply, time says ~9.3% — plus the first MEASURED conversion rates, 13.2 insns/ns for redundant getattrs (two cells, 0.5% apart) (deadlock-audit-c5ecm)
-worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1) harness=criterion_python_elementwise::bench_binary_counter_multiply_fnp_plain|numpy_plain under perf stat -e task-clock,instructions:u (ELF elf_sort_after) (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 5036-5058; confidence high)
 
 **Result class:** a generality check that strengthens yesterday's correction and produces the first
 conversion factor in this campaign that is measured rather than assumed. Artifact reuse, no build,
@@ -55406,7 +55410,7 @@ and costs nothing.
 AGENT_NAME=SlateFinch.
 
 ## 2026-08-18 — THE 13.2 insns/ns CONVERSION RATE DOES NOT TRANSFER ACROSS LEVERS: the predicate lever converts at ~18 (95% [14.3, 25.0]), and the predicted 1,076 ns lies OUTSIDE the measured interval (deadlock-audit-c5ecm)
-worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1)
+worker=thinkstation1 (transcribed 2026-09-03 from the author's session transcript df1ce346, which records the counter probes as worker=thinkstation1) harness=criterion_python_elementwise::bench_argsort_counter_fnp_i64|numpy_i64 under perf stat -e task-clock (ELF pair elf_before/elf_after) (transcribed 2026-09-05 from session df1ce346-a1ec-43a1-bc93-938b856785bc (author SlateFinch), lines 5129-5154; confidence high)
 
 **Result class:** a pre-registered cross-lever test of my own newest constant, which it FAILED — the
 outcome I said would be the more useful one. Artifact reuse, no build, /data 47G.
@@ -56490,7 +56494,8 @@ The durable fix is not vigilance: it is to commit with an explicit pathspec - `g
 ## 2026-08-22 — MEASURED: corrected bench_maximum_arms_vs_numpy under the fixed allocation-symmetric harness - serial native is a DECIDABLE_REGRESSION at 0.9315x, parallel a DECIDABLE_WIN at 1.5326x; the withdrawn 1.352x serial "win" was the buffer artifact, now confirmed by direct re-measurement (deadlock-audit-48by6)
 worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's recorded measurement context)
 
-**Campaign result class:** maintenance-self-speedup for the arms group as a whole - both arms are
+**Campaign result class:** maintenance-self-speedup
+for the arms group as a whole - both arms are
 replicas (`arms_are_replicas_not_the_shipped_route=true`); these rows may never be quoted against
 NumPy as route-level claims. Route-level numbers remain RedLynx's 0.907848 (maximum) / 0.913424
 (minimum).
@@ -57367,6 +57372,14 @@ AGENT_NAME=TanBridge.
 
 ## 2026-08-26 — SHIP: a SCALAR index made `fnp.take` copy the WHOLE source; 191.87x slower than NumPy at n=2^20 becomes 7.2x FASTER (`deadlock-audit-yphwc`)
 worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+
+**Campaign result class:** maintenance-self-speedup
+
+The heading's 7.2x-vs-NumPy end-state is such context; the shipped change itself is the scalar-index guard on our own take path.
+Class transcribed 2026-09-05 from session ddc07e24: the lever is an fnp-own before/after with disclosed controls and
+nulls; the producing python-harness outputs carry no invocation_id or NumPy artifact_sha256, so the vs-NumPy figures
+in this row stand as context and cannot carry an incumbent-win declaration (Gate-5 contract bits unrecoverable for
+these runs). Re-class to incumbent-win only via a re-measurement through a contract-printing harness.
 
 The `as*array` ship earlier today left `take[f64_scalar]` as `bench_vs_numpy_loss_sweep`'s worst
 cell at 21.1050x. That figure UNDERSTATES it, because the sweep measures one size. NumPy's cost
@@ -58347,7 +58360,7 @@ AGENT_NAME=TanBridge.
 ---
 
 ## 2026-08-26 — REJECT: removing `fmod`'s O(n) divisor pre-scan buys NOTHING MEASURABLE; three variants (`deadlock-audit-5o4lp`)
-harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's own recorded harness context)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from this row's own recorded harness context; worker from the cited bead's own description in session ddc07e24-1a51-4ec6-b13c-b85f8f372fc2 (author TanBridge), which records "TanBridge, thinkstation1, numpy 2.4.3 live" for these runs)
 
 **NOTHING SHIPPED. The tree is at `abdf2d33` and the experiment is reverted.** This row exists so the
 design is not re-attempted.
@@ -58652,6 +58665,13 @@ AGENT_NAME=TanBridge.
 
 ## 2026-08-26 — SHIP (2nd from the strided vein): `isposinf`/`isneginf`/`logical_not`, 35.343x strided becomes 1.032x (`deadlock-audit-0iwez`)
 
+
+**Campaign result class:** maintenance-self-speedup
+
+Class transcribed 2026-09-05 from session ddc07e24: the lever is an fnp-own before/after with disclosed controls and
+nulls; the producing python-harness outputs carry no invocation_id or NumPy artifact_sha256, so the vs-NumPy figures
+in this row stand as context and cannot carry an incumbent-win declaration (Gate-5 contract bits unrecoverable for
+these runs). Re-class to incumbent-win only via a re-measurement through a contract-printing harness.
 Second ship from the operand axis opened in `b47125ed`. These are the three largest remaining cells
 on it.
 
@@ -58710,6 +58730,13 @@ AGENT_NAME=TanBridge.
 
 ## 2026-08-26 — SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 19.793x becomes 1.047x (`deadlock-audit-0iwez`)
 worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+
+**Campaign result class:** maintenance-self-speedup
+
+Class transcribed 2026-09-05 from session ddc07e24: the lever is an fnp-own before/after with disclosed controls and
+nulls; the producing python-harness outputs carry no invocation_id or NumPy artifact_sha256, so the vs-NumPy figures
+in this row stand as context and cannot carry an incumbent-win declaration (Gate-5 contract bits unrecoverable for
+these runs). Re-class to incumbent-win only via a re-measurement through a contract-printing harness.
 
 Third and final ship from the operand axis opened in `b47125ed`, taking the remaining cells worst
 ratio first. Same mechanism in all five: the zero-copy path needs a contiguous buffer, a strided
@@ -58782,6 +58809,13 @@ AGENT_NAME=TanBridge.
 
 ## 2026-08-26 — SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1.011x; and the triage misled a THIRD time (`deadlock-audit-0iwez`)
 worker=thinkstation1 harness=common::run_dual_null_median_ci_contract (transcribed 2026-09-03 from the cited bead's recorded measurement context)
+
+**Campaign result class:** maintenance-self-speedup
+
+Class transcribed 2026-09-05 from session ddc07e24: the lever is an fnp-own before/after with disclosed controls and
+nulls; the producing python-harness outputs carry no invocation_id or NumPy artifact_sha256, so the vs-NumPy figures
+in this row stand as context and cannot carry an incumbent-win declaration (Gate-5 contract bits unrecoverable for
+these runs). Re-class to incumbent-win only via a re-measurement through a contract-printing harness.
 
 ### THE TRIAGE RANKING FAILED AGAIN — half the candidate list was not real
 
@@ -61566,7 +61600,7 @@ wrappers, the `nan*` family) - none of which has been checked this way.
 AGENT_NAME=TanBridge.
 
 ## 2026-08-27 - A DTYPE-ONLY AUDIT OF 1800 CELLS FOUND ONE MORE DEFECT, AND THE OBVIOUS FIX FOR IT COSTS 432 INSTRUCTIONS PER CALL WHILE THE RIGHT ONE COSTS 23 (`franken_numpy-dtype-promotion-audit`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=scratchpad dtype_promotion_audit.py (the 1800-cell audit the row names) + dtype_ab.py wall-clock pairs; instruction counts via the session's counted_* perf-stat probes (transcribed 2026-09-05 from session ddc07e24-1a51-4ec6-b13c-b85f8f372fc2 (author TanBridge), campaign scripts and timestamps identified; exact producing command line not isolated in-session; confidence medium)
 
 `TanBridge`. Shipped `84e1c3b2`. Measured on `thinkstation1` against the LIVE installed numpy
 2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1. Class: CORRECTNESS fix, with a
@@ -61856,7 +61890,7 @@ applies to any predicate named for one dtype family that guards a claim about a 
 AGENT_NAME=TanBridge.
 
 ## 2026-08-27 - THE OBVIOUS FIX WOULD HAVE THROWN AWAY A 395x WIN: bool `abs`/`square` fell into the generic extract (11.17x), but `signbit` on bool beats numpy 0.0026x, so the gate is TWO OPS and not one dtype (`franken_numpy-bool-unary-gap`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=inline python median-of-7 pricer (scratchpad med() helper, OPENBLAS_NUM_THREADS=1, ulimit -v 20000000) over scratchpad build dirs (transcribed 2026-09-05 from session ddc07e24-1a51-4ec6-b13c-b85f8f372fc2 (author TanBridge), verbatim run at session lines 10310-10313 matching the row's cells; confidence high)
 
 `TanBridge`. Shipped `6b6c7205`. Measured on `thinkstation1` against the LIVE installed numpy
 2.4.3 in the SAME invocation, median of 7, OPENBLAS_NUM_THREADS=1. Perf figures are PRICING
@@ -62223,7 +62257,7 @@ estimated at ~67% of the full cost and is UNMEASURED - that is the next probe, a
 compared against simply widening the birthday threshold, which is free.
 
 ## 2026-08-27 - REJECT: numpy SHORTCUTS ASCENDING ONLY, so widening the ascending guard to descending forfeits a real win - and a 15.81x INSTRUCTION gap turned out to be a design trade, not a defect (`franken_numpy-argsort-descending`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=counted_argsort.py perf-stat instruction diff + inline median-of-9 wall prober (transcribed 2026-09-05 from session ddc07e24-1a51-4ec6-b13c-b85f8f372fc2 (author TanBridge); instrument created in the same turn per the session file-history snapshot, and the row's BEFORE elf ebefc63340be2f7e matches the session's recorded sha256sum verbatim at line 11125; exact invocation line not isolated; confidence high)
 
 `TanBridge`. Built, measured, REVERTED in `d66a81ea`. Measured on `thinkstation1` against the
 LIVE installed numpy 2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1.
@@ -63225,7 +63259,7 @@ blindly** - this row is the evidence that the lever only pays where a cell's exc
 same order as 171.9 ns, which at 65536 it never is.
 
 ## 2026-08-27 - REJECT: a branchless compaction for `compress`/`extract` wins the unpredictable mask and LOSES 2.2x on a sparse one - plus a correction to the 2026-06-21 "branchless already" premise (`franken_numpy-compress-branchless`)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=scratchpad masktriage.py mask-pattern triage (alternating/random50/sparse) + ab6.py-generation python A/B (transcribed 2026-09-05 from session ddc07e24-1a51-4ec6-b13c-b85f8f372fc2 (author TanBridge), file-history snapshot timestamps match the row's session; exact producing command not isolated; confidence medium)
 
 `TanBridge`. Built, measured, REVERTED. Measured on `thinkstation1` against the LIVE installed
 numpy 2.4.3 in the SAME invocation, OPENBLAS_NUM_THREADS=1.
@@ -64559,7 +64593,7 @@ out correctly (count 0, matching `n - n`). Also note 2^21 reads 0.98x against 0.
 is the 16 MB allocator band this campaign has repeatedly seen, not this gate.
 
 ## 2026-08-27 - WIN (SHIP): `repeat`'s parallel arm burned 64.59 INSTRUCTIONS PER OUTPUT ELEMENT against NumPy's 3.47 - a million 8-byte memcpys plus rayon fan-out on a BANDWIDTH-BOUND fill - 18.61x -> 0.43x counted (`deadlock-audit-hzl1w` rule, `deadlock-audit-sfgg3` audit)
-worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=counted_* perf-stat family (counted_op.py / counted_run.sh), baseline-subtracted instructions per call, OPENBLAS_NUM_THREADS=1 (transcribed 2026-09-05 from session ddc07e24-1a51-4ec6-b13c-b85f8f372fc2 (author TanBridge), file-history snapshot backupTimes 2026-08-27T10:37-11:17Z match; exact re-count command not isolated; confidence medium)
 
 `TanBridge`, `thinkstation1`, numpy 2.4.3 live in the SAME invocation, OPENBLAS_NUM_THREADS=1.
 
@@ -65549,6 +65583,7 @@ deserves, and the answer there is a two-pass radix on the packed key, not a fine
 implementations can be A/B'd in one process, and its default is the shipped route.
 
 ## 2026-08-28 - NO MEASURABLE EFFECT (kept, not claimed) + a CORRECTION to the row above: folding the count into pass 1 is below a 13% paired noise floor, and the card=8 win I claimed yesterday is CONTRADICTED (`deadlock-audit-sfgg3`)
+worker=hz4 harness=h2h_lexsort (transcribed 2026-09-05 from session ddc07e24-1a51-4ec6-b13c-b85f8f372fc2 (author TanBridge): row committed from this session 0f1d0189; the feeding runs are rch exec -- cargo run --release -p fnp-python --example h2h_lexsort <seed>, whose output records "host hz4" and the in-process ELF sha256)
 
 `TanBridge`. Worker-side h2h harness; both arms and both fnp implementations in one process.
 
@@ -65632,6 +65667,7 @@ elements is a regime where even one hash probe per element is more than the work
 answer is a two-pass radix on the packed key.
 
 ## 2026-08-28 - REJECT: force-inlining `transform_field` makes lexsort 20-30% SLOWER - the same `#[inline]` -> `#[inline(always)]` fix that WON on `take` loses here, and the difference is what the body contains (`deadlock-audit-sfgg3`)
+worker=hz4 harness=h2h_lexsort (transcribed 2026-09-05 from session ddc07e24-1a51-4ec6-b13c-b85f8f372fc2 (author TanBridge): row committed from this session c68a3ca3; producing run "timeout 580 rch exec --job -- cargo run --release -p fnp-python --example h2h_lexsort 4242" with output "in-process ELF sha256 199c7f72... | host hz4", replicated at seed 9001 with "host hz4")
 
 `TanBridge`. Worker-side h2h harness; both arms and both fnp implementations in one process.
 
@@ -65699,6 +65735,7 @@ too. The lexsort card=2 cell is untouched by this and remains the standing loss 
 its own named design (a two-pass radix on the packed key).
 
 ## 2026-08-28 - REJECT x2, and the standing lexsort loss is now bounded from BOTH sides: neither the per-element dispatch nor the record traffic is where the time goes (`deadlock-audit-sfgg3`)
+worker=hz4 harness=h2h_lexsort (transcribed 2026-09-05 from session ddc07e24-1a51-4ec6-b13c-b85f8f372fc2 (author TanBridge): row committed from this session 249a3d4f; same-evening h2h_lexsort rch runs bracketed by captured "host hz4" outputs at 22:39/22:46; host for this specific run inferred from that bracket; harness and authorship certain)
 
 `TanBridge`. Worker-side h2h harness; both arms and both fnp implementations in one process.
 
@@ -66100,7 +66137,7 @@ ordered batches: ascending, descending and clustered are all now measured wins.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — WIN (maintenance): the unordered-batch fallback was m SERIAL bisections; transposing it to a batched search takes our own arm 1.023x -> 0.796x in ONE process — and the vs-NumPy verdict for this cell turns out to depend on the WORKER'S NUMPY VERSION (`deadlock-audit-sfgg3`)
-worker=vmi1227854 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=vmi1227854 harness=h2h_searchsorted (worker transcribed 2026-09-03 from this row's recorded measurement context; harness transcribed 2026-09-05 from the author's session transcript 4651b537, which records the feeding run: rch exec -- cargo run -j2 --release -p fnp-python --example h2h_searchsorted)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66503,7 +66540,7 @@ supply.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — REJECT: lowering the searchsorted parallel gates BELOW 2^12 — the [2^10, 2^12) band is a decidable LOSS on f32 at both 2^10 and 2^11, and the crossover is HOST-DEPENDENT as predicted (`deadlock-audit-sfgg3`)
-worker=hetzner2 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=hetzner2 harness=h2h_searchsorted (worker transcribed 2026-09-03 from this row's recorded measurement context; harness transcribed 2026-09-05 from the author's session transcript 4651b537, which records the feeding run: rch exec -- cargo run -j2 --release -p fnp-python --example h2h_searchsorted)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66569,7 +66606,7 @@ that survives the host dependence demonstrated here.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — STRENGTHENING THE BAND REJECT: below 2^12 the parallel arm's sign is HOST-DIVERGENT, not merely negative — the same f32 m=2^11 cell reads 2.419x on one worker and 0.632x on another (`deadlock-audit-sfgg3`)
-worker=hz4 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=hz4 harness=h2h_searchsorted (worker transcribed 2026-09-03 from this row's recorded measurement context; harness transcribed 2026-09-05 from the author's session transcript 4651b537, which records the feeding run: rch exec -- cargo run -j2 --release -p fnp-python --example h2h_searchsorted)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66623,7 +66660,7 @@ rather than on a bare element count if it ever succeeds.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — NON-RESULT (premise wrong) on `np.take`'s 1<<21 parallel gate, and a NEWLY PRICED standing loss: `fnp.take` is 1.25-1.49x SLOWER than NumPy on a route the spy proves is NATIVE (`deadlock-audit-sfgg3`)
-worker=hz4 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=hz4 harness=h2h_take (worker transcribed 2026-09-03 from this row's recorded measurement context; harness transcribed 2026-09-05 from the author's session transcript 4651b537, which records the feeding run: rch exec -- cargo run -j2 --release -p fnp-python --example h2h_take)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -66700,7 +66737,7 @@ its own engagement-probed measurement before any claim.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-30 — CORRECTION to my own row six hours old: the take gate switch WAS on the executed path, the instrumentation proves it, and the real finding is that PARALLELISING `np.take`'s flat gather BUYS NOTHING from 2^10 to 2^20 (`deadlock-audit-ddoeq`)
-worker=hetzner2 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=hetzner2 harness=h2h_take (worker transcribed 2026-09-03 from this row's recorded measurement context; harness transcribed 2026-09-05 from the author's session transcript 4651b537, which records the feeding run: rch exec -- env FNP_TAKE_DEBUG=1 cargo run -j2 --release -p fnp-python --example h2h_take)
 
 **Campaign result class:** maintenance-self-speedup
 
@@ -67341,7 +67378,7 @@ either - it is already a 2.6-2.9x win.
 AGENT_NAME=BlackThrush.
 
 ## 2026-08-31 — REJECT of a STALE-CONSTANT hypothesis I raised myself: `searchsorted`'s `MERGE_MIN_*` were fitted against a path I deleted this session, and the sort+merge route is STILL the better one (11% faster on sorted needles, both nulls clean) (`deadlock-audit-sfgg3`)
-worker=hz4 (transcribed 2026-09-03 from this row's recorded measurement context)
+worker=hz4 harness=h2h_searchsorted (worker transcribed 2026-09-03 from this row's recorded measurement context; harness transcribed 2026-09-05 from the author's session transcript 4651b537, which records the feeding run: rch exec -- cargo run -j2 --release -p fnp-python --example h2h_searchsorted)
 
 **Campaign result class:** maintenance-self-speedup
 
