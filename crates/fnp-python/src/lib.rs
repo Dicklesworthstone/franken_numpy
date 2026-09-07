@@ -24109,28 +24109,83 @@ fn trapezoid_impl(
     build_numpy_scalar_or_array_from_ufunc(py, &result)
 }
 
-#[pyfunction]
-#[pyo3(signature = (y, x=None, dx=1.0, axis=-1))]
-fn trapezoid(
-    py: Python<'_>,
-    y: Py<PyAny>,
-    x: Option<Py<PyAny>>,
-    dx: f64,
-    axis: isize,
-) -> PyResult<Py<PyAny>> {
-    trapezoid_impl(py, "trapezoid", y, x, dx, axis)
+fn parse_trapezoid_args<'py>(
+    _py: Python<'py>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<(Bound<'py, PyAny>, Option<Bound<'py, PyAny>>, f64, isize)>> {
+    const NAMES: [&str; 4] = ["y", "x", "dx", "axis"];
+    if args.len() > 4 {
+        return Ok(None);
+    }
+    let mut slots: [Option<Bound<'py, PyAny>>; 4] = [None, None, None, None];
+    for (index, value) in args.iter().enumerate() {
+        slots[index] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for key in kwargs.keys() {
+            let Ok(name) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            match NAMES.iter().position(|candidate| *candidate == name) {
+                Some(index) => {
+                    if slots[index].is_some() {
+                        return Ok(None);
+                    }
+                    slots[index] = kwargs.get_item(name.as_str())?;
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+    let Some(y) = slots[0].take() else {
+        return Ok(None);
+    };
+    let x = match slots[1].take() {
+        Some(val) if !val.is_none() => Some(val),
+        _ => None,
+    };
+    let dx = match slots[2].take() {
+        None => 1.0,
+        Some(val) => match val.extract::<f64>() {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        },
+    };
+    let axis = match slots[3].take() {
+        None => -1,
+        Some(val) => match val.extract::<isize>() {
+            Ok(a) => a,
+            Err(_) => return Ok(None),
+        },
+    };
+    Ok(Some((y, x, dx, axis)))
 }
 
 #[pyfunction]
-#[pyo3(signature = (y, x=None, dx=1.0, axis=-1))]
+#[pyo3(signature = (*args, **kwargs))]
+fn trapezoid(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((y, x, dx, axis)) = parse_trapezoid_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "trapezoid"), args, kwargs);
+    };
+    trapezoid_impl(py, "trapezoid", y.unbind(), x.map(|v| v.unbind()), dx, axis)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
 fn trapz(
     py: Python<'_>,
-    y: Py<PyAny>,
-    x: Option<Py<PyAny>>,
-    dx: f64,
-    axis: isize,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    trapezoid_impl(py, "trapz", y, x, dx, axis)
+    let Some((y, x, dx, axis)) = parse_trapezoid_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "trapz"), args, kwargs);
+    };
+    trapezoid_impl(py, "trapz", y.unbind(), x.map(|v| v.unbind()), dx, axis)
 }
 
 #[pyfunction(name = "where")]
@@ -41142,76 +41197,103 @@ fn try_zerocopy_diff1_pend(
     diff1_pend_i64(py, numpy, a, prepend, append)
 }
 
-#[pyfunction]
-#[pyo3(signature = (a, n=1, axis=-1, *varargs, **kwargs))]
-fn diff(
-    py: Python<'_>,
-    a: Py<PyAny>,
-    n: i64,
-    axis: i64,
-    varargs: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let diff_fn = numpy.getattr(intern!(py, "diff"))?;
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let mut positional: Vec<Py<PyAny>> = Vec::with_capacity(varargs.len() + 3);
-        positional.push(a.clone_ref(py));
-        positional.push(n.into_pyobject(py)?.into_any().unbind());
-        positional.push(axis.into_pyobject(py)?.into_any().unbind());
-        for arg in varargs.iter() {
-            positional.push(arg.unbind());
-        }
-        let args = PyTuple::new(py, positional.iter().map(|item| item.bind(py)))?;
-        let call_kwargs = PyDict::new(py);
-        if let Some(kwargs) = kwargs {
-            for (key, value) in kwargs.iter() {
-                call_kwargs.set_item(key, value)?;
+fn parse_diff_args<'py>(
+    _py: Python<'py>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<(Bound<'py, PyAny>, usize, i64, Option<Bound<'py, PyAny>>, Option<Bound<'py, PyAny>>)>> {
+    const NAMES: [&str; 5] = ["a", "n", "axis", "prepend", "append"];
+    if args.len() > 5 {
+        return Ok(None);
+    }
+    let mut slots: [Option<Bound<'py, PyAny>>; 5] = [None, None, None, None, None];
+    for (index, value) in args.iter().enumerate() {
+        slots[index] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for key in kwargs.keys() {
+            let Ok(name) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            match NAMES.iter().position(|candidate| *candidate == name) {
+                Some(index) => {
+                    if slots[index].is_some() {
+                        return Ok(None);
+                    }
+                    slots[index] = kwargs.get_item(name.as_str())?;
+                }
+                None => return Ok(None),
             }
         }
-        Ok(diff_fn.call(args, Some(&call_kwargs))?.unbind())
+    }
+    let Some(a) = slots[0].take() else {
+        return Ok(None);
     };
+    let n = match slots[1].take() {
+        None => 1,
+        Some(val) => match val.extract::<i64>() {
+            Ok(n) if n > 0 => n as usize,
+            _ => return Ok(None),
+        },
+    };
+    let axis = match slots[2].take() {
+        None => -1,
+        Some(val) => match val.extract::<i64>() {
+            Ok(axis) => axis,
+            Err(_) => return Ok(None),
+        },
+    };
+    let prepend = match slots[3].take() {
+        Some(val) if !val.is_none() => Some(val),
+        _ => None,
+    };
+    let append = match slots[4].take() {
+        Some(val) if !val.is_none() => Some(val),
+        _ => None,
+    };
+    Ok(Some((a, n, axis, prepend, append)))
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn diff(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let fallback = || -> PyResult<Py<PyAny>> {
+        core_numpy_passthrough_interned(py, intern!(py, "diff"), args, kwargs)
+    };
+
+    let Some((a, n, axis, prepend, append)) = parse_diff_args(py, args, kwargs)? else {
+        return fallback();
+    };
+
+    let numpy = cached_numpy(py)?;
 
     // A byte-swapped operand belongs to numpy, and it has to be decided HERE. Declining only the
     // zero-copy route drops `>u8` into the f64 storage bridge, which RAISES on a wrapping
     // difference rather than answering; every native route below reads bytes in host order.
-    if ndarray_is_byteswapped(py, a.bind(py)) {
+    if ndarray_is_byteswapped(py, &a) {
         return fallback();
     }
 
     // Fused prepend=/append= SCALAR form (n=1, 1-D, axis collapses): numpy
     // composes concatenate-then-diff; the fused arm computes boundary elements
     // directly (see diff1_pend_arm). Any other kwarg mix keeps the delegate.
-    if varargs.len() == 0
-        && n == 1
-        && (axis == -1 || axis == 0)
-        && let Some(kw) = kwargs
-        && !kw.is_empty()
-        && kw.iter().all(|(k, _)| {
-            matches!(
-                k.extract::<String>().ok().as_deref(),
-                Some("prepend" | "append")
-            )
-        })
-    {
-        let prepend = kw.get_item("prepend")?.filter(|v| !v.is_none());
-        let append = kw.get_item("append")?.filter(|v| !v.is_none());
-        if let Some(out) =
-            try_zerocopy_diff1_pend(py, numpy, a.bind(py), prepend.as_ref(), append.as_ref())?
+    if prepend.is_some() || append.is_some() {
+        if n == 1
+            && (axis == -1 || axis == 0)
+            && let Some(out) =
+                try_zerocopy_diff1_pend(py, numpy, &a, prepend.as_ref(), append.as_ref())?
         {
             return Ok(out);
         }
-    }
-
-    if varargs.len() > 0 || kwargs.is_some_and(|kwargs| !kwargs.is_empty()) {
         return fallback();
     }
 
-    let Ok(n) = usize::try_from(n) else {
-        return fallback();
-    };
     if n == 1
-        && let Some(output) = try_zerocopy_f16_diff_1d(py, numpy, a.bind(py), axis)?
+        && let Some(output) = try_zerocopy_f16_diff_1d(py, numpy, &a, axis)?
     {
         return Ok(output);
     }
@@ -41223,7 +41305,7 @@ fn diff(
     // timedelta output). Bit-identical (int64 subtraction is exactly numpy's). Any miss
     // (non-contiguous, empty axis) falls to the numpy.diff fallback.
     if n >= 1 {
-        let a_bound = a.bind(py);
+        let a_bound = &a;
         if a_bound.is_exact_instance(cached_ndarray_type(py)?) {
             let dtype = a_bound.getattr(intern!(py, "dtype"))?;
             let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
@@ -41277,7 +41359,7 @@ fn diff(
     // path (n==0, non-f64/int dtype, non-contiguous, empty axis), the whole thing
     // falls through to the general extract path below with the original full n.
     if n >= 1 {
-        let mut current: Py<PyAny> = a.clone_ref(py);
+        let mut current: Py<PyAny> = a.clone().unbind();
         let mut all_ok = true;
         for _ in 0..n {
             let cur = current.bind(py);
@@ -41324,9 +41406,8 @@ fn diff(
     // Non-contiguous (transposed/strided) ndarrays make every zero-copy diff path bail
     // to the cold extract → native diff (~5.6x slower than numpy's strided diff).
     // Delegate them to numpy (byte-identical).
-    if a.bind(py).is_exact_instance(cached_ndarray_type(py)?)
+    if a.is_exact_instance(cached_ndarray_type(py)?)
         && !a
-            .bind(py)
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
@@ -41338,8 +41419,8 @@ fn diff(
     // pass); the extract path below bridges bool->f64 and runs ~700x slower (85ms vs
     // 122us @4M). numpy is the parity reference, so defer bool to it. (Checked only on
     // the fallthrough — f64/int/f32 already returned.)
-    if a.bind(py).is_exact_instance(cached_ndarray_type(py)?)
-        && a.bind(py)
+    if a.is_exact_instance(cached_ndarray_type(py)?)
+        && a
             .getattr(intern!(py, "dtype"))?
             .getattr(intern!(py, "kind"))?
             .extract::<String>()?
@@ -41347,11 +41428,11 @@ fn diff(
     {
         return fallback();
     }
-    let a = match extract_precise_numeric_array(py, a.bind(py), "diff(a)") {
+    let a_num = match extract_precise_numeric_array(py, &a, "diff(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let result = match a.diff(n, Some(axis as isize)) {
+    let result = match a_num.diff(n, Some(axis as isize)) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
@@ -43408,89 +43489,140 @@ fn try_zerocopy_tri(
     }
 }
 
+fn parse_tri_args<'py>(
+    _py: Python<'py>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<(usize, usize, i64, Option<Bound<'py, PyAny>>)>> {
+    const POS_NAMES: [&str; 4] = ["N", "M", "k", "dtype"];
+    if args.len() > 4 {
+        return Ok(None);
+    }
+    let mut slots: [Option<Bound<'py, PyAny>>; 4] = [None, None, None, None];
+    for (index, value) in args.iter().enumerate() {
+        slots[index] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, val) in kwargs.iter() {
+            let Ok(name) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            if name == "like" {
+                if !val.is_none() {
+                    return Ok(None);
+                }
+                continue;
+            }
+            match POS_NAMES.iter().position(|candidate| *candidate == name) {
+                Some(index) => {
+                    if slots[index].is_some() {
+                        return Ok(None);
+                    }
+                    slots[index] = Some(val);
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+    let Some(n_any) = slots[0].take() else {
+        return Ok(None);
+    };
+    let Some(n_int) = integer_argument(&n_any).filter(|&v| v >= 0) else {
+        return Ok(None);
+    };
+    let n = n_int as usize;
+    let m = match slots[1].take() {
+        None => n,
+        Some(m_any) => {
+            if m_any.is_none() {
+                n
+            } else {
+                match integer_argument(&m_any).filter(|&v| v >= 0) {
+                    Some(m_int) => m_int as usize,
+                    None => return Ok(None),
+                }
+            }
+        }
+    };
+    let k = match slots[2].take() {
+        None => 0,
+        Some(k_any) => match integer_argument(&k_any) {
+            Some(k_int) => k_int,
+            None => return Ok(None),
+        },
+    };
+    let dtype = match slots[3].take() {
+        Some(d) if !d.is_none() => Some(d),
+        _ => None,
+    };
+    Ok(Some((n, m, k, dtype)))
+}
+
 #[pyfunction]
-#[pyo3(signature = (N, M=None, k=0, dtype=None, *, like=None))]
+#[pyo3(signature = (*args, **kwargs))]
 #[allow(non_snake_case)]
 fn tri(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((rows, mm, offset, dtype)) = parse_tri_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "tri"), args, kwargs);
+    };
+    let numpy = cached_numpy(py)?;
+    let dt_obj: Bound<'_, PyAny> = match dtype.as_ref() {
+        Some(d) => numpy.getattr(intern!(py, "dtype"))?.call1((d,))?,
+        None => numpy.getattr(intern!(py, "dtype"))?.call1(("float64",))?,
+    };
+    if let Some(out) = try_zerocopy_tri(py, numpy, rows, mm, offset, &dt_obj)? {
+        return Ok(out);
+    }
+    core_numpy_passthrough_interned(py, intern!(py, "tri"), args, kwargs)
+}
+
+#[cfg(test)]
+fn tri_impl(
     py: Python<'_>,
     N: &Bound<'_, PyAny>,
     M: Option<usize>,
     k: i64,
     dtype: Option<Py<PyAny>>,
-    like: Option<Py<PyAny>>,
+    _like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    // An `N` numpy converts but we cannot DELEGATES rather than raising
-    // (`deadlock-audit-strict-scalar-argument-typing-soeis`). Read BEFORE the `like` branch
-    // below so both bail-outs share one shape, and a negative `N` goes to numpy too - its
-    // empty-grid behaviour is its own. `M` and `k` carry defaults and therefore stay strict.
     let Some(rows) = integer_argument(N).filter(|value| *value >= 0) else {
-        return delegate_tri(py, numpy, N, M, k, dtype.as_ref());
-    };
-    let (rows, columns, offset) = (rows as usize, M, k);
-    // `like` is keyword-only in numpy and selects __array_function__ dispatch,
-    // which only numpy can perform; delegate the whole call when it is given.
-    if like.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
         let kwargs = PyDict::new(py);
-        if let Some(columns) = columns {
+        kwargs.set_item(intern!(py, "k"), k)?;
+        if let Some(columns) = M {
             kwargs.set_item("M", columns)?;
         }
-        kwargs.set_item(intern!(py, "k"), offset)?;
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "like"), like.as_ref().map(|v| v.bind(py)))?;
-        return Ok(numpy
-            .getattr(intern!(py, "tri"))?
-            .call((rows,), Some(&kwargs))?
-            .unbind());
-    }
-    // `N` / `M` carry numpy's capital spelling: np.tri(N=3, M=2) is the documented
-    // call and PyO3 derives the Python keyword from the Rust identifier.
-    // Native parallel per-row fill for the large fresh (N,M) grid (page-fault wall). Resolve the dtype
-    // (default float64, matching numpy.tri) then fan the rows across the pool. Small / unusual dtypes fall
-    // through to the numpy delegate below (whose serial build was 18-178x slower for the old native path).
-    let mm = columns.unwrap_or(rows);
+        return Ok(numpy.getattr(intern!(py, "tri"))?.call((N,), Some(&kwargs))?.unbind());
+    };
+    let rows = rows as usize;
+    let mm = M.unwrap_or(rows);
     let dt_obj: Bound<'_, PyAny> = match dtype.as_ref() {
         Some(d) if !d.bind(py).is_none() => {
             numpy.getattr(intern!(py, "dtype"))?.call1((d.bind(py),))?
         }
         _ => numpy.getattr(intern!(py, "dtype"))?.call1(("float64",))?,
     };
-    if let Some(out) = try_zerocopy_tri(py, numpy, rows, mm, offset, &dt_obj)? {
+    if let Some(out) = try_zerocopy_tri(py, numpy, rows, mm, k, &dt_obj)? {
         return Ok(out);
     }
-    // numpy.tri creates the boolean/typed lower-triangle directly; the native
-    // UFuncArray build-then-convert path was 18-178x slower (int8 178x). Delegate.
-    delegate_tri(py, numpy, N, M, k, dtype.as_ref())
-}
-
-/// Hands `np.tri` back to numpy with its arguments EXACTLY as they arrived.
-///
-/// Three call sites share it: an argument we cannot convert, a `like=` that only numpy's
-/// __array_function__ dispatch can honour, and the dtype/width combinations where numpy's own
-/// builder is 18-178x faster than a native build-then-convert.
-fn delegate_tri(
-    py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
-    n: &Bound<'_, PyAny>,
-    m: Option<usize>,
-    k: i64,
-    dtype: Option<&Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "k"), k)?;
-    if let Some(columns) = m {
+    if let Some(columns) = M {
         kwargs.set_item("M", columns)?;
     }
-    if let Some(dtype_val) = dtype {
+    if let Some(dtype_val) = dtype.as_ref() {
         kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
     }
-    Ok(numpy
-        .getattr(intern!(py, "tri"))?
-        .call((n,), Some(&kwargs))?
-        .unbind())
+    Ok(numpy.getattr(intern!(py, "tri"))?.call((rows,), Some(&kwargs))?.unbind())
 }
+
 
 #[pyfunction]
 #[pyo3(signature = (condition, a, copy=true))]
@@ -45491,27 +45623,46 @@ fn cov_gram_should_delegate(
         || ((256..512).contains(&n_vars) && n_obs < 256)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowvarArg {
+    NotGiven,
+    Native(bool),
+}
+
+impl RowvarArg {
+    fn to_bool(self) -> bool {
+        match self {
+            Self::NotGiven => true,
+            Self::Native(val) => val,
+        }
+    }
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn parse_rowvar_arg(value: &Bound<'_, PyAny>) -> PyResult<RowvarArg> {
+    Ok(RowvarArg::Native(value.is_truthy()?))
+}
+
 #[pyfunction]
 // `dtype` is KEYWORD-ONLY in numpy (it sits after the `*`), so it takes the same
 // spelling here rather than becoming an eighth positional slot.
-#[pyo3(signature = (m, y=None, rowvar=true, bias=None, ddof=None, fweights=None, aweights=None, *, dtype=None))]
+#[pyo3(signature = (m, y=None, rowvar=RowvarArg::NotGiven, bias=None, ddof=None, fweights=None, aweights=None, *, dtype=None))]
 #[allow(clippy::too_many_arguments)]
 fn cov(
     py: Python<'_>,
     m: Py<PyAny>,
     y: Option<Py<PyAny>>,
-    rowvar: bool,
+    #[pyo3(from_py_with = parse_rowvar_arg)] rowvar: RowvarArg,
     bias: Option<&Bound<'_, PyAny>>,
     ddof: Option<Py<PyAny>>,
     fweights: Option<Py<PyAny>>,
     aweights: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let rowvar_bool = rowvar.to_bool();
     // numpy reads `bias` for TRUTHINESS
-    // (`deadlock-audit-strict-scalar-argument-typing-soeis`). `rowvar` DEFAULTS TO TRUE and
-    // therefore cannot take this treatment: PyO3 collapses an omitted argument and an explicit
-    // `None` into the same value, and numpy reads an explicit `None` as falsy, so matching it
-    // needs a distinct sentinel rather than a wider type.
+    // (`deadlock-audit-strict-scalar-argument-typing-soeis`). `rowvar` DEFAULTS TO TRUE;
+    // `RowvarArg` preserves omitted (true) vs explicit None/falsy (false).
     let bias = truthy_flag(bias)?;
     let numpy = cached_numpy(py)?;
     // INT/BOOL input (dtype-gap audit): numpy's cov converts to
@@ -45537,7 +45688,10 @@ fn cov(
         if let Some(y_val) = y.as_ref() {
             kwargs.set_item(intern!(py, "y"), y_val.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "rowvar"), rowvar)?;
+        match rowvar {
+            RowvarArg::NotGiven => {}
+            RowvarArg::Native(val) => kwargs.set_item(intern!(py, "rowvar"), val)?,
+        }
         kwargs.set_item(intern!(py, "bias"), bias)?;
         if let Some(ddof_val) = ddof.as_ref() {
             kwargs.set_item(intern!(py, "ddof"), ddof_val.bind(py))?;
@@ -45600,7 +45754,7 @@ fn cov(
     // cov(M, rowvar=False) 2-D column-variable form: native cov is ~10x (column access + no-C-BLAS
     // Gram; a transpose copy doesn't help). numpy.cov is faster -> delegate for parity (rowvar=True /
     // two-1-D-operand stay on the fast Gram below).
-    if !rowvar
+    if !rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && m_bound
             .getattr(intern!(py, "ndim"))
@@ -45616,7 +45770,7 @@ fn cov(
     // and small n_vars (<48) once Gram work n_vars^2*n_obs crosses ~200k (8x5000, 16x1000,
     // 24x500 = 1.2-3.5x loss); below that tiny-Gram native still wins (2x20000=0.81, 16x500
     // =0.85). Preserve all native wins outside these regions.
-    if rowvar
+    if rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && m_bound
             .getattr(intern!(py, "ndim"))
@@ -45633,14 +45787,14 @@ fn cov(
     }
     // Fast path: rowvar=True with no y is the common shape and maps to a single
     // zero-copy parallel Gram (no transpose / extract / full-matrix allocations).
-    if rowvar
+    if rowvar_bool
         && resolved_ddof == 1
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_ufunc_rowvar_f64_cov_core(py, m_bound, RowvarCovCore::Cov)?
     {
         return Ok(out);
     }
-    if rowvar
+    if rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_zerocopy_cov_rowvar_f64(py, m_bound, resolved_ddof)?
     {
@@ -45659,7 +45813,7 @@ fn cov(
     // same loss box (rowvar=True only — 1-D/1-D rowvar=False is n_vars=2 and wins).
     if let Some(y_val) = y_binding
         && !y_val.is_none()
-        && rowvar
+        && rowvar_bool
         && let (Some((mv, mo)), Some((yv, yo))) =
             (cov_operand_vars_obs(m_bound), cov_operand_vars_obs(y_val))
         && mo == yo
@@ -45669,12 +45823,12 @@ fn cov(
     }
     if let Some(y_val) = y_binding
         && !y_val.is_none()
-        && (rowvar || (ndim_is_1(m_bound) && ndim_is_1(y_val)))
+        && (rowvar_bool || (ndim_is_1(m_bound) && ndim_is_1(y_val)))
         && let Some(out) = try_zerocopy_cov_two_rowvar_f64(py, m_bound, y_val, resolved_ddof)?
     {
         return Ok(out);
     }
-    let native = match native_cov_unweighted(py, m_bound, y_binding, rowvar, resolved_ddof) {
+    let native = match native_cov_unweighted(py, m_bound, y_binding, rowvar_bool, resolved_ddof) {
         Ok(Some(value)) => value,
         _ => return fallback(py),
     };
@@ -45693,16 +45847,17 @@ fn cov(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y=None, rowvar=true, bias=None, ddof=None, dtype=None))]
+#[pyo3(signature = (x, y=None, rowvar=RowvarArg::NotGiven, bias=None, ddof=None, dtype=None))]
 fn corrcoef(
     py: Python<'_>,
     x: Py<PyAny>,
     y: Option<Py<PyAny>>,
-    rowvar: bool,
+    #[pyo3(from_py_with = parse_rowvar_arg)] rowvar: RowvarArg,
     bias: Option<Py<PyAny>>,
     ddof: Option<Py<PyAny>>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let rowvar_bool = rowvar.to_bool();
     let numpy = cached_numpy(py)?;
     // `bias` / `ddof`: hand the WHOLE call to numpy the moment either is supplied.
     //
@@ -45730,7 +45885,10 @@ fn corrcoef(
         if let Some(y_val) = y.as_ref() {
             kwargs.set_item(intern!(py, "y"), y_val.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "rowvar"), rowvar)?;
+        match rowvar {
+            RowvarArg::NotGiven => {}
+            RowvarArg::Native(val) => kwargs.set_item(intern!(py, "rowvar"), val)?,
+        }
         if let Some(bias_val) = bias.as_ref() {
             kwargs.set_item(intern!(py, "bias"), bias_val.bind(py))?;
         }
@@ -45763,7 +45921,10 @@ fn corrcoef(
         if let Some(y_val) = y.as_ref() {
             kwargs.set_item(intern!(py, "y"), y_val.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "rowvar"), rowvar)?;
+        match rowvar {
+            RowvarArg::NotGiven => {}
+            RowvarArg::Native(val) => kwargs.set_item(intern!(py, "rowvar"), val)?,
+        }
         // bias/ddof are not forwarded here because they cannot reach this point:
         // supplying either returns above, straight to numpy.
         if let Some(dtype_val) = dtype.as_ref() {
@@ -45797,7 +45958,7 @@ fn corrcoef(
     // corrcoef(M, rowvar=False) 2-D column-variable form: the native cov+normalize path is ~4.8-6.8x
     // (column access + no-C-BLAS Gram; a contiguous transpose doesn't help — the strided copy negates
     // it). numpy.corrcoef is faster, so delegate for parity (rowvar=True / two-1-D-operand stay fast).
-    if !rowvar
+    if !rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && x_bound
             .getattr(intern!(py, "ndim"))
@@ -45811,7 +45972,7 @@ fn corrcoef(
     // + a cheap normalize): delegate the mid n_vars band [48,256) and small n_vars (<48)
     // once Gram work n_vars^2*n_obs crosses ~400k (corrcoef's win region runs a bit larger
     // than cov's: 16x1000=0.89, 24x500=0.95 still win). Preserve native wins outside.
-    if rowvar
+    if rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && x_bound
             .getattr(intern!(py, "ndim"))
@@ -45828,13 +45989,13 @@ fn corrcoef(
     }
     // Fast path: rowvar=True with no y maps to the zero-copy parallel-Gram cov + an
     // in-place normalize, avoiding the cold-allocation UFuncArray chain (see cov).
-    if rowvar
+    if rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_ufunc_rowvar_f64_cov_core(py, x_bound, RowvarCovCore::Corrcoef)?
     {
         return Ok(out);
     }
-    if rowvar
+    if rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_zerocopy_corrcoef_rowvar_f64(py, x_bound)?
     {
@@ -45846,12 +46007,12 @@ fn corrcoef(
     // bug for corrcoef(a,b,rowvar=False).
     if let Some(y_val) = y_binding
         && !y_val.is_none()
-        && (rowvar || (ndim_is_1(x_bound) && ndim_is_1(y_val)))
+        && (rowvar_bool || (ndim_is_1(x_bound) && ndim_is_1(y_val)))
         && let Some(out) = try_zerocopy_corrcoef_two_rowvar_f64(py, x_bound, y_val)?
     {
         return Ok(out);
     }
-    let cov_array = match native_cov_unweighted(py, x_bound, y_binding, rowvar, 1) {
+    let cov_array = match native_cov_unweighted(py, x_bound, y_binding, rowvar_bool, 1) {
         Ok(Some(value)) => value,
         _ => return fallback(py),
     };
@@ -65043,9 +65204,66 @@ fn try_zerocopy_f32_allclose(
     Ok(Some(verdict))
 }
 
-#[pyfunction]
-#[pyo3(signature = (a, b, rtol=1e-5, atol=1e-8, equal_nan=false))]
-fn allclose(
+fn parse_close_args<'py>(
+    _py: Python<'py>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>, f64, f64, bool)>> {
+    const NAMES: [&str; 5] = ["a", "b", "rtol", "atol", "equal_nan"];
+    if args.len() > 5 {
+        return Ok(None);
+    }
+    let mut slots: [Option<Bound<'py, PyAny>>; 5] = [None, None, None, None, None];
+    for (index, value) in args.iter().enumerate() {
+        slots[index] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, val) in kwargs.iter() {
+            let Ok(name) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            match NAMES.iter().position(|candidate| *candidate == name) {
+                Some(index) => {
+                    if slots[index].is_some() {
+                        return Ok(None);
+                    }
+                    slots[index] = Some(val);
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+    let Some(a) = slots[0].take() else {
+        return Ok(None);
+    };
+    let Some(b) = slots[1].take() else {
+        return Ok(None);
+    };
+    let rtol = match slots[2].take() {
+        None => 1e-5,
+        Some(val) => match val.extract::<f64>() {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        },
+    };
+    let atol = match slots[3].take() {
+        None => 1e-8,
+        Some(val) => match val.extract::<f64>() {
+            Ok(a) => a,
+            Err(_) => return Ok(None),
+        },
+    };
+    let equal_nan = match slots[4].take() {
+        None => false,
+        Some(val) => match val.is_truthy() {
+            Ok(truth) => truth,
+            Err(_) => return Ok(None),
+        },
+    };
+    Ok(Some((a, b, rtol, atol, equal_nan)))
+}
+
+fn allclose_impl(
     py: Python<'_>,
     a: Py<PyAny>,
     b: Py<PyAny>,
@@ -65112,6 +65330,19 @@ fn allclose(
     };
     // numpy.allclose returns a Python bool, not numpy.bool_ (`deadlock-audit-7evbk`).
     Ok(PyBool::new(py, verdict).to_owned().into_any().unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn allclose(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((a, b, rtol, atol, equal_nan)) = parse_close_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "allclose"), args, kwargs);
+    };
+    allclose_impl(py, a.unbind(), b.unbind(), rtol, atol, equal_nan)
 }
 
 #[pyfunction]
@@ -87212,38 +87443,159 @@ fn diag_indices_from(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
     build_diag_indices_tuple(py, n, shape.len())
 }
 
+fn parse_tril_triu_indices_args<'py>(
+    _py: Python<'py>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<(usize, i64, usize)>> {
+    const NAMES: [&str; 3] = ["n", "k", "m"];
+    if args.len() > 3 {
+        return Ok(None);
+    }
+    let mut slots: [Option<Bound<'py, PyAny>>; 3] = [None, None, None];
+    for (index, value) in args.iter().enumerate() {
+        slots[index] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, val) in kwargs.iter() {
+            let Ok(name) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            match NAMES.iter().position(|candidate| *candidate == name) {
+                Some(index) => {
+                    if slots[index].is_some() {
+                        return Ok(None);
+                    }
+                    slots[index] = Some(val);
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+    let Some(n_any) = slots[0].take() else {
+        return Ok(None);
+    };
+    let Some(n_int) = integer_argument(&n_any).filter(|&v| v >= 0) else {
+        return Ok(None);
+    };
+    let n = n_int as usize;
+    let k = match slots[1].take() {
+        None => 0,
+        Some(k_any) => match integer_argument(&k_any) {
+            Some(k_int) => k_int,
+            None => return Ok(None),
+        },
+    };
+    let m = match slots[2].take() {
+        None => n,
+        Some(m_any) => {
+            if m_any.is_none() {
+                n
+            } else {
+                match integer_argument(&m_any).filter(|&v| v >= 0) {
+                    Some(m_int) => m_int as usize,
+                    None => return Ok(None),
+                }
+            }
+        }
+    };
+    Ok(Some((n, k, m)))
+}
+
+fn parse_indices_from_args<'py>(
+    _py: Python<'py>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<(Bound<'py, PyAny>, i64)>> {
+    const NAMES: [&str; 2] = ["arr", "k"];
+    if args.len() > 2 {
+        return Ok(None);
+    }
+    let mut slots: [Option<Bound<'py, PyAny>>; 2] = [None, None];
+    for (index, value) in args.iter().enumerate() {
+        slots[index] = Some(value);
+    }
+    if let Some(kwargs) = kwargs {
+        for (key, val) in kwargs.iter() {
+            let Ok(name) = key.extract::<String>() else {
+                return Ok(None);
+            };
+            match NAMES.iter().position(|candidate| *candidate == name) {
+                Some(index) => {
+                    if slots[index].is_some() {
+                        return Ok(None);
+                    }
+                    slots[index] = Some(val);
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+    let Some(arr) = slots[0].take() else {
+        return Ok(None);
+    };
+    let k = match slots[1].take() {
+        None => 0,
+        Some(k_any) => match integer_argument(&k_any) {
+            Some(k_int) => k_int,
+            None => return Ok(None),
+        },
+    };
+    Ok(Some((arr, k)))
+}
+
 #[pyfunction]
-#[pyo3(signature = (n, k=0, m=None))]
+#[pyo3(signature = (*args, **kwargs))]
 fn tril_indices(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((n, k, m)) = parse_tril_triu_indices_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "tril_indices"), args, kwargs);
+    };
+    if let Some(out) = build_tri_indices(py, n, m, k, false)? {
+        return Ok(out);
+    }
+    let (rows, cols) = UFuncArray::tril_indices(n, m, k);
+    build_numpy_tuple_from_ufuncs(py, &[rows, cols])
+}
+
+#[cfg(test)]
+fn tril_indices_impl(
     py: Python<'_>,
     n: &Bound<'_, PyAny>,
     k: i64,
     m: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
-    // An `n` numpy converts but we cannot DELEGATES the whole call
-    // (`deadlock-audit-strict-scalar-argument-typing-soeis`). `k` and `m` carry defaults and
-    // therefore stay strict - see `integer_argument`.
-    let Some(rows_count) = integer_argument(n).filter(|value| *value >= 0) else {
-        let kwargs = PyDict::new(py);
-        if let Some(columns) = m {
-            kwargs.set_item(intern!(py, "m"), columns)?;
-        }
-        return Ok(cached_numpy(py)?
-            .call_method(intern!(py, "tril_indices"), (n, k), Some(&kwargs))?
-            .unbind());
-    };
-    let rows_count = rows_count as usize;
-    if let Some(out) = build_tri_indices(py, rows_count, m.unwrap_or(rows_count), k, false)? {
+    let rows_count = integer_argument(n).filter(|value| *value >= 0).unwrap() as usize;
+    let cols_count = m.unwrap_or(rows_count);
+    if let Some(out) = build_tri_indices(py, rows_count, cols_count, k, false)? {
         return Ok(out);
     }
-    let (rows, cols) = UFuncArray::tril_indices(rows_count, m.unwrap_or(rows_count), k);
+    let (rows, cols) = UFuncArray::tril_indices(rows_count, cols_count, k);
     build_numpy_tuple_from_ufuncs(py, &[rows, cols])
 }
 
 #[pyfunction]
-#[pyo3(signature = (arr, k=0))]
-fn tril_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
-    let shape = extract_array_shape(py, arr.bind(py), "tril_indices_from(arr)")?;
+#[pyo3(signature = (*args, **kwargs))]
+fn tril_indices_from(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((arr, k)) = parse_indices_from_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "tril_indices_from"), args, kwargs);
+    };
+    tril_indices_from_impl(py, &arr, k)
+}
+
+fn tril_indices_from_impl(
+    py: Python<'_>,
+    arr: &Bound<'_, PyAny>,
+    k: i64,
+) -> PyResult<Py<PyAny>> {
+    let shape = extract_array_shape(py, arr, "tril_indices_from(arr)")?;
     if shape.len() != 2 {
         return Err(PyValueError::new_err("input array must be 2-d"));
     }
@@ -87256,36 +87608,57 @@ fn tril_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAn
 }
 
 #[pyfunction]
-#[pyo3(signature = (n, k=0, m=None))]
+#[pyo3(signature = (*args, **kwargs))]
 fn triu_indices(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((n, k, m)) = parse_tril_triu_indices_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "triu_indices"), args, kwargs);
+    };
+    if let Some(out) = build_tri_indices(py, n, m, k, true)? {
+        return Ok(out);
+    }
+    let (rows, cols) = UFuncArray::triu_indices(n, m, k);
+    build_numpy_tuple_from_ufuncs(py, &[rows, cols])
+}
+
+#[cfg(test)]
+fn triu_indices_impl(
     py: Python<'_>,
     n: &Bound<'_, PyAny>,
     k: i64,
     m: Option<usize>,
 ) -> PyResult<Py<PyAny>> {
-    // Same shape as `tril_indices` above: only `n` can be widened, because `k` and `m` carry
-    // defaults (`deadlock-audit-strict-scalar-argument-typing-soeis`).
-    let Some(rows_count) = integer_argument(n).filter(|value| *value >= 0) else {
-        let kwargs = PyDict::new(py);
-        if let Some(columns) = m {
-            kwargs.set_item(intern!(py, "m"), columns)?;
-        }
-        return Ok(cached_numpy(py)?
-            .call_method(intern!(py, "triu_indices"), (n, k), Some(&kwargs))?
-            .unbind());
-    };
-    let rows_count = rows_count as usize;
-    if let Some(out) = build_tri_indices(py, rows_count, m.unwrap_or(rows_count), k, true)? {
+    let rows_count = integer_argument(n).filter(|value| *value >= 0).unwrap() as usize;
+    let cols_count = m.unwrap_or(rows_count);
+    if let Some(out) = build_tri_indices(py, rows_count, cols_count, k, true)? {
         return Ok(out);
     }
-    let (rows, cols) = UFuncArray::triu_indices(rows_count, m.unwrap_or(rows_count), k);
+    let (rows, cols) = UFuncArray::triu_indices(rows_count, cols_count, k);
     build_numpy_tuple_from_ufuncs(py, &[rows, cols])
 }
 
 #[pyfunction]
-#[pyo3(signature = (arr, k=0))]
-fn triu_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
-    let shape = extract_array_shape(py, arr.bind(py), "triu_indices_from(arr)")?;
+#[pyo3(signature = (*args, **kwargs))]
+fn triu_indices_from(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((arr, k)) = parse_indices_from_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "triu_indices_from"), args, kwargs);
+    };
+    triu_indices_from_impl(py, &arr, k)
+}
+
+fn triu_indices_from_impl(
+    py: Python<'_>,
+    arr: &Bound<'_, PyAny>,
+    k: i64,
+) -> PyResult<Py<PyAny>> {
+    let shape = extract_array_shape(py, arr, "triu_indices_from(arr)")?;
     if shape.len() != 2 {
         return Err(PyValueError::new_err("input array must be 2-d"));
     }
@@ -115636,8 +116009,19 @@ fn correlate_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyR
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, b, rtol=1e-05, atol=1e-08, equal_nan=false))]
+#[pyo3(signature = (*args, **kwargs))]
 fn isclose(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let Some((a, b, rtol, atol, equal_nan)) = parse_close_args(py, args, kwargs)? else {
+        return core_numpy_passthrough_interned(py, intern!(py, "isclose"), args, kwargs);
+    };
+    isclose_impl(py, a.unbind(), b.unbind(), rtol, atol, equal_nan)
+}
+
+fn isclose_impl(
     py: Python<'_>,
     a: Py<PyAny>,
     b: Py<PyAny>,
@@ -133483,7 +133867,7 @@ mod tests {
             }
 
             let y = numeric_array(py, vec![1.0, 2.0, 4.0, 8.0], "float64");
-            let actual = trapezoid(py, y.clone().unbind(), None, 1.0, -1)?;
+            let actual = trapezoid_impl(py, "trapezoid", y.clone().unbind(), None, 1.0, -1)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("trapezoid", (y,))?;
 
@@ -133504,7 +133888,7 @@ mod tests {
                 vec![vec![1.0, 2.0, 4.0], vec![3.0, 5.0, 9.0]],
                 "float64",
             );
-            let actual = trapezoid(py, y.clone().unbind(), None, 0.5, 0)?;
+            let actual = trapezoid_impl(py, "trapezoid", y.clone().unbind(), None, 0.5, 0)?;
             let numpy = py.import("numpy")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("dx", 0.5)?;
@@ -133529,7 +133913,14 @@ mod tests {
                 "float64",
             );
             let x = numeric_array(py, vec![0.0, 1.0, 3.0], "float64");
-            let actual = trapezoid(py, y.clone().unbind(), Some(x.clone().unbind()), 99.0, 1)?;
+            let actual = trapezoid_impl(
+                py,
+                "trapezoid",
+                y.clone().unbind(),
+                Some(x.clone().unbind()),
+                99.0,
+                1,
+            )?;
             let numpy = py.import("numpy")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("x", x)?;
@@ -133555,7 +133946,14 @@ mod tests {
                 "float64",
             );
             let x = numeric_array(py, vec![vec![0.0, 1.0, 3.0]], "float64");
-            let actual = trapezoid(py, y.clone().unbind(), Some(x.clone().unbind()), 1.0, 1)?;
+            let actual = trapezoid_impl(
+                py,
+                "trapezoid",
+                y.clone().unbind(),
+                Some(x.clone().unbind()),
+                1.0,
+                1,
+            )?;
             let numpy = py.import("numpy")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("x", x)?;
@@ -133584,7 +133982,14 @@ mod tests {
                 vec![vec![0.0, 1.0, 3.0], vec![0.0, 2.0, 5.0]],
                 "float64",
             );
-            let actual = trapezoid(py, y.clone().unbind(), Some(x.clone().unbind()), 1.0, 1)?;
+            let actual = trapezoid_impl(
+                py,
+                "trapezoid",
+                y.clone().unbind(),
+                Some(x.clone().unbind()),
+                1.0,
+                1,
+            )?;
             let numpy = py.import("numpy")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("x", x)?;
@@ -138148,7 +138553,7 @@ mod tests {
             }
 
             let y = numeric_array(py, vec![2.0, 3.0, 7.0], "float64");
-            let actual = trapz(py, y.clone().unbind(), None, 2.0, -1)?;
+            let actual = trapezoid_impl(py, "trapz", y.clone().unbind(), None, 2.0, -1)?;
             let numpy = py.import("numpy")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item("dx", 2.0)?;
@@ -148112,11 +148517,11 @@ mod tests {
             let numpy = py.import("numpy")?;
 
             let int_arg = |value: i64| value.into_pyobject(py).unwrap().into_any();
-            let actual_default = tri(py, &int_arg(3), None, 0, None, None)?;
+            let actual_default = tri_impl(py, &int_arg(3), None, 0, None, None)?;
             let expected_default = numpy.call_method1("tri", (3,))?;
             assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
 
-            let actual_neg = tri(
+            let actual_neg = tri_impl(
                 py,
                 &int_arg(3),
                 Some(5),
@@ -148136,7 +148541,7 @@ mod tests {
             )?;
             assert_array_matches_numpy(actual_neg.bind(py), &expected_neg)?;
 
-            let actual_pos = tri(
+            let actual_pos = tri_impl(
                 py,
                 &int_arg(4),
                 Some(2),
@@ -148472,7 +148877,7 @@ mod tests {
             }
 
             let int_arg = |value: i64| value.into_pyobject(py).unwrap().into_any();
-            let actual = tril_indices(py, &int_arg(4), 2, Some(5))?;
+            let actual = tril_indices_impl(py, &int_arg(4), 2, Some(5))?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("tril_indices", (4, 2, 5))?;
 
@@ -148489,7 +148894,7 @@ mod tests {
             }
 
             let int_arg = |value: i64| value.into_pyobject(py).unwrap().into_any();
-            let actual = triu_indices(py, &int_arg(4), 2, Some(5))?;
+            let actual = triu_indices_impl(py, &int_arg(4), 2, Some(5))?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("triu_indices", (4, 2, 5))?;
 
@@ -148510,7 +148915,7 @@ mod tests {
                 vec![vec![1_i64, 2_i64, 3_i64], vec![4_i64, 5_i64, 6_i64]],
                 "int64",
             );
-            let actual = tril_indices_from(py, arr.clone().unbind(), 1)?;
+            let actual = tril_indices_from_impl(py, &arr, 1)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("tril_indices_from", (arr, 1))?;
             assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
@@ -148520,7 +148925,7 @@ mod tests {
                 vec![vec![vec![1_i64, 2_i64], vec![3_i64, 4_i64]]],
                 "int64",
             );
-            let err = tril_indices_from(py, cube.unbind(), 0).unwrap_err();
+            let err = tril_indices_from_impl(py, &cube, 0).unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert!(err.to_string().contains("2-d"));
             Ok(())
@@ -148539,13 +148944,13 @@ mod tests {
                 vec![vec![1_i64, 2_i64, 3_i64], vec![4_i64, 5_i64, 6_i64]],
                 "int64",
             );
-            let actual = triu_indices_from(py, arr.clone().unbind(), 1)?;
+            let actual = triu_indices_from_impl(py, &arr, 1)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("triu_indices_from", (arr, 1))?;
             assert_index_tuple_matches_numpy(actual.bind(py), &expected)?;
 
             let vector = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
-            let err = triu_indices_from(py, vector.unbind(), 0).unwrap_err();
+            let err = triu_indices_from_impl(py, &vector, 0).unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
             assert!(err.to_string().contains("2-d"));
             Ok(())
