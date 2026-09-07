@@ -87371,11 +87371,13 @@ fn diag_indices(
 /// = numpy's default 2); any non-int value, unknown keyword, duplicate
 /// positional+keyword or a missing `n` returns `None` so the caller delegates
 /// VERBATIM and numpy raises/answers with exactly what it was given.
+type ParsedDiagIndicesArgs<'py> = (Bound<'py, PyAny>, Option<Bound<'py, PyAny>>);
+
 fn parse_diag_indices_args<'py>(
     _py: Python<'py>,
     args: &Bound<'py, PyTuple>,
     kwargs: Option<&Bound<'py, PyDict>>,
-) -> PyResult<Option<(Bound<'py, PyAny>, Option<Bound<'py, PyAny>>)>> {
+) -> PyResult<Option<ParsedDiagIndicesArgs<'py>>> {
     const NAMES: [&str; 2] = ["n", "ndim"];
     if args.len() > 2 {
         return Ok(None);
