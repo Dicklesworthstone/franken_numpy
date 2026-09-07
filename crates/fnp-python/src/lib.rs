@@ -24109,11 +24109,13 @@ fn trapezoid_impl(
     build_numpy_scalar_or_array_from_ufunc(py, &result)
 }
 
+type ParsedTrapezoidArgs<'py> = (Bound<'py, PyAny>, Option<Bound<'py, PyAny>>, f64, isize);
+
 fn parse_trapezoid_args<'py>(
     _py: Python<'py>,
     args: &Bound<'py, PyTuple>,
     kwargs: Option<&Bound<'py, PyDict>>,
-) -> PyResult<Option<(Bound<'py, PyAny>, Option<Bound<'py, PyAny>>, f64, isize)>> {
+) -> PyResult<Option<ParsedTrapezoidArgs<'py>>> {
     const NAMES: [&str; 4] = ["y", "x", "dx", "axis"];
     if args.len() > 4 {
         return Ok(None);
@@ -41197,11 +41199,19 @@ fn try_zerocopy_diff1_pend(
     diff1_pend_i64(py, numpy, a, prepend, append)
 }
 
+type ParsedDiffArgs<'py> = (
+    Bound<'py, PyAny>,
+    usize,
+    i64,
+    Option<Bound<'py, PyAny>>,
+    Option<Bound<'py, PyAny>>,
+);
+
 fn parse_diff_args<'py>(
     _py: Python<'py>,
     args: &Bound<'py, PyTuple>,
     kwargs: Option<&Bound<'py, PyDict>>,
-) -> PyResult<Option<(Bound<'py, PyAny>, usize, i64, Option<Bound<'py, PyAny>>, Option<Bound<'py, PyAny>>)>> {
+) -> PyResult<Option<ParsedDiffArgs<'py>>> {
     const NAMES: [&str; 5] = ["a", "n", "axis", "prepend", "append"];
     if args.len() > 5 {
         return Ok(None);
@@ -41420,8 +41430,7 @@ fn diff(
     // 122us @4M). numpy is the parity reference, so defer bool to it. (Checked only on
     // the fallthrough — f64/int/f32 already returned.)
     if a.is_exact_instance(cached_ndarray_type(py)?)
-        && a
-            .getattr(intern!(py, "dtype"))?
+        && a.getattr(intern!(py, "dtype"))?
             .getattr(intern!(py, "kind"))?
             .extract::<String>()?
             == "b"
@@ -43489,11 +43498,13 @@ fn try_zerocopy_tri(
     }
 }
 
+type ParsedTriArgs<'py> = (usize, usize, i64, Option<Bound<'py, PyAny>>);
+
 fn parse_tri_args<'py>(
     _py: Python<'py>,
     args: &Bound<'py, PyTuple>,
     kwargs: Option<&Bound<'py, PyDict>>,
-) -> PyResult<Option<(usize, usize, i64, Option<Bound<'py, PyAny>>)>> {
+) -> PyResult<Option<ParsedTriArgs<'py>>> {
     const POS_NAMES: [&str; 4] = ["N", "M", "k", "dtype"];
     if args.len() > 4 {
         return Ok(None);
@@ -43583,26 +43594,29 @@ fn tri(
 #[cfg(test)]
 fn tri_impl(
     py: Python<'_>,
-    N: &Bound<'_, PyAny>,
-    M: Option<usize>,
+    n: &Bound<'_, PyAny>,
+    m: Option<usize>,
     k: i64,
     dtype: Option<Py<PyAny>>,
     _like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let Some(rows) = integer_argument(N).filter(|value| *value >= 0) else {
+    let Some(rows) = integer_argument(n).filter(|value| *value >= 0) else {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "k"), k)?;
-        if let Some(columns) = M {
+        if let Some(columns) = m {
             kwargs.set_item("M", columns)?;
         }
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        return Ok(numpy.getattr(intern!(py, "tri"))?.call((N,), Some(&kwargs))?.unbind());
+        return Ok(numpy
+            .getattr(intern!(py, "tri"))?
+            .call((n,), Some(&kwargs))?
+            .unbind());
     };
     let rows = rows as usize;
-    let mm = M.unwrap_or(rows);
+    let mm = m.unwrap_or(rows);
     let dt_obj: Bound<'_, PyAny> = match dtype.as_ref() {
         Some(d) if !d.bind(py).is_none() => {
             numpy.getattr(intern!(py, "dtype"))?.call1((d.bind(py),))?
@@ -43614,15 +43628,17 @@ fn tri_impl(
     }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "k"), k)?;
-    if let Some(columns) = M {
+    if let Some(columns) = m {
         kwargs.set_item("M", columns)?;
     }
     if let Some(dtype_val) = dtype.as_ref() {
         kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
     }
-    Ok(numpy.getattr(intern!(py, "tri"))?.call((rows,), Some(&kwargs))?.unbind())
+    Ok(numpy
+        .getattr(intern!(py, "tri"))?
+        .call((rows,), Some(&kwargs))?
+        .unbind())
 }
-
 
 #[pyfunction]
 #[pyo3(signature = (condition, a, copy=true))]
@@ -65204,11 +65220,13 @@ fn try_zerocopy_f32_allclose(
     Ok(Some(verdict))
 }
 
+type ParsedCloseArgs<'py> = (Bound<'py, PyAny>, Bound<'py, PyAny>, f64, f64, bool);
+
 fn parse_close_args<'py>(
     _py: Python<'py>,
     args: &Bound<'py, PyTuple>,
     kwargs: Option<&Bound<'py, PyDict>>,
-) -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>, f64, f64, bool)>> {
+) -> PyResult<Option<ParsedCloseArgs<'py>>> {
     const NAMES: [&str; 5] = ["a", "b", "rtol", "atol", "equal_nan"];
     if args.len() > 5 {
         return Ok(None);
@@ -87590,11 +87608,7 @@ fn tril_indices_from(
     tril_indices_from_impl(py, &arr, k)
 }
 
-fn tril_indices_from_impl(
-    py: Python<'_>,
-    arr: &Bound<'_, PyAny>,
-    k: i64,
-) -> PyResult<Py<PyAny>> {
+fn tril_indices_from_impl(py: Python<'_>, arr: &Bound<'_, PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     let shape = extract_array_shape(py, arr, "tril_indices_from(arr)")?;
     if shape.len() != 2 {
         return Err(PyValueError::new_err("input array must be 2-d"));
@@ -87653,11 +87667,7 @@ fn triu_indices_from(
     triu_indices_from_impl(py, &arr, k)
 }
 
-fn triu_indices_from_impl(
-    py: Python<'_>,
-    arr: &Bound<'_, PyAny>,
-    k: i64,
-) -> PyResult<Py<PyAny>> {
+fn triu_indices_from_impl(py: Python<'_>, arr: &Bound<'_, PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     let shape = extract_array_shape(py, arr, "triu_indices_from(arr)")?;
     if shape.len() != 2 {
         return Err(PyValueError::new_err("input array must be 2-d"));
@@ -121706,16 +121716,17 @@ mod tests {
         NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, ScimathFix, UFuncKind,
         accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, busdays_in_span, cached_float64_dtype, cached_numpy,
-        ceil_native, choose, compress, copysign, count_nonzero, degrees_native, diag, diag_indices,
-        diag_indices_from, diagflat, diagonal, digitize, divide_slice_detecting_fe_hazards,
-        dtype_kind_of, extract, extract_numeric_array, extract_precise_numeric_array,
-        f64_binary_route_is_worth_taking, f64_divide_evidence_saw_non_normal,
-        f64_divide_fast_accepts_without_fp_error, f64_divide_non_fast_raises_fp_error,
-        f64_divide_quotient_bits_are_normal, f64_divide_quotient_non_normal_evidence,
-        f64_divide_raises_fp_error, f64_out_route_is_worth_taking, fill_diagonal, flatnonzero,
-        flip, fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name,
-        interp, is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native,
-        isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
+        ceil_native, choose, compress, copysign, count_nonzero, degrees_native, diag,
+        diag_indices_from, diag_indices_impl, diagflat, diagonal, digitize,
+        divide_slice_detecting_fe_hazards, dtype_kind_of, extract, extract_numeric_array,
+        extract_precise_numeric_array, f64_binary_route_is_worth_taking,
+        f64_divide_evidence_saw_non_normal, f64_divide_fast_accepts_without_fp_error,
+        f64_divide_non_fast_raises_fp_error, f64_divide_quotient_bits_are_normal,
+        f64_divide_quotient_non_normal_evidence, f64_divide_raises_fp_error,
+        f64_out_route_is_worth_taking, fill_diagonal, flatnonzero, flip, fliplr, flipud,
+        floor_native, fnp_python, frexp, hypot, indices, interned_ufunc_name, interp,
+        is_business_day, is_exact_numpy_ndarray, isfinite_native, isinf_native, isnan_native,
+        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2,
         masked_pairwise_parallel, masked_pairwise_streamed, meshgrid, modf, nan_to_num_impl,
         narrow_bitmap_setop, native_apply_along_axis, native_apply_over_axes, native_array_str,
         native_atleast, native_base_repr, native_binary_repr, native_format_float, native_isdtype,
@@ -121724,11 +121735,12 @@ mod tests {
         python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians_native, ravel_multi_index,
         required_dict_item, rfftfreq, rint_native, searchsorted, select, sign, signbit_native,
-        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
-        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc_native,
-        try_native_lstsq_tsqr, try_zerocopy_busday_count, try_zerocopy_busday_offset,
-        try_zerocopy_f64_binary_into, try_zerocopy_is_busday, try_zerocopy_isnat, unravel_index,
-        where_py, wide_int_table_bounds, zerocopy_f64_binary_flat,
+        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve,
+        trapezoid_impl, tri_impl, tril_indices_from_impl, tril_indices_impl,
+        triu_indices_from_impl, triu_indices_impl, trunc_native, try_native_lstsq_tsqr,
+        try_zerocopy_busday_count, try_zerocopy_busday_offset, try_zerocopy_f64_binary_into,
+        try_zerocopy_is_busday, try_zerocopy_isnat, unravel_index, where_py, wide_int_table_bounds,
+        zerocopy_f64_binary_flat,
     };
     use crate::try_zerocopy_f64_take;
     use fnp_dtype::{ArrayStorage, DType};
@@ -146398,7 +146410,8 @@ mod tests {
             );
 
             let int_values = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
-            let actual_int = nan_to_num_impl(py, int_values.clone().unbind(), true, 0.0, None, None)?;
+            let actual_int =
+                nan_to_num_impl(py, int_values.clone().unbind(), true, 0.0, None, None)?;
             let expected_int = numpy.getattr("nan_to_num")?.call1((int_values,))?;
 
             assert_eq!(
