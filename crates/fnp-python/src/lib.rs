@@ -15068,7 +15068,8 @@ fn try_zerocopy_f64_nan_to_num(
         // not already getting. The f16 sibling gates at 2^20 and is left alone - it is not
         // measured here.
         const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 17;
-        if n >= NAN_TO_NUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let threads = rayon::current_num_threads().min(n / NAN_TO_NUM_PARALLEL_MIN);
+        if n >= NAN_TO_NUM_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
             // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
             // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
@@ -15076,7 +15077,7 @@ fn try_zerocopy_f64_nan_to_num(
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
             let out_data: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
-            let chunk = n.div_ceil(rayon::current_num_threads());
+            let chunk = n.div_ceil(threads);
             out_data
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
@@ -15184,7 +15185,8 @@ fn try_zerocopy_f32_nan_to_num(
         // not already getting. The f16 sibling gates at 2^20 and is left alone - it is not
         // measured here.
         const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 17;
-        if n >= NAN_TO_NUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let threads = rayon::current_num_threads().min(n / NAN_TO_NUM_PARALLEL_MIN);
+        if n >= NAN_TO_NUM_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
             // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
             // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
@@ -15192,7 +15194,7 @@ fn try_zerocopy_f32_nan_to_num(
                 unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
             let out_data: &mut [f32] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
-            let chunk = n.div_ceil(rayon::current_num_threads());
+            let chunk = n.div_ceil(threads);
             out_data
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
