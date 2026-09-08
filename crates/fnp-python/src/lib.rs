@@ -13309,7 +13309,8 @@ fn try_native_int_floordiv(
         return Ok(None);
     }
     let n: usize = a_shape.iter().product();
-    if n < INT_FLOORDIV_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let threads = rayon::current_num_threads().min(n / INT_FLOORDIV_PARALLEL_MIN);
+    if n < INT_FLOORDIV_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
@@ -13453,7 +13454,8 @@ fn try_native_timedelta_addsub(
         return Ok(None);
     }
     let n: usize = a_shape.iter().product();
-    if n < TD_ADDSUB_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let threads = rayon::current_num_threads().min(n / TD_ADDSUB_PARALLEL_MIN);
+    if n < TD_ADDSUB_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
     let i64t = numpy.getattr(intern!(py, "int64"))?;
@@ -13514,7 +13516,8 @@ fn try_native_timedelta_floordiv(
         return Ok(None);
     }
     let n: usize = a_shape.iter().product();
-    if n < TD_FLOORDIV_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let threads = rayon::current_num_threads().min(n / TD_FLOORDIV_PARALLEL_MIN);
+    if n < TD_FLOORDIV_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
     // View both as int64 (timedelta64 is int64 internally; NaT == i64::MIN).
@@ -13595,7 +13598,8 @@ fn try_native_timedelta_remainder(
         return Ok(None);
     }
     let n: usize = a_shape.iter().product();
-    if n < TD_REM_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let threads = rayon::current_num_threads().min(n / TD_REM_PARALLEL_MIN);
+    if n < TD_REM_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
     let i64t = numpy.getattr(intern!(py, "int64"))?;
@@ -13683,7 +13687,8 @@ fn try_native_int_remainder(
         return Ok(None);
     }
     let n: usize = a_shape.iter().product();
-    if n < INT_REM_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let threads = rayon::current_num_threads().min(n / INT_REM_PARALLEL_MIN);
+    if n < INT_REM_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
@@ -13796,7 +13801,8 @@ where
         let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
         let q: &mut [T] = unsafe { std::slice::from_raw_parts_mut(qout.as_ptr() as *mut T, n) };
         let r: &mut [T] = unsafe { std::slice::from_raw_parts_mut(rout.as_ptr() as *mut T, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let threads = rayon::current_num_threads().min(n / (1 << 18));
+        let chunk = n.div_ceil(threads.max(1));
         q.par_chunks_mut(chunk)
             .zip(r.par_chunks_mut(chunk))
             .zip(lhs.par_chunks(chunk))
@@ -13858,7 +13864,8 @@ fn try_native_int_divmod(
         return Ok(None);
     }
     let n: usize = a_shape.iter().product();
-    if n < INT_DIVMOD_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let threads = rayon::current_num_threads().min(n / INT_DIVMOD_PARALLEL_MIN);
+    if n < INT_DIVMOD_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
