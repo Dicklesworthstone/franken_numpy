@@ -10861,7 +10861,8 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             | BinaryOp::Div => 1 << 21,
             _ => FLOAT_POWER_PARALLEL_MIN_LEN,
         };
-        if parallelizable && n >= parallel_min && rayon::current_num_threads() >= 2 {
+        let threads = rayon::current_num_threads().min(n / parallel_min);
+        if parallelizable && n >= parallel_min && threads >= 2 {
             use rayon::prelude::*;
             // No Vec copy: read the borrowed buffers as &[f64] and write op.apply straight
             // into the numpy.empty output. ReadOnlyCell<f64>/Cell<f64> are repr(transparent)
@@ -10872,7 +10873,7 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
             let rhs: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
             let out_data: &mut [f64] =
                 unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
-            let chunk = n.div_ceil(rayon::current_num_threads());
+            let chunk = n.div_ceil(threads);
             if matches!(op, BinaryOp::Div) {
                 // The normality test rides ALONG with the divide instead of in a
                 // second pass over the quotients. `vdivpd` is throughput-bound
