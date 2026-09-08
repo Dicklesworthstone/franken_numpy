@@ -24172,7 +24172,9 @@ fn trapezoid(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let Some((y, x, dx, axis)) = parse_trapezoid_args(py, args, kwargs)? else {
-        return core_numpy_passthrough_interned(py, intern!(py, "trapezoid"), args, kwargs);
+        let numpy = cached_numpy(py)?;
+        let delegate = numpy_trapezoid_delegate(numpy, "trapz")?;
+        return Ok(delegate.call(args, kwargs)?.unbind());
     };
     trapezoid_impl(py, "trapezoid", y.unbind(), x.map(|v| v.unbind()), dx, axis)
 }
@@ -24185,7 +24187,9 @@ fn trapz(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let Some((y, x, dx, axis)) = parse_trapezoid_args(py, args, kwargs)? else {
-        return core_numpy_passthrough_interned(py, intern!(py, "trapz"), args, kwargs);
+        let numpy = cached_numpy(py)?;
+        let delegate = numpy_trapezoid_delegate(numpy, "trapz")?;
+        return Ok(delegate.call(args, kwargs)?.unbind());
     };
     trapezoid_impl(py, "trapz", y.unbind(), x.map(|v| v.unbind()), dx, axis)
 }
