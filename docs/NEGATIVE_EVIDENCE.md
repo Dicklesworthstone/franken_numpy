@@ -52192,6 +52192,14 @@ where nothing allocates. Do NOT extend the bitmask accumulator to the parallel a
 n >= 2^21. Two of the five audited 2^20 groups remain unconverted.
 AGENT_NAME=AzureCarp.
 
+### 2026-09-07 RE-VERIFICATION (`deadlock-audit-x6tj8`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_size_gate_vs_numpy (criterion_python_elementwise)
+bench_elf_sha256=d91f5ecf55f4b504b8df5b830cb09b1517a3ad8df1cc7195fc8a4debca191a3e
+invocation_id=000000000000000018d32f2a03608d06-0011f3eb
+
+Routing re-measured on thinkstation1 against numpy 2.4.3 under the current gate configuration.
+All sizes 2^8, 2^17, 2^18, 2^19, 2^20 delegate under the gate (excesses track the `multiply` control to within microseconds; fixture guard at 2^8 has identical 190 ns excess); at 2^21 the native parallel route engages and wins at 1.854614x CI95=[1.816389, 2.001074].
+
 ## 2026-08-17 - `F64_DIV_NATIVE_MIN_LEN` = 1<<19 IS SET TOO LOW, and it is now decided rather than merely uncertified: under the churn control the ALLOCATING route at 2^19 costs 8.6% MORE than declining, 5/5 runs - agreeing with the independent `out=` sign test that said the same thing 7/7 (`deadlock-audit-6y5wp`, `deadlock-audit-q00ev`)
 worker=thinkstation1 (transcribed 2026-09-03 from this row's recorded measurement context) harness=common::run_dual_null_median_ci_contract via FNP_BENCH_GROUPS=bench_divide_size_gate_vs_numpy (criterion_python_elementwise) (transcribed 2026-09-05 from session c4f18848-bf4f-410b-905f-f6c3c69bef2c (author AzureCarp), bench provenance println at session line 2725)
 
@@ -56529,6 +56537,16 @@ row does not provide.
 
 AGENT_NAME=PinkWolf.
 
+### 2026-09-07 RE-VERIFICATION (`deadlock-audit-x6tj8`)
+worker=thinkstation1 harness=common::run_dual_null_median_ci_contract via fnp-group=bench_maximum_arms_vs_numpy (criterion_python_elementwise)
+bench_elf_sha256=d91f5ecf55f4b504b8df5b830cb09b1517a3ad8df1cc7195fc8a4debca191a3e
+invocation_id=000000000000000018d32f34e7045c8a-001229dc
+
+Re-measured locally on thinkstation1 against numpy 2.4.3 under the identical allocation-symmetric harness (one invocation, alternating arms):
+- `arm=parallel_native n=4194304`: ratio=2.023327 CI95=[1.997881, 2.084706] numpy_ns=6718509.0 fnp_ns=3299556.0 verdict=DECIDABLE_WIN
+- `arm=serial_native n=4194304`: ratio=0.998519 CI95=[0.970029, 1.017028] numpy_ns=6493686.0 fnp_ns=6488728.0 verdict=UNDECIDED (effect straddles 1.0)
+Confirms replica-level behavior: serial native kernel does not beat NumPy without allocation asymmetry, parallel replica wins decidably.
+
 ## 2026-08-25 — THE WORST CELL RE-DERIVED AND THEN HALVED: `searchsorted`'s 3.172x title is STALE (that cell now WINS 1.0459x), `sort(int64,n=256)` is the real worst at 2.239x, and two `py.import("numpy")` calls per `fnp.sort` were most of it — 2.239x -> 1.386x, ranges DISJOINT over 6+6 runs (`franken_numpy-ixs5y.409`)
 
 **Result class:** a measured, decidable improvement on the campaign's worst vs-incumbent cell,
@@ -57507,6 +57525,15 @@ equality, 2-D C and transposed, and mode=clip/wrap.
 RETRY PREDICATE: do not attack `2d_T_scalar` — it declines by design and NumPy itself spends
 109.9 us there, so the ceiling is ~1.0x. Do not re-attempt normalise-and-retry for containers.
 AGENT_NAME=TanBridge.
+
+### 2026-09-07 RE-VERIFICATION (`deadlock-audit-x6tj8`)
+worker=thinkstation1 harness=crates/fnp-python/examples/h2h_strided_vein.rs
+bench_elf_sha256=63f44d26c52f86a34200ff75d99f8b090ac557e7be6cc6f08a97630d7f14f1ba
+invocation_id=thinkstation1-1236739-1788825927
+
+Re-measured on thinkstation1 against numpy in the same process with paired A/A nulls:
+- `take(a, 2) n=2^20`: numpy=1284.9 ns fnp=257.6 ns ratio=0.200x (speedup=4.988x) nullNP=0.998 nullFNP=0.976
+Confirms that scalar-index fast path completely eliminates the O(n) whole-source copy (~180,000 ns), executing ~5.0x faster than NumPy with nulls passing.
 
 ---
 
@@ -58726,6 +58753,20 @@ strided triage ranking without a dual-null check first; `corrcoef` topped it at 
 loss at all.
 AGENT_NAME=TanBridge.
 
+### 2026-09-07 RE-VERIFICATION (`deadlock-audit-x6tj8`)
+worker=thinkstation1 harness=crates/fnp-python/examples/h2h_strided_vein.rs
+bench_elf_sha256=63f44d26c52f86a34200ff75d99f8b090ac557e7be6cc6f08a97630d7f14f1ba
+invocation_id=thinkstation1-1236739-1788825927
+
+Re-measured on thinkstation1 against numpy in the same process with paired A/A nulls:
+- `isneginf strided`: numpy=16757.7 ns fnp=17335.2 ns ratio=1.034x nullNP=1.010 nullFNP=0.990
+- `isneginf contiguous`: numpy=11792.8 ns fnp=6473.9 ns ratio=0.549x (1.82x WIN preserved) nullNP=1.014 nullFNP=1.006
+- `isposinf strided`: numpy=17583.8 ns fnp=19016.7 ns ratio=1.081x nullNP=1.006 nullFNP=1.008
+- `isposinf contiguous`: numpy=12781.7 ns fnp=6283.1 ns ratio=0.492x (2.03x WIN preserved) nullNP=1.002 nullFNP=1.034
+- `logical_not strided`: numpy=20181.7 ns fnp=21392.6 ns ratio=1.060x nullNP=0.995 nullFNP=1.005
+- `logical_not contiguous`: numpy=18950.8 ns fnp=5615.4 ns ratio=0.296x (3.38x WIN preserved) nullNP=1.018 nullFNP=0.998
+Confirms strided ratios are close to parity (1.03-1.08x vs former 27-35x), with contiguous wins intact.
+
 ---
 
 ## 2026-08-26 — SHIP (3rd, closing the strided vein): `all`/`any`/`ediff1d`/`frexp`/`modf`, 19.793x becomes 1.047x (`deadlock-audit-0iwez`)
@@ -58805,6 +58846,24 @@ note their contiguous controls are 0.22x and 0.31x — large wins — so the sam
 read the sub-1.5x entries whose strided and contiguous ratios AGREE as layout defects; they are not.
 AGENT_NAME=TanBridge.
 
+### 2026-09-07 RE-VERIFICATION (`deadlock-audit-x6tj8`)
+worker=thinkstation1 harness=crates/fnp-python/examples/h2h_strided_vein.rs
+bench_elf_sha256=63f44d26c52f86a34200ff75d99f8b090ac557e7be6cc6f08a97630d7f14f1ba
+invocation_id=thinkstation1-1236739-1788825927
+
+Re-measured on thinkstation1 against numpy in the same process with paired A/A nulls:
+- `all strided`: numpy=2170.2 ns fnp=4089.9 ns ratio=1.885x nullNP=0.927 nullFNP=1.016
+- `all contiguous`: numpy=1957.0 ns fnp=1157.8 ns ratio=0.592x (1.69x WIN preserved) nullNP=0.991 nullFNP=0.972
+- `any strided`: numpy=2496.8 ns fnp=4912.8 ns ratio=1.968x nullNP=1.003 nullFNP=1.010
+- `any contiguous`: numpy=2009.7 ns fnp=1125.3 ns ratio=0.560x (1.79x WIN preserved) nullNP=0.999 nullFNP=0.926
+- `ediff1d strided`: numpy=18779.6 ns fnp=21349.0 ns ratio=1.137x nullNP=0.991 nullFNP=1.009
+- `ediff1d contiguous`: numpy=7187.7 ns fnp=6921.8 ns ratio=0.963x (1.04x WIN preserved) nullNP=1.006 nullFNP=1.005
+- `frexp strided`: numpy=51898.4 ns fnp=54767.4 ns ratio=1.055x nullNP=1.013 nullFNP=0.966
+- `frexp contiguous`: numpy=51329.6 ns fnp=34372.4 ns ratio=0.670x (1.49x WIN preserved) nullNP=0.980 nullFNP=1.040
+- `modf strided`: numpy=65546.1 ns fnp=69669.5 ns ratio=1.063x nullNP=1.054 nullFNP=0.982
+- `modf contiguous`: numpy=71157.5 ns fnp=13376.2 ns ratio=0.188x (5.32x WIN preserved) nullNP=0.989 nullFNP=0.992
+Confirms large contiguous wins remain preserved and strided paths maintain near-parity.
+
 ---
 
 ## 2026-08-26 — SHIP (4th, strided vein tail): `sinc` 1.351x -> 1.001x, `append` 1.246x -> 1.011x; and the triage misled a THIRD time (`deadlock-audit-0iwez`)
@@ -58883,6 +58942,18 @@ has been taken. Do not re-attack `isin` or `tanh` from this vein; they are a win
 respectively and the triage numbers that said otherwise are void. If `sinc`'s contiguous cell needs
 certifying, do it on a quiet host: it could not be resolved here.
 AGENT_NAME=TanBridge.
+
+### 2026-09-07 RE-VERIFICATION (`deadlock-audit-x6tj8`)
+worker=thinkstation1 harness=crates/fnp-python/examples/h2h_strided_vein.rs
+bench_elf_sha256=63f44d26c52f86a34200ff75d99f8b090ac557e7be6cc6f08a97630d7f14f1ba
+invocation_id=thinkstation1-1236739-1788825927
+
+Re-measured on thinkstation1 against numpy in the same process with paired A/A nulls:
+- `sinc strided`: numpy=571062.1 ns fnp=579923.3 ns ratio=1.016x nullNP=1.056 nullFNP=1.015
+- `sinc contiguous`: numpy=581265.7 ns fnp=543342.6 ns ratio=0.935x (1.07x WIN preserved) nullNP=1.017 nullFNP=1.000
+- `append strided`: numpy=25393.4 ns fnp=25726.2 ns ratio=1.013x nullNP=1.118 nullFNP=0.969
+- `append contiguous`: numpy=13841.1 ns fnp=16184.3 ns ratio=1.169x nullNP=0.861 nullFNP=0.991
+Confirms strided sinc and append remain at 1.01x parity with NumPy, avoiding the former fallback overheads.
 
 ## 2026-08-26 - `log1p` WAS LEFT OUT OF THE CATEGORY-RESOLVE BRANCH: 2.978x -> 1.253x at 2^13 and a 1.870x LOSS -> 0.507x WIN at 2^16, plus a per-ufunc NaN SIGN and a dropped -inf event (`deadlock-audit-mx78f`, leaf of `deadlock-audit-7kcz8`)
 
