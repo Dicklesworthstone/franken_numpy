@@ -289,4 +289,3 @@ print(all(ok), len(ok))
     assert_eq!(numpy_oracle(&script)?, "True 5");
     Ok(())
 }
-

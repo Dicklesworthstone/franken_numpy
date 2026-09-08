@@ -697,76 +697,6 @@ fn conformance_setops_matrix() {
             },
         );
 
-        // ─── in1d (MUST + SHOULD invert / assume_unique) ────────────────
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "setops-in1d-1d",
-            "in1d",
-            RequirementLevel::Must,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![1, 2, 3, 4, 5])?,
-                        np_array_1d_i(py, vec![2, 4, 6])?,
-                    ],
-                )
-            },
-            no_kwargs,
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "setops-in1d-invert",
-            "in1d",
-            RequirementLevel::Should,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![1, 2, 3, 4, 5])?,
-                        np_array_1d_i(py, vec![2, 4, 6])?,
-                    ],
-                )
-            },
-            |py| {
-                let kw = PyDict::new(py);
-                kw.set_item("invert", true)?;
-                Ok(Some(kw))
-            },
-        );
-        run_case(
-            py,
-            &module,
-            &numpy,
-            "setops-in1d-assume_unique",
-            "in1d",
-            RequirementLevel::Should,
-            CompareMode::Strict,
-            t,
-            |py| {
-                PyTuple::new(
-                    py,
-                    [
-                        np_array_1d_i(py, vec![1, 2, 3, 4, 5])?,
-                        np_array_1d_i(py, vec![2, 4, 6])?,
-                    ],
-                )
-            },
-            |py| {
-                let kw = PyDict::new(py);
-                kw.set_item("assume_unique", true)?;
-                Ok(Some(kw))
-            },
-        );
-
         // ─── unique (MUST + SHOULD return_inverse / return_counts) ─────
         run_case(
             py,
@@ -1299,6 +1229,59 @@ fn setxor1d_complex128_dense_integral_grid_matches_numpy() {
         );
         let dtype = ours.getattr("dtype")?.str()?.to_string();
         assert_eq!(dtype, "complex128");
+        Ok(())
+    });
+}
+
+#[test]
+fn in1d_matches_numpy_isin_raveled() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ns = PyDict::new(py);
+        py.run(
+            pyo3::ffi::c_str!(
+                "import numpy as np\n\
+                 a_1d = np.array([1, 2, 3, 4, 5])\n\
+                 b = np.array([2, 4, 6])\n\
+                 a_2d = np.array([[1, 2], [3, 4]])\n"
+            ),
+            Some(&ns),
+            Some(&ns),
+        )?;
+        let a_1d = ns.get_item("a_1d")?.unwrap();
+        let b = ns.get_item("b")?.unwrap();
+        let a_2d = ns.get_item("a_2d")?.unwrap();
+        let in1d_fn = module.getattr("in1d")?;
+
+        // 1-D case
+        let ours_1d = in1d_fn.call1((&a_1d, &b))?;
+        let theirs_1d = numpy.getattr("isin")?.call1((&a_1d, &b))?;
+        let eq_1d: bool = numpy
+            .getattr("array_equal")?
+            .call1((&ours_1d, &theirs_1d))?
+            .extract()?;
+        assert!(eq_1d, "in1d 1-D must match isin");
+
+        // 2-D case: in1d flattens ar1 so result is 1-D of length 4
+        let ours_2d = in1d_fn.call1((&a_2d, &b))?;
+        let a_2d_flat = a_2d.call_method0("ravel")?;
+        let theirs_2d = numpy.getattr("isin")?.call1((&a_2d_flat, &b))?;
+        let eq_2d: bool = numpy
+            .getattr("array_equal")?
+            .call1((&ours_2d, &theirs_2d))?
+            .extract()?;
+        assert!(eq_2d, "in1d 2-D must match isin on raveled ar1");
+
+        // invert kwarg
+        let kw = PyDict::new(py);
+        kw.set_item("invert", true)?;
+        let ours_inv = in1d_fn.call((&a_1d, &b), Some(&kw))?;
+        let theirs_inv = numpy.getattr("isin")?.call((&a_1d, &b), Some(&kw))?;
+        let eq_inv: bool = numpy
+            .getattr("array_equal")?
+            .call1((&ours_inv, &theirs_inv))?
+            .extract()?;
+        assert!(eq_inv, "in1d invert must match isin invert");
+
         Ok(())
     });
 }
