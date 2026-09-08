@@ -215,3 +215,78 @@ print(np.float64(ours).view(np.uint64) == np.float64(theirs).view(np.uint64),
     assert_eq!(numpy_oracle(&script)?, "True 50.0");
     Ok(())
 }
+
+/// `fnp.masked_mean(a, mask)` must match `a[mask].mean()` bit-for-bit across
+/// various sizes and densities.
+#[test]
+fn masked_mean_is_byte_identical_across_sizes_and_densities() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(20260908)
+bad = []
+for n in [1, 7, 8, 127, 128, 129, 1000, 4096, 50_000]:
+    for dens in [0.01, 0.25, 0.5, 0.75, 1.0]:
+        a = rng.standard_normal(n) * 1e4
+        m = rng.random(n) < dens
+        if not m.any():
+            continue
+        ours = fnp.masked_mean(a, m)
+        theirs = a[m].mean()
+        if np.float64(ours).view(np.uint64) != np.float64(theirs).view(np.uint64):
+            bad.append((n, dens, float(ours), float(theirs)))
+print("CASES_OK" if not bad else f"MISMATCH {bad}")
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "CASES_OK");
+    Ok(())
+}
+
+/// Empty selections and deferred non-f64/2-D inputs must match NumPy's behaviour.
+#[test]
+fn masked_mean_empty_and_deferred_inputs_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+rng = np.random.default_rng(20260909)
+ok = []
+
+# Empty selection warning and nan result parity
+with warnings.catch_warnings(record=True) as recorded:
+    warnings.simplefilter("always")
+    e_ours = fnp.masked_mean(np.array([1.0, 2.0]), np.array([False, False]))
+    has_warning = len(recorded) > 0 and any("Mean of empty slice" in str(w.message) for w in recorded)
+    is_nan = np.isnan(e_ours)
+ok.append(has_warning and is_nan)
+
+# float32 array
+a32 = rng.standard_normal(2000).astype(np.float32)
+m = rng.random(2000) < 0.4
+ok.append(np.float32(fnp.masked_mean(a32, m)) == a32[m].mean())
+
+# non-contiguous slice
+base = rng.standard_normal(5000)
+a_nc, m_nc = base[::2], (rng.random(5000) < 0.5)[::2]
+ok.append(np.float64(fnp.masked_mean(a_nc, m_nc)).view(np.uint64)
+          == np.float64(a_nc[m_nc].mean()).view(np.uint64))
+
+# 2-D array
+a2 = rng.standard_normal((100, 200))
+m2 = rng.random((100, 200)) < 0.3
+ok.append(np.float64(fnp.masked_mean(a2, m2)).view(np.uint64)
+          == np.float64(a2[m2].mean()).view(np.uint64))
+
+# integer array
+ai = rng.integers(-50, 50, 2000)
+mi = rng.random(2000) < 0.5
+ok.append(fnp.masked_mean(ai, mi) == ai[mi].mean())
+
+print(all(ok), len(ok))
+"#
+        .to_string(),
+    );
+    assert_eq!(numpy_oracle(&script)?, "True 5");
+    Ok(())
+}
+

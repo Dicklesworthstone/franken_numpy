@@ -2,7 +2,7 @@
 //!
 //! Differential parity for fnp_python's set-operation surface:
 //!
-//!   intersect1d, union1d, setdiff1d, setxor1d, isin,
+//!   intersect1d, union1d, setdiff1d, setxor1d, isin, in1d,
 //!   unique, ediff1d
 //!
 //! All are native bodies that delegate to numpy on edge cases (string
@@ -678,6 +678,76 @@ fn conformance_setops_matrix() {
             &numpy,
             "setops-isin-assume_unique",
             "isin",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_i(py, vec![1, 2, 3, 4, 5])?,
+                        np_array_1d_i(py, vec![2, 4, 6])?,
+                    ],
+                )
+            },
+            |py| {
+                let kw = PyDict::new(py);
+                kw.set_item("assume_unique", true)?;
+                Ok(Some(kw))
+            },
+        );
+
+        // ─── in1d (MUST + SHOULD invert / assume_unique) ────────────────
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "setops-in1d-1d",
+            "in1d",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_i(py, vec![1, 2, 3, 4, 5])?,
+                        np_array_1d_i(py, vec![2, 4, 6])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "setops-in1d-invert",
+            "in1d",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_i(py, vec![1, 2, 3, 4, 5])?,
+                        np_array_1d_i(py, vec![2, 4, 6])?,
+                    ],
+                )
+            },
+            |py| {
+                let kw = PyDict::new(py);
+                kw.set_item("invert", true)?;
+                Ok(Some(kw))
+            },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "setops-in1d-assume_unique",
+            "in1d",
             RequirementLevel::Should,
             CompareMode::Strict,
             t,
