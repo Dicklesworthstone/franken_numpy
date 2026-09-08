@@ -9635,9 +9635,10 @@ fn zerocopy_f64_isclose_flat<'py>(
         let b_raw: &[f64] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
         let out_raw: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
-        if n >= ISCLOSE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let threads = rayon::current_num_threads().min(n / ISCLOSE_PARALLEL_MIN);
+        if n >= ISCLOSE_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
-            let chunk = n.div_ceil(rayon::current_num_threads());
+            let chunk = n.div_ceil(threads);
             out_raw
                 .par_chunks_mut(chunk)
                 .zip(a_raw.par_chunks(chunk).zip(b_raw.par_chunks(chunk)))
@@ -9736,9 +9737,10 @@ fn zerocopy_f32_isclose_flat<'py>(
             unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f32>(), n_elems) };
         let out_raw: &mut [u8] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n_elems) };
-        if n_elems >= ISCLOSE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let threads = rayon::current_num_threads().min(n_elems / ISCLOSE_PARALLEL_MIN);
+        if n_elems >= ISCLOSE_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
-            let chunk = n_elems.div_ceil(rayon::current_num_threads());
+            let chunk = n_elems.div_ceil(threads);
             out_raw
                 .par_chunks_mut(chunk)
                 .zip(a_raw.par_chunks(chunk).zip(b_raw.par_chunks(chunk)))
@@ -9845,9 +9847,10 @@ fn try_zerocopy_f64_isclose_array_scalar(
             }
         };
         const ISCLOSE_PARALLEL_MIN: usize = 1 << 21;
-        if n >= ISCLOSE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let threads = rayon::current_num_threads().min(n / ISCLOSE_PARALLEL_MIN);
+        if n >= ISCLOSE_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
-            let chunk = n.div_ceil(rayon::current_num_threads());
+            let chunk = n.div_ceil(threads);
             out.par_chunks_mut(chunk)
                 .zip(data.par_chunks(chunk))
                 .for_each(|(o, d)| kernel(o, d));
