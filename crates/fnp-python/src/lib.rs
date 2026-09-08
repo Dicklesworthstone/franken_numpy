@@ -12820,7 +12820,8 @@ where
         let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
         let out_data: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let threads = rayon::current_num_threads().min(n / (1 << 18));
+        let chunk = n.div_ceil(threads.max(1));
         out_data
             .par_chunks_mut(chunk)
             .zip(lhs.par_chunks(chunk))
@@ -12870,7 +12871,8 @@ fn try_native_int_gcd(
         return Ok(None);
     }
     let n: usize = a_shape.iter().product();
-    if n < INT_GCD_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let threads = rayon::current_num_threads().min(n / INT_GCD_PARALLEL_MIN);
+    if n < INT_GCD_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
@@ -12945,7 +12947,8 @@ where
         let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
         let out_data: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let threads = rayon::current_num_threads().min(n / (1 << 18));
+        let chunk = n.div_ceil(threads.max(1));
         out_data
             .par_chunks_mut(chunk)
             .zip(lhs.par_chunks(chunk))
@@ -13001,7 +13004,8 @@ fn try_native_int_lcm(
         return Ok(None);
     }
     let n: usize = a_shape.iter().product();
-    if n < INT_LCM_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let threads = rayon::current_num_threads().min(n / INT_LCM_PARALLEL_MIN);
+    if n < INT_LCM_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
@@ -13077,7 +13081,8 @@ where
         let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
         let out_data: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let threads = rayon::current_num_threads().min(n / (1 << 18));
+        let chunk = n.div_ceil(threads.max(1));
         out_data
             .par_chunks_mut(chunk)
             .zip(lhs.par_chunks(chunk))
@@ -13145,7 +13150,8 @@ fn try_native_int_power(
         return Ok(None);
     }
     let n: usize = a_shape.iter().product();
-    if n < INT_POW_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    let threads = rayon::current_num_threads().min(n / INT_POW_PARALLEL_MIN);
+    if n < INT_POW_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
@@ -13252,7 +13258,8 @@ where
         let rhs: &[T] = unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<T>(), n) };
         let out_data: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let threads = rayon::current_num_threads().min(n / (1 << 18));
+        let chunk = n.div_ceil(threads.max(1));
         out_data
             .par_chunks_mut(chunk)
             .zip(lhs.par_chunks(chunk))
