@@ -9931,9 +9931,10 @@ fn try_zerocopy_f32_isclose_array_scalar(
             }
         };
         const ISCLOSE_PARALLEL_MIN: usize = 1 << 21;
-        if n >= ISCLOSE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let threads = rayon::current_num_threads().min(n / ISCLOSE_PARALLEL_MIN);
+        if n >= ISCLOSE_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
-            let chunk = n.div_ceil(rayon::current_num_threads());
+            let chunk = n.div_ceil(threads);
             out.par_chunks_mut(chunk)
                 .zip(data.par_chunks(chunk))
                 .for_each(|(o, d)| kernel(o, d));
@@ -18334,9 +18335,10 @@ fn try_zerocopy_f64_putmask(
     let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
     let vals: &[f64] = unsafe { std::slice::from_raw_parts(val_in.as_ptr().cast::<f64>(), v) };
     const PUTMASK_PARALLEL_MIN: usize = 1 << 19;
-    if n >= PUTMASK_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+    let threads = rayon::current_num_threads().min(n / PUTMASK_PARALLEL_MIN);
+    if n >= PUTMASK_PARALLEL_MIN && threads >= 2 {
         use rayon::prelude::*;
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let chunk = n.div_ceil(threads);
         a_slice
             .par_chunks_mut(chunk)
             .enumerate()
@@ -18402,9 +18404,10 @@ fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
     let vals: &[T] = unsafe { std::slice::from_raw_parts(val_in.as_ptr().cast::<T>(), v) };
     const PUTMASK_PARALLEL_MIN: usize = 1 << 19;
-    if n >= PUTMASK_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+    let threads = rayon::current_num_threads().min(n / PUTMASK_PARALLEL_MIN);
+    if n >= PUTMASK_PARALLEL_MIN && threads >= 2 {
         use rayon::prelude::*;
-        let chunk = n.div_ceil(rayon::current_num_threads());
+        let chunk = n.div_ceil(threads);
         a_slice
             .par_chunks_mut(chunk)
             .enumerate()
