@@ -33385,15 +33385,8 @@ fn zerocopy_multiply_add_f16(
     b: &Bound<'_, PyAny>,
     c: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let ndarray = cached_ndarray_type(numpy.py())?.clone();
     for operand in [a, b, c] {
-        if !operand.is_exact_instance(&ndarray) {
-            return Ok(None);
-        }
-        let dtype = operand.getattr(intern!(py, "dtype"))?;
-        if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-            || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-        {
+        if !is_exact_numpy_ndarray(py, operand)? || !dtype_is_f16(operand)? {
             return Ok(None);
         }
     }
@@ -33882,21 +33875,14 @@ where
 /// ALU, so its `out=` spelling still pays two widen/narrow round trips.
 fn zerocopy_multiply_add_out_f16(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     c: &Bound<'_, PyAny>,
     output: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let ndarray = cached_ndarray_type(numpy.py())?.clone();
     for operand in [a, b, c, output] {
-        if !operand.is_exact_instance(&ndarray) {
-            return Ok(None);
-        }
-        let dtype = operand.getattr(intern!(py, "dtype"))?;
-        if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-            || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-        {
+        if !is_exact_numpy_ndarray(py, operand)? || !dtype_is_f16(operand)? {
             return Ok(None);
         }
     }
@@ -33915,12 +33901,12 @@ fn zerocopy_multiply_add_out_f16(
     if n == 0 {
         return Ok(None);
     }
-    let u16_dtype = numpy.getattr(intern!(py, "uint16"))?;
+    let u16_dtype = cached_uint16_type(py)?;
     let (Ok(raw_a), Ok(raw_b), Ok(raw_c), Ok(raw_out)) = (
-        a.call_method1(intern!(py, "view"), (&u16_dtype,)),
-        b.call_method1(intern!(py, "view"), (&u16_dtype,)),
-        c.call_method1(intern!(py, "view"), (&u16_dtype,)),
-        output.call_method1(intern!(py, "view"), (&u16_dtype,)),
+        a.call_method1(intern!(py, "view"), (u16_dtype,)),
+        b.call_method1(intern!(py, "view"), (u16_dtype,)),
+        c.call_method1(intern!(py, "view"), (u16_dtype,)),
+        output.call_method1(intern!(py, "view"), (u16_dtype,)),
     ) else {
         return Ok(None);
     };
