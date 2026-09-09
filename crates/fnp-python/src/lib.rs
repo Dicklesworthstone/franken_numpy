@@ -14405,8 +14405,7 @@ fn try_zerocopy_f64_i32_ldexp(
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
         return Ok(None);
     }
     if !ndarray_has_native_f64_dtype(x1)? || !ndarray_has_native_i32_dtype(x2)? {
@@ -14426,9 +14425,12 @@ fn try_zerocopy_f64_i32_ldexp(
 
     let shape = x1_buffer.shape().to_vec();
     let n = mantissas.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = if shape.len() == 1 {
+        numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (shape_tuple, cached_float64_type(py)?))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -14461,14 +14463,7 @@ fn try_zerocopy_f64_i32_ldexp(
         }
     }
 
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 // float32 sibling of try_zerocopy_f64_i32_ldexp. numpy runs f32 ldexp single-threaded (scalbnf,
@@ -14484,8 +14479,7 @@ fn try_zerocopy_f32_i32_ldexp(
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
         return Ok(None);
     }
     if !numpy_dtype_is_f32(x1) || !ndarray_has_native_i32_dtype(x2)? {
@@ -14503,9 +14497,12 @@ fn try_zerocopy_f32_i32_ldexp(
     };
     let shape = x1_buffer.shape().to_vec();
     let n = m_s.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float32")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = if shape.len() == 1 {
+        numpy.call_method1(intern!(py, "empty"), (n, cached_float32_type(py)?))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (shape_tuple, cached_float32_type(py)?))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
@@ -14543,14 +14540,7 @@ fn try_zerocopy_f32_i32_ldexp(
                 }
             });
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 // f16 sibling of try_zerocopy_f32_i32_ldexp. numpy has no f16 ALU, so np.ldexp(float16, int32) widens
@@ -88655,6 +88645,33 @@ fn cached_float64_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     Ok(FLOAT64_TYPE
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
             Ok(cached_numpy(py)?.getattr(intern!(py, "float64"))?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_float32_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static FLOAT32_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(FLOAT32_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "float32"))?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_float16_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static FLOAT16_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(FLOAT16_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "float16"))?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_uint16_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static UINT16_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(UINT16_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "uint16"))?.unbind())
         })?
         .bind(py))
 }
