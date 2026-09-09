@@ -97898,10 +97898,9 @@ fn try_native_f16_einsum_full_contraction(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     let x1 = args.get_item(1)?;
     let x2 = args.get_item(2)?;
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, &x1)? || !is_exact_numpy_ndarray(py, &x2)? {
         return Ok(None);
     }
     let is_f16 = dtype_is_f16;
@@ -97925,10 +97924,10 @@ fn try_native_f16_einsum_full_contraction(
     if k < F16_DOT_MIN_K || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -97975,11 +97974,10 @@ fn try_native_f16_einsum_full_contraction(
         out = f16::from_f32(out.to_f32() + tree);
     }
     // Materialize the exact bits and hand back numpy's own float16 scalar.
-    let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
-    let holder = numpy.call_method(intern!(py, "empty"), (1,), Some(&kwargs_out))?;
+    let f16t = cached_float16_type(py)?;
+    let holder = numpy.call_method1(intern!(py, "empty"), (1, f16t))?;
     {
-        let holder_view = holder.call_method1(intern!(py, "view"), (&u16t,))?;
+        let holder_view = holder.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(holder_buf) = PyBuffer::<u16>::get(&holder_view) else {
             return Ok(None);
         };
@@ -98037,10 +98035,9 @@ fn try_native_f16_einsum_matmul_batched(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     let x1 = args.get_item(1)?;
     let x2 = args.get_item(2)?;
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, &x1)? || !is_exact_numpy_ndarray(py, &x2)? {
         return Ok(None);
     }
     let is_f16 = dtype_is_f16;
@@ -98070,10 +98067,10 @@ fn try_native_f16_einsum_matmul_batched(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -98086,11 +98083,10 @@ fn try_native_f16_einsum_matmul_batched(
     if a_in.len() != bt * m * k || b_in.len() != bt * k * n {
         return Ok(None);
     }
-    let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
-    let out = numpy.call_method(intern!(py, "empty"), ((bt, m, n),), Some(&kwargs_out))?;
+    let f16t = cached_float16_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), ((bt, m, n), f16t))?;
     if bt * m * n > 0 {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
