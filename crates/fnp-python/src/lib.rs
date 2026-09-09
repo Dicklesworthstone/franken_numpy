@@ -98231,13 +98231,12 @@ fn try_native_f16_einsum_transposed_batched(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     let mut x1 = args.get_item(1)?;
     let mut x2 = args.get_item(2)?;
     if swapped {
         std::mem::swap(&mut x1, &mut x2);
     }
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, &x1)? || !is_exact_numpy_ndarray(py, &x2)? {
         return Ok(None);
     }
     let is_f16 = dtype_is_f16;
@@ -98272,10 +98271,10 @@ fn try_native_f16_einsum_transposed_batched(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -98288,11 +98287,10 @@ fn try_native_f16_einsum_transposed_batched(
     if a_in.len() != bt * m * k || b_in.len() != bt * n * k {
         return Ok(None);
     }
-    let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
-    let out = numpy.call_method(intern!(py, "empty"), ((bt, m, n),), Some(&kwargs_out))?;
+    let f16t = cached_float16_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), ((bt, m, n), f16t))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
@@ -98424,13 +98422,12 @@ fn try_native_f16_einsum_gram_batched(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     let mut x1 = args.get_item(1)?;
     let mut x2 = args.get_item(2)?;
     if swapped {
         std::mem::swap(&mut x1, &mut x2);
     }
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, &x1)? || !is_exact_numpy_ndarray(py, &x2)? {
         return Ok(None);
     }
     let is_f16 = dtype_is_f16;
@@ -98460,10 +98457,10 @@ fn try_native_f16_einsum_gram_batched(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -98476,11 +98473,10 @@ fn try_native_f16_einsum_gram_batched(
     if a_in.len() != bt * k * m || b_in.len() != bt * k * n {
         return Ok(None);
     }
-    let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
-    let out = numpy.call_method(intern!(py, "empty"), ((bt, m, n),), Some(&kwargs_out))?;
+    let f16t = cached_float16_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), ((bt, m, n), f16t))?;
     if bt * m * n > 0 {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
@@ -98577,10 +98573,9 @@ fn try_native_f16_einsum_elementwise(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     let x1 = args.get_item(1)?;
     let x2 = args.get_item(2)?;
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, &x1)? || !is_exact_numpy_ndarray(py, &x2)? {
         return Ok(None);
     }
     let is_f16 = dtype_is_f16;
@@ -98604,10 +98599,10 @@ fn try_native_f16_einsum_elementwise(
     if k < F16_ELEMENTWISE_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -98620,12 +98615,11 @@ fn try_native_f16_einsum_elementwise(
     if a_in.len() != k || b_in.len() != k {
         return Ok(None);
     }
-    let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
+    let f16t = cached_float16_type(py)?;
     let shape_tuple = PyTuple::new(py, a_shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (&shape_tuple,), Some(&kwargs_out))?;
+    let out = numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f16t))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
@@ -98701,10 +98695,9 @@ fn try_native_f64f32_einsum_elementwise(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
     let x1 = args.get_item(1)?;
     let x2 = args.get_item(2)?;
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, &x1)? || !is_exact_numpy_ndarray(py, &x2)? {
         return Ok(None);
     }
     let dtype_of = |v: &Bound<'_, PyAny>| -> PyResult<(String, usize)> {
@@ -98736,13 +98729,13 @@ fn try_native_f64f32_einsum_elementwise(
     if k < ELEMENTWISE_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item(
-        intern!(py, "dtype"),
-        if s1 == 8 { "float64" } else { "float32" },
-    )?;
+    let out_dtype = if s1 == 8 {
+        cached_float64_type(py)?
+    } else {
+        cached_float32_type(py)?
+    };
     let shape_tuple = PyTuple::new(py, a_shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (&shape_tuple,), Some(&kwargs_out))?;
+    let out = numpy.call_method1(intern!(py, "empty"), (&shape_tuple, out_dtype))?;
     use rayon::prelude::*;
     if s1 == 8 {
         let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<f64>::get(&x1), PyBuffer::<f64>::get(&x2)) else {
