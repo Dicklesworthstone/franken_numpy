@@ -95769,9 +95769,7 @@ fn int_matmul_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     if a_in.len() != m * k || b_in.len() != k * n {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), ((m, n), dtype_name))?;
     if m * n > 0 && k > 0 {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -95863,8 +95861,7 @@ fn try_native_int_matmul(
 ) -> PyResult<Option<Py<PyAny>>> {
     const INT_MATMUL_MIN_WORK: usize = 1 << 18; // ~64^3; below this numpy's loop is cheap enough
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
         return Ok(None);
     }
     let a_shape: Vec<usize> = x1.getattr(intern!(py, "shape"))?.extract()?;
@@ -95959,8 +95956,7 @@ fn try_native_int_vecmat(
 ) -> PyResult<Option<Py<PyAny>>> {
     const INT_MATMUL_MIN_WORK: usize = 1 << 18;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
         return Ok(None);
     }
     let v_shape: Vec<usize> = x1.getattr(intern!(py, "shape"))?.extract()?;
@@ -96050,9 +96046,7 @@ fn int_vecmat_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     if v_in.len() != k || a_in.len() != k * n {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let out = numpy.call_method(intern!(py, "empty"), ((n,),), Some(&kwargs))?;
+    let out = numpy.call_method1(intern!(py, "empty"), ((n,), dtype_name))?;
     let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
         return Ok(None);
     };
@@ -96103,10 +96097,10 @@ fn bool_matmul_bitpacked(
     k: usize,
     n: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let u8t = numpy.getattr(intern!(py, "uint8"))?;
+    let u8t = cached_uint8_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u8t,)),
-        x2.call_method1(intern!(py, "view"), (&u8t,)),
+        x1.call_method1(intern!(py, "view"), (u8t,)),
+        x2.call_method1(intern!(py, "view"), (u8t,)),
     ) else {
         return Ok(None);
     };
@@ -96119,11 +96113,10 @@ fn bool_matmul_bitpacked(
     if a_in.len() != m * k || b_in.len() != k * n {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "bool")?;
-    let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs))?;
+    let bool_t = cached_bool_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), ((m, n), bool_t))?;
     if m * n > 0 && k > 0 {
-        let out_view = out.call_method1(intern!(py, "view"), (&u8t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u8t,))?;
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
@@ -96190,7 +96183,7 @@ fn bool_matmul_bitpacked(
     } else if m * n > 0 {
         // k == 0: an empty OR is False everywhere (unreachable under the work
         // gate, kept for safety like the sibling kernels).
-        let out_view = out.call_method1(intern!(py, "view"), (&u8t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u8t,))?;
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
@@ -96218,8 +96211,7 @@ fn try_native_f16_matmul(
 ) -> PyResult<Option<Py<PyAny>>> {
     const F16_MATMUL_MIN_WORK: usize = 1 << 18; // ~64^3; numpy's f16 loop is cheap below this
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
         return Ok(None);
     }
     let a_shape: Vec<usize> = x1.getattr(intern!(py, "shape"))?.extract()?;
@@ -96392,9 +96384,7 @@ fn batched_int_matmul_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     if a_in.len() != a_len || b_in.len() != batch * k * n {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (out_shape.to_vec(),), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (out_shape.to_vec(), dtype_name))?;
     if batch * m * n > 0 && k > 0 {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -96492,11 +96482,10 @@ fn try_native_int_batched_matmul(
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const INT_MATMUL_MIN_WORK: usize = 1 << 18;
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
     let a_shape: Vec<usize> = x1.getattr(intern!(py, "shape"))?.extract()?;
     let b_shape: Vec<usize> = x2.getattr(intern!(py, "shape"))?.extract()?;
     // Both >=3-D, identical batch-dim prefix, conforming inner dims.
@@ -96607,10 +96596,10 @@ fn bool_batched_matmul_bitpacked(
     // share ONE (m, k) a — packed once — across every slice (mirror broadcast).
     a_batch_stride: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let u8t = numpy.getattr(intern!(py, "uint8"))?;
+    let u8t = cached_uint8_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u8t,)),
-        x2.call_method1(intern!(py, "view"), (&u8t,)),
+        x1.call_method1(intern!(py, "view"), (u8t,)),
+        x2.call_method1(intern!(py, "view"), (u8t,)),
     ) else {
         return Ok(None);
     };
@@ -96628,11 +96617,10 @@ fn bool_batched_matmul_bitpacked(
     if a_in.len() != a_len || b_in.len() != batch * k * n {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "bool")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (out_shape.to_vec(),), Some(&kwargs))?;
+    let bool_t = cached_bool_type(py)?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (out_shape.to_vec(), bool_t))?;
     if batch * m * n > 0 && k > 0 {
-        let out_view = flat.call_method1(intern!(py, "view"), (&u8t,))?;
+        let out_view = flat.call_method1(intern!(py, "view"), (u8t,))?;
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
@@ -96715,7 +96703,7 @@ fn bool_batched_matmul_bitpacked(
     } else if batch * m * n > 0 {
         // k == 0: an empty OR is False everywhere (unreachable under the work
         // gate, kept for safety like the sibling kernels).
-        let out_view = flat.call_method1(intern!(py, "view"), (&u8t,))?;
+        let out_view = flat.call_method1(intern!(py, "view"), (u8t,))?;
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
