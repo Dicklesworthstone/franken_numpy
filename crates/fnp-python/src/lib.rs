@@ -84364,9 +84364,13 @@ fn cross(
     axisc: i64,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let cross_fn = numpy.getattr(intern!(py, "cross"))?;
+    let b_a = a.bind(py);
+    let b_b = b.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
+        let cross_fn = cached_numpy_cross(py)?;
+        if axis.is_none() && axisa == -1 && axisb == -1 && axisc == -1 {
+            return Ok(cross_fn.call1((b_a, b_b))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "axisa"), axisa)?;
         kwargs.set_item(intern!(py, "axisb"), axisb)?;
@@ -84375,7 +84379,7 @@ fn cross(
             kwargs.set_item(intern!(py, "axis"), value.bind(py))?;
         }
         Ok(cross_fn
-            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+            .call((b_a, b_b), Some(&kwargs))?
             .unbind())
     };
 
@@ -84393,7 +84397,7 @@ fn cross(
                 .unwrap_or(false),
             None => axis_is_first_2d(axisa) && axis_is_first_2d(axisb) && axis_is_first_2d(axisc),
         };
-        if is_axis0_case && let Some(out) = try_zerocopy_cross_axis0_3n(py, a.bind(py), b.bind(py))?
+        if is_axis0_case && let Some(out) = try_zerocopy_cross_axis0_3n(py, b_a, b_b)?
         {
             return Ok(out);
         }
@@ -84405,31 +84409,31 @@ fn cross(
 
     // Zero-copy fast path for the common (N, 3) f64 batch: skips both extract copies
     // and the build round-trip the native path pays. Other dtypes/shapes fall through.
-    if let Some(out) = try_zerocopy_f64_cross_n3(py, a.bind(py), b.bind(py))? {
+    if let Some(out) = try_zerocopy_f64_cross_n3(py, b_a, b_b)? {
         return Ok(out);
     }
     // f32 (N,3) cross: read f32 directly (the f64 path is f64-only; f32 otherwise ~6x cold extract).
-    if let Some(out) = try_zerocopy_f32_cross_n3(py, a.bind(py), b.bind(py))? {
+    if let Some(out) = try_zerocopy_f32_cross_n3(py, b_a, b_b)? {
         return Ok(out);
     }
     // INTEGER (N,3) cross, all widths: wrapping mul/sub, bit-identical
     // (numpy's int path probed 527.8ms at (8M,3) i64).
-    if let Some(out) = try_zerocopy_int_cross_n3(py, a.bind(py), b.bind(py))? {
+    if let Some(out) = try_zerocopy_int_cross_n3(py, b_a, b_b)? {
         return Ok(out);
     }
 
-    let a = match extract_precise_numeric_array(py, a.bind(py), "cross(a)") {
+    let arr_a = match extract_precise_numeric_array(py, b_a, "cross(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let b = match extract_precise_numeric_array(py, b.bind(py), "cross(b)") {
+    let arr_b = match extract_precise_numeric_array(py, b_b, "cross(b)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    if a.has_integer_sidecar()
-        || b.has_integer_sidecar()
-        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
-        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
+    if arr_a.has_integer_sidecar()
+        || arr_b.has_integer_sidecar()
+        || matches!(arr_a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(arr_b.dtype(), DType::Complex64 | DType::Complex128)
     {
         return fallback();
     }
@@ -84440,11 +84444,11 @@ fn cross(
     // moment conformance_cross could run under rch again
     // (`deadlock-audit-propagate-extension-resolver-to-135-suites`). Delegating tracks whichever
     // numpy is installed instead of pinning us to the one this kernel was written against.
-    if a.shape().last() == Some(&2) || b.shape().last() == Some(&2) {
+    if arr_a.shape().last() == Some(&2) || arr_b.shape().last() == Some(&2) {
         return fallback();
     }
 
-    let result = match a.cross(&b) {
+    let result = match arr_a.cross(&arr_b) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
@@ -88700,6 +88704,14 @@ cached_numpy_attr!(cached_numpy_outer, "outer");
 cached_numpy_attr!(cached_numpy_kron, "kron");
 cached_numpy_attr!(cached_numpy_tensordot, "tensordot");
 cached_numpy_attr!(cached_numpy_searchsorted, "searchsorted");
+cached_numpy_attr!(cached_numpy_asarray, "asarray");
+cached_numpy_attr!(cached_numpy_cross, "cross");
+cached_numpy_attr!(cached_numpy_trace, "trace");
+cached_numpy_attr!(cached_numpy_diag, "diag");
+cached_numpy_attr!(cached_numpy_diagonal, "diagonal");
+cached_numpy_attr!(cached_numpy_diagflat, "diagflat");
+cached_numpy_attr!(cached_numpy_fill_diagonal, "fill_diagonal");
+cached_numpy_attr!(cached_numpy_ix_, "ix_");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
@@ -93973,27 +93985,26 @@ fn trace(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let a_for_fallback = a.clone_ref(py);
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-
+    let a_bound = a.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        // Import numpy lazily here so the native fast paths below pay neither the
-        // module-import lookup nor the `trace` attribute fetch on the hot path.
-        let numpy = cached_numpy(py)?;
-        let trace_fn = numpy.getattr(intern!(py, "trace"))?;
+        let trace_fn = cached_numpy_trace(py)?;
+        let has_dtype = dtype.as_ref().is_some_and(|v| !v.bind(py).is_none());
+        let has_out = out.as_ref().is_some_and(|v| !v.bind(py).is_none());
+        if !has_dtype && !has_out && offset == 0 && axis1 == 0 && axis2 == 1 {
+            return Ok(trace_fn.call1((a_bound,))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "offset"), offset)?;
         kwargs.set_item(intern!(py, "axis1"), axis1)?;
         kwargs.set_item(intern!(py, "axis2"), axis2)?;
-        if let Some(dt) = dtype_for_fallback.as_ref() {
+        if let Some(dt) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(trace_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a_bound,), Some(&kwargs))?
             .unbind())
     };
 
@@ -94009,7 +94020,7 @@ fn trace(
     // are preserved. Our native trace_axis preserves the input dtype, so it only
     // matches NumPy for int64/uint64/float inputs; defer bool and narrow int/uint
     // (which NumPy widens) to numpy.trace.
-    if numpy_dtype_is_subplatform_integer(py, a.bind(py)) {
+    if numpy_dtype_is_subplatform_integer(py, a_bound) {
         return fallback();
     }
 
@@ -94019,7 +94030,6 @@ fn trace(
     // import, no `diagonal` view object, no per-element extract across the bridge.
     // Bit-identical to the diagonal-view path below: identical i-ascending order and
     // the same left-to-right f64 fold from 0.0 (matching UFuncArray::scalar(_,F64)).
-    let a_bound = a.bind(py);
     {
         let n1 = if axis1 < 0 { axis1 + 2 } else { axis1 };
         let n2 = if axis2 < 0 { axis2 + 2 } else { axis2 };
@@ -94063,11 +94073,11 @@ fn trace(
     // f64 fold and the scalar dtype match exactly. Restricted to the canonical
     // (axis1, axis2) == (0, 1) form (trace_axis is transpose-invariant for 2-D, so
     // swapped/other axes keep the validated full path).
-    if let Ok(shape) = a_bound
-        .getattr(intern!(py, "shape"))
-        .and_then(|s| s.extract::<Vec<usize>>())
-        && shape.len() == 2
-    {
+    let ndim = a_bound
+        .getattr(intern!(py, "ndim"))
+        .and_then(|n| n.extract::<usize>())
+        .ok();
+    if ndim == Some(2) {
         let n1 = if axis1 < 0 { axis1 + 2 } else { axis1 };
         let n2 = if axis2 < 0 { axis2 + 2 } else { axis2 };
         if n1 == 0
@@ -94086,7 +94096,7 @@ fn trace(
     }
 
     // Extract input array
-    let array = match extract_precise_numeric_array(py, a.bind(py), "trace(a)") {
+    let array = match extract_precise_numeric_array(py, a_bound, "trace(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
