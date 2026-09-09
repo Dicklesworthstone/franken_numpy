@@ -1442,6 +1442,42 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
+fn searchsorted_bool_array_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([False, False, True, True], dtype=bool)
+v = np.array([False, True, True, False, False], dtype=bool)
+all_ok = True
+for side in ('left', 'right'):
+    res = fnp.searchsorted(a, v, side=side)
+    exp = np.searchsorted(a, v, side=side)
+    if not (np.array_equal(res, exp) and res.dtype == exp.dtype and res.shape == exp.shape):
+        all_ok = False
+v_nd = v.reshape(1, 5)
+for side in ('left', 'right'):
+    res = fnp.searchsorted(a, v_nd, side=side)
+    exp = np.searchsorted(a, v_nd, side=side)
+    if not (np.array_equal(res, exp) and res.dtype == exp.dtype and res.shape == exp.shape):
+        all_ok = False
+for side in ('left', 'right'):
+    res = fnp.searchsorted(a, True, side=side)
+    exp = np.searchsorted(a, True, side=side)
+    if res != exp or type(res) is not type(exp):
+        all_ok = False
+print(all_ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "searchsorted bool array should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_large_f64_array_matches_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"

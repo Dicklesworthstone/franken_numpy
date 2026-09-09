@@ -7436,9 +7436,7 @@ fn numpy_array_from_slice<'py, T: pyo3::buffer::Element + Copy>(
     values: &[T],
     dtype_name: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let array = numpy.call_method(intern!(py, "empty"), (values.len(),), Some(&kwargs))?;
+    let array = numpy.call_method1(intern!(py, "empty"), (values.len(), dtype_name))?;
     if !values.is_empty() {
         let buffer = PyBuffer::<T>::get(&array)?;
         buffer.copy_from_slice(py, values)?;
@@ -9240,15 +9238,8 @@ fn try_zerocopy_f64_unary(
         return Ok(None);
     };
     // No reshape: `zerocopy_f64_unary_flat` allocates at the final shape, so the buffer
-    // arrives with the right rank at every rank (`deadlock-audit-ei9jz`). The name in
-    // this comment used to be `zerocopy_f32_binary_flat`, which is in neither path -
-    // and the f64 helper had not in fact been changed, which is how the flattening
-    // regression got in.
-    let output = flat.unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    // arrives with the right rank at every rank (`deadlock-audit-ei9jz`).
+    Ok(Some(finish_preshaped_output(flat, &shape)?))
 }
 
 // float32 counterpart of try_zerocopy_f64_unary, for single-op handlers (sign,
@@ -9262,14 +9253,7 @@ fn try_zerocopy_f32_unary(
     let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)? else {
         return Ok(None);
     };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    Ok(Some(finish_preshaped_output(flat, &shape)?))
 }
 
 // Bool-output counterpart of zerocopy_f64_unary_flat for the IEEE predicates
@@ -9336,11 +9320,11 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
     // shape, so an n-D result then needs no reshape either. 1-D stays an int argument
     // (`np.empty(n, u8)` 166.7 ns vs `np.empty((n,), u8)` 202.9 ns) and 0-d allocates
     // one element, because a 0-d buffer yields NO slice to write through.
-    let bytes = if shape.len() >= 2 {
+    let bytes = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+    } else {
         let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
         numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
-    } else {
-        numpy.call_method1(intern!(py, "empty"), (n, cached_uint8_type(py)?))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -9414,11 +9398,11 @@ fn zerocopy_f64_isnan_flat<'py>(
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let bytes = if shape.len() >= 2 {
+    let bytes = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+    } else {
         let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
         numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
-    } else {
-        numpy.call_method1(intern!(py, "empty"), (n, cached_uint8_type(py)?))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -9459,14 +9443,7 @@ fn try_zerocopy_f64_isnan(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
     let Some((flat, shape)) = zerocopy_f64_isnan_flat(py, numpy, x)? else {
         return Ok(None);
     };
-    if !shape.is_empty() {
-        return Ok(Some(flat.unbind()));
-    }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output.bind(py).get_item(())?.unbind()))
+    Ok(Some(finish_preshaped_output(flat, &shape)?))
 }
 
 // f64->f64 counterpart of zerocopy_f64_predicate_flat for elementwise ops not covered by
@@ -9499,9 +9476,13 @@ fn zerocopy_f64_unary_flat_with<'py, F: Fn(f64) -> f64>(
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let float64_type = cached_float64_type(py)?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -9529,20 +9510,7 @@ fn try_zerocopy_f64_predicate<F: Fn(f64) -> bool>(
     let Some((flat, shape)) = zerocopy_f64_predicate_flat(py, numpy, x, pred)? else {
         return Ok(None);
     };
-    // The output is allocated in its own shape, so ONLY the 0-d case still needs the
-    // reshape - it is the one that has to come back as a numpy SCALAR. The reshape was
-    // 116.9 ns of pure ceremony on every other shape (`timeit`, installed interpreter).
-    if !shape.is_empty() {
-        return Ok(Some(flat.unbind()));
-    }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    Ok(Some(finish_preshaped_output(flat, &shape)?))
 }
 
 // float32 sibling of zerocopy_f64_predicate_flat: a C-contiguous float32 ndarray
@@ -9577,11 +9545,11 @@ fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
     let n = input.len();
     // Positional dtype, held type objects and shape-preserving allocation, same as the
     // f64 sibling above.
-    let bytes = if shape.len() >= 2 {
+    let bytes = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+    } else {
         let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
         numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
-    } else {
-        numpy.call_method1(intern!(py, "empty"), (n, cached_uint8_type(py)?))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -9609,17 +9577,7 @@ fn try_zerocopy_f32_predicate<F: Fn(f32) -> bool>(
     let Some((flat, shape)) = zerocopy_f32_predicate_flat(py, numpy, x, pred)? else {
         return Ok(None);
     };
-    if !shape.is_empty() {
-        return Ok(Some(flat.unbind()));
-    }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    Ok(Some(finish_preshaped_output(flat, &shape)?))
 }
 
 // Two-input bool counterpart (for isclose) of zerocopy_f64_predicate_flat. When
@@ -9671,9 +9629,12 @@ fn zerocopy_f64_isclose_flat<'py>(
     }
     let shape: Vec<usize> = a_buffer.shape().to_vec();
     let n = a_in.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let bytes = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
             return Ok(None);
@@ -9719,7 +9680,7 @@ fn zerocopy_f64_isclose_flat<'py>(
             }
         }
     }
-    let flat = bytes.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
+    let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
     Ok(Some((flat, shape)))
 }
 
@@ -9771,9 +9732,12 @@ fn zerocopy_f32_isclose_flat<'py>(
     }
     let shape: Vec<usize> = a_buffer.shape().to_vec();
     let n = a_in.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let bytes = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
             return Ok(None);
@@ -9821,7 +9785,7 @@ fn zerocopy_f32_isclose_flat<'py>(
             }
         }
     }
-    let flat = bytes.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
+    let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
     Ok(Some((flat, shape)))
 }
 
@@ -9838,14 +9802,7 @@ fn try_zerocopy_f32_isclose(
     else {
         return Ok(None);
     };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    Ok(Some(finish_preshaped_output(flat, &shape)?))
 }
 
 // Zero-copy isclose(f64-array, FINITE scalar): np.isclose(a,b) = |a-b| <= atol + rtol*|b|. For
@@ -9892,9 +9849,12 @@ fn try_zerocopy_f64_isclose_array_scalar(
     let n = cells.len();
     let shape: Vec<usize> = buf.shape().to_vec();
     let thresh = atol + rtol * bv.abs();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let bytes = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+    };
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
             return Ok(None);
@@ -9924,14 +9884,8 @@ fn try_zerocopy_f64_isclose_array_scalar(
             kernel(out, data);
         }
     }
-    let as_bool =
-        bytes.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        as_bool
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    let as_bool = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
+    Ok(Some(finish_preshaped_output(as_bool, &shape)?))
 }
 
 // f32 counterpart of try_zerocopy_f64_isclose_array_scalar. isclose(f32-array, finite scalar)
@@ -9976,9 +9930,12 @@ fn try_zerocopy_f32_isclose_array_scalar(
     let n = cells.len();
     let shape: Vec<usize> = buf.shape().to_vec();
     let thresh = atol + rtol * bv.abs();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let bytes = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let bytes = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+    };
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
             return Ok(None);
@@ -10008,14 +9965,8 @@ fn try_zerocopy_f32_isclose_array_scalar(
             kernel(out, data);
         }
     }
-    let as_bool =
-        bytes.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        as_bool
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    let as_bool = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
+    Ok(Some(finish_preshaped_output(as_bool, &shape)?))
 }
 
 // Wrap zerocopy_f64_isclose_flat with the shared reshape / 0-d scalar handling.
@@ -10032,14 +9983,7 @@ fn try_zerocopy_f64_isclose(
     else {
         return Ok(None);
     };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    Ok(Some(finish_preshaped_output(flat, &shape)?))
 }
 
 // True when `a / b` would raise an IEEE floating-point exception, given the
@@ -18075,9 +18019,7 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         }
         resolved.push(k as usize);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), out_dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (total_out,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (total_out, out_dtype_name))?;
     if total_out > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -18209,13 +18151,13 @@ fn try_zerocopy_take_axis(
     let la = s_arr[ax];
     let outer: usize = s_arr[..ax].iter().product();
     let inner: usize = s_arr[ax + 1..].iter().product();
-    let s_idx: Vec<usize> = indices.getattr(intern!(py, "shape"))?.extract()?;
     let Ok(idx_buf) = PyBuffer::<i64>::get(indices) else {
         return Ok(None);
     };
     let Some(idx_in) = idx_buf.as_slice(py) else {
         return Ok(None);
     };
+    let s_idx = idx_buf.shape();
     let mover_name = match itemsize {
         1 => "uint8",
         2 => "uint16",
@@ -18223,7 +18165,6 @@ fn try_zerocopy_take_axis(
         8 => "uint64",
         _ => return Ok(None),
     };
-    let orig_name = a_dtype.getattr(intern!(py, "name"))?.extract::<String>()?;
     let arr_u = a.call_method1(intern!(py, "view"), (numpy.getattr(mover_name)?,))?;
     let flat = match itemsize {
         1 => take_axis_typed::<u8>(py, numpy, &arr_u, idx_in, "uint8", outer, la, inner)?,
@@ -18235,17 +18176,22 @@ fn try_zerocopy_take_axis(
         return Ok(None);
     };
     let _ = kind;
-    let restored = flat.call_method1(intern!(py, "view"), (numpy.getattr(orig_name.as_str())?,))?;
+    let restored = flat.call_method1(intern!(py, "view"), (&a_dtype,))?;
     // out shape = a.shape[:ax] + indices.shape + a.shape[ax+1:]
     let mut out_shape: Vec<usize> = s_arr[..ax].to_vec();
-    out_shape.extend_from_slice(&s_idx);
+    out_shape.extend_from_slice(s_idx);
     out_shape.extend_from_slice(&s_arr[ax + 1..]);
+    if out_shape.len() == 1 {
+        return Ok(Some(restored.unbind()));
+    }
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    Ok(Some(
-        restored
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    let output = restored
+        .call_method1(intern!(py, "reshape"), (&output_shape,))?
+        .unbind();
+    if out_shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
 }
 
 // Zero-copy flat gather for the non-f64 gated dtypes the f64 helper leaves to the
@@ -18320,6 +18266,9 @@ fn try_zerocopy_int_take(
     };
     // View the gathered uint result back to the input's exact dtype (bit-identical bytes).
     let flat = flat_uint.call_method1(intern!(py, "view"), (&a_dtype,))?;
+    if out_shape.len() == 1 {
+        return Ok(Some(flat.unbind()));
+    }
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let output = flat
         .call_method1(intern!(py, "reshape"), (&output_shape,))?
@@ -21143,9 +21092,12 @@ where
     let mut out_shape = shape.clone();
     out_shape[ax] = out_axis_len;
     let total_out = outer * out_axis_len * inner;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (total_out,), Some(&kwargs))?;
+    let flat = if let [only] = out_shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype_name))?
+    } else {
+        let alloc_shape = PyTuple::new(py, out_shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, dtype_name))?
+    };
     if total_out > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -21277,11 +21229,7 @@ fn try_zerocopy_int_diff(
     let Some((flat, out_shape)) = result else {
         return Ok(None);
     };
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    Ok(Some(finish_preshaped_output(flat, &out_shape)?))
 }
 
 // Zero-copy np.diff(n=1) for float32 ndarrays, any axis. numpy's float diff is the
@@ -21313,11 +21261,7 @@ fn try_zerocopy_f32_diff(
     let Some((flat, out_shape)) = result else {
         return Ok(None);
     };
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    Ok(Some(finish_preshaped_output(flat, &out_shape)?))
 }
 
 // Zero-copy parallel np.diff(n=1) for a large contiguous float16 vector.
@@ -23757,9 +23701,14 @@ fn try_zerocopy_f64_interp(
         unsafe { std::slice::from_raw_parts(xp_cells.as_ptr().cast::<f64>(), xp_cells.len()) };
     let fp_in: &[f64] =
         unsafe { std::slice::from_raw_parts(fp_cells.as_ptr().cast::<f64>(), fp_cells.len()) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (nx,), Some(&kwargs))?;
+    let shape = x_buf.shape();
+    let dtype = cached_float64_dtype(py)?;
+    let flat = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&alloc_shape, dtype))?
+    };
     if nx > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -23776,12 +23725,7 @@ fn try_zerocopy_f64_interp(
             return Ok(None);
         }
     }
-    let shape: Vec<usize> = x_buf.shape().to_vec();
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    Ok(Some(finish_preshaped_output(flat, shape)?))
 }
 
 // Zero-copy parallel trapezoid for a 1-D f64 C-contiguous ndarray with uniform dx.
@@ -25671,7 +25615,7 @@ fn take(
 /// niche to violate even if an array held a byte other than 0 or 1. `is_compatible_format`
 /// accepts ONLY `'?'`, so no other buffer can be read through this type, and pyo3 still checks
 /// size and alignment separately.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 struct NpBool(u8);
 
@@ -32954,14 +32898,7 @@ fn spacing(
             if v.is_sign_negative() { -s } else { s }
         }
     })? {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        let output = flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     let x = extract_numeric_array(py, x.bind(py), "spacing(x)")?;
     let result = ufunc_spacing(&x).map_err(map_ufunc_error)?;
@@ -37310,7 +37247,7 @@ fn searchsorted(
     // f64) defer to the existing path.
     if sorter.is_none()
         && v_is_scalar
-        && let Some(out) = try_zerocopy_scalar_searchsorted(py, a.bind(py), v_bound, side)?
+        && let Some(out) = try_zerocopy_scalar_searchsorted(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
@@ -37340,6 +37277,7 @@ fn searchsorted(
     if sorter.is_none()
         && !v_is_scalar
         && matches!(a_kind, 'i' | 'u' | 'b')
+        && a_arr.len().is_ok_and(|n| n >= (1 << 19))
         && let Some(out) = try_zerocopy_int_searchsorted_merge(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
@@ -37479,18 +37417,33 @@ fn scalar_search_index<T: pyo3::buffer::Element + Copy + PartialOrd>(
     key: T,
     right: bool,
 ) -> usize {
+    let raw: &[T] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), s.len()) };
+    let n = raw.len();
     let mut left = 0usize;
-    let mut len = s.len();
-    while len > 0 {
-        let half = len / 2;
-        let mid = left + half;
-        let probe = s[mid].get();
-        let cond = if right { probe <= key } else { probe < key };
-        if cond {
-            left = mid + 1;
-            len -= half + 1;
-        } else {
-            len = half;
+    let mut len = n;
+    if right {
+        while len > 0 {
+            let half = len / 2;
+            let mid = left + half;
+            // SAFETY: mid < left + len <= n by loop invariant
+            let probe = unsafe { *raw.get_unchecked(mid) };
+            let advance = usize::from(probe <= key);
+            let next_left = mid + 1;
+            let next_len = len - half - 1;
+            left = if advance == 1 { next_left } else { left };
+            len = if advance == 1 { next_len } else { half };
+        }
+    } else {
+        while len > 0 {
+            let half = len / 2;
+            let mid = left + half;
+            // SAFETY: mid < left + len <= n by loop invariant
+            let probe = unsafe { *raw.get_unchecked(mid) };
+            let advance = usize::from(probe < key);
+            let next_left = mid + 1;
+            let next_len = len - half - 1;
+            left = if advance == 1 { next_left } else { left };
+            len = if advance == 1 { next_len } else { half };
         }
     }
     left
@@ -37503,22 +37456,32 @@ fn scalar_search_index<T: pyo3::buffer::Element + Copy + PartialOrd>(
 // last). Operates on a plain &[f64] so it is callable from rayon worker threads.
 #[inline]
 fn search_index_f64_raw(s: &[f64], key: f64, right: bool) -> usize {
+    let n = s.len();
     let mut left = 0usize;
-    let mut len = s.len();
-    while len > 0 {
-        let half = len / 2;
-        let mid = left + half;
-        let probe = s[mid];
-        let cond = if right {
-            !(key < probe || (probe.is_nan() && !key.is_nan()))
-        } else {
-            probe < key || (key.is_nan() && !probe.is_nan())
-        };
-        if cond {
-            left = mid + 1;
-            len -= half + 1;
-        } else {
-            len = half;
+    let mut len = n;
+    if right {
+        while len > 0 {
+            let half = len / 2;
+            let mid = left + half;
+            // SAFETY: mid < left + len <= n by loop invariant
+            let probe = unsafe { *s.get_unchecked(mid) };
+            let advance = usize::from(!(key < probe || (probe.is_nan() && !key.is_nan())));
+            let next_left = mid + 1;
+            let next_len = len - half - 1;
+            left = if advance == 1 { next_left } else { left };
+            len = if advance == 1 { next_len } else { half };
+        }
+    } else {
+        while len > 0 {
+            let half = len / 2;
+            let mid = left + half;
+            // SAFETY: mid < left + len <= n by loop invariant
+            let probe = unsafe { *s.get_unchecked(mid) };
+            let advance = usize::from(probe < key || (key.is_nan() && !probe.is_nan()));
+            let next_left = mid + 1;
+            let next_len = len - half - 1;
+            left = if advance == 1 { next_left } else { left };
+            len = if advance == 1 { next_len } else { half };
         }
     }
     left
@@ -37556,7 +37519,7 @@ fn search_index_f64_raw_guess(s: &[f64], key: f64, right: bool, hint: usize) -> 
     };
     let h = if hint >= n { n - 1 } else { hint };
     let (mut lo, mut hi);
-    if cond(s[h]) {
+    if cond(unsafe { *s.get_unchecked(h) }) {
         // Boundary is in (h, n]; gallop upward from h with doubling stride.
         lo = h + 1;
         hi = n;
@@ -37566,7 +37529,7 @@ fn search_index_f64_raw_guess(s: &[f64], key: f64, right: bool, hint: usize) -> 
             if probe >= n {
                 break; // hi stays n
             }
-            if cond(s[probe]) {
+            if cond(unsafe { *s.get_unchecked(probe) }) {
                 lo = probe + 1;
                 step <<= 1;
             } else {
@@ -37579,13 +37542,17 @@ fn search_index_f64_raw_guess(s: &[f64], key: f64, right: bool, hint: usize) -> 
         lo = 0;
         hi = h;
     }
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if cond(s[mid]) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
+    let mut len = hi - lo;
+    while len > 0 {
+        let half = len / 2;
+        let mid = lo + half;
+        // SAFETY: mid < lo + len <= hi <= n
+        let probe = unsafe { *s.get_unchecked(mid) };
+        let advance = usize::from(cond(probe));
+        let next_lo = mid + 1;
+        let next_len = len - half - 1;
+        lo = if advance == 1 { next_lo } else { lo };
+        len = if advance == 1 { next_len } else { half };
     }
     lo
 }
@@ -37609,7 +37576,7 @@ fn search_index_f32_raw_guess(s: &[f32], key: f32, right: bool, hint: usize) -> 
     };
     let h = if hint >= n { n - 1 } else { hint };
     let (mut lo, mut hi);
-    if cond(s[h]) {
+    if cond(unsafe { *s.get_unchecked(h) }) {
         lo = h + 1;
         hi = n;
         let mut step = 1usize;
@@ -37618,7 +37585,7 @@ fn search_index_f32_raw_guess(s: &[f32], key: f32, right: bool, hint: usize) -> 
             if probe >= n {
                 break;
             }
-            if cond(s[probe]) {
+            if cond(unsafe { *s.get_unchecked(probe) }) {
                 lo = probe + 1;
                 step <<= 1;
             } else {
@@ -37630,25 +37597,64 @@ fn search_index_f32_raw_guess(s: &[f32], key: f32, right: bool, hint: usize) -> 
         lo = 0;
         hi = h;
     }
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if cond(s[mid]) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
+    let mut len = hi - lo;
+    while len > 0 {
+        let half = len / 2;
+        let mid = lo + half;
+        // SAFETY: mid < lo + len <= hi <= n
+        let probe = unsafe { *s.get_unchecked(mid) };
+        let advance = usize::from(cond(probe));
+        let next_lo = mid + 1;
+        let next_len = len - half - 1;
+        lo = if advance == 1 { next_lo } else { lo };
+        len = if advance == 1 { next_len } else { half };
     }
     lo
 }
 
+#[inline]
+fn search_index_f32_raw(s: &[f32], key: f32, right: bool) -> usize {
+    let n = s.len();
+    let mut left = 0usize;
+    let mut len = n;
+    if right {
+        while len > 0 {
+            let half = len / 2;
+            let mid = left + half;
+            // SAFETY: mid < left + len <= n by loop invariant
+            let probe = unsafe { *s.get_unchecked(mid) };
+            let advance = usize::from(!(key < probe || (probe.is_nan() && !key.is_nan())));
+            let next_left = mid + 1;
+            let next_len = len - half - 1;
+            left = if advance == 1 { next_left } else { left };
+            len = if advance == 1 { next_len } else { half };
+        }
+    } else {
+        while len > 0 {
+            let half = len / 2;
+            let mid = left + half;
+            // SAFETY: mid < left + len <= n by loop invariant
+            let probe = unsafe { *s.get_unchecked(mid) };
+            let advance = usize::from(probe < key || (key.is_nan() && !probe.is_nan()));
+            let next_left = mid + 1;
+            let next_len = len - half - 1;
+            left = if advance == 1 { next_left } else { left };
+            len = if advance == 1 { next_len } else { half };
+        }
+    }
+    left
+}
+
+fn scalar_search_index_f32(s: &[pyo3::buffer::ReadOnlyCell<f32>], key: f32, right: bool) -> usize {
+    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+    let raw: &[f32] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<f32>(), s.len()) };
+    search_index_f32_raw(raw, key, right)
+}
+
 // Zero-copy np.searchsorted for a SCALAR query `v` over a 1-D numeric haystack `a`,
 // returning numpy's np.intp scalar. Reads `a`'s buffer directly and runs one binary
-// search — no extract of the haystack. Handles the haystacks where the comparison is
-// unambiguous: f64 (numpy compares in f64 whether v is int or float), and i64/u64
-// with an integer-valued query. An int/uint haystack with a non-integer (float) query
-// promotes to f64 in numpy, so that — and every other dtype (narrow ints, f32,
-// complex, datetime) — defers (returns None) to the existing path. Bit-exact: the
-// search loop is identical to the array fast path.
+// search — no extract of the haystack. Handles all standard numeric types with matching
+// query types. Mixed/complex/datetime defer to the fallback path.
 fn try_zerocopy_scalar_searchsorted(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -37658,23 +37664,9 @@ fn try_zerocopy_scalar_searchsorted(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    // DECIDE ON THE NEEDLE FIRST (`deadlock-audit-v46rn`).
-    //
-    // This probe only handles a SCALAR needle, and `np.searchsorted(a, v)` with an ARRAY
-    // `v` is ordinary usage - so for that case everything below is wasted: an `ndim`
-    // getattr, a dtype fetch with `kind` and `itemsize` extracted, and then an
-    // `extract::<T>()` that fails and leaves a constructed-and-discarded Python exception
-    // behind. Asking about the needle first skips the whole body, not just the exception.
-    //
-    // Same narrow predicate as the spaced builders and `clip`: only an EXACT ndarray with
-    // `ndim >= 1` cannot be a scalar, so 0-d arrays and every NumPy scalar width keep the
-    // native path they have today.
     if arg_cannot_be_scalar(py, v) {
         return Ok(None);
     }
-    // Cached module handle: this probe is not a `#[pyfunction]`, so the wrapper sweep did
-    // not reach it, and a per-call `py.import` measured 656 ns on the ufunc methods.
-    let numpy = cached_numpy(py)?;
     if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
         return Ok(None); // numpy searchsorted requires a 1-D haystack
     }
@@ -37684,12 +37676,15 @@ fn try_zerocopy_scalar_searchsorted(
         _ => return Ok(None),
     };
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    if !dtype_is_native_order(&a_dtype) {
+        return Ok(None);
+    }
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = a_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
-    let idx = match (kind.as_str(), itemsize) {
-        ("f", 8) => {
+    let idx = match (kind, itemsize) {
+        ('f', 8) => {
             let Ok(key) = v.extract::<f64>() else {
                 return Ok(None);
             };
@@ -37701,7 +37696,19 @@ fn try_zerocopy_scalar_searchsorted(
             };
             scalar_search_index_f64(slice, key, right)
         }
-        ("i", 8) => {
+        ('f', 4) => {
+            let Ok(key) = v.extract::<f32>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<f32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index_f32(slice, key, right)
+        }
+        ('i', 8) => {
             // A float (non-integer) query promotes both sides to f64 in numpy; defer.
             let Ok(key) = v.extract::<i64>() else {
                 return Ok(None);
@@ -37714,7 +37721,43 @@ fn try_zerocopy_scalar_searchsorted(
             };
             scalar_search_index(slice, key, right)
         }
-        ("u", 8) => {
+        ('i', 4) => {
+            let Ok(key) = v.extract::<i32>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<i32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index(slice, key, right)
+        }
+        ('i', 2) => {
+            let Ok(key) = v.extract::<i16>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<i16>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index(slice, key, right)
+        }
+        ('i', 1) => {
+            let Ok(key) = v.extract::<i8>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<i8>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index(slice, key, right)
+        }
+        ('u', 8) => {
             let Ok(key) = v.extract::<u64>() else {
                 return Ok(None);
             };
@@ -37726,14 +37769,58 @@ fn try_zerocopy_scalar_searchsorted(
             };
             scalar_search_index(slice, key, right)
         }
+        ('u', 4) => {
+            let Ok(key) = v.extract::<u32>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<u32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index(slice, key, right)
+        }
+        ('u', 2) => {
+            let Ok(key) = v.extract::<u16>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<u16>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index(slice, key, right)
+        }
+        ('u', 1) => {
+            let Ok(key) = v.extract::<u8>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<u8>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index(slice, key, right)
+        }
+        ('b', 1) => {
+            let Ok(key_bool) = v.extract::<bool>() else {
+                return Ok(None);
+            };
+            let key = NpBool(u8::from(key_bool));
+            let Ok(buffer) = PyBuffer::<NpBool>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index(slice, key, right)
+        }
         _ => return Ok(None),
     };
-    Ok(Some(
-        numpy
-            .getattr(intern!(py, "intp"))?
-            .call1((idx as i64,))?
-            .unbind(),
-    ))
+    Ok(Some(cached_intp_type(py)?.call1((idx as i64,))?.unbind()))
 }
 
 // Zero-copy np.searchsorted for an f64 haystack `a` and an f64 array query `v`
@@ -37840,9 +37927,14 @@ fn try_zerocopy_f64_searchsorted_merge(
     // finite/no-NaN queries here; ±0.0 tie order is irrelevant since the merge uses `<`/`<=`).
     let mut pairs: Vec<(f64, u32)> = (0..m).map(|i| (v_raw[i], i as u32)).collect();
     pairs.par_sort_unstable_by(|x, y| x.0.total_cmp(&y.0));
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "intp")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
+    let shape = v_buf.shape();
+    let intp = cached_intp_type(py)?;
+    let flat = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, intp))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
+    };
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -37872,12 +37964,7 @@ fn try_zerocopy_f64_searchsorted_merge(
             }
         }
     }
-    let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    Ok(Some(finish_preshaped_output(flat, shape)?))
 }
 
 fn try_zerocopy_f64_searchsorted(
@@ -37929,7 +38016,14 @@ fn try_zerocopy_f64_searchsorted(
         return Ok(None);
     };
     let m = v_s.len();
-    let flat = numpy.call_method1(intern!(py, "empty"), (m, "intp"))?;
+    let shape = v_buf.shape();
+    let intp = cached_intp_type(py)?;
+    let flat = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, intp))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
+    };
     if m > 0 {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -38003,18 +38097,7 @@ fn try_zerocopy_f64_searchsorted(
             }
         }
     }
-    // `flat` already has the exact intp dtype and `(m,)` shape for a 1-D
-    // query. Avoid allocating a shape tuple and asking NumPy to create an
-    // identity reshape view on the common array-needle route.
-    if v_buf.dimensions() == 1 {
-        return Ok(Some(flat.unbind()));
-    }
-    let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    Ok(Some(finish_preshaped_output(flat, shape)?))
 }
 
 // Typed binary-search core for np.searchsorted over a sorted haystack. For each
@@ -38029,7 +38112,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     a: &Bound<'py, PyAny>,
     v: &Bound<'py, PyAny>,
     right: bool,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
+) -> PyResult<Option<Py<PyAny>>> {
     let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<T>::get(a), PyBuffer::<T>::get(v)) else {
         return Ok(None);
     };
@@ -38037,9 +38120,14 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         return Ok(None);
     };
     let m = v_s.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "intp")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
+    let shape = v_buf.shape();
+    let intp = cached_intp_type(py)?;
+    let flat = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, intp))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
+    };
     if m > 0 {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -38053,18 +38141,32 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         // Same search => bit-identical regardless of chunking. Gate large query counts only.
         #[inline]
         fn search_index<U: Copy + PartialOrd>(a: &[U], key: U, right: bool) -> i64 {
+            let n = a.len();
             let mut left = 0usize;
-            let mut len = a.len();
-            while len > 0 {
-                let half = len / 2;
-                let mid = left + half;
-                let probe = a[mid];
-                let cond = if right { probe <= key } else { probe < key };
-                if cond {
-                    left = mid + 1;
-                    len -= half + 1;
-                } else {
-                    len = half;
+            let mut len = n;
+            if right {
+                while len > 0 {
+                    let half = len / 2;
+                    let mid = left + half;
+                    // SAFETY: mid < left + len <= n by loop invariant
+                    let probe = unsafe { *a.get_unchecked(mid) };
+                    let advance = usize::from(probe <= key);
+                    let next_left = mid + 1;
+                    let next_len = len - half - 1;
+                    left = if advance == 1 { next_left } else { left };
+                    len = if advance == 1 { next_len } else { half };
+                }
+            } else {
+                while len > 0 {
+                    let half = len / 2;
+                    let mid = left + half;
+                    // SAFETY: mid < left + len <= n by loop invariant
+                    let probe = unsafe { *a.get_unchecked(mid) };
+                    let advance = usize::from(probe < key);
+                    let next_left = mid + 1;
+                    let next_len = len - half - 1;
+                    left = if advance == 1 { next_left } else { left };
+                    len = if advance == 1 { next_len } else { half };
                 }
             }
             left as i64
@@ -38075,6 +38177,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         // The initial `!before` test is also the duplicate fast path: a repeated needle keeps the
         // same left/right insertion point without probing the haystack again.
         #[inline]
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
         fn search_index_from_previous<U: Copy + PartialOrd>(
             a: &[U],
             key: U,
@@ -38085,35 +38188,69 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             if previous >= n {
                 return n as i64;
             }
-            let before = |probe: U| if right { probe <= key } else { probe < key };
-            if !before(a[previous]) {
-                return previous as i64;
-            }
-            let mut lo = previous + 1;
-            let mut hi = n;
-            let mut step = 1usize;
-            while let Some(probe) = previous.checked_add(step) {
-                if probe >= n {
-                    break;
+            if right {
+                // SAFETY: previous < n
+                if !(unsafe { *a.get_unchecked(previous) } <= key) {
+                    return previous as i64;
                 }
-                if before(a[probe]) {
-                    lo = probe + 1;
-                    step = step.saturating_mul(2);
-                } else {
-                    hi = probe;
-                    break;
+                let mut lo = previous + 1;
+                let mut hi = n;
+                let mut step = 1usize;
+                while let Some(probe) = previous.checked_add(step) {
+                    if probe >= n {
+                        break;
+                    }
+                    // SAFETY: probe < n
+                    if unsafe { *a.get_unchecked(probe) } <= key {
+                        lo = probe + 1;
+                        step = step.saturating_mul(2);
+                    } else {
+                        hi = probe;
+                        break;
+                    }
                 }
-            }
-            while lo < hi {
-                let half = (hi - lo) / 2;
-                let mid = lo + half;
-                if before(a[mid]) {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
+                while lo < hi {
+                    let half = (hi - lo) / 2;
+                    let mid = lo + half;
+                    // SAFETY: mid < hi <= n
+                    let advance = usize::from(unsafe { *a.get_unchecked(mid) } <= key);
+                    let next_lo = mid + 1;
+                    lo = if advance == 1 { next_lo } else { lo };
+                    hi = if advance == 1 { hi } else { mid };
                 }
+                lo as i64
+            } else {
+                // SAFETY: previous < n
+                if !(unsafe { *a.get_unchecked(previous) } < key) {
+                    return previous as i64;
+                }
+                let mut lo = previous + 1;
+                let mut hi = n;
+                let mut step = 1usize;
+                while let Some(probe) = previous.checked_add(step) {
+                    if probe >= n {
+                        break;
+                    }
+                    // SAFETY: probe < n
+                    if unsafe { *a.get_unchecked(probe) } < key {
+                        lo = probe + 1;
+                        step = step.saturating_mul(2);
+                    } else {
+                        hi = probe;
+                        break;
+                    }
+                }
+                while lo < hi {
+                    let half = (hi - lo) / 2;
+                    let mid = lo + half;
+                    // SAFETY: mid < hi <= n
+                    let advance = usize::from(unsafe { *a.get_unchecked(mid) } < key);
+                    let next_lo = mid + 1;
+                    lo = if advance == 1 { next_lo } else { lo };
+                    hi = if advance == 1 { hi } else { mid };
+                }
+                lo as i64
             }
-            lo as i64
         }
         // DEFAULT ON - the shipped route is the SPAN-GATED merge below. The env knob selects the
         // loop per call so every arm is timed on the same arrays in ONE process (see
@@ -38140,11 +38277,17 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
         // merge in this function, so widening it - lowering the threshold - would silently route
         // sorted needles into m parallel bisections and give back the 8.9x the merge wins on
         // exactly that shape. An ordered batch is therefore excluded here by construction, and
-        // the threshold below is free to move on its own evidence. The scan short-circuits on the
-        // first descent, so an unordered batch pays ~2 comparisons for it.
-        let ordered_batch = m > 1
-            && (v_probe.windows(2).all(|w| w[0] <= w[1])
-                || v_probe.windows(2).all(|w| w[0] >= w[1]));
+        // the threshold below is free to move on its own evidence.
+        //
+        // Scan for sortedness once and reuse the flags across the parallel check and the merge walk.
+        let (sorted_q, desc_q) = if m > 1 {
+            let asc = v_probe.windows(2).all(|w| w[0] <= w[1]);
+            let dsc = !asc && v_probe.windows(2).all(|w| w[0] >= w[1]);
+            (asc, dsc)
+        } else {
+            (true, false)
+        };
+        let ordered_batch = sorted_q || desc_q;
         if m >= searchsorted_parallel_min() && !ordered_batch && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             // SAFETY: Cell<i64> is repr(transparent) over i64; `flat` is a fresh numpy.empty
@@ -38173,30 +38316,7 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
             // A SORTED QUERY BATCH IS A MERGE, NOT m BINARY SEARCHES. When the needles are
             // nondecreasing their insertion points are nondecreasing too, so ONE forward pointer
             // through the haystack answers every query: O(n + m) against O(m log n), and every
-            // probe is sequential rather than a cache-missing jump to the middle. The float paths
-            // learned this in `8f6cc811`; the integer path never got it and still ran a branchy
-            // bisection per query through `Cell` reads.
-            //
-            // The scan costs one pass over the needles; it is O(m) against a search that is
-            // O(m log n), so it cannot pay for itself only on a bench input.
-            //
-            // BUT THE ADMISSION TEST MUST READ BOTH OPERANDS. Nondecreasing is a property of the
-            // QUERIES, while the walk's cost is O(span) in the HAYSTACK. A single needle is
-            // trivially sorted - `windows(2)` is empty - so an m=1 query against a 2^22 haystack
-            // would walk up to 4.2M elements where the bisection pays 23 probes. That is the
-            // gate-reads-operand-A-while-operand-B-pays shape, so price the walk before taking
-            // it: two bisections, on the first and last needle, give the EXACT span the pointer
-            // travels, and starting the pointer at the first needle's own insertion point means
-            // clustered queries never pay for the haystack prefix below them.
-            let sorted_q = v_raw.windows(2).all(|w| w[0] <= w[1]);
-            // A DESCENDING BATCH IS EXACTLY AS PREDICTABLE AS AN ASCENDING ONE, and it was
-            // measured losing 2.329x on the same corpus where the ascending route wins 8.9x
-            // (`deadlock-audit-sfgg3`). Non-increasing needles have non-increasing insertion
-            // points, so the identical argument runs with the pointer moving DOWN from the
-            // largest needle's insertion point. `m > 1` because a single needle is already
-            // nondecreasing and is handled above; an all-equal batch satisfies both tests and
-            // ascending wins, which is arbitrary but consistent.
-            let desc_q = !sorted_q && m > 1 && v_raw.windows(2).all(|w| w[0] >= w[1]);
+            // probe is sequential rather than a cache-missing jump to the middle.
             let mode = if sorted_q || desc_q {
                 merge_mode()
             } else {
@@ -38298,17 +38418,19 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send +
                     for (slot, &key) in out_data.iter_mut().zip(v_raw.iter()) {
                         *slot = search_index(a_raw, key, right);
                     }
+                } else if merge_mode().as_deref() == Some(std::ffi::OsStr::new("level")) {
+                    if right {
+                        batched_search_level::<T, true>(a_raw, v_raw, out_data);
+                    } else {
+                        batched_search_level::<T, false>(a_raw, v_raw, out_data);
+                    }
                 } else {
                     batched_search_indices(a_raw, v_raw, out_data, right);
                 }
             }
         }
     }
-    let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?,
-    ))
+    Ok(Some(finish_preshaped_output(flat, shape)?))
 }
 
 /// Restores the explicit index-dtype probe that `PyBuffer::<i64>::get` already
@@ -38521,12 +38643,68 @@ fn searchsorted_parallel_min() -> usize {
 ///
 /// `RIGHT` is a const parameter rather than a runtime flag so the comparison is
 /// one instruction with no branch in the innermost loop - the loop runs
+#[inline]
+fn branchless_search_indices<T: Copy + PartialOrd>(
+    haystack: &[T],
+    needles: &[T],
+    out: &mut [i64],
+    right: bool,
+) {
+    debug_assert_eq!(needles.len(), out.len());
+    let n = haystack.len();
+    if n == 0 {
+        out.fill(0);
+        return;
+    }
+    if right {
+        for (slot, &key) in out.iter_mut().zip(needles) {
+            let mut left = 0usize;
+            let mut len = n;
+            while len > 0 {
+                let half = len / 2;
+                let mid = left + half;
+                // SAFETY: mid < left + len <= n by loop invariant
+                let probe = unsafe { *haystack.get_unchecked(mid) };
+                let advance = usize::from(probe <= key);
+                let next_left = mid + 1;
+                let next_len = len - half - 1;
+                left = if advance == 1 { next_left } else { left };
+                len = if advance == 1 { next_len } else { half };
+            }
+            *slot = left as i64;
+        }
+    } else {
+        for (slot, &key) in out.iter_mut().zip(needles) {
+            let mut left = 0usize;
+            let mut len = n;
+            while len > 0 {
+                let half = len / 2;
+                let mid = left + half;
+                // SAFETY: mid < left + len <= n by loop invariant
+                let probe = unsafe { *haystack.get_unchecked(mid) };
+                let advance = usize::from(probe < key);
+                let next_left = mid + 1;
+                let next_len = len - half - 1;
+                left = if advance == 1 { next_left } else { left };
+                len = if advance == 1 { next_len } else { half };
+            }
+            *slot = left as i64;
+        }
+    }
+}
+
+/// Batched ("transposed") binary search: every key advances one level per outer
+/// iteration instead of each key running its own bisection to completion.
+///
+/// `RIGHT` is a const parameter rather than a runtime flag so the comparison is
+/// one instruction with no branch in the innermost loop - the loop runs
 /// `key_len * log2(arr_len)` times and a loop-invariant branch inside it is
 /// exactly the shape that stops this from vectorising.
 ///
 /// Invariant, for every key j: the insertion index lies in
 /// `[base_j, base_j + interval]`, and each pass halves `interval`. When
 /// `interval == 1` one final comparison picks `base_j` or `base_j + 1`.
+#[allow(dead_code)]
 fn batched_search_level<T: Copy + PartialOrd, const RIGHT: bool>(
     a: &[T],
     v: &[T],
@@ -38562,18 +38740,9 @@ fn batched_search_level<T: Copy + PartialOrd, const RIGHT: bool>(
 }
 
 /// Dispatch the batched search on `right` ONCE, outside the loops.
+#[inline]
 fn batched_search_indices<T: Copy + PartialOrd>(a: &[T], v: &[T], out: &mut [i64], right: bool) {
-    if a.is_empty() {
-        // NumPy returns all zeros for an empty haystack; the level loop below indexes `a[half]`
-        // unconditionally, so this case must not reach it.
-        out.fill(0);
-        return;
-    }
-    if right {
-        batched_search_level::<T, true>(a, v, out);
-    } else {
-        batched_search_level::<T, false>(a, v, out);
-    }
+    branchless_search_indices(a, v, out, right);
 }
 
 fn searchsorted_int_merge_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Send + Sync>(
@@ -38582,7 +38751,7 @@ fn searchsorted_int_merge_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Sen
     a: &Bound<'py, PyAny>,
     v: &Bound<'py, PyAny>,
     right: bool,
-) -> PyResult<Option<Bound<'py, PyAny>>> {
+) -> PyResult<Option<Py<PyAny>>> {
     let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<T>::get(a), PyBuffer::<T>::get(v)) else {
         return Ok(None);
     };
@@ -38615,9 +38784,14 @@ fn searchsorted_int_merge_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Sen
     let mut pairs: Vec<(T, u32)> = (0..m).map(|i| (v_raw[i], i as u32)).collect();
     pairs.par_sort_unstable_by(|x, y| x.0.cmp(&y.0));
 
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "intp")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
+    let shape = v_buf.shape();
+    let intp = cached_intp_type(py)?;
+    let flat = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, intp))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
+    };
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -38645,11 +38819,7 @@ fn searchsorted_int_merge_typed<'py, T: pyo3::buffer::Element + Copy + Ord + Sen
             }
         }
     }
-    let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?,
-    ))
+    Ok(Some(finish_preshaped_output(flat, shape)?))
 }
 
 // Sort-merge np.searchsorted for same-dtype integer haystack/query arrays. The existing
@@ -38691,22 +38861,22 @@ fn try_zerocopy_int_searchsorted_merge(
         "right" => true,
         _ => return Ok(None),
     };
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = a_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
-    let flat = match (kind.as_str(), itemsize) {
-        ("i", 1) => searchsorted_int_merge_typed::<i8>(py, numpy, a, v, right)?,
-        ("i", 2) => searchsorted_int_merge_typed::<i16>(py, numpy, a, v, right)?,
-        ("i", 4) => searchsorted_int_merge_typed::<i32>(py, numpy, a, v, right)?,
-        ("i", 8) => searchsorted_int_merge_typed::<i64>(py, numpy, a, v, right)?,
-        ("u", 1) => searchsorted_int_merge_typed::<u8>(py, numpy, a, v, right)?,
-        ("u", 2) => searchsorted_int_merge_typed::<u16>(py, numpy, a, v, right)?,
-        ("u", 4) => searchsorted_int_merge_typed::<u32>(py, numpy, a, v, right)?,
-        ("u", 8) => searchsorted_int_merge_typed::<u64>(py, numpy, a, v, right)?,
+    let flat = match (kind, itemsize) {
+        ('i', 1) => searchsorted_int_merge_typed::<i8>(py, numpy, a, v, right)?,
+        ('i', 2) => searchsorted_int_merge_typed::<i16>(py, numpy, a, v, right)?,
+        ('i', 4) => searchsorted_int_merge_typed::<i32>(py, numpy, a, v, right)?,
+        ('i', 8) => searchsorted_int_merge_typed::<i64>(py, numpy, a, v, right)?,
+        ('u', 1) => searchsorted_int_merge_typed::<u8>(py, numpy, a, v, right)?,
+        ('u', 2) => searchsorted_int_merge_typed::<u16>(py, numpy, a, v, right)?,
+        ('u', 4) => searchsorted_int_merge_typed::<u32>(py, numpy, a, v, right)?,
+        ('u', 8) => searchsorted_int_merge_typed::<u64>(py, numpy, a, v, right)?,
         _ => return Ok(None),
     };
-    Ok(flat.map(|f| f.unbind()))
+    Ok(flat)
 }
 
 // Zero-copy np.searchsorted for a matched integer dtype haystack/query (array v,
@@ -38747,22 +38917,23 @@ fn try_zerocopy_int_searchsorted(
         "right" => true,
         _ => return Ok(None),
     };
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = a_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
-    let flat = match (kind.as_str(), itemsize) {
-        ("i", 1) => searchsorted_typed::<i8>(py, numpy, a, v, right)?,
-        ("i", 2) => searchsorted_typed::<i16>(py, numpy, a, v, right)?,
-        ("i", 4) => searchsorted_typed::<i32>(py, numpy, a, v, right)?,
-        ("i", 8) => searchsorted_typed::<i64>(py, numpy, a, v, right)?,
-        ("u", 1) => searchsorted_typed::<u8>(py, numpy, a, v, right)?,
-        ("u", 2) => searchsorted_typed::<u16>(py, numpy, a, v, right)?,
-        ("u", 4) => searchsorted_typed::<u32>(py, numpy, a, v, right)?,
-        ("u", 8) => searchsorted_typed::<u64>(py, numpy, a, v, right)?,
+    let flat = match (kind, itemsize) {
+        ('i', 1) => searchsorted_typed::<i8>(py, numpy, a, v, right)?,
+        ('i', 2) => searchsorted_typed::<i16>(py, numpy, a, v, right)?,
+        ('i', 4) => searchsorted_typed::<i32>(py, numpy, a, v, right)?,
+        ('i', 8) => searchsorted_typed::<i64>(py, numpy, a, v, right)?,
+        ('u', 1) => searchsorted_typed::<u8>(py, numpy, a, v, right)?,
+        ('u', 2) => searchsorted_typed::<u16>(py, numpy, a, v, right)?,
+        ('u', 4) => searchsorted_typed::<u32>(py, numpy, a, v, right)?,
+        ('u', 8) => searchsorted_typed::<u64>(py, numpy, a, v, right)?,
+        ('b', 1) => searchsorted_typed::<NpBool>(py, numpy, a, v, right)?,
         _ => return Ok(None),
     };
-    Ok(flat.map(|f| f.unbind()))
+    Ok(flat)
 }
 
 // Zero-copy np.searchsorted for a float32 haystack + float32 array query (sorter=None). numpy's
@@ -38847,9 +39018,14 @@ fn try_zerocopy_f32_searchsorted_merge(
     }
     let mut pairs: Vec<(f32, u32)> = (0..m).map(|i| (v_raw[i], i as u32)).collect();
     pairs.par_sort_unstable_by(|x, y| x.0.total_cmp(&y.0));
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "intp")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
+    let shape = v_buf.shape();
+    let intp = cached_intp_type(py)?;
+    let flat = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, intp))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
+    };
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -38877,12 +39053,7 @@ fn try_zerocopy_f32_searchsorted_merge(
             }
         }
     }
-    let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    Ok(Some(finish_preshaped_output(flat, shape)?))
 }
 
 fn try_zerocopy_f32_searchsorted(
@@ -38925,7 +39096,14 @@ fn try_zerocopy_f32_searchsorted(
         return Ok(None);
     };
     let m = v_s.len();
-    let flat = numpy.call_method1(intern!(py, "empty"), (m, "intp"))?;
+    let shape = v_buf.shape();
+    let intp = cached_intp_type(py)?;
+    let flat = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, intp))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
+    };
     if m > 0 {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -39001,18 +39179,7 @@ fn try_zerocopy_f32_searchsorted(
             }
         }
     }
-    // `flat` already has the exact intp dtype and `(m,)` shape for a 1-D
-    // query. Avoid allocating a shape tuple and asking NumPy to create an
-    // identity reshape view on the common array-needle route.
-    if v_buf.dimensions() == 1 {
-        return Ok(Some(flat.unbind()));
-    }
-    let shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    Ok(Some(finish_preshaped_output(flat, shape)?))
 }
 
 #[pyfunction]
@@ -72050,7 +72217,7 @@ fn try_zerocopy_c128_searchsorted(
 ) -> PyResult<Option<Py<PyAny>>> {
     const QUERY_MIN: usize = 1 << 16;
     let a_dt = a_arr.getattr(intern!(py, "dtype"))?;
-    if a_dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if a_dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || a_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
     {
         return Ok(None);
@@ -72067,7 +72234,7 @@ fn try_zerocopy_c128_searchsorted(
         return Ok(None);
     }
     let v_dt = v.getattr(intern!(py, "dtype"))?;
-    if v_dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if v_dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || v_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
     {
         return Ok(None);
@@ -72119,7 +72286,8 @@ fn try_zerocopy_c128_searchsorted(
         return Ok(None);
     }
     let right = side == "right";
-    let out = numpy.call_method(intern!(py, "empty"), ((m,), "int64"), None)?;
+    let intp = cached_intp_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), (m, intp))?;
     let out_buf = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buf.as_mut_slice(py) else {
         return Ok(None);
@@ -72280,7 +72448,7 @@ fn try_zerocopy_c64_searchsorted(
 ) -> PyResult<Option<Py<PyAny>>> {
     const QUERY_MIN: usize = 1 << 16;
     let a_dt = a_arr.getattr(intern!(py, "dtype"))?;
-    if a_dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if a_dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || a_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -72297,7 +72465,7 @@ fn try_zerocopy_c64_searchsorted(
         return Ok(None);
     }
     let v_dt = v.getattr(intern!(py, "dtype"))?;
-    if v_dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if v_dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || v_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -72349,7 +72517,8 @@ fn try_zerocopy_c64_searchsorted(
         return Ok(None);
     }
     let right = side == "right";
-    let out = numpy.call_method(intern!(py, "empty"), ((m,), "int64"), None)?;
+    let intp = cached_intp_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), (m, intp))?;
     let out_buf = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buf.as_mut_slice(py) else {
         return Ok(None);
@@ -75871,10 +76040,14 @@ fn try_native_f16_searchsorted_table(
     for key in 1..cumulative.len() {
         cumulative[key] += cumulative[key - 1];
     }
-    let query_shape: Vec<usize> = v.getattr(intern!(py, "shape"))?.extract()?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "intp")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (v_raw.len(),), Some(&kwargs))?;
+    let shape = v_buffer.shape();
+    let intp = cached_intp_type(py)?;
+    let flat = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, intp))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&alloc_shape, intp))?
+    };
     let Ok(output_buffer) = PyBuffer::<i64>::get(&flat) else {
         return Ok(None);
     };
@@ -75903,11 +76076,7 @@ fn try_native_f16_searchsorted_table(
                 };
             }
         });
-    let output_shape = PyTuple::new(py, query_shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    Ok(Some(finish_preshaped_output(flat, shape)?))
 }
 
 // float16 set-ops via exact f32 widening (numpy f16 set-ops ~172ms @2M+2M, no SIMD). Widen both operands to
@@ -75978,24 +76147,24 @@ fn try_native_searchsorted_struct(
         return Ok(None);
     }
     let fields = a_dtype.getattr(intern!(py, "fields"))?;
-    let mut field_kind: Option<String> = None;
+    let mut field_kind: Option<char> = None;
     for (i, name) in names.iter().enumerate() {
         let field = fields.get_item(name.as_str())?;
         let ftype = field.get_item(0)?;
         let offset: usize = field.get_item(1)?.extract()?;
-        let kind = ftype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+        let kind = ftype.getattr(intern!(py, "kind"))?.extract::<char>()?;
         if offset != i * 8
-            || !matches!(kind.as_str(), "i" | "u")
+            || !matches!(kind, 'i' | 'u')
             || ftype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
         {
             return Ok(None);
         }
-        if field_kind.as_deref().is_some_and(|seen| seen != kind) {
+        if field_kind.is_some_and(|seen| seen != kind) {
             return Ok(None);
         }
         field_kind = Some(kind);
-        let bo: String = ftype.getattr(intern!(py, "byteorder"))?.extract()?;
-        if bo != "<" && bo != "=" && bo != "|" {
+        let bo = ftype.getattr(intern!(py, "byteorder"))?.extract::<char>()?;
+        if bo != '<' && bo != '=' && bo != '|' {
             return Ok(None);
         }
     }
@@ -76033,11 +76202,11 @@ fn try_native_searchsorted_struct(
     if n < 1 || m < QUERY_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    match field_kind.as_deref() {
-        Some("i") => {
+    match field_kind {
+        Some('i') => {
             searchsorted_struct_typed::<i64>(py, numpy, a_arr, v, side, n, m, nfields, "int64")
         }
-        Some("u") => {
+        Some('u') => {
             searchsorted_struct_typed::<u64>(py, numpy, a_arr, v, side, n, m, nfields, "uint64")
         }
         _ => Ok(None),
@@ -76095,22 +76264,22 @@ fn try_native_searchsorted_struct_valuelex(
         let ftype = field.get_item(0)?;
         let offset: usize = field.get_item(1)?.extract()?;
         let fw = ftype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-        let fk = ftype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-        let kind_byte = match fk.as_str() {
-            "i" => b'i',
-            "u" => b'u',
-            "b" => b'b',
-            "f" => b'f',
+        let fk = ftype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+        let kind_byte = match fk {
+            'i' => b'i',
+            'u' => b'u',
+            'b' => b'b',
+            'f' => b'f',
             _ => return Ok(None),
         };
         if offset != expected_off || !matches!(fw, 1 | 2 | 4 | 8) {
             return Ok(None);
         }
-        let bo: String = ftype.getattr(intern!(py, "byteorder"))?.extract()?;
-        if bo != "<" && bo != "=" && bo != "|" {
+        let bo = ftype.getattr(intern!(py, "byteorder"))?.extract::<char>()?;
+        if bo != '<' && bo != '=' && bo != '|' {
             return Ok(None);
         }
-        if fk == "f" {
+        if fk == 'f' {
             has_float = true;
         }
         descs.push((offset, kind_byte, fw));
@@ -76170,7 +76339,8 @@ fn try_native_searchsorted_struct_valuelex(
     let hkeys = build_keys(a_data, n);
     let qkeys = build_keys(v_data, m);
     let right = side == "right";
-    let out = numpy.call_method(intern!(py, "empty"), ((m,), "int64"), None)?;
+    let intp = cached_intp_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), (m, intp))?;
     let out_buf = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buf.as_mut_slice(py) else {
         return Ok(None);
@@ -88525,6 +88695,16 @@ fn cached_bool_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     Ok(BOOL_TYPE
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
             Ok(cached_numpy(py)?.getattr(intern!(py, "bool_"))?.unbind())
+        })?
+        .bind(py))
+}
+
+/// `numpy.intp`, on the same terms - the output dtype searchsorted allocates with.
+fn cached_intp_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static INTP_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(INTP_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "intp"))?.unbind())
         })?
         .bind(py))
 }
