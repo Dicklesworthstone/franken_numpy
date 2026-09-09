@@ -36622,7 +36622,6 @@ fn searchsorted(
 ) -> PyResult<Py<PyAny>> {
     let a_bound = a.bind(py);
     let v_bound = v.bind(py);
-    let mut sorter_bound = sorter.as_ref().map(|s| s.bind(py));
     let numpy = cached_numpy(py)?;
     // An invalid `side` is a pure error case: defer the whole call to numpy so it
     // raises ITS canonical ValueError. The message wording tracks the installed
@@ -36631,7 +36630,13 @@ fn searchsorted(
     // so for any side that is not "left"/"right" let numpy own the error. Matching
     // numpy's literal in Rust would silently re-break on every numpy rewording.
     if side != "left" && side != "right" {
-        return delegate_numpy_searchsorted(py, a_bound, v_bound, side, sorter_bound);
+        return delegate_numpy_searchsorted(
+            py,
+            a_bound,
+            v_bound,
+            side,
+            sorter.as_ref().map(|s| s.bind(py)),
+        );
     }
     // The native binary-search path only handles real numeric dtypes. numpy
     // also searches sorted string ('U'/'S'), datetime64 ('M'), timedelta64
@@ -36683,7 +36688,13 @@ fn searchsorted(
     // on the text can see. Defer so numpy owns the wording rather than pinning
     // its literal here, where every numpy rewording would silently re-break it.
     if a_arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
-        return delegate_numpy_searchsorted(py, a_bound, v_bound, side, sorter_bound);
+        return delegate_numpy_searchsorted(
+            py,
+            a_bound,
+            v_bound,
+            side,
+            sorter.as_ref().map(|s| s.bind(py)),
+        );
     }
     let mut a = a;
     let mut sorter = sorter;
@@ -36721,7 +36732,6 @@ fn searchsorted(
                 // exact original call).
                 a = a_arr.clone().unbind();
                 sorter = None;
-                sorter_bound = None;
                 gathered = true;
             }
         }
@@ -36854,7 +36864,13 @@ fn searchsorted(
         return Ok(out);
     }
     if !matches!(a_kind, 'b' | 'i' | 'u' | 'f') {
-        return delegate_numpy_searchsorted(py, &a_arr, v_bound, side, sorter_bound);
+        return delegate_numpy_searchsorted(
+            py,
+            &a_arr,
+            v_bound,
+            side,
+            sorter.as_ref().map(|s| s.bind(py)),
+        );
     }
 
     // Mirror numpy's scalar-vs-array return shape: when `v` is a Python
@@ -37055,10 +37071,10 @@ fn searchsorted(
         Err(_) => {
             return delegate_numpy_searchsorted(
                 py,
-                &a.bind(py),
+                a.bind(py),
                 v_bound,
                 side,
-                sorter_bound.as_ref(),
+                sorter.as_ref().map(|s| s.bind(py)),
             );
         }
     };
