@@ -86379,17 +86379,22 @@ fn irfft2(
 #[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let arr = numpy.call_method1(intern!(py, "asarray"), (v.bind(py),))?;
-    let dtype_kind = arr
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if dtype_kind == "c" {
-        return Ok(numpy
-            .getattr(intern!(py, "diag"))?
-            .call1((arr, k))?
-            .unbind());
+    let v_bound = v.bind(py);
+    let arr = if v_bound.is_exact_instance(cached_ndarray_type(py)?) {
+        v_bound.clone()
+    } else {
+        cached_numpy_asarray(py)?.call1((v_bound,))?
+    };
+    let diag_fn = cached_numpy_diag(py)?;
+    let delegate = || -> PyResult<Py<PyAny>> {
+        if k == 0 {
+            Ok(diag_fn.call1((&arr,))?.unbind())
+        } else {
+            Ok(diag_fn.call1((&arr, k))?.unbind())
+        }
+    };
+    if dtype_kind_of(&arr) == Some('c') {
+        return delegate();
     }
     // 2-D input: np.diag(M, k) returns numpy's read-only, strided VIEW of the
     // k-diagonal — O(1), shares memory with M — because the numpy function simply
@@ -86400,15 +86405,12 @@ fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     // owned. Delegate to numpy.diag for the exact view, dtype, writeable flag, and
     // aliasing — we cannot beat an O(1) stride trick by copying. (1-D input
     // CONSTRUCTS a matrix and is handled by the zero-copy diagflat path below.)
-    if let Ok(shape) = arr
-        .getattr(intern!(py, "shape"))
-        .and_then(|s| s.extract::<Vec<usize>>())
-        && shape.len() == 2
-    {
-        return Ok(numpy
-            .getattr(intern!(py, "diag"))?
-            .call1((arr, k))?
-            .unbind());
+    let ndim = arr
+        .getattr(intern!(py, "ndim"))
+        .and_then(|n| n.extract::<usize>())
+        .ok();
+    if ndim == Some(2) {
+        return delegate();
     }
     // 1-D input CONSTRUCTS an (n+|k|)×(n+|k|) matrix with v on the k-th diagonal —
     // identical to diagflat for a 1-D operand. The generic path below materializes
@@ -86417,21 +86419,11 @@ fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     // Route f64 1-D to the zero-copy diagflat construction (numpy.zeros lazy pages +
     // diagonal write), which is byte-identical (zeros + verbatim diagonal values).
     // 20x faster at n=2000 (33.5ms→~1.6ms).
-    if let Ok(shape) = arr
-        .getattr(intern!(py, "shape"))
-        .and_then(|s| s.extract::<Vec<usize>>())
-        && shape.len() == 1
-        && let Some(out) = try_zerocopy_f64_diagflat(py, &arr, k)?
-    {
+    if ndim == Some(1) && let Some(out) = try_zerocopy_f64_diagflat(py, &arr, k)? {
         return Ok(out);
     }
-    // Non-f64 1-D construct: the native path materialized the WHOLE n² output Vec
-    // (mostly zeros) then converted it across the bridge — ~573x slower for int8 at
-    // n=2000. numpy uses lazy calloc + writes only the n diagonal cells. Delegate.
-    Ok(numpy
-        .getattr(intern!(py, "diag"))?
-        .call1((arr, k))?
-        .unbind())
+    // Non-f64 1-D construct or non-1D/2D invalid input: delegate to numpy.diag.
+    delegate()
 }
 
 // Zero-copy np.diagflat(v, k) for a C-contiguous float64 ndarray: numpy flattens
@@ -86447,9 +86439,7 @@ fn try_zerocopy_f64_diagflat(
     v: &Bound<'_, PyAny>,
     k: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !v.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, v) {
+    if !v.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, v) {
         return Ok(None);
     }
     let Ok(buffer) = PyBuffer::<f64>::get(v) else {
@@ -86461,9 +86451,8 @@ fn try_zerocopy_f64_diagflat(
     let n = input.len();
     let abs_k = k.unsigned_abs() as usize;
     let s = n + abs_k;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let out = numpy.call_method(intern!(py, "zeros"), ((s, s),), Some(&kwargs))?;
+    let numpy = cached_numpy(py)?;
+    let out = numpy.call_method1(intern!(py, "zeros"), ((s, s), cached_float64_dtype(py)?))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -86487,30 +86476,23 @@ fn try_zerocopy_f64_diagflat(
 #[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diagflat(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let arr = numpy.call_method1(intern!(py, "asarray"), (v.bind(py),))?;
-    let dtype_kind = arr
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if dtype_kind == "c" {
-        return Ok(numpy
-            .getattr(intern!(py, "diagflat"))?
-            .call1((arr, k))?
-            .unbind());
-    }
+    let v_bound = v.bind(py);
     // Zero-copy diagonal write for C-contiguous f64 ndarrays; skips the cold
     // extract + full s*s build Vecs. Bit-identical; other dtypes fall through.
-    if let Some(result) = try_zerocopy_f64_diagflat(py, v.bind(py), k)? {
+    if let Some(result) = try_zerocopy_f64_diagflat(py, v_bound, k)? {
         return Ok(result);
     }
-    // Non-f64: the native path materialized the whole s² output then converted it
-    // across the bridge (~34x slower). numpy writes only the diagonal into lazy
-    // calloc memory. Delegate.
-    Ok(numpy
-        .getattr(intern!(py, "diagflat"))?
-        .call1((arr, k))?
-        .unbind())
+    let arr = if v_bound.is_exact_instance(cached_ndarray_type(py)?) {
+        v_bound.clone()
+    } else {
+        cached_numpy_asarray(py)?.call1((v_bound,))?
+    };
+    let diagflat_fn = cached_numpy_diagflat(py)?;
+    if k == 0 {
+        Ok(diagflat_fn.call1((&arr,))?.unbind())
+    } else {
+        Ok(diagflat_fn.call1((&arr, k))?.unbind())
+    }
 }
 
 #[pyfunction]
@@ -86527,11 +86509,13 @@ fn diagonal(
     // cost O(n^2) (it bridged the whole matrix) and diverged from numpy's
     // read-only-view semantics. Delegate to numpy.diagonal for the exact view,
     // dtype, writeable flag, and error surface.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "diagonal"))?
-        .call1((a.bind(py), offset, axis1, axis2))?
-        .unbind())
+    let diag_fn = cached_numpy_diagonal(py)?;
+    let a_bound = a.bind(py);
+    if offset == 0 && axis1 == 0 && axis2 == 1 {
+        Ok(diag_fn.call1((a_bound,))?.unbind())
+    } else {
+        Ok(diag_fn.call1((a_bound, offset, axis1, axis2))?.unbind())
+    }
 }
 
 // Zero-copy in-place np.fill_diagonal(a, val) for a 2-D float64 ndarray with a
@@ -86550,9 +86534,7 @@ fn try_zerocopy_f64_fill_diagonal(
     val: &Bound<'_, PyAny>,
     wrap: bool,
 ) -> PyResult<bool> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
+    if !a.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, a) {
         return Ok(false);
     }
     // Only a scalar float val keeps the fast path (array vals cycle along the
@@ -86589,41 +86571,24 @@ fn try_zerocopy_f64_fill_diagonal(
 fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> PyResult<Py<PyAny>> {
     let a = a.bind(py);
     require_numpy_ndarray(py, a, "fill_diagonal")?;
-
-    // Check for complex dtype and fallback to numpy
-    let dtype_kind = a
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if dtype_kind == "c" {
-        let numpy = cached_numpy(py)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "wrap"), wrap)?;
-        numpy
-            .getattr(intern!(py, "fill_diagonal"))?
-            .call((a, val.bind(py)), Some(&kwargs))?;
-        return Ok(py.None());
-    }
+    let b_val = val.bind(py);
 
     // Zero-copy in-place write for the common case (2-D f64 matrix + scalar val);
     // touches only the diagonal slots of a's own buffer, skipping the full-matrix
     // extract and copy-back. Bit-identical; array vals, non-2-D, wrapping tall
     // matrices, and other dtypes fall through.
-    if try_zerocopy_f64_fill_diagonal(py, a, val.bind(py), wrap)? {
+    if try_zerocopy_f64_fill_diagonal(py, a, b_val, wrap)? {
         return Ok(py.None());
     }
 
-    // Residual (non-f64 dtype, array val, non-2-D, wrapping tall matrix): the old
-    // path extracted the ENTIRE matrix to an f64 Vec and copied it back, even though
-    // fill_diagonal only writes the n diagonal slots — ~60-611x slower than numpy for
-    // a 2000x2000 int8. numpy writes only the diagonal in place (and owns the exact
-    // dtype-cast surface), so delegate.
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "wrap"), wrap)?;
-    numpy
-        .getattr(intern!(py, "fill_diagonal"))?
-        .call((a, val.bind(py)), Some(&kwargs))?;
+    let fill_fn = cached_numpy_fill_diagonal(py)?;
+    if !wrap {
+        fill_fn.call1((a, b_val))?;
+    } else {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "wrap"), wrap)?;
+        fill_fn.call((a, b_val), Some(&kwargs))?;
+    }
     Ok(py.None())
 }
 
@@ -86635,9 +86600,7 @@ fn ix_(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
     // materialized via UFuncArray::ix_, scaling O(N) and hitting 2530x at N=100K
     // (BlackThrush 2026-06-22). Delegate to numpy.ix_ for parity. (composite-op-routes-
     // to-slow-native-path fix, cf matrix_power / einsum-diagonal / true_divide.)
-    Ok(py
-        .import("numpy")?
-        .getattr(intern!(py, "ix_"))?
+    Ok(cached_numpy_ix_(py)?
         .call(args, None)?
         .unbind())
 }
