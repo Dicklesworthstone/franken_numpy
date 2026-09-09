@@ -2843,36 +2843,28 @@ impl PyRandomGenerator {
                 .extract::<bool>()?
         {
             let dtype = bound.getattr(intern!(py, "dtype"))?;
-            let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+            let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
             let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-            if matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+            if matches!(kind, 'i' | 'u' | 'f' | 'b') {
                 let handled = match itemsize {
                     1 => {
-                        let v = bound.call_method1(
-                            intern!(py, "view"),
-                            (numpy.getattr(intern!(py, "uint8"))?,),
-                        )?;
+                        let v =
+                            bound.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
                         shuffle_buffer_inplace::<u8>(&mut self.inner, py, &v)?
                     }
                     2 => {
-                        let v = bound.call_method1(
-                            intern!(py, "view"),
-                            (numpy.getattr(intern!(py, "uint16"))?,),
-                        )?;
+                        let v =
+                            bound.call_method1(intern!(py, "view"), (cached_uint16_type(py)?,))?;
                         shuffle_buffer_inplace::<u16>(&mut self.inner, py, &v)?
                     }
                     4 => {
-                        let v = bound.call_method1(
-                            intern!(py, "view"),
-                            (numpy.getattr(intern!(py, "uint32"))?,),
-                        )?;
+                        let v =
+                            bound.call_method1(intern!(py, "view"), (cached_uint32_type(py)?,))?;
                         shuffle_buffer_inplace::<u32>(&mut self.inner, py, &v)?
                     }
                     8 => {
-                        let v = bound.call_method1(
-                            intern!(py, "view"),
-                            (numpy.getattr(intern!(py, "uint64"))?,),
-                        )?;
+                        let v =
+                            bound.call_method1(intern!(py, "view"), (cached_uint64_type(py)?,))?;
                         shuffle_buffer_inplace::<u64>(&mut self.inner, py, &v)?
                     }
                     _ => false,
@@ -11389,10 +11381,7 @@ fn try_zerocopy_f16_binary_widen(
             return Ok(None);
         }
     }
-    let result = out_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let result = out_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(result.unbind()))
 }
 
@@ -11571,10 +11560,7 @@ fn try_zerocopy_f16_nan_to_num(
                 }
             });
     }
-    let result = out_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let result = out_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(result.unbind()))
 }
 
@@ -11657,10 +11643,7 @@ fn try_zerocopy_f16_clip(
                 }
             });
     }
-    let result = out_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let result = out_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(result.unbind()))
 }
 
@@ -11839,10 +11822,7 @@ fn try_zerocopy_f16_minmax_flat(
     // Build a numpy float16 scalar from the exact f16 bits (uint16 0-d -> view float16 -> scalar).
     let numpy = cached_numpy(py)?;
     let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(scalar.unbind()))
 }
 
@@ -11945,10 +11925,7 @@ fn try_zerocopy_f16_minmax_axis(
     out_shape.extend_from_slice(&shape[k + 1..]);
     let numpy = cached_numpy(py)?;
     let flat_u16 = numpy_array_from_slice(py, numpy, &ext, "uint16")?;
-    let flat = flat_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     finish_preshaped_output(reshaped, &out_shape).map(Some)
@@ -12020,10 +11997,7 @@ fn try_zerocopy_f16_ptp_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     let bits = f16::from_f32(mx - mn).to_bits();
     let numpy = cached_numpy(py)?;
     let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(scalar.unbind()))
 }
 
@@ -12121,10 +12095,7 @@ fn try_zerocopy_f16_ptp_axis(
     out_shape.extend_from_slice(&shape[k + 1..]);
     let numpy = cached_numpy(py)?;
     let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
-    let flat = flat_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     finish_preshaped_output(reshaped, &out_shape).map(Some)
@@ -12205,10 +12176,7 @@ fn try_zerocopy_f16_nanextreme_flat(
     let bits = f16::from_f32(ext).to_bits();
     let numpy = cached_numpy(py)?;
     let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
-    let scalar = scalar_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(scalar.unbind()))
 }
 
@@ -12316,10 +12284,7 @@ fn try_zerocopy_f16_nanextreme_axis(
     out_shape.extend_from_slice(&shape[k + 1..]);
     let numpy = cached_numpy(py)?;
     let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
-    let flat = flat_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     finish_preshaped_output(reshaped, &out_shape).map(Some)
@@ -12412,8 +12377,7 @@ fn try_zerocopy_f16_compare(
                 }
             });
     }
-    let result =
-        out_u8.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
+    let result = out_u8.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
     Ok(Some(result.unbind()))
 }
 
@@ -12482,8 +12446,7 @@ where
                 }
             });
     }
-    let result =
-        out_u8.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
+    let result = out_u8.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
     Ok(Some(result.unbind()))
 }
 
@@ -13384,7 +13347,6 @@ fn try_native_timedelta_addsub(
     }
 }
 
-
 fn try_native_timedelta_floordiv(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -14122,10 +14084,7 @@ fn try_zerocopy_f16_unary_widen(
                 }
             });
     }
-    let result = out_u16.call_method1(
-        intern!(py, "view"),
-        (cached_float16_type(py)?,),
-    )?;
+    let result = out_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(result.unbind()))
 }
 
@@ -14299,7 +14258,10 @@ fn try_zerocopy_f64_i32_ldexp(
         numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (shape_tuple, cached_float64_type(py)?))?
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (shape_tuple, cached_float64_type(py)?),
+        )?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -14371,7 +14333,10 @@ fn try_zerocopy_f32_i32_ldexp(
         numpy.call_method1(intern!(py, "empty"), (n, cached_float32_type(py)?))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (shape_tuple, cached_float32_type(py)?))?
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (shape_tuple, cached_float32_type(py)?),
+        )?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -14463,7 +14428,10 @@ fn try_zerocopy_f16_i32_ldexp(
         numpy.call_method1(intern!(py, "empty"), (n, cached_float16_type(py)?))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (shape_tuple, cached_float16_type(py)?))?
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (shape_tuple, cached_float16_type(py)?),
+        )?
     };
     {
         let out16 = flat.call_method1(intern!(py, "view"), (u16t,))?;
@@ -14543,7 +14511,10 @@ fn try_zerocopy_f64_clip(
         numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (shape_tuple, cached_float64_type(py)?))?
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (shape_tuple, cached_float64_type(py)?),
+        )?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -14635,7 +14606,10 @@ fn try_zerocopy_f32_clip(
         numpy.call_method1(intern!(py, "empty"), (n, cached_float32_type(py)?))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (shape_tuple, cached_float32_type(py)?))?
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (shape_tuple, cached_float32_type(py)?),
+        )?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -14901,7 +14875,10 @@ fn try_zerocopy_f64_nan_to_num(
         numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, cached_float64_type(py)?))?
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (&output_shape, cached_float64_type(py)?),
+        )?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -15015,7 +14992,10 @@ fn try_zerocopy_f32_nan_to_num(
         numpy.call_method1(intern!(py, "empty"), (*only, cached_float32_type(py)?))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, cached_float32_type(py)?))?
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (&output_shape, cached_float32_type(py)?),
+        )?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -15583,10 +15563,8 @@ fn try_zerocopy_int_where(
             };
             match where_typed::<u16>(py, numpy, condition, &x_u, &y_u, false)? {
                 Some((flat_u16, shape)) => {
-                    let flat_f = flat_u16.call_method1(
-                        intern!(py, "view"),
-                        (cached_float16_type(py)?,),
-                    )?;
+                    let flat_f =
+                        flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
                     Some((flat_f, shape))
                 }
                 None => None,
@@ -17265,31 +17243,19 @@ fn try_zerocopy_any_compact(
         ($C:ty, $cview:expr, $pred:expr) => {
             match itemsize {
                 1 => {
-                    let v = arr.call_method1(
-                        intern!(py, "view"),
-                        (numpy.getattr(intern!(py, "uint8"))?,),
-                    )?;
+                    let v = arr.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
                     compact_typed::<$C, u8>(py, &numpy, &$cview, &v, "uint8", $pred)?
                 }
                 2 => {
-                    let v = arr.call_method1(
-                        intern!(py, "view"),
-                        (numpy.getattr(intern!(py, "uint16"))?,),
-                    )?;
+                    let v = arr.call_method1(intern!(py, "view"), (cached_uint16_type(py)?,))?;
                     compact_typed::<$C, u16>(py, &numpy, &$cview, &v, "uint16", $pred)?
                 }
                 4 => {
-                    let v = arr.call_method1(
-                        intern!(py, "view"),
-                        (numpy.getattr(intern!(py, "uint32"))?,),
-                    )?;
+                    let v = arr.call_method1(intern!(py, "view"), (cached_uint32_type(py)?,))?;
                     compact_typed::<$C, u32>(py, &numpy, &$cview, &v, "uint32", $pred)?
                 }
                 8 => {
-                    let v = arr.call_method1(
-                        intern!(py, "view"),
-                        (numpy.getattr(intern!(py, "uint64"))?,),
-                    )?;
+                    let v = arr.call_method1(intern!(py, "view"), (cached_uint64_type(py)?,))?;
                     compact_typed::<$C, u64>(py, &numpy, &$cview, &v, "uint64", $pred)?
                 }
                 _ => return Ok(None),
@@ -17298,29 +17264,19 @@ fn try_zerocopy_any_compact(
     }
     let compacted = match (c_kind.as_str(), c_itemsize) {
         ("b", _) | ("i" | "u", 1) => {
-            let cv =
-                cond.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+            let cv = cond.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
             with_arr!(u8, cv, |v: u8| v != 0)
         }
         ("i" | "u", 2) => {
-            let cv = cond.call_method1(
-                intern!(py, "view"),
-                (numpy.getattr(intern!(py, "uint16"))?,),
-            )?;
+            let cv = cond.call_method1(intern!(py, "view"), (cached_uint16_type(py)?,))?;
             with_arr!(u16, cv, |v: u16| v != 0)
         }
         ("i" | "u", 4) => {
-            let cv = cond.call_method1(
-                intern!(py, "view"),
-                (numpy.getattr(intern!(py, "uint32"))?,),
-            )?;
+            let cv = cond.call_method1(intern!(py, "view"), (cached_uint32_type(py)?,))?;
             with_arr!(u32, cv, |v: u32| v != 0)
         }
         ("i" | "u", 8) => {
-            let cv = cond.call_method1(
-                intern!(py, "view"),
-                (numpy.getattr(intern!(py, "uint64"))?,),
-            )?;
+            let cv = cond.call_method1(intern!(py, "view"), (cached_uint64_type(py)?,))?;
             with_arr!(u64, cv, |v: u64| v != 0)
         }
         ("f", 8) => with_arr!(f64, cond.clone(), |v: f64| v != 0.0),
@@ -19798,14 +19754,10 @@ fn try_zerocopy_f16_cumulative_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    if dtype_kind_of(a) != Some('f') {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2 {
-        return Ok(None);
-    }
     if !a
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
@@ -19830,8 +19782,8 @@ fn try_zerocopy_f16_cumulative_axis(
     let total: usize = shape.iter().product();
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(a16) = a.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(in_buffer) = PyBuffer::<u16>::get(&a16) else {
@@ -19844,8 +19796,11 @@ fn try_zerocopy_f16_cumulative_axis(
         return Ok(None);
     }
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method1(intern!(py, "empty"), (shape_tuple, &dtype))?;
-    let oview = out.call_method1(intern!(py, "view"), (&u16t,))?;
+    let out = numpy.call_method1(
+        intern!(py, "empty"),
+        (shape_tuple, cached_float16_type(py)?),
+    )?;
+    let oview = out.call_method1(intern!(py, "view"), (u16t,))?;
     let Ok(out_buffer) = PyBuffer::<u16>::get(&oview) else {
         return Ok(None);
     };
@@ -21134,10 +21089,7 @@ fn try_zerocopy_f16_diff_1d(
     }
     Ok(Some(
         output_u16
-            .call_method1(
-                intern!(py, "view"),
-                (cached_float16_type(py)?,),
-            )?
+            .call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?
             .unbind(),
     ))
 }
@@ -35345,13 +35297,10 @@ fn try_zerocopy_f32_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
 fn try_zerocopy_f16_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     const FREXP_PARALLEL_MIN: usize = 1 << 19;
     let numpy = cached_numpy(py)?;
-    if !x.is_exact_instance(cached_ndarray_type(py)?) {
+    if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
     }
-    let dt = x.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(x)? {
         return Ok(None);
     }
     if !x
@@ -35366,8 +35315,8 @@ fn try_zerocopy_f16_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
         return Ok(None);
     }
     let n: usize = shape.iter().product();
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(x16) = x.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(x16) = x.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(in_buffer) = PyBuffer::<u16>::get(&x16) else {
@@ -35379,14 +35328,10 @@ fn try_zerocopy_f16_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
     if input.len() != n {
         return Ok(None);
     }
-    let mkw = PyDict::new(py);
-    mkw.set_item(intern!(py, "dtype"), "float16")?;
-    let mantissa = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&mkw))?;
-    let ekw = PyDict::new(py);
-    ekw.set_item(intern!(py, "dtype"), "int32")?;
-    let exponent = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&ekw))?;
+    let mantissa = numpy.call_method1(intern!(py, "empty"), (&shape, cached_float16_type(py)?))?;
+    let exponent = numpy.call_method1(intern!(py, "empty"), (&shape, "int32"))?;
     if n > 0 {
-        let m16 = mantissa.call_method1(intern!(py, "view"), (&u16t,))?;
+        let m16 = mantissa.call_method1(intern!(py, "view"), (u16t,))?;
         let (Ok(m_buf), Ok(e_buf)) = (PyBuffer::<u16>::get(&m16), PyBuffer::<i32>::get(&exponent))
         else {
             return Ok(None);
@@ -35649,14 +35594,10 @@ fn try_zerocopy_f32_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
 // parallel (f16 is not a PyBuffer Element).
 fn try_zerocopy_f16_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     const F16_MODF_PARALLEL_MIN: usize = 1 << 20;
-    let numpy = cached_numpy(py)?;
-    if !x.is_exact_instance(cached_ndarray_type(py)?) {
+    if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
     }
-    let dt = x.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(x)? {
         return Ok(None);
     }
     if x.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0
@@ -35672,8 +35613,8 @@ fn try_zerocopy_f16_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     if n < F16_MODF_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(x16) = x.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(x16) = x.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(x_buf) = PyBuffer::<u16>::get(&x16) else {
@@ -35691,13 +35632,13 @@ fn try_zerocopy_f16_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     if src.par_iter().any(|&b| (b & 0x7c00) == 0x7c00) {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float16")?;
-    let frac_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
-    let int_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
+    let numpy = cached_numpy(py)?;
+    let f16t = cached_float16_type(py)?;
+    let frac_arr = numpy.call_method1(intern!(py, "empty"), (&shape, f16t))?;
+    let int_arr = numpy.call_method1(intern!(py, "empty"), (&shape, f16t))?;
     {
-        let frac16 = frac_arr.call_method1(intern!(py, "view"), (&u16t,))?;
-        let int16 = int_arr.call_method1(intern!(py, "view"), (&u16t,))?;
+        let frac16 = frac_arr.call_method1(intern!(py, "view"), (u16t,))?;
+        let int16 = int_arr.call_method1(intern!(py, "view"), (u16t,))?;
         let (Ok(frac_buf), Ok(int_buf)) =
             (PyBuffer::<u16>::get(&frac16), PyBuffer::<u16>::get(&int16))
         else {
@@ -39467,10 +39408,7 @@ fn try_zerocopy_histogram_f16(
         return Ok(None);
     }
 
-    let bits_view = a.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "uint16"))?,),
-    )?;
+    let bits_view = a.call_method1(intern!(py, "view"), (cached_uint16_type(py)?,))?;
     let Ok(bits_buffer) = PyBuffer::<u16>::get(&bits_view) else {
         return Ok(None);
     };
@@ -39610,10 +39548,7 @@ fn try_zerocopy_histogram_f16(
         .map(|value| value.to_bits())
         .collect::<Vec<_>>();
     let edges_u16 = numpy_array_from_slice(py, numpy, &edge_bits, "uint16")?;
-    let edges = edges_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let edges = edges_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(
         PyTuple::new(py, [counts.as_any(), edges.as_any()])?
             .into_any()
@@ -42609,11 +42544,11 @@ fn try_zerocopy_any_put(
     }
     let numpy = cached_numpy(py)?;
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = a_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
-    if kind != "i" && kind != "u" && kind != "f" {
+    if kind != 'i' && kind != 'u' && kind != 'f' {
         return Ok(None);
     }
     // Normalize indices to a contiguous int64 array; only integer index dtypes
@@ -42622,12 +42557,12 @@ fn try_zerocopy_any_put(
     let ind_kind = ind_arr
         .getattr(intern!(py, "dtype"))?
         .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if ind_kind != "i" && ind_kind != "u" {
+        .extract::<char>()?;
+    if ind_kind != 'i' && ind_kind != 'u' {
         return Ok(None);
     }
     let kw = PyDict::new(py);
-    kw.set_item(intern!(py, "dtype"), "int64")?;
+    kw.set_item(intern!(py, "dtype"), cached_int64_type(py)?)?;
     let ind64 = numpy
         .getattr(intern!(py, "ascontiguousarray"))?
         .call((ind_arr,), Some(&kw))?;
@@ -42652,45 +42587,45 @@ fn try_zerocopy_any_put(
             return Ok(Some(()));
         }
     };
-    match (kind.as_str(), itemsize) {
-        ("i", 8) => put_typed::<i64>(py, a, &ind64, &v_cast),
-        ("i", 4) => put_typed::<i32>(py, a, &ind64, &v_cast),
-        ("i", 2) => put_typed::<i16>(py, a, &ind64, &v_cast),
-        ("i", 1) => put_typed::<i8>(py, a, &ind64, &v_cast),
-        ("u", 8) => put_typed::<u64>(py, a, &ind64, &v_cast),
-        ("u", 4) => put_typed::<u32>(py, a, &ind64, &v_cast),
-        ("u", 2) => put_typed::<u16>(py, a, &ind64, &v_cast),
-        ("u", 1) => put_typed::<u8>(py, a, &ind64, &v_cast),
+    match (kind, itemsize) {
+        ('i', 8) => put_typed::<i64>(py, a, &ind64, &v_cast),
+        ('i', 4) => put_typed::<i32>(py, a, &ind64, &v_cast),
+        ('i', 2) => put_typed::<i16>(py, a, &ind64, &v_cast),
+        ('i', 1) => put_typed::<i8>(py, a, &ind64, &v_cast),
+        ('u', 8) => put_typed::<u64>(py, a, &ind64, &v_cast),
+        ('u', 4) => put_typed::<u32>(py, a, &ind64, &v_cast),
+        ('u', 2) => put_typed::<u16>(py, a, &ind64, &v_cast),
+        ('u', 1) => put_typed::<u8>(py, a, &ind64, &v_cast),
         // Float scatter is value-agnostic: view both `a` (aliasing its own buffer,
         // so the write is in-place) and the dtype-cast values as the same-width
         // unsigned integer and reuse the u16/u32/u64 put_typed instantiations — no
         // new monomorphizations that could perturb the already-fast integer path.
         // A non-contiguous `a` (or values) makes .view raise; defer to numpy then.
-        ("f", 8) => {
-            let uview = numpy.getattr(intern!(py, "uint64"))?;
+        ('f', 8) => {
+            let uview = cached_uint64_type(py)?;
             let (Ok(a_u), Ok(v_u)) = (
-                a.call_method1(intern!(py, "view"), (&uview,)),
-                v_cast.call_method1(intern!(py, "view"), (&uview,)),
+                a.call_method1(intern!(py, "view"), (uview,)),
+                v_cast.call_method1(intern!(py, "view"), (uview,)),
             ) else {
                 return Ok(None);
             };
             put_typed::<u64>(py, &a_u, &ind64, &v_u)
         }
-        ("f", 4) => {
-            let uview = numpy.getattr(intern!(py, "uint32"))?;
+        ('f', 4) => {
+            let uview = cached_uint32_type(py)?;
             let (Ok(a_u), Ok(v_u)) = (
-                a.call_method1(intern!(py, "view"), (&uview,)),
-                v_cast.call_method1(intern!(py, "view"), (&uview,)),
+                a.call_method1(intern!(py, "view"), (uview,)),
+                v_cast.call_method1(intern!(py, "view"), (uview,)),
             ) else {
                 return Ok(None);
             };
             put_typed::<u32>(py, &a_u, &ind64, &v_u)
         }
-        ("f", 2) => {
-            let uview = numpy.getattr(intern!(py, "uint16"))?;
+        ('f', 2) => {
+            let uview = cached_uint16_type(py)?;
             let (Ok(a_u), Ok(v_u)) = (
-                a.call_method1(intern!(py, "view"), (&uview,)),
-                v_cast.call_method1(intern!(py, "view"), (&uview,)),
+                a.call_method1(intern!(py, "view"), (uview,)),
+                v_cast.call_method1(intern!(py, "view"), (uview,)),
             ) else {
                 return Ok(None);
             };
@@ -47412,14 +47347,10 @@ fn try_zerocopy_f16_nansum_flat(
     // parallel path (no NaN pre-scan needed) wins from ~130K up. Measured crossover ~1<<17.
     const F16_NANSUM_PARALLEL_MIN: usize = 1 << 17;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(py)?.clone();
-    if !x.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
     }
-    let dt = x.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(x)? {
         return Ok(None);
     }
     if !x
@@ -47434,8 +47365,8 @@ fn try_zerocopy_f16_nansum_flat(
     if n < F16_NANSUM_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(x16) = x.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(x16) = x.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(x_buf) = PyBuffer::<u16>::get(&x16) else {
@@ -47448,13 +47379,8 @@ fn try_zerocopy_f16_nansum_flat(
     let data: &[u16] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<u16>(), n) };
     let total = par_pairwise_nansum_f16(data, 0, n);
     let bits = f16::from_f32(total).to_bits();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
-    let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
-    let scalar = scalar_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
+    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(scalar.unbind()))
 }
 
@@ -47471,14 +47397,10 @@ fn try_zerocopy_f16_nanmean_flat(
     // its fixed overhead is larger; measured crossover ~1<<19 (262K is 1.04x, 1M is 0.58x win).
     const F16_NANMEAN_PARALLEL_MIN: usize = 1 << 19;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(py)?.clone();
-    if !x.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
     }
-    let dt = x.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(x)? {
         return Ok(None);
     }
     if !x
@@ -47493,8 +47415,8 @@ fn try_zerocopy_f16_nanmean_flat(
     if n < F16_NANMEAN_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(x16) = x.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(x16) = x.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(x_buf) = PyBuffer::<u16>::get(&x16) else {
@@ -47519,13 +47441,8 @@ fn try_zerocopy_f16_nanmean_flat(
     let nansum_f16 = f16::from_f32(par_pairwise_nansum_f16(data, 0, n));
     let mean_f32 = nansum_f16.to_f32() / (count as f32);
     let bits = f16::from_f32(mean_f32).to_bits();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
-    let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
-    let scalar = scalar_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
+    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(scalar.unbind()))
 }
 
@@ -47549,13 +47466,10 @@ fn try_zerocopy_f16_sum_lastaxis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
     if !a
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
@@ -47582,8 +47496,8 @@ fn try_zerocopy_f16_sum_lastaxis(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(a16) = a.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(in_buffer) = PyBuffer::<u16>::get(&a16) else {
@@ -47620,10 +47534,7 @@ fn try_zerocopy_f16_sum_lastaxis(
         out_shape.push(1);
     }
     let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
-    let flat = flat_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     Ok(Some(reshaped.unbind()))
@@ -47645,14 +47556,14 @@ fn try_zerocopy_f16_average_lastaxis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-        || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
-    {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    if !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let numpy = cached_numpy(py)?;
     if !a
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
@@ -47694,10 +47605,8 @@ fn try_zerocopy_f16_average_lastaxis(
         return Ok(None);
     }
 
-    let Ok(raw_u16) = a.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "uint16"))?,),
-    ) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(raw_u16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(buffer) = PyBuffer::<u16>::get(&raw_u16) else {
@@ -47730,10 +47639,7 @@ fn try_zerocopy_f16_average_lastaxis(
         });
 
     let raw_output = numpy_array_from_slice(py, numpy, &output_bits, "uint16")?;
-    let output = raw_output.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let output = raw_output.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
     Ok(Some(
         output
@@ -47760,13 +47666,10 @@ fn try_zerocopy_f16_nanmean_lastaxis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
     if !a
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
@@ -47793,8 +47696,8 @@ fn try_zerocopy_f16_nanmean_lastaxis(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(a16) = a.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(in_buffer) = PyBuffer::<u16>::get(&a16) else {
@@ -47832,10 +47735,7 @@ fn try_zerocopy_f16_nanmean_lastaxis(
         out_shape.push(1);
     }
     let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
-    let flat = flat_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     Ok(Some(reshaped.unbind()))
@@ -47863,13 +47763,10 @@ fn try_zerocopy_f16_sum_nonlast_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
     if !a
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
@@ -47898,8 +47795,8 @@ fn try_zerocopy_f16_sum_nonlast_axis(
     if total < F16_NANSUM_NONLAST_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(a16) = a.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(in_buffer) = PyBuffer::<u16>::get(&a16) else {
@@ -47939,10 +47836,7 @@ fn try_zerocopy_f16_sum_nonlast_axis(
     }
     out_shape.extend_from_slice(&shape[k + 1..]);
     let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
-    let flat = flat_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     Ok(Some(reshaped.unbind()))
@@ -47966,13 +47860,10 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
     if !a
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
@@ -48001,8 +47892,8 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
     if total < F16_NANMEAN_NONLAST_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(a16) = a.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(in_buffer) = PyBuffer::<u16>::get(&a16) else {
@@ -48048,10 +47939,7 @@ fn try_zerocopy_f16_nanmean_nonlast_axis(
     }
     out_shape.extend_from_slice(&shape[k + 1..]);
     let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
-    let flat = flat_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     Ok(Some(reshaped.unbind()))
@@ -48080,13 +47968,10 @@ fn try_zerocopy_f16_nanvar_nonlast_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
     if !a
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
@@ -48115,8 +48000,8 @@ fn try_zerocopy_f16_nanvar_nonlast_axis(
     if total < F16_NANVAR_NONLAST_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(a16) = a.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(in_buffer) = PyBuffer::<u16>::get(&a16) else {
@@ -48183,10 +48068,7 @@ fn try_zerocopy_f16_nanvar_nonlast_axis(
     }
     out_shape.extend_from_slice(&shape[k + 1..]);
     let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
-    let flat = flat_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     Ok(Some(reshaped.unbind()))
@@ -48215,13 +48097,10 @@ fn try_zerocopy_f16_nanvar_lastaxis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
     if !a
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
@@ -48248,8 +48127,8 @@ fn try_zerocopy_f16_nanvar_lastaxis(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(a16) = a.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(in_buffer) = PyBuffer::<u16>::get(&a16) else {
@@ -48313,10 +48192,7 @@ fn try_zerocopy_f16_nanvar_lastaxis(
         out_shape.push(1);
     }
     let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
-    let flat = flat_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     Ok(Some(reshaped.unbind()))
@@ -48332,14 +48208,10 @@ fn try_zerocopy_f16_sum_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     // -> 0.26x at 16M). Gate at 1<<22 so only the DRAM-bound sizes take the fast path.
     const F16_SUM_PARALLEL_MIN: usize = 1 << 22;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
     }
-    let dt = x.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(x)? {
         return Ok(None);
     }
     if !x
@@ -48354,8 +48226,8 @@ fn try_zerocopy_f16_sum_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     if n < F16_SUM_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(x16) = x.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(x16) = x.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(x_buf) = PyBuffer::<u16>::get(&x16) else {
@@ -48377,13 +48249,8 @@ fn try_zerocopy_f16_sum_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     let total = par_pairwise_sum_f16(data, 0, n);
     let bits = f16::from_f32(total).to_bits();
     // Build a numpy float16 scalar from exact bits (uint16 0-d -> view float16), matching np.sum's dtype.
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
-    let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
-    let scalar = scalar_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
+    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(scalar.unbind()))
 }
 
@@ -48394,14 +48261,10 @@ fn try_zerocopy_f16_sum_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
 fn try_zerocopy_f16_mean_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     const F16_MEAN_PARALLEL_MIN: usize = 1 << 22;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
     }
-    let dt = x.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(x)? {
         return Ok(None);
     }
     if !x
@@ -48416,8 +48279,8 @@ fn try_zerocopy_f16_mean_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<
     if n < F16_MEAN_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(x16) = x.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(x16) = x.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(x_buf) = PyBuffer::<u16>::get(&x16) else {
@@ -48438,13 +48301,8 @@ fn try_zerocopy_f16_mean_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<
     let total = par_pairwise_sum_f16(data, 0, n);
     let mean_f32 = total / (n as f32); // numpy: f32_sum / float32(n), then narrow
     let bits = f16::from_f32(mean_f32).to_bits();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
-    let scalar_u16 = numpy.call_method(intern!(py, "array"), (bits,), Some(&kwargs))?;
-    let scalar = scalar_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let scalar_u16 = numpy.call_method1(intern!(py, "array"), (bits, u16t))?;
+    let scalar = scalar_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(scalar.unbind()))
 }
 
@@ -75526,10 +75384,10 @@ fn try_native_f16_isin(
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        let u16t = numpy.getattr(intern!(py, "uint16"))?;
+        let u16t = cached_uint16_type(py)?;
         if let (Ok(ve), Ok(vt)) = (
-            element.call_method1(intern!(py, "view"), (&u16t,)),
-            test.call_method1(intern!(py, "view"), (&u16t,)),
+            element.call_method1(intern!(py, "view"), (u16t,)),
+            test.call_method1(intern!(py, "view"), (u16t,)),
         ) && let (Ok(e_buf), Ok(t_buf)) = (PyBuffer::<u16>::get(&ve), PyBuffer::<u16>::get(&vt))
             && let (Some(e_in), Some(t_in)) = (e_buf.as_slice(py), t_buf.as_slice(py))
         {
@@ -77384,13 +77242,10 @@ fn try_native_f16_sort(
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN: usize = 1 << 17;
-    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+    if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
     let ndim = a.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
@@ -77418,10 +77273,8 @@ fn try_native_f16_sort(
     if n < MIN || shape[ndim - 1] < 2 || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let bits = a.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "uint16"))?,),
-    )?;
+    let u16t = cached_uint16_type(py)?;
+    let bits = a.call_method1(intern!(py, "view"), (u16t,))?;
     let Ok(buf) = PyBuffer::<u16>::get(&bits) else {
         return Ok(None);
     };
@@ -77440,17 +77293,13 @@ fn try_native_f16_sort(
     {
         return Ok(None);
     }
-    let widened = a.call_method1(
-        intern!(py, "astype"),
-        (numpy.getattr(intern!(py, "float32"))?,),
-    )?;
+    let f32t = cached_float32_type(py)?;
+    let widened = a.call_method1(intern!(py, "astype"), (f32t,))?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "axis"), -1)?;
     let sorted = numpy.call_method(intern!(py, "sort"), (widened,), Some(&kwargs))?;
-    let out = sorted.call_method1(
-        intern!(py, "astype"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let f16t = cached_float16_type(py)?;
+    let out = sorted.call_method1(intern!(py, "astype"), (f16t,))?;
     Ok(Some(out.unbind()))
 }
 
@@ -82645,8 +82494,8 @@ fn try_native_f16_multi_quantile_histogram(
         return Ok(None);
     }
 
-    let u16_dtype = numpy.getattr(intern!(py, "uint16"))?;
-    let bits_view = a.call_method1(intern!(py, "view"), (&u16_dtype,))?;
+    let u16_dtype = cached_uint16_type(py)?;
+    let bits_view = a.call_method1(intern!(py, "view"), (u16_dtype,))?;
     let bits_buffer = PyBuffer::<u16>::get(&bits_view)?;
     let Some(bits_cells) = bits_buffer.as_slice(py) else {
         return Ok(None);
@@ -94582,8 +94431,8 @@ fn try_zerocopy_lastaxis_argextreme(
         // float16 last-axis argextreme: numpy widens f16->f32 per lane (~80ms@16M). View the
         // array as uint16 and run lane_argextreme_f16 per contiguous lane (widening in-kernel).
         // Index-based -> bit-exact first-occurrence; any NaN lane defers the whole call.
-        let u16t = numpy.getattr(intern!(py, "uint16"))?;
-        let Ok(a16) = a.call_method1(intern!(py, "view"), (&u16t,)) else {
+        let u16t = cached_uint16_type(py)?;
+        let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
             return Ok(None);
         };
         let Ok(in_buffer) = PyBuffer::<u16>::get(&a16) else {
@@ -96396,10 +96245,10 @@ fn try_native_f16_matmul(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -96412,11 +96261,10 @@ fn try_native_f16_matmul(
     if a_in.len() != m * k || b_in.len() != k * n {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float16")?;
-    let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs))?;
+    let f16t = cached_float16_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), ((m, n), f16t))?;
     if m * n > 0 && k > 0 {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
@@ -96927,10 +96775,10 @@ fn try_native_f16_batched_matmul(
     let mut out_shape: Vec<usize> = a_shape[..nd - 2].to_vec();
     out_shape.push(m);
     out_shape.push(n);
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -96943,11 +96791,10 @@ fn try_native_f16_batched_matmul(
     if a_in.len() != batch * m * k || b_in.len() != batch * k * n {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float16")?;
-    let out = numpy.call_method(intern!(py, "empty"), (out_shape,), Some(&kwargs))?;
+    let f16t = cached_float16_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), (out_shape, f16t))?;
     if batch * m * n > 0 && k > 0 {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
@@ -97355,10 +97202,10 @@ fn try_native_f16_broadcast_matmul(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -97373,11 +97220,10 @@ fn try_native_f16_broadcast_matmul(
     if a_in.len() != a_len || b_in.len() != b_len {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float16")?;
-    let out = numpy.call_method(intern!(py, "empty"), (out_shape,), Some(&kwargs))?;
+    let f16t = cached_float16_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), (out_shape, f16t))?;
     if batch * m * n > 0 && k > 0 {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
@@ -97530,10 +97376,10 @@ fn try_native_f16_einsum_matmul(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -97546,11 +97392,10 @@ fn try_native_f16_einsum_matmul(
     if a_in.len() != m * k || b_in.len() != k * n {
         return Ok(None);
     }
-    let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
-    let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs_out))?;
+    let f16t = cached_float16_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), ((m, n), f16t))?;
     if m * n > 0 && k > 0 {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
@@ -97718,10 +97563,10 @@ fn try_native_f16_einsum_matmul_transposed(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -97734,11 +97579,10 @@ fn try_native_f16_einsum_matmul_transposed(
     if a_in.len() != m * k || b_in.len() != n * k {
         return Ok(None);
     }
-    let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
-    let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs_out))?;
+    let f16t = cached_float16_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), ((m, n), f16t))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
@@ -97938,10 +97782,10 @@ fn try_native_f16_einsum_matmul_gram(
     {
         return Ok(None);
     }
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
+    let u16t = cached_uint16_type(py)?;
     let (Ok(va), Ok(vb)) = (
-        x1.call_method1(intern!(py, "view"), (&u16t,)),
-        x2.call_method1(intern!(py, "view"), (&u16t,)),
+        x1.call_method1(intern!(py, "view"), (u16t,)),
+        x2.call_method1(intern!(py, "view"), (u16t,)),
     ) else {
         return Ok(None);
     };
@@ -97954,11 +97798,10 @@ fn try_native_f16_einsum_matmul_gram(
     if a_in.len() != k * m || b_in.len() != k * n {
         return Ok(None);
     }
-    let kwargs_out = PyDict::new(py);
-    kwargs_out.set_item(intern!(py, "dtype"), "float16")?;
-    let out = numpy.call_method(intern!(py, "empty"), ((m, n),), Some(&kwargs_out))?;
+    let f16t = cached_float16_type(py)?;
+    let out = numpy.call_method1(intern!(py, "empty"), ((m, n), f16t))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&u16t,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (u16t,))?;
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_view) else {
             return Ok(None);
         };
@@ -114486,11 +114329,7 @@ fn try_zerocopy_f16_around(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if !dtype_is_f16(a)? {
         return Ok(None);
     }
     if !a
@@ -114507,8 +114346,8 @@ fn try_zerocopy_f16_around(
     }
     let neg = decimals < 0;
     let scale = f16::from_f64(10_f64.powi(decimals.abs())).to_f32();
-    let u16t = numpy.getattr(intern!(py, "uint16"))?;
-    let Ok(a16) = a.call_method1(intern!(py, "view"), (&u16t,)) else {
+    let u16t = cached_uint16_type(py)?;
+    let Ok(a16) = a.call_method1(intern!(py, "view"), (u16t,)) else {
         return Ok(None);
     };
     let Ok(a_buf) = PyBuffer::<u16>::get(&a16) else {
@@ -114517,9 +114356,8 @@ fn try_zerocopy_f16_around(
     let Some(a_in) = a_buf.as_slice(py) else {
         return Ok(None);
     };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
-    let out_u16 = numpy.call_method(intern!(py, "empty"), (shape,), Some(&kwargs))?;
+    let numpy = cached_numpy(py)?;
+    let out_u16 = numpy.call_method1(intern!(py, "empty"), (shape, u16t))?;
     let hazard = std::sync::atomic::AtomicBool::new(false);
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
@@ -114579,10 +114417,7 @@ fn try_zerocopy_f16_around(
         // Defer the whole call: numpy re-rounds and emits its own warnings.
         return Ok(None);
     }
-    let result = out_u16.call_method1(
-        intern!(py, "view"),
-        (numpy.getattr(intern!(py, "float16"))?,),
-    )?;
+    let result = out_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
     Ok(Some(result.unbind()))
 }
 
