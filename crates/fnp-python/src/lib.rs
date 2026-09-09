@@ -19827,17 +19827,8 @@ fn try_zerocopy_int_cumsum_axis(
     let add_u64 = |x: u64, y: u64| x.wrapping_add(y);
     // bool -> int64 accumulator (uint8 view of the 0/1 bytes; see try_zerocopy_int_cumsum).
     if kind == 'b' {
-        let viewed =
-            a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-        cumsum_axis_typed::<u8, i64, _, _>(
-            py,
-            numpy,
-            &viewed,
-            axis,
-            "int64",
-            |v| v as i64,
-            add_i64,
-        )
+        let viewed = a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
+        cumsum_axis_typed::<u8, i64, _, _>(py, numpy, &viewed, axis, "int64", |v| v as i64, add_i64)
     } else {
         match (kind, itemsize) {
             ('i', 1) => cumsum_axis_typed::<i8, i64, _, _>(
@@ -20246,8 +20237,7 @@ fn try_zerocopy_int_cumprod(
     // bytes through a zero-copy uint8 view. Was falling through to the f64-bridge
     // extract path (~15x slower than numpy at 4M).
     if kind == 'b' {
-        let viewed =
-            a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
+        let viewed = a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
         return cumsum_typed::<u8, i64, _, _>(
             py,
             numpy,
@@ -20308,17 +20298,8 @@ fn try_zerocopy_int_cumprod_axis(
     let mul_u64 = |x: u64, y: u64| x.wrapping_mul(y);
     // bool -> int64 accumulator (uint8 view of the 0/1 bytes; see try_zerocopy_int_cumprod).
     if kind == 'b' {
-        let viewed =
-            a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-        cumsum_axis_typed::<u8, i64, _, _>(
-            py,
-            numpy,
-            &viewed,
-            axis,
-            "int64",
-            |v| v as i64,
-            mul_i64,
-        )
+        let viewed = a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
+        cumsum_axis_typed::<u8, i64, _, _>(py, numpy, &viewed, axis, "int64", |v| v as i64, mul_i64)
     } else {
         match (kind, itemsize) {
             ('i', 1) => cumsum_axis_typed::<i8, i64, _, _>(
