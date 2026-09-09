@@ -9342,6 +9342,41 @@ impl UFuncArray {
                 }
             };
         }
+        if self.dtype == DType::F32 {
+            return match axis {
+                None => {
+                    let mut acc = 0.0f32;
+                    let values: Vec<f64> = self
+                        .values
+                        .iter()
+                        .map(|&v| {
+                            acc += v as f32;
+                            acc as f64
+                        })
+                        .collect();
+                    Ok(Self {
+                        shape: vec![values.len()],
+                        values,
+                        dtype: out_dtype,
+                        integer_sidecar: None,
+                    })
+                }
+                Some(axis) => {
+                    let axis = normalize_axis(axis, self.shape.len())?;
+                    let values_f32: Vec<f32> = self.values.iter().map(|&v| v as f32).collect();
+                    let out_f32 =
+                        cumulate_axis_f32(&values_f32, &self.shape, axis, 0.0f32, |acc, v| {
+                            acc + v
+                        })?;
+                    Ok(Self {
+                        shape: self.shape.clone(),
+                        values: out_f32.into_iter().map(|v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: None,
+                    })
+                }
+            };
+        }
         match axis {
             None => {
                 // Flatten and cumsum
@@ -9441,6 +9476,41 @@ impl UFuncArray {
                         values: out_sidecar.iter().map(|&v| v as f64).collect(),
                         dtype: out_dtype,
                         integer_sidecar: Some(IntegerSidecar::U64(out_sidecar)),
+                    })
+                }
+            };
+        }
+        if self.dtype == DType::F32 {
+            return match axis {
+                None => {
+                    let mut acc = 1.0f32;
+                    let values: Vec<f64> = self
+                        .values
+                        .iter()
+                        .map(|&v| {
+                            acc *= v as f32;
+                            acc as f64
+                        })
+                        .collect();
+                    Ok(Self {
+                        shape: vec![values.len()],
+                        values,
+                        dtype: out_dtype,
+                        integer_sidecar: None,
+                    })
+                }
+                Some(axis) => {
+                    let axis = normalize_axis(axis, self.shape.len())?;
+                    let values_f32: Vec<f32> = self.values.iter().map(|&v| v as f32).collect();
+                    let out_f32 =
+                        cumulate_axis_f32(&values_f32, &self.shape, axis, 1.0f32, |acc, v| {
+                            acc * v
+                        })?;
+                    Ok(Self {
+                        shape: self.shape.clone(),
+                        values: out_f32.into_iter().map(|v| v as f64).collect(),
+                        dtype: out_dtype,
+                        integer_sidecar: None,
                     })
                 }
             };
@@ -33859,6 +33929,77 @@ fn cumulate_axis(
     Ok(out)
 }
 
+fn cumulate_axis_f32(
+    values: &[f32],
+    shape: &[usize],
+    axis: usize,
+    identity: f32,
+    fold: impl Fn(f32, f32) -> f32 + Sync,
+) -> Result<Vec<f32>, UFuncError> {
+    debug_assert!(axis < shape.len());
+    let total = element_count(shape).map_err(UFuncError::Shape)?;
+    let axis_len = shape[axis];
+    if axis_len == 0 || total == 0 {
+        return Ok(vec![0.0f32; total]);
+    }
+    if axis_len == 1 {
+        return Ok(values.iter().map(|&value| fold(identity, value)).collect());
+    }
+
+    let mut out = vec![0.0f32; total];
+    let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
+    let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
+
+    if inner == 1 {
+        let scan_lane = |(out_lane, in_lane): (&mut [f32], &[f32])| {
+            let mut acc = identity;
+            for (out_slot, &value) in out_lane.iter_mut().zip(in_lane.iter()) {
+                acc = fold(acc, value);
+                *out_slot = acc;
+            }
+        };
+        const CUM_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+        if outer >= 2 && total >= CUM_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+            out.par_chunks_mut(axis_len)
+                .zip(values.par_chunks(axis_len))
+                .for_each(scan_lane);
+        } else {
+            out.chunks_mut(axis_len)
+                .zip(values.chunks(axis_len))
+                .for_each(scan_lane);
+        }
+        return Ok(out);
+    }
+
+    let block = axis_len * inner;
+    let process_block = |(out_block, in_block): (&mut [f32], &[f32])| {
+        for c in 0..inner {
+            out_block[c] = fold(identity, in_block[c]);
+        }
+        for a in 1..axis_len {
+            let (done, todo) = out_block.split_at_mut(a * inner);
+            let prev_row = &done[(a - 1) * inner..a * inner];
+            let curr_row = &mut todo[..inner];
+            let in_row = &in_block[a * inner..a * inner + inner];
+            for c in 0..inner {
+                curr_row[c] = fold(prev_row[c], in_row[c]);
+            }
+        }
+    };
+    const CUM_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+    if outer >= 2 && total >= CUM_AXIS_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(block)
+            .zip(values.par_chunks(block))
+            .for_each(process_block);
+    } else {
+        out.chunks_mut(block)
+            .zip(values.chunks(block))
+            .for_each(process_block);
+    }
+
+    Ok(out)
+}
+
 fn cumulate_axis_i64(
     values: &[i64],
     shape: &[usize],
@@ -48638,6 +48779,40 @@ print(json.dumps(payload))
         let out = arr.cumsum(Some(1)).expect("cumsum axis=1");
         assert_eq!(out.shape(), &[2, 3]);
         assert_eq!(out.values(), &[1.0, 3.0, 6.0, 4.0, 9.0, 15.0]);
+    }
+
+    #[test]
+    fn cumsum_f32_accumulates_in_single_precision() {
+        let v1 = 1_000_000.0f32;
+        let v2 = 0.1f32;
+        let v3 = 0.2f32;
+        let arr =
+            UFuncArray::new(vec![3], vec![v1 as f64, v2 as f64, v3 as f64], DType::F32).unwrap();
+        let out = arr.cumsum(None).unwrap();
+        assert_eq!(out.dtype(), DType::F32);
+        let expected_1 = v1;
+        let expected_2 = v1 + v2;
+        let expected_3 = expected_2 + v3;
+        assert_eq!((out.values()[0] as f32).to_bits(), expected_1.to_bits());
+        assert_eq!((out.values()[1] as f32).to_bits(), expected_2.to_bits());
+        assert_eq!((out.values()[2] as f32).to_bits(), expected_3.to_bits());
+    }
+
+    #[test]
+    fn cumprod_f32_accumulates_in_single_precision() {
+        let v1 = 1.0001f32;
+        let v2 = 1.0002f32;
+        let v3 = 1.0003f32;
+        let arr =
+            UFuncArray::new(vec![3], vec![v1 as f64, v2 as f64, v3 as f64], DType::F32).unwrap();
+        let out = arr.cumprod(None).unwrap();
+        assert_eq!(out.dtype(), DType::F32);
+        let expected_1 = v1;
+        let expected_2 = v1 * v2;
+        let expected_3 = expected_2 * v3;
+        assert_eq!((out.values()[0] as f32).to_bits(), expected_1.to_bits());
+        assert_eq!((out.values()[1] as f32).to_bits(), expected_2.to_bits());
+        assert_eq!((out.values()[2] as f32).to_bits(), expected_3.to_bits());
     }
 
     #[test]
