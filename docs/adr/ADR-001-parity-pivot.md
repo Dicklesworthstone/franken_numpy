@@ -160,18 +160,18 @@ Pivot to Phase 3 when ALL of the following are true:
   - NumPy buffer protocol support?
   - GIL management strategy?
 
-### Draft Bead 2: BLAS Backend Integration
+### Draft Bead 2: BLAS Backend Integration (Decided: bead deadlock-audit-ceb7k)
 
 **Title:** Integrate OpenBLAS/MKL as optional BLAS backend for linalg
-**Priority:** P1
-**Scope:**
-- Feature-flagged `blas` feature in fnp-linalg
-- Isolated `unsafe` module for CBLAS FFI (audited)
-- Dispatch large matrices to BLAS, keep pure-Rust for small
-- Design questions:
-  - Static vs dynamic linking?
-  - Runtime detection of BLAS availability?
-  - Maintain zero-unsafe default build?
+**Priority:** P1 / Phase 3 Capability Exploration
+**Status:** DESIGN DECIDED (bead `deadlock-audit-ceb7k`, 2026-09-08)
+**Scope & Decisions:**
+- Feature name: `cblas-lapack` in `crates/fnp-linalg/Cargo.toml` (default = off), exposed as `blas` / `lapack` in workspace root.
+- Invariant: The default 9-crate build remains strictly `#![forbid(unsafe_code)]` with zero external C dependencies.
+- Linkage: Dynamic system linkage via pkg-config (`cblas` / `lapack`) to avoid compiling external Fortran/C sources.
+- FFI quarantine: Isolated, audited submodule under `crates/fnp-linalg/src/ffi/`.
+- Suite-wide governance: Strict adherence to AGENTS.md "Dependency smuggling" — this feature is an opt-in capability provider, never enabled in benchmark comparisons against NumPy or used to claim speedups.
+- Route mapping: Level 3 BLAS (`gemm`, `syrk`, `trsm` for $N \ge 64$), LAPACK solvers (`dgesv`, `dpotrf`/`dpotrs`, `dgeqrf`/`dorgqr`, `dgesdd`, `dsyev`/`dgeev`).
 
 ### Draft Bead 3: SIMD Vectorization
 
@@ -199,17 +199,17 @@ Pivot to Phase 3 when ALL of the following are true:
   - Work-stealing vs static partitioning?
   - Integration with existing iterator infrastructure?
 
-### Draft Bead 5: Native i64/u64 Arithmetic
+### Draft Bead 5: Native i64/u64 Arithmetic (Decided: bead deadlock-audit-reqc1)
 
 **Title:** Implement native integer arithmetic without f64 intermediary
-**Priority:** P3
-**Scope:**
-- Direct i64/u64 operations for values > 2^53
-- Maintain compatibility with smaller values
-- Design questions:
-  - Breaking change or opt-in behavior?
-  - Impact on dtype promotion rules?
-  - Overflow behavior alignment with NumPy?
+**Priority:** P3 / Phase 3 Stream
+**Status:** DESIGN DECIDED (bead `deadlock-audit-reqc1`, 2026-09-08)
+**Scope & Decisions:**
+- Python surface: High-throughput integer paths in `fnp-python` (matmul, vecmat, batched matmul, floordiv, rem, divmod, gcd, lcm, pow, where, clip, diff, ediff1d, putmask) already operate on native `PyBuffer<i64>/<u64>/<i32>` without f64 conversion, preserving exact integers $> 2^{53}$.
+- Integer GEMM: MR=4 register-blocked parallel wrapping GEMM delivers bit-exact execution with large speedups where NumPy lacks BLAS.
+- Storage evolution: Target architecture evolves `UFuncArray` storage from `values: Vec<f64> + IntegerSidecar` to unified `ArrayStorage` enum (`F64(Vec<f64>)`, `I64(Vec<i64>)`, `U64(Vec<u64>)`, etc.) to eliminate sidecar sync tax while preserving SCE/fnp-dtype determinism.
+- Overflow & promotion semantics: Wrapping two's complement (`wrapping_add`, `wrapping_sub`, `wrapping_mul`) strictly matching NumPy C integer behavior. Deterministic promotion lattice via SCE.
+- Competitive rule discipline: Any competitive claim must run same-invocation head-to-head against NumPy under A/A dual nulls without violating bit-exactness (no k-blocking).
 
 ---
 
