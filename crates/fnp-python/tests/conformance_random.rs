@@ -407,3 +407,81 @@ fn multinomial_rejects_sum_pvals_minus_last_gt_one() {
         Ok(())
     });
 }
+
+#[test]
+fn default_rng_accepts_diverse_seed_types() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let our_random = module.getattr("random")?;
+        let np_random = numpy.getattr("random")?;
+
+        // 1. None seed
+        let rng1 = our_random.call_method1("default_rng", (py.None(),))?;
+        let _ = rng1.call_method0("random")?;
+
+        // 2. Integer seed
+        let rng2 = our_random.call_method1("default_rng", (12345_u64,))?;
+        let val2 = rng2.call_method0("random")?.extract::<f64>()?;
+        let np_rng2 = np_random.call_method1("default_rng", (12345_u64,))?;
+        let np_val2 = np_rng2.call_method0("random")?.extract::<f64>()?;
+        assert_eq!(
+            val2.to_bits(),
+            np_val2.to_bits(),
+            "Integer seed must match numpy exactly"
+        );
+
+        // 3. fnp PCG64 BitGenerator object
+        let pcg_cls = our_random.getattr("PCG64")?;
+        let pcg_obj = pcg_cls.call1((12345_u64,))?;
+        let rng3 = our_random.call_method1("default_rng", (&pcg_obj,))?;
+        let val3 = rng3.call_method0("random")?.extract::<f64>()?;
+        assert_eq!(
+            val3.to_bits(),
+            np_val2.to_bits(),
+            "PCG64 BitGenerator seed must match"
+        );
+
+        // 4. NumPy upstream BitGenerator object
+        let np_pcg_cls = np_random.getattr("PCG64")?;
+        let np_pcg_obj = np_pcg_cls.call1((12345_u64,))?;
+        let rng4 = our_random.call_method1("default_rng", (&np_pcg_obj,))?;
+        let val4 = rng4.call_method0("random")?.extract::<f64>()?;
+        assert_eq!(
+            val4.to_bits(),
+            np_val2.to_bits(),
+            "NumPy PCG64 BitGenerator seed must match"
+        );
+
+        // 5. SeedSequence object
+        let ss_cls = our_random.getattr("SeedSequence")?;
+        let ss_obj = ss_cls.call1((12345_u64,))?;
+        let rng5 = our_random.call_method1("default_rng", (&ss_obj,))?;
+        let val5 = rng5.call_method0("random")?.extract::<f64>()?;
+        assert_eq!(
+            val5.to_bits(),
+            np_val2.to_bits(),
+            "SeedSequence seed must match"
+        );
+
+        // 6. Sequence of integers
+        let seq = vec![123_u32, 456_u32, 789_u32];
+        let rng6 = our_random.call_method1("default_rng", (seq.clone(),))?;
+        let np_rng6 = np_random.call_method1("default_rng", (seq,))?;
+        let val6 = rng6.call_method0("random")?.extract::<f64>()?;
+        let np_val6 = np_rng6.call_method0("random")?.extract::<f64>()?;
+        assert_eq!(
+            val6.to_bits(),
+            np_val6.to_bits(),
+            "Sequence seed must match numpy"
+        );
+
+        // 7. Existing Generator (idempotent / returns generator)
+        let rng7 = our_random.call_method1("default_rng", (&rng2,))?;
+        let is_same = rng7.is(&rng2);
+        assert!(
+            is_same,
+            "default_rng(generator) should preserve generator identity"
+        );
+
+        Ok(())
+    });
+}

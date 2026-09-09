@@ -3654,19 +3654,77 @@ impl PyRandomState {
 
 #[pyfunction]
 #[pyo3(signature = (seed=None))]
-fn default_rng(seed: Option<u64>) -> PyResult<PyRandomGenerator> {
-    let inner = match seed {
-        Some(seed) => {
-            let seed_sequence = seed_sequence_from_u64(seed)?;
-            RandomGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &seed_sequence)
-                .map_err(map_bit_generator_error)?
-        }
-        None => RandomGenerator::from_bit_generator(construct_bit_generator(
+fn default_rng(py: Python<'_>, seed: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
+    let Some(seed) = seed else {
+        let inner = RandomGenerator::from_bit_generator(construct_bit_generator(
             BitGeneratorKind::Pcg64,
             None,
-        )?),
+        )?);
+        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
     };
-    Ok(PyRandomGenerator { inner })
+    if seed.is_none() {
+        let inner = RandomGenerator::from_bit_generator(construct_bit_generator(
+            BitGeneratorKind::Pcg64,
+            None,
+        )?);
+        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+    }
+    if seed.is_instance_of::<PyRandomGenerator>() {
+        return Ok(seed.clone().unbind());
+    }
+    if let Ok(rng_gen) = seed.extract::<PyRef<'_, PyRandomGenerator>>() {
+        return Ok(Py::new(
+            py,
+            PyRandomGenerator {
+                inner: rng_gen.inner.clone(),
+            },
+        )?
+        .into_any());
+    }
+    if let Ok(bg_attr) = seed.getattr(intern!(py, "bit_generator"))
+        && let Ok((bit_generator, seed_sequence)) = extract_bit_generator_binding(&bg_attr)
+    {
+        let inner = match seed_sequence.as_ref() {
+            Some(seed_sequence) => {
+                RandomGenerator::bind_seed_sequence(bit_generator.clone(), seed_sequence)
+                    .unwrap_or_else(|_| RandomGenerator::from_bit_generator(bit_generator))
+            }
+            None => RandomGenerator::from_bit_generator(bit_generator),
+        };
+        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+    }
+    if let Ok((bit_generator, seed_sequence)) = extract_bit_generator_binding(seed) {
+        let inner = match seed_sequence.as_ref() {
+            Some(seed_sequence) => {
+                RandomGenerator::bind_seed_sequence(bit_generator.clone(), seed_sequence)
+                    .unwrap_or_else(|_| RandomGenerator::from_bit_generator(bit_generator))
+            }
+            None => RandomGenerator::from_bit_generator(bit_generator),
+        };
+        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+    }
+    if let Ok(seed_sequence) = seed.extract::<PyRef<'_, PySeedSequence>>() {
+        let inner =
+            RandomGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &seed_sequence.inner)
+                .map_err(map_bit_generator_error)?;
+        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+    }
+    if let Ok(seed_u64) = seed.extract::<u64>() {
+        let seed_sequence = seed_sequence_from_u64(seed_u64)?;
+        let inner = RandomGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &seed_sequence)
+            .map_err(map_bit_generator_error)?;
+        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+    }
+    if let Ok((entropy_words, _)) = seed_sequence_entropy_from_py(py, Some(seed.clone().unbind())) {
+        let seed_sequence = SeedSequence::new(&entropy_words)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        let inner = RandomGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &seed_sequence)
+            .map_err(map_bit_generator_error)?;
+        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+    }
+    Err(PyTypeError::new_err(
+        "default_rng expects None, an integer, a sequence of integers, a SeedSequence, a BitGenerator, or a Generator",
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -4354,6 +4412,14 @@ fn extract_bit_generator_binding(
             bit_generator.inner.clone(),
             bit_generator.seed_sequence.clone(),
         ));
+    }
+    let py = value.py();
+    if let Ok(state_obj) = value.getattr(intern!(py, "state"))
+        && let Ok(state) = py_bit_generator_state_from_dict(&state_obj)
+    {
+        let mut bg = construct_bit_generator(state.kind, None)?;
+        bg.set_state(&state).map_err(map_bit_generator_error)?;
+        return Ok((bg, None));
     }
     Err(PyTypeError::new_err(
         "Generator expects an fnp_python.random bit generator",
