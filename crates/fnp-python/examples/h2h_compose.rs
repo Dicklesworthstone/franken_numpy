@@ -96,6 +96,10 @@ for lg in (12, 14, 16, 18, 19, 20, 21):
     CELLS.append(("S sqrt(abs) 2^%-2d" % lg,
                   "np.sqrt(np.abs(a%d))" % lg, "fnp.sqrt(fnp.abs(a%d))" % lg, n))
 
+filt = os.environ.get("CELL_FILTER")
+if filt:
+    CELLS = [c for c in CELLS if filt in c[0]]
+
 out("")
 out("%-24s%13s%13s%9s%13s%8s%9s%9s"
     % ("cell","numpy_ns","fnp_ns","ratio","excess_ns","nullNP","nullFNP","incSprd"))
