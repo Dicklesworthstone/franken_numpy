@@ -36631,7 +36631,7 @@ fn searchsorted(
     // so for any side that is not "left"/"right" let numpy own the error. Matching
     // numpy's literal in Rust would silently re-break on every numpy rewording.
     if side != "left" && side != "right" {
-        return delegate_numpy_searchsorted(py, a_bound, v_bound, side, sorter_bound.as_ref());
+        return delegate_numpy_searchsorted(py, a_bound, v_bound, side, sorter_bound);
     }
     // The native binary-search path only handles real numeric dtypes. numpy
     // also searches sorted string ('U'/'S'), datetime64 ('M'), timedelta64
@@ -36683,7 +36683,7 @@ fn searchsorted(
     // on the text can see. Defer so numpy owns the wording rather than pinning
     // its literal here, where every numpy rewording would silently re-break it.
     if a_arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
-        return delegate_numpy_searchsorted(py, a_bound, v_bound, side, sorter_bound.as_ref());
+        return delegate_numpy_searchsorted(py, a_bound, v_bound, side, sorter_bound);
     }
     let mut a = a;
     let mut sorter = sorter;
@@ -36726,7 +36726,7 @@ fn searchsorted(
             }
         }
         if !gathered {
-            return delegate_numpy_searchsorted(py, &a_arr, v_bound, side, Some(&sb));
+            return delegate_numpy_searchsorted(py, &a_arr, v_bound, side, Some(sb));
         }
     }
     // UNCONDITIONAL ON EVERY CALL (`deadlock-audit-v46rn`): this ran two non-interned
@@ -36854,7 +36854,7 @@ fn searchsorted(
         return Ok(out);
     }
     if !matches!(a_kind, 'b' | 'i' | 'u' | 'f') {
-        return delegate_numpy_searchsorted(py, &a_arr, v_bound, side, sorter_bound.as_ref());
+        return delegate_numpy_searchsorted(py, &a_arr, v_bound, side, sorter_bound);
     }
 
     // Mirror numpy's scalar-vs-array return shape: when `v` is a Python
