@@ -19054,9 +19054,7 @@ where
         return Ok(None);
     };
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), out_dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (n, out_dtype_name))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
             return Ok(None);
@@ -19172,18 +19170,14 @@ fn try_zerocopy_int_cumsum(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    if !matches!(dtype_kind_of(a), Some('i' | 'u' | 'b')) {
+    let Some(kind) = dtype_kind_of(a) else {
         return Ok(None);
-    }
-    if !is_exact_numpy_ndarray(py, a)? {
+    };
+    if kind != 'i' && kind != 'u' && kind != 'b' {
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" && kind != "b" {
-        return Ok(None);
-    }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let ndim = shape.len();
     let flatten_ok = match axis {
@@ -19201,7 +19195,7 @@ fn try_zerocopy_int_cumsum(
     // numpy promotes a bool cumsum to an int64 accumulator. bool buffers export '?'
     // (PyBuffer<u8> rejects it) so read the 0/1 bytes via a zero-copy uint8 view. Was
     // falling through to the f64-bridge extract path (~3.7x slower than numpy).
-    if kind == "b" {
+    if kind == 'b' {
         let viewed =
             a.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
         return cumsum_typed::<u8, i64, _, _>(
@@ -19214,8 +19208,8 @@ fn try_zerocopy_int_cumsum(
             true,
         );
     }
-    match (kind.as_str(), itemsize) {
-        ("i", 1) => cumsum_typed::<i8, i64, _, _>(
+    match (kind, itemsize) {
+        ('i', 1) => cumsum_typed::<i8, i64, _, _>(
             py,
             numpy,
             a,
@@ -19224,7 +19218,7 @@ fn try_zerocopy_int_cumsum(
             |a, b| a.wrapping_add(b),
             true,
         ),
-        ("i", 2) => cumsum_typed::<i16, i64, _, _>(
+        ('i', 2) => cumsum_typed::<i16, i64, _, _>(
             py,
             numpy,
             a,
@@ -19233,7 +19227,7 @@ fn try_zerocopy_int_cumsum(
             |a, b| a.wrapping_add(b),
             true,
         ),
-        ("i", 4) => cumsum_typed::<i32, i64, _, _>(
+        ('i', 4) => cumsum_typed::<i32, i64, _, _>(
             py,
             numpy,
             a,
@@ -19242,7 +19236,7 @@ fn try_zerocopy_int_cumsum(
             |a, b| a.wrapping_add(b),
             true,
         ),
-        ("i", 8) => cumsum_typed::<i64, i64, _, _>(
+        ('i', 8) => cumsum_typed::<i64, i64, _, _>(
             py,
             numpy,
             a,
@@ -19251,7 +19245,7 @@ fn try_zerocopy_int_cumsum(
             |a, b| a.wrapping_add(b),
             true,
         ),
-        ("u", 1) => cumsum_typed::<u8, u64, _, _>(
+        ('u', 1) => cumsum_typed::<u8, u64, _, _>(
             py,
             numpy,
             a,
@@ -19260,7 +19254,7 @@ fn try_zerocopy_int_cumsum(
             |a, b| a.wrapping_add(b),
             true,
         ),
-        ("u", 2) => cumsum_typed::<u16, u64, _, _>(
+        ('u', 2) => cumsum_typed::<u16, u64, _, _>(
             py,
             numpy,
             a,
@@ -19269,7 +19263,7 @@ fn try_zerocopy_int_cumsum(
             |a, b| a.wrapping_add(b),
             true,
         ),
-        ("u", 4) => cumsum_typed::<u32, u64, _, _>(
+        ('u', 4) => cumsum_typed::<u32, u64, _, _>(
             py,
             numpy,
             a,
@@ -19278,7 +19272,7 @@ fn try_zerocopy_int_cumsum(
             |a, b| a.wrapping_add(b),
             true,
         ),
-        ("u", 8) => cumsum_typed::<u64, u64, _, _>(
+        ('u', 8) => cumsum_typed::<u64, u64, _, _>(
             py,
             numpy,
             a,
@@ -19668,7 +19662,7 @@ fn cumsum_axis_typed<'py, T, A, FC, FA>(
     dtype_name: &str,
     convert: FC,
     op: FA,
-) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
+) -> PyResult<Option<Py<PyAny>>>
 where
     T: pyo3::buffer::Element + Copy + Sync,
     A: pyo3::buffer::Element + Copy + Send + Sync,
@@ -19698,9 +19692,12 @@ where
     let total = input.len();
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let flat = if shape.len() == 1 {
+        numpy.call_method1(intern!(py, "empty"), (total, dtype_name))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (shape_tuple, dtype_name))?
+    };
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
             return Ok(None);
@@ -19801,7 +19798,7 @@ where
             }
         }
     }
-    Ok(Some((flat, shape)))
+    Ok(Some(flat.unbind()))
 }
 
 // Zero-copy per-axis integer cumsum (explicit axis), all widths, with numpy's
@@ -19817,19 +19814,21 @@ fn try_zerocopy_int_cumsum_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" && kind != "b" {
+    let Some(kind) = dtype_kind_of(a) else {
+        return Ok(None);
+    };
+    if kind != 'i' && kind != 'u' && kind != 'b' {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
+    let dtype = a.getattr(intern!(py, "dtype"))?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     let add_i64 = |x: i64, y: i64| x.wrapping_add(y);
     let add_u64 = |x: u64, y: u64| x.wrapping_add(y);
     // bool -> int64 accumulator (uint8 view of the 0/1 bytes; see try_zerocopy_int_cumsum).
-    let result = if kind == "b" {
+    if kind == 'b' {
         let viewed =
-            a.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+            a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
         cumsum_axis_typed::<u8, i64, _, _>(
             py,
             numpy,
@@ -19838,10 +19837,10 @@ fn try_zerocopy_int_cumsum_axis(
             "int64",
             |v| v as i64,
             add_i64,
-        )?
+        )
     } else {
-        match (kind.as_str(), itemsize) {
-            ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(
+        match (kind, itemsize) {
+            ('i', 1) => cumsum_axis_typed::<i8, i64, _, _>(
                 py,
                 numpy,
                 a,
@@ -19849,8 +19848,8 @@ fn try_zerocopy_int_cumsum_axis(
                 "int64",
                 |v| v as i64,
                 add_i64,
-            )?,
-            ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(
+            ),
+            ('i', 2) => cumsum_axis_typed::<i16, i64, _, _>(
                 py,
                 numpy,
                 a,
@@ -19858,8 +19857,8 @@ fn try_zerocopy_int_cumsum_axis(
                 "int64",
                 |v| v as i64,
                 add_i64,
-            )?,
-            ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(
+            ),
+            ('i', 4) => cumsum_axis_typed::<i32, i64, _, _>(
                 py,
                 numpy,
                 a,
@@ -19867,11 +19866,11 @@ fn try_zerocopy_int_cumsum_axis(
                 "int64",
                 |v| v as i64,
                 add_i64,
-            )?,
-            ("i", 8) => {
-                cumsum_axis_typed::<i64, i64, _, _>(py, numpy, a, axis, "int64", |v| v, add_i64)?
+            ),
+            ('i', 8) => {
+                cumsum_axis_typed::<i64, i64, _, _>(py, numpy, a, axis, "int64", |v| v, add_i64)
             }
-            ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(
+            ('u', 1) => cumsum_axis_typed::<u8, u64, _, _>(
                 py,
                 numpy,
                 a,
@@ -19879,8 +19878,8 @@ fn try_zerocopy_int_cumsum_axis(
                 "uint64",
                 |v| v as u64,
                 add_u64,
-            )?,
-            ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(
+            ),
+            ('u', 2) => cumsum_axis_typed::<u16, u64, _, _>(
                 py,
                 numpy,
                 a,
@@ -19888,8 +19887,8 @@ fn try_zerocopy_int_cumsum_axis(
                 "uint64",
                 |v| v as u64,
                 add_u64,
-            )?,
-            ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(
+            ),
+            ('u', 4) => cumsum_axis_typed::<u32, u64, _, _>(
                 py,
                 numpy,
                 a,
@@ -19897,21 +19896,13 @@ fn try_zerocopy_int_cumsum_axis(
                 "uint64",
                 |v| v as u64,
                 add_u64,
-            )?,
-            ("u", 8) => {
-                cumsum_axis_typed::<u64, u64, _, _>(py, numpy, a, axis, "uint64", |v| v, add_u64)?
+            ),
+            ('u', 8) => {
+                cumsum_axis_typed::<u64, u64, _, _>(py, numpy, a, axis, "uint64", |v| v, add_u64)
             }
-            _ => return Ok(None),
+            _ => Ok(None),
         }
-    };
-    let Some((flat, shape)) = result else {
-        return Ok(None);
-    };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    }
 }
 
 // Zero-copy float32 cumsum for the flatten case (axis=None any ndim, or 1-D with
@@ -19930,11 +19921,12 @@ fn try_zerocopy_f32_cumsum(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    if dtype_kind_of(a) != Some('f') {
+        return Ok(None);
+    }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
-    {
+    if dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4 {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
@@ -19962,23 +19954,15 @@ fn try_zerocopy_f32_cumsum_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
-    {
+    if dtype_kind_of(a) != Some('f') {
         return Ok(None);
     }
-    let result =
-        cumsum_axis_typed::<f32, f32, _, _>(py, numpy, a, axis, "float32", |v| v, |a, b| a + b)?;
-    let Some((flat, shape)) = result else {
+    let numpy = cached_numpy(py)?;
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    if dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4 {
         return Ok(None);
-    };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    }
+    cumsum_axis_typed::<f32, f32, _, _>(py, numpy, a, axis, "float32", |v| v, |a, b| a + b)
 }
 
 // Per-axis f16 cumsum/cumprod. numpy has no f16 ALU, so it widens f16->f32 per element, accumulates,
@@ -19999,11 +19983,12 @@ fn try_zerocopy_f16_cumulative_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    if dtype_kind_of(a) != Some('f') {
+        return Ok(None);
+    }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-    {
+    if dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2 {
         return Ok(None);
     }
     if !a
@@ -20043,10 +20028,8 @@ fn try_zerocopy_f16_cumulative_axis(
     if input.len() != total {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), &dtype)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out = numpy.call_method1(intern!(py, "empty"), (shape_tuple, &dtype))?;
     let oview = out.call_method1(intern!(py, "view"), (&u16t,))?;
     let Ok(out_buffer) = PyBuffer::<u16>::get(&oview) else {
         return Ok(None);
@@ -20187,14 +20170,15 @@ fn try_zerocopy_f32_nancumulative_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
-    {
+    if dtype_kind_of(a) != Some('f') {
         return Ok(None);
     }
-    let result = if is_prod {
+    let numpy = cached_numpy(py)?;
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    if dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4 {
+        return Ok(None);
+    }
+    if is_prod {
         cumsum_axis_typed::<f32, f32, _, _>(
             py,
             numpy,
@@ -20203,7 +20187,7 @@ fn try_zerocopy_f32_nancumulative_axis(
             "float32",
             |v| if v.is_nan() { 1.0 } else { v },
             |a, b| a * b,
-        )?
+        )
     } else {
         cumsum_axis_typed::<f32, f32, _, _>(
             py,
@@ -20213,16 +20197,8 @@ fn try_zerocopy_f32_nancumulative_axis(
             "float32",
             |v| if v.is_nan() { 0.0 } else { v },
             |a, b| a + b,
-        )?
-    };
-    let Some((flat, shape)) = result else {
-        return Ok(None);
-    };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+        )
+    }
 }
 
 // Zero-copy integer cumprod for the flatten case (axis=None any ndim, or 1-D with
@@ -20238,32 +20214,17 @@ fn try_zerocopy_int_cumprod(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // CHEAP PRE-DECLINE (`deadlock-audit-v46rn`).
-    //
-    // `accumulate` calls this on EVERY invocation, for every dtype, before the float route
-    // is even considered - and for f64 it exists only to say no. The decline below costs a
-    // `py.import("numpy")`, a `getattr("ndarray")`, and a `dtype.kind` extracted into a
-    // heap `String`: the probe-to-decline shape measured at 656 ns on the ufunc methods,
-    // paid here to learn that a float array is not an integer array.
-    //
-    // This answers the same question from a cached type object and two interned getattrs.
-    // Everything below is left byte-identical - the redundant work still runs, but only for
-    // operands that will actually be ROUTED, where a real accumulation amortises it.
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    if !matches!(dtype_kind_of(a), Some('i' | 'u' | 'b')) {
+    let Some(kind) = dtype_kind_of(a) else {
         return Ok(None);
-    }
-    if !is_exact_numpy_ndarray(py, a)? {
+    };
+    if kind != 'i' && kind != 'u' && kind != 'b' {
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" && kind != "b" {
-        return Ok(None);
-    }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     let ndim = shape.len();
     let flatten_ok = match axis {
@@ -20284,9 +20245,9 @@ fn try_zerocopy_int_cumprod(
     // wraps). bool buffers export format '?', which PyBuffer<u8> rejects, so read the
     // bytes through a zero-copy uint8 view. Was falling through to the f64-bridge
     // extract path (~15x slower than numpy at 4M).
-    if kind == "b" {
+    if kind == 'b' {
         let viewed =
-            a.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+            a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
         return cumsum_typed::<u8, i64, _, _>(
             py,
             numpy,
@@ -20297,27 +20258,27 @@ fn try_zerocopy_int_cumprod(
             true,
         );
     }
-    match (kind.as_str(), itemsize) {
-        ("i", 1) => {
+    match (kind, itemsize) {
+        ('i', 1) => {
             cumsum_typed::<i8, i64, _, _>(py, numpy, a, "int64", |v| v as i64, mul_i64, true)
         }
-        ("i", 2) => {
+        ('i', 2) => {
             cumsum_typed::<i16, i64, _, _>(py, numpy, a, "int64", |v| v as i64, mul_i64, true)
         }
-        ("i", 4) => {
+        ('i', 4) => {
             cumsum_typed::<i32, i64, _, _>(py, numpy, a, "int64", |v| v as i64, mul_i64, true)
         }
-        ("i", 8) => cumsum_typed::<i64, i64, _, _>(py, numpy, a, "int64", |v| v, mul_i64, true),
-        ("u", 1) => {
+        ('i', 8) => cumsum_typed::<i64, i64, _, _>(py, numpy, a, "int64", |v| v, mul_i64, true),
+        ('u', 1) => {
             cumsum_typed::<u8, u64, _, _>(py, numpy, a, "uint64", |v| v as u64, mul_u64, true)
         }
-        ("u", 2) => {
+        ('u', 2) => {
             cumsum_typed::<u16, u64, _, _>(py, numpy, a, "uint64", |v| v as u64, mul_u64, true)
         }
-        ("u", 4) => {
+        ('u', 4) => {
             cumsum_typed::<u32, u64, _, _>(py, numpy, a, "uint64", |v| v as u64, mul_u64, true)
         }
-        ("u", 8) => cumsum_typed::<u64, u64, _, _>(py, numpy, a, "uint64", |v| v, mul_u64, true),
+        ('u', 8) => cumsum_typed::<u64, u64, _, _>(py, numpy, a, "uint64", |v| v, mul_u64, true),
         _ => Ok(None),
     }
 }
@@ -20334,19 +20295,21 @@ fn try_zerocopy_int_cumprod_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" && kind != "b" {
+    let Some(kind) = dtype_kind_of(a) else {
+        return Ok(None);
+    };
+    if kind != 'i' && kind != 'u' && kind != 'b' {
         return Ok(None);
     }
+    let numpy = cached_numpy(py)?;
+    let dtype = a.getattr(intern!(py, "dtype"))?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     let mul_i64 = |x: i64, y: i64| x.wrapping_mul(y);
     let mul_u64 = |x: u64, y: u64| x.wrapping_mul(y);
     // bool -> int64 accumulator (uint8 view of the 0/1 bytes; see try_zerocopy_int_cumprod).
-    let result = if kind == "b" {
+    if kind == 'b' {
         let viewed =
-            a.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+            a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
         cumsum_axis_typed::<u8, i64, _, _>(
             py,
             numpy,
@@ -20355,10 +20318,10 @@ fn try_zerocopy_int_cumprod_axis(
             "int64",
             |v| v as i64,
             mul_i64,
-        )?
+        )
     } else {
-        match (kind.as_str(), itemsize) {
-            ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(
+        match (kind, itemsize) {
+            ('i', 1) => cumsum_axis_typed::<i8, i64, _, _>(
                 py,
                 numpy,
                 a,
@@ -20366,8 +20329,8 @@ fn try_zerocopy_int_cumprod_axis(
                 "int64",
                 |v| v as i64,
                 mul_i64,
-            )?,
-            ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(
+            ),
+            ('i', 2) => cumsum_axis_typed::<i16, i64, _, _>(
                 py,
                 numpy,
                 a,
@@ -20375,8 +20338,8 @@ fn try_zerocopy_int_cumprod_axis(
                 "int64",
                 |v| v as i64,
                 mul_i64,
-            )?,
-            ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(
+            ),
+            ('i', 4) => cumsum_axis_typed::<i32, i64, _, _>(
                 py,
                 numpy,
                 a,
@@ -20384,11 +20347,11 @@ fn try_zerocopy_int_cumprod_axis(
                 "int64",
                 |v| v as i64,
                 mul_i64,
-            )?,
-            ("i", 8) => {
-                cumsum_axis_typed::<i64, i64, _, _>(py, numpy, a, axis, "int64", |v| v, mul_i64)?
+            ),
+            ('i', 8) => {
+                cumsum_axis_typed::<i64, i64, _, _>(py, numpy, a, axis, "int64", |v| v, mul_i64)
             }
-            ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(
+            ('u', 1) => cumsum_axis_typed::<u8, u64, _, _>(
                 py,
                 numpy,
                 a,
@@ -20396,8 +20359,8 @@ fn try_zerocopy_int_cumprod_axis(
                 "uint64",
                 |v| v as u64,
                 mul_u64,
-            )?,
-            ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(
+            ),
+            ('u', 2) => cumsum_axis_typed::<u16, u64, _, _>(
                 py,
                 numpy,
                 a,
@@ -20405,8 +20368,8 @@ fn try_zerocopy_int_cumprod_axis(
                 "uint64",
                 |v| v as u64,
                 mul_u64,
-            )?,
-            ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(
+            ),
+            ('u', 4) => cumsum_axis_typed::<u32, u64, _, _>(
                 py,
                 numpy,
                 a,
@@ -20414,21 +20377,13 @@ fn try_zerocopy_int_cumprod_axis(
                 "uint64",
                 |v| v as u64,
                 mul_u64,
-            )?,
-            ("u", 8) => {
-                cumsum_axis_typed::<u64, u64, _, _>(py, numpy, a, axis, "uint64", |v| v, mul_u64)?
+            ),
+            ('u', 8) => {
+                cumsum_axis_typed::<u64, u64, _, _>(py, numpy, a, axis, "uint64", |v| v, mul_u64)
             }
-            _ => return Ok(None),
+            _ => Ok(None),
         }
-    };
-    let Some((flat, shape)) = result else {
-        return Ok(None);
-    };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    }
 }
 
 // Zero-copy float32 cumprod (flatten: axis=None any ndim, or 1-D axis 0/-1). The
@@ -20447,11 +20402,12 @@ fn try_zerocopy_f32_cumprod(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
+    if dtype_kind_of(a) != Some('f') {
+        return Ok(None);
+    }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
-    {
+    if dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4 {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
@@ -20479,23 +20435,15 @@ fn try_zerocopy_f32_cumprod_axis(
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
-    {
+    if dtype_kind_of(a) != Some('f') {
         return Ok(None);
     }
-    let result =
-        cumsum_axis_typed::<f32, f32, _, _>(py, numpy, a, axis, "float32", |v| v, |a, b| a * b)?;
-    let Some((flat, shape)) = result else {
+    let numpy = cached_numpy(py)?;
+    let dtype = a.getattr(intern!(py, "dtype"))?;
+    if dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4 {
         return Ok(None);
-    };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    }
+    cumsum_axis_typed::<f32, f32, _, _>(py, numpy, a, axis, "float32", |v| v, |a, b| a * b)
 }
 
 // Zero-copy np.tile(a, reps) for the 1-D scalar-reps form: a C-contiguous float64
@@ -20534,9 +20482,7 @@ fn try_zerocopy_f64_tile(
     let Some(total) = n.checked_mul(r) else {
         return Ok(None);
     };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (total, cached_float64_type(py)?))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -20595,18 +20541,21 @@ fn try_zerocopy_any_tile(
     if shape.len() != 1 {
         return Ok(None);
     }
-    let dtype = a.getattr(intern!(py, "dtype"))?;
+    let Some(kind) = dtype_kind_of(a) else {
+        return Ok(None);
+    };
     // Complex already has an efficient native/numpy fallback; the byte copy does
     // not beat it, so leave it (and any zero-itemsize dtype) on the existing path.
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? == "c" {
+    if kind == 'c' {
         return Ok(None);
     }
+    let dtype = a.getattr(intern!(py, "dtype"))?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize == 0 {
         return Ok(None);
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let Ok(in_u8) = a.call_method1(intern!(py, "view"), (&uint8,)) else {
+    let uint8 = cached_uint8_type(py)?;
+    let Ok(in_u8) = a.call_method1(intern!(py, "view"), (uint8,)) else {
         return Ok(None);
     };
     let Ok(in_buffer) = PyBuffer::<u8>::get(&in_u8) else {
@@ -20627,9 +20576,7 @@ fn try_zerocopy_any_tile(
     let Some(total_bytes) = n_bytes.checked_mul(r) else {
         return Ok(None);
     };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let out_u8 = numpy.call_method(intern!(py, "empty"), (total_bytes,), Some(&kwargs))?;
+    let out_u8 = numpy.call_method1(intern!(py, "empty"), (total_bytes, uint8))?;
     if total_bytes > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
