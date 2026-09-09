@@ -36590,6 +36590,27 @@ fn choose(
     }
 }
 
+#[inline]
+fn delegate_numpy_searchsorted(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    v: &Bound<'_, PyAny>,
+    side: &str,
+    sorter: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let ss_fn = cached_numpy_searchsorted(py)?;
+    match sorter {
+        Some(s) if !s.is_none() => Ok(ss_fn.call1((a, v, side, s))?.unbind()),
+        _ => {
+            if side == "left" {
+                Ok(ss_fn.call1((a, v))?.unbind())
+            } else {
+                Ok(ss_fn.call1((a, v, side))?.unbind())
+            }
+        }
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, v, side="left", sorter=None))]
 fn searchsorted(
@@ -36599,6 +36620,9 @@ fn searchsorted(
     side: &str,
     sorter: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    let a_bound = a.bind(py);
+    let v_bound = v.bind(py);
+    let mut sorter_bound = sorter.as_ref().map(|s| s.bind(py));
     let numpy = cached_numpy(py)?;
     // An invalid `side` is a pure error case: defer the whole call to numpy so it
     // raises ITS canonical ValueError. The message wording tracks the installed
@@ -36607,15 +36631,7 @@ fn searchsorted(
     // so for any side that is not "left"/"right" let numpy own the error. Matching
     // numpy's literal in Rust would silently re-break on every numpy rewording.
     if side != "left" && side != "right" {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "side"), side)?;
-        if let Some(sorter) = sorter.as_ref() {
-            kwargs.set_item(intern!(py, "sorter"), sorter.bind(py))?;
-        }
-        return Ok(numpy
-            .getattr(intern!(py, "searchsorted"))?
-            .call((a.bind(py), v.bind(py)), Some(&kwargs))?
-            .unbind());
+        return delegate_numpy_searchsorted(py, a_bound, v_bound, side, sorter_bound.as_ref());
     }
     // The native binary-search path only handles real numeric dtypes. numpy
     // also searches sorted string ('U'/'S'), datetime64 ('M'), timedelta64
@@ -36638,7 +36654,6 @@ fn searchsorted(
     // The call-site rule from `deadlock-audit-v46rn`'s recent rows applies here and is why
     // this is worth landing where three micro-gates were not: nothing else in this function
     // guards it, so it genuinely runs every time.
-    let a_bound = a.bind(py);
     // INTERNED METHOD KEY (`deadlock-audit-s70kb`). UNMEASURED - landed unbuilt under a disk
     // freeze.
     //
@@ -36668,15 +36683,7 @@ fn searchsorted(
     // on the text can see. Defer so numpy owns the wording rather than pinning
     // its literal here, where every numpy rewording would silently re-break it.
     if a_arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1 {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "side"), side)?;
-        if let Some(sorter) = sorter.as_ref() {
-            kwargs.set_item(intern!(py, "sorter"), sorter.bind(py))?;
-        }
-        return Ok(numpy
-            .getattr(intern!(py, "searchsorted"))?
-            .call((a.bind(py), v.bind(py)), Some(&kwargs))?
-            .unbind());
+        return delegate_numpy_searchsorted(py, a_bound, v_bound, side, sorter_bound.as_ref());
     }
     let mut a = a;
     let mut sorter = sorter;
@@ -36714,17 +36721,12 @@ fn searchsorted(
                 // exact original call).
                 a = a_arr.clone().unbind();
                 sorter = None;
+                sorter_bound = None;
                 gathered = true;
             }
         }
         if !gathered {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "side"), side)?;
-            kwargs.set_item(intern!(py, "sorter"), sb)?;
-            return Ok(numpy
-                .getattr(intern!(py, "searchsorted"))?
-                .call((&a_arr, v.bind(py)), Some(&kwargs))?
-                .unbind());
+            return delegate_numpy_searchsorted(py, &a_arr, v_bound, side, Some(&sb));
         }
     }
     // UNCONDITIONAL ON EVERY CALL (`deadlock-audit-v46rn`): this ran two non-interned
@@ -36766,7 +36768,7 @@ fn searchsorted(
     // memcmp binary search (numpy's per-record string binary search is ~2s @2M). C-contiguous N-D
     // queries use a zero-copy flat view, then recover numpy's query shape. Wide 'U' codepoints defer.
     if (a_kind == 'U' || a_kind == 'S') && sorter.is_none() {
-        let query = v.bind(py);
+        let query = v_bound;
         if query.is_exact_instance(cached_ndarray_type(py)?)
             && query.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
             && query
@@ -36791,13 +36793,13 @@ fn searchsorted(
     // (numpy single-threaded ~1.07s @2M). NaN/-0.0 defer.
     if a_kind == 'c'
         && sorter.is_none()
-        && let Some(out) = try_zerocopy_c128_searchsorted(py, numpy, &a_arr, v.bind(py), side)?
+        && let Some(out) = try_zerocopy_c128_searchsorted(py, numpy, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
     if a_kind == 'c'
         && sorter.is_none()
-        && let Some(out) = try_zerocopy_c64_searchsorted(py, numpy, &a_arr, v.bind(py), side)?
+        && let Some(out) = try_zerocopy_c64_searchsorted(py, numpy, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
@@ -36805,7 +36807,7 @@ fn searchsorted(
     // either the homogeneous integer view or the mixed-field byte transform. C-contiguous N-D
     // queries use a zero-copy flat view, then recover numpy's query shape.
     if a_kind == 'V' && sorter.is_none() {
-        let query = v.bind(py);
+        let query = v_bound;
         if query.is_exact_instance(cached_ndarray_type(py)?)
             && query.getattr(intern!(py, "ndim"))?.extract::<usize>()? > 1
             && query
@@ -36840,27 +36842,19 @@ fn searchsorted(
     // searchsorted (numpy delegates datetime searchsorted, ~867ms @2M+2M; indices are dtype-agnostic). NaT defer.
     if (a_kind == 'M' || a_kind == 'm')
         && sorter.is_none()
-        && let Some(out) = try_native_datetime_searchsorted(py, &a_arr, v.bind(py), side)?
+        && let Some(out) = try_native_datetime_searchsorted(py, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
     // float16 haystack + queries: widen exact to f32, route to the fast f32 searchsorted (numpy f16 ~332ms).
     if a_float_char == 'e'
         && sorter.is_none()
-        && let Some(out) = try_native_f16_searchsorted(py, numpy, &a_arr, v.bind(py), side)?
+        && let Some(out) = try_native_f16_searchsorted(py, numpy, &a_arr, v_bound, side)?
     {
         return Ok(out);
     }
     if !matches!(a_kind, 'b' | 'i' | 'u' | 'f') {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "side"), side)?;
-        if let Some(sorter) = sorter.as_ref() {
-            kwargs.set_item(intern!(py, "sorter"), sorter.bind(py))?;
-        }
-        return Ok(numpy
-            .getattr(intern!(py, "searchsorted"))?
-            .call((a_arr, v.bind(py)), Some(&kwargs))?
-            .unbind());
+        return delegate_numpy_searchsorted(py, &a_arr, v_bound, side, sorter_bound.as_ref());
     }
 
     // Mirror numpy's scalar-vs-array return shape: when `v` is a Python
@@ -36876,7 +36870,6 @@ fn searchsorted(
     // scalar only if the object also extracts as a Python numeric scalar
     // (int / float / bool). Lists, tuples, and other sequences fail that
     // extraction and correctly fall through to the array branch.
-    let v_bound = v.bind(py);
     // TYPE CHECK BEFORE THE getattr THAT RAISES (`deadlock-audit-v46rn`).
     //
     // A plain Python `float` or `int` needle has no `ndim` attribute, so the `getattr`
@@ -37060,15 +37053,13 @@ fn searchsorted(
     let v = match extract_numeric_array(py, v_bound, "searchsorted(v)") {
         Ok(value) => value,
         Err(_) => {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "side"), side)?;
-            if let Some(sorter) = sorter.as_ref() {
-                kwargs.set_item(intern!(py, "sorter"), sorter.bind(py))?;
-            }
-            return Ok(numpy
-                .getattr(intern!(py, "searchsorted"))?
-                .call((a.bind(py), v_bound), Some(&kwargs))?
-                .unbind());
+            return delegate_numpy_searchsorted(
+                py,
+                &a.bind(py),
+                v_bound,
+                side,
+                sorter_bound.as_ref(),
+            );
         }
     };
     let a = extract_numeric_array(py, a.bind(py), "searchsorted(a)")?;
@@ -88692,6 +88683,7 @@ cached_numpy_attr!(cached_numpy_vdot, "vdot");
 cached_numpy_attr!(cached_numpy_outer, "outer");
 cached_numpy_attr!(cached_numpy_kron, "kron");
 cached_numpy_attr!(cached_numpy_tensordot, "tensordot");
+cached_numpy_attr!(cached_numpy_searchsorted, "searchsorted");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
