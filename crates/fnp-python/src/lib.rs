@@ -21031,13 +21031,10 @@ fn try_zerocopy_f16_diff_1d(
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
     const F16_DIFF_PARALLEL_MIN: usize = 1 << 20;
-    if !a.is_exact_instance(cached_ndarray_type(py)?) {
+    if !is_exact_numpy_ndarray(py, a)? || !dtype_is_f16(a)? {
         return Ok(None);
     }
-    let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
-        || a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
+    if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
         || !(axis == 0 || axis == -1)
         || !a
             .getattr(intern!(py, "flags"))?
@@ -21051,8 +21048,8 @@ fn try_zerocopy_f16_diff_1d(
         return Ok(None);
     }
 
-    let uint16 = numpy.getattr(intern!(py, "uint16"))?;
-    let input_view = a.call_method1(intern!(py, "view"), (&uint16,))?;
+    let uint16 = cached_uint16_type(py)?;
+    let input_view = a.call_method1(intern!(py, "view"), (uint16,))?;
     let Ok(input_buffer) = PyBuffer::<u16>::get(&input_view) else {
         return Ok(None);
     };
@@ -21060,9 +21057,7 @@ fn try_zerocopy_f16_diff_1d(
         return Ok(None);
     };
     let output_len = input_len - 1;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint16")?;
-    let output_u16 = numpy.call_method(intern!(py, "empty"), (output_len,), Some(&kwargs))?;
+    let output_u16 = numpy.call_method1(intern!(py, "empty"), (output_len, uint16))?;
     let hazard = std::sync::atomic::AtomicBool::new(false);
     {
         let Ok(output_buffer) = PyBuffer::<u16>::get(&output_u16) else {
@@ -21141,7 +21136,7 @@ fn try_zerocopy_f16_diff_1d(
         output_u16
             .call_method1(
                 intern!(py, "view"),
-                (numpy.getattr(intern!(py, "float16"))?,),
+                (cached_float16_type(py)?,),
             )?
             .unbind(),
     ))
@@ -21355,17 +21350,10 @@ fn try_zerocopy_int_ediff1d(py: Python<'_>, ary: &Bound<'_, PyAny>) -> PyResult<
 // single-precision subtraction x - y (bit-identical; nan/inf/-0.0 propagate exactly).
 // Returns None for a non-float32 dtype or a non-ndarray input.
 fn try_zerocopy_f32_ediff1d(py: Python<'_>, ary: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    if !is_exact_numpy_ndarray(py, ary)? || !numpy_dtype_is_f32(ary) {
+        return Ok(None);
+    }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !ary.is_exact_instance(&ndarray_type) {
-        return Ok(None);
-    }
-    let dtype = ary.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
-    {
-        return Ok(None);
-    }
     ediff1d_typed::<f32, _>(py, numpy, ary, "float32", |x, y| x - y)
 }
 
@@ -21413,7 +21401,7 @@ fn build_numpy_array_from_storage(
             let bytes: &[u8] =
                 unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len()) };
             let u8_arr = numpy_array_from_slice(py, numpy, bytes, "uint8")?;
-            let bool_dtype = numpy.getattr(intern!(py, "bool_"))?;
+            let bool_dtype = cached_bool_type(py)?;
             u8_arr.call_method1(intern!(py, "view"), (bool_dtype,))?
         }
         ArrayStorage::F16(values) => {
@@ -21423,7 +21411,8 @@ fn build_numpy_array_from_storage(
             // float per element (~1700x slower than numpy on a 4M abs/sqrt result).
             let bits: Vec<u16> = values.iter().map(|value| value.to_bits()).collect();
             let u16_arr = numpy_array_from_slice(py, numpy, &bits, "uint16")?;
-            u16_arr.call_method1(intern!(py, "view"), ("float16",))?
+            let f16_dtype = cached_float16_type(py)?;
+            u16_arr.call_method1(intern!(py, "view"), (f16_dtype,))?
         }
         unsupported => {
             return Err(PyTypeError::new_err(format!(
@@ -33420,11 +33409,11 @@ fn zerocopy_multiply_add_f16(
         return Ok(None);
     }
     // Reinterpret the halves as raw bit patterns; PyO3 has no f16 buffer element.
-    let u16_dtype = numpy.getattr(intern!(py, "uint16"))?;
+    let u16_dtype = cached_uint16_type(py)?;
     let (Ok(raw_a), Ok(raw_b), Ok(raw_c)) = (
-        a.call_method1(intern!(py, "view"), (&u16_dtype,)),
-        b.call_method1(intern!(py, "view"), (&u16_dtype,)),
-        c.call_method1(intern!(py, "view"), (&u16_dtype,)),
+        a.call_method1(intern!(py, "view"), (u16_dtype,)),
+        b.call_method1(intern!(py, "view"), (u16_dtype,)),
+        c.call_method1(intern!(py, "view"), (u16_dtype,)),
     ) else {
         return Ok(None);
     };
@@ -33451,11 +33440,10 @@ fn zerocopy_multiply_add_f16(
     let vb: &[u16] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<u16>(), n) };
     let vc: &[u16] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<u16>(), n) };
 
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float16")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let f16_dtype = cached_float16_type(py)?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (n, f16_dtype))?;
     {
-        let raw_out = flat.call_method1(intern!(py, "view"), (&u16_dtype,))?;
+        let raw_out = flat.call_method1(intern!(py, "view"), (u16_dtype,))?;
         let Ok(out_buffer) = PyBuffer::<u16>::get(&raw_out) else {
             return Ok(None);
         };
