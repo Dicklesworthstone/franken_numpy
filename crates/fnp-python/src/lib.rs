@@ -10645,6 +10645,17 @@ fn cached_float32_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .bind(py))
 }
 
+fn cached_float16_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static F16_DTYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(F16_DTYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "dtype"), ("float16",))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
 fn zerocopy_f64_binary_flat<'py>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -11095,12 +11106,18 @@ fn logaddexp2_f32(x: f32, y: f32) -> f32 {
 /// whose `kind` is not a single character has no f16 route either, so it must DECLINE
 /// rather than raise.
 fn dtype_is_f16(v: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let dt = v.getattr("dtype")?;
-    if dt.getattr("itemsize")?.extract::<usize>()? != 2 {
+    let py = v.py();
+    let dt = v.getattr(intern!(py, "dtype"))?;
+    if let Ok(f16_dtype) = cached_float16_dtype(py)
+        && dt.is(f16_dtype)
+    {
+        return Ok(true);
+    }
+    if dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2 {
         return Ok(false);
     }
     Ok(dt
-        .getattr("kind")
+        .getattr(intern!(py, "kind"))
         .and_then(|kind| kind.extract::<char>())
         .is_ok_and(|kind| kind == 'f'))
 }
@@ -43943,8 +43960,7 @@ fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // wrap-to-int32 gave wrong values (e.g. vdot([2^30,2^30,7],[2^30,2^30,3])
     // returned 0 instead of 21). Deferring to numpy makes dtype, integer
     // wraparound, and float pairwise-summation all bit-exact.
-    let numpy = cached_numpy(py)?;
-    let vdot_fn = numpy.getattr(intern!(py, "vdot"))?;
+    let vdot_fn = cached_numpy_vdot(py)?;
     Ok(vdot_fn.call1((a.bind(py), b.bind(py)))?.unbind())
 }
 
@@ -83669,16 +83685,15 @@ fn tensordot(
     b: Py<PyAny>,
     axes: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let tensordot_fn = numpy.getattr(intern!(py, "tensordot"))?;
+    let b_a = a.bind(py);
+    let b_b = b.bind(py);
+    let tensordot_fn = cached_numpy_tensordot(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let axes_arg = match axes.as_ref() {
             Some(value) => value.bind(py).clone(),
             None => 2_i64.into_pyobject(py)?.into_any(),
         };
-        Ok(tensordot_fn
-            .call1((a.bind(py), b.bind(py), axes_arg))?
-            .unbind())
+        Ok(tensordot_fn.call1((b_a, b_b, axes_arg))?.unbind())
     };
 
     let axes = match axes.as_ref() {
@@ -83689,13 +83704,10 @@ fn tensordot(
                 // normalizes these via transpose+reshape into ONE serial
                 // no-BLAS dot for ints (508.9ms at 268M MACs measured). Mirror
                 // the normalization, land on the native int GEMM instead.
-                if let Some(result) = try_native_int_tensordot_tuple_axes(
-                    py,
-                    numpy,
-                    a.bind(py),
-                    b.bind(py),
-                    value.bind(py),
-                )? {
+                let numpy = cached_numpy(py)?;
+                if let Some(result) =
+                    try_native_int_tensordot_tuple_axes(py, numpy, b_a, b_b, value.bind(py))?
+                {
                     return Ok(result);
                 }
                 return fallback();
@@ -83707,18 +83719,20 @@ fn tensordot(
     // Integer tensordot (axes-int contraction): numpy has no BLAS for ints, so route to
     // the native parallel int GEMM via contiguous 2-D reshapes (bit-exact). Floats fall
     // through to the f64 native-window logic below; everything else defers to numpy.
-    if axes >= 1
-        && let Some(result) = try_native_int_tensordot(py, numpy, a.bind(py), b.bind(py), axes)?
-    {
-        return Ok(result);
+    if axes >= 1 {
+        let numpy = cached_numpy(py)?;
+        if let Some(result) = try_native_int_tensordot(py, numpy, b_a, b_b, axes)? {
+            return Ok(result);
+        }
     }
 
     // FLOAT16 tensordot (axes>=1): numpy has no f16 BLAS -> slow naive widen matmul. Route to
     // the native parallel f16 GEMM via contiguous 2-D reshapes (bit-exact). Everything else defers.
-    if axes >= 1
-        && let Some(result) = try_native_f16_tensordot(py, numpy, a.bind(py), b.bind(py), axes)?
-    {
-        return Ok(result);
+    if axes >= 1 {
+        let numpy = cached_numpy(py)?;
+        if let Some(result) = try_native_f16_tensordot(py, numpy, b_a, b_b, axes)? {
+            return Ok(result);
+        }
     }
 
     // Cheap metadata pre-gate (no extraction): tensordot(axes=k) flattens to the
@@ -83730,11 +83744,9 @@ fn tensordot(
     // Read the shapes straight off the ndarrays and delegate the non-competitive
     // contractions to numpy.tensordot before paying for any Rust-side extraction.
     if let (Ok(a_shape), Ok(b_shape)) = (
-        a.bind(py)
-            .getattr(intern!(py, "shape"))
+        b_a.getattr(intern!(py, "shape"))
             .and_then(|s| s.extract::<Vec<usize>>()),
-        b.bind(py)
-            .getattr(intern!(py, "shape"))
+        b_b.getattr(intern!(py, "shape"))
             .and_then(|s| s.extract::<Vec<usize>>()),
     ) && axes <= a_shape.len()
         && axes <= b_shape.len()
@@ -83756,11 +83768,11 @@ fn tensordot(
         }
     }
 
-    let a = match extract_precise_numeric_array(py, a.bind(py), "tensordot(a)") {
+    let a = match extract_precise_numeric_array(py, b_a, "tensordot(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let b = match extract_precise_numeric_array(py, b.bind(py), "tensordot(b)") {
+    let b = match extract_precise_numeric_array(py, b_b, "tensordot(b)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -85287,36 +85299,38 @@ fn try_zerocopy_int_kron1d(
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let kron_fn = numpy.getattr(intern!(py, "kron"))?;
-    let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(kron_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
+    let b_a = a.bind(py);
+    let b_b = b.bind(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kron_fn = cached_numpy_kron(py)?;
+        Ok(kron_fn.call1((b_a, b_b))?.unbind())
+    };
 
     // Zero-copy 1-D Kronecker product (= flattened outer) for C-contiguous f64
     // ndarrays; skips the cold extract + full n*m build Vecs. Bit-identical;
     // multi-dim inputs and other dtypes fall through to the general path.
-    if let Some(result) = try_zerocopy_f64_kron1d(py, a.bind(py), b.bind(py))? {
+    if let Some(result) = try_zerocopy_f64_kron1d(py, b_a, b_b)? {
         return Ok(result);
     }
-    if let Some(result) = try_zerocopy_int_kron1d(py, a.bind(py), b.bind(py))? {
+    if let Some(result) = try_zerocopy_int_kron1d(py, b_a, b_b)? {
         return Ok(result);
     }
     // SIMD block-fill 2-D f64 Kronecker product (~7x faster than the cold extract
     // + native build); other ndims/dtypes fall through.
-    if let Some(result) = try_zerocopy_f64_kron2d(py, a.bind(py), b.bind(py))? {
+    if let Some(result) = try_zerocopy_f64_kron2d(py, b_a, b_b)? {
         return Ok(result);
     }
     // f32 / integer 2-D Kronecker product (the f64 path above is f64-only; f32/int otherwise hit the
     // cold extract ~6-36x). Element-wise block products, bit-identical to numpy.
-    if let Some(result) = try_zerocopy_typed_kron2d(py, a.bind(py), b.bind(py))? {
+    if let Some(result) = try_zerocopy_typed_kron2d(py, b_a, b_b)? {
         return Ok(result);
     }
 
-    let a = match extract_precise_numeric_array(py, a.bind(py), "kron(a)") {
+    let a = match extract_precise_numeric_array(py, b_a, "kron(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let b = match extract_precise_numeric_array(py, b.bind(py), "kron(b)") {
+    let b = match extract_precise_numeric_array(py, b_b, "kron(b)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -85337,15 +85351,14 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    // The `numpy.inner` handle is looked up INSIDE the closure: the native paths
+    let b_a = a.bind(py);
+    let b_b = b.bind(py);
+    // The `numpy.inner` handle is cached: the native paths
     // below return without ever delegating, and a non-interned-free getattr on
     // the way in is pure loss for them.
     let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(numpy
-            .getattr(intern!(py, "inner"))?
-            .call1((a.bind(py), b.bind(py)))?
-            .unbind())
+        let inner_fn = cached_numpy_inner(py)?;
+        Ok(inner_fn.call1((b_a, b_b))?.unbind())
     };
 
     // Same one-classification dispatch as `matmul`/`dot` (`deadlock-audit-z1gjs`).
@@ -85353,24 +85366,26 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // before declining, and `np.inner` of two 1-D f64 vectors - the commonest
     // call there is - can be accepted by neither.
     let plan = MatmulGatePlan::for_operands(
-        numeric_operand_facts(py, a.bind(py))?,
-        numeric_operand_facts(py, b.bind(py))?,
+        numeric_operand_facts(py, b_a)?,
+        numeric_operand_facts(py, b_b)?,
     );
 
     // Integer inner: numpy has no BLAS for ints. Route to the native parallel int GEMM
     // (reshape + contiguous b^T). Bit-exact; floats fall through to the f64 window below.
-    if plan.int_any_rank()
-        && let Some(result) = try_native_int_inner(py, numpy, a.bind(py), b.bind(py))?
-    {
-        return Ok(result);
+    if plan.int_any_rank() {
+        let numpy = cached_numpy(py)?;
+        if let Some(result) = try_native_int_inner(py, numpy, b_a, b_b)? {
+            return Ok(result);
+        }
     }
 
     // FLOAT16 inner: numpy has no f16 BLAS -> slow naive widen matmul. Route to the native
     // parallel f16 GEMM (reshape + contiguous b^T). Bit-exact (inner == matmul(a, ascontig(b.T))).
-    if plan.f16_any_rank()
-        && let Some(result) = try_native_f16_inner(py, numpy, a.bind(py), b.bind(py))?
-    {
-        return Ok(result);
+    if plan.f16_any_rank() {
+        let numpy = cached_numpy(py)?;
+        if let Some(result) = try_native_f16_inner(py, numpy, b_a, b_b)? {
+            return Ok(result);
+        }
     }
 
     // np.inner contracts the shared LAST axis: out = a @ b^T flattens to the GEMM
@@ -85384,11 +85399,9 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // contractions to numpy.inner before paying for any Rust-side extraction —
     // the native GEMM is kept only in the window where it is faster than numpy.
     if let (Ok(a_shape), Ok(b_shape)) = (
-        a.bind(py)
-            .getattr(intern!(py, "shape"))
+        b_a.getattr(intern!(py, "shape"))
             .and_then(|s| s.extract::<Vec<usize>>()),
-        b.bind(py)
-            .getattr(intern!(py, "shape"))
+        b_b.getattr(intern!(py, "shape"))
             .and_then(|s| s.extract::<Vec<usize>>()),
     ) && !a_shape.is_empty()
         && !b_shape.is_empty()
@@ -85415,11 +85428,11 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         }
     }
 
-    let a = match extract_precise_numeric_array(py, a.bind(py), "inner(a)") {
+    let a = match extract_precise_numeric_array(py, b_a, "inner(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let b = match extract_precise_numeric_array(py, b.bind(py), "inner(b)") {
+    let b = match extract_precise_numeric_array(py, b_b, "inner(b)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -85660,37 +85673,41 @@ fn outer(
     b: Py<PyAny>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let outer_fn = numpy.getattr(intern!(py, "outer"))?;
-    let kwargs = PyDict::new(py);
-    if let Some(ref value) = out {
-        kwargs.set_item(intern!(py, "out"), value.bind(py))?;
-    }
+    let b_a = a.bind(py);
+    let b_b = b.bind(py);
+    let has_out = out.as_ref().is_some_and(|value| !value.bind(py).is_none());
     let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(outer_fn
-            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
-            .unbind())
+        let outer_fn = cached_numpy_outer(py)?;
+        if let Some(ref value) = out {
+            let b_out = value.bind(py);
+            if !b_out.is_none() {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item(intern!(py, "out"), b_out)?;
+                return Ok(outer_fn.call((b_a, b_b), Some(&kwargs))?.unbind());
+            }
+        }
+        Ok(outer_fn.call1((b_a, b_b))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
+    if has_out {
         return fallback();
     }
 
     // Zero-copy rank-1 product for C-contiguous f64 ndarrays (the common case);
     // skips the cold extract + full n*m build Vecs. Bit-identical; other dtypes
     // and non-contiguous inputs fall through to the general path.
-    if let Some(result) = try_zerocopy_f64_outer(py, a.bind(py), b.bind(py))? {
+    if let Some(result) = try_zerocopy_f64_outer(py, b_a, b_b)? {
         return Ok(result);
     }
-    if let Some(result) = try_zerocopy_int_outer(py, a.bind(py), b.bind(py))? {
+    if let Some(result) = try_zerocopy_int_outer(py, b_a, b_b)? {
         return Ok(result);
     }
 
-    let a = match extract_precise_numeric_array(py, a.bind(py), "outer(a)") {
+    let a = match extract_precise_numeric_array(py, b_a, "outer(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let b = match extract_precise_numeric_array(py, b.bind(py), "outer(b)") {
+    let b = match extract_precise_numeric_array(py, b_b, "outer(b)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -88668,6 +88685,13 @@ cached_numpy_attr!(cached_numpy_can_cast, "can_cast");
 cached_numpy_attr!(cached_numpy_datetime_data, "datetime_data");
 cached_numpy_attr!(cached_numpy_promote_types, "promote_types");
 cached_numpy_attr!(cached_numpy_result_type, "result_type");
+cached_numpy_attr!(cached_numpy_matmul, "matmul");
+cached_numpy_attr!(cached_numpy_dot, "dot");
+cached_numpy_attr!(cached_numpy_inner, "inner");
+cached_numpy_attr!(cached_numpy_vdot, "vdot");
+cached_numpy_attr!(cached_numpy_outer, "outer");
+cached_numpy_attr!(cached_numpy_kron, "kron");
+cached_numpy_attr!(cached_numpy_tensordot, "tensordot");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
@@ -100371,7 +100395,7 @@ fn numeric_operand_facts(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<Option<NumericOperandFacts>> {
-    if !value.is_exact_instance(cached_ndarray_type(py)?) {
+    if !is_exact_numpy_ndarray(py, value)? {
         return Ok(None);
     }
     let rank = value.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
@@ -100388,12 +100412,11 @@ fn numeric_operand_facts(
     // getattr path below would have produced - this is the same answer with the lookup
     // removed, not a narrower one.
     //
-    // EXACTLY TWO COMPARES, f64 first. A miss costs a handful of instructions and then takes
-    // the unchanged path, so no operand can be made slower in any way that matters; adding
-    // int64/uint8/... would tax every f64 call to speed up dtypes whose gates are not the hot
-    // ones here. A BYTE-SWAPPED `>f8` is a DIFFERENT object and therefore misses, falls
-    // through, and is classified `('f', 8)` exactly as before - the identity compare is used
-    // here only to answer faster, never to route.
+    // EXACTLY THREE COMPARES: f64, f32, and f16. A miss costs a handful of instructions and then
+    // takes the unchanged path, so no operand can be made slower in any way that matters.
+    // A BYTE-SWAPPED `>f8` is a DIFFERENT object and therefore misses, falls through, and is
+    // classified `('f', 8)` exactly as before - the identity compare is used here only to
+    // answer faster, never to route.
     if let Ok(f64_dtype) = cached_float64_dtype(py)
         && dtype.is(f64_dtype)
     {
@@ -100410,6 +100433,15 @@ fn numeric_operand_facts(
             rank,
             kind: 'f',
             itemsize: 4,
+        }));
+    }
+    if let Ok(f16_dtype) = cached_float16_dtype(py)
+        && dtype.is(f16_dtype)
+    {
+        return Ok(Some(NumericOperandFacts {
+            rank,
+            kind: 'f',
+            itemsize: 2,
         }));
     }
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
@@ -100513,6 +100545,8 @@ fn matmul(
     out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    let b_x1 = x1.bind(py);
+    let b_x2 = x2.bind(py);
     // ONE classification for the whole chain below (`deadlock-audit-z1gjs`). It
     // also subsumes the eleven repeated kwargs/`out=` checks, which each bound a
     // fresh `Bound` before deciding nothing had changed since the last gate.
@@ -100520,29 +100554,23 @@ fn matmul(
         && python_explicit_out_is_absent_or_none(py, out.as_ref())
     {
         MatmulGatePlan::for_operands(
-            numeric_operand_facts(py, x1.bind(py))?,
-            numeric_operand_facts(py, x2.bind(py))?,
+            numeric_operand_facts(py, b_x1)?,
+            numeric_operand_facts(py, b_x2)?,
         )
     } else {
         MatmulGatePlan::NOTHING
     };
 
     if plan.f64_flat
-        && let Some(result) = python_native_gemm_f64_2d(
-            py,
-            x1.bind(py),
-            x2.bind(py),
-            PythonNativeGemmOp::Matmul,
-            true,
-        )?
+        && let Some(result) =
+            python_native_gemm_f64_2d(py, b_x1, b_x2, PythonNativeGemmOp::Matmul, true)?
     {
         return Ok(result);
     }
 
     if plan.f64_batched {
         let numpy = cached_numpy(py)?;
-        if let Some(result) = try_zerocopy_f64_batched_matmul(py, numpy, x1.bind(py), x2.bind(py))?
-        {
+        if let Some(result) = try_zerocopy_f64_batched_matmul(py, numpy, b_x1, b_x2)? {
             return Ok(result);
         }
     }
@@ -100550,7 +100578,7 @@ fn matmul(
     // Native parallel integer 2-D @ 2-D matmul (numpy has no BLAS for ints -> slow
     // naive loop). Bit-exact wrapping GEMM; defers everything else to numpy.
     if plan.int_flat
-        && let Some(result) = try_native_int_matmul(py, x1.bind(py), x2.bind(py))?
+        && let Some(result) = try_native_int_matmul(py, b_x1, b_x2)?
     {
         return Ok(result);
     }
@@ -100558,7 +100586,7 @@ fn matmul(
     // Integer vecmat (1-D v @ 2-D A): numpy's strided column walk is ~7x its
     // own matvec; row-major block accumulation is byte-exact and parallel.
     if plan.int_flat
-        && let Some(result) = try_native_int_vecmat(py, x1.bind(py), x2.bind(py))?
+        && let Some(result) = try_native_int_vecmat(py, b_x1, b_x2)?
     {
         return Ok(result);
     }
@@ -100566,7 +100594,7 @@ fn matmul(
     // Native parallel FLOAT16 2-D @ 2-D matmul (numpy has no f16 BLAS -> naive widen loop,
     // ~245x slower than f32 BLAS). Bit-exact (sequential-k f32 accumulation, narrow once).
     if plan.f16_flat
-        && let Some(result) = try_native_f16_matmul(py, x1.bind(py), x2.bind(py))?
+        && let Some(result) = try_native_f16_matmul(py, b_x1, b_x2)?
     {
         return Ok(result);
     }
@@ -100574,7 +100602,7 @@ fn matmul(
     // Native parallel BATCHED integer matmul (>=3-D, matching batch dims). numpy's
     // integer batched matmul is a naive per-slice serial loop (~53x slower than float).
     if plan.int_batched
-        && let Some(result) = try_native_int_batched_matmul(py, x1.bind(py), x2.bind(py))?
+        && let Some(result) = try_native_int_batched_matmul(py, b_x1, b_x2)?
     {
         return Ok(result);
     }
@@ -100582,7 +100610,7 @@ fn matmul(
     // Broadcast-batch (>=3-D @ shared 2-D) integer/bool matmul: numpy's no-BLAS
     // loop is serial per slice; a zero-copy (B*m, k) reshape routes the 2-D kernels.
     if plan.int_batched
-        && let Some(result) = try_native_intbool_broadcast_matmul(py, x1.bind(py), x2.bind(py))?
+        && let Some(result) = try_native_intbool_broadcast_matmul(py, b_x1, b_x2)?
     {
         return Ok(result);
     }
@@ -100591,8 +100619,7 @@ fn matmul(
     // batched kernels (a_batch_stride=0). matmul-only - dot's 2-D @ N-D
     // contraction has a different output layout.
     if plan.int_batched
-        && let Some(result) =
-            try_native_intbool_shared_a_batched_matmul(py, x1.bind(py), x2.bind(py))?
+        && let Some(result) = try_native_intbool_shared_a_batched_matmul(py, b_x1, b_x2)?
     {
         return Ok(result);
     }
@@ -100600,7 +100627,7 @@ fn matmul(
     // Native parallel BATCHED float16 matmul (>=3-D, matching batch dims). numpy has no f16
     // BLAS -> naive per-slice widen loop (~54x slower than batched f32 BLAS). Bit-exact.
     if plan.f16_batched
-        && let Some(result) = try_native_f16_batched_matmul(py, x1.bind(py), x2.bind(py))?
+        && let Some(result) = try_native_f16_batched_matmul(py, b_x1, b_x2)?
     {
         return Ok(result);
     }
@@ -100608,18 +100635,18 @@ fn matmul(
     // Native parallel BROADCAST float16 matmul (one operand >=3-D, the other 2-D shared across the
     // batch). numpy has no f16 BLAS -> naive widen loop (~105x slower than f32 BLAS). Bit-exact.
     if plan.f16_batched
-        && let Some(result) = try_native_f16_broadcast_matmul(py, x1.bind(py), x2.bind(py))?
+        && let Some(result) = try_native_f16_broadcast_matmul(py, b_x1, b_x2)?
     {
         return Ok(result);
     }
 
-    let numpy = cached_numpy(py)?;
-    let matmul_fn = numpy.getattr(intern!(py, "matmul"))?;
+    let matmul_fn = cached_numpy_matmul(py)?;
     match out {
-        Some(o) => Ok(matmul_fn
-            .call((x1.bind(py), x2.bind(py), o.bind(py)), kwargs)?
-            .unbind()),
-        None => Ok(matmul_fn.call((x1.bind(py), x2.bind(py)), kwargs)?.unbind()),
+        Some(o) => Ok(matmul_fn.call((b_x1, b_x2, o.bind(py)), kwargs)?.unbind()),
+        None => match kwargs {
+            Some(kw) if !kw.is_empty() => Ok(matmul_fn.call((b_x1, b_x2), Some(kw))?.unbind()),
+            _ => Ok(matmul_fn.call1((b_x1, b_x2))?.unbind()),
+        },
     }
 }
 
@@ -100627,13 +100654,15 @@ fn matmul(
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    let b_a = a.bind(py);
+    let b_b = b.bind(py);
     // Same one-classification dispatch as `matmul` (`deadlock-audit-z1gjs`): six
     // gates that each re-read shape and dtype for themselves, and a 1-D @ 1-D dot
     // product that none of them can accept.
     let plan = if python_explicit_out_is_absent_or_none(py, out.as_ref()) {
         MatmulGatePlan::for_operands(
-            numeric_operand_facts(py, a.bind(py))?,
-            numeric_operand_facts(py, b.bind(py))?,
+            numeric_operand_facts(py, b_a)?,
+            numeric_operand_facts(py, b_b)?,
         )
     } else {
         MatmulGatePlan::NOTHING
@@ -100641,7 +100670,7 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
 
     if plan.f64_flat
         && let Some(result) =
-            python_native_gemm_f64_2d(py, a.bind(py), b.bind(py), PythonNativeGemmOp::Dot, true)?
+            python_native_gemm_f64_2d(py, b_a, b_b, PythonNativeGemmOp::Dot, true)?
     {
         return Ok(result);
     }
@@ -100649,14 +100678,14 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
     // Native parallel integer 2-D @ 2-D dot (np.dot(2d,2d) == matmul; numpy has no BLAS
     // for ints -> slow naive loop). Bit-exact wrapping GEMM; everything else defers.
     if plan.int_flat
-        && let Some(result) = try_native_int_matmul(py, a.bind(py), b.bind(py))?
+        && let Some(result) = try_native_int_matmul(py, b_a, b_b)?
     {
         return Ok(result);
     }
 
     // Integer dot(v 1-D, A 2-D) contracts v with A's first axis == vecmat.
     if plan.int_flat
-        && let Some(result) = try_native_int_vecmat(py, a.bind(py), b.bind(py))?
+        && let Some(result) = try_native_int_vecmat(py, b_a, b_b)?
     {
         return Ok(result);
     }
@@ -100665,7 +100694,7 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
     // same element math as broadcast matmul - so the zero-copy reshape arm
     // (int/bool) applies verbatim.
     if plan.int_batched
-        && let Some(result) = try_native_intbool_broadcast_matmul(py, a.bind(py), b.bind(py))?
+        && let Some(result) = try_native_intbool_broadcast_matmul(py, b_a, b_b)?
     {
         return Ok(result);
     }
@@ -100673,7 +100702,7 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
     // np.dot(a >=2-D, b >=3-D) int/bool: shared-A kernel values, one
     // transpose-copy into dot's (Ma, B.., n) layout.
     if plan.int_batched
-        && let Some(result) = try_native_intbool_dot_a2d_bnd(py, a.bind(py), b.bind(py))?
+        && let Some(result) = try_native_intbool_dot_a2d_bnd(py, b_a, b_b)?
     {
         return Ok(result);
     }
@@ -100681,18 +100710,15 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
     // Native parallel FLOAT16 2-D @ 2-D dot (numpy has no f16 BLAS -> naive widen loop).
     // np.dot(2d,2d) == matmul; bit-exact (sequential-k f32 accumulation, narrow once).
     if plan.f16_flat
-        && let Some(result) = try_native_f16_matmul(py, a.bind(py), b.bind(py))?
+        && let Some(result) = try_native_f16_matmul(py, b_a, b_b)?
     {
         return Ok(result);
     }
 
-    let numpy = cached_numpy(py)?;
-    let dot_fn = numpy.getattr(intern!(py, "dot"))?;
+    let dot_fn = cached_numpy_dot(py)?;
     match out {
-        Some(o) => Ok(dot_fn
-            .call((a.bind(py), b.bind(py), o.bind(py)), None)?
-            .unbind()),
-        None => Ok(dot_fn.call((a.bind(py), b.bind(py)), None)?.unbind()),
+        Some(o) => Ok(dot_fn.call1((b_a, b_b, o.bind(py)))?.unbind()),
+        None => Ok(dot_fn.call1((b_a, b_b))?.unbind()),
     }
 }
 
