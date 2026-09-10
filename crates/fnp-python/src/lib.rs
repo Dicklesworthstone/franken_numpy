@@ -17973,19 +17973,18 @@ fn try_zerocopy_int_take(
         return Ok(None);
     }
     {
-        // `kind` as a CHAR, not a heap-allocated `String`. PyO3 extracts a one-character Python
-        // str straight into a `char`; the `String` form allocated on the entry path of every
-        // `np.take`. Same comparison, same admitted set - the sort route took the identical fix
-        // (`franken_numpy-ixs5y.409`).
+        if dtype_kind_of(indices) != Some('i') {
+            return Ok(None);
+        }
         let dtype = indices.getattr(intern!(py, "dtype"))?;
-        if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
-            || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
-        {
+        if dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8 {
             return Ok(None);
         }
     }
+    let Some(kind) = dtype_kind_of(a) else {
+        return Ok(None);
+    };
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     let itemsize = a_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
@@ -17993,22 +17992,22 @@ fn try_zerocopy_int_take(
     // (elements are copied verbatim), then view the result back to the original dtype — dtype-
     // preserving for EVERY 1/2/4/8-byte fixed-width dtype (int/uint/float/complex64/bool). 16-byte
     // (complex128) has no primitive mover -> defer. Mirrors try_zerocopy_take_axis.
-    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
+    if !matches!(kind, 'b' | 'i' | 'u' | 'f' | 'c') {
         return Ok(None);
     }
-    let mover_name = match itemsize {
-        1 => "uint8",
-        2 => "uint16",
-        4 => "uint32",
-        8 => "uint64",
+    let mover_type = match itemsize {
+        1 => cached_uint8_type(py)?,
+        2 => cached_uint16_type(py)?,
+        4 => cached_uint32_type(py)?,
+        8 => cached_uint64_type(py)?,
         _ => return Ok(None),
     };
-    let a_uint = a.call_method1(intern!(py, "view"), (numpy.getattr(mover_name)?,))?;
+    let a_uint = a.call_method1(intern!(py, "view"), (mover_type,))?;
     let gathered = match itemsize {
-        1 => take_typed::<u8>(py, numpy, &a_uint, indices, "uint8", mode_code)?,
-        2 => take_typed::<u16>(py, numpy, &a_uint, indices, "uint16", mode_code)?,
-        4 => take_typed::<u32>(py, numpy, &a_uint, indices, "uint32", mode_code)?,
-        _ => take_typed::<u64>(py, numpy, &a_uint, indices, "uint64", mode_code)?,
+        1 => take_typed::<u8>(py, numpy, &a_uint, indices, mover_type, mode_code)?,
+        2 => take_typed::<u16>(py, numpy, &a_uint, indices, mover_type, mode_code)?,
+        4 => take_typed::<u32>(py, numpy, &a_uint, indices, mover_type, mode_code)?,
+        _ => take_typed::<u64>(py, numpy, &a_uint, indices, mover_type, mode_code)?,
     };
     let (flat_uint, out_shape) = match gathered {
         Some(r) => r,
@@ -24953,31 +24952,30 @@ fn take(
     out: Option<Py<PyAny>>,
     mode: &str,
 ) -> PyResult<Py<PyAny>> {
-    let a_for_fallback = a.clone_ref(py);
-    let indices_for_fallback = indices.clone_ref(py);
-    let out_for_fallback = out.as_ref().map(|value| value.clone_ref(py));
+    let b_a = a.bind(py);
+    let b_indices = indices.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let kwargs = PyDict::new(py);
-        if let Some(axis) = axis {
-            kwargs.set_item(intern!(py, "axis"), axis)?;
+        let take_fn = cached_numpy_take(py)?;
+        if axis.is_none() && out.is_none() && mode == "raise" {
+            Ok(take_fn.call1((b_a, b_indices))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            if let Some(axis) = axis {
+                kwargs.set_item(intern!(py, "axis"), axis)?;
+            }
+            if let Some(out_val) = out.as_ref() {
+                kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
+            }
+            if mode != "raise" {
+                kwargs.set_item(intern!(py, "mode"), mode)?;
+            }
+            Ok(take_fn.call((b_a, b_indices), Some(&kwargs))?.unbind())
         }
-        if let Some(out_val) = out_for_fallback.as_ref() {
-            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-        }
-        kwargs.set_item(intern!(py, "mode"), mode)?;
-        Ok(numpy
-            .getattr(intern!(py, "take"))?
-            .call(
-                (a_for_fallback.bind(py), indices_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
     };
 
     // Non-native byte order delegates whole: numpy preserves the input's byte order on the
     // gathered result, every native gather rebuilds native order (`deadlock-audit-2kqw3`).
-    if ndarray_is_byteswapped(py, a.bind(py)) {
+    if ndarray_is_byteswapped(py, b_a) {
         return fallback();
     }
 
@@ -24991,7 +24989,7 @@ fn take(
     // native gather paths below canonicalize with `asarray` and rebuild a base
     // ndarray, so subclasses must delegate before route selection
     // (`deadlock-audit-30d18`).
-    if ndarray_subclass_needs_numpy(py, a.bind(py))? {
+    if ndarray_subclass_needs_numpy(py, b_a)? {
         return fallback();
     }
 
@@ -25036,7 +25034,7 @@ fn take(
     // `a.item(i)` is cheaper still (48.2 ns) and is NOT equivalent: it returns a Python `float`
     // where numpy returns `np.float64`.
     if axis.is_none() && mode == "raise" {
-        let indices_bound = indices.bind(py);
+        let indices_bound = b_indices;
         // Resolve the index to an i64 VALUE rather than forwarding the caller's object, because
         // for bool the two differ: numpy indexes with `True` as 1 (`take(a, True)` is `a[1]`, and
         // a bool ARRAY is an index list of 0/1, not a mask), whereas handing a Python bool to
@@ -25082,7 +25080,7 @@ fn take(
             }
         };
         if let Some(scalar_index) = scalar_index {
-            let a_bound = a.bind(py);
+            let a_bound = b_a;
             let ndarray_type = cached_ndarray_type(py)?.clone();
             if a_bound.is_exact_instance(&ndarray_type) {
                 let ndim = a_bound.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
@@ -25116,13 +25114,13 @@ fn take(
     // delegate. NB: the cold extract residual below still widens narrow widths, so it is guarded to
     // bool/8-byte only — the byte-gather helpers cover every relaxed dtype before it is reached.
     let numpy = cached_numpy(py)?;
-    let arr = numpy.call_method1(intern!(py, "asarray"), (a.bind(py),))?;
+    let arr = numpy.call_method1(intern!(py, "asarray"), (b_a,))?;
+    let Some(dtype_kind) = dtype_kind_of(&arr) else {
+        return fallback();
+    };
     let dtype = arr.getattr(intern!(py, "dtype"))?;
-    let dtype_kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    if !(matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f" | "c")
-        && matches!(itemsize, 1 | 2 | 4 | 8))
-    {
+    if !(matches!(dtype_kind, 'b' | 'i' | 'u' | 'f' | 'c') && matches!(itemsize, 1 | 2 | 4 | 8)) {
         return fallback();
     }
 
@@ -25134,31 +25132,29 @@ fn take(
     // A flat Python list/tuple is an ordinary np.take index spelling.  It cannot
     // enter the ndarray-buffer gathers below without first allocating an int64
     // ndarray, so consume its existing integer objects directly.
-    if let Some(out) =
-        try_zerocopy_f64_container_take(py, a.bind(py), indices.bind(py), axis, mode)?
-    {
+    if let Some(out) = try_zerocopy_f64_container_take(py, b_a, b_indices, axis, mode)? {
         return Ok(out);
     }
     // Zero-copy flat gather for the common case (axis=None, mode="raise", f64 a +
     // int64 indices); skips the cold extract/build Vecs. Bit-identical; per-axis
     // takes, other index widths, and out-of-range indices fall through.
-    if let Some(out) = try_zerocopy_f64_take(py, a.bind(py), indices.bind(py), axis, mode)? {
+    if let Some(out) = try_zerocopy_f64_take(py, b_a, b_indices, axis, mode)? {
         return Ok(out);
     }
     // Dtype-agnostic byte gather for the remaining gated dtypes (int64/uint64 ~39x
     // slower via the extract Vec, plus bool); elements move verbatim so it is
     // bit-identical. Out-of-range indices fall through so numpy raises IndexError.
-    if let Some(out) = try_zerocopy_int_take(py, a.bind(py), indices.bind(py), axis, mode)? {
+    if let Some(out) = try_zerocopy_int_take(py, b_a, b_indices, axis, mode)? {
         return Ok(out);
     }
     // Per-axis gather for the gated dtypes — the axis case the flat helpers skip,
     // otherwise routed through the cold extract→ndarray.take path (30-100x slower).
-    if let Some(out) = try_zerocopy_take_axis(py, a.bind(py), indices.bind(py), axis, mode)? {
+    if let Some(out) = try_zerocopy_take_axis(py, b_a, b_indices, axis, mode)? {
         return Ok(out);
     }
     // Non-contiguous (transposed/strided) source ndarrays bail into the cold extract;
     // delegate to numpy's strided take.
-    if noncontiguous_ndarray(numpy, a.bind(py))? {
+    if noncontiguous_ndarray(numpy, b_a)? {
         return fallback();
     }
     // The extract residual below widens narrow widths to i64/u64/f64 (dtype-parity bug). The
@@ -25173,12 +25169,11 @@ fn take(
     // handle complex, and when they decline (a Python-list index, say) the call
     // has to reach numpy, not the residual
     // (deadlock-audit-output-dtype-parity-sweep-liz1c).
-    if !(dtype_kind == "b" || (itemsize == 8 && dtype_kind != "c")) {
+    if !(dtype_kind == 'b' || (itemsize == 8 && dtype_kind != 'c')) {
         return fallback();
     }
-    let a = extract_numeric_array(py, a.bind(py), "take(a)")?;
-    let (indices_shape, flat_indices) =
-        extract_take_indices(py, indices.bind(py), "take(indices)")?;
+    let a = extract_numeric_array(py, b_a, "take(a)")?;
+    let (indices_shape, flat_indices) = extract_take_indices(py, b_indices, "take(indices)")?;
     // numpy.take raises IndexError (not ValueError) for out-of-range index.
     // Our ufunc layer returns Msg("take: index X out of bounds ..."), which
     // map_ufunc_error would flatten to PyValueError. Fall back so the
@@ -35990,25 +35985,22 @@ fn compress(
     axis: Option<isize>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let condition_for_fallback = condition.clone_ref(py);
-    let a_for_fallback = a.clone_ref(py);
-    let out_for_fallback = out.as_ref().map(|value| value.clone_ref(py));
+    let b_cond = condition.bind(py);
+    let b_a = a.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let kwargs = PyDict::new(py);
-        if let Some(axis) = axis {
-            kwargs.set_item(intern!(py, "axis"), axis)?;
+        let compress_fn = cached_numpy_compress(py)?;
+        if axis.is_none() && out.is_none() {
+            Ok(compress_fn.call1((b_cond, b_a))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            if let Some(axis) = axis {
+                kwargs.set_item(intern!(py, "axis"), axis)?;
+            }
+            if let Some(out_val) = out.as_ref() {
+                kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
+            }
+            Ok(compress_fn.call((b_cond, b_a), Some(&kwargs))?.unbind())
         }
-        if let Some(out_val) = out_for_fallback.as_ref() {
-            kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-        }
-        Ok(numpy
-            .getattr(intern!(py, "compress"))?
-            .call(
-                (condition_for_fallback.bind(py), a_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
     };
     // No native compaction writes into a caller-supplied buffer, so an out=
     // delegates whole.
@@ -36022,20 +36014,20 @@ fn compress(
     // helper (5x). Bit-identical (elements move verbatim). Per-axis compress,
     // complex, non-bool conditions, and non-ndarray operands fall through.
     if axis.is_none()
-        && let Some(out) = try_zerocopy_any_compact(py, condition.bind(py), a.bind(py))?
+        && let Some(out) = try_zerocopy_any_compact(py, b_cond, b_a)?
     {
         return Ok(out);
     }
     // Remaining flat float64 cases (e.g. when the generic path declines) and any
     // residue keep the dedicated f64 helper before the cold extract path.
-    if let Some(out) = try_zerocopy_f64_compress(py, condition.bind(py), a.bind(py), axis)? {
+    if let Some(out) = try_zerocopy_f64_compress(py, b_cond, b_a, axis)? {
         return Ok(out);
     }
     // Per-axis float64 compress: select slabs along the axis with contiguous block
     // copies off the borrowed buffer, skipping the whole-array extract + native
     // rebuild (which was ~17x numpy on a 1000x1000 axis-0 compress).
     if let Some(axis) = axis
-        && let Some(out) = try_zerocopy_f64_compress_axis(py, condition.bind(py), a.bind(py), axis)?
+        && let Some(out) = try_zerocopy_f64_compress_axis(py, b_cond, b_a, axis)?
     {
         return Ok(out);
     }
@@ -36050,18 +36042,15 @@ fn compress(
 
 #[pyfunction]
 fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let condition_for_fallback = condition.clone_ref(py);
-    let arr_for_fallback = arr.clone_ref(py);
+    let b_cond = condition.bind(py);
+    let b_arr = arr.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        Ok(numpy
-            .getattr(intern!(py, "extract"))?
-            .call1((condition_for_fallback.bind(py), arr_for_fallback.bind(py)))?
-            .unbind())
+        let extract_fn = cached_numpy_extract(py)?;
+        Ok(extract_fn.call1((b_cond, b_arr))?.unbind())
     };
     // NumPy's extract preserves the data array's dtype; our native kernel
     // canonicalizes narrow ints/floats, so defer non-canonical widths to NumPy.
-    if !numpy_dtype_native_roundtrip_preserves(py, arr.bind(py)) {
+    if !numpy_dtype_native_roundtrip_preserves(py, b_arr) {
         return fallback();
     }
     // Typed BRANCHLESS compaction (extract == compress over the raveled
@@ -36073,14 +36062,14 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
     // replaces the old f64-only `if cond { store; w+=1 }` extract loop, whose
     // ~50% branch-mispredict on a balanced mask made extract ~4-5x slower than
     // compress for identical inputs. Bit-identical (elements move verbatim).
-    if let Some(out) = try_zerocopy_any_compact(py, condition.bind(py), arr.bind(py))? {
+    if let Some(out) = try_zerocopy_any_compact(py, b_cond, b_arr)? {
         return Ok(out);
     }
-    let condition = match extract_numeric_array(py, condition.bind(py), "extract(condition)") {
+    let condition = match extract_numeric_array(py, b_cond, "extract(condition)") {
         Ok(condition) => condition,
         Err(_) => return fallback(),
     };
-    let arr = match extract_numeric_array(py, arr.bind(py), "extract(arr)") {
+    let arr = match extract_numeric_array(py, b_arr, "extract(arr)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
@@ -36099,31 +36088,18 @@ fn select(
     choicelist: Py<PyAny>,
     default: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let condlist_for_fallback = condlist.clone_ref(py);
-    let choicelist_for_fallback = choicelist.clone_ref(py);
-    let default_for_fallback = default.as_ref().map(|value| value.clone_ref(py));
+    let b_condlist = condlist.bind(py);
+    let b_choicelist = choicelist.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = cached_numpy(py)?;
-        let select_fn = numpy.getattr(intern!(py, "select"))?;
-        if let Some(default) = default_for_fallback.as_ref() {
+        let select_fn = cached_numpy_select(py)?;
+        if let Some(default) = default.as_ref() {
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "default"), default.bind(py))?;
             Ok(select_fn
-                .call(
-                    (
-                        condlist_for_fallback.bind(py),
-                        choicelist_for_fallback.bind(py),
-                    ),
-                    Some(&kwargs),
-                )?
+                .call((b_condlist, b_choicelist), Some(&kwargs))?
                 .unbind())
         } else {
-            Ok(select_fn
-                .call1((
-                    condlist_for_fallback.bind(py),
-                    choicelist_for_fallback.bind(py),
-                ))?
-                .unbind())
+            Ok(select_fn.call1((b_condlist, b_choicelist))?.unbind())
         }
     };
 
@@ -36134,7 +36110,7 @@ fn select(
     // round-trip reproduces exactly — and defer every other dtype mix to numpy,
     // which preserves the promoted result dtype.
     let choices_all_f64 = || -> PyResult<bool> {
-        for item in choicelist.bind(py).try_iter()? {
+        for item in b_choicelist.try_iter()? {
             if !numpy_dtype_is_f64(py, &item?) {
                 return Ok(false);
             }
@@ -36156,8 +36132,7 @@ fn select(
         // select through same-width unsigned views — selection moves elements
         // verbatim, so it is bit-exact for every fixed-width integer. Every
         // defer inside falls through to the numpy delegate.
-        if let Some(out) =
-            try_zerocopy_int_select(py, condlist.bind(py), choicelist.bind(py), default.as_ref())?
+        if let Some(out) = try_zerocopy_int_select(py, b_condlist, b_choicelist, default.as_ref())?
         {
             return Ok(out);
         }
@@ -36168,21 +36143,18 @@ fn select(
     // f64 choices of one shape, scalar default); skips the chained where_select
     // fold and the cold extract/build Vecs. Bit-identical; broadcasting,
     // non-contiguous, or non-scalar-default cases fall through below.
-    if let Some(out) =
-        try_zerocopy_f64_select(py, condlist.bind(py), choicelist.bind(py), default.as_ref())?
-    {
+    if let Some(out) = try_zerocopy_f64_select(py, b_condlist, b_choicelist, default.as_ref())? {
         return Ok(out);
     }
 
-    let condlist = match extract_numeric_array_sequence(py, condlist.bind(py), "select(condlist)") {
+    let condlist = match extract_numeric_array_sequence(py, b_condlist, "select(condlist)") {
         Ok(condlist) => condlist,
         Err(_) => return fallback(),
     };
-    let choicelist =
-        match extract_numeric_array_sequence(py, choicelist.bind(py), "select(choicelist)") {
-            Ok(choicelist) => choicelist,
-            Err(_) => return fallback(),
-        };
+    let choicelist = match extract_numeric_array_sequence(py, b_choicelist, "select(choicelist)") {
+        Ok(choicelist) => choicelist,
+        Err(_) => return fallback(),
+    };
 
     if condlist.len() != choicelist.len() {
         return fallback();
@@ -36197,11 +36169,13 @@ fn select(
         return fallback();
     }
 
-    let mut result = match default {
-        Some(default) => match extract_numeric_array(py, default.bind(py), "select(default)") {
-            Ok(default) => default,
-            Err(_) => return fallback(),
-        },
+    let mut result = match default.as_ref() {
+        Some(default_val) => {
+            match extract_numeric_array(py, default_val.bind(py), "select(default)") {
+                Ok(default) => default,
+                Err(_) => return fallback(),
+            }
+        }
         None => {
             UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![0])).map_err(map_ufunc_error)?
         }
@@ -36307,11 +36281,10 @@ fn try_zerocopy_int_choose(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let a_kind = a
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if a_kind != "i" && a_kind != "u" {
+    let Some(a_kind) = dtype_kind_of(a) else {
+        return Ok(None);
+    };
+    if a_kind != 'i' && a_kind != 'u' {
         return Ok(None);
     }
     let a_shape = a.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?;
@@ -36335,14 +36308,16 @@ fn try_zerocopy_int_choose(
     if !is_exact_numpy_ndarray(py, &items[0])? {
         return Ok(None);
     }
+    let Some(kind) = dtype_kind_of(&items[0]) else {
+        return Ok(None);
+    };
+    if kind != 'i' && kind != 'u' && kind != 'f' {
+        return Ok(None);
+    }
     let c0_dtype = items[0].getattr(intern!(py, "dtype"))?;
-    let kind = c0_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     let itemsize = c0_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
-    if kind != "i" && kind != "u" && kind != "f" {
-        return Ok(None);
-    }
     for c in &items {
         if !is_exact_numpy_ndarray(py, c)?
             || c.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()? != a_shape
@@ -36350,7 +36325,7 @@ fn try_zerocopy_int_choose(
             return Ok(None);
         }
         let d = c.getattr(intern!(py, "dtype"))?;
-        if d.getattr(intern!(py, "kind"))?.extract::<String>()? != kind
+        if dtype_kind_of(c) != Some(kind)
             || d.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != itemsize
         {
             return Ok(None);
@@ -36362,27 +36337,27 @@ fn try_zerocopy_int_choose(
     let a64 = numpy
         .getattr(intern!(py, "ascontiguousarray"))?
         .call((a,), Some(&kw))?;
-    match (kind.as_str(), itemsize) {
-        ("i", 8) => choose_typed::<i64>(py, numpy, &a64, &items, "int64", &a_shape),
-        ("i", 4) => choose_typed::<i32>(py, numpy, &a64, &items, "int32", &a_shape),
-        ("i", 2) => choose_typed::<i16>(py, numpy, &a64, &items, "int16", &a_shape),
-        ("i", 1) => choose_typed::<i8>(py, numpy, &a64, &items, "int8", &a_shape),
-        ("u", 8) => choose_typed::<u64>(py, numpy, &a64, &items, "uint64", &a_shape),
-        ("u", 4) => choose_typed::<u32>(py, numpy, &a64, &items, "uint32", &a_shape),
-        ("u", 2) => choose_typed::<u16>(py, numpy, &a64, &items, "uint16", &a_shape),
-        ("u", 1) => choose_typed::<u8>(py, numpy, &a64, &items, "uint8", &a_shape),
+    match (kind, itemsize) {
+        ('i', 8) => choose_typed::<i64>(py, numpy, &a64, &items, "int64", &a_shape),
+        ('i', 4) => choose_typed::<i32>(py, numpy, &a64, &items, "int32", &a_shape),
+        ('i', 2) => choose_typed::<i16>(py, numpy, &a64, &items, "int16", &a_shape),
+        ('i', 1) => choose_typed::<i8>(py, numpy, &a64, &items, "int8", &a_shape),
+        ('u', 8) => choose_typed::<u64>(py, numpy, &a64, &items, "uint64", &a_shape),
+        ('u', 4) => choose_typed::<u32>(py, numpy, &a64, &items, "uint32", &a_shape),
+        ('u', 2) => choose_typed::<u16>(py, numpy, &a64, &items, "uint16", &a_shape),
+        ('u', 1) => choose_typed::<u8>(py, numpy, &a64, &items, "uint8", &a_shape),
         // Float choose is a value-agnostic gather: view every (same-shape,
         // same-dtype) choice as the same-width unsigned integer, gather through the
         // existing u16/u32/u64 choose_typed instantiations, then view the result
         // back to the float dtype. No new monomorphizations, so the integer path is
         // unchanged. A non-contiguous choice makes .view raise; defer to numpy then.
-        ("f", 8) => {
+        ('f', 8) => {
             choose_float_via_unsigned::<u64>(py, numpy, &a64, &items, "uint64", "float64", &a_shape)
         }
-        ("f", 4) => {
+        ('f', 4) => {
             choose_float_via_unsigned::<u32>(py, numpy, &a64, &items, "uint32", "float32", &a_shape)
         }
-        ("f", 2) => {
+        ('f', 2) => {
             choose_float_via_unsigned::<u16>(py, numpy, &a64, &items, "uint16", "float16", &a_shape)
         }
         _ => Ok(None),
@@ -36453,12 +36428,10 @@ fn choose(
     // Deferring a 0-d index costs nothing: the native path exists to accelerate
     // bulk selection, and a scalar index selects exactly one element.
     let numpy = cached_numpy(py)?;
+    let b_a = a.bind(py);
     let choices_bound = choices.bind(py);
-    let index_array = numpy.call_method1(intern!(py, "asarray"), (a.bind(py),))?;
-    let index_kind = index_array
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
+    let index_array = numpy.call_method1(intern!(py, "asarray"), (b_a,))?;
+    let index_kind = dtype_kind_of(&index_array);
     let index_is_scalar = index_array
         .getattr(intern!(py, "ndim"))?
         .extract::<usize>()?
@@ -36467,7 +36440,7 @@ fn choose(
     // the list of things that defer whole.
     let out_supplied = out.as_ref().is_some_and(|value| !value.bind(py).is_none());
     let mut defer_to_numpy =
-        out_supplied || index_is_scalar || !matches!(index_kind.as_str(), "i" | "u");
+        out_supplied || index_is_scalar || !matches!(index_kind, Some('i' | 'u'));
     if !defer_to_numpy {
         let choice_items: Vec<Bound<'_, PyAny>> = if let Ok(sequence) = choices_bound.try_iter() {
             sequence.collect::<PyResult<Vec<_>>>()?
@@ -36476,25 +36449,25 @@ fn choose(
         };
         for item in choice_items {
             let arr = numpy.call_method1(intern!(py, "asarray"), (item,))?;
-            let dtype_kind = arr
-                .getattr(intern!(py, "dtype"))?
-                .getattr(intern!(py, "kind"))?
-                .extract::<String>()?;
-            if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
+            let dtype_kind = dtype_kind_of(&arr);
+            if !matches!(dtype_kind, Some('b' | 'i' | 'u' | 'f')) {
                 defer_to_numpy = true;
                 break;
             }
         }
     }
     if defer_to_numpy {
+        let choose_fn = cached_numpy_choose(py)?;
+        if !out_supplied && mode == "raise" {
+            return Ok(choose_fn.call1((b_a, choices_bound))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(out_val) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "mode"), mode)?;
-        return Ok(numpy
-            .getattr(intern!(py, "choose"))?
-            .call((a.bind(py), choices_bound), Some(&kwargs))?
+        return Ok(choose_fn
+            .call((b_a, choices_bound), Some(&kwargs))?
             .unbind());
     }
     // Past this point out is None (a supplied one deferred above), so the
@@ -36504,11 +36477,11 @@ fn choose(
     // ndarray choices (the common case); skips the cold extract + rebuild. Bit-
     // identical; broadcasting, mismatched dtypes/shapes, OOB indices, scalar a,
     // and other dtypes fall through.
-    if let Some(result) = try_zerocopy_int_choose(py, a.bind(py), choices_bound, mode)? {
+    if let Some(result) = try_zerocopy_int_choose(py, b_a, choices_bound, mode)? {
         return Ok(result);
     }
 
-    let index = extract_integer_array(py, a.bind(py), "choose(a)")?;
+    let index = extract_integer_array(py, b_a, "choose(a)")?;
     let extracted_choices = extract_numeric_array_sequence(py, choices_bound, "choose(choices)")?;
     // ERROR CASES BELONG TO NUMPY, exactly as for `searchsorted`'s invalid side.
     // The native path raises its own house-style strings - `choose: unsupported
@@ -36523,12 +36496,16 @@ fn choose(
     match index.choose_with_mode(&extracted_choices, mode) {
         Ok(result) => build_numpy_array_from_ufunc(py, &result),
         Err(_) => {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "mode"), mode)?;
-            Ok(numpy
-                .getattr(intern!(py, "choose"))?
-                .call((a.bind(py), choices_bound), Some(&kwargs))?
-                .unbind())
+            let choose_fn = cached_numpy_choose(py)?;
+            if mode == "raise" {
+                Ok(choose_fn.call1((b_a, choices_bound))?.unbind())
+            } else {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item(intern!(py, "mode"), mode)?;
+                Ok(choose_fn
+                    .call((b_a, choices_bound), Some(&kwargs))?
+                    .unbind())
+            }
         }
     }
 }
@@ -42589,25 +42566,18 @@ fn put(
     v: Py<PyAny>,
     mode: &str,
 ) -> PyResult<Py<PyAny>> {
-    let a_for_fallback = a.clone_ref(py);
-    let ind_for_fallback = ind.clone_ref(py);
-    let v_for_fallback = v.clone_ref(py);
-    let mode_owned = mode.to_string();
+    let b_a = a.bind(py);
+    let b_ind = ind.bind(py);
+    let b_v = v.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "mode"), &mode_owned)?;
-        Ok(numpy
-            .getattr(intern!(py, "put"))?
-            .call(
-                (
-                    a_for_fallback.bind(py),
-                    ind_for_fallback.bind(py),
-                    v_for_fallback.bind(py),
-                ),
-                Some(&kwargs),
-            )?
-            .unbind())
+        let put_fn = cached_numpy_put(py)?;
+        if mode == "raise" {
+            Ok(put_fn.call1((b_a, b_ind, b_v))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "mode"), mode)?;
+            Ok(put_fn.call((b_a, b_ind, b_v), Some(&kwargs))?.unbind())
+        }
     };
 
     // The native path only models the default 'raise' mode; 'wrap'/'clip' (and
@@ -42617,22 +42587,17 @@ fn put(
         return fallback();
     }
 
-    let a = a.bind(py);
-    require_numpy_ndarray(py, a, "put")?;
+    require_numpy_ndarray(py, b_a, "put")?;
 
     // Check for complex dtype and fallback to numpy
-    let dtype_kind = a
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if dtype_kind == "c" {
+    if dtype_kind_of(b_a) == Some('c') {
         return fallback();
     }
 
     // Zero-copy in-place scatter for integer a + integer indices + same-dtype
     // ndarray values (the common case); skips the cold extract + full copy-back.
     // Bit-identical; other dtypes/scalar-or-list values/OOB indices fall through.
-    if try_zerocopy_any_put(py, a, ind.bind(py), v.bind(py))?.is_some() {
+    if try_zerocopy_any_put(py, b_a, b_ind, b_v)?.is_some() {
         return Ok(py.None());
     }
 
@@ -42640,11 +42605,11 @@ fn put(
     // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). `np.put` scatters into an
     // object array fine; we answered that call with `TypeError: put(a): expected a
     // bool/int/uint/float array`. Same `fallback` the 'wrap'/'clip' modes already use.
-    let Some(mut array) = try_extract_numeric_array(py, a)? else {
+    let Some(mut array) = try_extract_numeric_array(py, b_a)? else {
         return fallback();
     };
-    let (_, indices) = extract_take_indices(py, ind.bind(py), "put(ind)")?;
-    let Some(values) = try_extract_numeric_array(py, v.bind(py))? else {
+    let (_, indices) = extract_take_indices(py, b_ind, "put(ind)")?;
+    let Some(values) = try_extract_numeric_array(py, b_v)? else {
         return fallback();
     };
 
@@ -42654,7 +42619,7 @@ fn put(
     if array.put(&indices, &values).is_err() {
         return fallback();
     }
-    copy_result_into_numpy_array(py, a, &array)?;
+    copy_result_into_numpy_array(py, b_a, &array)?;
     Ok(py.None())
 }
 
@@ -88572,17 +88537,7 @@ cached_numpy_attr!(cached_numpy_compress, "compress");
 cached_numpy_attr!(cached_numpy_extract, "extract");
 cached_numpy_attr!(cached_numpy_select, "select");
 cached_numpy_attr!(cached_numpy_choose, "choose");
-cached_numpy_attr!(cached_numpy_clip, "clip");
-cached_numpy_attr!(cached_numpy_place, "place");
 cached_numpy_attr!(cached_numpy_put, "put");
-cached_numpy_attr!(cached_numpy_putmask, "putmask");
-cached_numpy_attr!(cached_numpy_nonzero, "nonzero");
-cached_numpy_attr!(cached_numpy_flatnonzero, "flatnonzero");
-cached_numpy_attr!(cached_numpy_argwhere, "argwhere");
-cached_numpy_attr!(cached_numpy_count_nonzero, "count_nonzero");
-cached_numpy_attr!(cached_numpy_around, "around");
-cached_numpy_attr!(cached_numpy_bincount, "bincount");
-cached_numpy_attr!(cached_numpy_digitize, "digitize");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
