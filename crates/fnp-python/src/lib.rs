@@ -23879,9 +23879,7 @@ fn where_py(
     // version-appropriate error. The positional fast paths below only ever run when
     // kwargs is empty.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let where_fn = numpy.getattr(intern!(py, "where"))?;
-        Ok(where_fn.call(args, kwargs)?.unbind())
+        Ok(cached_numpy_where(py)?.call(args, kwargs)?.unbind())
     };
 
     if kwargs.is_some_and(|k| !k.is_empty()) {
@@ -23892,11 +23890,10 @@ fn where_py(
         return fallback();
     }
 
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?;
     let condition = args.get_item(0)?;
     let condition_bound = &condition;
-    if !condition_bound.is_exact_instance(&ndarray_type) {
+    if !condition_bound.is_exact_instance(ndarray_type) {
         return fallback();
     }
 
@@ -23955,23 +23952,23 @@ fn where_py(
     // else keeps the numpy delegate (the OLD native extract + where_nonzero
     // scan ran 15-54x slower and stays dead).
     if args.len() == 1 {
-        if condition_bound.is_exact_instance(&ndarray_type) {
+        if condition_bound.is_exact_instance(ndarray_type) {
             let ndim = condition_bound
                 .getattr(intern!(py, "ndim"))
                 .and_then(|d| d.extract::<usize>())
                 .unwrap_or(0);
             if ndim == 1
-                && let Some(flat) = try_parallel_flatnonzero(py, numpy, condition_bound)?
+                && let Some(flat) = try_parallel_flatnonzero(py, condition_bound)?
             {
                 return Ok(PyTuple::new(py, [flat.bind(py)])?.unbind().into_any());
             }
             if ndim == 2
-                && let Some(t) = try_parallel_nonzero_2d(py, numpy, condition_bound)?
+                && let Some(t) = try_parallel_nonzero_2d(py, condition_bound)?
             {
                 return Ok(t);
             }
             if ndim >= 3
-                && let Some(t) = try_parallel_nonzero_nd(py, numpy, condition_bound)?
+                && let Some(t) = try_parallel_nonzero_nd(py, condition_bound)?
             {
                 return Ok(t);
             }
@@ -23983,7 +23980,7 @@ fn where_py(
     // into the cold extract → rebuild (~7x slower than numpy's strided where).
     // Delegate when any operand is a non-contiguous ndarray.
     let is_noncontig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
-        Ok(v.is_exact_instance(&ndarray_type)
+        Ok(v.is_exact_instance(ndarray_type)
             && !v
                 .getattr(intern!(py, "flags"))?
                 .getattr(intern!(py, "c_contiguous"))?
@@ -24027,7 +24024,7 @@ fn where_py(
         3 => {
             let x_arg = args.get_item(1)?;
             let y_arg = args.get_item(2)?;
-            if !x_arg.is_exact_instance(&ndarray_type) || !y_arg.is_exact_instance(&ndarray_type) {
+            if !x_arg.is_exact_instance(ndarray_type) || !y_arg.is_exact_instance(ndarray_type) {
                 return fallback();
             }
             let x = match extract_precise_numeric_array(py, &x_arg, "where(x)") {
@@ -24049,7 +24046,6 @@ fn where_py(
 
 #[pyfunction]
 fn nonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     let a_bound = a.bind(py);
     // 1-D large contiguous supported dtypes: nonzero's single tuple element IS
     // flatnonzero (identical ascending intp indices), so the parallel two-pass
@@ -24063,21 +24059,21 @@ fn nonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .and_then(|d| d.extract::<usize>())
             .unwrap_or(0);
         if ndim == 1
-            && let Some(flat) = try_parallel_flatnonzero(py, numpy, a_bound)?
+            && let Some(flat) = try_parallel_flatnonzero(py, a_bound)?
         {
             return Ok(PyTuple::new(py, [flat.bind(py)])?.unbind().into_any());
         }
         // 2-D: same kernel shape, pass 2 writes (rows, cols) via a per-block
         // odometer (numpy's 2-D core measured 205.9ms dense 4096^2 int64).
         if ndim == 2
-            && let Some(t) = try_parallel_nonzero_2d(py, numpy, a_bound)?
+            && let Some(t) = try_parallel_nonzero_2d(py, a_bound)?
         {
             return Ok(t);
         }
         // 3-D+: the argwhere odometer writing d separate coordinate arrays
         // (numpy's 3-D core measured 257.2ms dense 256^3 int64).
         if ndim >= 3
-            && let Some(t) = try_parallel_nonzero_nd(py, numpy, a_bound)?
+            && let Some(t) = try_parallel_nonzero_nd(py, a_bound)?
         {
             return Ok(t);
         }
@@ -24104,9 +24100,8 @@ fn nonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 // store + conditional increment. Integers are nonzero iff any bit is set, so they
 // are scanned through a uintN bit-view chosen by itemsize; floats must compare by
 // VALUE so +-0.0 (sign bit set) is excluded and NaN included — matching numpy.
-fn flatnonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
-    py: Python<'py>,
-    _numpy: &Bound<'py, PyModule>,
+fn flatnonzero_typed<T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
+    py: Python<'_>,
     input: &[pyo3::buffer::ReadOnlyCell<T>],
     pred: F,
 ) -> PyResult<Option<Py<PyAny>>> {
@@ -24168,7 +24163,6 @@ fn parallel_block_for(len: usize, min_block: usize) -> usize {
 
 fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     py: Python<'_>,
-    _numpy: &Bound<'_, PyModule>,
     input: &[pyo3::buffer::ReadOnlyCell<T>],
     pred: impl Fn(T) -> bool + Sync,
 ) -> PyResult<Option<Py<PyAny>>> {
@@ -24222,7 +24216,6 @@ fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
 // dtypes, non-contiguous inputs, small sizes, or a starved thread pool.
 fn try_parallel_flatnonzero(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const FLATNONZERO_PAR_MIN: usize = 1 << 19;
@@ -24247,7 +24240,7 @@ fn try_parallel_flatnonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            flatnonzero_parallel_typed(py, numpy, input, |v: $T| v != 0)
+            flatnonzero_parallel_typed(py, input, |v: $T| v != 0)
         }};
     }
     match (kind, itemsize) {
@@ -24262,7 +24255,7 @@ fn try_parallel_flatnonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            flatnonzero_parallel_typed(py, numpy, input, |v: f64| v != 0.0)
+            flatnonzero_parallel_typed(py, input, |v: f64| v != 0.0)
         }
         ('f', 4) => {
             let Ok(buffer) = PyBuffer::<f32>::get(a) else {
@@ -24271,7 +24264,7 @@ fn try_parallel_flatnonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            flatnonzero_parallel_typed(py, numpy, input, |v: f32| v != 0.0)
+            flatnonzero_parallel_typed(py, input, |v: f32| v != 0.0)
         }
         _ => Ok(None),
     }
@@ -24285,7 +24278,6 @@ fn try_parallel_flatnonzero(
 // a ~90%-dense 4096^2 int64 (two output arrays double the write volume).
 fn nonzero_2d_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     py: Python<'_>,
-    _numpy: &Bound<'_, PyModule>,
     input: &[pyo3::buffer::ReadOnlyCell<T>],
     inner: usize,
     pred: impl Fn(T) -> bool + Sync,
@@ -24366,7 +24358,6 @@ fn nonzero_2d_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
 // 257.2ms dense 256^3 (4-D 298.6ms).
 fn nonzero_nd_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
     py: Python<'_>,
-    _numpy: &Bound<'_, PyModule>,
     input: &[pyo3::buffer::ReadOnlyCell<T>],
     shape: &[usize],
     pred: impl Fn(T) -> bool + Sync,
@@ -24466,7 +24457,6 @@ fn nonzero_nd_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
 // to the numpy delegate). 2-D keeps its dedicated (rows, cols) kernel.
 fn try_parallel_nonzero_nd(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const FLATNONZERO_PAR_MIN: usize = 1 << 19;
@@ -24494,7 +24484,7 @@ fn try_parallel_nonzero_nd(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            nonzero_nd_parallel_typed(py, numpy, input, &shape, |v: $T| v != 0)
+            nonzero_nd_parallel_typed(py, input, &shape, |v: $T| v != 0)
         }};
     }
     match (kind, itemsize) {
@@ -24509,7 +24499,7 @@ fn try_parallel_nonzero_nd(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            nonzero_nd_parallel_typed(py, numpy, input, &shape, |v: f64| v != 0.0)
+            nonzero_nd_parallel_typed(py, input, &shape, |v: f64| v != 0.0)
         }
         ('f', 4) => {
             let Ok(buffer) = PyBuffer::<f32>::get(a) else {
@@ -24518,7 +24508,7 @@ fn try_parallel_nonzero_nd(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            nonzero_nd_parallel_typed(py, numpy, input, &shape, |v: f32| v != 0.0)
+            nonzero_nd_parallel_typed(py, input, &shape, |v: f32| v != 0.0)
         }
         _ => Ok(None),
     }
@@ -24529,7 +24519,6 @@ fn try_parallel_nonzero_nd(
 // to the numpy delegate).
 fn try_parallel_nonzero_2d(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const FLATNONZERO_PAR_MIN: usize = 1 << 19;
@@ -24558,7 +24547,7 @@ fn try_parallel_nonzero_2d(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            nonzero_2d_parallel_typed(py, numpy, input, inner, |v: $T| v != 0)
+            nonzero_2d_parallel_typed(py, input, inner, |v: $T| v != 0)
         }};
     }
     match (kind, itemsize) {
@@ -24573,7 +24562,7 @@ fn try_parallel_nonzero_2d(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            nonzero_2d_parallel_typed(py, numpy, input, inner, |v: f64| v != 0.0)
+            nonzero_2d_parallel_typed(py, input, inner, |v: f64| v != 0.0)
         }
         ('f', 4) => {
             let Ok(buffer) = PyBuffer::<f32>::get(a) else {
@@ -24582,7 +24571,7 @@ fn try_parallel_nonzero_2d(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            nonzero_2d_parallel_typed(py, numpy, input, inner, |v: f32| v != 0.0)
+            nonzero_2d_parallel_typed(py, input, inner, |v: f32| v != 0.0)
         }
         _ => Ok(None),
     }
@@ -24592,10 +24581,9 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
     if !is_exact_numpy_ndarray(py, a)? {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     // Large contiguous supported dtypes take the parallel two-pass kernel;
     // 1-D-or-any-shape is fine here because flatnonzero ravels by definition.
-    if let Some(out) = try_parallel_flatnonzero(py, numpy, a)? {
+    if let Some(out) = try_parallel_flatnonzero(py, a)? {
         return Ok(Some(out));
     }
     // The SERIAL count+gather scan below is ~1.9-2.2x behind numpy's tight C
@@ -24620,7 +24608,7 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            flatnonzero_typed(py, numpy, input, |v: $T| v != 0)
+            flatnonzero_typed(py, input, |v: $T| v != 0)
         }};
     }
     match (kind, itemsize) {
@@ -24635,7 +24623,7 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            flatnonzero_typed(py, numpy, input, |v: f64| v != 0.0)
+            flatnonzero_typed(py, input, |v: f64| v != 0.0)
         }
         ('f', 4) => {
             let Ok(buffer) = PyBuffer::<f32>::get(a) else {
@@ -24644,7 +24632,7 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            flatnonzero_typed(py, numpy, input, |v: f32| v != 0.0)
+            flatnonzero_typed(py, input, |v: f32| v != 0.0)
         }
         _ => Ok(None),
     }
@@ -88460,6 +88448,9 @@ cached_numpy_attr!(cached_numpy_flatnonzero, "flatnonzero");
 cached_numpy_attr!(cached_numpy_argwhere, "argwhere");
 cached_numpy_attr!(cached_numpy_count_nonzero, "count_nonzero");
 cached_numpy_attr!(cached_numpy_expand_dims, "expand_dims");
+cached_numpy_attr!(cached_numpy_where, "where");
+cached_numpy_attr!(cached_numpy_copyto, "copyto");
+cached_numpy_attr!(cached_numpy_trim_zeros, "trim_zeros");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
@@ -88499,6 +88490,24 @@ cached_numpy_submodule!(cached_numpy_recfunctions, "numpy.lib.recfunctions");
 cached_numpy_submodule!(cached_numpy_scimath, "numpy.lib.scimath");
 cached_numpy_submodule!(cached_numpy_array_utils, "numpy.lib.array_utils");
 cached_numpy_submodule!(cached_numpy_linalg, "numpy.linalg");
+
+macro_rules! cached_numpy_ma_attr {
+    ($fn_name:ident, $attr:literal) => {
+        fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+            static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+            Ok(CACHE
+                .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+                    Ok(cached_numpy_ma(py)?
+                        .getattr(intern!(py, $attr))?
+                        .unbind())
+                })?
+                .bind(py))
+        }
+    };
+}
+
+cached_numpy_ma_attr!(cached_numpy_ma_masked_where, "masked_where");
+cached_numpy_ma_attr!(cached_numpy_ma_masked_invalid, "masked_invalid");
 
 macro_rules! cached_numpy_linalg_attr {
     ($fn_name:ident, $attr:literal) => {
