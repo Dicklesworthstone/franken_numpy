@@ -16878,9 +16878,7 @@ fn try_zerocopy_f64_compress(
         return Ok(None);
     }
     let count = count_true_u8_prefix(cond_in, m);
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (count, cached_float64_type(py)?))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -16932,7 +16930,7 @@ fn try_zerocopy_f64_compress_axis(
         return Ok(None);
     }
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
-    if a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype_kind_of(a) != Some('f')
         || a_dtype
             .getattr(intern!(py, "itemsize"))?
             .extract::<usize>()?
@@ -16940,12 +16938,7 @@ fn try_zerocopy_f64_compress_axis(
     {
         return Ok(None);
     }
-    if condition
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        != "b"
-    {
+    if dtype_kind_of(condition) != Some('b') {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
@@ -16962,8 +16955,7 @@ fn try_zerocopy_f64_compress_axis(
     if !arr_buffer.is_c_contiguous() {
         return Ok(None);
     }
-    let cond_u8 =
-        condition.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+    let cond_u8 = condition.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
     let (Ok(cond_buffer), Some(arr_in)) = (PyBuffer::<u8>::get(&cond_u8), arr_buffer.as_slice(py))
     else {
         return Ok(None);
@@ -16991,9 +16983,13 @@ fn try_zerocopy_f64_compress_axis(
     let mut out_shape = shape.clone();
     out_shape[ax] = count;
     let out_elems = outer * count * inner;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
+    let float64_type = cached_float64_type(py)?;
+    let flat = if let [only] = out_shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+    } else {
+        let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+    };
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -17020,11 +17016,7 @@ fn try_zerocopy_f64_compress_axis(
             }
         }
     }
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Generic typed core for boolean-mask stream compaction (np.compress / np.extract
@@ -17080,9 +17072,7 @@ fn compact_typed<
             .map(|c| c.iter().filter(|&&v| pred(v)).count())
             .collect();
         let total: usize = counts.iter().sum();
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-        let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+        let flat = numpy.call_method1(intern!(py, "empty"), (total, dtype_name))?;
         if total > 0 {
             let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
                 return Ok(None);
@@ -17117,9 +17107,7 @@ fn compact_typed<
         return Ok(Some(flat.unbind()));
     }
     let count = cond_in.iter().filter(|cell| pred(cell.get())).count();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (count, dtype_name))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -17427,9 +17415,7 @@ fn try_zerocopy_f64_container_take(
         return Ok(None);
     };
     let n = a_in.len() as i64;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (count, cached_float64_type(py)?))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -17528,7 +17514,7 @@ fn try_zerocopy_f64_take(
     if n == 0 && mode_code != 0 {
         return Ok(None); // clip/wrap on an empty source -> numpy raises; delegate (and rem_euclid(0) traps)
     }
-    let out_shape: Vec<usize> = idx_buffer.shape().to_vec();
+    let out_shape = idx_buffer.shape();
     let count = idx_in.len();
     // `numpy.empty` takes dtype as its SECOND POSITIONAL parameter, so the kwargs dict this used
     // to build was pure overhead on every call (`d16ee71a`; this ledger priced a 3-key dict at
@@ -17536,12 +17522,13 @@ fn try_zerocopy_f64_take(
     //
     // `FNP_TAKE_ALLOC=kwargs` restores the former spelling so the two can be timed against each
     // other in ONE process; presence is resolved once, so the shipped path pays an atomic load.
+    let float64_type = cached_float64_type(py)?;
     let flat = if take_alloc_is_kwargs() {
         let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "dtype"), "float64")?;
+        kwargs.set_item(intern!(py, "dtype"), float64_type)?;
         numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?
     } else {
-        numpy.call_method1(intern!(py, "empty"), (count, "float64"))?
+        numpy.call_method1(intern!(py, "empty"), (count, float64_type))?
     };
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -17664,7 +17651,7 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     numpy: &Bound<'py, PyModule>,
     src: &Bound<'py, PyAny>,
     indices: &Bound<'py, PyAny>,
-    dtype_name: &str,
+    dtype_obj: &Bound<'py, PyAny>,
     mode_code: u8,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
     let (Ok(a_buffer), Ok(idx_buffer)) = (PyBuffer::<T>::get(src), PyBuffer::<i64>::get(indices))
@@ -17681,7 +17668,7 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     let out_shape: Vec<usize> = idx_buffer.shape().to_vec();
     let count = idx_in.len();
     // dtype positionally, as above - no per-call kwargs dict.
-    let flat = numpy.call_method1(intern!(py, "empty"), (count, dtype_name))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (count, dtype_obj))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -17883,14 +17870,11 @@ fn try_zerocopy_take_axis(
         return Ok(None);
     }
     {
-        // `kind` as a CHAR, not a heap-allocated `String`. PyO3 extracts a one-character Python
-        // str straight into a `char`; the `String` form allocated on the entry path of every
-        // `np.take`. Same comparison, same admitted set - the sort route took the identical fix
-        // (`franken_numpy-ixs5y.409`).
+        if dtype_kind_of(indices) != Some('i') {
+            return Ok(None);
+        }
         let dtype = indices.getattr(intern!(py, "dtype"))?;
-        if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
-            || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
-        {
+        if dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8 {
             return Ok(None);
         }
     }
@@ -17902,7 +17886,6 @@ fn try_zerocopy_take_axis(
         return Ok(None); // non-contiguous source: as_slice would be in wrong order
     }
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     let itemsize = a_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
@@ -17926,14 +17909,14 @@ fn try_zerocopy_take_axis(
         return Ok(None);
     };
     let s_idx = idx_buf.shape();
-    let mover_name = match itemsize {
-        1 => "uint8",
-        2 => "uint16",
-        4 => "uint32",
-        8 => "uint64",
+    let mover_type = match itemsize {
+        1 => cached_uint8_type(py)?,
+        2 => cached_uint16_type(py)?,
+        4 => cached_uint32_type(py)?,
+        8 => cached_uint64_type(py)?,
         _ => return Ok(None),
     };
-    let arr_u = a.call_method1(intern!(py, "view"), (numpy.getattr(mover_name)?,))?;
+    let arr_u = a.call_method1(intern!(py, "view"), (mover_type,))?;
     let flat = match itemsize {
         1 => take_axis_typed::<u8>(py, numpy, &arr_u, idx_in, "uint8", outer, la, inner)?,
         2 => take_axis_typed::<u16>(py, numpy, &arr_u, idx_in, "uint16", outer, la, inner)?,
@@ -17943,7 +17926,6 @@ fn try_zerocopy_take_axis(
     let Some(flat) = flat else {
         return Ok(None);
     };
-    let _ = kind;
     let restored = flat.call_method1(intern!(py, "view"), (&a_dtype,))?;
     // out shape = a.shape[:ax] + indices.shape + a.shape[ax+1:]
     let mut out_shape: Vec<usize> = s_arr[..ax].to_vec();
@@ -88585,6 +88567,22 @@ cached_numpy_attr!(cached_numpy_flipud, "flipud");
 cached_numpy_attr!(cached_numpy_fliplr, "fliplr");
 cached_numpy_attr!(cached_numpy_tile, "tile");
 cached_numpy_attr!(cached_numpy_pad, "pad");
+cached_numpy_attr!(cached_numpy_take, "take");
+cached_numpy_attr!(cached_numpy_compress, "compress");
+cached_numpy_attr!(cached_numpy_extract, "extract");
+cached_numpy_attr!(cached_numpy_select, "select");
+cached_numpy_attr!(cached_numpy_choose, "choose");
+cached_numpy_attr!(cached_numpy_clip, "clip");
+cached_numpy_attr!(cached_numpy_place, "place");
+cached_numpy_attr!(cached_numpy_put, "put");
+cached_numpy_attr!(cached_numpy_putmask, "putmask");
+cached_numpy_attr!(cached_numpy_nonzero, "nonzero");
+cached_numpy_attr!(cached_numpy_flatnonzero, "flatnonzero");
+cached_numpy_attr!(cached_numpy_argwhere, "argwhere");
+cached_numpy_attr!(cached_numpy_count_nonzero, "count_nonzero");
+cached_numpy_attr!(cached_numpy_around, "around");
+cached_numpy_attr!(cached_numpy_bincount, "bincount");
+cached_numpy_attr!(cached_numpy_digitize, "digitize");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
