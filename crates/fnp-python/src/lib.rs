@@ -7436,6 +7436,26 @@ fn numpy_array_from_slice<'py, T: pyo3::buffer::Element + Copy>(
     Ok(array)
 }
 
+fn numpy_array_from_slice_shaped<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    values: &[T],
+    dtype_name: &str,
+    shape: &[usize],
+) -> PyResult<Bound<'py, PyAny>> {
+    let array = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype_name))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (output_shape, dtype_name))?
+    };
+    if !values.is_empty() {
+        let buffer = PyBuffer::<T>::get(&array)?;
+        buffer.copy_from_slice(py, values)?;
+    }
+    Ok(array)
+}
+
 fn direct_f64_unary_output_supported(array: &UFuncArray, op: UnaryOp) -> bool {
     if array.dtype() != DType::F64 || array.has_integer_sidecar() {
         return false;
@@ -11756,10 +11776,8 @@ fn try_zerocopy_f16_argextreme_axis(
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
     let numpy = cached_numpy(py)?;
-    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    finish_preshaped_output(reshaped, &out_shape).map(Some)
+    let flat = numpy_array_from_slice_shaped(py, numpy, &indices, "intp", &out_shape)?;
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Native parallel f16 FLAT min/max reduction (axis=None). numpy widens f16->f32 to reduce
@@ -11941,11 +11959,9 @@ fn try_zerocopy_f16_minmax_axis(
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
     let numpy = cached_numpy(py)?;
-    let flat_u16 = numpy_array_from_slice(py, numpy, &ext, "uint16")?;
+    let flat_u16 = numpy_array_from_slice_shaped(py, numpy, &ext, "uint16", &out_shape)?;
     let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    finish_preshaped_output(reshaped, &out_shape).map(Some)
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Native parallel f16 FLAT ptp (axis=None): max - min in one pass. numpy widens f16->f32
@@ -12111,11 +12127,9 @@ fn try_zerocopy_f16_ptp_axis(
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
     let numpy = cached_numpy(py)?;
-    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice_shaped(py, numpy, &out, "uint16", &out_shape)?;
     let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    finish_preshaped_output(reshaped, &out_shape).map(Some)
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Native parallel f16 FLAT nanmin/nanmax (axis=None) -> f16 scalar. numpy widens f16->f32 to reduce
@@ -12300,11 +12314,9 @@ fn try_zerocopy_f16_nanextreme_axis(
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
     let numpy = cached_numpy(py)?;
-    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice_shaped(py, numpy, &out, "uint16", &out_shape)?;
     let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    finish_preshaped_output(reshaped, &out_shape).map(Some)
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Native parallel f16 ORDERED comparison (greater/less/greater_equal/less_equal) -> bool.
@@ -15330,9 +15342,13 @@ fn try_zerocopy_f64_where(
     };
     let xs = x_scalar.unwrap_or(0.0);
     let ys = y_scalar.unwrap_or(0.0);
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let float64_type = cached_float64_type(py)?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -15396,14 +15412,7 @@ fn try_zerocopy_f64_where(
             }
         }
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 // Generic typed core for np.where(cond, x, y) element-wise select with no
@@ -15453,7 +15462,12 @@ fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     // NORMALISES the output dtype there (`>i8` operands give `int64`), so echoing a swapped
     // descriptor would produce a result numpy never produces.
     let x_dtype = x.getattr(intern!(py, "dtype"))?;
-    let flat = numpy.call_method1(intern!(py, "empty"), (n, &x_dtype))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, &x_dtype))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, &x_dtype))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -15597,14 +15611,7 @@ fn try_zerocopy_int_where(
     let Some((flat, shape)) = result else {
         return Ok(None);
     };
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 // Zero-copy np.where(cond, x, y) where exactly ONE of x/y is an ndarray and the other is
@@ -15890,9 +15897,13 @@ fn try_zerocopy_f64_select(
     };
 
     let n = choice_slices[0].len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let float64_type = cached_float64_type(py)?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+    } else {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+    };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -15943,14 +15954,7 @@ fn try_zerocopy_f64_select(
             }
         }
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 // INT/UINT/BOOL np.select (dtype-gap arm of try_zerocopy_f64_select above, which
@@ -16066,7 +16070,7 @@ fn try_zerocopy_int_select(
             if k == 0 || k != choice_items.len() {
                 return Ok(None);
             }
-            let uint8 = numpy.getattr(intern!(py, "uint8"))?;
+            let uint8 = cached_uint8_type(py)?;
             let mut cond_buffers: Vec<PyBuffer<u8>> = Vec::with_capacity(k);
             let mut shape: Option<Vec<usize>> = None;
             for condition in &cond_items {
@@ -16158,9 +16162,16 @@ fn try_zerocopy_int_select(
             {
                 return Ok(None);
             }
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "dtype"), uname)?;
-            let flat = numpy.call_method(intern!(py, "empty"), (units,), Some(&kwargs))?;
+            let flat = if em == 1 {
+                if let [only] = shape.as_slice() {
+                    numpy.call_method1(intern!(py, "empty"), (*only, &udtype))?
+                } else {
+                    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+                    numpy.call_method1(intern!(py, "empty"), (&output_shape, &udtype))?
+                }
+            } else {
+                numpy.call_method1(intern!(py, "empty"), (units, &udtype))?
+            };
             if n > 0 {
                 let Ok(out_buffer) = PyBuffer::<$t>::get(&flat) else {
                     return Ok(None);
@@ -16238,14 +16249,18 @@ fn try_zerocopy_int_select(
                 }
             }
             let typed = flat.call_method1(intern!(py, "view"), (&dt,))?;
-            let output_shape = PyTuple::new(py, shape.iter().copied())?;
-            let output = typed
-                .call_method1(intern!(py, "reshape"), (&output_shape,))?
-                .unbind();
-            if shape.is_empty() {
-                return Ok(Some(output.bind(py).get_item(())?.unbind()));
+            if em == 1 {
+                finish_preshaped_output(typed, &shape).map(Some)
+            } else if let [only] = shape.as_slice() {
+                debug_assert_eq!(*only, n);
+                Ok(Some(typed.unbind()))
+            } else {
+                let output_shape = PyTuple::new(py, shape.iter().copied())?;
+                let output = typed
+                    .call_method1(intern!(py, "reshape"), (&output_shape,))?
+                    .unbind();
+                Ok(Some(output))
             }
-            Ok(Some(output))
         }};
     }
     match itemsize {
@@ -16308,16 +16323,10 @@ fn par_copy_slice<T: Copy + Send + Sync>(dst: &mut [T], src: &[T]) {
 fn try_zerocopy_f64_roll(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
-    shift: &Bound<'_, PyAny>,
+    shift_scalar: i64,
     axis: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !is_exact_numpy_ndarray(py, a)? {
-        return Ok(None);
-    }
     let numpy = cached_numpy(py)?;
-    let Ok(shift_scalar) = shift.extract::<i64>() else {
-        return Ok(None);
-    };
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
@@ -16325,6 +16334,9 @@ fn try_zerocopy_f64_roll(
     // array with axis in {0, -1}. A per-axis roll on a multi-dim array moves
     // elements differently and is left to the general path.
     let ndim = in_buffer.shape().len();
+    if ndim == 0 {
+        return Ok(None);
+    }
     let flatten_ok = match axis {
         None => true,
         Some(value) => {
@@ -16345,7 +16357,7 @@ fn try_zerocopy_f64_roll(
         return Ok(None);
     };
     let n = input.len();
-    let out = numpy.getattr(intern!(py, "empty_like"))?.call1((a,))?;
+    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
     if n > 0 {
         // Normalize the shift into [0, n); result[i] = input[(i - shift) mod n],
         // i.e. result = input[n-s..] ++ input[..n-s].
@@ -16358,7 +16370,7 @@ fn try_zerocopy_f64_roll(
         };
         let split = n - s;
         // SAFETY: ReadOnlyCell<f64> and Cell<f64> are repr(transparent) over f64.
-        // `flat` is a freshly allocated numpy.empty output, so it cannot alias the
+        // `out` is a freshly allocated numpy.empty_like output, so it cannot alias the
         // input buffer. Both contiguous runs are moved verbatim, matching np.roll.
         let input_f64: &[f64] =
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
@@ -16381,18 +16393,12 @@ fn try_zerocopy_f64_roll(
 fn try_zerocopy_any_roll(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
-    shift: &Bound<'_, PyAny>,
+    shift_scalar: i64,
     axis: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !is_exact_numpy_ndarray(py, a)? {
-        return Ok(None);
-    }
     let numpy = cached_numpy(py)?;
-    let Ok(shift_scalar) = shift.extract::<i64>() else {
-        return Ok(None);
-    };
-    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let ndim = shape.len();
+    let shape_tuple = a.getattr(intern!(py, "shape"))?;
+    let ndim = shape_tuple.len()?;
     if ndim == 0 {
         return Ok(None);
     }
@@ -16413,32 +16419,34 @@ fn try_zerocopy_any_roll(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
+        return Ok(None);
+    }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize == 0 {
         return Ok(None);
     }
-    let n: usize = shape.iter().product();
-    // 1-D uint8 view of the (C-order) data. reshape(-1) yields a contiguous view
-    // (or ravel copy) whose byte image matches numpy's flatten order.
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let Ok(flat_in) = a.call_method1(intern!(py, "reshape"), (-1i64,)) else {
+    let uint8 = cached_uint8_type(py)?;
+    let Ok(a_u8) = a.call_method1(intern!(py, "view"), (uint8,)) else {
         return Ok(None);
     };
-    let flat_in_u8 = flat_in.call_method1(intern!(py, "view"), (&uint8,))?;
-    let Ok(in_buffer) = PyBuffer::<u8>::get(&flat_in_u8) else {
+    let Ok(in_buffer) = PyBuffer::<u8>::get(&a_u8) else {
         return Ok(None);
     };
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
     let total_bytes = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let out_u8 = numpy.call_method(intern!(py, "empty"), (total_bytes,), Some(&kwargs))?;
+    let n = total_bytes / itemsize;
+    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
     if n > 0 {
         let s = (((shift_scalar % n as i64) + n as i64) % n as i64) as usize;
         let split_bytes = (n - s) * itemsize;
         let s_bytes = s * itemsize;
+        let Ok(out_u8) = out.call_method1(intern!(py, "view"), (uint8,)) else {
+            return Ok(None);
+        };
         let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
@@ -16447,7 +16455,7 @@ fn try_zerocopy_any_roll(
         };
         // result = input[split..] ++ input[..split], in bytes.
         // SAFETY: ReadOnlyCell<u8> and Cell<u8> are repr(transparent) over u8.
-        // `out_u8` is freshly allocated and unaliased; roll copies raw element bytes.
+        // `out` is freshly allocated by empty_like and unaliased; roll copies raw element bytes.
         let input_u8: &[u8] =
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), total_bytes) };
         let output_u8: &mut [u8] =
@@ -16455,12 +16463,7 @@ fn try_zerocopy_any_roll(
         par_copy_slice(&mut output_u8[..s_bytes], &input_u8[split_bytes..]);
         par_copy_slice(&mut output_u8[s_bytes..], &input_u8[..split_bytes]);
     }
-    let out_typed = out_u8.call_method1(intern!(py, "view"), (&dtype,))?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = out_typed
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    Ok(Some(out.unbind()))
 }
 
 // Zero-copy np.roll(a, shift, axis=ax) along a single explicit axis of a
@@ -16480,14 +16483,11 @@ fn try_zerocopy_f64_roll_axis(
     shift_scalar: i64,
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !is_exact_numpy_ndarray(py, a)? {
-        return Ok(None);
-    }
     let numpy = cached_numpy(py)?;
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let shape = in_buffer.shape();
     let ndim = shape.len() as i64;
     if ndim == 0 {
         return Ok(None);
@@ -16505,12 +16505,10 @@ fn try_zerocopy_f64_roll_axis(
     let axis_len = shape[ax];
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
     if total > 0 && axis_len > 0 {
         let s = (((shift_scalar % axis_len as i64) + axis_len as i64) % axis_len as i64) as usize;
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
         let Some(output) = out_buffer.as_mut_slice(py) else {
@@ -16549,11 +16547,7 @@ fn try_zerocopy_f64_roll_axis(
             }
         }
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    Ok(Some(out.unbind()))
 }
 
 // Dtype-agnostic per-axis np.roll (scalar shift, explicit integer axis) for the
@@ -16571,13 +16565,10 @@ fn try_zerocopy_any_roll_axis(
     shift_scalar: i64,
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !is_exact_numpy_ndarray(py, a)? {
-        return Ok(None);
-    }
     let numpy = cached_numpy(py)?;
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
-    // Complex already has an efficient fallback; skip it (and zero-itemsize).
-    if a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()? == "c" {
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    if !matches!(kind.as_str(), "b" | "i" | "u" | "f") {
         return Ok(None);
     }
     let itemsize = a_dtype
@@ -16599,11 +16590,10 @@ fn try_zerocopy_any_roll_axis(
     let axis_len = shape[ax];
     let inner: usize = shape[ax + 1..].iter().product();
     let outer: usize = shape[..ax].iter().product();
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let Ok(a_flat) = a.call_method1(intern!(py, "reshape"), (-1i64,)) else {
+    let uint8 = cached_uint8_type(py)?;
+    let Ok(a_u8) = a.call_method1(intern!(py, "view"), (uint8,)) else {
         return Ok(None);
     };
-    let a_u8 = a_flat.call_method1(intern!(py, "view"), (&uint8,))?;
     let Ok(in_buffer) = PyBuffer::<u8>::get(&a_u8) else {
         return Ok(None);
     };
@@ -16611,11 +16601,12 @@ fn try_zerocopy_any_roll_axis(
         return Ok(None);
     };
     let total_bytes = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let out_u8 = numpy.call_method(intern!(py, "empty"), (total_bytes,), Some(&kwargs))?;
+    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
     if total_bytes > 0 && axis_len > 0 {
         let s = (((shift_scalar % axis_len as i64) + axis_len as i64) % axis_len as i64) as usize;
+        let Ok(out_u8) = out.call_method1(intern!(py, "view"), (uint8,)) else {
+            return Ok(None);
+        };
         let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
@@ -16626,10 +16617,6 @@ fn try_zerocopy_any_roll_axis(
         let lane_bytes = axis_len * inner * itemsize;
         let head = s * inner * itemsize;
         let split = lane_bytes - head;
-        let total_bytes = outer * lane_bytes;
-        // SAFETY: repr(transparent) u8 cells; input read-only under the GIL, output a fresh owned buffer. Each
-        // lane is an independent within-lane byte roll -> parallelize over lanes + memcpy the two runs (was a
-        // serial per-BYTE Cell.set loop = the parity).
         let in_raw: &[u8] =
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), total_bytes) };
         let out_raw: &mut [u8] =
@@ -16655,12 +16642,7 @@ fn try_zerocopy_any_roll_axis(
             }
         }
     }
-    let out_typed = out_u8.call_method1(intern!(py, "view"), (&a_dtype,))?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = out_typed
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    Ok(Some(out.unbind()))
 }
 
 // Zero-copy multi-axis np.roll for a 2-D C-contiguous float64 ndarray: a roll
@@ -16708,9 +16690,7 @@ fn try_zerocopy_f64_roll_2d_multi(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let out = numpy.call_method(intern!(py, "empty"), ((rows, cols),), Some(&kwargs))?;
+    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
     if rows > 0 && cols > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -16762,21 +16742,15 @@ fn try_zerocopy_any_roll_2d_multi(
     shifts: &[i64],
     axes: &[i64],
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !is_exact_numpy_ndarray(py, a)? {
-        return Ok(None);
-    }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    if shape.len() != 2 {
+    let Ok((rows, cols)) = a.getattr(intern!(py, "shape"))?.extract::<(usize, usize)>() else {
         return Ok(None);
-    }
-    let rows = shape[0];
-    let cols = shape[1];
+    };
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     // Net shift per axis (axes normalized into {0, 1}); out-of-range axis defers so numpy raises.
     let mut s_row: i64 = 0;
@@ -16789,15 +16763,10 @@ fn try_zerocopy_any_roll_2d_multi(
             _ => return Ok(None),
         }
     }
-    if !a
-        .getattr(intern!(py, "flags"))?
-        .getattr(intern!(py, "c_contiguous"))?
-        .extract::<bool>()?
-    {
+    let uint8 = cached_uint8_type(py)?;
+    let Ok(a_bytes) = a.call_method1(intern!(py, "view"), (uint8,)) else {
         return Ok(None);
-    }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let a_bytes = a.call_method1(intern!(py, "view"), (&uint8,))?;
+    };
     let Ok(in_buffer) = PyBuffer::<u8>::get(&a_bytes) else {
         return Ok(None);
     };
@@ -16806,7 +16775,9 @@ fn try_zerocopy_any_roll_2d_multi(
     };
     let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
     if rows > 0 && cols > 0 {
-        let out_bytes = out.call_method1(intern!(py, "view"), (&uint8,))?;
+        let Ok(out_bytes) = out.call_method1(intern!(py, "view"), (uint8,)) else {
+            return Ok(None);
+        };
         let Ok(out_buffer) = PyBuffer::<u8>::get(&out_bytes) else {
             return Ok(None);
         };
@@ -41410,70 +41381,70 @@ fn roll(
     // Non-contiguous (transposed/strided) ndarrays can't use the contiguous block-copy
     // fast paths and otherwise reach the cold extract → rebuild (~3.5x slower than
     // numpy's strided roll). Delegate them to numpy up front.
-    if noncontiguous_ndarray(numpy, b_a)? {
+    if !is_exact_numpy_ndarray(py, b_a)? || noncontiguous_ndarray(numpy, b_a)? {
         return fallback();
     }
 
-    // Zero-copy flatten roll for C-contiguous f64 ndarrays (axis=None any ndim,
-    // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical;
-    // per-axis multi-dim rolls and tuple shifts fall through to the general path.
-    if let Some(out) = try_zerocopy_f64_roll(py, b_a, b_shift, axis.as_ref())? {
-        return Ok(out);
-    }
+    if let Ok(shift_scalar) = b_shift.extract::<i64>() {
+        let (axis_none, axis_int) = match axis.as_ref() {
+            None => (true, None),
+            Some(axis_obj) => {
+                let b = axis_obj.bind(py);
+                if b.is_none() {
+                    (true, None)
+                } else if let Ok(i) = b.extract::<i64>() {
+                    (false, Some(i))
+                } else {
+                    (false, None)
+                }
+            }
+        };
 
-    // Dtype-agnostic flatten roll (byte rotation) for every other dtype — int
-    // (all widths), float32, complex, bool — covering the same axis=None / 1-D
-    // axis cases. Bit-identical (elements move verbatim) and skips the cold,
-    // for-ints-lossy extract Vec.
-    if let Some(out) = try_zerocopy_any_roll(py, b_a, b_shift, axis.as_ref())? {
-        return Ok(out);
-    }
-
-    // Zero-copy per-axis roll for C-contiguous f64 ndarrays with a scalar shift
-    // and an explicit integer axis (the multi-dim case the flatten path skips);
-    // block-copies the rotated inner-lanes. Bit-identical; tuple shifts/axes and
-    // out-of-range axes fall through to the general path.
-    if let (Ok(shift_scalar), Some(axis_obj)) = (b_shift.extract::<i64>(), axis.as_ref()) {
-        let axis_bound = axis_obj.bind(py);
-        if !axis_bound.is_none()
-            && let Ok(axis_int) = axis_bound.extract::<i64>()
-        {
-            if let Some(out) = try_zerocopy_f64_roll_axis(py, b_a, shift_scalar, axis_int)? {
+        if axis_none {
+            // Zero-copy flatten roll for C-contiguous f64 ndarrays (axis=None any ndim);
+            // skips the cold extract/build Vecs. Bit-identical.
+            if let Some(out) = try_zerocopy_f64_roll(py, b_a, shift_scalar, axis.as_ref())? {
+                return Ok(out);
+            }
+            // Dtype-agnostic flatten roll (byte rotation) for every other dtype — int
+            // (all widths), float32, complex, bool — covering axis=None. Bit-identical
+            // (elements move verbatim) and skips the cold, for-ints-lossy extract Vec.
+            if let Some(out) = try_zerocopy_any_roll(py, b_a, shift_scalar, axis.as_ref())? {
+                return Ok(out);
+            }
+        } else if let Some(axis_val) = axis_int {
+            // Zero-copy per-axis roll for C-contiguous f64 ndarrays with a scalar shift
+            // and an explicit integer axis (including 1-D axis 0/-1); block-copies the rotated
+            // inner-lanes. Bit-identical; out-of-range axes fall through to fallback.
+            if let Some(out) = try_zerocopy_f64_roll_axis(py, b_a, shift_scalar, axis_val)? {
                 return Ok(out);
             }
             // Dtype-agnostic byte per-axis roll for int/float32/bool (the non-f64
             // dtypes); contiguous per-lane block copies, bit-identical.
-            if let Some(out) = try_zerocopy_any_roll_axis(py, b_a, shift_scalar, axis_int)? {
+            if let Some(out) = try_zerocopy_any_roll_axis(py, b_a, shift_scalar, axis_val)? {
                 return Ok(out);
+            }
+        }
+    } else if let (Ok(shifts), Some(axis_obj)) = (b_shift.extract::<Vec<i64>>(), axis.as_ref()) {
+        // Zero-copy multi-axis roll for a tuple/list of shifts with matching axes on a
+        // 2-D array: a single-pass fused roll (one allocation) of the net per-axis shift.
+        if let Ok(axes) = axis_obj.bind(py).extract::<Vec<i64>>()
+            && !axes.is_empty()
+            && axes.len() == shifts.len()
+        {
+            if let Some(result) = try_zerocopy_f64_roll_2d_multi(py, b_a, &shifts, &axes)? {
+                return Ok(result);
+            }
+            // Same fused 2-D multi-axis roll for every OTHER fixed-width dtype (int/f32/f16/complex/bool)
+            // via the uint8 view.
+            if let Some(result) = try_zerocopy_any_roll_2d_multi(py, b_a, &shifts, &axes)? {
+                return Ok(result);
             }
         }
     }
 
-    // Zero-copy multi-axis roll for a tuple/list of shifts with matching axes on a
-    // 2-D f64 array: a single-pass fused roll (one allocation) of the net per-axis
-    // shift. Bit-identical; higher-dim, non-f64, or out-of-range axes fall through.
-    if let (Ok(shifts), Some(axis_obj)) = (b_shift.extract::<Vec<i64>>(), axis.as_ref())
-        && let Ok(axes) = axis_obj.bind(py).extract::<Vec<i64>>()
-        && !axes.is_empty()
-        && axes.len() == shifts.len()
-    {
-        if let Some(result) = try_zerocopy_f64_roll_2d_multi(py, b_a, &shifts, &axes)? {
-            return Ok(result);
-        }
-        // Same fused 2-D multi-axis roll for every OTHER fixed-width dtype (int/f32/f16/complex/bool)
-        // via the uint8 view — the residual below would otherwise delegate these to numpy's slower
-        // successive-concatenation roll.
-        if let Some(result) = try_zerocopy_any_roll_2d_multi(py, b_a, &shifts, &axes)? {
-            return Ok(result);
-        }
-    }
-
-    // Everything the zero-copy paths above missed — most importantly NON-f64
-    // tuple-axis rolls (roll(M, (5,7), axis=(0,1))) — went through extract_precise
-    // -> UFuncArray::roll(_multi) -> export-bridge rebuild, which was 37-355x slower
-    // than numpy (int8 2-D tuple roll 355x). roll is a pure element relocation
-    // (sequential 1-D rotations) that numpy does at memcpy speed, so delegate the
-    // residual. (The f64 flatten / per-axis / 2-D-tuple fast paths above are kept.)
+    // Everything the zero-copy paths above missed (e.g. non-numeric dtypes, mismatched tuple shifts,
+    // out-of-range axes, non-contiguous strided views) delegates to numpy.
     fallback()
 }
 
