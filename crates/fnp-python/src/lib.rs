@@ -18053,18 +18053,14 @@ fn try_zerocopy_f64_putmask(
     {
         return Ok(false);
     }
-    if mask
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        != "b"
+    if dtype_kind_of(mask) != Some('b')
         || !numpy_dtype_is_f64(py, a)
         || !numpy_dtype_is_f64(py, values)
     {
         return Ok(false);
     }
     let mask_u8 =
-        mask.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+        mask.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
     let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
         PyBuffer::<f64>::get(a),
         PyBuffer::<u8>::get(&mask_u8),
@@ -18134,13 +18130,13 @@ fn try_zerocopy_f64_putmask(
 // read-only/non-contiguous array, or a buffer-protocol failure.
 fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     mask: &Bound<'_, PyAny>,
     a_view: &Bound<'_, PyAny>,
     val_view: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
     let mask_u8 =
-        mask.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+        mask.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
     let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
         PyBuffer::<T>::get(a_view),
         PyBuffer::<u8>::get(&mask_u8),
@@ -18236,17 +18232,12 @@ fn try_zerocopy_any_putmask(
     {
         return Ok(false);
     }
-    if mask
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        != "b"
-    {
+    if dtype_kind_of(mask) != Some('b') {
         return Ok(false);
     }
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if !matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'i' | 'u' | 'f' | 'b') {
         return Ok(false);
     }
     // numpy casts values to a's dtype; only an identical dtype is a verbatim move.
@@ -18256,16 +18247,15 @@ fn try_zerocopy_any_putmask(
     let itemsize = a_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
-    let uname = match itemsize {
-        1 => "uint8",
-        2 => "uint16",
-        4 => "uint32",
-        8 => "uint64",
+    let uview = match itemsize {
+        1 => cached_uint8_type(py)?,
+        2 => cached_uint16_type(py)?,
+        4 => cached_uint32_type(py)?,
+        8 => cached_uint64_type(py)?,
         _ => return Ok(false),
     };
-    let uview = numpy.getattr(uname)?;
-    let a_u = a.call_method1(intern!(py, "view"), (&uview,))?;
-    let v_u = values.call_method1(intern!(py, "view"), (&uview,))?;
+    let a_u = a.call_method1(intern!(py, "view"), (uview,))?;
+    let v_u = values.call_method1(intern!(py, "view"), (uview,))?;
     match itemsize {
         1 => putmask_scatter_typed::<u8>(py, numpy, mask, &a_u, &v_u),
         2 => putmask_scatter_typed::<u16>(py, numpy, mask, &a_u, &v_u),
@@ -18287,13 +18277,13 @@ fn try_zerocopy_any_putmask(
 // non-contiguous array, or a buffer-protocol failure.
 fn place_scatter_typed<T: pyo3::buffer::Element + Copy>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     mask: &Bound<'_, PyAny>,
     a_view: &Bound<'_, PyAny>,
     val_view: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
     let mask_u8 =
-        mask.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+        mask.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
     let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
         PyBuffer::<T>::get(a_view),
         PyBuffer::<u8>::get(&mask_u8),
@@ -18349,17 +18339,12 @@ fn try_zerocopy_any_place(
     {
         return Ok(false);
     }
-    if mask
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        != "b"
-    {
+    if dtype_kind_of(mask) != Some('b') {
         return Ok(false);
     }
     let a_dtype = arr.getattr(intern!(py, "dtype"))?;
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if !matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'i' | 'u' | 'f' | 'b') {
         return Ok(false);
     }
     if !a_dtype.eq(vals.getattr(intern!(py, "dtype"))?)? {
@@ -18368,16 +18353,15 @@ fn try_zerocopy_any_place(
     let itemsize = a_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
-    let uname = match itemsize {
-        1 => "uint8",
-        2 => "uint16",
-        4 => "uint32",
-        8 => "uint64",
+    let uview = match itemsize {
+        1 => cached_uint8_type(py)?,
+        2 => cached_uint16_type(py)?,
+        4 => cached_uint32_type(py)?,
+        8 => cached_uint64_type(py)?,
         _ => return Ok(false),
     };
-    let uview = numpy.getattr(uname)?;
-    let a_u = arr.call_method1(intern!(py, "view"), (&uview,))?;
-    let v_u = vals.call_method1(intern!(py, "view"), (&uview,))?;
+    let a_u = arr.call_method1(intern!(py, "view"), (uview,))?;
+    let v_u = vals.call_method1(intern!(py, "view"), (uview,))?;
     match itemsize {
         1 => place_scatter_typed::<u8>(py, numpy, mask, &a_u, &v_u),
         2 => place_scatter_typed::<u16>(py, numpy, mask, &a_u, &v_u),
@@ -18413,18 +18397,14 @@ fn try_zerocopy_f64_place(
     {
         return Ok(false);
     }
-    if mask
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        != "b"
+    if dtype_kind_of(mask) != Some('b')
         || !numpy_dtype_is_f64(py, arr)
         || !numpy_dtype_is_f64(py, vals)
     {
         return Ok(false);
     }
     let mask_u8 =
-        mask.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+        mask.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
     let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
         PyBuffer::<f64>::get(arr),
         PyBuffer::<u8>::get(&mask_u8),
@@ -42843,18 +42823,13 @@ fn copyto(
 #[pyfunction]
 fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let arr = arr.bind(py);
+    let mask = mask.bind(py);
+    let vals = vals.bind(py);
     require_numpy_ndarray(py, arr, "place")?;
 
     // Check for complex dtype and fallback to numpy
-    let dtype_kind = arr
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if dtype_kind == "c" {
-        let numpy = py.import("numpy")?;
-        numpy
-            .getattr(intern!(py, "place"))?
-            .call1((arr, mask.bind(py), vals.bind(py)))?;
+    if dtype_kind_of(arr) == Some('c') {
+        cached_numpy_place(py)?.call1((arr, mask, vals))?;
         return Ok(py.None());
     }
 
@@ -42862,13 +42837,13 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
     // identical shape + non-empty f64 vals); touches only the masked slots of
     // arr's own buffer, cycling vals by the running True count. Bit-identical;
     // shape mismatch, empty vals, and other dtypes fall through.
-    if try_zerocopy_f64_place(py, arr, mask.bind(py), vals.bind(py))? {
+    if try_zerocopy_f64_place(py, arr, mask, vals)? {
         return Ok(py.None());
     }
     // All other fixed-width dtypes (narrow ints, int64/uint64, float32, bool):
     // in-place scatter through a same-width unsigned view, skipping the cold
     // extract/copy-back (6-8x slower for ints). Bit-identical.
-    if try_zerocopy_any_place(py, arr, mask.bind(py), vals.bind(py))? {
+    if try_zerocopy_any_place(py, arr, mask, vals)? {
         return Ok(py.None());
     }
 
@@ -42878,24 +42853,22 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
     // materialize an arr-dtype array via np.array(vals, dtype=arr.dtype) (the exact
     // cast incl. OverflowError parity) and re-enter the in-place scatter.
     {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-        if !vals.bind(py).is_exact_instance(&ndarray_type) {
+        if !vals.is_exact_instance(&ndarray_type) {
             let arr_dtype = arr.getattr(intern!(py, "dtype"))?;
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "dtype"), arr_dtype)?;
-            let vals_arr = numpy
-                .call_method(intern!(py, "array"), (vals.bind(py),), Some(&kwargs))?
+            let vals_arr = cached_numpy_array(py)?
+                .call1((vals, arr_dtype))?
                 .call_method1(intern!(py, "ravel"), ())?;
             if vals_arr
                 .call_method0(intern!(py, "__len__"))?
                 .extract::<usize>()?
                 > 0
             {
-                if try_zerocopy_f64_place(py, arr, mask.bind(py), &vals_arr)? {
+                if try_zerocopy_f64_place(py, arr, mask, &vals_arr)? {
                     return Ok(py.None());
                 }
-                if try_zerocopy_any_place(py, arr, mask.bind(py), &vals_arr)? {
+                if try_zerocopy_any_place(py, arr, mask, &vals_arr)? {
                     return Ok(py.None());
                 }
             }
@@ -42909,14 +42882,10 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
     // one the complex-dtype bail-out above already uses, and it performs the in-place write.
     let (Some(mut array), Some(mask_values), Some(values)) = (
         try_extract_numeric_array(py, arr)?,
-        try_extract_numeric_array(py, mask.bind(py))?,
-        try_extract_numeric_array(py, vals.bind(py))?,
+        try_extract_numeric_array(py, mask)?,
+        try_extract_numeric_array(py, vals)?,
     ) else {
-        py.import("numpy")?.getattr(intern!(py, "place"))?.call1((
-            arr,
-            mask.bind(py),
-            vals.bind(py),
-        ))?;
+        cached_numpy_place(py)?.call1((arr, mask, vals))?;
         return Ok(py.None());
     };
 
@@ -42936,18 +42905,13 @@ fn putmask(
     values: Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
     let a = a.bind(py);
+    let mask = mask.bind(py);
+    let values = values.bind(py);
     require_numpy_ndarray(py, a, "putmask")?;
 
     // Check for complex dtype and fallback to numpy
-    let dtype_kind = a
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if dtype_kind == "c" {
-        let numpy = py.import("numpy")?;
-        numpy
-            .getattr(intern!(py, "putmask"))?
-            .call1((a, mask.bind(py), values.bind(py)))?;
+    if dtype_kind_of(a) == Some('c') {
+        cached_numpy_putmask(py)?.call1((a, mask, values))?;
         return Ok(py.None());
     }
 
@@ -42955,13 +42919,13 @@ fn putmask(
     // shape + non-empty f64 values); touches only the masked slots of a's own
     // buffer, skipping the cold extract/copy-back. Bit-identical; shape mismatch,
     // empty values, and other dtypes fall through.
-    if try_zerocopy_f64_putmask(py, a, mask.bind(py), values.bind(py))? {
+    if try_zerocopy_f64_putmask(py, a, mask, values)? {
         return Ok(py.None());
     }
     // All other fixed-width dtypes (narrow ints, int64/uint64, float32, bool):
     // in-place scatter through a same-width unsigned view, skipping the cold
     // extract/copy-back that widens narrow ints through f64. Bit-identical.
-    if try_zerocopy_any_putmask(py, a, mask.bind(py), values.bind(py))? {
+    if try_zerocopy_any_putmask(py, a, mask, values)? {
         return Ok(py.None());
     }
 
@@ -42973,27 +42937,25 @@ fn putmask(
     // scalar becomes a 1-element array (v=1 -> constant fill). Only non-ndarray
     // `values` are normalized; ndarray inputs already went through the paths above.
     {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-        if !values.bind(py).is_exact_instance(&ndarray_type) {
+        if !values.is_exact_instance(&ndarray_type) {
             // np.array(values, dtype=a.dtype) reproduces numpy.putmask's scalar cast
             // EXACTLY, including raising OverflowError on an out-of-range Python int
             // for a narrow dtype (numpy 2.x) — astype() would silently wrap instead.
             let a_dtype = a.getattr(intern!(py, "dtype"))?;
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "dtype"), a_dtype)?;
-            let vals_arr = numpy
-                .call_method(intern!(py, "array"), (values.bind(py),), Some(&kwargs))?
+            let vals_arr = cached_numpy_array(py)?
+                .call1((values, a_dtype))?
                 .call_method1(intern!(py, "ravel"), ())?;
             if vals_arr
                 .call_method0(intern!(py, "__len__"))?
                 .extract::<usize>()?
                 > 0
             {
-                if try_zerocopy_f64_putmask(py, a, mask.bind(py), &vals_arr)? {
+                if try_zerocopy_f64_putmask(py, a, mask, &vals_arr)? {
                     return Ok(py.None());
                 }
-                if try_zerocopy_any_putmask(py, a, mask.bind(py), &vals_arr)? {
+                if try_zerocopy_any_putmask(py, a, mask, &vals_arr)? {
                     return Ok(py.None());
                 }
             }
@@ -43006,12 +42968,10 @@ fn putmask(
     // call numpy performs.
     let (Some(mut array), Some(mask_values), Some(value_values)) = (
         try_extract_numeric_array(py, a)?,
-        try_extract_numeric_array(py, mask.bind(py))?,
-        try_extract_numeric_array(py, values.bind(py))?,
+        try_extract_numeric_array(py, mask)?,
+        try_extract_numeric_array(py, values)?,
     ) else {
-        py.import("numpy")?
-            .getattr(intern!(py, "putmask"))?
-            .call1((a, mask.bind(py), values.bind(py)))?;
+        cached_numpy_putmask(py)?.call1((a, mask, values))?;
         return Ok(py.None());
     };
 
@@ -88538,6 +88498,8 @@ cached_numpy_attr!(cached_numpy_extract, "extract");
 cached_numpy_attr!(cached_numpy_select, "select");
 cached_numpy_attr!(cached_numpy_choose, "choose");
 cached_numpy_attr!(cached_numpy_put, "put");
+cached_numpy_attr!(cached_numpy_place, "place");
+cached_numpy_attr!(cached_numpy_putmask, "putmask");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
