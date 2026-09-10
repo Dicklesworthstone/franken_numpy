@@ -27769,37 +27769,27 @@ fn repeat(
     repeats: Py<PyAny>,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
+    let a_bound = a.bind(py);
+    let repeats_bound = repeats.bind(py);
+    let axis_bound = axis.as_ref().map(|v| v.bind(py));
+    let axis_non_none = axis_bound.filter(|v| !v.is_none());
     // Native parallel fast path: scalar-int repeat along axis=None/0 breaks numpy's serial page-fault
     // wall on the large fresh output (bit-exact byte copy). Everything else falls through to numpy.
-    if let Some(out) = try_native_repeat_scalar(
-        py,
-        a.bind(py),
-        repeats.bind(py),
-        axis.as_ref().map(|v| v.bind(py)).filter(|v| !v.is_none()),
-    )? {
+    if let Some(out) = try_native_repeat_scalar(py, a_bound, repeats_bound, axis_non_none)? {
         return Ok(out);
     }
     // Native parallel per-element (variable count array) repeat: prefix-sum offsets + disjoint scatter.
-    if let Some(out) = try_native_repeat_array(
-        py,
-        a.bind(py),
-        repeats.bind(py),
-        axis.as_ref().map(|v| v.bind(py)).filter(|v| !v.is_none()),
-    )? {
+    if let Some(out) = try_native_repeat_array(py, a_bound, repeats_bound, axis_non_none)? {
         return Ok(out);
     }
     // Delegate to NumPy so scalar and per-element repeat counts,
     // flattened default behavior, axis-aware expansion, and zero-count
     // segments all match exactly.
-    let repeat_fn = numpy.getattr(intern!(py, "repeat"))?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis) = axis {
-        kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
+    let repeat_fn = cached_numpy_repeat(py)?;
+    match axis_bound {
+        Some(ax) => Ok(repeat_fn.call1((a_bound, repeats_bound, ax))?.unbind()),
+        None => Ok(repeat_fn.call1((a_bound, repeats_bound))?.unbind()),
     }
-    Ok(repeat_fn
-        .call((a.bind(py), repeats.bind(py)), Some(&kwargs))?
-        .unbind())
 }
 
 // Zero-copy np.append(arr, values, axis=None): ravel(arr) ++ ravel(values) as a 1-D
@@ -41406,35 +41396,28 @@ fn roll(
     // through roll; tuple-of-shifts with tuple-of-axes routes through
     // roll_multi; mismatched tuples, non-int shifts, non-numeric dtypes
     // fall back to np.roll so numpy's dispatch surface stays exact.
-    let numpy = cached_numpy(py)?;
-    let roll_fn = numpy.getattr(intern!(py, "roll"))?;
-    let a_for_fallback = a.clone_ref(py);
-    let shift_for_fallback = shift.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let b_a = a.bind(py);
+    let b_shift = shift.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        if let Some(axis_val) = axis_for_fallback.as_ref() {
-            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
+        let roll_fn = cached_numpy_roll(py)?;
+        match axis.as_ref() {
+            Some(axis_val) => Ok(roll_fn.call1((b_a, b_shift, axis_val.bind(py)))?.unbind()),
+            None => Ok(roll_fn.call1((b_a, b_shift))?.unbind()),
         }
-        Ok(roll_fn
-            .call(
-                (a_for_fallback.bind(py), shift_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
     };
 
+    let numpy = cached_numpy(py)?;
     // Non-contiguous (transposed/strided) ndarrays can't use the contiguous block-copy
     // fast paths and otherwise reach the cold extract → rebuild (~3.5x slower than
     // numpy's strided roll). Delegate them to numpy up front.
-    if noncontiguous_ndarray(numpy, a.bind(py))? {
+    if noncontiguous_ndarray(numpy, b_a)? {
         return fallback();
     }
 
     // Zero-copy flatten roll for C-contiguous f64 ndarrays (axis=None any ndim,
     // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical;
     // per-axis multi-dim rolls and tuple shifts fall through to the general path.
-    if let Some(out) = try_zerocopy_f64_roll(py, a.bind(py), shift.bind(py), axis.as_ref())? {
+    if let Some(out) = try_zerocopy_f64_roll(py, b_a, b_shift, axis.as_ref())? {
         return Ok(out);
     }
 
@@ -41442,7 +41425,7 @@ fn roll(
     // (all widths), float32, complex, bool — covering the same axis=None / 1-D
     // axis cases. Bit-identical (elements move verbatim) and skips the cold,
     // for-ints-lossy extract Vec.
-    if let Some(out) = try_zerocopy_any_roll(py, a.bind(py), shift.bind(py), axis.as_ref())? {
+    if let Some(out) = try_zerocopy_any_roll(py, b_a, b_shift, axis.as_ref())? {
         return Ok(out);
     }
 
@@ -41450,17 +41433,17 @@ fn roll(
     // and an explicit integer axis (the multi-dim case the flatten path skips);
     // block-copies the rotated inner-lanes. Bit-identical; tuple shifts/axes and
     // out-of-range axes fall through to the general path.
-    if let (Ok(shift_scalar), Some(axis_obj)) = (shift.bind(py).extract::<i64>(), axis.as_ref()) {
+    if let (Ok(shift_scalar), Some(axis_obj)) = (b_shift.extract::<i64>(), axis.as_ref()) {
         let axis_bound = axis_obj.bind(py);
         if !axis_bound.is_none()
             && let Ok(axis_int) = axis_bound.extract::<i64>()
         {
-            if let Some(out) = try_zerocopy_f64_roll_axis(py, a.bind(py), shift_scalar, axis_int)? {
+            if let Some(out) = try_zerocopy_f64_roll_axis(py, b_a, shift_scalar, axis_int)? {
                 return Ok(out);
             }
             // Dtype-agnostic byte per-axis roll for int/float32/bool (the non-f64
             // dtypes); contiguous per-lane block copies, bit-identical.
-            if let Some(out) = try_zerocopy_any_roll_axis(py, a.bind(py), shift_scalar, axis_int)? {
+            if let Some(out) = try_zerocopy_any_roll_axis(py, b_a, shift_scalar, axis_int)? {
                 return Ok(out);
             }
         }
@@ -41469,18 +41452,18 @@ fn roll(
     // Zero-copy multi-axis roll for a tuple/list of shifts with matching axes on a
     // 2-D f64 array: a single-pass fused roll (one allocation) of the net per-axis
     // shift. Bit-identical; higher-dim, non-f64, or out-of-range axes fall through.
-    if let (Ok(shifts), Some(axis_obj)) = (shift.bind(py).extract::<Vec<i64>>(), axis.as_ref())
+    if let (Ok(shifts), Some(axis_obj)) = (b_shift.extract::<Vec<i64>>(), axis.as_ref())
         && let Ok(axes) = axis_obj.bind(py).extract::<Vec<i64>>()
         && !axes.is_empty()
         && axes.len() == shifts.len()
     {
-        if let Some(result) = try_zerocopy_f64_roll_2d_multi(py, a.bind(py), &shifts, &axes)? {
+        if let Some(result) = try_zerocopy_f64_roll_2d_multi(py, b_a, &shifts, &axes)? {
             return Ok(result);
         }
         // Same fused 2-D multi-axis roll for every OTHER fixed-width dtype (int/f32/f16/complex/bool)
         // via the uint8 view — the residual below would otherwise delegate these to numpy's slower
         // successive-concatenation roll.
-        if let Some(result) = try_zerocopy_any_roll_2d_multi(py, a.bind(py), &shifts, &axes)? {
+        if let Some(result) = try_zerocopy_any_roll_2d_multi(py, b_a, &shifts, &axes)? {
             return Ok(result);
         }
     }
@@ -41736,7 +41719,15 @@ fn reshape(
     // the installed numpy EXACTLY (e.g. newshape= raises here iff it raises in the
     // numpy on this machine). copy is forwarded only when set so numpy's default
     // (copy=None) is preserved on numpy builds predating the copy argument.
-    let numpy = cached_numpy(py)?;
+    let b_a = a.bind(py);
+    let reshape_fn = cached_numpy_reshape(py)?;
+    if order == "C"
+        && copy.is_none()
+        && newshape.is_none()
+        && let Some(ref shape_val) = shape
+    {
+        return Ok(reshape_fn.call1((b_a, shape_val.bind(py)))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "order"), order)?;
     if let Some(copy) = copy {
@@ -41745,19 +41736,12 @@ fn reshape(
     if let Some(newshape) = newshape.as_ref() {
         kwargs.set_item(intern!(py, "newshape"), newshape.bind(py))?;
     }
-    // `shape` is passed POSITIONALLY (the 2nd positional arg on every numpy — named
-    // `newshape` pre-2.1, `shape` after — so a positional bind is version-robust,
-    // unlike a `shape=` keyword which fails on pre-2.1 builds). When `shape` is
-    // omitted we forward no positional bound and let numpy validate (e.g. raise its
-    // own missing-argument error, or consume the `newshape` kwarg above).
-    let mut args: Vec<Bound<'_, PyAny>> = vec![a.bind(py).clone()];
-    if let Some(shape) = shape.as_ref() {
-        args.push(shape.bind(py).clone());
+    match shape.as_ref() {
+        Some(shape_val) => Ok(reshape_fn
+            .call((b_a, shape_val.bind(py)), Some(&kwargs))?
+            .unbind()),
+        None => Ok(reshape_fn.call((b_a,), Some(&kwargs))?.unbind()),
     }
-    Ok(numpy
-        .getattr(intern!(py, "reshape"))?
-        .call(PyTuple::new(py, args)?, Some(&kwargs))?
-        .unbind())
 }
 
 #[pyfunction]
@@ -41768,15 +41752,12 @@ fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<
     // slower AND a view-semantics divergence (and it widened narrow dtypes via the
     // extract). Delegate to numpy.transpose, which yields the exact view, preserves
     // the dtype, and reproduces numpy's exact error surface.
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    if let Some(axes_val) = axes.as_ref() {
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
+    let b_a = a.bind(py);
+    let transpose_fn = cached_numpy_transpose(py)?;
+    match axes.as_ref() {
+        Some(axes_val) => Ok(transpose_fn.call1((b_a, axes_val.bind(py)))?.unbind()),
+        None => Ok(transpose_fn.call1((b_a,))?.unbind()),
     }
-    Ok(numpy
-        .getattr(intern!(py, "transpose"))?
-        .call((a.bind(py),), Some(&kwargs))?
-        .unbind())
 }
 
 #[pyfunction]
@@ -41785,11 +41766,8 @@ fn swapaxes(py: Python<'_>, a: Py<PyAny>, axis1: i64, axis2: i64) -> PyResult<Py
     // np.swapaxes swaps two strides — a VIEW (O(1)). The old native path
     // materialized a copy (~13x slower + view-semantics divergence). Delegate to
     // numpy.swapaxes for the exact view, dtype, and error surface.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "swapaxes"))?
-        .call1((a.bind(py), axis1, axis2))?
-        .unbind())
+    let swapaxes_fn = cached_numpy_swapaxes(py)?;
+    Ok(swapaxes_fn.call1((a.bind(py), axis1, axis2))?.unbind())
 }
 
 #[pyfunction]
@@ -41803,9 +41781,8 @@ fn moveaxis(
     // np.moveaxis is a pure stride permutation — a VIEW (O(1)). The old native
     // path materialized a copy (~4x slower + view-semantics divergence). Delegate
     // to numpy.moveaxis for the exact view, dtype, and error surface.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "moveaxis"))?
+    let moveaxis_fn = cached_numpy_moveaxis(py)?;
+    Ok(moveaxis_fn
         .call1((a.bind(py), source.bind(py), destination.bind(py)))?
         .unbind())
 }
@@ -41819,11 +41796,8 @@ fn rollaxis(py: Python<'_>, a: Py<PyAny>, axis: i64, start: i64) -> PyResult<Py<
     // input). An axis roll is never faster materialized than as numpy's view, so
     // delegate unconditionally (cf. matrix_transpose; moveaxis/swapaxes already
     // delegate and correctly return views).
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "rollaxis"))?
-        .call1((a.bind(py), axis, start))?
-        .unbind())
+    let rollaxis_fn = cached_numpy_rollaxis(py)?;
+    Ok(rollaxis_fn.call1((a.bind(py), axis, start))?.unbind())
 }
 
 #[pyfunction]
@@ -41832,15 +41806,12 @@ fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py
     // np.squeeze returns a VIEW (drops length-1 axes via stride metadata). The old
     // native path materialized a copy and diverged from numpy's view semantics.
     // Delegate to numpy.squeeze for the exact view, dtype, and error surface.
-    let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis.as_ref() {
-        kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
+    let b_a = a.bind(py);
+    let squeeze_fn = cached_numpy_squeeze(py)?;
+    match axis.as_ref() {
+        Some(axis_val) => Ok(squeeze_fn.call1((b_a, axis_val.bind(py)))?.unbind()),
+        None => Ok(squeeze_fn.call1((b_a,))?.unbind()),
     }
-    Ok(numpy
-        .getattr(intern!(py, "squeeze"))?
-        .call((a.bind(py),), Some(&kwargs))?
-        .unbind())
 }
 
 #[pyfunction]
@@ -41850,11 +41821,8 @@ fn rot90(py: Python<'_>, m: Py<PyAny>, k: i64, axes: (i64, i64)) -> PyResult<Py<
     // (O(1)). The old native path materialized a rotated copy (~13x slower +
     // view-semantics divergence). Delegate to numpy.rot90 for the exact view,
     // dtype, and error surface.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "rot90"))?
-        .call1((m.bind(py), k, axes))?
-        .unbind())
+    let rot90_fn = cached_numpy_rot90(py)?;
+    Ok(rot90_fn.call1((m.bind(py), k, axes))?.unbind())
 }
 
 #[pyfunction]
@@ -55609,43 +55577,38 @@ fn build_flip_view<'py>(
     let rev = cached_slice_reversed(py)?;
     arr.get_item(PyTuple::new(
         py,
-        mask.iter()
-            .map(|&flip| if flip { rev } else { full })
-            .collect::<Vec<_>>(),
+        mask.iter().map(|&flip| if flip { rev } else { full }),
     )?)
 }
 
 #[pyfunction]
 #[pyo3(signature = (m, axis=None))]
 fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let m_for_fallback = m.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
+    let m_bound = m.bind(py);
+    let axis_bound = axis.as_ref().map(|v| v.bind(py));
     // Held module handle, and `axis` positionally - it is numpy's second positional
     // parameter (`deadlock-audit-lxt2l`). `py.import` is 382.5 ns/call, not a
     // `sys.modules` lookup.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let flip_fn = cached_numpy(py)?.getattr(intern!(py, "flip"))?;
-        match &axis_for_fallback {
-            Some(ax) => Ok(flip_fn
-                .call1((m_for_fallback.bind(py), ax.bind(py)))?
-                .unbind()),
-            None => Ok(flip_fn.call1((m_for_fallback.bind(py),))?.unbind()),
+        let flip_fn = cached_numpy_flip(py)?;
+        match axis_bound {
+            Some(ax) => Ok(flip_fn.call1((m_bound, ax))?.unbind()),
+            None => Ok(flip_fn.call1((m_bound,))?.unbind()),
         }
     };
 
     let numpy = cached_numpy(py)?;
     // Identity skip, same as flipud/fliplr (`deadlock-audit-yhg7k`).
-    let arr = flip_operand_as_array(py, numpy, m.bind(py))?;
+    let arr = flip_operand_as_array(py, numpy, m_bound)?;
     let ndim = arr.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
 
     // Resolve the set of axes to reverse into a per-axis boolean mask. Any
     // out-of-range or repeated axis defers to numpy so its exact AxisError /
     // ValueError type and message are reproduced.
     let mut mask = vec![false; ndim];
-    match axis {
+    match axis_bound {
         None => mask.iter_mut().for_each(|f| *f = true),
         Some(ax) => {
-            let ax = ax.bind(py);
             if ax.is_none() {
                 mask.iter_mut().for_each(|f| *f = true);
             } else if let Ok(single) = ax.extract::<isize>() {
@@ -55709,10 +55672,7 @@ fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let arr = flip_operand_as_array(py, numpy, m.bind(py))?;
     let ndim = arr.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 1 {
-        return Ok(numpy
-            .getattr(intern!(py, "flipud"))?
-            .call1((arr,))?
-            .unbind());
+        return Ok(cached_numpy_flipud(py)?.call1((arr,))?.unbind());
     }
     let mut mask = vec![false; ndim];
     mask[0] = true;
@@ -55728,10 +55688,7 @@ fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let arr = flip_operand_as_array(py, numpy, m.bind(py))?;
     let ndim = arr.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
     if ndim < 2 {
-        return Ok(numpy
-            .getattr(intern!(py, "fliplr"))?
-            .call1((arr,))?
-            .unbind());
+        return Ok(cached_numpy_fliplr(py)?.call1((arr,))?.unbind());
     }
     let mut mask = vec![false; ndim];
     mask[1] = true;
@@ -63013,18 +62970,15 @@ fn tile(py: Python<'_>, A: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // dispatch surface (scalar reps, batched handling, object dtype) is
     // preserved exactly. `A` carries numpy's capital spelling so the
     // documented np.tile(A=..., reps=...) keyword call ports verbatim.
-    let numpy = cached_numpy(py)?;
-    let a_for_fallback = A.clone_ref(py);
-    let reps_for_fallback = reps.clone_ref(py);
+    let a_bound = A.bind(py);
+    let reps_bound = reps.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(numpy
-            .getattr(intern!(py, "tile"))?
-            .call1((a_for_fallback.bind(py), reps_for_fallback.bind(py)))?
+        Ok(cached_numpy_tile(py)?
+            .call1((a_bound, reps_bound))?
             .unbind())
     };
 
     // Normalize reps to Vec<usize>. Accept scalar int or 1-D iterable.
-    let reps_bound = reps.bind(py);
     let reps_vec: Vec<usize> = if let Ok(scalar) = reps_bound.extract::<i64>() {
         if scalar < 0 {
             return fallback();
@@ -63042,28 +62996,29 @@ fn tile(py: Python<'_>, A: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Zero-copy block copy for the common case (1-D f64 ndarray, scalar reps);
     // skips the cold extract/build Vecs. Bit-identical; multi-dim inputs and
     // multi-element reps tuples fall through to the general path.
-    if let Some(out) = try_zerocopy_f64_tile(py, A.bind(py), &reps_vec)? {
+    if let Some(out) = try_zerocopy_f64_tile(py, a_bound, &reps_vec)? {
         return Ok(out);
     }
 
     // Dtype-agnostic 1-D tile (byte replication) for every other dtype — int (all
     // widths), float32, complex, bool. Bit-identical (elements move verbatim) and
     // skips the cold, for-ints-lossy extract Vec.
-    if let Some(out) = try_zerocopy_any_tile(py, A.bind(py), &reps_vec)? {
+    if let Some(out) = try_zerocopy_any_tile(py, a_bound, &reps_vec)? {
         return Ok(out);
     }
 
     // Dtype-agnostic multi-dim tile (A.ndim >= 2): byte row-block replication with a
     // modular source-row mapping. Bit-identical; complex / non-contiguous fall through.
-    if let Some(out) = try_zerocopy_any_tile_multidim(py, A.bind(py), &reps_vec)? {
+    if let Some(out) = try_zerocopy_any_tile_multidim(py, a_bound, &reps_vec)? {
         return Ok(out);
     }
 
     // Non-contiguous (transposed/strided) ndarrays bail into the cold extract; delegate.
-    if noncontiguous_ndarray(numpy, A.bind(py))? {
+    let numpy = cached_numpy(py)?;
+    if noncontiguous_ndarray(numpy, a_bound)? {
         return fallback();
     }
-    let array = match extract_precise_numeric_array(py, A.bind(py), "tile(A)") {
+    let array = match extract_precise_numeric_array(py, a_bound, "tile(A)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -65724,30 +65679,29 @@ fn mask_indices(py: Python<'_>, n: i64, mask_func: Py<PyAny>, k: i64) -> PyResul
 #[pyfunction]
 #[pyo3(signature = (x1, x2, *, axis=-1_i64))]
 fn linalg_vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let vecdot_fn = numpy
-        .getattr(intern!(py, "linalg"))?
-        .getattr(intern!(py, "vecdot"))?;
+    let vecdot_fn = cached_numpy_linalg_vecdot(py)?;
+    let b_x1 = x1.bind(py);
+    let b_x2 = x2.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
         // numpy's default axis for vecdot is -1. `inspect.signature` reports NO default
         // for it - it is a gufunc, so the audit could not clear this site the way it
         // cleared the other 22 - so it was confirmed EMPIRICALLY instead: omitting axis
         // equals axis=-1 and differs from axis=0, on both np.vecdot and
         // np.linalg.vecdot (`deadlock-audit-v46rn`).
         if axis != -1 {
+            let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "axis"), axis)?;
+            Ok(vecdot_fn.call((b_x1, b_x2), Some(&kwargs))?.unbind())
+        } else {
+            Ok(vecdot_fn.call1((b_x1, b_x2))?.unbind())
         }
-        Ok(vecdot_fn
-            .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
-            .unbind())
     };
 
-    let x1 = match extract_precise_numeric_array(py, x1.bind(py), "linalg.vecdot(x1)") {
+    let x1 = match extract_precise_numeric_array(py, b_x1, "linalg.vecdot(x1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let x2 = match extract_precise_numeric_array(py, x2.bind(py), "linalg.vecdot(x2)") {
+    let x2 = match extract_precise_numeric_array(py, b_x2, "linalg.vecdot(x2)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -69365,63 +69319,44 @@ fn pad(
     // mode-specific kwargs (constant_values, end_values, stat_length,
     // reflect_type). Extra kwargs forward through verbatim so the full
     // numpy surface is exposed.
+    let arr_b = array.bind(py);
+    let pad_b = pad_width.bind(py);
     let numpy = cached_numpy(py)?;
     // Native 1-D constant-mode fast path (bypasses np.pad's ~9us Python dispatch).
-    if let Some(out) = try_zerocopy_f64_pad_1d_constant(
-        py,
-        numpy,
-        array.bind(py),
-        pad_width.bind(py),
-        mode,
-        kwargs,
-    )? {
+    if let Some(out) = try_zerocopy_f64_pad_1d_constant(py, numpy, arr_b, pad_b, mode, kwargs)? {
         return Ok(out);
     }
     // Same fast path for non-f64 numeric dtypes (f32/int*/complex/bool) via a byte copy.
-    if let Some(out) = try_zerocopy_pad_bytes_1d_constant(
-        py,
-        numpy,
-        array.bind(py),
-        pad_width.bind(py),
-        mode,
-        kwargs,
-    )? {
+    if let Some(out) = try_zerocopy_pad_bytes_1d_constant(py, numpy, arr_b, pad_b, mode, kwargs)? {
         return Ok(out);
     }
     // Native 1-D edge-mode fast path (first/last element replication) for all numeric dtypes.
-    if let Some(out) =
-        try_zerocopy_pad_bytes_1d_edge(py, numpy, array.bind(py), pad_width.bind(py), mode, kwargs)?
-    {
+    if let Some(out) = try_zerocopy_pad_bytes_1d_edge(py, numpy, arr_b, pad_b, mode, kwargs)? {
         return Ok(out);
     }
     // Native 1-D wrap-mode fast path (periodic tiling, before<=n & after<=n) for all numeric dtypes.
-    if let Some(out) =
-        try_zerocopy_pad_bytes_1d_wrap(py, numpy, array.bind(py), pad_width.bind(py), mode, kwargs)?
-    {
+    if let Some(out) = try_zerocopy_pad_bytes_1d_wrap(py, numpy, arr_b, pad_b, mode, kwargs)? {
         return Ok(out);
     }
     // Native 1-D reflect/symmetric fast path (single-reflection mirror) for all numeric dtypes.
-    if let Some(out) = try_zerocopy_pad_bytes_1d_reflect(
-        py,
-        numpy,
-        array.bind(py),
-        pad_width.bind(py),
-        mode,
-        kwargs,
-    )? {
+    if let Some(out) = try_zerocopy_pad_bytes_1d_reflect(py, numpy, arr_b, pad_b, mode, kwargs)? {
         return Ok(out);
     }
-    let call_kwargs = PyDict::new(py);
-    call_kwargs.set_item(intern!(py, "mode"), mode)?;
-    if let Some(extras) = kwargs {
-        for (k, v) in extras.iter() {
-            call_kwargs.set_item(k, v)?;
+    let pad_fn = cached_numpy_pad(py)?;
+    if kwargs.is_some_and(|extras| !extras.is_empty()) {
+        let call_kwargs = PyDict::new(py);
+        call_kwargs.set_item(intern!(py, "mode"), mode)?;
+        if let Some(extras) = kwargs {
+            for (k, v) in extras.iter() {
+                call_kwargs.set_item(k, v)?;
+            }
         }
+        Ok(pad_fn.call((arr_b, pad_b), Some(&call_kwargs))?.unbind())
+    } else if mode == "constant" {
+        Ok(pad_fn.call1((arr_b, pad_b))?.unbind())
+    } else {
+        Ok(pad_fn.call1((arr_b, pad_b, mode))?.unbind())
     }
-    Ok(numpy
-        .getattr(intern!(py, "pad"))?
-        .call((array.bind(py), pad_width.bind(py)), Some(&call_kwargs))?
-        .unbind())
 }
 
 #[pyfunction]
@@ -69431,12 +69366,7 @@ fn linalg_eig(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // for a general square matrix. Matches numpy on real matrices with
     // real eigenvalues, real matrices with complex-conjugate pairs,
     // complex input, and 3-D batched input (last two axes).
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "linalg"))?
-        .getattr(intern!(py, "eig"))?
-        .call1((a.bind(py),))?
-        .unbind())
+    Ok(cached_numpy_linalg_eig(py)?.call1((a.bind(py),))?.unbind())
 }
 
 #[pyfunction]
@@ -69492,7 +69422,7 @@ fn linalg_matrix_norm(
     // deterministic, the norm result is allclose-level). The cheap orders
     // (Frobenius/None, 1, -1, inf, -inf are row/col-sum reductions, not SVD) and
     // every 2-D / complex / non-finite case stay on the numpy passthrough.
-    let numpy = cached_numpy(py)?;
+    let b_x = x.bind(py);
     // svd_mode: 0 = spectral (sigma_max), 1 = neg-spectral (sigma_min),
     // 2 = nuclear (sum). None = not an SVD-derived order.
     let svd_mode: Option<u8> = ord.as_ref().and_then(|ord_val| {
@@ -69512,7 +69442,7 @@ fn linalg_matrix_norm(
         }
     });
     if let Some(mode) = svd_mode
-        && let Ok(array) = extract_numeric_array(py, x.bind(py), "matrix_norm(x)")
+        && let Ok(array) = extract_numeric_array(py, b_x, "matrix_norm(x)")
     {
         let shape = array.shape();
         if shape.len() >= 3
@@ -69553,10 +69483,8 @@ fn linalg_matrix_norm(
     if let Some(ord_val) = ord {
         kwargs.set_item(intern!(py, "ord"), ord_val.bind(py))?;
     }
-    Ok(numpy
-        .getattr(intern!(py, "linalg"))?
-        .getattr(intern!(py, "matrix_norm"))?
-        .call((x.bind(py),), Some(&kwargs))?
+    Ok(cached_numpy_linalg_matrix_norm(py)?
+        .call((b_x,), Some(&kwargs))?
         .unbind())
 }
 
@@ -84378,9 +84306,7 @@ fn cross(
         if let Some(value) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), value.bind(py))?;
         }
-        Ok(cross_fn
-            .call((b_a, b_b), Some(&kwargs))?
-            .unbind())
+        Ok(cross_fn.call((b_a, b_b), Some(&kwargs))?.unbind())
     };
 
     // Native fast path for the "components stored column-wise" case: np.cross(a, b, axis=0) on two
@@ -84397,8 +84323,7 @@ fn cross(
                 .unwrap_or(false),
             None => axis_is_first_2d(axisa) && axis_is_first_2d(axisb) && axis_is_first_2d(axisc),
         };
-        if is_axis0_case && let Some(out) = try_zerocopy_cross_axis0_3n(py, b_a, b_b)?
-        {
+        if is_axis0_case && let Some(out) = try_zerocopy_cross_axis0_3n(py, b_a, b_b)? {
             return Ok(out);
         }
     }
@@ -86419,7 +86344,9 @@ fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     // Route f64 1-D to the zero-copy diagflat construction (numpy.zeros lazy pages +
     // diagonal write), which is byte-identical (zeros + verbatim diagonal values).
     // 20x faster at n=2000 (33.5ms→~1.6ms).
-    if ndim == Some(1) && let Some(out) = try_zerocopy_f64_diagflat(py, &arr, k)? {
+    if ndim == Some(1)
+        && let Some(out) = try_zerocopy_f64_diagflat(py, &arr, k)?
+    {
         return Ok(out);
     }
     // Non-f64 1-D construct or non-1D/2D invalid input: delegate to numpy.diag.
@@ -86600,9 +86527,7 @@ fn ix_(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
     // materialized via UFuncArray::ix_, scaling O(N) and hitting 2530x at N=100K
     // (BlackThrush 2026-06-22). Delegate to numpy.ix_ for parity. (composite-op-routes-
     // to-slow-native-path fix, cf matrix_power / einsum-diagonal / true_divide.)
-    Ok(cached_numpy_ix_(py)?
-        .call(args, None)?
-        .unbind())
+    Ok(cached_numpy_ix_(py)?.call(args, None)?.unbind())
 }
 
 // Build np.repeat(v, times).reshape(len(v), times): each row i is the scalar v[i]
@@ -88675,6 +88600,20 @@ cached_numpy_attr!(cached_numpy_diagonal, "diagonal");
 cached_numpy_attr!(cached_numpy_diagflat, "diagflat");
 cached_numpy_attr!(cached_numpy_fill_diagonal, "fill_diagonal");
 cached_numpy_attr!(cached_numpy_ix_, "ix_");
+cached_numpy_attr!(cached_numpy_repeat, "repeat");
+cached_numpy_attr!(cached_numpy_roll, "roll");
+cached_numpy_attr!(cached_numpy_reshape, "reshape");
+cached_numpy_attr!(cached_numpy_transpose, "transpose");
+cached_numpy_attr!(cached_numpy_swapaxes, "swapaxes");
+cached_numpy_attr!(cached_numpy_moveaxis, "moveaxis");
+cached_numpy_attr!(cached_numpy_rollaxis, "rollaxis");
+cached_numpy_attr!(cached_numpy_squeeze, "squeeze");
+cached_numpy_attr!(cached_numpy_rot90, "rot90");
+cached_numpy_attr!(cached_numpy_flip, "flip");
+cached_numpy_attr!(cached_numpy_flipud, "flipud");
+cached_numpy_attr!(cached_numpy_fliplr, "fliplr");
+cached_numpy_attr!(cached_numpy_tile, "tile");
+cached_numpy_attr!(cached_numpy_pad, "pad");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
@@ -88714,6 +88653,31 @@ cached_numpy_submodule!(cached_numpy_recfunctions, "numpy.lib.recfunctions");
 cached_numpy_submodule!(cached_numpy_scimath, "numpy.lib.scimath");
 cached_numpy_submodule!(cached_numpy_array_utils, "numpy.lib.array_utils");
 cached_numpy_submodule!(cached_numpy_linalg, "numpy.linalg");
+
+macro_rules! cached_numpy_linalg_attr {
+    ($fn_name:ident, $attr:literal) => {
+        fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+            static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+            Ok(CACHE
+                .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+                    Ok(cached_numpy_linalg(py)?
+                        .getattr(intern!(py, $attr))?
+                        .unbind())
+                })?
+                .bind(py))
+        }
+    };
+}
+
+cached_numpy_linalg_attr!(cached_numpy_linalg_cross, "cross");
+cached_numpy_linalg_attr!(cached_numpy_linalg_diagonal, "diagonal");
+cached_numpy_linalg_attr!(cached_numpy_linalg_trace, "trace");
+cached_numpy_linalg_attr!(cached_numpy_linalg_outer, "outer");
+cached_numpy_linalg_attr!(cached_numpy_linalg_tensordot, "tensordot");
+cached_numpy_linalg_attr!(cached_numpy_linalg_vector_norm, "vector_norm");
+cached_numpy_linalg_attr!(cached_numpy_linalg_vecdot, "vecdot");
+cached_numpy_linalg_attr!(cached_numpy_linalg_eig, "eig");
+cached_numpy_linalg_attr!(cached_numpy_linalg_matrix_norm, "matrix_norm");
 
 fn clone_py_kwargs<'py>(
     py: Python<'py>,
@@ -93966,9 +93930,7 @@ fn trace(
         if let Some(o) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
-        Ok(trace_fn
-            .call((a_bound,), Some(&kwargs))?
-            .unbind())
+        Ok(trace_fn.call((a_bound,), Some(&kwargs))?.unbind())
     };
 
     // Fallback for `out` buffer or explicit dtype (conversion not native)
@@ -113647,11 +113609,7 @@ fn linalg_cross(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = cached_numpy_linalg(py)?;
-    Ok(np_linalg
-        .getattr(intern!(py, "cross"))?
-        .call(args, kwargs)?
-        .unbind())
+    Ok(cached_numpy_linalg_cross(py)?.call(args, kwargs)?.unbind())
 }
 
 // linalg.diagonal / linalg.trace / linalg.outer / linalg.tensordot
@@ -113677,9 +113635,7 @@ fn linalg_diagonal(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = cached_numpy_linalg(py)?;
-    Ok(np_linalg
-        .getattr(intern!(py, "diagonal"))?
+    Ok(cached_numpy_linalg_diagonal(py)?
         .call(args, kwargs)?
         .unbind())
 }
@@ -113691,11 +113647,7 @@ fn linalg_trace(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = cached_numpy_linalg(py)?;
-    Ok(np_linalg
-        .getattr(intern!(py, "trace"))?
-        .call(args, kwargs)?
-        .unbind())
+    Ok(cached_numpy_linalg_trace(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -113705,11 +113657,7 @@ fn linalg_outer(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = cached_numpy_linalg(py)?;
-    Ok(np_linalg
-        .getattr(intern!(py, "outer"))?
-        .call(args, kwargs)?
-        .unbind())
+    Ok(cached_numpy_linalg_outer(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -113719,9 +113667,7 @@ fn linalg_tensordot(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = cached_numpy_linalg(py)?;
-    Ok(np_linalg
-        .getattr(intern!(py, "tensordot"))?
+    Ok(cached_numpy_linalg_tensordot(py)?
         .call(args, kwargs)?
         .unbind())
 }
@@ -113735,9 +113681,7 @@ fn linalg_vector_norm(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let np_linalg = cached_numpy_linalg(py)?;
-    Ok(np_linalg
-        .getattr(intern!(py, "vector_norm"))?
+    Ok(cached_numpy_linalg_vector_norm(py)?
         .call(args, kwargs)?
         .unbind())
 }
