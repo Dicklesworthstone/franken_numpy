@@ -2958,10 +2958,7 @@ impl PyRandomGenerator {
         }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "casting"), intern!(py, "safe"))?;
-        cached_numpy_copyto(py)?.call(
-            (out_bound, &generated),
-            Some(&kwargs),
-        )?;
+        cached_numpy_copyto(py)?.call((out_bound, &generated), Some(&kwargs))?;
         Ok(out)
     }
 }
@@ -22941,9 +22938,7 @@ fn try_zerocopy_bincount_weighted(
     // float64 array (a no-op view when already f64). Defer on any cast failure.
     let kw = PyDict::new(py);
     kw.set_item(intern!(py, "dtype"), "float64")?;
-    let Ok(w_arr) = cached_numpy_ascontiguousarray(py)?
-        .call((weights,), Some(&kw))
-    else {
+    let Ok(w_arr) = cached_numpy_ascontiguousarray(py)?.call((weights,), Some(&kw)) else {
         return Ok(None);
     };
     let Ok(w_buffer) = PyBuffer::<f64>::get(&w_arr) else {
@@ -32271,9 +32266,7 @@ fn spacing(
         return Ok(out);
     }
     if !numpy_dtype_is_f64(py, x.bind(py)) {
-        return Ok(cached_numpy_spacing(py)?
-            .call1((x.bind(py),))?
-            .unbind());
+        return Ok(cached_numpy_spacing(py)?.call1((x.bind(py),))?.unbind());
     }
     // Zero-copy fast path: read the contiguous f64 buffer and write spacing(v) straight
     // into the np.empty output (no extract-to-Vec + rebuild, which was ~6x slower than
@@ -35602,10 +35595,7 @@ fn nan_to_num_impl(
             if is_complex && ndim >= 1 {
                 let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
                 if itemsize == 16 {
-                    let view = xb.call_method1(
-                        intern!(py, "view"),
-                        (cached_float64_type(py)?,),
-                    )?;
+                    let view = xb.call_method1(intern!(py, "view"), (cached_float64_type(py)?,))?;
                     if let Some(out) = try_zerocopy_f64_nan_to_num(
                         py,
                         &view,
@@ -35617,10 +35607,7 @@ fn nan_to_num_impl(
                         return Ok(restored.unbind());
                     }
                 } else if itemsize == 8 {
-                    let view = xb.call_method1(
-                        intern!(py, "view"),
-                        (cached_float32_type(py)?,),
-                    )?;
+                    let view = xb.call_method1(intern!(py, "view"), (cached_float32_type(py)?,))?;
                     if let Some(out) = try_zerocopy_f32_nan_to_num(
                         py,
                         &view,
@@ -36065,8 +36052,7 @@ fn try_zerocopy_int_choose(
     // Normalize the index array to contiguous int64.
     let kw = PyDict::new(py);
     kw.set_item(intern!(py, "dtype"), "int64")?;
-    let a64 = cached_numpy_ascontiguousarray(py)?
-        .call((a,), Some(&kw))?;
+    let a64 = cached_numpy_ascontiguousarray(py)?.call((a,), Some(&kw))?;
     match (kind, itemsize) {
         ('i', 8) => choose_typed::<i64>(py, numpy, &a64, &items, "int64", &a_shape),
         ('i', 4) => choose_typed::<i32>(py, numpy, &a64, &items, "int32", &a_shape),
@@ -42214,8 +42200,7 @@ fn try_zerocopy_any_put(
     }
     let kw = PyDict::new(py);
     kw.set_item(intern!(py, "dtype"), cached_int64_type(py)?)?;
-    let ind64 = cached_numpy_ascontiguousarray(py)?
-        .call((ind_arr,), Some(&kw))?;
+    let ind64 = cached_numpy_ascontiguousarray(py)?.call((ind_arr,), Some(&kw))?;
     // Cast values to a's dtype and ravel (covers scalar / list / array, any dtype),
     // matching numpy.put's cast. asarray raises OverflowError for an out-of-range
     // python int exactly as numpy.put does; on any cast failure, route the call to
@@ -42902,9 +42887,7 @@ fn indices(
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "sparse"), true)?;
-        return Ok(indices_fn
-            .call((dimensions,), Some(&kwargs))?
-            .unbind());
+        return Ok(indices_fn.call((dimensions,), Some(&kwargs))?.unbind());
     }
     if let Some(out) = try_zerocopy_indices(py, &dimensions, dtype.as_ref().map(|d| d.bind(py)))? {
         return Ok(out);
@@ -65815,9 +65798,7 @@ fn load(
         kwargs.set_item(intern!(py, "encoding"), encoding)?;
         kwargs.set_item(intern!(py, "max_header_size"), max_header_size)?;
         let load_fn = cached_numpy_load(py)?;
-        Ok(load_fn
-            .call((file.bind(py),), Some(&kwargs))?
-            .unbind())
+        Ok(load_fn.call((file.bind(py),), Some(&kwargs))?.unbind())
     };
 
     if mmap_mode
@@ -88285,7 +88266,10 @@ cached_numpy_submodule!(cached_numpy_lib_format, "numpy.lib.format");
 cached_numpy_submodule!(cached_numpy_lib, "numpy.lib");
 cached_numpy_submodule!(cached_numpy_hermite_e, "numpy.polynomial.hermite_e");
 cached_numpy_submodule!(cached_numpy_polyutils, "numpy.polynomial.polyutils");
-cached_numpy_submodule!(cached_numpy_polynomial_polynomial, "numpy.polynomial.polynomial");
+cached_numpy_submodule!(
+    cached_numpy_polynomial_polynomial,
+    "numpy.polynomial.polynomial"
+);
 
 macro_rules! cached_numpy_ma_attr {
     ($fn_name:ident, $attr:literal) => {
@@ -118980,8 +118964,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if random.getattr(intern!(py, "__all__")).is_err() {
             random.setattr("__all__", PyList::new(py, random_public_names)?)?;
         }
-        cached_sys_modules(py)?
-            .set_item(&random_qualified_name, &random)?;
+        cached_sys_modules(py)?.set_item(&random_qualified_name, &random)?;
         m.add_submodule(&random)?;
         m.add("random", random)?;
     }
@@ -120082,8 +120065,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Some(callable_module_cls) = callable_module_ns.get_item("_CallableFFTModule")? {
             fft_module.setattr("__class__", callable_module_cls)?;
         }
-        cached_sys_modules(py)?
-            .set_item(&qualified_name, &fft_module)?;
+        cached_sys_modules(py)?.set_item(&qualified_name, &fft_module)?;
         m.add_submodule(&fft_module)?;
         m.add("fft", fft_module)?;
     }
@@ -120233,8 +120215,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let linalg_dict = linalg.dict();
         py.run(getattr_src, Some(&linalg_dict), None)?;
-        cached_sys_modules(py)?
-            .set_item(&linalg_qualified_name, &linalg)?;
+        cached_sys_modules(py)?.set_item(&linalg_qualified_name, &linalg)?;
         m.add_submodule(&linalg)?;
         // Also expose as top-level attribute so `fnp_python.linalg` resolves
         // via attribute access regardless of import style.
@@ -120634,8 +120615,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
-        cached_sys_modules(py)?
-            .set_item(&ma_qualified_name, &ma)?;
+        cached_sys_modules(py)?.set_item(&ma_qualified_name, &ma)?;
         m.add_submodule(&ma)?;
         m.add("ma", ma)?;
     }
@@ -120746,8 +120726,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let testing_dict = testing.dict();
         py.run(testing_getattr_src, Some(&testing_dict), None)?;
-        cached_sys_modules(py)?
-            .set_item(&testing_qualified_name, &testing)?;
+        cached_sys_modules(py)?.set_item(&testing_qualified_name, &testing)?;
         m.add_submodule(&testing)?;
         m.add("testing", testing)?;
     }
@@ -120813,8 +120792,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let exceptions_dict = exceptions.dict();
         py.run(exceptions_getattr_src, Some(&exceptions_dict), None)?;
-        cached_sys_modules(py)?
-            .set_item(&exceptions_qualified_name, &exceptions)?;
+        cached_sys_modules(py)?.set_item(&exceptions_qualified_name, &exceptions)?;
         m.add_submodule(&exceptions)?;
         m.add("exceptions", exceptions)?;
     }
@@ -120904,8 +120882,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let dtypes_dict = dtypes_module.dict();
         py.run(dtypes_getattr_src, Some(&dtypes_dict), None)?;
-        cached_sys_modules(py)?
-            .set_item(&dtypes_qualified_name, &dtypes_module)?;
+        cached_sys_modules(py)?.set_item(&dtypes_qualified_name, &dtypes_module)?;
         m.add_submodule(&dtypes_module)?;
         m.add("dtypes", dtypes_module)?;
     }
@@ -121243,9 +121220,8 @@ mod tests {
         NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, ScimathFix, UFuncKind,
         accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, busdays_in_span, cached_float64_dtype, cached_numpy,
-        cached_numpy_recfunctions,
-        ceil_native, choose, compress, copysign, count_nonzero, degrees_native, diag,
-        diag_indices_from, diag_indices_impl, diagflat, diagonal, digitize,
+        cached_numpy_recfunctions, ceil_native, choose, compress, copysign, count_nonzero,
+        degrees_native, diag, diag_indices_from, diag_indices_impl, diagflat, diagonal, digitize,
         divide_slice_detecting_fe_hazards, dtype_kind_of, extract, extract_numeric_array,
         extract_precise_numeric_array, f64_binary_route_is_worth_taking,
         f64_divide_evidence_saw_non_normal, f64_divide_fast_accepts_without_fp_error,
