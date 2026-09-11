@@ -387,7 +387,7 @@ impl PyUFunc {
 
     #[getter]
     fn __signature__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let inspect = py.import("inspect")?;
+        let inspect = cached_inspect(py)?;
         let param_cls = inspect.getattr("Parameter")?;
         let sig_cls = inspect.getattr("Signature")?;
         let pos_only = param_cls.getattr("POSITIONAL_ONLY")?;
@@ -1993,8 +1993,7 @@ impl PyRandomGenerator {
         };
         let generated = build_random_f64_parts(py, shape, values, scalar)?;
         if let Some(out) = out {
-            py.import("numpy")?
-                .call_method1(intern!(py, "copyto"), (out.bind(py), generated.bind(py)))?;
+            cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
             Ok(out)
         } else {
             Ok(generated)
@@ -2032,8 +2031,7 @@ impl PyRandomGenerator {
             .map_err(map_random_error)?;
         let generated = build_random_f64_parts(py, out_shape, values, scalar)?;
         if let Some(out) = out {
-            py.import("numpy")?
-                .call_method1(intern!(py, "copyto"), (out.bind(py), generated.bind(py)))?;
+            cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
             Ok(out)
         } else {
             Ok(generated)
@@ -2895,8 +2893,7 @@ impl PyRandomGenerator {
         axis: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let arr = numpy.call_method1(intern!(py, "asarray"), (x.bind(py),))?;
+        let arr = cached_numpy_asarray(py)?.call1((x.bind(py),))?;
         let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
         let axis_spec = extract_axis_spec(py, axis, "Generator.permuted(axis)")?;
         if shape.is_empty() && axis_spec.is_none() {
@@ -2907,9 +2904,8 @@ impl PyRandomGenerator {
             Some(axes) if axes.len() == 1 => {
                 let axis = axes[0];
                 Some(try_normalize_axis(axis, shape.len()).ok_or_else(|| {
-                    let axis_error = numpy
-                        .getattr(intern!(py, "exceptions"))
-                        .and_then(|exceptions| exceptions.getattr("AxisError"))
+                    let axis_error = cached_numpy_exceptions(py)
+                        .and_then(|exceptions| exceptions.getattr(intern!(py, "AxisError")))
                         .and_then(|axis_error| axis_error.call1((axis, shape.len())));
                     match axis_error {
                         Ok(error) => PyErr::from_value(error),
@@ -2961,9 +2957,8 @@ impl PyRandomGenerator {
             return Err(PyValueError::new_err("out must have the same shape as x"));
         }
         let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "casting"), "safe")?;
-        numpy.call_method(
-            intern!(py, "copyto"),
+        kwargs.set_item(intern!(py, "casting"), intern!(py, "safe"))?;
+        cached_numpy_copyto(py)?.call(
             (out_bound, &generated),
             Some(&kwargs),
         )?;
@@ -3947,7 +3942,7 @@ fn bit_generator_numpy_name(kind: BitGeneratorKind) -> &'static str {
 }
 
 fn py_int_from_u128<'py>(py: Python<'py>, value: u128) -> PyResult<Bound<'py, PyAny>> {
-    py.import("builtins")?
+    cached_builtins(py)?
         .getattr(intern!(py, "int"))?
         .call1((value.to_string(),))
 }
@@ -4083,7 +4078,7 @@ fn build_numpy_compatible_bit_generator_state_dict(
             dict.set_item(intern!(py, "state"), state_dict)?;
         }
         BitGeneratorKind::Mt19937 => {
-            let numpy = py.import("numpy")?;
+            let numpy = cached_numpy(py)?;
             let mut key = Vec::with_capacity(624);
             for index in 0..624 {
                 key.push(bit_generator_schema_entry_u32(
@@ -4093,16 +4088,16 @@ fn build_numpy_compatible_bit_generator_state_dict(
             }
             state_dict.set_item(
                 intern!(py, "key"),
-                numpy_array_from_u32_list(py, &numpy, &key)?,
+                numpy_array_from_u32_list(py, numpy, &key)?,
             )?;
             state_dict.set_item(
-                "pos",
+                intern!(py, "pos"),
                 bit_generator_schema_entry_u64(&state.schema_entries, "mt19937_pos")?,
             )?;
             dict.set_item(intern!(py, "state"), state_dict)?;
         }
         BitGeneratorKind::Philox => {
-            let numpy = py.import("numpy")?;
+            let numpy = cached_numpy(py)?;
             let counter = [
                 bit_generator_schema_entry_u64(&state.schema_entries, "philox_ctr0")?,
                 bit_generator_schema_entry_u64(&state.schema_entries, "philox_ctr1")?,
@@ -4121,24 +4116,24 @@ fn build_numpy_compatible_bit_generator_state_dict(
             ];
             state_dict.set_item(
                 intern!(py, "counter"),
-                numpy_array_from_u64_list(py, &numpy, &counter)?,
+                numpy_array_from_u64_list(py, numpy, &counter)?,
             )?;
             state_dict.set_item(
                 intern!(py, "key"),
-                numpy_array_from_u64_list(py, &numpy, &key)?,
+                numpy_array_from_u64_list(py, numpy, &key)?,
             )?;
             dict.set_item(intern!(py, "state"), state_dict)?;
             dict.set_item(
                 intern!(py, "buffer"),
-                numpy_array_from_u64_list(py, &numpy, &buffer)?,
+                numpy_array_from_u64_list(py, numpy, &buffer)?,
             )?;
             dict.set_item(
-                "buffer_pos",
+                intern!(py, "buffer_pos"),
                 bit_generator_schema_entry_u64(&state.schema_entries, "philox_pos")?,
             )?;
         }
         BitGeneratorKind::Sfc64 => {
-            let numpy = py.import("numpy")?;
+            let numpy = cached_numpy(py)?;
             let state_values = [
                 bit_generator_schema_entry_u64(&state.schema_entries, "sfc64_s0")?,
                 bit_generator_schema_entry_u64(&state.schema_entries, "sfc64_s1")?,
@@ -4146,8 +4141,8 @@ fn build_numpy_compatible_bit_generator_state_dict(
                 bit_generator_schema_entry_u64(&state.schema_entries, "sfc64_s3")?,
             ];
             state_dict.set_item(
-                "state",
-                numpy_array_from_u64_list(py, &numpy, &state_values)?,
+                intern!(py, "state"),
+                numpy_array_from_u64_list(py, numpy, &state_values)?,
             )?;
             dict.set_item(intern!(py, "state"), state_dict)?;
         }
@@ -6045,15 +6040,7 @@ fn try_normalize_axis(axis: isize, ndim: usize) -> Option<usize> {
 /// Extract and validate axes for tensorsolve permutation.
 /// Reserved for numpy.linalg.tensorsolve support.
 fn require_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>, context: &str) -> PyResult<()> {
-    let builtins = py.import("builtins")?;
-    let is_ndarray = builtins
-        .call_method1(
-            intern!(py, "isinstance"),
-            (value, cached_ndarray_type(py)?.clone()),
-        )?
-        .extract::<bool>()?;
-
-    if is_ndarray {
+    if value.is_instance(cached_ndarray_type(py)?)? {
         Ok(())
     } else {
         Err(PyTypeError::new_err(format!(
@@ -6666,7 +6653,7 @@ fn numpy_savez_call(
     allow_pickle: bool,
     kwds: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let mut positional = Vec::with_capacity(args.len() + 1);
     positional.push(file.clone_ref(py));
     for arg in args.iter() {
@@ -7061,7 +7048,7 @@ fn structured_to_unstructured(
 ) -> PyResult<Py<PyAny>> {
     // Delegate to numpy.lib.recfunctions so scalar records, nested subarrays,
     // casting rules, and dtype inference match NumPy exactly.
-    let recfunctions = py.import("numpy.lib.recfunctions")?;
+    let recfunctions = cached_numpy_recfunctions(py)?;
     let kwargs = PyDict::new(py);
     if let Some(dtype) = dtype {
         kwargs.set_item(intern!(py, "dtype"), dtype.bind(py))?;
@@ -7130,7 +7117,6 @@ fn parse_grid_slice(
     };
 
     let numpy = cached_numpy(py)?;
-    let builtins = py.import("builtins")?;
     let is_complex = numpy
         .getattr(intern!(py, "iscomplexobj"))?
         .call1((step_obj.bind(py),))?
@@ -7148,6 +7134,7 @@ fn parse_grid_slice(
     })?;
 
     let (spec, step_for_dtype) = if is_complex {
+        let builtins = cached_builtins(py)?;
         let magnitude = builtins.call_method1(intern!(py, "abs"), (step_obj.bind(py),))?;
         let num = magnitude.extract::<f64>().map_err(|_| {
             PyTypeError::new_err(format!(
@@ -7348,7 +7335,7 @@ fn axis_concatenator_numpy_fallback(
     kind: AxisConcatenatorKind,
     key: &Bound<'_, PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr(kind.context())?
         .call_method1(intern!(py, "__getitem__"), (key,))?
@@ -21528,7 +21515,7 @@ fn extract_object_array_input(
     context: &str,
 ) -> PyResult<(Vec<usize>, Vec<Py<PyAny>>)> {
     let numpy = cached_numpy(py)?;
-    let builtins = py.import("builtins")?;
+    let builtins = cached_builtins(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(
         intern!(py, "dtype"),
@@ -21554,7 +21541,7 @@ fn build_numpy_object_array_from_flat_values(
     values: &[Py<PyAny>],
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let builtins = py.import("builtins")?;
+    let builtins = cached_builtins(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(
         intern!(py, "dtype"),
@@ -21652,7 +21639,7 @@ fn extract_frompyfunc_where_mask(
     }
 
     let numpy = cached_numpy(py)?;
-    let builtins = py.import("builtins")?;
+    let builtins = cached_builtins(py)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), builtins.getattr(intern!(py, "bool"))?)?;
     let mask = numpy.call_method(intern!(py, "asarray"), (where_value,), Some(&kwargs))?;
@@ -21803,7 +21790,7 @@ impl PyFromPyFunc {
         }
 
         let numpy = cached_numpy(py)?;
-        let builtins = py.import("builtins")?;
+        let builtins = cached_builtins(py)?;
         let object_dtype = builtins.getattr(intern!(py, "object"))?;
 
         let mut input_shapes = Vec::with_capacity(args.len());
@@ -22954,8 +22941,7 @@ fn try_zerocopy_bincount_weighted(
     // float64 array (a no-op view when already f64). Defer on any cast failure.
     let kw = PyDict::new(py);
     kw.set_item(intern!(py, "dtype"), "float64")?;
-    let Ok(w_arr) = numpy
-        .getattr(intern!(py, "ascontiguousarray"))?
+    let Ok(w_arr) = cached_numpy_ascontiguousarray(py)?
         .call((weights,), Some(&kw))
     else {
         return Ok(None);
@@ -30127,11 +30113,11 @@ fn try_native_int_matrix_power(
 // runs at least one multiply, so the result is never an alias of the input.
 fn bool_matrix_power_bitpacked(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     power: u64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let mm = numpy.getattr(intern!(py, "matmul"))?;
+    let mm = cached_numpy_matmul(py)?;
     let step = |x: &Bound<'_, PyAny>, y: &Bound<'_, PyAny>| -> PyResult<Py<PyAny>> {
         match try_native_int_matmul(py, x, y)? {
             Some(r) => Ok(r),
@@ -32285,9 +32271,7 @@ fn spacing(
         return Ok(out);
     }
     if !numpy_dtype_is_f64(py, x.bind(py)) {
-        let numpy = py.import("numpy")?;
-        return Ok(numpy
-            .getattr(intern!(py, "spacing"))?
+        return Ok(cached_numpy_spacing(py)?
             .call1((x.bind(py),))?
             .unbind());
     }
@@ -32519,9 +32503,7 @@ fn rint_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         return Ok(out);
     }
     if !numpy_dtype_is_f64(py, x) {
-        // `cached_numpy`, not `py.import` - 382.5 ns/call on this host.
-        let numpy = cached_numpy(py)?;
-        return Ok(numpy.getattr(intern!(py, "rint"))?.call1((x,))?.unbind());
+        return Ok(cached_numpy_rint(py)?.call1((x,))?.unbind());
     }
     if let Some(out) = try_zerocopy_f64_unary(py, x, UnaryOp::Rint)? {
         return Ok(out);
@@ -32529,14 +32511,13 @@ fn rint_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // Non-contiguous (transposed/strided) f64: extract_numeric_array does a transpose-copy that is
     // 6-40x slower than numpy's strided rint; the sibling round/floor/ceil/trunc all delegate this.
     // Delegate. (BlackThrush 2026-06-23.)
-    let numpy = py.import("numpy")?;
     if x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return Ok(numpy.getattr(intern!(py, "rint"))?.call1((x,))?.unbind());
+        return Ok(cached_numpy_rint(py)?.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "rint(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Rint))
@@ -35543,7 +35524,6 @@ fn nan_to_num_impl(
     // semantics. copy=True (the default, and the overwhelmingly common call) keeps the
     // native zero-extract paths.
     if !copy {
-        let numpy = py.import("numpy")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "copy"), false)?;
         kwargs.set_item(intern!(py, "nan"), nan)?;
@@ -35553,8 +35533,7 @@ fn nan_to_num_impl(
         if let Some(n) = neginf {
             kwargs.set_item(intern!(py, "neginf"), n)?;
         }
-        return Ok(numpy
-            .getattr(intern!(py, "nan_to_num"))?
+        return Ok(cached_numpy_nan_to_num(py)?
             .call((x.bind(py),), Some(&kwargs))?
             .unbind());
     }
@@ -35562,7 +35541,6 @@ fn nan_to_num_impl(
     // native-dtype view of the bytes, which no buffer-level guard can see
     // (`deadlock-audit-2kqw3`).
     if ndarray_is_byteswapped(py, x.bind(py)) {
-        let numpy = cached_numpy(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "nan"), nan)?;
         if let Some(p) = posinf {
@@ -35571,8 +35549,7 @@ fn nan_to_num_impl(
         if let Some(n) = neginf {
             kwargs.set_item(intern!(py, "neginf"), n)?;
         }
-        return Ok(numpy
-            .getattr(intern!(py, "nan_to_num"))?
+        return Ok(cached_numpy_nan_to_num(py)?
             .call((x.bind(py),), Some(&kwargs))?
             .unbind());
     }
@@ -35618,7 +35595,6 @@ fn nan_to_num_impl(
     // beating numpy's multi-pass complex path. Only for ndim>=1 (a 0-d complex view is degenerate).
     {
         let xb = x.bind(py);
-        let numpy = py.import("numpy")?;
         if xb.is_exact_instance(cached_ndarray_type(py)?) {
             let dtype = xb.getattr(intern!(py, "dtype"))?;
             let is_complex = dtype.getattr(intern!(py, "kind"))?.extract::<String>()? == "c";
@@ -35628,7 +35604,7 @@ fn nan_to_num_impl(
                 if itemsize == 16 {
                     let view = xb.call_method1(
                         intern!(py, "view"),
-                        (numpy.getattr(intern!(py, "float64"))?,),
+                        (cached_float64_type(py)?,),
                     )?;
                     if let Some(out) = try_zerocopy_f64_nan_to_num(
                         py,
@@ -35643,7 +35619,7 @@ fn nan_to_num_impl(
                 } else if itemsize == 8 {
                     let view = xb.call_method1(
                         intern!(py, "view"),
-                        (numpy.getattr(intern!(py, "float32"))?,),
+                        (cached_float32_type(py)?,),
                     )?;
                     if let Some(out) = try_zerocopy_f32_nan_to_num(
                         py,
@@ -35663,7 +35639,6 @@ fn nan_to_num_impl(
     // below bridges bool->f64 and rebuilds (~900x slower than numpy's bool copy). numpy
     // is the parity reference; defer bool (only on the fallthrough — f64/int/f32 above).
     {
-        let numpy = py.import("numpy")?;
         if x.bind(py).is_exact_instance(cached_ndarray_type(py)?)
             && x.bind(py)
                 .getattr(intern!(py, "dtype"))?
@@ -35679,8 +35654,7 @@ fn nan_to_num_impl(
             if let Some(n) = neginf {
                 kwargs.set_item(intern!(py, "neginf"), n)?;
             }
-            return Ok(numpy
-                .getattr(intern!(py, "nan_to_num"))?
+            return Ok(cached_numpy_nan_to_num(py)?
                 .call((x.bind(py),), Some(&kwargs))?
                 .unbind());
         }
@@ -35688,8 +35662,7 @@ fn nan_to_num_impl(
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
     // cold extract → rebuild (transpose-copy, ~2.5x slower). Delegate to numpy.
     {
-        let numpy = py.import("numpy")?;
-        if noncontiguous_ndarray(&numpy, x.bind(py))? {
+        if noncontiguous_ndarray(cached_numpy(py)?, x.bind(py))? {
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "copy"), true)?;
             kwargs.set_item(intern!(py, "nan"), nan)?;
@@ -35699,8 +35672,7 @@ fn nan_to_num_impl(
             if let Some(n) = neginf {
                 kwargs.set_item(intern!(py, "neginf"), n)?;
             }
-            return Ok(numpy
-                .getattr(intern!(py, "nan_to_num"))?
+            return Ok(cached_numpy_nan_to_num(py)?
                 .call((x.bind(py),), Some(&kwargs))?
                 .unbind());
         }
@@ -35713,7 +35685,6 @@ fn nan_to_num_impl(
             // and imaginary parts, applying nan/posinf/neginf to each. Delegate with
             // the same args so the result is exact; genuinely invalid input (e.g. a
             // string array) reproduces numpy's own error.
-            let numpy = py.import("numpy")?;
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "nan"), nan)?;
             if let Some(p) = posinf {
@@ -35722,8 +35693,7 @@ fn nan_to_num_impl(
             if let Some(n) = neginf {
                 kwargs.set_item(intern!(py, "neginf"), n)?;
             }
-            return Ok(numpy
-                .getattr(intern!(py, "nan_to_num"))?
+            return Ok(cached_numpy_nan_to_num(py)?
                 .call((x.bind(py),), Some(&kwargs))?
                 .unbind());
         }
@@ -36095,8 +36065,7 @@ fn try_zerocopy_int_choose(
     // Normalize the index array to contiguous int64.
     let kw = PyDict::new(py);
     kw.set_item(intern!(py, "dtype"), "int64")?;
-    let a64 = numpy
-        .getattr(intern!(py, "ascontiguousarray"))?
+    let a64 = cached_numpy_ascontiguousarray(py)?
         .call((a,), Some(&kw))?;
     match (kind, itemsize) {
         ('i', 8) => choose_typed::<i64>(py, numpy, &a64, &items, "int64", &a_shape),
@@ -42245,8 +42214,7 @@ fn try_zerocopy_any_put(
     }
     let kw = PyDict::new(py);
     kw.set_item(intern!(py, "dtype"), cached_int64_type(py)?)?;
-    let ind64 = numpy
-        .getattr(intern!(py, "ascontiguousarray"))?
+    let ind64 = cached_numpy_ascontiguousarray(py)?
         .call((ind_arr,), Some(&kw))?;
     // Cast values to a's dtype and ravel (covers scalar / list / array, any dtype),
     // matching numpy.put's cast. asarray raises OverflowError for an out-of-range
@@ -42928,14 +42896,13 @@ fn indices(
     // broadcastable arrays, one per dimension, not a single stacked grid - so it
     // cannot be layered onto the native dense build; delegate.
     if sparse {
-        let numpy = py.import("numpy")?;
+        let indices_fn = cached_numpy_indices(py)?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "sparse"), true)?;
-        return Ok(numpy
-            .getattr(intern!(py, "indices"))?
+        return Ok(indices_fn
             .call((dimensions,), Some(&kwargs))?
             .unbind());
     }
@@ -55147,8 +55114,7 @@ fn cached_slice_full(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static SLICE_FULL: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
     Ok(SLICE_FULL
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
-            Ok(py
-                .import("builtins")?
+            Ok(cached_builtins(py)?
                 .getattr(intern!(py, "slice"))?
                 .call1((py.None(),))?
                 .unbind())
@@ -55160,8 +55126,7 @@ fn cached_slice_reversed(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static SLICE_REV: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
     Ok(SLICE_REV
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
-            Ok(py
-                .import("builtins")?
+            Ok(cached_builtins(py)?
                 .getattr(intern!(py, "slice"))?
                 .call1((py.None(), py.None(), -1i64))?
                 .unbind())
@@ -59840,7 +59805,7 @@ fn ascontiguousarray(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let asc_fn = numpy.getattr(intern!(py, "ascontiguousarray"))?;
+        let asc_fn = cached_numpy_ascontiguousarray(py)?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
@@ -65840,7 +65805,6 @@ fn load(
     encoding: &str,
     max_header_size: usize,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(mode) = mmap_mode.as_ref() {
@@ -65850,8 +65814,8 @@ fn load(
         kwargs.set_item(intern!(py, "fix_imports"), fix_imports)?;
         kwargs.set_item(intern!(py, "encoding"), encoding)?;
         kwargs.set_item(intern!(py, "max_header_size"), max_header_size)?;
-        Ok(numpy
-            .getattr(intern!(py, "load"))?
+        let load_fn = cached_numpy_load(py)?;
+        Ok(load_fn
             .call((file.bind(py),), Some(&kwargs))?
             .unbind())
     };
@@ -65872,8 +65836,7 @@ fn load(
         }
     } else if let Ok(raw) = file_bound.extract::<Vec<u8>>() {
         raw
-    } else if let Ok(path_obj) = py
-        .import("os")?
+    } else if let Ok(path_obj) = cached_os(py)?
         .getattr(intern!(py, "fspath"))?
         .call1((file_bound,))
         && let Ok(path) = path_obj.extract::<String>()
@@ -65917,16 +65880,14 @@ fn load_via_numpy_bytes(
     encoding: &str,
     max_header_size: usize,
 ) -> PyResult<Py<PyAny>> {
-    let io = py.import("io")?;
+    let io = cached_io(py)?;
     let buffer = io.getattr("BytesIO")?.call1((PyBytes::new(py, bytes),))?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "allow_pickle"), allow_pickle)?;
     kwargs.set_item(intern!(py, "fix_imports"), fix_imports)?;
     kwargs.set_item(intern!(py, "encoding"), encoding)?;
     kwargs.set_item(intern!(py, "max_header_size"), max_header_size)?;
-    Ok(py
-        .import("numpy")?
-        .getattr(intern!(py, "load"))?
+    Ok(cached_numpy_load(py)?
         .call((buffer,), Some(&kwargs))?
         .unbind())
 }
@@ -66140,7 +66101,7 @@ fn fromfile(
         return fallback();
     }
 
-    let os = py.import("os")?;
+    let os = cached_os(py)?;
     let path_obj = match os.getattr(intern!(py, "fspath"))?.call1((file.bind(py),)) {
         Ok(path) => path,
         Err(_) => return fallback(),
@@ -67234,8 +67195,7 @@ fn recfunctions_drop_fields(
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "usemask"), usemask)?;
         kwargs.set_item(intern!(py, "asrecarray"), asrecarray)?;
-        Ok(py
-            .import("numpy.lib.recfunctions")?
+        Ok(cached_numpy_recfunctions(py)?
             .getattr(intern!(py, "drop_fields"))?
             .call((base_bound, drop_names_bound), Some(&kwargs))?
             .unbind())
@@ -67318,8 +67278,7 @@ fn recfunctions_rename_fields(
     let base_bound = base.bind(py);
     let namemapper_bound = namemapper.bind(py);
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        Ok(py
-            .import("numpy.lib.recfunctions")?
+        Ok(cached_numpy_recfunctions(py)?
             .getattr(intern!(py, "rename_fields"))?
             .call1((base_bound, namemapper_bound))?
             .unbind())
@@ -67400,8 +67359,7 @@ fn recfunctions_append_fields(
         kwargs.set_item(intern!(py, "fill_value"), fill_value)?;
         kwargs.set_item(intern!(py, "usemask"), usemask)?;
         kwargs.set_item(intern!(py, "asrecarray"), asrecarray)?;
-        Ok(py
-            .import("numpy.lib.recfunctions")?
+        Ok(cached_numpy_recfunctions(py)?
             .getattr(intern!(py, "append_fields"))?
             .call((base_bound, names_bound, data_bound), Some(&kwargs))?
             .unbind())
@@ -67499,8 +67457,7 @@ fn recfunctions_merge_arrays(
         kwargs.set_item(intern!(py, "flatten"), flatten)?;
         kwargs.set_item(intern!(py, "usemask"), usemask)?;
         kwargs.set_item(intern!(py, "asrecarray"), asrecarray)?;
-        Ok(py
-            .import("numpy.lib.recfunctions")?
+        Ok(cached_numpy_recfunctions(py)?
             .getattr(intern!(py, "merge_arrays"))?
             .call((seqarrays_bound,), Some(&kwargs))?
             .unbind())
@@ -67632,8 +67589,7 @@ fn recfunctions_unstructured_to_structured(
         kwargs.set_item(intern!(py, "align"), align)?;
         kwargs.set_item(intern!(py, "copy"), copy)?;
         kwargs.set_item(intern!(py, "casting"), casting)?;
-        Ok(py
-            .import("numpy.lib.recfunctions")?
+        Ok(cached_numpy_recfunctions(py)?
             .getattr(intern!(py, "unstructured_to_structured"))?
             .call((arr_bound,), Some(&kwargs))?
             .unbind())
@@ -69129,7 +69085,7 @@ fn asfortranarray(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let asf_fn = numpy.getattr(intern!(py, "asfortranarray"))?;
+        let asf_fn = cached_numpy_asfortranarray(py)?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
@@ -70103,7 +70059,7 @@ fn testing_assert_string_equal(py: Python<'_>, actual: &str, desired: &str) -> P
     //       actual.splitlines(True), desired.splitlines(True)))
     //   diff = [d for d in diff if not d.startswith('? ')]
     //   if any non-equal markers: msg = "Differences in strings:\n" + ''.join(diff).rstrip()
-    let difflib = py.import("difflib")?;
+    let difflib = cached_difflib(py)?;
     let differ = difflib.getattr("Differ")?.call0()?;
     // 2axo: route through Python's str.splitlines(keepends=True) so
     // the canonical Python separator set (\r\n, \n, \r, \v, \f, \x1c,
@@ -87266,7 +87222,7 @@ fn put_along_axis(
     let indices_for_fallback = indices.clone_ref(py);
     let values_for_fallback = values.clone_ref(py);
     let invoke_fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let put_along_axis_fn = cached_numpy_put_along_axis(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(
             "axis",
@@ -87275,8 +87231,7 @@ fn put_along_axis(
                 None => py.None().into_bound(py),
             },
         )?;
-        Ok(numpy
-            .getattr(intern!(py, "put_along_axis"))?
+        Ok(put_along_axis_fn
             .call(
                 (
                     arr_for_fallback.bind(py),
@@ -87542,7 +87497,7 @@ fn take_along_axis(
     let arr_for_fallback = arr.clone_ref(py);
     let indices_for_fallback = indices.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let take_along_axis_fn = cached_numpy_take_along_axis(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(
             "axis",
@@ -87551,8 +87506,7 @@ fn take_along_axis(
                 None => py.None().into_bound(py),
             },
         )?;
-        Ok(numpy
-            .getattr(intern!(py, "take_along_axis"))?
+        Ok(take_along_axis_fn
             .call(
                 (arr_for_fallback.bind(py), indices_for_fallback.bind(py)),
                 Some(&kwargs),
@@ -87633,6 +87587,96 @@ fn cached_numpy(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     Ok(NUMPY_MODULE
         .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
             Ok(py.import("numpy")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_builtins(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static BUILTINS_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(BUILTINS_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("builtins")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_warnings(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static WARNINGS_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(WARNINGS_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("warnings")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_sys(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static SYS_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(SYS_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("sys")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_sys_modules(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static SYS_MODULES: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(SYS_MODULES
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_sys(py)?.getattr(intern!(py, "modules"))?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_os(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static OS_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(OS_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("os")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_io(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static IO_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(IO_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("io")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_difflib(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static DIFFLIB_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(DIFFLIB_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("difflib")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_inspect(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static INSPECT_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(INSPECT_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("inspect")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_operator(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static OPERATOR_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(OPERATOR_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("operator")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_functools(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+    static FUNCTOOLS_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    Ok(FUNCTOOLS_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            Ok(py.import("functools")?.unbind())
         })?
         .bind(py))
 }
@@ -88184,6 +88228,9 @@ cached_numpy_attr!(cached_numpy_nan_to_num, "nan_to_num");
 cached_numpy_attr!(cached_numpy_spacing, "spacing");
 cached_numpy_attr!(cached_numpy_rint, "rint");
 cached_numpy_attr!(cached_numpy_indices, "indices");
+cached_numpy_attr!(cached_numpy_put_along_axis, "put_along_axis");
+cached_numpy_attr!(cached_numpy_take_along_axis, "take_along_axis");
+cached_numpy_attr!(cached_numpy_load, "load");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
@@ -88225,6 +88272,16 @@ cached_numpy_submodule!(cached_numpy_array_utils, "numpy.lib.array_utils");
 cached_numpy_submodule!(cached_numpy_linalg, "numpy.linalg");
 cached_numpy_submodule!(cached_numpy_random, "numpy.random");
 cached_numpy_submodule!(cached_numpy_exceptions, "numpy.exceptions");
+cached_numpy_submodule!(cached_numpy_arraysetops_impl, "numpy.lib._arraysetops_impl");
+cached_numpy_submodule!(cached_numpy_polynomial, "numpy.polynomial");
+cached_numpy_submodule!(cached_numpy_fft, "numpy.fft");
+cached_numpy_submodule!(cached_numpy_testing, "numpy.testing");
+cached_numpy_submodule!(cached_numpy_dtypes, "numpy.dtypes");
+cached_numpy_submodule!(cached_numpy_lib_format, "numpy.lib.format");
+cached_numpy_submodule!(cached_numpy_lib, "numpy.lib");
+cached_numpy_submodule!(cached_numpy_hermite_e, "numpy.polynomial.hermite_e");
+cached_numpy_submodule!(cached_numpy_polyutils, "numpy.polynomial.polyutils");
+cached_numpy_submodule!(cached_numpy_polynomial_polynomial, "numpy.polynomial.polynomial");
 
 macro_rules! cached_numpy_ma_attr {
     ($fn_name:ident, $attr:literal) => {
@@ -101378,7 +101435,7 @@ fn einsum(
                     // ~107ms at 512^2 while its own matmul is 14ms, so this is
                     // a pure reroute to numpy's faster path (sorter= precedent).
                     if bool_kind(&x1) && bool_kind(&x2) {
-                        let mm = py.import("numpy")?.getattr(intern!(py, "matmul"))?;
+                        let mm = cached_numpy_matmul(py)?;
                         if einsum_int_chain_spec_matches(&norm, 2)
                             || einsum_int_batched_chain_spec_matches(&norm, 2)
                         {
@@ -101600,7 +101657,7 @@ fn einsum(
                         }
                     }
                     if all_bool {
-                        let mm = py.import("numpy")?.getattr(intern!(py, "matmul"))?;
+                        let mm = cached_numpy_matmul(py)?;
                         // Each fold step prefers the native bitpacked bool
                         // GEMMs (2-D then batched, above-gate); numpy's own
                         // bool matmul is the byte-exact fallback (small steps).
@@ -114766,7 +114823,7 @@ fn array_api_unique_route(
     match result_type {
         None => Ok(res), // unique_values: bare sorted-unique values array
         Some(tname) => {
-            let Ok(m) = py.import("numpy.lib._arraysetops_impl") else {
+            let Ok(m) = cached_numpy_arraysetops_impl(py) else {
                 return passthrough(py);
             };
             let Ok(ctor) = m.getattr(tname) else {
@@ -118863,7 +118920,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // be importable (numpy-less CI workers); in that case install a
         // module-level __getattr__ that lazy-loads on first access, same
         // pattern as linalg.LinAlgError.
-        if let Ok(np_random) = py.import("numpy.random") {
+        if let Ok(np_random) = cached_numpy_random(py) {
             for name in [
                 "BitGenerator",
                 "bit_generator",
@@ -118900,7 +118957,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             let rs_cls = random.getattr("RandomState")?;
             install_fn.call1((&random, rs_cls))?;
         }
-        if let Ok(np_random) = py.import("numpy.random")
+        if let Ok(np_random) = cached_numpy_random(py)
             && let Ok(all_names) = np_random.getattr(intern!(py, "__all__"))
         {
             // Copy, not the object — see `copied_all_names`. `.clone()` on a
@@ -118919,8 +118976,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if random.getattr(intern!(py, "__all__")).is_err() {
             random.setattr("__all__", PyList::new(py, random_public_names)?)?;
         }
-        py.import("sys")?
-            .getattr(intern!(py, "modules"))?
+        cached_sys_modules(py)?
             .set_item(&random_qualified_name, &random)?;
         m.add_submodule(&random)?;
         m.add("random", random)?;
@@ -118951,7 +119007,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "laguerre",
             "Laguerre",
         ];
-        if let Ok(np_poly) = py.import("numpy.polynomial") {
+        if let Ok(np_poly) = cached_numpy_polynomial(py) {
             for name in [
                 "Polynomial",
                 "Chebyshev",
@@ -118982,11 +119038,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let poly_dict = polynomial.dict();
         py.run(poly_getattr_src, Some(&poly_dict), None)?;
-        let sys_modules = py.import("sys")?.getattr(intern!(py, "modules"))?;
+        let sys_modules = cached_sys_modules(py)?;
         // crid: eager subpackage install when numpy.polynomial is
         // importable. setattr each of the 6 subpackages so attribute
         // access (not __getattr__) resolves and dir() enumerates them.
-        if let Ok(np_poly) = py.import("numpy.polynomial") {
+        if let Ok(np_poly) = cached_numpy_polynomial(py) {
             for sub in [
                 "polynomial",
                 "chebyshev",
@@ -119828,7 +119884,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Underlying numpy version used at compile-introspection time. Lets\n
     // downstream code branch on np-version differences without re-importing\n
     // numpy from a possibly-different environment.
-    if let Ok(numpy) = py.import("numpy")
+    if let Ok(numpy) = cached_numpy(py)
         && let Ok(ver) = numpy.getattr(intern!(py, "__version__"))
     {
         m.setattr("__numpy_version__", &ver)?;
@@ -119851,7 +119907,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // users can pass e.g. `fnp_python.int8` as the dtype= argument to any
     // wrapper and numpy recognises it. Platform-specific types (float128,
     // complex256) are skipped gracefully on systems that lack them.
-    if let Ok(numpy) = py.import("numpy") {
+    if let Ok(numpy) = cached_numpy(py) {
         const NUMPY_DTYPE_SCALARS: &[&str] = &[
             "bool",
             "bool_",
@@ -119994,12 +120050,12 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 fft_module.add(name, value)?;
             }
         }
-        if let Ok(np_fft) = py.import("numpy.fft")
+        if let Ok(np_fft) = cached_numpy_fft(py)
             && let Ok(test_attr) = np_fft.getattr(intern!(py, "test"))
         {
             fft_module.add("test", test_attr)?;
         }
-        if let Ok(np_fft) = py.import("numpy.fft")
+        if let Ok(np_fft) = cached_numpy_fft(py)
             && let Ok(all_names) = np_fft.getattr(intern!(py, "__all__"))
         {
             fft_module.setattr("__all__", copied_all_names(&all_names)?)?;
@@ -120022,8 +120078,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Some(callable_module_cls) = callable_module_ns.get_item("_CallableFFTModule")? {
             fft_module.setattr("__class__", callable_module_cls)?;
         }
-        py.import("sys")?
-            .getattr(intern!(py, "modules"))?
+        cached_sys_modules(py)?
             .set_item(&qualified_name, &fft_module)?;
         m.add_submodule(&fft_module)?;
         m.add("fft", fft_module)?;
@@ -120148,7 +120203,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // fnp_python.linalg.LinAlgError and callers of linalg.test see the
         // exact NumPy objects. Lazy __getattr__ keeps resolution working for
         // hosts where numpy is unavailable during embedded interpreter init.
-        if let Ok(np_linalg) = py.import("numpy.linalg") {
+        if let Ok(np_linalg) = cached_numpy_linalg(py) {
             for name in ["LinAlgError", "test"] {
                 if let Ok(value) = np_linalg.getattr(name) {
                     linalg.setattr(name, value)?;
@@ -120174,8 +120229,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let linalg_dict = linalg.dict();
         py.run(getattr_src, Some(&linalg_dict), None)?;
-        py.import("sys")?
-            .getattr(intern!(py, "modules"))?
+        cached_sys_modules(py)?
             .set_item(&linalg_qualified_name, &linalg)?;
         m.add_submodule(&linalg)?;
         // Also expose as top-level attribute so `fnp_python.linalg` resolves
@@ -120200,7 +120254,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // `char` reports why instead of leaving the next agent to guess
     // (deadlock-audit-smr32).
     {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
         let submodule_errors = PyDict::new(py);
         if let Ok(strings_upstream) =
             resolve_numpy_submodule(py, &numpy, "strings").inspect_err(|why| {
@@ -120545,7 +120599,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "allclose",
             "test",
         ];
-        if let Ok(np_ma) = py.import("numpy.ma") {
+        if let Ok(np_ma) = cached_numpy_ma(py) {
             for name in ma_core_names {
                 if let Ok(value) = np_ma.getattr(name) {
                     ma.add(name, value)?;
@@ -120576,8 +120630,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
-        py.import("sys")?
-            .getattr(intern!(py, "modules"))?
+        cached_sys_modules(py)?
             .set_item(&ma_qualified_name, &ma)?;
         m.add_submodule(&ma)?;
         m.add("ma", ma)?;
@@ -120657,7 +120710,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "TestCase",
             "overrides",
         ];
-        if let Ok(np_testing) = py.import("numpy.testing") {
+        if let Ok(np_testing) = cached_numpy_testing(py) {
             if let Ok(all_names) = np_testing.getattr(intern!(py, "__all__")) {
                 testing.setattr("__all__", all_names.clone())?;
                 for item in all_names.try_iter()? {
@@ -120689,8 +120742,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let testing_dict = testing.dict();
         py.run(testing_getattr_src, Some(&testing_dict), None)?;
-        py.import("sys")?
-            .getattr(intern!(py, "modules"))?
+        cached_sys_modules(py)?
             .set_item(&testing_qualified_name, &testing)?;
         m.add_submodule(&testing)?;
         m.add("testing", testing)?;
@@ -120718,7 +120770,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "AxisError",
             "DTypePromotionError",
         ];
-        if let Ok(np_exceptions) = py.import("numpy.exceptions") {
+        if let Ok(np_exceptions) = cached_numpy_exceptions(py) {
             // Mirror __all__ verbatim when present, else use the
             // canonical fallback list.
             if let Ok(all_names) = np_exceptions.getattr(intern!(py, "__all__")) {
@@ -120757,8 +120809,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let exceptions_dict = exceptions.dict();
         py.run(exceptions_getattr_src, Some(&exceptions_dict), None)?;
-        py.import("sys")?
-            .getattr(intern!(py, "modules"))?
+        cached_sys_modules(py)?
             .set_item(&exceptions_qualified_name, &exceptions)?;
         m.add_submodule(&exceptions)?;
         m.add("exceptions", exceptions)?;
@@ -120811,7 +120862,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "TimeDelta64DType",
             "StringDType",
         ];
-        if let Ok(np_dtypes) = py.import("numpy.dtypes") {
+        if let Ok(np_dtypes) = cached_numpy_dtypes(py) {
             if let Ok(all_names) = np_dtypes.getattr(intern!(py, "__all__")) {
                 dtypes_module.setattr("__all__", all_names.clone())?;
                 for item in all_names.try_iter()? {
@@ -120849,8 +120900,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let dtypes_dict = dtypes_module.dict();
         py.run(dtypes_getattr_src, Some(&dtypes_dict), None)?;
-        py.import("sys")?
-            .getattr(intern!(py, "modules"))?
+        cached_sys_modules(py)?
             .set_item(&dtypes_qualified_name, &dtypes_module)?;
         m.add_submodule(&dtypes_module)?;
         m.add("dtypes", dtypes_module)?;
@@ -120932,7 +120982,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "structured_to_unstructured",
             "unstructured_to_structured",
         ];
-        if let Ok(np_recfunctions) = py.import("numpy.lib.recfunctions")
+        if let Ok(np_recfunctions) = cached_numpy_recfunctions(py)
             && let Ok(all_names) = np_recfunctions.getattr(intern!(py, "__all__"))
         {
             recfunctions.setattr("__all__", all_names.clone())?;
@@ -120972,7 +121022,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 scimath.add(numpy_name, value)?;
             }
         }
-        if let Ok(np_scimath) = py.import("numpy.lib.scimath")
+        if let Ok(np_scimath) = cached_numpy_scimath(py)
             && let Ok(all_names) = np_scimath.getattr(intern!(py, "__all__"))
         {
             scimath.setattr("__all__", all_names.clone())?;
@@ -121013,7 +121063,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 array_utils.add(numpy_name, value)?;
             }
         }
-        if let Ok(np_array_utils) = py.import("numpy.lib.array_utils")
+        if let Ok(np_array_utils) = cached_numpy_array_utils(py)
             && let Ok(all_names) = np_array_utils.getattr(intern!(py, "__all__"))
         {
             array_utils.setattr("__all__", all_names.clone())?;
@@ -121062,7 +121112,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "write_array_header_1_0",
             "write_array_header_2_0",
         ];
-        if let Ok(np_format) = py.import("numpy.lib.format") {
+        if let Ok(np_format) = cached_numpy_lib_format(py) {
             for name in format_names {
                 if let Ok(value) = np_format.getattr(name) {
                     format_module.add(name, value)?;
@@ -121101,7 +121151,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "stride_tricks",
             "tracemalloc_domain",
         ];
-        if let Ok(np_lib) = py.import("numpy.lib") {
+        if let Ok(np_lib) = cached_numpy_lib(py) {
             if let Ok(all_names) = np_lib.getattr(intern!(py, "__all__")) {
                 lib_module.setattr("__all__", all_names.clone())?;
                 for item in all_names.try_iter()? {
@@ -121133,7 +121183,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let lib_dict = lib_module.dict();
         py.run(lib_getattr_src, Some(&lib_dict), None)?;
-        let sys_modules = py.import("sys")?.getattr(intern!(py, "modules"))?;
+        let sys_modules = cached_sys_modules(py)?;
         sys_modules.set_item(&lib_qualified_name, &lib_module)?;
         sys_modules.set_item(
             &recfunctions_qualified_name,
@@ -121172,7 +121222,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // exactly numpy's, which is what `fnp_python_top_level_all_matches_numpy_verbatim`
     // has always claimed to check — while the list was shared with numpy's that
     // test was comparing an object with itself (deadlock-audit-335rd).
-    if let Ok(numpy) = py.import("numpy")
+    if let Ok(numpy) = cached_numpy(py)
         && let Ok(all_names) = numpy.getattr(intern!(py, "__all__"))
     {
         m.setattr("__all__", copied_all_names(&all_names)?)?;
@@ -121189,6 +121239,7 @@ mod tests {
         NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, ScimathFix, UFuncKind,
         accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, busdays_in_span, cached_float64_dtype, cached_numpy,
+        cached_numpy_recfunctions,
         ceil_native, choose, compress, copysign, count_nonzero, degrees_native, diag,
         diag_indices_from, diag_indices_impl, diagflat, diagonal, digitize,
         divide_slice_detecting_fe_hazards, dtype_kind_of, extract, extract_numeric_array,
@@ -143944,7 +143995,7 @@ mod tests {
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
-            let recfunctions = py.import("numpy.lib.recfunctions")?;
+            let recfunctions = cached_numpy_recfunctions(py)?;
 
             let mixed_dtype = numpy
                 .getattr("dtype")?
@@ -144001,7 +144052,7 @@ mod tests {
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
-            let recfunctions = py.import("numpy.lib.recfunctions")?;
+            let recfunctions = cached_numpy_recfunctions(py)?;
 
             let subarray_dtype = numpy.getattr("dtype")?.call1((py.eval(
                 pyo3::ffi::c_str!("[('xy', '<i4', (2,)), ('z', '<i4')]"),
@@ -174151,7 +174202,7 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             }
 
             if numpy_available(py) {
-                let np_recfunctions = py.import("numpy.lib.recfunctions")?;
+                let np_recfunctions = cached_numpy_recfunctions(py)?;
                 let theirs_all: Vec<String> = np_recfunctions.getattr("__all__")?.extract()?;
                 assert_eq!(
                     our_all, theirs_all,
@@ -174230,7 +174281,7 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let numpy = py.import("numpy")?;
             // numpy 2.x no longer exposes `recfunctions` as an attribute
             // of `numpy.lib` — it must be imported as an explicit submodule.
-            let nrf = py.import("numpy.lib.recfunctions")?;
+            let nrf = cached_numpy_recfunctions(py)?;
             let numpy_drop = nrf.getattr("drop_fields")?;
             let numpy_rename = nrf.getattr("rename_fields")?;
             let numpy_append = nrf.getattr("append_fields")?;
@@ -174333,7 +174384,7 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
             let recfunctions = module.getattr("lib")?.getattr("recfunctions")?;
-            let nrf = py.import("numpy.lib.recfunctions")?;
+            let nrf = cached_numpy_recfunctions(py)?;
             let numpy = py.import("numpy")?;
             let builtins = py.import("builtins")?;
             let eval_fn = builtins.getattr("eval")?;
@@ -174507,7 +174558,7 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
             let recfunctions = module.getattr("lib")?.getattr("recfunctions")?;
-            let nrf = py.import("numpy.lib.recfunctions")?;
+            let nrf = cached_numpy_recfunctions(py)?;
             let numpy = py.import("numpy")?;
             let builtins = py.import("builtins")?;
             let eval_fn = builtins.getattr("eval")?;
@@ -174614,7 +174665,7 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
             let recfunctions = module.getattr("lib")?.getattr("recfunctions")?;
-            let nrf = py.import("numpy.lib.recfunctions")?;
+            let nrf = cached_numpy_recfunctions(py)?;
             let numpy = py.import("numpy")?;
             let builtins = py.import("builtins")?;
             let eval_fn = builtins.getattr("eval")?;
