@@ -87600,6 +87600,7 @@ fn cached_builtins(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
         .bind(py))
 }
 
+#[allow(dead_code)]
 fn cached_warnings(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     static WARNINGS_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
     Ok(WARNINGS_MODULE
@@ -87663,6 +87664,7 @@ fn cached_inspect(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
         .bind(py))
 }
 
+#[allow(dead_code)]
 fn cached_operator(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     static OPERATOR_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
     Ok(OPERATOR_MODULE
@@ -87672,6 +87674,7 @@ fn cached_operator(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
         .bind(py))
 }
 
+#[allow(dead_code)]
 fn cached_functools(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     static FUNCTOOLS_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
     Ok(FUNCTOOLS_MODULE
@@ -88251,6 +88254,7 @@ cached_numpy_attr!(cached_numpy_load, "load");
 /// unpriced lever `core_numpy_passthrough` carries, and it stays unpriced here.
 macro_rules! cached_numpy_submodule {
     ($fn_name:ident, $module:literal) => {
+        #[allow(dead_code)]
         fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
             static CACHE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
             Ok(CACHE
