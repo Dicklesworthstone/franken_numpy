@@ -120261,7 +120261,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let numpy = cached_numpy(py)?;
         let submodule_errors = PyDict::new(py);
         if let Ok(strings_upstream) =
-            resolve_numpy_submodule(py, &numpy, "strings").inspect_err(|why| {
+            resolve_numpy_submodule(py, numpy, "strings").inspect_err(|why| {
                 let _ = submodule_errors.set_item(intern!(py, "strings"), why);
             })
         {
@@ -120304,7 +120304,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add_submodule(&strings)?;
             m.add("strings", strings)?;
         }
-        if let Ok(char_upstream) = resolve_numpy_submodule(py, &numpy, "char").inspect_err(|why| {
+        if let Ok(char_upstream) = resolve_numpy_submodule(py, numpy, "char").inspect_err(|why| {
             let _ = submodule_errors.set_item(intern!(py, "char"), why);
         }) {
             let char_mod = PyModule::new(py, "char")?;
@@ -120358,7 +120358,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add("char", char_mod)?;
         }
         for name in ["rec", "emath", "matrixlib"] {
-            match resolve_numpy_submodule(py, &numpy, name) {
+            match resolve_numpy_submodule(py, numpy, name) {
                 Ok(submod) => m.add(name, &submod)?,
                 Err(why) => submodule_errors.set_item(name, why)?,
             }
