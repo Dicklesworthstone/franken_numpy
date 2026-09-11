@@ -1902,8 +1902,7 @@ impl PyRandomGenerator {
         };
 
         if let Some(out) = out {
-            py.import("numpy")?
-                .call_method1(intern!(py, "copyto"), (out.bind(py), generated.bind(py)))?;
+            cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
             Ok(out)
         } else {
             Ok(generated)
@@ -1931,8 +1930,7 @@ impl PyRandomGenerator {
             .map_err(map_random_error)?;
         let generated = build_random_f64_output(py, output)?;
         if let Some(out) = out {
-            py.import("numpy")?
-                .call_method1(intern!(py, "copyto"), (out.bind(py), generated.bind(py)))?;
+            cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
             Ok(out)
         } else {
             Ok(generated)
@@ -4722,8 +4720,8 @@ fn random_state_numpy_legacy_method(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy_random = py.import("numpy.random")?;
-    let numpy_state = numpy_random.getattr("RandomState")?.call0()?;
+    let numpy_random = cached_numpy_random(py)?;
+    let numpy_state = numpy_random.getattr(intern!(py, "RandomState"))?.call0()?;
     let state = build_random_state_state(py, random_state, true)?;
     numpy_state.call_method1(intern!(py, "set_state"), (state,))?;
     let result = numpy_state.getattr(name)?.call(args, kwargs)?.unbind();
@@ -4743,15 +4741,15 @@ fn random_generator_numpy_method(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy_random = py.import("numpy.random")?;
+    let numpy_random = cached_numpy_random(py)?;
     let kind = generator.bit_generator().kind();
     let bit_generator_name = bit_generator_numpy_name(kind);
     let numpy_bit_generator = numpy_random.getattr(bit_generator_name)?.call0()?;
     let state = build_numpy_compatible_bit_generator_state_dict(py, generator.bit_generator())?;
-    numpy_bit_generator.setattr("state", state)?;
+    numpy_bit_generator.setattr(intern!(py, "state"), state)?;
 
     let numpy_generator = numpy_random
-        .getattr("Generator")?
+        .getattr(intern!(py, "Generator"))?
         .call1((numpy_bit_generator,))?;
     let result = numpy_generator.getattr(name)?.call(args, kwargs)?.unbind();
     let updated_state = numpy_generator
@@ -23835,9 +23833,8 @@ fn where_py(
     // numpy.where (forwarding args AND kwargs) so numpy raises the byte-identical,
     // version-appropriate error. The positional fast paths below only ever run when
     // kwargs is empty.
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(cached_numpy_where(py)?.call(args, kwargs)?.unbind())
-    };
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(cached_numpy_where(py)?.call(args, kwargs)?.unbind()) };
 
     if kwargs.is_some_and(|k| !k.is_empty()) {
         return fallback();
@@ -24171,10 +24168,7 @@ fn flatnonzero_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
 // Dispatch the parallel flatnonzero by dtype for a large contiguous ndarray.
 // Returns None (callers fall through to the numpy delegate) for unsupported
 // dtypes, non-contiguous inputs, small sizes, or a starved thread pool.
-fn try_parallel_flatnonzero(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
+fn try_parallel_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     const FLATNONZERO_PAR_MIN: usize = 1 << 19;
     if a.getattr(intern!(py, "size"))?.extract::<usize>()? < FLATNONZERO_PAR_MIN
         || rayon::current_num_threads() < 2
@@ -24412,10 +24406,7 @@ fn nonzero_nd_parallel_typed<T: pyo3::buffer::Element + Copy + Sync>(
 // Dispatch the parallel N-D (ndim >= 3) nonzero by dtype for a large
 // contiguous ndarray; returns the ready d-tuple or None (callers fall through
 // to the numpy delegate). 2-D keeps its dedicated (rows, cols) kernel.
-fn try_parallel_nonzero_nd(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
+fn try_parallel_nonzero_nd(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     const FLATNONZERO_PAR_MIN: usize = 1 << 19;
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     if shape.len() < 3
@@ -24474,10 +24465,7 @@ fn try_parallel_nonzero_nd(
 // Dispatch the parallel 2-D nonzero by dtype for a large contiguous 2-D
 // ndarray; returns the ready (rows, cols) tuple or None (callers fall through
 // to the numpy delegate).
-fn try_parallel_nonzero_2d(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
+fn try_parallel_nonzero_2d(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     const FLATNONZERO_PAR_MIN: usize = 1 << 19;
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
     if shape.len() != 2
@@ -68022,8 +68010,7 @@ fn scimath_fix_scalar(
     } else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
-    let as_array = numpy.getattr(intern!(py, "asarray"))?.call1((value,))?;
+    let as_array = cached_numpy_asarray(py)?.call1((value,))?;
     if !negative {
         return Ok(Some(as_array.unbind()));
     }
@@ -68031,7 +68018,7 @@ fn scimath_fix_scalar(
         // `_tocomplex`: `asarray` of a Python int is int64 and of a Python float is float64,
         // and neither is in numpy's single-precision list, so both go to complex128.
         ScimathScalarFix::RealLtZero => {
-            let complex_type = numpy.getattr(intern!(py, "complex128"))?;
+            let complex_type = cached_complex128_type(py)?;
             as_array.call_method1(intern!(py, "astype"), (complex_type,))?
         }
         // `_fix_int_lt_zero` is `x * 1.0`, NOT `_tocomplex`. The two look interchangeable and
@@ -68044,11 +68031,11 @@ fn scimath_fix_scalar(
 /// `_tocomplex` for the ARRAY operand: single precision to complex64, everything else to
 /// complex128. Of the dtypes these routes accept that is f32 -> complex64, f64 -> complex128.
 fn scimath_tocomplex(py: Python<'_>, x: &Bound<'_, PyAny>, single: bool) -> PyResult<Py<PyAny>> {
-    let complex_type = cached_numpy(py)?.getattr(if single {
-        intern!(py, "complex64")
+    let complex_type = if single {
+        cached_complex64_type(py)?
     } else {
-        intern!(py, "complex128")
-    })?;
+        cached_complex128_type(py)?
+    };
     Ok(x.call_method1(intern!(py, "astype"), (complex_type,))?
         .unbind())
 }
@@ -68081,7 +68068,7 @@ fn native_scimath_logn(
     } else {
         x.unbind()
     };
-    let log = cached_numpy(py)?.getattr(intern!(py, "log"))?;
+    let log = cached_numpy_log(py)?;
     let numerator = log.call1((x_fixed,))?;
     let denominator = log.call1((base_fixed,))?;
     Ok(Some(
@@ -68118,8 +68105,7 @@ fn native_scimath_power(
         x.unbind()
     };
     Ok(Some(
-        cached_numpy(py)?
-            .getattr(intern!(py, "power"))?
+        cached_numpy_power(py)?
             .call1((x_fixed, exponent_fixed))?
             .unbind(),
     ))
@@ -87801,6 +87787,28 @@ fn cached_uint64_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .bind(py))
 }
 
+fn cached_complex64_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static COMPLEX64_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(COMPLEX64_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .getattr(intern!(py, "complex64"))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_complex128_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static COMPLEX128_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(COMPLEX128_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .getattr(intern!(py, "complex128"))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
 // `isdtype`'s kind classes. These are the FIVE partitions numpy's `sctypes` draws plus a sixth
 // "none of them" - `bytes_`, `str_`, `void`, `object_`, `datetime64`, `timedelta64` and every
 // ABSTRACT type are accepted inputs that no kind string can ever match, which is why they are
@@ -88168,6 +88176,14 @@ cached_numpy_attr!(cached_numpy_asanyarray, "asanyarray");
 cached_numpy_attr!(cached_numpy_zeros, "zeros");
 cached_numpy_attr!(cached_numpy_eye, "eye");
 cached_numpy_attr!(cached_numpy_identity, "identity");
+cached_numpy_attr!(cached_numpy_log, "log");
+cached_numpy_attr!(cached_numpy_power, "power");
+cached_numpy_attr!(cached_numpy_ascontiguousarray, "ascontiguousarray");
+cached_numpy_attr!(cached_numpy_asfortranarray, "asfortranarray");
+cached_numpy_attr!(cached_numpy_nan_to_num, "nan_to_num");
+cached_numpy_attr!(cached_numpy_spacing, "spacing");
+cached_numpy_attr!(cached_numpy_rint, "rint");
+cached_numpy_attr!(cached_numpy_indices, "indices");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
@@ -88207,6 +88223,8 @@ cached_numpy_submodule!(cached_numpy_recfunctions, "numpy.lib.recfunctions");
 cached_numpy_submodule!(cached_numpy_scimath, "numpy.lib.scimath");
 cached_numpy_submodule!(cached_numpy_array_utils, "numpy.lib.array_utils");
 cached_numpy_submodule!(cached_numpy_linalg, "numpy.linalg");
+cached_numpy_submodule!(cached_numpy_random, "numpy.random");
+cached_numpy_submodule!(cached_numpy_exceptions, "numpy.exceptions");
 
 macro_rules! cached_numpy_ma_attr {
     ($fn_name:ident, $attr:literal) => {
@@ -88214,9 +88232,7 @@ macro_rules! cached_numpy_ma_attr {
             static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
             Ok(CACHE
                 .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
-                    Ok(cached_numpy_ma(py)?
-                        .getattr(intern!(py, $attr))?
-                        .unbind())
+                    Ok(cached_numpy_ma(py)?.getattr(intern!(py, $attr))?.unbind())
                 })?
                 .bind(py))
         }
