@@ -1590,16 +1590,16 @@ macro_rules! define_py_bit_generator {
         #[derive(Clone)]
         pub struct $type_name {
             inner: BitGenerator,
-            seed_sequence: Option<SeedSequence>,
+            seed_sequence: Option<Py<PySeedSequence>>,
         }
 
         #[pymethods]
         impl $type_name {
             #[new]
             #[pyo3(signature = (seed=None))]
-            fn new(seed: Option<u64>) -> PyResult<Self> {
+            fn new(py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<Self> {
                 let (inner, seed_sequence) =
-                    construct_bit_generator_with_seed_sequence($kind, seed)?;
+                    construct_bit_generator_with_py_seed(py, $kind, seed)?;
                 Ok(Self {
                     inner,
                     seed_sequence,
@@ -1607,8 +1607,13 @@ macro_rules! define_py_bit_generator {
             }
 
             #[getter]
+            fn seed_seq(&self, py: Python<'_>) -> Option<Py<PySeedSequence>> {
+                self.seed_sequence.as_ref().map(|s| s.clone_ref(py))
+            }
+
+            #[getter]
             fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-                build_bit_generator_state_dict(py, &self.inner)
+                build_numpy_compatible_bit_generator_state_dict(py, &self.inner)
             }
 
             #[setter]
@@ -1631,34 +1636,81 @@ macro_rules! define_py_bit_generator {
             }
 
             #[pyo3(signature = (jumps=1))]
-            fn jumped(&self, jumps: u64) -> PyResult<Self> {
+            fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
                 Ok(Self {
                     inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
-                    seed_sequence: self.seed_sequence.clone(),
+                    seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
                 })
             }
 
             fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
                 let list = PyList::empty(py);
-                for (inner, seed_sequence) in spawn_bit_generator_children(
-                    $kind,
-                    &mut self.inner,
-                    &mut self.seed_sequence,
-                    n_children,
-                )? {
-                    list.append(Py::new(
-                        py,
-                        Self {
-                            inner,
-                            seed_sequence,
-                        },
-                    )?)?;
+                if n_children == 0 {
+                    return Ok(list.into_any().unbind());
+                }
+                if let Some(ref seed_seq_py) = self.seed_sequence {
+                    let mut seed_seq_ref = seed_seq_py.extract::<PyRefMut<'_, PySeedSequence>>(py)?;
+                    let children_seqs = seed_seq_ref.spawn(py, n_children)?;
+                    for child_seq in children_seqs.bind(py).try_iter()? {
+                        let child_seq = child_seq?;
+                        let child_ss = child_seq.extract::<PyRef<'_, PySeedSequence>>()?;
+                        let inner = BitGenerator::from_seed_sequence($kind, &child_ss.inner)
+                            .map_err(map_bit_generator_error)?;
+                        drop(child_ss);
+                        let child_py_ss: Py<PySeedSequence> = child_seq.unbind().extract(py)?;
+                        list.append(Py::new(
+                            py,
+                            Self {
+                                inner,
+                                seed_sequence: Some(child_py_ss),
+                            },
+                        )?)?;
+                    }
+                } else {
+                    for inner in self.inner.spawn(n_children).map_err(map_bit_generator_error)? {
+                        list.append(Py::new(
+                            py,
+                            Self {
+                                inner,
+                                seed_sequence: None,
+                            },
+                        )?)?;
+                    }
                 }
                 Ok(list.into_any().unbind())
             }
 
-            fn __repr__(&self) -> String {
-                format!("{}()", $py_name)
+            fn __getstate__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Option<Py<PySeedSequence>>)> {
+                let state = self.state(py)?;
+                let seed_seq = self.seed_seq(py);
+                Ok((state, seed_seq))
+            }
+
+            fn __setstate__(&mut self, py: Python<'_>, state_seed_seq: Bound<'_, PyAny>) -> PyResult<()> {
+                if let Ok(dict) = state_seed_seq.extract::<Bound<'_, PyDict>>() {
+                    let s = py_bit_generator_state_from_dict(&dict)?;
+                    self.inner.set_state(&s).map_err(map_bit_generator_error)?;
+                    self.seed_sequence = None;
+                } else if let Ok(tuple) = state_seed_seq.extract::<Bound<'_, PyTuple>>() {
+                    if tuple.len() >= 1 {
+                        let s = py_bit_generator_state_from_dict(&tuple.get_item(0)?)?;
+                        self.inner.set_state(&s).map_err(map_bit_generator_error)?;
+                    }
+                    if tuple.len() >= 2 {
+                        let ss_obj = tuple.get_item(1)?;
+                        if let Ok(ss) = ss_obj.extract::<Py<PySeedSequence>>() {
+                            self.seed_sequence = Some(ss);
+                        } else {
+                            self.seed_sequence = None;
+                        }
+                    }
+                }
+                Ok(())
+            }
+
+            fn __repr__(slf: &Bound<'_, Self>) -> String {
+                let ptr = slf.as_ptr() as usize;
+                format!("<{} object at {:#X}>", $py_name, ptr)
             }
         }
     };
@@ -1674,7 +1726,7 @@ fn construct_py_bit_generator(
     py: Python<'_>,
     kind: BitGeneratorKind,
     inner: BitGenerator,
-    seed_sequence: Option<SeedSequence>,
+    seed_sequence: Option<Py<PySeedSequence>>,
 ) -> PyResult<Py<PyAny>> {
     match kind {
         BitGeneratorKind::Mt19937 => {
@@ -1822,8 +1874,64 @@ impl PySeedSequence {
         Ok(list.into_any().unbind())
     }
 
-    fn __repr__(&self) -> String {
-        "SeedSequence".to_string()
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let mut lines = Vec::new();
+        lines.push("SeedSequence(".to_string());
+        let entropy_obj = self.entropy(py)?;
+        lines.push(format!("    entropy={},", entropy_obj.bind(py).repr()?));
+        if !self.inner.spawn_key().is_empty() {
+            let spawn_key_obj = self.spawn_key(py)?;
+            lines.push(format!("    spawn_key={},", spawn_key_obj.bind(py).repr()?));
+        }
+        if self.inner.pool_size() != 4 {
+            lines.push(format!("    pool_size={},", self.inner.pool_size()));
+        }
+        if self.inner.spawn_counter() != 0 {
+            lines.push(format!("    n_children_spawned={},", self.inner.spawn_counter()));
+        }
+        lines.push(")".to_string());
+        Ok(lines.join("\n"))
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let borrow = slf.borrow();
+        let cls = slf.get_type();
+        let args = (
+            borrow.entropy(py)?,
+            borrow.spawn_key(py)?,
+            borrow.pool_size(),
+            borrow.n_children_spawned(),
+        );
+        Ok((cls, args).into_pyobject(py)?.into_any().unbind())
+    }
+
+    fn __getstate__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.state(py)
+    }
+
+    fn __setstate__(&mut self, py: Python<'_>, state: Bound<'_, PyDict>) -> PyResult<()> {
+        let entropy_val = state.get_item("entropy")?.map(|b| b.unbind());
+        let (entropy_words, entropy) = seed_sequence_entropy_from_py(py, entropy_val)?;
+        let spawn_key_val = state.get_item("spawn_key")?.map(|b| b.unbind());
+        let spawn_key = seed_sequence_spawn_key_from_py(py, spawn_key_val)?;
+        let pool_size: usize = match state.get_item("pool_size")? {
+            Some(v) => v.extract()?,
+            None => 4,
+        };
+        let n_children_spawned: u64 = match state.get_item("n_children_spawned")? {
+            Some(v) => v.extract()?,
+            None => 0,
+        };
+        self.inner = SeedSequence::from_snapshot(&SeedSequenceSnapshot {
+            entropy: entropy_words,
+            spawn_key,
+            pool_size,
+            spawn_counter: n_children_spawned,
+        })
+        .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        self.entropy = entropy;
+        Ok(())
     }
 }
 
@@ -1965,7 +2073,7 @@ impl PyRandomGenerator {
     #[getter]
     fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.sync_bit_generator(py)?;
-        build_bit_generator_state_dict(py, self.inner.bit_generator())
+        build_numpy_compatible_bit_generator_state_dict(py, self.inner.bit_generator())
     }
 
     fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
@@ -1974,29 +2082,38 @@ impl PyRandomGenerator {
             return Ok(list.into_any().unbind());
         }
         self.sync_from_bit_generator(py)?;
-        let kind = self.inner.bit_generator().kind();
-        for inner in self
-            .inner
-            .spawn(n_children)
-            .map_err(map_bit_generator_error)?
-        {
-            let py_bg = construct_py_bit_generator(
-                py,
-                kind,
-                inner.bit_generator().clone(),
-                None,
-            )?;
-            list.append(Py::new(py, Self { inner, bit_generator: py_bg })?)?;
+        let bound_bg = self.bit_generator.bind(py);
+        let spawned_bgs = bound_bg.call_method1(intern!(py, "spawn"), (n_children,))?;
+        for child_bg in spawned_bgs.try_iter()? {
+            let child_bg = child_bg?;
+            let child_gen = Py::new(py, PyRandomGenerator::new(&child_bg)?)?;
+            list.append(child_gen)?;
         }
         self.sync_bit_generator(py)?;
         Ok(list.into_any().unbind())
     }
 
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+    fn __repr__(slf: &Bound<'_, Self>) -> String {
+        let borrow = slf.borrow();
+        let kind = borrow.inner.bit_generator().kind();
+        let bg_name = bit_generator_numpy_name(kind);
+        let ptr = slf.as_ptr() as usize;
+        format!("Generator({bg_name}) at {ptr:#X}")
+    }
+
+    fn __str__(&self) -> String {
         let kind = self.inner.bit_generator().kind();
         let bg_name = bit_generator_numpy_name(kind);
-        let ptr = self.bit_generator.as_ptr() as usize;
-        Ok(format!("Generator({bg_name}) at {ptr:#X}"))
+        format!("Generator({bg_name})")
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let borrow = slf.borrow();
+        borrow.sync_bit_generator(py)?;
+        let cls = slf.get_type();
+        let args = (borrow.bit_generator.clone_ref(py),);
+        Ok((cls, args).into_pyobject(py)?.into_any().unbind())
     }
 
     #[pyo3(signature = (size=None, dtype=None, out=None))]
@@ -2007,6 +2124,7 @@ impl PyRandomGenerator {
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let dtype = extract_random_float_dtype(py, dtype, "Generator.random(dtype)")?;
         let requested_size = random_size_from_py(py, size, "Generator.random(size)")?;
         let (size, out) =
@@ -2017,6 +2135,7 @@ impl PyRandomGenerator {
                     .inner
                     .random_f32_shaped(size.as_deref())
                     .map_err(map_random_error)?;
+                self.after_draw(py);
                 build_random_f32_output(py, output)?
             }
             DType::F64 => {
@@ -2024,6 +2143,7 @@ impl PyRandomGenerator {
                     .inner
                     .random_shaped(size.as_deref())
                     .map_err(map_random_error)?;
+                self.after_draw(py);
                 build_random_f64_output(py, output)?
             }
             _ => {
