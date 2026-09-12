@@ -1547,11 +1547,7 @@ mod tests {
         let scrub_raw = fs::read_to_string(&scrub).expect("read scrub");
         assert!(scrub_raw.contains("\"status\": \"ok\""));
 
-        let _ = fs::remove_file(file_a);
-        let _ = fs::remove_file(file_b);
-        let _ = fs::remove_file(sidecar);
-        let _ = fs::remove_file(scrub);
-        let _ = fs::remove_file(proof);
+        // Retain the input, sidecar, scrub, and proof files for inspection.
     }
 
     #[test]
@@ -1678,9 +1674,7 @@ mod tests {
             .expect_err("tampered symbol payload should fail closed");
         assert!(err.contains("symbol hash mismatch"));
 
-        let _ = fs::remove_file(sidecar_path);
-        let _ = fs::remove_file(scrub_path);
-        let _ = fs::remove_file(proof_path);
+        // Retain the tampered sidecar and failure reports for inspection.
     }
 
     fn small_stress_report(name: &str) -> RaptorQStressReport {
