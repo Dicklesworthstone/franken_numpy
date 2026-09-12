@@ -32,6 +32,51 @@ dead ends are not rediscovered as fresh ideas.
 
 
 
+## 2026-09-12 - WIN (SHIP, INCUMBENT-WIN): selected-bool `loadtxt(usecols)` 8192x16 is 1.526842x vs NumPy 2.4.3 under dual-null contract (`deadlock-audit-s17g0.1`)
+
+`VioletMink`. Bead `deadlock-audit-s17g0.1`. Same-invocation rerun of selected-bool
+`loadtxt(usecols)` on worker `vmi1149989` resolving the 2026-08-14 `UNDECIDED` measurement
+(`deadlock-audit-s17g0`) and the 2026-07-27 historical loss (0.671524x).
+
+**Campaign result class:** incumbent-win
+
+**A/A null control (same invocation):** incumbent A/A ratio_median 0.979589 ci95=[0.949396,1.004548] (straddles unity, half-width 0.050604) and candidate A/A ratio_median 0.990266 ci95=[0.975879,0.995500] (half-width 0.024121); controlling half-width 0.050604, required 2x delta 0.101209, measured effect delta 0.526842 > 0.101209.
+
+**Legacy incumbent arm (same invocation):** name=NumPy version=2.4.3 artifact_sha256=c037bcec05c4849d9e6f7939853cd17fc80542775fc3ef1856e5eb37927b982f invocation_id=000000000000000018d4ab18b2d6137c-0038f68d measured_ratio=1.526842x
+
+**Incumbent isolation proof:** candidate=fnp.loadtxt incumbent=numpy.loadtxt shared_timed_component=none
+
+harness=common::run_dual_null_median_ci_contract (incumbent A/A + candidate A/A, ABBAABBA, 41 rounds, min-of-3)
+HOST_BASELINE host=vmi1149989 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 online_cpus=0:1:2:3:4:5:6:7:8:9 allowed_logical_threads=10 allowed_cpus=0:1:2:3:4:5:6:7:8:9 governor=unavailable
+THREAD_CONFIGURATION rayon_pool_threads=10 RAYON_NUM_THREADS=unset OPENBLAS_NUM_THREADS=unset OMP_NUM_THREADS=unset MKL_NUM_THREADS=unset
+ISA_BASELINE target_arch=x86_64 compile_sse2=true compile_avx2=true runtime_sse2=true runtime_avx=true runtime_avx2=true runtime_f16c=true runtime_fma=true runtime_avx512f=false runtime_avx512bw=false
+
+bench_elf_sha256=65a40e7a7cab318c3ab1a5de4417bedf4513c2211a03ffdc60faf1433c3296dc (53518448 bytes)
+numpy_artifact_sha256=c037bcec05c4849d9e6f7939853cd17fc80542775fc3ef1856e5eb37927b982f (10452801 bytes)
+artifact_path=/root/.local/lib/python3.14/site-packages/numpy/_core/_multiarray_umath.cpython-314-x86_64-linux-gnu.so
+bench_invocation_id=000000000000000018d4ab18b2d6137c-0038f68d
+harness_contract_source_sha256=4f31cd50eb42fd5ff849e2d4ab50fbcd386a7ed0e9999897b230123cfeef52da
+bench_file_source_sha256=d7a680b099ea90676d321a56ecee3c31c4d70455c325e362ffab5d339d6ef99f
+selector="bench_loadtxt_selected_bool_median_gate"
+
+DISPATCH_PROOF row=python_loadtxt_selected_bool_8192x16_vs_numpy fnp_callable=fnp_python.loadtxt delegated_to_numpy=false
+dispatch_assert=passed
+Checksum: `30fb6a0b5c0da785` across all PAIRED rows (byte-identical array outputs).
+
+| Phase | Arm A | Arm B | Ratio Median | Ratio CI95 | CV (provenance) | Verdict |
+|---|---:|---:|---:|---:|---:|---|
+| Incumbent A/A (NumPy/NumPy) | 1.179652 ms | 1.221615 ms | 0.979589 | `[0.949396, 1.004548]` | 11.028% | Straddles unity |
+| Candidate A/A (FNP/FNP) | 0.733826 ms | 0.745929 ms | 0.990266 | `[0.975879, 0.995500]` | 9.870% | Within bound |
+| Effect (NumPy / FNP) | 1.024042 ms | **0.678748 ms** | **1.526842** | **`[1.469130, 1.628752]`** | 15.913% | **DECIDABLE_WIN** |
+
+Same-invocation former-path control (maintenance reference):
+- `null_base_aa`: arm_a=5.323576 ms, arm_b=5.139765 ms, ratio=1.006105 ci95=[0.974288, 1.060367], straddles unity
+- `effect_former_over_candidate`: arm_a=5.666013 ms, arm_b=0.927297 ms, ratio=6.508718 ci95=[6.148627, 6.868851], DECIDABLE_WIN
+
+CPU Witness: all phases recorded `same_core=true`, arm clock spread 1.0000 (arm_a_cpu=7/arm_b_cpu=7 for incumbent null, arm_a_cpu=2/arm_b_cpu=2 for candidate null and effect).
+
+AGENT_NAME=VioletMink.
+
 ## 2026-08-16 - CERTIFIED, AND IT GENERALISES: ALL THREE ~0.91 cells become WINS with `out=` - maximum 1.756669, minimum 1.687567, divide 1.800915 - while divide's SERIAL cell still loses (`deadlock-audit-ei9jz`, `deadlock-audit-48by6`)
 
 `SlateHeron`. The two untested cells, run in the same invocation as the two already certified. The
