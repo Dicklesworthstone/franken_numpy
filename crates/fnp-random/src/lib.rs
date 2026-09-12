@@ -1521,9 +1521,7 @@ impl SeedSequence {
         pool_size: usize,
         spawn_counter: u64,
     ) -> Result<Self, SeedSequenceError> {
-        if entropy.is_empty()
-            || !(DEFAULT_SEED_SEQUENCE_POOL_SIZE..=MAX_SEED_SEQUENCE_POOL_SIZE).contains(&pool_size)
-        {
+        if !(DEFAULT_SEED_SEQUENCE_POOL_SIZE..=MAX_SEED_SEQUENCE_POOL_SIZE).contains(&pool_size) {
             return Err(SeedSequenceError::GenerateStateContractViolation);
         }
 
@@ -4186,6 +4184,7 @@ impl Generator {
     }
 
     pub fn set_state(&mut self, state: &BitGeneratorState) -> Result<(), BitGeneratorError> {
+        self.u32_buf_ready = false;
         self.bit_generator.set_state(state)
     }
 
@@ -7216,7 +7215,7 @@ fn seed_sequence_from_os_entropy() -> Result<SeedSequence, SeedSequenceError> {
     SeedSequence::new(&words)
 }
 
-fn os_entropy_u32_words(words: usize) -> Result<Vec<u32>, SeedSequenceError> {
+pub fn os_entropy_u32_words(words: usize) -> Result<Vec<u32>, SeedSequenceError> {
     let byte_len = words
         .checked_mul(std::mem::size_of::<u32>())
         .ok_or(SeedSequenceError::GenerateStateContractViolation)?;
