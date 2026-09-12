@@ -4186,6 +4186,7 @@ impl Generator {
     }
 
     pub fn set_state(&mut self, state: &BitGeneratorState) -> Result<(), BitGeneratorError> {
+        self.u32_buf_ready = false;
         self.bit_generator.set_state(state)
     }
 
