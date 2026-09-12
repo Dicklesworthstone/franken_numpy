@@ -3,20 +3,14 @@
 All notable changes to FrankenNumPy are documented in this file.
 
 FrankenNumPy is a memory-safe, clean-room Rust reimplementation of NumPy. The
-workspace version is `0.2.0`. `v0.2.0` is the **first tagged release / GitHub
-Release** and packages the June–July 2026 native-fast-path performance campaign;
-the May 2026 "Workspace metadata + crates.io publish-readiness" wave (see below)
-had already completed the metadata side of publishing. Every entry below maps to
-a date range on the `main` branch. Representative commits link to
+workspace version is `0.3.0`. `v0.3.0` is the **second tagged release / GitHub
+Release** and packages the August–September 2026 Python-dispatch overhead reduction
+and zero-copy native fast-path campaign along with 79 dependency updates;
+`v0.2.0` packaged the June–July 2026 native-fast-path performance campaign.
+Every entry below maps to a date range on the `main` branch. Representative commits link to
 `https://github.com/Dicklesworthstone/franken_numpy/commit/<hash>`.
 
-Scope window: project inception on 2026-02-13 through HEAD on 2026-08-19.
-This 2026-08-19 refresh covers the previously undocumented window **2026-07-12
-through 2026-08-19** (post-`v0.2.0` Unreleased). The `v0.2.0` section and the
-pre-release `[0.1.x]` capability-area history are unchanged except for path
-corrections (`audit_numpy_reality.md` now lives under `docs/planning/`).
-Representative commits in each wave are live-linked to GitHub.
-
+Scope window: project inception on 2026-02-13 through HEAD on 2026-09-11.
 The sections below are organized by **capability area** rather than diff order,
 so that readers can quickly find what changed in the subsystem they care about.
 
@@ -24,7 +18,8 @@ so that readers can quickly find what changed in the subsystem they care about.
 
 | Version | Date | Kind | Summary |
 |---|---|---|---|
-| `[Unreleased]` | 2026-07-12 → 2026-08-19 | dev head on `main` | Post-`v0.2.0` Python-dispatch tax, IO parsers, int/bool GEMM/einsum, random-stream correctness, and the 2026-08-18/19 repo-janitor docs move. No new tag. |
+| `[Unreleased]` | | dev head on `main` | |
+| [`v0.3.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.3.0) | 2026-09-11 | GitHub Release | Comprehensive Python-dispatch overhead reduction & NumPy C-API call caching (reusing cached modules/callables, positional empty/zeros, preshaped allocation avoiding reshape, zero-copy roll/take/put/choose/bincount/digitize/trapezoid/cumulative), planning doc reorg under `docs/planning/`, and 79 dependency updates. |
 | [`v0.2.0`](https://github.com/Dicklesworthstone/franken_numpy/releases/tag/v0.2.0) | 2026-07-11 | GitHub Release | Native fast-path performance release: ~1,230 landed `perf(...)` commits (2026-06-01 → 2026-07-11) delivering measured speedups vs NumPy across float16, integer/complex/temporal, sort/unique/set-ops, reductions/scans, strings, and array construction — every win byte-exact by construction and recorded in the append-only negative-evidence ledger. |
 | `0.1.0` | 2026-02-13 → 2026-05-19 | untagged dev head | 100% `numpy.__all__` surface parity (499/499), zero hand-written `unsafe`, dual-mode runtime, conformance/fuzz/RaptorQ infrastructure. Preserved below under "[0.1.x]" and the pre-2026-03-21 detail. |
 
@@ -32,9 +27,22 @@ There are no other GitHub Releases. Tag `covzc-evidence-20260710` (2026-07-09) i
 
 ---
 
-## [Unreleased] — post-`v0.2.0` development head (2026-07-12 through 2026-08-19)
+## [Unreleased]
 
-1,434 non-merge commits after the `v0.2.0` tag (HEAD 2026-08-19). 445 beads closed in the window. No new tag or GitHub Release. The campaign stays honesty-gated: measured vs NumPy in the same invocation, with losses and no-ships recorded rather than silently rerouted.
+---
+
+## [0.3.0] — Python-dispatch optimization & zero-copy native release (2026-07-12 → 2026-09-11)
+
+2,103 non-merge commits after the `v0.2.0` tag. 445+ beads closed in the window. Comprehensive reduction of Python runtime tax and expansion of zero-copy native fast-paths.
+
+### Python-dispatch tax & NumPy C-API call caching (August–September 2026)
+
+- Reused cached NumPy modules and callable accessors (`cached_numpy_empty`, `cached_numpy_zeros`, `cached_numpy_where`, etc.) avoiding expensive runtime attribute lookup and reimporting under the GIL.
+- Eliminated intermediate `PyDict` / keyword dictionary allocations across hundreds of array allocation and fallback paths via direct positional invocation of `numpy.empty`, `numpy.zeros`, and `numpy.ascontiguousarray`.
+- Preshaped array allocation for multidimensional outputs, eliminating redundant intermediate 1D buffer creations and separate `reshape()` calls.
+- High-performance zero-copy and optimized paths for `roll`, `take`, `put`, `select`, `choose`, `compress`, `nonzero`, `flatnonzero`, `argwhere`, `digitize`, `bincount`, `trapezoid`, and cumulative scans (`cumsum`, `cumprod`).
+- Positional empty allocations and cached dtype lookups across native integer, boolean, and float16 matmul and einsum kernels.
+- 79 dependencies updated to latest semver-compatible versions in `Cargo.lock` with clean compilation and clippy.
 
 ### Closed workstreams
 

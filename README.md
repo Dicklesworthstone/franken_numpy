@@ -289,7 +289,7 @@ cargo build -p fnp-python --release --features python-extension
 
 ```python
 import fnp_python as np
-np.__version__              # workspace version (0.2.0)
+np.__version__              # workspace version (0.3.0)
 np.__numpy_version__        # version of numpy used as fallback oracle
 np.linalg.solve([[3, 1], [1, 2]], [9, 8])
 ```
@@ -298,7 +298,7 @@ A wheel is one command (added 2026-09-03; `pyproject.toml` at the repo root driv
 
 ```bash
 pip install maturin
-maturin build --release          # -> target/wheels/frankennumpy-0.2.0-cp313-*.whl
+maturin build --release          # -> target/wheels/frankennumpy-0.3.0-cp313-*.whl
 pip install target/wheels/frankennumpy-*.whl
 # or, in one step from the checkout:
 pip install .
@@ -1136,7 +1136,7 @@ FrankenNumPy parallelizes per operation rather than globally: an op runs `rayon`
 
 | Surface | What we promise |
 |---|---|
-| Workspace version | `0.2.0` (`v0.2.0` tagged 2026-07-11), no semver promises yet. The crates.io publish-readiness metadata (description, repository, keywords, categories, license-file) is in place; the publish itself is gated on the explicit "ship a tag" decision. |
+| Workspace version | `0.3.0` (`v0.3.0` tagged 2026-09-11), no semver promises yet. The crates.io publish-readiness metadata (description, repository, keywords, categories, license-file) is in place; the publish itself is gated on the explicit "ship a tag" decision. |
 | `numpy.__all__` parity | Tracked against the **live numpy on the build host**, whatever that version is. The structural lock-in test (`fnp_python_covers_full_numpy_all`) catches any new name that numpy adds to `__all__`. New names fail CI until explicitly added to the re-export block. |
 | RNG bit-exactness | Promised vs **PCG64DXSM** specifically, the algorithm NumPy 1.20+ ships as its high-quality default. Other bit generators (PCG64, MT19937, Philox, SFC64) match their upstream NumPy counterparts at the wire-stream level. |
 | `.npy` / `.npz` round-trip | Promised for NPY 1.0 and 2.0 formats with every supported dtype. NumPy 3.0 will introduce a new format version; FrankenNumPy will follow once the format is finalized. |
