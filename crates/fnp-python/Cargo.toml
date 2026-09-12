@@ -32,13 +32,13 @@ pyo3 = { workspace = true }
 # - fnp-linalg: numpy.linalg.* bindings (solve, svd, eig, ...)
 # - fnp-random: numpy.random.* bindings (Generator, BitGenerators, distributions)
 # - fnp-io: numpy.load / numpy.save / numpy.savez / loadtxt / savetxt bindings
-fnp-dtype = { path = "../fnp-dtype" }
-fnp-iter = { path = "../fnp-iter" }
-fnp-ndarray = { path = "../fnp-ndarray" }
-fnp-ufunc = { path = "../fnp-ufunc" }
-fnp-linalg = { path = "../fnp-linalg" }
-fnp-random = { path = "../fnp-random" }
-fnp-io = { path = "../fnp-io" }
+fnp-dtype = { path = "../fnp-dtype", version = "0.3.0" }
+fnp-iter = { path = "../fnp-iter", version = "0.3.0" }
+fnp-ndarray = { path = "../fnp-ndarray", version = "0.3.0" }
+fnp-ufunc = { path = "../fnp-ufunc", version = "0.3.0" }
+fnp-linalg = { path = "../fnp-linalg", version = "0.3.0" }
+fnp-random = { path = "../fnp-random", version = "0.3.0" }
+fnp-io = { path = "../fnp-io", version = "0.3.0" }
 rayon.workspace = true
 
 [dev-dependencies]
