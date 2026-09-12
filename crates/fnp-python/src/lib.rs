@@ -7428,9 +7428,14 @@ fn numpy_array_from_direct_f64_unary<'py>(
         return Ok(None);
     }
 
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let output = numpy.call_method(intern!(py, "empty"), (array.values().len(),), Some(&kwargs))?;
+    let shape = array.shape();
+    let float64_type = cached_float64_type(py)?;
+    let output = if let [only] = shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+    } else {
+        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, float64_type))?
+    };
     if array.values().is_empty() {
         return Ok(Some(output));
     }
@@ -13605,9 +13610,12 @@ where
     let shape: Vec<usize> = a_buf.shape().to_vec();
     let n = a_in.len();
     let mk = |nm: &str| -> PyResult<Bound<'_, PyAny>> {
-        let kw = PyDict::new(py);
-        kw.set_item(intern!(py, "dtype"), nm)?;
-        numpy.call_method(intern!(py, "empty"), (n,), Some(&kw))
+        if let [only] = shape.as_slice() {
+            numpy.call_method1(intern!(py, "empty"), (*only, nm))
+        } else {
+            let shape_t = PyTuple::new(py, shape.iter().copied())?;
+            numpy.call_method1(intern!(py, "empty"), (shape_t, nm))
+        }
     };
     let quotient = mk(name)?;
     let remainder = mk(name)?;
@@ -13646,9 +13654,6 @@ where
                 }
             });
     }
-    let shape_t = PyTuple::new(py, shape.iter().copied())?;
-    let quotient = quotient.call_method1(intern!(py, "reshape"), (&shape_t,))?;
-    let remainder = remainder.call_method1(intern!(py, "reshape"), (&shape_t,))?;
     if shape.is_empty() {
         let qs = quotient.get_item(())?;
         let rs = remainder.get_item(())?;
@@ -18456,9 +18461,7 @@ fn accumulate_extremum_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     if n < ACCUMULATE_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (n, dtype_name))?;
     let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
         return Ok(None);
     };
@@ -18671,9 +18674,7 @@ fn try_zerocopy_f64_cumsum(
         return Ok(None);
     };
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -18982,9 +18983,7 @@ fn try_zerocopy_f64_cumprod(
         return Ok(None);
     };
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -19033,9 +19032,7 @@ fn try_zerocopy_f64_nancumsum(
         return Ok(None);
     };
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -19083,9 +19080,7 @@ fn try_zerocopy_f64_nancumprod(
         return Ok(None);
     };
     let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?;
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -19156,9 +19151,15 @@ fn try_zerocopy_f64_cumulative_axis(
     let total = input.len();
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let flat = if shape.len() == 1 {
+        numpy.call_method1(intern!(py, "empty"), (total, cached_float64_type(py)?))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (shape_tuple, cached_float64_type(py)?),
+        )?
+    };
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -19309,11 +19310,7 @@ fn try_zerocopy_f64_cumulative_axis(
             }
         }
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    Ok(Some(flat.unbind()))
 }
 
 // Generic typed core for per-axis integer cumsum. Reads the input `T` buffer and
@@ -20343,9 +20340,7 @@ fn try_zerocopy_any_tile_multidim(
     };
     let row_bytes = a_last * itemsize;
     let total_bytes: usize = out_shape.iter().product::<usize>() * itemsize;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let out_u8 = numpy.call_method(intern!(py, "empty"), (total_bytes,), Some(&kwargs))?;
+    let out_u8 = numpy.call_method1(intern!(py, "empty"), (total_bytes, cached_uint8_type(py)?))?;
     if total_bytes > 0 && row_bytes > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
@@ -20463,9 +20458,7 @@ fn try_zerocopy_f64_diff1d(
         return Ok(None);
     };
     let n_out = input.len().saturating_sub(1);
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n_out,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (n_out, cached_float64_type(py)?))?;
     if n_out > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -20555,9 +20548,15 @@ fn try_zerocopy_f64_diff_axis(
     let mut out_shape = shape.clone();
     out_shape[ax] = out_axis_len;
     let total_out = outer * out_axis_len * inner;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (total_out,), Some(&kwargs))?;
+    let flat = if let [only] = out_shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?
+    } else {
+        let alloc_shape = PyTuple::new(py, out_shape.iter().copied())?;
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (alloc_shape, cached_float64_type(py)?),
+        )?
+    };
     if total_out > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -20637,11 +20636,7 @@ fn try_zerocopy_f64_diff_axis(
             }
         }
     }
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    Ok(Some(output))
+    Ok(Some(finish_preshaped_output(flat, &out_shape)?))
 }
 
 // Generic typed core for np.diff(n=1) along an axis, via the same
@@ -21046,9 +21041,7 @@ fn try_zerocopy_f64_ediff1d(
     };
 
     let total = begin.len() + n_diff + end.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (total, cached_float64_type(py)?))?;
     if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -21107,9 +21100,7 @@ fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T)
         return Ok(None);
     };
     let n_out = input.len().saturating_sub(1);
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n_out,), Some(&kwargs))?;
+    let flat = numpy.call_method1(intern!(py, "empty"), (n_out, dtype_name))?;
     if n_out > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -22538,9 +22529,12 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Syn
     };
     let decreasing = dirn == -1;
     let m = xs.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "intp")?;
-    let out = numpy.call_method(intern!(py, "empty"), (m,), Some(&kwargs))?;
+    let out = if xb.shape().len() == 1 {
+        numpy.call_method1(intern!(py, "empty"), (m, cached_intp_type(py)?))?
+    } else {
+        let shape_tuple = PyTuple::new(py, xb.shape().iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (shape_tuple, cached_intp_type(py)?))?
+    };
     if m > 0 {
         let Ok(ob) = PyBuffer::<i64>::get(&out) else {
             return Ok(None);
@@ -22594,11 +22588,7 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Syn
             }
         }
     }
-    let shape: Vec<usize> = x.getattr(intern!(py, "shape"))?.extract()?;
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        out.call_method1(intern!(py, "reshape"), (&output_shape,))?,
-    ))
+    Ok(Some(out))
 }
 
 // Zero-copy np.digitize for an increasing-bins, matched-dtype (f64/f32/integer)
@@ -22714,9 +22704,7 @@ where
         return Ok(None);
     }
     let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "int64")?;
-    let out = numpy.call_method(intern!(py, "zeros"), (length,), Some(&kwargs))?;
+    let out = numpy.call_method1(intern!(py, "zeros"), (length, cached_int64_type(py)?))?;
     if length > 0 && n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
             return Ok(None);
@@ -22830,9 +22818,7 @@ fn try_zerocopy_bincount(
         return Ok(None);
     }
     let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "int64")?;
-    let out = numpy.call_method(intern!(py, "zeros"), (length,), Some(&kwargs))?;
+    let out = numpy.call_method1(intern!(py, "zeros"), (length, cached_int64_type(py)?))?;
     if length > 0 && n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
             return Ok(None);
@@ -22936,9 +22922,8 @@ fn try_zerocopy_bincount_weighted(
     }
     // numpy accumulates weighted bincount in float64; cast weights to a contiguous
     // float64 array (a no-op view when already f64). Defer on any cast failure.
-    let kw = PyDict::new(py);
-    kw.set_item(intern!(py, "dtype"), "float64")?;
-    let Ok(w_arr) = cached_numpy_ascontiguousarray(py)?.call((weights,), Some(&kw)) else {
+    let Ok(w_arr) = cached_numpy_ascontiguousarray(py)?.call1((weights, cached_float64_type(py)?))
+    else {
         return Ok(None);
     };
     let Ok(w_buffer) = PyBuffer::<f64>::get(&w_arr) else {
@@ -22966,9 +22951,7 @@ fn try_zerocopy_bincount_weighted(
         return Ok(None);
     }
     let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
-    let kwz = PyDict::new(py);
-    kwz.set_item(intern!(py, "dtype"), "float64")?;
-    let out = numpy.call_method(intern!(py, "zeros"), (length,), Some(&kwz))?;
+    let out = numpy.call_method1(intern!(py, "zeros"), (length, cached_float64_type(py)?))?;
     if length > 0 && !x_in.is_empty() {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -23419,9 +23402,15 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
     let outer = total / l;
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (outer,), Some(&kwargs))?;
+    let flat = if ndim == 2 {
+        numpy.call_method1(intern!(py, "empty"), (outer, cached_float64_type(py)?))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (shape_tuple, cached_float64_type(py)?),
+        )?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -23453,11 +23442,7 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
             }
         }
     }
-    let shape_tuple = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-            .unbind(),
-    ))
+    Ok(Some(flat.unbind()))
 }
 
 // Zero-copy trapezoid along the LAST axis for an f32 C-contiguous ndarray (1-D -> f32
@@ -23536,9 +23521,15 @@ fn try_zerocopy_f32_trapezoid(
         ));
     }
     let outer = total / l;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float32")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (outer,), Some(&kwargs))?;
+    let flat = if ndim == 2 {
+        numpy.call_method1(intern!(py, "empty"), (outer, cached_float32_type(py)?))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
+        numpy.call_method1(
+            intern!(py, "empty"),
+            (shape_tuple, cached_float32_type(py)?),
+        )?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
             return Ok(None);
@@ -23559,11 +23550,7 @@ fn try_zerocopy_f32_trapezoid(
             }
         }
     }
-    let shape_tuple = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-            .unbind(),
-    ))
+    Ok(Some(flat.unbind()))
 }
 
 /// Resolve the numpy function to delegate a trapezoid call to.
@@ -60875,15 +60862,8 @@ fn native_unary_elementwise(
     {
         return fallback(py);
     }
-    if let Some(flat) = numpy_array_from_direct_f64_unary(py, numpy, &native, op)? {
-        let output_shape = PyTuple::new(py, native.shape().iter().copied())?;
-        let output = flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind();
-        if native.shape().is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+    if let Some(out) = numpy_array_from_direct_f64_unary(py, numpy, &native, op)? {
+        return finish_preshaped_output(out, native.shape());
     }
     let result = native.elementwise_unary(op);
     if !dtype_supported_by_numpy_export_bridge(result.dtype()) {
@@ -61063,15 +61043,8 @@ fn native_unary_promoting(
     {
         return fallback(py);
     }
-    if let Some(flat) = numpy_array_from_direct_f64_unary(py, numpy, &native, op)? {
-        let output_shape = PyTuple::new(py, native.shape().iter().copied())?;
-        let output = flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind();
-        if native.shape().is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+    if let Some(out) = numpy_array_from_direct_f64_unary(py, numpy, &native, op)? {
+        return finish_preshaped_output(out, native.shape());
     }
     let result = native.elementwise_unary(op);
     if !dtype_supported_by_numpy_export_bridge(result.dtype()) {
