@@ -26032,31 +26032,10 @@ fn axis_any_all_fold<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
     }
     let mut out_shape = shape.to_vec();
     out_shape.remove(axu);
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "uint8")?;
-    let flat_u8 = numpy.call_method(intern!(py, "empty"), (out_elems,), Some(&kwargs))?;
-    if out_elems > 0 {
-        let Ok(out_buffer) = PyBuffer::<u8>::get(&flat_u8) else {
-            return Ok(None);
-        };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        for (o, &r) in output.iter().zip(result.iter()) {
-            o.set(r);
-        }
-    }
+    let flat_u8 = numpy_array_from_slice_shaped(py, numpy, &result, "uint8", &out_shape)?;
     let flat_bool =
         flat_u8.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat_bool.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    // Reducing a 1-D operand along its ONLY axis leaves `out_shape` empty, and `reshape(())`
-    // builds a 0-d ARRAY. numpy returns a `numpy.bool_` SCALAR there, exactly as it does for
-    // `axis=None` - so unwrap it (`deadlock-audit-30d18`).
-    if out_shape.is_empty() {
-        return Ok(Some(reshaped.get_item(())?.unbind()));
-    }
-    Ok(Some(reshaped.unbind()))
+    finish_preshaped_output(flat_bool, &out_shape).map(Some)
 }
 
 // Generic block-folded truthiness scan for a full any/all reduction over any
@@ -47439,11 +47418,9 @@ fn try_zerocopy_f16_sum_lastaxis(
     if keepdims {
         out_shape.push(1);
     }
-    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice_shaped(py, numpy, &out, "uint16", &out_shape)?;
     let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    Ok(Some(reshaped.unbind()))
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Native parallel unweighted f16 average along the LAST (contiguous) axis. With
@@ -47544,14 +47521,10 @@ fn try_zerocopy_f16_average_lastaxis(
             *output = f16::from_f32(sum / denominator).to_bits();
         });
 
-    let raw_output = numpy_array_from_slice(py, numpy, &output_bits, "uint16")?;
+    let out_shape = &shape[..ndim - 1];
+    let raw_output = numpy_array_from_slice_shaped(py, numpy, &output_bits, "uint16", out_shape)?;
     let output = raw_output.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    let output_shape = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
-    Ok(Some(
-        output
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind(),
-    ))
+    finish_preshaped_output(output, out_shape).map(Some)
 }
 
 // Native parallel f16 nanmean along the LAST (contiguous) axis -> f16 array. numpy's per-lane f16 nanmean
@@ -47640,11 +47613,9 @@ fn try_zerocopy_f16_nanmean_lastaxis(
     if keepdims {
         out_shape.push(1);
     }
-    let flat_u16 = numpy_array_from_slice(py, numpy, &out, "uint16")?;
+    let flat_u16 = numpy_array_from_slice_shaped(py, numpy, &out, "uint16", &out_shape)?;
     let flat = flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    Ok(Some(reshaped.unbind()))
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Native parallel f16 sum/nansum along a NON-LAST axis (axis 0 or middle) -> f16 array. Unlike the
