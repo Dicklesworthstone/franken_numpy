@@ -1563,6 +1563,7 @@ pub struct PyCClass;
 #[pyclass(name = "Generator", unsendable)]
 pub struct PyRandomGenerator {
     inner: RandomGenerator,
+    bit_generator: Py<PyAny>,
 }
 
 #[pyclass(name = "RandomState")]
@@ -1668,6 +1669,31 @@ define_py_bit_generator!(PyPcg64, "PCG64", BitGeneratorKind::Pcg64);
 define_py_bit_generator!(PyPcg64Dxsm, "PCG64DXSM", BitGeneratorKind::Pcg64Dxsm);
 define_py_bit_generator!(PyPhilox, "Philox", BitGeneratorKind::Philox);
 define_py_bit_generator!(PySfc64, "SFC64", BitGeneratorKind::Sfc64);
+
+fn construct_py_bit_generator(
+    py: Python<'_>,
+    kind: BitGeneratorKind,
+    inner: BitGenerator,
+    seed_sequence: Option<SeedSequence>,
+) -> PyResult<Py<PyAny>> {
+    match kind {
+        BitGeneratorKind::Mt19937 => {
+            Ok(Py::new(py, PyMt19937 { inner, seed_sequence })?.into_any())
+        }
+        BitGeneratorKind::Pcg64 => {
+            Ok(Py::new(py, PyPcg64 { inner, seed_sequence })?.into_any())
+        }
+        BitGeneratorKind::Pcg64Dxsm => {
+            Ok(Py::new(py, PyPcg64Dxsm { inner, seed_sequence })?.into_any())
+        }
+        BitGeneratorKind::Philox => {
+            Ok(Py::new(py, PyPhilox { inner, seed_sequence })?.into_any())
+        }
+        BitGeneratorKind::Sfc64 => {
+            Ok(Py::new(py, PySfc64 { inner, seed_sequence })?.into_any())
+        }
+    }
+}
 
 #[pymethods]
 impl PySeedSequence {
@@ -1826,28 +1852,119 @@ fn shuffle_buffer_inplace<T: pyo3::buffer::Element + Copy>(
     Ok(true)
 }
 
+impl PyRandomGenerator {
+    fn sync_bit_generator(&self, py: Python<'_>) -> PyResult<()> {
+        let current_bg = self.inner.bit_generator();
+        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PyPcg64>>(py) {
+            bg.inner = current_bg.clone();
+            return Ok(());
+        }
+        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PyPcg64Dxsm>>(py) {
+            bg.inner = current_bg.clone();
+            return Ok(());
+        }
+        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PyMt19937>>(py) {
+            bg.inner = current_bg.clone();
+            return Ok(());
+        }
+        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PyPhilox>>(py) {
+            bg.inner = current_bg.clone();
+            return Ok(());
+        }
+        if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PySfc64>>(py) {
+            bg.inner = current_bg.clone();
+            return Ok(());
+        }
+        let bound_bg = self.bit_generator.bind(py);
+        if let Ok(state_dict) = build_numpy_compatible_bit_generator_state_dict(py, current_bg) {
+            let _ = bound_bg.setattr(intern!(py, "state"), state_dict);
+        }
+        Ok(())
+    }
+
+    fn sync_from_bit_generator(&mut self, py: Python<'_>) -> PyResult<()> {
+        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPcg64>>(py) {
+            let s = bg.inner.state();
+            if s != self.inner.bit_generator().state() {
+                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
+            }
+            return Ok(());
+        }
+        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPcg64Dxsm>>(py) {
+            let s = bg.inner.state();
+            if s != self.inner.bit_generator().state() {
+                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
+            }
+            return Ok(());
+        }
+        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyMt19937>>(py) {
+            let s = bg.inner.state();
+            if s != self.inner.bit_generator().state() {
+                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
+            }
+            return Ok(());
+        }
+        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PyPhilox>>(py) {
+            let s = bg.inner.state();
+            if s != self.inner.bit_generator().state() {
+                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
+            }
+            return Ok(());
+        }
+        if let Ok(bg) = self.bit_generator.extract::<PyRef<'_, PySfc64>>(py) {
+            let s = bg.inner.state();
+            if s != self.inner.bit_generator().state() {
+                self.inner.set_state(&s).map_err(map_bit_generator_error)?;
+            }
+            return Ok(());
+        }
+        let bound_bg = self.bit_generator.bind(py);
+        if let Ok(state_obj) = bound_bg.getattr(intern!(py, "state"))
+            && let Ok(state) = py_bit_generator_state_from_dict(&state_obj)
+        {
+            if state != self.inner.bit_generator().state() {
+                self.inner.set_state(&state).map_err(map_bit_generator_error)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn before_draw(&mut self, py: Python<'_>) -> PyResult<()> {
+        self.sync_from_bit_generator(py)
+    }
+
+    fn after_draw(&self, py: Python<'_>) {
+        let _ = self.sync_bit_generator(py);
+    }
+}
+
 #[pymethods]
 impl PyRandomGenerator {
     #[new]
     fn new(bit_generator: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let (bit_generator, seed_sequence) = extract_bit_generator_binding(bit_generator)?;
+        let (extracted_bg, seed_sequence) = extract_bit_generator_binding(bit_generator)?;
         let inner = match seed_sequence.as_ref() {
             Some(seed_sequence) => {
-                RandomGenerator::bind_seed_sequence(bit_generator.clone(), seed_sequence)
-                    .unwrap_or_else(|_| RandomGenerator::from_bit_generator(bit_generator))
+                RandomGenerator::bind_seed_sequence(extracted_bg.clone(), seed_sequence)
+                    .unwrap_or_else(|_| RandomGenerator::from_bit_generator(extracted_bg))
             }
-            None => RandomGenerator::from_bit_generator(bit_generator),
+            None => RandomGenerator::from_bit_generator(extracted_bg),
         };
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            bit_generator: bit_generator.clone().unbind(),
+        })
     }
 
     #[getter]
-    fn bit_generator(&self) -> String {
-        self.inner.bit_generator().kind().as_str().to_string()
+    fn bit_generator(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.sync_bit_generator(py)?;
+        Ok(self.bit_generator.clone_ref(py))
     }
 
     #[getter]
     fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.sync_bit_generator(py)?;
         build_bit_generator_state_dict(py, self.inner.bit_generator())
     }
 
@@ -1856,14 +1973,30 @@ impl PyRandomGenerator {
         if n_children == 0 {
             return Ok(list.into_any().unbind());
         }
+        self.sync_from_bit_generator(py)?;
+        let kind = self.inner.bit_generator().kind();
         for inner in self
             .inner
             .spawn(n_children)
             .map_err(map_bit_generator_error)?
         {
-            list.append(Py::new(py, Self { inner })?)?;
+            let py_bg = construct_py_bit_generator(
+                py,
+                kind,
+                inner.bit_generator().clone(),
+                None,
+            )?;
+            list.append(Py::new(py, Self { inner, bit_generator: py_bg })?)?;
         }
+        self.sync_bit_generator(py)?;
         Ok(list.into_any().unbind())
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let kind = self.inner.bit_generator().kind();
+        let bg_name = bit_generator_numpy_name(kind);
+        let ptr = self.bit_generator.as_ptr() as usize;
+        Ok(format!("Generator({bg_name}) at {ptr:#X}"))
     }
 
     #[pyo3(signature = (size=None, dtype=None, out=None))]
