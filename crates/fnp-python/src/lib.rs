@@ -1571,23 +1571,15 @@ pub struct PyRandomState {
     inner: CoreRandomState,
 }
 
-#[derive(Clone)]
-enum PySeedSequenceEntropy {
-    Scalar(u128),
-    Sequence(Vec<u32>),
-}
-
 #[pyclass(name = "SeedSequence", unsendable, skip_from_py_object)]
-#[derive(Clone)]
 pub struct PySeedSequence {
     inner: SeedSequence,
-    entropy: PySeedSequenceEntropy,
+    entropy: Py<PyAny>,
 }
 
 macro_rules! define_py_bit_generator {
     ($type_name:ident, $py_name:literal, $kind:expr) => {
         #[pyclass(name = $py_name, unsendable, skip_from_py_object)]
-        #[derive(Clone)]
         pub struct $type_name {
             inner: BitGenerator,
             seed_sequence: Option<Py<PySeedSequence>>,
@@ -1598,8 +1590,7 @@ macro_rules! define_py_bit_generator {
             #[new]
             #[pyo3(signature = (seed=None))]
             fn new(py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<Self> {
-                let (inner, seed_sequence) =
-                    construct_bit_generator_with_py_seed(py, $kind, seed)?;
+                let (inner, seed_sequence) = construct_bit_generator_with_py_seed(py, $kind, seed)?;
                 Ok(Self {
                     inner,
                     seed_sequence,
@@ -1649,7 +1640,7 @@ macro_rules! define_py_bit_generator {
                     return Ok(list.into_any().unbind());
                 }
                 if let Some(ref seed_seq_py) = self.seed_sequence {
-                    let mut seed_seq_ref = seed_seq_py.extract::<PyRefMut<'_, PySeedSequence>>(py)?;
+                    let mut seed_seq_ref = seed_seq_py.bind(py).borrow_mut();
                     let children_seqs = seed_seq_ref.spawn(py, n_children)?;
                     for child_seq in children_seqs.bind(py).try_iter()? {
                         let child_seq = child_seq?;
@@ -1657,7 +1648,7 @@ macro_rules! define_py_bit_generator {
                         let inner = BitGenerator::from_seed_sequence($kind, &child_ss.inner)
                             .map_err(map_bit_generator_error)?;
                         drop(child_ss);
-                        let child_py_ss: Py<PySeedSequence> = child_seq.unbind().extract(py)?;
+                        let child_py_ss: Py<PySeedSequence> = child_seq.extract()?;
                         list.append(Py::new(
                             py,
                             Self {
@@ -1667,7 +1658,11 @@ macro_rules! define_py_bit_generator {
                         )?)?;
                     }
                 } else {
-                    for inner in self.inner.spawn(n_children).map_err(map_bit_generator_error)? {
+                    for inner in self
+                        .inner
+                        .spawn(n_children)
+                        .map_err(map_bit_generator_error)?
+                    {
                         list.append(Py::new(
                             py,
                             Self {
@@ -1680,13 +1675,20 @@ macro_rules! define_py_bit_generator {
                 Ok(list.into_any().unbind())
             }
 
-            fn __getstate__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Option<Py<PySeedSequence>>)> {
+            fn __getstate__(
+                &self,
+                py: Python<'_>,
+            ) -> PyResult<(Py<PyAny>, Option<Py<PySeedSequence>>)> {
                 let state = self.state(py)?;
                 let seed_seq = self.seed_seq(py);
                 Ok((state, seed_seq))
             }
 
-            fn __setstate__(&mut self, py: Python<'_>, state_seed_seq: Bound<'_, PyAny>) -> PyResult<()> {
+            fn __setstate__(
+                &mut self,
+                _py: Python<'_>,
+                state_seed_seq: Bound<'_, PyAny>,
+            ) -> PyResult<()> {
                 if let Ok(dict) = state_seed_seq.extract::<Bound<'_, PyDict>>() {
                     let s = py_bit_generator_state_from_dict(&dict)?;
                     self.inner.set_state(&s).map_err(map_bit_generator_error)?;
@@ -1708,6 +1710,14 @@ macro_rules! define_py_bit_generator {
                 Ok(())
             }
 
+            fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+                let py = slf.py();
+                let borrow = slf.borrow();
+                let cls = slf.get_type();
+                let state = borrow.__getstate__(py)?;
+                Ok((cls, (), state).into_pyobject(py)?.into_any().unbind())
+            }
+
             fn __repr__(slf: &Bound<'_, Self>) -> String {
                 let ptr = slf.as_ptr() as usize;
                 format!("<{} object at {:#X}>", $py_name, ptr)
@@ -1722,43 +1732,33 @@ define_py_bit_generator!(PyPcg64Dxsm, "PCG64DXSM", BitGeneratorKind::Pcg64Dxsm);
 define_py_bit_generator!(PyPhilox, "Philox", BitGeneratorKind::Philox);
 define_py_bit_generator!(PySfc64, "SFC64", BitGeneratorKind::Sfc64);
 
-fn construct_py_bit_generator(
-    py: Python<'_>,
-    kind: BitGeneratorKind,
-    inner: BitGenerator,
-    seed_sequence: Option<Py<PySeedSequence>>,
-) -> PyResult<Py<PyAny>> {
-    match kind {
-        BitGeneratorKind::Mt19937 => {
-            Ok(Py::new(py, PyMt19937 { inner, seed_sequence })?.into_any())
-        }
-        BitGeneratorKind::Pcg64 => {
-            Ok(Py::new(py, PyPcg64 { inner, seed_sequence })?.into_any())
-        }
-        BitGeneratorKind::Pcg64Dxsm => {
-            Ok(Py::new(py, PyPcg64Dxsm { inner, seed_sequence })?.into_any())
-        }
-        BitGeneratorKind::Philox => {
-            Ok(Py::new(py, PyPhilox { inner, seed_sequence })?.into_any())
-        }
-        BitGeneratorKind::Sfc64 => {
-            Ok(Py::new(py, PySfc64 { inner, seed_sequence })?.into_any())
-        }
-    }
-}
-
 #[pymethods]
 impl PySeedSequence {
     #[new]
     #[pyo3(signature = (entropy=None, *, spawn_key=None, pool_size=4, n_children_spawned=0))]
     fn new(
         py: Python<'_>,
-        entropy: Option<Py<PyAny>>,
+        entropy: Option<&Bound<'_, PyAny>>,
         spawn_key: Option<Py<PyAny>>,
         pool_size: usize,
         n_children_spawned: u64,
     ) -> PyResult<Self> {
-        let (entropy_words, entropy) = seed_sequence_entropy_from_py(py, entropy)?;
+        if pool_size < 4 {
+            return Err(PyValueError::new_err(
+                "The size of the entropy pool should be at least 4",
+            ));
+        }
+        let (entropy_words, entropy_obj) = match entropy {
+            None => generate_os_entropy_int(py, pool_size)?,
+            Some(ent) => {
+                if ent.is_none() {
+                    generate_os_entropy_int(py, pool_size)?
+                } else {
+                    let words = coerce_to_uint32_words(ent)?;
+                    (words, ent.clone().unbind())
+                }
+            }
+        };
         let spawn_key = seed_sequence_spawn_key_from_py(py, spawn_key)?;
         let inner = SeedSequence::from_snapshot(&SeedSequenceSnapshot {
             entropy: entropy_words,
@@ -1767,17 +1767,15 @@ impl PySeedSequence {
             spawn_counter: n_children_spawned,
         })
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
-        Ok(Self { inner, entropy })
+        Ok(Self {
+            inner,
+            entropy: entropy_obj,
+        })
     }
 
     #[getter]
-    fn entropy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.entropy {
-            PySeedSequenceEntropy::Scalar(value) => Ok(py_int_from_u128(py, *value)?.unbind()),
-            PySeedSequenceEntropy::Sequence(values) => {
-                Ok(PyList::new(py, values.iter().copied())?.into_any().unbind())
-            }
-        }
+    fn entropy(&self, py: Python<'_>) -> Py<PyAny> {
+        self.entropy.clone_ref(py)
     }
 
     #[getter]
@@ -1809,7 +1807,7 @@ impl PySeedSequence {
     #[getter]
     fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);
-        dict.set_item(intern!(py, "entropy"), self.entropy(py)?)?;
+        dict.set_item(intern!(py, "entropy"), self.entropy.clone_ref(py))?;
         dict.set_item(intern!(py, "spawn_key"), self.spawn_key(py)?)?;
         dict.set_item(intern!(py, "pool_size"), self.inner.pool_size())?;
         dict.set_item(
@@ -1847,12 +1845,11 @@ impl PySeedSequence {
                         .map_err(|err| PyValueError::new_err(err.to_string()))?,
                 ),
             ),
-            _ => Err(PyTypeError::new_err(
-                "Unsupported dtype for SeedSequence.generate_state",
-            )),
+            _ => Err(PyValueError::new_err("only support uint32 or uint64")),
         }
     }
 
+    #[pyo3(signature = (n_children))]
     fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
         let list = PyList::empty(py);
         if n_children == 0 {
@@ -1867,7 +1864,7 @@ impl PySeedSequence {
                 py,
                 Self {
                     inner: child,
-                    entropy: self.entropy.clone(),
+                    entropy: self.entropy.clone_ref(py),
                 },
             )?)?;
         }
@@ -1877,8 +1874,7 @@ impl PySeedSequence {
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let mut lines = Vec::new();
         lines.push("SeedSequence(".to_string());
-        let entropy_obj = self.entropy(py)?;
-        lines.push(format!("    entropy={},", entropy_obj.bind(py).repr()?));
+        lines.push(format!("    entropy={},", self.entropy.bind(py).repr()?));
         if !self.inner.spawn_key().is_empty() {
             let spawn_key_obj = self.spawn_key(py)?;
             lines.push(format!("    spawn_key={},", spawn_key_obj.bind(py).repr()?));
@@ -1887,7 +1883,10 @@ impl PySeedSequence {
             lines.push(format!("    pool_size={},", self.inner.pool_size()));
         }
         if self.inner.spawn_counter() != 0 {
-            lines.push(format!("    n_children_spawned={},", self.inner.spawn_counter()));
+            lines.push(format!(
+                "    n_children_spawned={},",
+                self.inner.spawn_counter()
+            ));
         }
         lines.push(")".to_string());
         Ok(lines.join("\n"))
@@ -1897,13 +1896,9 @@ impl PySeedSequence {
         let py = slf.py();
         let borrow = slf.borrow();
         let cls = slf.get_type();
-        let args = (
-            borrow.entropy(py)?,
-            borrow.spawn_key(py)?,
-            borrow.pool_size(),
-            borrow.n_children_spawned(),
-        );
-        Ok((cls, args).into_pyobject(py)?.into_any().unbind())
+        let state = borrow.state(py)?;
+        let args = (borrow.entropy.clone_ref(py),);
+        Ok((cls, args, state).into_pyobject(py)?.into_any().unbind())
     }
 
     fn __getstate__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -1911,8 +1906,11 @@ impl PySeedSequence {
     }
 
     fn __setstate__(&mut self, py: Python<'_>, state: Bound<'_, PyDict>) -> PyResult<()> {
-        let entropy_val = state.get_item("entropy")?.map(|b| b.unbind());
-        let (entropy_words, entropy) = seed_sequence_entropy_from_py(py, entropy_val)?;
+        let entropy_obj = match state.get_item("entropy")? {
+            Some(v) => v.unbind(),
+            None => self.entropy.clone_ref(py),
+        };
+        let entropy_words = coerce_to_uint32_words(entropy_obj.bind(py))?;
         let spawn_key_val = state.get_item("spawn_key")?.map(|b| b.unbind());
         let spawn_key = seed_sequence_spawn_key_from_py(py, spawn_key_val)?;
         let pool_size: usize = match state.get_item("pool_size")? {
@@ -1930,7 +1928,7 @@ impl PySeedSequence {
             spawn_counter: n_children_spawned,
         })
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
-        self.entropy = entropy;
+        self.entropy = entropy_obj;
         Ok(())
     }
 }
@@ -2029,10 +2027,11 @@ impl PyRandomGenerator {
         let bound_bg = self.bit_generator.bind(py);
         if let Ok(state_obj) = bound_bg.getattr(intern!(py, "state"))
             && let Ok(state) = py_bit_generator_state_from_dict(&state_obj)
+            && state != self.inner.bit_generator().state()
         {
-            if state != self.inner.bit_generator().state() {
-                self.inner.set_state(&state).map_err(map_bit_generator_error)?;
-            }
+            self.inner
+                .set_state(&state)
+                .map_err(map_bit_generator_error)?;
         }
         Ok(())
     }
@@ -2169,6 +2168,7 @@ impl PyRandomGenerator {
         size: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let requested_size = random_size_from_py(py, size, "Generator.standard_normal(size)")?;
         let (size, out) = resolve_random_out(
             py,
@@ -2181,6 +2181,7 @@ impl PyRandomGenerator {
             .inner
             .standard_normal_shaped(size.as_deref())
             .map_err(map_random_error)?;
+        self.after_draw(py);
         let generated = build_random_f64_output(py, output)?;
         if let Some(out) = out {
             cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
@@ -2198,11 +2199,13 @@ impl PyRandomGenerator {
         scale: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.normal(size)")?;
         let output = self
             .inner
             .normal_shaped(loc, scale, size.as_deref())
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_output(py, output)
     }
 
@@ -2213,12 +2216,14 @@ impl PyRandomGenerator {
         scale: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.exponential(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .exponential(scale, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2230,6 +2235,7 @@ impl PyRandomGenerator {
         method: &str,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let requested_size = random_size_from_py(py, size, "Generator.standard_exponential(size)")?;
         let (size, out) = resolve_random_out(
             py,
@@ -2244,6 +2250,7 @@ impl PyRandomGenerator {
         } else {
             self.inner.standard_exponential_inv(len)
         };
+        self.after_draw(py);
         let generated = build_random_f64_parts(py, shape, values, scalar)?;
         if let Some(out) = out {
             cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
@@ -2262,6 +2269,7 @@ impl PyRandomGenerator {
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let dtype = extract_random_float_dtype(py, dtype, "Generator.standard_gamma(dtype)")?;
         if dtype != DType::F64 {
             return Err(PyTypeError::new_err(format!(
@@ -2282,6 +2290,7 @@ impl PyRandomGenerator {
             .inner
             .standard_gamma(shape, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         let generated = build_random_f64_parts(py, out_shape, values, scalar)?;
         if let Some(out) = out {
             cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
@@ -2299,12 +2308,14 @@ impl PyRandomGenerator {
         scale: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.gamma(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .gamma(shape, scale, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
@@ -2315,9 +2326,11 @@ impl PyRandomGenerator {
         lam: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.poisson(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.poisson(lam, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
@@ -2329,9 +2342,11 @@ impl PyRandomGenerator {
         p: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.binomial(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.binomial(n, p, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
@@ -2343,9 +2358,11 @@ impl PyRandomGenerator {
         b: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.beta(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.beta(a, b, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2357,12 +2374,14 @@ impl PyRandomGenerator {
         sigma: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.lognormal(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .lognormal(mean, sigma, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2373,9 +2392,11 @@ impl PyRandomGenerator {
         df: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.chisquare(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.chisquare(df, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2386,17 +2407,21 @@ impl PyRandomGenerator {
         p: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.geometric(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.geometric(p, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (size=None))]
     fn standard_cauchy(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.standard_cauchy(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.standard_cauchy(len);
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2409,12 +2434,14 @@ impl PyRandomGenerator {
         right: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.triangular(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .triangular(left, mode, right, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2426,12 +2453,14 @@ impl PyRandomGenerator {
         scale: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.laplace(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .laplace(loc, scale, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2443,20 +2472,24 @@ impl PyRandomGenerator {
         scale: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.gumbel(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .gumbel(loc, scale, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn weibull(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.weibull(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.weibull(a, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2468,12 +2501,14 @@ impl PyRandomGenerator {
         p: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.negative_binomial(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .negative_binomial(n, p, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
@@ -2485,9 +2520,11 @@ impl PyRandomGenerator {
         dfden: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.f(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.f(dfnum, dfden, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2498,20 +2535,24 @@ impl PyRandomGenerator {
         df: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.standard_t(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .standard_t(df, len)
             .map_err(|_| PyValueError::new_err("df <= 0"))?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn power(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.power(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.power(a, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2522,17 +2563,21 @@ impl PyRandomGenerator {
         scale: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.rayleigh(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.rayleigh(scale, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn pareto(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.pareto(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.pareto(a, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2544,12 +2589,14 @@ impl PyRandomGenerator {
         scale: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.logistic(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .logistic(loc, scale, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2562,12 +2609,14 @@ impl PyRandomGenerator {
         nsample: u64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.hypergeometric(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .hypergeometric(ngood, nbad, nsample, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
@@ -2579,6 +2628,7 @@ impl PyRandomGenerator {
         scale: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.wald(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.wald(mean, scale, len).map_err(|_| {
@@ -2588,17 +2638,18 @@ impl PyRandomGenerator {
                 PyValueError::new_err("scale <= 0")
             }
         })?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn zipf(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.zipf(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
-            .inner
-            .zipf(a, len)
-            .map_err(map_random_error)?
+        let values = self.inner.zipf(a, len).map_err(map_random_error)?;
+        self.after_draw(py);
+        let values = values
             .into_iter()
             .map(|value| {
                 if value > i64::MAX as f64 {
@@ -2617,9 +2668,11 @@ impl PyRandomGenerator {
         p: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.logseries(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self.inner.logseries(p, len).map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
@@ -2631,12 +2684,14 @@ impl PyRandomGenerator {
         kappa: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.vonmises(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .vonmises(mu, kappa, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2648,12 +2703,14 @@ impl PyRandomGenerator {
         nonc: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.noncentral_chisquare(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .noncentral_chisquare(df, nonc, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2666,12 +2723,14 @@ impl PyRandomGenerator {
         nonc: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.noncentral_f(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
             .noncentral_f(dfnum, dfden, nonc, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -2683,6 +2742,7 @@ impl PyRandomGenerator {
         pvals: Py<PyAny>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let pvals = extract_random_f64_vector(py, pvals.bind(py))?;
         if pvals.is_empty() {
             return Err(PyValueError::new_err(
@@ -2709,6 +2769,7 @@ impl PyRandomGenerator {
         let (shape, len, _) = random_len_and_shape(size)?;
         let width = pvals.len();
         let values = self.inner.multinomial(n, &pvals, len);
+        self.after_draw(py);
         build_random_u64_matrix_as_i64_parts(py, shape, values, width)
     }
 
@@ -2719,6 +2780,7 @@ impl PyRandomGenerator {
         alpha: Py<PyAny>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let alpha = extract_random_f64_vector(py, alpha.bind(py))?;
         let size = random_size_from_py(py, size, "Generator.dirichlet(size)")?;
         let (shape, len, _) = random_len_and_shape(size)?;
@@ -2727,6 +2789,7 @@ impl PyRandomGenerator {
             .inner
             .dirichlet(&alpha, len)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_matrix_parts(py, shape, values, width)
     }
 
@@ -2737,7 +2800,11 @@ impl PyRandomGenerator {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_generator_numpy_method(py, &mut self.inner, "multivariate_normal", args, kwargs)
+        self.before_draw(py)?;
+        let res =
+            random_generator_numpy_method(py, &mut self.inner, "multivariate_normal", args, kwargs);
+        self.after_draw(py);
+        res
     }
 
     #[pyo3(signature = (colors, nsample, size=None, method="marginals"))]
@@ -2749,6 +2816,7 @@ impl PyRandomGenerator {
         size: Option<Py<PyAny>>,
         method: &str,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         if !matches!(method, "count" | "marginals") {
             return Err(PyValueError::new_err(
                 "method must be \"count\" or \"marginals\".",
@@ -2770,6 +2838,7 @@ impl PyRandomGenerator {
                 .multivariate_hypergeometric(&colors, nsample, len)
         }
         .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_u64_matrix_as_i64_parts(py, shape, values, width)
     }
 
@@ -2781,11 +2850,13 @@ impl PyRandomGenerator {
         high: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.uniform(size)")?;
         let output = self
             .inner
             .uniform_shaped(low, high, size.as_deref())
             .map_err(map_random_error)?;
+        self.after_draw(py);
         build_random_f64_output(py, output)
     }
 
@@ -2799,6 +2870,7 @@ impl PyRandomGenerator {
         dtype: Option<Py<PyAny>>,
         endpoint: bool,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let (low, high) = match high {
             Some(high) => (low, high),
             None => (0, low),
@@ -2812,6 +2884,7 @@ impl PyRandomGenerator {
                     .inner
                     .integers_i8_shaped(low, high, size.as_deref(), endpoint)
                     .map_err(map_random_error)?;
+                self.after_draw(py);
                 let (shape, values, scalar) = output.into_parts();
                 return build_random_integer_storage_parts(
                     py,
@@ -2825,6 +2898,7 @@ impl PyRandomGenerator {
                     .inner
                     .integers_i16_shaped(low, high, size.as_deref(), endpoint)
                     .map_err(map_random_error)?;
+                self.after_draw(py);
                 let (shape, values, scalar) = output.into_parts();
                 return build_random_integer_storage_parts(
                     py,
@@ -2838,6 +2912,7 @@ impl PyRandomGenerator {
                     .inner
                     .integers_u8_shaped(low, high, size.as_deref(), endpoint)
                     .map_err(map_random_error)?;
+                self.after_draw(py);
                 let (shape, values, scalar) = output.into_parts();
                 return build_random_integer_storage_parts(
                     py,
@@ -2851,6 +2926,7 @@ impl PyRandomGenerator {
                     .inner
                     .integers_u16_shaped(low, high, size.as_deref(), endpoint)
                     .map_err(map_random_error)?;
+                self.after_draw(py);
                 let (shape, values, scalar) = output.into_parts();
                 return build_random_integer_storage_parts(
                     py,
@@ -2868,14 +2944,16 @@ impl PyRandomGenerator {
             self.inner.integers_shaped(low, high, size.as_deref())
         }
         .map_err(map_random_error)?;
+        self.after_draw(py);
         let (shape, values, scalar) = output.into_parts();
         build_random_integer_parts(py, shape, values, scalar, dtype)
     }
 
     fn bytes(&mut self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
-        Ok(PyBytes::new(py, &self.inner.bytes(length))
-            .into_any()
-            .unbind())
+        self.before_draw(py)?;
+        let bytes = self.inner.bytes(length);
+        self.after_draw(py);
+        Ok(PyBytes::new(py, &bytes).into_any().unbind())
     }
 
     #[pyo3(signature = (a, size=None, replace=true, p=None, axis=0, shuffle=true))]
@@ -2890,6 +2968,7 @@ impl PyRandomGenerator {
         axis: isize,
         shuffle: bool,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.choice(size)")?;
         let weights = match p.as_ref() {
             Some(value) if !value.bind(py).is_none() => {
@@ -2917,9 +2996,12 @@ impl PyRandomGenerator {
                 let population = (0..population_len)
                     .map(|value| value as f64)
                     .collect::<Vec<_>>();
-                self.inner
+                let drawn = self
+                    .inner
                     .choice_weighted(&population, len, replace, weights)
-                    .map_err(map_random_error)?
+                    .map_err(map_random_error)?;
+                self.after_draw(py);
+                drawn
                     .into_iter()
                     .map(|value| {
                         if !value.is_finite() || value < 0.0 || value > i64::MAX as f64 {
@@ -2935,11 +3017,16 @@ impl PyRandomGenerator {
                 // path `integers` uses) instead of the per-element numpy_bounded_uint64 loop
                 // + u64->i64 conversion pass — bit-exact (numpy choice == numpy integers,
                 // and fnp integers is bit-exact with numpy integers) and ~5x faster.
-                self.inner.integers(0, n, len).map_err(map_random_error)?
+                let drawn = self.inner.integers(0, n, len).map_err(map_random_error)?;
+                self.after_draw(py);
+                drawn
             } else {
-                self.inner
+                let drawn = self
+                    .inner
                     .choice_indices_with_shuffle(population_len, len, replace, shuffle)
-                    .map_err(map_random_error)?
+                    .map_err(map_random_error)?;
+                self.after_draw(py);
+                drawn
                     .into_iter()
                     .map(|value| {
                         i64::try_from(value)
@@ -2966,9 +3053,12 @@ impl PyRandomGenerator {
                 return Err(PyValueError::new_err("a and p must have same size"));
             }
             let axis_population = (0..axis_len).map(|value| value as f64).collect::<Vec<_>>();
-            self.inner
+            let drawn = self
+                .inner
                 .choice_weighted(&axis_population, sample_len, replace, weights)
-                .map_err(map_random_error)?
+                .map_err(map_random_error)?;
+            self.after_draw(py);
+            drawn
                 .into_iter()
                 .map(|value| {
                     if !value.is_finite() || value < 0.0 || value > usize::MAX as f64 {
@@ -2978,9 +3068,12 @@ impl PyRandomGenerator {
                 })
                 .collect::<PyResult<Vec<_>>>()?
         } else {
-            self.inner
+            let drawn = self
+                .inner
                 .choice_indices_with_shuffle(axis_len, sample_len, replace, shuffle)
-                .map_err(map_random_error)?
+                .map_err(map_random_error)?;
+            self.after_draw(py);
+            drawn
         };
         // Gather the sampled elements from the ORIGINAL array via numpy.take so the
         // result keeps a's exact dtype (int/float/complex/string/...) instead of being
@@ -3003,6 +3096,7 @@ impl PyRandomGenerator {
 
     #[pyo3(signature = (x, axis=0))]
     fn permutation(&mut self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let bound = x.bind(py);
         if let Ok(n) = bound.extract::<i64>() {
             if n < 0 {
@@ -3012,10 +3106,9 @@ impl PyRandomGenerator {
             }
             let n = usize::try_from(n)
                 .map_err(|_| PyValueError::new_err("permutation length is too large"))?;
-            let values = self
-                .inner
-                .permutation_range(n)
-                .map_err(map_random_error)?
+            let values = self.inner.permutation_range(n).map_err(map_random_error)?;
+            self.after_draw(py);
+            let values = values
                 .into_iter()
                 .map(|value| {
                     i64::try_from(value)
@@ -3043,6 +3136,7 @@ impl PyRandomGenerator {
             .inner
             .permutation_range(shape[axis])
             .map_err(map_random_error)?;
+        self.after_draw(py);
         let order_i64: Vec<i64> = order.into_iter().map(|value| value as i64).collect();
         let index_array =
             build_numpy_array_from_storage(py, &[shape[axis]], ArrayStorage::I64(order_i64))?;
@@ -3055,6 +3149,7 @@ impl PyRandomGenerator {
 
     #[pyo3(signature = (x, axis=0))]
     fn shuffle(&mut self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let bound = x.bind(py);
         // Shuffle in place while preserving x's dtype. The previous path extracted x to
         // float64 and then copyto'd the float64 result back, which raised for integer x
@@ -3119,6 +3214,7 @@ impl PyRandomGenerator {
                     _ => false,
                 };
                 if handled {
+                    self.after_draw(py);
                     return Ok(py.None());
                 }
             }
@@ -3127,6 +3223,7 @@ impl PyRandomGenerator {
             .inner
             .permutation_range(shape[axis])
             .map_err(map_random_error)?;
+        self.after_draw(py);
         let order_i64: Vec<i64> = order.into_iter().map(|value| value as i64).collect();
         let index_array =
             build_numpy_array_from_storage(py, &[shape[axis]], ArrayStorage::I64(order_i64))?;
@@ -3146,6 +3243,7 @@ impl PyRandomGenerator {
         axis: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        self.before_draw(py)?;
         let arr = cached_numpy_asarray(py)?.call1((x.bind(py),))?;
         let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
         let axis_spec = extract_axis_spec(py, axis, "Generator.permuted(axis)")?;
@@ -3187,6 +3285,7 @@ impl PyRandomGenerator {
             .inner
             .permuted(&identity, &shape, axis)
             .map_err(map_random_error)?;
+        self.after_draw(py);
         let index_i64: Vec<i64> = permuted_index.iter().map(|&value| value as i64).collect();
         let index_array =
             build_numpy_array_from_storage(py, &[total], ArrayStorage::I64(index_i64))?;
@@ -3225,6 +3324,17 @@ impl PyRandomState {
         Ok(Self {
             inner: CoreRandomState::new(seed).map_err(map_bit_generator_error)?,
         })
+    }
+
+    #[getter]
+    fn _bit_generator(&self, py: Python<'_>) -> PyResult<Py<PyMt19937>> {
+        Py::new(
+            py,
+            PyMt19937 {
+                inner: self.inner.bit_generator().clone(),
+                seed_sequence: None,
+            },
+        )
     }
 
     #[pyo3(signature = (seed=None))]
@@ -3891,75 +4001,33 @@ impl PyRandomState {
 #[pyo3(signature = (seed=None))]
 fn default_rng(py: Python<'_>, seed: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
     let Some(seed) = seed else {
-        let inner = RandomGenerator::from_bit_generator(construct_bit_generator(
-            BitGeneratorKind::Pcg64,
-            None,
-        )?);
-        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+        let pcg = Py::new(py, PyPcg64::new(py, None)?)?;
+        let generator = PyRandomGenerator::new(pcg.bind(py))?;
+        return Ok(Py::new(py, generator)?.into_any());
     };
     if seed.is_none() {
-        let inner = RandomGenerator::from_bit_generator(construct_bit_generator(
-            BitGeneratorKind::Pcg64,
-            None,
-        )?);
-        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+        let pcg = Py::new(py, PyPcg64::new(py, None)?)?;
+        let generator = PyRandomGenerator::new(pcg.bind(py))?;
+        return Ok(Py::new(py, generator)?.into_any());
     }
     if seed.is_instance_of::<PyRandomGenerator>() {
         return Ok(seed.clone().unbind());
     }
-    if let Ok(rng_gen) = seed.extract::<PyRef<'_, PyRandomGenerator>>() {
-        return Ok(Py::new(
-            py,
-            PyRandomGenerator {
-                inner: rng_gen.inner.clone(),
-            },
-        )?
-        .into_any());
+    if let Ok(bg_attr) = seed.getattr(intern!(py, "_bit_generator")) {
+        let generator = PyRandomGenerator::new(&bg_attr)?;
+        return Ok(Py::new(py, generator)?.into_any());
     }
-    if let Ok(bg_attr) = seed.getattr(intern!(py, "bit_generator"))
-        && let Ok((bit_generator, seed_sequence)) = extract_bit_generator_binding(&bg_attr)
-    {
-        let inner = match seed_sequence.as_ref() {
-            Some(seed_sequence) => {
-                RandomGenerator::bind_seed_sequence(bit_generator.clone(), seed_sequence)
-                    .unwrap_or_else(|_| RandomGenerator::from_bit_generator(bit_generator))
-            }
-            None => RandomGenerator::from_bit_generator(bit_generator),
-        };
-        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+    if let Ok(bg_attr) = seed.getattr(intern!(py, "bit_generator")) {
+        let generator = PyRandomGenerator::new(&bg_attr)?;
+        return Ok(Py::new(py, generator)?.into_any());
     }
-    if let Ok((bit_generator, seed_sequence)) = extract_bit_generator_binding(seed) {
-        let inner = match seed_sequence.as_ref() {
-            Some(seed_sequence) => {
-                RandomGenerator::bind_seed_sequence(bit_generator.clone(), seed_sequence)
-                    .unwrap_or_else(|_| RandomGenerator::from_bit_generator(bit_generator))
-            }
-            None => RandomGenerator::from_bit_generator(bit_generator),
-        };
-        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
+    if extract_bit_generator_binding(seed).is_ok() {
+        let generator = PyRandomGenerator::new(seed)?;
+        return Ok(Py::new(py, generator)?.into_any());
     }
-    if let Ok(seed_sequence) = seed.extract::<PyRef<'_, PySeedSequence>>() {
-        let inner =
-            RandomGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &seed_sequence.inner)
-                .map_err(map_bit_generator_error)?;
-        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
-    }
-    if let Ok(seed_u64) = seed.extract::<u64>() {
-        let seed_sequence = seed_sequence_from_u64(seed_u64)?;
-        let inner = RandomGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &seed_sequence)
-            .map_err(map_bit_generator_error)?;
-        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
-    }
-    if let Ok((entropy_words, _)) = seed_sequence_entropy_from_py(py, Some(seed.clone().unbind())) {
-        let seed_sequence = SeedSequence::new(&entropy_words)
-            .map_err(|err| PyValueError::new_err(err.to_string()))?;
-        let inner = RandomGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &seed_sequence)
-            .map_err(map_bit_generator_error)?;
-        return Ok(Py::new(py, PyRandomGenerator { inner })?.into_any());
-    }
-    Err(PyTypeError::new_err(
-        "default_rng expects None, an integer, a sequence of integers, a SeedSequence, a BitGenerator, or a Generator",
-    ))
+    let pcg = Py::new(py, PyPcg64::new(py, Some(seed.clone().unbind()))?)?;
+    let generator = PyRandomGenerator::new(pcg.bind(py))?;
+    Ok(Py::new(py, generator)?.into_any())
 }
 
 #[derive(Clone, Copy)]
@@ -4053,64 +4121,146 @@ fn construct_bit_generator(kind: BitGeneratorKind, seed: Option<u64>) -> PyResul
     BitGenerator::new(kind, seed).map_err(map_bit_generator_error)
 }
 
-fn seed_sequence_words_from_u128(value: u128) -> Vec<u32> {
-    let mut words = vec![(value & 0xFFFF_FFFF) as u32];
-    let mut remaining = value >> 32;
-    while remaining > 0 {
-        words.push((remaining & 0xFFFF_FFFF) as u32);
-        remaining >>= 32;
+fn generate_os_entropy_int(py: Python<'_>, pool_size: usize) -> PyResult<(Vec<u32>, Py<PyAny>)> {
+    let words = fnp_random::os_entropy_u32_words(pool_size)
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for &w in &words {
+        bytes.extend_from_slice(&w.to_le_bytes());
     }
-    words
+    let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+    let bytes_obj = pyo3::types::PyBytes::new(py, &bytes);
+    let py_int = int_type.call_method1(
+        intern!(py, "from_bytes"),
+        (bytes_obj, intern!(py, "little")),
+    )?;
+    Ok((words, py_int.unbind()))
 }
 
-fn nondeterministic_seed_sequence_entropy() -> u128 {
-    let nanos = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(duration) => duration.as_nanos(),
-        Err(_) => 0,
+fn coerce_int_to_uint32_words(py: Python<'_>, val: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+    let py_int = if val.is_instance_of::<pyo3::types::PyInt>() {
+        val.clone()
+    } else {
+        if val.is_instance_of::<pyo3::types::PyFloat>()
+            || val.is_instance_of::<pyo3::types::PyString>()
+        {
+            return Err(PyTypeError::new_err(format!(
+                "SeedSequence expects int or sequence of ints for entropy not {}",
+                val.repr()?
+            )));
+        }
+        if let Ok(idx) = val.call_method0(intern!(py, "__index__")) {
+            idx
+        } else if let Ok(converted) = int_type.call1((val,)) {
+            converted
+        } else {
+            return Err(PyTypeError::new_err(format!(
+                "SeedSequence expects int or sequence of ints for entropy not {}",
+                val.repr()?
+            )));
+        }
     };
-    nanos ^ (u128::from(std::process::id()) << 64)
+
+    let is_negative = py_int
+        .call_method1(intern!(py, "__lt__"), (0,))?
+        .extract::<bool>()?;
+    if is_negative {
+        return Err(PyValueError::new_err("expected non-negative integer"));
+    }
+
+    let bit_length: usize = py_int.call_method0(intern!(py, "bit_length"))?.extract()?;
+    if bit_length == 0 {
+        return Ok(vec![0]);
+    }
+    let byte_len = bit_length.div_ceil(8);
+    let bytes_obj =
+        py_int.call_method1(intern!(py, "to_bytes"), (byte_len, intern!(py, "little")))?;
+    let bytes = bytes_obj.extract::<&[u8]>()?;
+    let mut words = Vec::with_capacity(bytes.len().div_ceil(4));
+    for chunk in bytes.chunks(4) {
+        let mut word_bytes = [0u8; 4];
+        word_bytes[..chunk.len()].copy_from_slice(chunk);
+        words.push(u32::from_le_bytes(word_bytes));
+    }
+    if words.is_empty() {
+        words.push(0);
+    }
+    Ok(words)
 }
 
-fn seed_sequence_u32_values_from_py(value: &Bound<'_, PyAny>, context: &str) -> PyResult<Vec<u32>> {
-    let mut values = Vec::new();
-    for item in value.try_iter()? {
-        let item = item?;
-        let value = py_state_u64(&item, context)?;
-        values.push(
-            u32::try_from(value)
-                .map_err(|_| PyValueError::new_err(format!("{context} values must fit uint32")))?,
-        );
+fn coerce_to_uint32_words(value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
+    let py = value.py();
+    if let Ok(buf) = PyBuffer::<u32>::get(value)
+        && let Some(slice) = buf.as_slice(py)
+    {
+        let data: &[u32] =
+            unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u32, slice.len()) };
+        return Ok(data.to_vec());
     }
-    Ok(values)
-}
 
-fn seed_sequence_entropy_from_py(
-    py: Python<'_>,
-    entropy: Option<Py<PyAny>>,
-) -> PyResult<(Vec<u32>, PySeedSequenceEntropy)> {
-    let Some(entropy) = entropy else {
-        let entropy = nondeterministic_seed_sequence_entropy();
-        return Ok((
-            seed_sequence_words_from_u128(entropy),
-            PySeedSequenceEntropy::Scalar(entropy),
-        ));
-    };
-    let entropy = entropy.bind(py);
-    if entropy.is_none() {
-        let entropy = nondeterministic_seed_sequence_entropy();
-        return Ok((
-            seed_sequence_words_from_u128(entropy),
-            PySeedSequenceEntropy::Scalar(entropy),
-        ));
+    if let Ok(s) = value.extract::<String>() {
+        let trimmed = s.trim();
+        let py_int = if let Some(hex) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+        {
+            let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+            int_type.call1((hex, 16))?
+        } else if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+            let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+            int_type.call1((trimmed,))?
+        } else {
+            return Err(PyValueError::new_err("unrecognized seed string"));
+        };
+        return coerce_int_to_uint32_words(py, &py_int);
     }
-    if let Ok(value) = py_state_u128(entropy, "SeedSequence(entropy)") {
-        return Ok((
-            seed_sequence_words_from_u128(value),
-            PySeedSequenceEntropy::Scalar(value),
-        ));
+
+    if value.is_instance_of::<pyo3::types::PyFloat>() {
+        return Err(PyTypeError::new_err(format!(
+            "SeedSequence expects int or sequence of ints for entropy not {}",
+            value.repr()?
+        )));
     }
-    let values = seed_sequence_u32_values_from_py(entropy, "SeedSequence(entropy)")?;
-    Ok((values.clone(), PySeedSequenceEntropy::Sequence(values)))
+
+    if value.is_instance_of::<pyo3::types::PyInt>() {
+        return coerce_int_to_uint32_words(py, value);
+    }
+
+    let is_numpy_int = value
+        .getattr(intern!(py, "dtype"))
+        .map(|dt| {
+            dt.getattr(intern!(py, "kind"))
+                .map(|k| {
+                    if let Ok(ks) = k.extract::<String>() {
+                        ks == "i" || ks == "u"
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+
+    if is_numpy_int {
+        let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+        let py_int = int_type.call1((value,))?;
+        return coerce_int_to_uint32_words(py, &py_int);
+    }
+
+    if let Ok(iter) = value.try_iter() {
+        let mut words = Vec::new();
+        for item in iter {
+            let item = item?;
+            words.extend(coerce_to_uint32_words(&item)?);
+        }
+        return Ok(words);
+    }
+
+    Err(PyTypeError::new_err(format!(
+        "SeedSequence expects int or sequence of ints for entropy not {}",
+        value.repr()?
+    )))
 }
 
 fn seed_sequence_spawn_key_from_py(
@@ -4120,65 +4270,59 @@ fn seed_sequence_spawn_key_from_py(
     let Some(spawn_key) = spawn_key else {
         return Ok(Vec::new());
     };
-    let spawn_key = spawn_key.bind(py);
-    if spawn_key.is_none() {
+    let bound = spawn_key.bind(py);
+    if bound.is_none() {
         return Ok(Vec::new());
     }
-    seed_sequence_u32_values_from_py(spawn_key, "SeedSequence(spawn_key)")
+    coerce_to_uint32_words(bound)
 }
 
-fn seed_sequence_from_u64(seed: u64) -> PyResult<SeedSequence> {
-    let entropy = if seed <= u64::from(u32::MAX) {
-        vec![seed as u32]
-    } else {
-        vec![seed as u32, (seed >> 32) as u32]
-    };
-    SeedSequence::new(&entropy).map_err(|err| PyValueError::new_err(err.to_string()))
-}
-
-fn construct_bit_generator_with_seed_sequence(
+fn construct_bit_generator_with_py_seed(
+    py: Python<'_>,
     kind: BitGeneratorKind,
-    seed: Option<u64>,
-) -> PyResult<(BitGenerator, Option<SeedSequence>)> {
-    let Some(seed) = seed else {
-        return Ok((construct_bit_generator(kind, None)?, None));
+    seed: Option<Py<PyAny>>,
+) -> PyResult<(BitGenerator, Option<Py<PySeedSequence>>)> {
+    let py_seed_seq = match seed {
+        Some(seed_obj) => {
+            let bound = seed_obj.bind(py);
+            if bound.is_none() {
+                Py::new(py, PySeedSequence::new(py, None, None, 4, 0)?)?
+            } else if let Ok(existing_ss) = bound.extract::<PyRef<'_, PySeedSequence>>() {
+                drop(existing_ss);
+                bound.extract::<Py<PySeedSequence>>()?
+            } else if let (Ok(entropy), Ok(spawn_key)) = (
+                bound.getattr(intern!(py, "entropy")),
+                bound.getattr(intern!(py, "spawn_key")),
+            ) {
+                let pool_size = bound
+                    .getattr(intern!(py, "pool_size"))
+                    .and_then(|p| p.extract::<usize>())
+                    .unwrap_or(4);
+                let n_children = bound
+                    .getattr(intern!(py, "n_children_spawned"))
+                    .and_then(|c| c.extract::<u64>())
+                    .unwrap_or(0);
+                Py::new(
+                    py,
+                    PySeedSequence::new(
+                        py,
+                        Some(&entropy),
+                        Some(spawn_key.unbind()),
+                        pool_size,
+                        n_children,
+                    )?,
+                )?
+            } else {
+                Py::new(py, PySeedSequence::new(py, Some(bound), None, 4, 0)?)?
+            }
+        }
+        None => Py::new(py, PySeedSequence::new(py, None, None, 4, 0)?)?,
     };
-    let seed_sequence = seed_sequence_from_u64(seed)?;
-    let bit_generator =
-        BitGenerator::from_seed_sequence(kind, &seed_sequence).map_err(map_bit_generator_error)?;
-    Ok((bit_generator, Some(seed_sequence)))
-}
-
-fn spawn_bit_generator_children(
-    kind: BitGeneratorKind,
-    bit_generator: &mut BitGenerator,
-    seed_sequence: &mut Option<SeedSequence>,
-    n_children: usize,
-) -> PyResult<Vec<(BitGenerator, Option<SeedSequence>)>> {
-    if n_children == 0 {
-        return Ok(Vec::new());
-    }
-    if let Some(seed_sequence) = seed_sequence.as_mut() {
-        return seed_sequence
-            .spawn(n_children)
-            .map_err(|err| PyValueError::new_err(err.to_string()))?
-            .into_iter()
-            .map(|child_sequence| {
-                let child = BitGenerator::from_seed_sequence(kind, &child_sequence)
-                    .map_err(map_bit_generator_error)?;
-                Ok((child, Some(child_sequence)))
-            })
-            .collect();
-    }
-    bit_generator
-        .spawn(n_children)
-        .map_err(map_bit_generator_error)
-        .map(|children| {
-            children
-                .into_iter()
-                .map(|child| (child, None))
-                .collect::<Vec<_>>()
-        })
+    let ss_borrow = py_seed_seq.bind(py).borrow();
+    let bit_generator = BitGenerator::from_seed_sequence(kind, &ss_borrow.inner)
+        .map_err(map_bit_generator_error)?;
+    drop(ss_borrow);
+    Ok((bit_generator, Some(py_seed_seq)))
 }
 
 fn bit_generator_numpy_name(kind: BitGeneratorKind) -> &'static str {
@@ -4195,33 +4339,6 @@ fn py_int_from_u128<'py>(py: Python<'py>, value: u128) -> PyResult<Bound<'py, Py
     cached_builtins(py)?
         .getattr(intern!(py, "int"))?
         .call1((value.to_string(),))
-}
-
-fn build_bit_generator_state_dict(
-    py: Python<'_>,
-    bit_generator: &BitGenerator,
-) -> PyResult<Py<PyAny>> {
-    let state = bit_generator.state();
-    let state_dict = PyDict::new(py);
-    state_dict.set_item(intern!(py, "state"), py_int_from_u128(py, state.seed)?)?;
-    state_dict.set_item(intern!(py, "inc"), py_int_from_u128(py, state.counter)?)?;
-
-    let schema_entries = PyList::empty(py);
-    for (key, value) in &state.schema_entries {
-        schema_entries.append(PyTuple::new(py, [key.clone(), value.to_string()])?)?;
-    }
-
-    let dict = PyDict::new(py);
-    dict.set_item(
-        intern!(py, "bit_generator"),
-        bit_generator_numpy_name(state.kind),
-    )?;
-    dict.set_item(intern!(py, "state"), state_dict)?;
-    dict.set_item(intern!(py, "schema_version"), state.schema_version)?;
-    dict.set_item(intern!(py, "schema_entries"), schema_entries)?;
-    dict.set_item(intern!(py, "has_uint32"), 0)?;
-    dict.set_item(intern!(py, "uinteger"), 0)?;
-    Ok(dict.into_any().unbind())
 }
 
 fn bit_generator_schema_entry_u64(entries: &[(String, u64)], key: &str) -> PyResult<u64> {
@@ -4618,35 +4735,41 @@ fn py_bit_generator_state_from_dict(state: &Bound<'_, PyAny>) -> PyResult<BitGen
 fn extract_bit_generator_binding(
     value: &Bound<'_, PyAny>,
 ) -> PyResult<(BitGenerator, Option<SeedSequence>)> {
+    let py = value.py();
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyMt19937>>() {
-        return Ok((
-            bit_generator.inner.clone(),
-            bit_generator.seed_sequence.clone(),
-        ));
+        let ss = bit_generator
+            .seed_sequence
+            .as_ref()
+            .map(|s| s.bind(py).borrow().inner.clone());
+        return Ok((bit_generator.inner.clone(), ss));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPcg64>>() {
-        return Ok((
-            bit_generator.inner.clone(),
-            bit_generator.seed_sequence.clone(),
-        ));
+        let ss = bit_generator
+            .seed_sequence
+            .as_ref()
+            .map(|s| s.bind(py).borrow().inner.clone());
+        return Ok((bit_generator.inner.clone(), ss));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPcg64Dxsm>>() {
-        return Ok((
-            bit_generator.inner.clone(),
-            bit_generator.seed_sequence.clone(),
-        ));
+        let ss = bit_generator
+            .seed_sequence
+            .as_ref()
+            .map(|s| s.bind(py).borrow().inner.clone());
+        return Ok((bit_generator.inner.clone(), ss));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PyPhilox>>() {
-        return Ok((
-            bit_generator.inner.clone(),
-            bit_generator.seed_sequence.clone(),
-        ));
+        let ss = bit_generator
+            .seed_sequence
+            .as_ref()
+            .map(|s| s.bind(py).borrow().inner.clone());
+        return Ok((bit_generator.inner.clone(), ss));
     }
     if let Ok(bit_generator) = value.extract::<PyRef<'_, PySfc64>>() {
-        return Ok((
-            bit_generator.inner.clone(),
-            bit_generator.seed_sequence.clone(),
-        ));
+        let ss = bit_generator
+            .seed_sequence
+            .as_ref()
+            .map(|s| s.bind(py).borrow().inner.clone());
+        return Ok((bit_generator.inner.clone(), ss));
     }
     let py = value.py();
     if let Ok(state_obj) = value.getattr(intern!(py, "state"))
@@ -30026,7 +30149,8 @@ fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // is robust and faster on the large sizes; the tiny-matrix native "win" was
     // on an unreliable path. (`eigvalsh` keeps its separate, reliable symmetric
     // QR path; `eig` already delegates to numpy.)
-    Ok(cached_numpy_linalg_eigvals(py)?
+    Ok(cached_numpy_linalg(py)?
+        .getattr(intern!(py, "eigvals"))?
         .call1((a.bind(py),))?
         .unbind())
 }
@@ -88566,7 +88690,6 @@ cached_numpy_linalg_attr!(cached_numpy_linalg_vecdot, "vecdot");
 cached_numpy_linalg_attr!(cached_numpy_linalg_eig, "eig");
 cached_numpy_linalg_attr!(cached_numpy_linalg_matrix_norm, "matrix_norm");
 cached_numpy_linalg_attr!(cached_numpy_linalg_pinv, "pinv");
-cached_numpy_linalg_attr!(cached_numpy_linalg_eigvals, "eigvals");
 cached_numpy_linalg_attr!(cached_numpy_linalg_matrix_rank, "matrix_rank");
 cached_numpy_linalg_attr!(cached_numpy_linalg_matrix_power, "matrix_power");
 cached_numpy_linalg_attr!(cached_numpy_linalg_slogdet, "slogdet");
