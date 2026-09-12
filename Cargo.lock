@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-conformance"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asupersync",
  "base64 0.23.1",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-dtype"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "half",
@@ -743,7 +743,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-io"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "crc32fast",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-iter"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "serde",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-linalg"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "fnp-ndarray",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-ndarray"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "sha2 0.11.0",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-python"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "fnp-dtype",
@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-random"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "fnp-ndarray",
@@ -811,11 +811,11 @@ dependencies = [
 
 [[package]]
 name = "fnp-random-core"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "fnp-runtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "asupersync",
  "ftui",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "fnp-ufunc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "fnp-dtype",
