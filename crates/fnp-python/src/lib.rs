@@ -33015,9 +33015,12 @@ fn try_zerocopy_f64_sinc(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     let shape: Vec<usize> = buffer.shape().to_vec();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -33051,15 +33054,7 @@ fn try_zerocopy_f64_sinc(
             }
         }
     }
-    if shape.len() == 1 {
-        Ok(Some(flat.unbind()))
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        Ok(Some(
-            flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                .unbind(),
-        ))
-    }
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 // Zero-copy np.heaviside(f64 ndarray, f64 SCALAR step-value): heaviside(x, h) = 0 for x<0, 1 for x>0,
@@ -70015,9 +70010,7 @@ fn try_zerocopy_f64_average_axis(
             )?
         };
         return Ok(Some(
-            PyTuple::new(py, [&avg_output, &sow])?
-                .into_any()
-                .unbind(),
+            PyTuple::new(py, [&avg_output, &sow])?.into_any().unbind(),
         ));
     }
     Ok(Some(avg_output.unbind()))
