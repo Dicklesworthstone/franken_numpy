@@ -9666,8 +9666,11 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(u8::from(pred(cell.get())));
+        let in_raw: &[f64] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+        let out_raw: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+        for (slot, &val) in out_raw.iter_mut().zip(in_raw.iter()) {
+            *slot = u8::from(pred(val));
         }
     }
     let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
@@ -9888,8 +9891,11 @@ fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(u8::from(pred(cell.get())));
+        let in_raw: &[f32] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+        let out_raw: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+        for (slot, &val) in out_raw.iter_mut().zip(in_raw.iter()) {
+            *slot = u8::from(pred(val));
         }
     }
     let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
@@ -10998,6 +11004,17 @@ fn cached_float16_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
             Ok(cached_numpy(py)?
                 .call_method1(intern!(py, "dtype"), ("float16",))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_int32_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static I32_DTYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(I32_DTYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "dtype"), ("int32",))?
                 .unbind())
         })?
         .bind(py))
@@ -14540,19 +14557,51 @@ fn try_zerocopy_f64_binary(
 }
 
 fn ndarray_has_native_f64_dtype(value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let dtype = value.getattr("dtype")?;
-    let dtype_kind: String = dtype.getattr("kind")?.extract()?;
-    let dtype_itemsize: usize = dtype.getattr("itemsize")?.extract()?;
-    let is_native: bool = dtype.getattr("isnative")?.extract()?;
-    Ok(matches!(dtype_kind.as_str(), "f") && dtype_itemsize == 8 && is_native)
+    let py = value.py();
+    let dtype = value.getattr(intern!(py, "dtype"))?;
+    if dtype.is(cached_float64_dtype(py)?) {
+        return Ok(true);
+    }
+    let Ok(dtype_kind) = dtype.getattr(intern!(py, "kind"))?.extract::<char>() else {
+        return Ok(false);
+    };
+    if dtype_kind != 'f' {
+        return Ok(false);
+    }
+    let Ok(dtype_itemsize) = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>() else {
+        return Ok(false);
+    };
+    if dtype_itemsize != 8 {
+        return Ok(false);
+    }
+    let Ok(is_native) = dtype.getattr(intern!(py, "isnative"))?.extract::<bool>() else {
+        return Ok(false);
+    };
+    Ok(is_native)
 }
 
 fn ndarray_has_native_i32_dtype(value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let dtype = value.getattr("dtype")?;
-    let dtype_kind: String = dtype.getattr("kind")?.extract()?;
-    let dtype_itemsize: usize = dtype.getattr("itemsize")?.extract()?;
-    let is_native: bool = dtype.getattr("isnative")?.extract()?;
-    Ok(matches!(dtype_kind.as_str(), "i") && dtype_itemsize == 4 && is_native)
+    let py = value.py();
+    let dtype = value.getattr(intern!(py, "dtype"))?;
+    if dtype.is(cached_int32_dtype(py)?) {
+        return Ok(true);
+    }
+    let Ok(dtype_kind) = dtype.getattr(intern!(py, "kind"))?.extract::<char>() else {
+        return Ok(false);
+    };
+    if dtype_kind != 'i' {
+        return Ok(false);
+    }
+    let Ok(dtype_itemsize) = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>() else {
+        return Ok(false);
+    };
+    if dtype_itemsize != 4 {
+        return Ok(false);
+    }
+    let Ok(is_native) = dtype.getattr(intern!(py, "isnative"))?.extract::<bool>() else {
+        return Ok(false);
+    };
+    Ok(is_native)
 }
 
 fn scalbn_f64_normal_result(mantissa: f64, exponent: i32) -> Option<f64> {
@@ -14608,16 +14657,17 @@ fn try_zerocopy_f64_i32_ldexp(
         return Ok(None);
     };
 
-    let shape = x1_buffer.shape().to_vec();
+    let shape = x1_buffer.shape();
     let n = mantissas.len();
-    let flat = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(
-            intern!(py, "empty"),
-            (shape_tuple, cached_float64_type(py)?),
-        )?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?,
+        _ => {
+            let shape_tuple = PyTuple::new(py, shape)?;
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&shape_tuple, cached_float64_type(py)?),
+            )?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -14626,14 +14676,19 @@ fn try_zerocopy_f64_i32_ldexp(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for ((slot, mantissa_cell), exponent_cell) in
-            output.iter().zip(mantissas.iter()).zip(exponents.iter())
-        {
-            let mantissa = mantissa_cell.get();
+        let mant: &[f64] =
+            unsafe { std::slice::from_raw_parts(mantissas.as_ptr().cast::<f64>(), n) };
+        let expo: &[i32] =
+            unsafe { std::slice::from_raw_parts(exponents.as_ptr().cast::<i32>(), n) };
+        let out_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+
+        for i in 0..n {
+            let mantissa = mant[i];
             if mantissa.is_nan() {
                 return Ok(None);
             }
-            let exponent = exponent_cell.get();
+            let exponent = expo[i];
             let Some(result) = scalbn_f64_normal_result(mantissa, exponent) else {
                 let result = mantissa * 2.0_f64.powf(f64::from(exponent));
                 let mantissa_magnitude_bits = mantissa.to_bits() & 0x7fff_ffff_ffff_ffff;
@@ -14644,14 +14699,14 @@ fn try_zerocopy_f64_i32_ldexp(
                 {
                     return Ok(None);
                 }
-                slot.set(result);
+                out_data[i] = result;
                 continue;
             };
-            slot.set(result);
+            out_data[i] = result;
         }
     }
 
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // float32 sibling of try_zerocopy_f64_i32_ldexp. numpy runs f32 ldexp single-threaded (scalbnf,
@@ -32543,11 +32598,14 @@ fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Op
     if n < F32_SPACING_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float32")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let out = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float32")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float32")))?
+    };
     {
-        let Ok(out_buf) = PyBuffer::<f32>::get(&flat) else {
+        let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
         };
         let Some(output) = out_buf.as_mut_slice(py) else {
@@ -32575,14 +32633,7 @@ fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Op
                 }
             });
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(out, &shape).map(Some)
 }
 
 #[pyfunction]
@@ -33088,9 +33139,12 @@ fn try_zerocopy_f64_heaviside_scalar(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
     let shape: Vec<usize> = buffer.shape().to_vec();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -33124,15 +33178,7 @@ fn try_zerocopy_f64_heaviside_scalar(
             }
         }
     }
-    if shape.len() == 1 {
-        Ok(Some(flat.unbind()))
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        Ok(Some(
-            flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                .unbind(),
-        ))
-    }
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 /// Arithmetic contract for fused element-wise chains.
@@ -33418,7 +33464,12 @@ fn zerocopy_multiply_add_f16(
     let vc: &[u16] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<u16>(), n) };
 
     let f16_dtype = cached_float16_type(py)?;
-    let flat = numpy.call_method1(intern!(py, "empty"), (n, f16_dtype))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, f16_dtype))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f16_dtype))?
+    };
     {
         let raw_out = flat.call_method1(intern!(py, "view"), (u16_dtype,))?;
         let Ok(out_buffer) = PyBuffer::<u16>::get(&raw_out) else {
@@ -33434,15 +33485,7 @@ fn zerocopy_multiply_add_f16(
 
         multiply_add_f16_into(out, va, vb, vc);
     }
-    if shape.len() == 1 {
-        Ok(Some(flat.unbind()))
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        Ok(Some(
-            flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                .unbind(),
-        ))
-    }
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 /// One fused pass of complex `a * b + c` over an interleaved `[re, im, ...]` band.
@@ -33642,9 +33685,12 @@ fn zerocopy_multiply_add_complex(
                     std::slice::from_raw_parts(cells_c.as_ptr().cast::<$float>(), components)
                 };
 
-                let kwargs = PyDict::new(py);
-                kwargs.set_item(intern!(py, "dtype"), complex_name)?;
-                let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+                let flat = if let [only] = shape.as_slice() {
+                    numpy.call_method1(intern!(py, "empty"), (*only, complex_name))?
+                } else {
+                    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+                    numpy.call_method1(intern!(py, "empty"), (&shape_tuple, complex_name))?
+                };
                 {
                     let view_out = flat.call_method1(intern!(py, "view"), (&component_dtype,))?;
                     let Ok(out_buffer) = PyBuffer::<$float>::get(&view_out) else {
@@ -33664,15 +33710,7 @@ fn zerocopy_multiply_add_complex(
                     // SAFETY: FMA availability established above.
                     unsafe { $band(out, va, vb, vc) };
                 }
-                if shape.len() == 1 {
-                    Ok(Some(flat.unbind()))
-                } else {
-                    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-                    Ok(Some(
-                        flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                            .unbind(),
-                    ))
-                }
+                finish_preshaped_output(flat, &shape).map(Some)
             }};
         }
 
@@ -33745,9 +33783,12 @@ where
     let vb: &[T] = unsafe { std::slice::from_raw_parts(cells_b.as_ptr().cast::<T>(), n) };
     let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
 
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, dtype))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -33762,15 +33803,7 @@ where
 
         multiply_add_into(out, va, vb, vc);
     }
-    if shape.len() == 1 {
-        Ok(Some(flat.unbind()))
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        Ok(Some(
-            flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                .unbind(),
-        ))
-    }
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 /// One fused `a * b + c` pass into a CALLER-OWNED output, for the primitive
@@ -34445,9 +34478,12 @@ where
     let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
     let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
 
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, dtype))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -34462,15 +34498,7 @@ where
 
         subtract_multiply_add_into(out, va, vb, vc, vd);
     }
-    if shape.len() == 1 {
-        Ok(Some(flat.unbind()))
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        Ok(Some(
-            flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                .unbind(),
-        ))
-    }
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 fn zerocopy_pairwise_multiply_add_typed<T>(
@@ -34533,9 +34561,12 @@ where
     let vc: &[T] = unsafe { std::slice::from_raw_parts(cells_c.as_ptr().cast::<T>(), n) };
     let vd: &[T] = unsafe { std::slice::from_raw_parts(cells_d.as_ptr().cast::<T>(), n) };
 
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, dtype))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -34549,15 +34580,7 @@ where
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut T, n) };
         pairwise_multiply_add_into(out, va, vb, vc, vd);
     }
-    if shape.len() == 1 {
-        Ok(Some(flat.unbind()))
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        Ok(Some(
-            flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                .unbind(),
-        ))
-    }
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 /// Write `(a - b) * c + d` directly into a caller-owned NumPy array.
@@ -35192,12 +35215,21 @@ fn try_zerocopy_f64_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
         return Ok(None);
     }
     let n = input.len();
-    let mkw = PyDict::new(py);
-    mkw.set_item(intern!(py, "dtype"), "float64")?;
-    let mantissa = numpy.call_method(intern!(py, "empty"), (n,), Some(&mkw))?;
-    let ekw = PyDict::new(py);
-    ekw.set_item(intern!(py, "dtype"), "int32")?;
-    let exponent = numpy.call_method(intern!(py, "empty"), (n,), Some(&ekw))?;
+    let (mantissa, exponent) = if let [only] = shape.as_slice() {
+        (
+            numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "int32")))?,
+        )
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        (
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&shape_tuple, cached_float64_type(py)?),
+            )?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "int32")))?,
+        )
+    };
     if n > 0 {
         let (Ok(m_buf), Ok(e_buf)) = (
             PyBuffer::<f64>::get(&mantissa),
@@ -35238,9 +35270,6 @@ fn try_zerocopy_f64_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
             kernel(m_slice, e_slice, data);
         }
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let mantissa = mantissa.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    let exponent = exponent.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     Ok(Some(
         PyTuple::new(py, [&mantissa, &exponent])?
             .into_any()
@@ -35267,12 +35296,21 @@ fn try_zerocopy_f32_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
         return Ok(None);
     }
     let n = input.len();
-    let mkw = PyDict::new(py);
-    mkw.set_item(intern!(py, "dtype"), "float32")?;
-    let mantissa = numpy.call_method(intern!(py, "empty"), (n,), Some(&mkw))?;
-    let ekw = PyDict::new(py);
-    ekw.set_item(intern!(py, "dtype"), "int32")?;
-    let exponent = numpy.call_method(intern!(py, "empty"), (n,), Some(&ekw))?;
+    let (mantissa, exponent) = if let [only] = shape.as_slice() {
+        (
+            numpy.call_method1(intern!(py, "empty"), (*only, cached_float32_type(py)?))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "int32")))?,
+        )
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        (
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&shape_tuple, cached_float32_type(py)?),
+            )?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "int32")))?,
+        )
+    };
     if n > 0 {
         let (Ok(m_buf), Ok(e_buf)) = (
             PyBuffer::<f32>::get(&mantissa),
@@ -35309,9 +35347,6 @@ fn try_zerocopy_f32_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
             kernel(m_slice, e_slice, data);
         }
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let mantissa = mantissa.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    let exponent = exponent.call_method1(intern!(py, "reshape"), (&output_shape,))?;
     Ok(Some(
         PyTuple::new(py, [&mantissa, &exponent])?
             .into_any()
@@ -35360,8 +35395,20 @@ fn try_zerocopy_f16_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
     if input.len() != n {
         return Ok(None);
     }
-    let mantissa = numpy.call_method1(intern!(py, "empty"), (&shape, cached_float16_type(py)?))?;
-    let exponent = numpy.call_method1(intern!(py, "empty"), (&shape, "int32"))?;
+    let f16t = cached_float16_type(py)?;
+    let i32t = intern!(py, "int32");
+    let (mantissa, exponent) = if let [only] = shape.as_slice() {
+        (
+            numpy.call_method1(intern!(py, "empty"), (*only, f16t))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, i32t))?,
+        )
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        (
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f16t))?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, i32t))?,
+        )
+    };
     if n > 0 {
         let m16 = mantissa.call_method1(intern!(py, "view"), (u16t,))?;
         let (Ok(m_buf), Ok(e_buf)) = (PyBuffer::<u16>::get(&m16), PyBuffer::<i32>::get(&exponent))
@@ -35488,19 +35535,8 @@ fn frexp(py: Python<'_>, x: Py<PyAny>, out: &Bound<'_, PyTuple>) -> PyResult<Py<
 // parity stay unchanged.
 fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x.is_exact_instance(&ndarray_type) {
+    if !x.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f64(py, x) {
         return Ok(None);
-    }
-    let dtype = x.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
-    {
-        return Ok(None);
-    }
-    let ndim = x.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
-    if ndim == 0 {
-        return Ok(None); // 0-d returns numpy scalars — keep the existing path
     }
     let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
         return Ok(None);
@@ -35511,11 +35547,23 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let shape = x.getattr(intern!(py, "shape"))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let frac_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
-    let int_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
+    let shape = in_buffer.shape();
+    if shape.is_empty() {
+        return Ok(None); // 0-d returns numpy scalars — keep the existing path
+    }
+    let f64t = cached_float64_type(py)?;
+    let (frac_arr, int_arr) = if let [only] = shape {
+        (
+            numpy.call_method1(intern!(py, "empty"), (*only, f64t))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, f64t))?,
+        )
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        (
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f64t))?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f64t))?,
+        )
+    };
     if !cells.is_empty() {
         let (Ok(frac_buf), Ok(int_buf)) = (
             PyBuffer::<f64>::get(&frac_arr),
@@ -35531,39 +35579,34 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
         // branch) writing TWO outputs (~24 B/elem), so a parallel raw-slice map aggregates
         // ALU+bandwidth and wins. Same per-element math => bit-identical.
         let n = cells.len();
+        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
+        // read-only under the GIL and frac/int are distinct fresh numpy.empty buffers
+        // we own (no alias with the input or each other).
+        let in_data: &[f64] =
+            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+        let frac_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(frac_out.as_ptr() as *mut f64, n) };
+        let int_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(int_out.as_ptr() as *mut f64, n) };
+        let kernel = |fo: &mut [f64], io: &mut [f64], ci: &[f64]| {
+            for ((f, i), &v) in fo.iter_mut().zip(io.iter_mut()).zip(ci.iter()) {
+                let t = v.trunc();
+                *i = t;
+                let base = if v.is_infinite() { 0.0 } else { v - t };
+                *f = base.copysign(v);
+            }
+        };
         const MODF_PARALLEL_MIN: usize = 1 << 21;
         if n >= MODF_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-            // read-only under the GIL and frac/int are distinct fresh numpy.empty buffers
-            // we own (no alias with the input or each other).
-            let in_data: &[f64] =
-                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
-            let frac_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(frac_out.as_ptr() as *mut f64, n) };
-            let int_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(int_out.as_ptr() as *mut f64, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
             frac_data
                 .par_chunks_mut(chunk)
                 .zip(int_data.par_chunks_mut(chunk))
                 .zip(in_data.par_chunks(chunk))
-                .for_each(|((fo, io), ci)| {
-                    for ((f, i), &v) in fo.iter_mut().zip(io.iter_mut()).zip(ci.iter()) {
-                        let t = v.trunc();
-                        *i = t;
-                        let base = if v.is_infinite() { 0.0 } else { v - t };
-                        *f = base.copysign(v);
-                    }
-                });
+                .for_each(|((fo, io), ci)| kernel(fo, io, ci));
         } else {
-            for ((c, fo), io) in cells.iter().zip(frac_out.iter()).zip(int_out.iter()) {
-                let v = c.get();
-                let t = v.trunc();
-                io.set(t);
-                let base = if v.is_infinite() { 0.0 } else { v - t };
-                fo.set(base.copysign(v));
-            }
+            kernel(frac_data, int_data, in_data);
         }
     }
     Ok(Some(PyTuple::new(py, [frac_arr, int_arr])?.unbind().into()))
@@ -35577,9 +35620,6 @@ fn try_zerocopy_f32_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     if !x.is_exact_instance(cached_ndarray_type(py)?) || !numpy_dtype_is_f32(x) {
         return Ok(None);
     }
-    if x.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0 {
-        return Ok(None);
-    }
     let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
         return Ok(None);
     };
@@ -35589,11 +35629,23 @@ fn try_zerocopy_f32_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let shape = x.getattr(intern!(py, "shape"))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float32")?;
-    let frac_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
-    let int_arr = numpy.call_method(intern!(py, "empty"), (&shape,), Some(&kwargs))?;
+    let shape = in_buffer.shape();
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let f32t = cached_float32_type(py)?;
+    let (frac_arr, int_arr) = if let [only] = shape {
+        (
+            numpy.call_method1(intern!(py, "empty"), (*only, f32t))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, f32t))?,
+        )
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        (
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f32t))?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f32t))?,
+        )
+    };
     if !cells.is_empty() {
         let (Ok(frac_buf), Ok(int_buf)) = (
             PyBuffer::<f32>::get(&frac_arr),
@@ -35605,12 +35657,35 @@ fn try_zerocopy_f32_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
         else {
             return Ok(None);
         };
-        for ((c, fo), io) in cells.iter().zip(frac_out.iter()).zip(int_out.iter()) {
-            let v = c.get();
-            let t = v.trunc();
-            io.set(t);
-            let base = if v.is_infinite() { 0.0 } else { v - t };
-            fo.set(base.copysign(v));
+        let n = cells.len();
+        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
+        // read-only under the GIL and frac/int are distinct fresh numpy.empty buffers
+        // we own (no alias with the input or each other).
+        let in_data: &[f32] =
+            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+        let frac_data: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(frac_out.as_ptr() as *mut f32, n) };
+        let int_data: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(int_out.as_ptr() as *mut f32, n) };
+        let kernel = |fo: &mut [f32], io: &mut [f32], ci: &[f32]| {
+            for ((f, i), &v) in fo.iter_mut().zip(io.iter_mut()).zip(ci.iter()) {
+                let t = v.trunc();
+                *i = t;
+                let base = if v.is_infinite() { 0.0 } else { v - t };
+                *f = base.copysign(v);
+            }
+        };
+        const MODF_PARALLEL_MIN: usize = 1 << 21;
+        if n >= MODF_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            frac_data
+                .par_chunks_mut(chunk)
+                .zip(int_data.par_chunks_mut(chunk))
+                .zip(in_data.par_chunks(chunk))
+                .for_each(|((fo, io), ci)| kernel(fo, io, ci));
+        } else {
+            kernel(frac_data, int_data, in_data);
         }
     }
     Ok(Some(PyTuple::new(py, [frac_arr, int_arr])?.unbind().into()))
@@ -35632,16 +35707,18 @@ fn try_zerocopy_f16_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     if !dtype_is_f16(x)? {
         return Ok(None);
     }
-    if x.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0
-        || !x
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
+    if !x
+        .getattr(intern!(py, "flags"))?
+        .getattr(intern!(py, "c_contiguous"))?
+        .extract::<bool>()?
     {
         return Ok(None);
     }
-    let shape = x.getattr(intern!(py, "shape"))?;
-    let n: usize = x.getattr(intern!(py, "size"))?.extract()?;
+    let shape: Vec<usize> = x.getattr(intern!(py, "shape"))?.extract()?;
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let n: usize = shape.iter().product();
     if n < F16_MODF_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -35666,8 +35743,18 @@ fn try_zerocopy_f16_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     }
     let numpy = cached_numpy(py)?;
     let f16t = cached_float16_type(py)?;
-    let frac_arr = numpy.call_method1(intern!(py, "empty"), (&shape, f16t))?;
-    let int_arr = numpy.call_method1(intern!(py, "empty"), (&shape, f16t))?;
+    let (frac_arr, int_arr) = if let [only] = shape.as_slice() {
+        (
+            numpy.call_method1(intern!(py, "empty"), (*only, f16t))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, f16t))?,
+        )
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        (
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f16t))?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_tuple, f16t))?,
+        )
+    };
     {
         let frac16 = frac_arr.call_method1(intern!(py, "view"), (u16t,))?;
         let int16 = int_arr.call_method1(intern!(py, "view"), (u16t,))?;
@@ -36293,33 +36380,40 @@ fn choose_typed<'py, T: pyo3::buffer::Element + Copy>(
         };
         slices.push(s);
     }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent), read-only under the GIL.
+    let a_slice: &[i64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<i64>(), n) };
+    let raw_slices: Vec<&[T]> = slices
+        .iter()
+        .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), n) })
+        .collect();
+
     // Validate ALL indices first so an OOB defers to numpy (exact ValueError).
-    for c in a_in.iter() {
-        let idx = c.get();
+    for &idx in a_slice {
         if idx < 0 || idx >= k {
             return Ok(None);
         }
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let out = if let [only] = out_shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype_name))?
+    } else {
+        let shape = PyTuple::new(py, out_shape)?;
+        numpy.call_method1(intern!(py, "empty"), (&shape, dtype_name))?
+    };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (i, c) in a_in.iter().enumerate() {
-            let sel = c.get() as usize;
-            output[i].set(slices[sel][i].get());
+        let out_slice: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        for (i, (&sel_idx, out_slot)) in a_slice[..n].iter().zip(&mut out_slice[..n]).enumerate() {
+            let sel = sel_idx as usize;
+            *out_slot = raw_slices[sel][i];
         }
     }
-    let shape = PyTuple::new(py, out_shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&shape,))?
-            .unbind(),
-    ))
+    Ok(Some(out.unbind()))
 }
 
 // Zero-copy integer np.choose for the dtypes the native path sends through the
@@ -36392,9 +36486,7 @@ fn try_zerocopy_int_choose(
         }
     }
     // Normalize the index array to contiguous int64.
-    let kw = PyDict::new(py);
-    kw.set_item(intern!(py, "dtype"), "int64")?;
-    let a64 = cached_numpy_ascontiguousarray(py)?.call((a,), Some(&kw))?;
+    let a64 = cached_numpy_ascontiguousarray(py)?.call1((a, cached_int64_type(py)?))?;
     match (kind, itemsize) {
         ('i', 8) => choose_typed::<i64>(py, numpy, &a64, &items, "int64", &a_shape),
         ('i', 4) => choose_typed::<i32>(py, numpy, &a64, &items, "int32", &a_shape),
@@ -39809,9 +39901,12 @@ fn try_zerocopy_f64_gradient_1d(
     let total = cells.len();
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let out = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -39876,15 +39971,7 @@ fn try_zerocopy_f64_gradient_1d(
             }
         }
     }
-    if ndim == 1 {
-        Ok(Some(out.unbind()))
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        Ok(Some(
-            out.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                .unbind(),
-        ))
-    }
+    finish_preshaped_output(out, &shape).map(Some)
 }
 
 // Zero-copy np.gradient(f, x) with a COORDINATE ARRAY x (NON-uniform spacing), 1-D f64, edge_order=1.
@@ -40185,9 +40272,12 @@ fn try_zerocopy_f64_gradient_axis_coords(
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let fd: &[f64] = unsafe { std::slice::from_raw_parts(fc.as_ptr().cast::<f64>(), total) };
     let cd: &[f64] = unsafe { std::slice::from_raw_parts(cc0.as_ptr().cast::<f64>(), la) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let out = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
+    };
     {
         let Ok(obuf) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -40268,11 +40358,7 @@ fn try_zerocopy_f64_gradient_axis_coords(
             }
         }
     }
-    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        out.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-            .unbind(),
-    ))
+    finish_preshaped_output(out, &shape).map(Some)
 }
 
 // f32 twin of try_zerocopy_f64_gradient_1d (last axis / 1-D, uniform spacing, edge_order=1). numpy
@@ -40314,9 +40400,12 @@ fn try_zerocopy_f32_gradient_1d(
     let total = cells.len();
     // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
     let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float32")?;
-    let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let out = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float32")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float32")))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
@@ -40363,15 +40452,7 @@ fn try_zerocopy_f32_gradient_1d(
             }
         }
     }
-    if ndim == 1 {
-        Ok(Some(out.unbind()))
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        Ok(Some(
-            out.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                .unbind(),
-        ))
-    }
+    finish_preshaped_output(out, &shape).map(Some)
 }
 
 // np.gradient along a single NON-last (strided) axis of a C-contiguous f64 ndarray,
@@ -40435,9 +40516,8 @@ fn try_zerocopy_f64_gradient_strided_axis(
     let total = cells.len();
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -40508,11 +40588,7 @@ fn try_zerocopy_f64_gradient_strided_axis(
                 .for_each(|(g, orow)| fill_row(g, orow));
         }
     }
-    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        out.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-            .unbind(),
-    ))
+    finish_preshaped_output(out, &shape).map(Some)
 }
 
 // f32 twin of try_zerocopy_f64_gradient_strided_axis (non-last axis, uniform spacing,
@@ -40566,9 +40642,8 @@ fn try_zerocopy_f32_gradient_strided_axis(
     let total = cells.len();
     // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
     let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float32")?;
-    let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float32")))?;
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
@@ -40615,11 +40690,7 @@ fn try_zerocopy_f32_gradient_strided_axis(
                 .for_each(|(g, orow)| fill_row(g, orow));
         }
     }
-    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        out.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-            .unbind(),
-    ))
+    finish_preshaped_output(out, &shape).map(Some)
 }
 
 // Convert an integer gradient input to float64 when the conversion is provably
@@ -60462,9 +60533,12 @@ fn try_zerocopy_complex_angle(
     }
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let flat = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -60498,15 +60572,7 @@ fn try_zerocopy_complex_angle(
             }
         }
     }
-    if shape.len() == 1 {
-        Ok(Some(flat.unbind()))
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        Ok(Some(
-            flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-                .unbind(),
-        ))
-    }
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 #[pyfunction]
@@ -82561,9 +82627,12 @@ fn try_zerocopy_f64_polyval(
     let total = cells.len();
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let out = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float64")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -82600,11 +82669,7 @@ fn try_zerocopy_f64_polyval(
             }
         }
     }
-    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        out.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-            .unbind(),
-    ))
+    finish_preshaped_output(out, &shape).map(Some)
 }
 
 // float32 sibling of try_zerocopy_f64_polyval. numpy runs polyval (Horner) single-threaded
@@ -82652,9 +82717,12 @@ fn try_zerocopy_f32_polyval(
     };
     let total = cells.len();
     let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float32")?;
-    let out = numpy.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let out = if let [only] = shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, intern!(py, "float32")))?
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float32")))?
+    };
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&out) else {
             return Ok(None);
@@ -82686,11 +82754,7 @@ fn try_zerocopy_f32_polyval(
             }
         }
     }
-    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    Ok(Some(
-        out.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-            .unbind(),
-    ))
+    finish_preshaped_output(out, &shape).map(Some)
 }
 
 #[pyfunction]
@@ -111704,8 +111768,8 @@ fn try_zerocopy_f64_divmod(
     let (Some(c1), Some(c2)) = (b1.as_slice(py), b2.as_slice(py)) else {
         return Ok(None);
     };
+    let shape = b1.shape();
     let n = c1.len();
-    let shape: Vec<usize> = b1.shape().to_vec();
     // SAFETY: ReadOnlyCell<f64> repr(transparent); read-only under the GIL.
     let a: &[f64] = unsafe { std::slice::from_raw_parts(c1.as_ptr().cast::<f64>(), n) };
     let b: &[f64] = unsafe { std::slice::from_raw_parts(c2.as_ptr().cast::<f64>(), n) };
@@ -111725,13 +111789,19 @@ fn try_zerocopy_f64_divmod(
     if !clean {
         return Ok(None);
     }
-    let mk = |nm: &str| -> PyResult<Bound<'_, PyAny>> {
-        let kw = PyDict::new(py);
-        kw.set_item(intern!(py, "dtype"), nm)?;
-        numpy.call_method(intern!(py, "empty"), (n,), Some(&kw))
+    let f64_t = cached_float64_type(py)?;
+    let (quotient, remainder) = if let [only] = shape {
+        (
+            numpy.call_method1(intern!(py, "empty"), (*only, f64_t))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, f64_t))?,
+        )
+    } else {
+        let shape_t = PyTuple::new(py, shape)?;
+        (
+            numpy.call_method1(intern!(py, "empty"), (&shape_t, f64_t))?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_t, f64_t))?,
+        )
     };
-    let quotient = mk("float64")?;
-    let remainder = mk("float64")?;
     if n > 0 {
         let (Ok(qb), Ok(rb)) = (
             PyBuffer::<f64>::get(&quotient),
@@ -111771,9 +111841,6 @@ fn try_zerocopy_f64_divmod(
             kernel(q, r, a, b);
         }
     }
-    let shape_t = PyTuple::new(py, shape.iter().copied())?;
-    let quotient = quotient.call_method1(intern!(py, "reshape"), (&shape_t,))?;
-    let remainder = remainder.call_method1(intern!(py, "reshape"), (&shape_t,))?;
     if shape.is_empty() {
         let qs = quotient.get_item(())?;
         let rs = remainder.get_item(())?;
