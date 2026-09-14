@@ -17735,8 +17735,8 @@ fn try_zerocopy_f64_container_take(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !a.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let list = indices.cast::<PyList>().ok();
@@ -17810,8 +17810,8 @@ fn try_zerocopy_f64_take(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type) || !indices.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !a.is_exact_instance(ndarray_type) || !indices.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     // indices must be a signed 64-bit integer ndarray (numpy's default index
@@ -17865,6 +17865,11 @@ fn try_zerocopy_f64_take(
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "dtype"), float64_type)?;
         numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?
+    } else if let [only] = out_shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+    } else if !take_reshape_is_always() {
+        let alloc_shape = PyTuple::new(py, out_shape)?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, float64_type))?
     } else {
         numpy.call_method1(intern!(py, "empty"), (count, float64_type))?
     };
@@ -17964,10 +17969,13 @@ fn try_zerocopy_f64_take(
     // `deadlock-audit-ddoeq`: the excess over NumPy decomposes as ~681 ns FIXED + ~0.16 ns/element,
     // so at small m the loss is entry, not the gather. `FNP_TAKE_RESHAPE=always` restores the
     // unconditional form for an in-process A/B.
-    if out_shape.len() == 1 && out_shape[0] == count && !take_reshape_is_always() {
+    if !take_reshape_is_always() {
+        return finish_preshaped_output(flat, out_shape).map(Some);
+    }
+    if out_shape.len() == 1 && out_shape[0] == count {
         return Ok(Some(flat.unbind()));
     }
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output_shape = PyTuple::new(py, out_shape)?;
     let output = flat
         .call_method1(intern!(py, "reshape"), (&output_shape,))?
         .unbind();
@@ -18005,8 +18013,13 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     }
     let out_shape: Vec<usize> = idx_buffer.shape().to_vec();
     let count = idx_in.len();
-    // dtype positionally, as above - no per-call kwargs dict.
-    let flat = numpy.call_method1(intern!(py, "empty"), (count, dtype_obj))?;
+    // Allocate at target shape directly so no reshape is needed at any rank.
+    let flat = if let [only] = out_shape.as_slice() {
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype_obj))?
+    } else {
+        let alloc_shape = PyTuple::new(py, &out_shape)?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, dtype_obj))?
+    };
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -18082,6 +18095,7 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     arr_u: &Bound<'py, PyAny>,
     idx_in: &[pyo3::buffer::ReadOnlyCell<i64>],
     out_dtype_name: &str,
+    out_shape: &[usize],
     outer: usize,
     la: usize,
     inner: usize,
@@ -18112,7 +18126,12 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         }
         resolved.push(k as usize);
     }
-    let flat = numpy.call_method1(intern!(py, "empty"), (total_out, out_dtype_name))?;
+    let flat = if let [only] = out_shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, out_dtype_name))?
+    } else {
+        let alloc_shape = PyTuple::new(py, out_shape)?;
+        numpy.call_method1(intern!(py, "empty"), (alloc_shape, out_dtype_name))?
+    };
     if total_out > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -18203,8 +18222,8 @@ fn try_zerocopy_take_axis(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type) || !indices.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !a.is_exact_instance(ndarray_type) || !indices.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     {
@@ -18255,31 +18274,29 @@ fn try_zerocopy_take_axis(
         _ => return Ok(None),
     };
     let arr_u = a.call_method1(intern!(py, "view"), (mover_type,))?;
+    // out shape = a.shape[:ax] + indices.shape + a.shape[ax+1:]
+    let mut out_shape: Vec<usize> = s_arr[..ax].to_vec();
+    out_shape.extend_from_slice(s_idx);
+    out_shape.extend_from_slice(&s_arr[ax + 1..]);
     let flat = match itemsize {
-        1 => take_axis_typed::<u8>(py, numpy, &arr_u, idx_in, "uint8", outer, la, inner)?,
-        2 => take_axis_typed::<u16>(py, numpy, &arr_u, idx_in, "uint16", outer, la, inner)?,
-        4 => take_axis_typed::<u32>(py, numpy, &arr_u, idx_in, "uint32", outer, la, inner)?,
-        _ => take_axis_typed::<u64>(py, numpy, &arr_u, idx_in, "uint64", outer, la, inner)?,
+        1 => take_axis_typed::<u8>(
+            py, numpy, &arr_u, idx_in, "uint8", &out_shape, outer, la, inner,
+        )?,
+        2 => take_axis_typed::<u16>(
+            py, numpy, &arr_u, idx_in, "uint16", &out_shape, outer, la, inner,
+        )?,
+        4 => take_axis_typed::<u32>(
+            py, numpy, &arr_u, idx_in, "uint32", &out_shape, outer, la, inner,
+        )?,
+        _ => take_axis_typed::<u64>(
+            py, numpy, &arr_u, idx_in, "uint64", &out_shape, outer, la, inner,
+        )?,
     };
     let Some(flat) = flat else {
         return Ok(None);
     };
     let restored = flat.call_method1(intern!(py, "view"), (&a_dtype,))?;
-    // out shape = a.shape[:ax] + indices.shape + a.shape[ax+1:]
-    let mut out_shape: Vec<usize> = s_arr[..ax].to_vec();
-    out_shape.extend_from_slice(s_idx);
-    out_shape.extend_from_slice(&s_arr[ax + 1..]);
-    if out_shape.len() == 1 {
-        return Ok(Some(restored.unbind()));
-    }
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let output = restored
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if out_shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(restored, &out_shape).map(Some)
 }
 
 // Zero-copy flat gather for the non-f64 gated dtypes the f64 helper leaves to the
@@ -18306,8 +18323,8 @@ fn try_zerocopy_int_take(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type) || !indices.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !a.is_exact_instance(ndarray_type) || !indices.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     {
@@ -18353,17 +18370,7 @@ fn try_zerocopy_int_take(
     };
     // View the gathered uint result back to the input's exact dtype (bit-identical bytes).
     let flat = flat_uint.call_method1(intern!(py, "view"), (&a_dtype,))?;
-    if out_shape.len() == 1 {
-        return Ok(Some(flat.unbind()));
-    }
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let output = flat
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind();
-    if out_shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Zero-copy in-place np.putmask(a, mask, values) for a writable float64 a ndarray,
@@ -18384,10 +18391,10 @@ fn try_zerocopy_f64_putmask(
     values: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type)
-        || !mask.is_exact_instance(&ndarray_type)
-        || !values.is_exact_instance(&ndarray_type)
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !a.is_exact_instance(ndarray_type)
+        || !mask.is_exact_instance(ndarray_type)
+        || !values.is_exact_instance(ndarray_type)
     {
         return Ok(false);
     }
@@ -18561,10 +18568,10 @@ fn try_zerocopy_any_putmask(
     values: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type)
-        || !mask.is_exact_instance(&ndarray_type)
-        || !values.is_exact_instance(&ndarray_type)
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !a.is_exact_instance(ndarray_type)
+        || !mask.is_exact_instance(ndarray_type)
+        || !values.is_exact_instance(ndarray_type)
     {
         return Ok(false);
     }
@@ -18667,10 +18674,10 @@ fn try_zerocopy_any_place(
     vals: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !arr.is_exact_instance(&ndarray_type)
-        || !mask.is_exact_instance(&ndarray_type)
-        || !vals.is_exact_instance(&ndarray_type)
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !arr.is_exact_instance(ndarray_type)
+        || !mask.is_exact_instance(ndarray_type)
+        || !vals.is_exact_instance(ndarray_type)
     {
         return Ok(false);
     }
@@ -18725,10 +18732,10 @@ fn try_zerocopy_f64_place(
     vals: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !arr.is_exact_instance(&ndarray_type)
-        || !mask.is_exact_instance(&ndarray_type)
-        || !vals.is_exact_instance(&ndarray_type)
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !arr.is_exact_instance(ndarray_type)
+        || !mask.is_exact_instance(ndarray_type)
+        || !vals.is_exact_instance(ndarray_type)
     {
         return Ok(false);
     }
@@ -18922,8 +18929,8 @@ fn try_zerocopy_accumulate_extremum(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !array.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !array.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let shape: Vec<usize> = array.getattr(intern!(py, "shape"))?.extract()?;
@@ -18979,8 +18986,8 @@ fn try_zerocopy_accumulate_bitwise(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !array.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !array.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let shape: Vec<usize> = array.getattr(intern!(py, "shape"))?.extract()?;
@@ -21586,17 +21593,37 @@ fn build_numpy_array_from_storage(
     let numpy = cached_numpy(py)?;
     let array = match storage {
         // Numeric dtypes whose Rust storage matches the NumPy element layout copy
-        // through the buffer protocol (see numpy_array_from_slice).
-        ArrayStorage::I8(values) => numpy_array_from_slice(py, numpy, &values, "int8")?,
-        ArrayStorage::I16(values) => numpy_array_from_slice(py, numpy, &values, "int16")?,
-        ArrayStorage::I32(values) => numpy_array_from_slice(py, numpy, &values, "int32")?,
-        ArrayStorage::I64(values) => numpy_array_from_slice(py, numpy, &values, "int64")?,
-        ArrayStorage::U8(values) => numpy_array_from_slice(py, numpy, &values, "uint8")?,
-        ArrayStorage::U16(values) => numpy_array_from_slice(py, numpy, &values, "uint16")?,
-        ArrayStorage::U32(values) => numpy_array_from_slice(py, numpy, &values, "uint32")?,
-        ArrayStorage::U64(values) => numpy_array_from_slice(py, numpy, &values, "uint64")?,
-        ArrayStorage::F32(values) => numpy_array_from_slice(py, numpy, &values, "float32")?,
-        ArrayStorage::F64(values) => numpy_array_from_slice(py, numpy, &values, "float64")?,
+        // through the buffer protocol (see numpy_array_from_slice_shaped).
+        ArrayStorage::I8(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "int8", shape)?
+        }
+        ArrayStorage::I16(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "int16", shape)?
+        }
+        ArrayStorage::I32(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "int32", shape)?
+        }
+        ArrayStorage::I64(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "int64", shape)?
+        }
+        ArrayStorage::U8(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "uint8", shape)?
+        }
+        ArrayStorage::U16(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "uint16", shape)?
+        }
+        ArrayStorage::U32(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "uint32", shape)?
+        }
+        ArrayStorage::U64(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "uint64", shape)?
+        }
+        ArrayStorage::F32(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "float32", shape)?
+        }
+        ArrayStorage::F64(values) => {
+            numpy_array_from_slice_shaped(py, numpy, &values, "float64", shape)?
+        }
         // NumPy bool_ is a single byte (1 = True, 0 = False), so build the result
         // through the uint8 buffer fast path (one memcpy) and reinterpret it as
         // bool_ with a zero-copy .view — bit-identical to the old per-element
@@ -21621,7 +21648,7 @@ fn build_numpy_array_from_storage(
             // performed by `numpy_array_from_slice`.
             let bytes: &[u8] =
                 unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len()) };
-            let u8_arr = numpy_array_from_slice(py, numpy, bytes, "uint8")?;
+            let u8_arr = numpy_array_from_slice_shaped(py, numpy, bytes, "uint8", shape)?;
             let bool_dtype = cached_bool_type(py)?;
             u8_arr.call_method1(intern!(py, "view"), (bool_dtype,))?
         }
@@ -21631,7 +21658,7 @@ fn build_numpy_array_from_storage(
             // to the old per-element PyList(f32) construction, which boxed one Python
             // float per element (~1700x slower than numpy on a 4M abs/sqrt result).
             let bits: Vec<u16> = values.iter().map(|value| value.to_bits()).collect();
-            let u16_arr = numpy_array_from_slice(py, numpy, &bits, "uint16")?;
+            let u16_arr = numpy_array_from_slice_shaped(py, numpy, &bits, "uint16", shape)?;
             let f16_dtype = cached_float16_type(py)?;
             u16_arr.call_method1(intern!(py, "view"), (f16_dtype,))?
         }
@@ -21643,10 +21670,7 @@ fn build_numpy_array_from_storage(
         }
     };
 
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    Ok(array
-        .call_method1(intern!(py, "reshape"), (&output_shape,))?
-        .unbind())
+    Ok(array.unbind())
 }
 
 fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
@@ -21659,11 +21683,9 @@ fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<
     // path (same bytes, same C-contiguous reshape).
     if array.dtype() == DType::F64 && !array.has_integer_sidecar() {
         let numpy = cached_numpy(py)?;
-        let flat = numpy_array_from_slice(py, numpy, array.values(), "float64")?;
-        let output_shape = PyTuple::new(py, array.shape().iter().copied())?;
-        return Ok(flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind());
+        let arr =
+            numpy_array_from_slice_shaped(py, numpy, array.values(), "float64", array.shape())?;
+        return Ok(arr.unbind());
     }
     // Same fast path for exact integer (int64/uint64) results: the sidecar already
     // holds the bytes NumPy wants, so copy it straight into the buffer instead of
@@ -21678,14 +21700,15 @@ fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<
         };
         if let Some(name) = dtype_name {
             let numpy = cached_numpy(py)?;
-            let flat = match sidecar {
-                IntegerSidecar::I64(v) => numpy_array_from_slice(py, numpy, v, name)?,
-                IntegerSidecar::U64(v) => numpy_array_from_slice(py, numpy, v, name)?,
+            let arr = match sidecar {
+                IntegerSidecar::I64(v) => {
+                    numpy_array_from_slice_shaped(py, numpy, v, name, array.shape())?
+                }
+                IntegerSidecar::U64(v) => {
+                    numpy_array_from_slice_shaped(py, numpy, v, name, array.shape())?
+                }
             };
-            let output_shape = PyTuple::new(py, array.shape().iter().copied())?;
-            return Ok(flat
-                .call_method1(intern!(py, "reshape"), (&output_shape,))?
-                .unbind());
+            return Ok(arr.unbind());
         }
     }
     let storage = array.to_storage().map_err(map_ufunc_error)?;
@@ -25794,7 +25817,12 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
             let mut out_shape = shape.to_vec();
             out_shape.remove(axu);
             let out_elems = outer * inner;
-            let flat = cached_numpy_empty(py)?.call1((out_elems, cached_int64_type(py)?))?;
+            let flat = if let [only] = out_shape.as_slice() {
+                cached_numpy_empty(py)?.call1((*only, cached_int64_type(py)?))?
+            } else {
+                let alloc_shape = PyTuple::new(py, &out_shape)?;
+                cached_numpy_empty(py)?.call1((alloc_shape, cached_int64_type(py)?))?
+            };
             if out_elems > 0 {
                 let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
                     return Ok(None);
@@ -25840,23 +25868,9 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
             }
             // A REDUCTION THAT REMOVES THE ONLY AXIS RETURNS A SCALAR, NOT A 0-d ARRAY
             // (`deadlock-audit-54arr`). `np.count_nonzero(a_1d, axis=0)` is
-            // `np.int64(k)`; this reshaped to `()` and handed back `array(k)` instead.
-            // The values and the dtype match, so only `type()` separates them - the same
-            // blind spot that hid the 0-d integral predicate results and the `np.matrix`
-            // results. 28 probe cells hit it: every dtype x {axis=0, axis=-1} on a 1-D
-            // operand, and the empty-array form too.
-            //
-            // `axis=None` already returns a scalar a few lines up and `keepdims=True` is
-            // handled by the caller, so this is the one branch left that can produce a
-            // rank-0 result, and it has to extract it the same way.
-            if out_shape.is_empty() {
-                return Ok(Some(flat.get_item(0)?.unbind()));
-            }
-            let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-            let output = flat
-                .call_method1(intern!(py, "reshape"), (&output_shape,))?
-                .unbind();
-            Ok(Some(output))
+            // `np.int64(k)`; allocating at `()` and indexing with `()` returns
+            // `np.int64(k)` scalar via finish_preshaped_output.
+            finish_preshaped_output(flat, &out_shape).map(Some)
         }
     }
 }
@@ -26332,14 +26346,12 @@ fn finish_any_all<F: Fn(usize) -> bool>(
             let mut out_shape = shape.to_vec();
             out_shape.remove(axu);
             let out_elems = outer * inner;
-            let flat = numpy.call_method1(intern!(py, "empty"), (out_elems,))?;
-            // numpy.empty defaults to f64; view as bool for an output buffer.
-            let flat = flat.call_method1(
-                intern!(py, "astype"),
-                (numpy.getattr(intern!(py, "bool_"))?,),
-            )?;
-            let flat_u8 =
-                flat.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+            let flat_u8 = if let [only] = out_shape.as_slice() {
+                numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+            } else {
+                let alloc_shape = PyTuple::new(py, &out_shape)?;
+                numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+            };
             if out_elems > 0 {
                 let Ok(out_buffer) = PyBuffer::<u8>::get(&flat_u8) else {
                     return Ok(None);
@@ -26362,15 +26374,8 @@ fn finish_any_all<F: Fn(usize) -> bool>(
                     }
                 }
             }
-            let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-            let output = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-            // A 1-D operand reduced along its only axis gives a 0-d ARRAY here; numpy gives a
-            // `numpy.bool_` SCALAR - see the twin in `axis_any_all_fold`
-            // (`deadlock-audit-30d18`).
-            if out_shape.is_empty() {
-                return Ok(Some(output.get_item(())?.unbind()));
-            }
-            Ok(Some(output.unbind()))
+            let flat = flat_u8.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
+            finish_preshaped_output(flat, &out_shape).map(Some)
         }
     }
 }
@@ -44040,9 +44045,12 @@ fn try_zerocopy_ma_filled_f64(
     if mask.len() != total {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), "float64")?;
-    let flat = cached_numpy(py)?.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let flat = if let [only] = shape.as_slice() {
+        cached_numpy(py)?.call_method1(intern!(py, "empty"), (*only, "float64"))?
+    } else {
+        let shape_tuple = PyTuple::new(py, &shape)?;
+        cached_numpy(py)?.call_method1(intern!(py, "empty"), (shape_tuple, "float64"))?
+    };
     if total > 0 {
         let Ok(out_buf) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -44054,11 +44062,7 @@ fn try_zerocopy_ma_filled_f64(
             o.set(if m.get() != 0 { fill } else { d.get() });
         }
     }
-    let shape_tuple = PyTuple::new(py, shape)?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-            .unbind(),
-    ))
+    Ok(Some(flat.unbind()))
 }
 
 // Generic-dtype counterpart of try_zerocopy_ma_filled_f64: the f64 path is f64-only, so int/uint/
@@ -44122,9 +44126,12 @@ where
     if mask.len() != total {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_str)?;
-    let flat = cached_numpy(py)?.call_method(intern!(py, "empty"), (total,), Some(&kwargs))?;
+    let flat = if let [only] = shape.as_slice() {
+        cached_numpy(py)?.call_method1(intern!(py, "empty"), (*only, dtype_str))?
+    } else {
+        let shape_tuple = PyTuple::new(py, &shape)?;
+        cached_numpy(py)?.call_method1(intern!(py, "empty"), (shape_tuple, dtype_str))?
+    };
     if total > 0 {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
@@ -44136,11 +44143,7 @@ where
             o.set(if m.get() != 0 { fill } else { d.get() });
         }
     }
-    let shape_tuple = PyTuple::new(py, shape)?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&shape_tuple,))?
-            .unbind(),
-    ))
+    Ok(Some(flat.unbind()))
 }
 
 #[pyfunction]
@@ -94299,9 +94302,8 @@ fn try_zerocopy_lastaxis_argextreme(
         return Ok(None);
     };
 
-    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (out_shape,))?;
-    Ok(Some(reshaped.unbind()))
+    let flat = numpy_array_from_slice_shaped(py, numpy, &indices, "intp", &out_shape)?;
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Zero-copy NON-last-axis argmin/argmax over a C-contiguous f64 ndarray (e.g.
@@ -94409,13 +94411,8 @@ fn try_zerocopy_f64_argextreme_axis(
     }
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    if out_shape.is_empty() {
-        return Ok(Some(reshaped.get_item(())?.unbind()));
-    }
-    Ok(Some(reshaped.unbind()))
+    let flat = numpy_array_from_slice_shaped(py, numpy, &indices, "intp", &out_shape)?;
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // f32 twin of try_zerocopy_f64_argextreme_axis (argmax/argmin over a NON-last axis). f32 had no
@@ -94510,13 +94507,8 @@ fn try_zerocopy_f32_argextreme_axis(
     }
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    if out_shape.is_empty() {
-        return Ok(Some(reshaped.get_item(())?.unbind()));
-    }
-    Ok(Some(reshaped.unbind()))
+    let flat = numpy_array_from_slice_shaped(py, numpy, &indices, "intp", &out_shape)?;
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Generic typed core for integer argmax/argmin over a NON-last axis. Mirrors the
@@ -94590,13 +94582,8 @@ where
     }
     let mut out_shape: Vec<usize> = shape[..k].to_vec();
     out_shape.extend_from_slice(&shape[k + 1..]);
-    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
-    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-    let reshaped = flat.call_method1(intern!(py, "reshape"), (&output_shape,))?;
-    if out_shape.is_empty() {
-        return Ok(Some(reshaped.get_item(())?.unbind()));
-    }
-    Ok(Some(reshaped.unbind()))
+    let flat = numpy_array_from_slice_shaped(py, numpy, &indices, "intp", &out_shape)?;
+    finish_preshaped_output(flat, &out_shape).map(Some)
 }
 
 // Dispatch the integer non-last-axis argmax/argmin by dtype width.
