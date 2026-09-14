@@ -9666,8 +9666,11 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(u8::from(pred(cell.get())));
+        let in_raw: &[f64] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+        let out_raw: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+        for (slot, &val) in out_raw.iter_mut().zip(in_raw.iter()) {
+            *slot = u8::from(pred(val));
         }
     }
     let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
@@ -9888,8 +9891,11 @@ fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(u8::from(pred(cell.get())));
+        let in_raw: &[f32] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+        let out_raw: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, n) };
+        for (slot, &val) in out_raw.iter_mut().zip(in_raw.iter()) {
+            *slot = u8::from(pred(val));
         }
     }
     let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
@@ -10998,6 +11004,17 @@ fn cached_float16_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
             Ok(cached_numpy(py)?
                 .call_method1(intern!(py, "dtype"), ("float16",))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_int32_dtype(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static I32_DTYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(I32_DTYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?
+                .call_method1(intern!(py, "dtype"), ("int32",))?
                 .unbind())
         })?
         .bind(py))
@@ -14540,19 +14557,51 @@ fn try_zerocopy_f64_binary(
 }
 
 fn ndarray_has_native_f64_dtype(value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let dtype = value.getattr("dtype")?;
-    let dtype_kind: String = dtype.getattr("kind")?.extract()?;
-    let dtype_itemsize: usize = dtype.getattr("itemsize")?.extract()?;
-    let is_native: bool = dtype.getattr("isnative")?.extract()?;
-    Ok(matches!(dtype_kind.as_str(), "f") && dtype_itemsize == 8 && is_native)
+    let py = value.py();
+    let dtype = value.getattr(intern!(py, "dtype"))?;
+    if dtype.is(cached_float64_dtype(py)?) {
+        return Ok(true);
+    }
+    let Ok(dtype_kind) = dtype.getattr(intern!(py, "kind"))?.extract::<char>() else {
+        return Ok(false);
+    };
+    if dtype_kind != 'f' {
+        return Ok(false);
+    }
+    let Ok(dtype_itemsize) = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>() else {
+        return Ok(false);
+    };
+    if dtype_itemsize != 8 {
+        return Ok(false);
+    }
+    let Ok(is_native) = dtype.getattr(intern!(py, "isnative"))?.extract::<bool>() else {
+        return Ok(false);
+    };
+    Ok(is_native)
 }
 
 fn ndarray_has_native_i32_dtype(value: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let dtype = value.getattr("dtype")?;
-    let dtype_kind: String = dtype.getattr("kind")?.extract()?;
-    let dtype_itemsize: usize = dtype.getattr("itemsize")?.extract()?;
-    let is_native: bool = dtype.getattr("isnative")?.extract()?;
-    Ok(matches!(dtype_kind.as_str(), "i") && dtype_itemsize == 4 && is_native)
+    let py = value.py();
+    let dtype = value.getattr(intern!(py, "dtype"))?;
+    if dtype.is(cached_int32_dtype(py)?) {
+        return Ok(true);
+    }
+    let Ok(dtype_kind) = dtype.getattr(intern!(py, "kind"))?.extract::<char>() else {
+        return Ok(false);
+    };
+    if dtype_kind != 'i' {
+        return Ok(false);
+    }
+    let Ok(dtype_itemsize) = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>() else {
+        return Ok(false);
+    };
+    if dtype_itemsize != 4 {
+        return Ok(false);
+    }
+    let Ok(is_native) = dtype.getattr(intern!(py, "isnative"))?.extract::<bool>() else {
+        return Ok(false);
+    };
+    Ok(is_native)
 }
 
 fn scalbn_f64_normal_result(mantissa: f64, exponent: i32) -> Option<f64> {
@@ -14608,16 +14657,17 @@ fn try_zerocopy_f64_i32_ldexp(
         return Ok(None);
     };
 
-    let shape = x1_buffer.shape().to_vec();
+    let shape = x1_buffer.shape();
     let n = mantissas.len();
-    let flat = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(
-            intern!(py, "empty"),
-            (shape_tuple, cached_float64_type(py)?),
-        )?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?,
+        _ => {
+            let shape_tuple = PyTuple::new(py, shape)?;
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&shape_tuple, cached_float64_type(py)?),
+            )?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -14626,14 +14676,19 @@ fn try_zerocopy_f64_i32_ldexp(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for ((slot, mantissa_cell), exponent_cell) in
-            output.iter().zip(mantissas.iter()).zip(exponents.iter())
-        {
-            let mantissa = mantissa_cell.get();
+        let mant: &[f64] =
+            unsafe { std::slice::from_raw_parts(mantissas.as_ptr().cast::<f64>(), n) };
+        let expo: &[i32] =
+            unsafe { std::slice::from_raw_parts(exponents.as_ptr().cast::<i32>(), n) };
+        let out_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+
+        for i in 0..n {
+            let mantissa = mant[i];
             if mantissa.is_nan() {
                 return Ok(None);
             }
-            let exponent = exponent_cell.get();
+            let exponent = expo[i];
             let Some(result) = scalbn_f64_normal_result(mantissa, exponent) else {
                 let result = mantissa * 2.0_f64.powf(f64::from(exponent));
                 let mantissa_magnitude_bits = mantissa.to_bits() & 0x7fff_ffff_ffff_ffff;
@@ -14644,14 +14699,14 @@ fn try_zerocopy_f64_i32_ldexp(
                 {
                     return Ok(None);
                 }
-                slot.set(result);
+                out_data[i] = result;
                 continue;
             };
-            slot.set(result);
+            out_data[i] = result;
         }
     }
 
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // float32 sibling of try_zerocopy_f64_i32_ldexp. numpy runs f32 ldexp single-threaded (scalbnf,
@@ -36325,33 +36380,40 @@ fn choose_typed<'py, T: pyo3::buffer::Element + Copy>(
         };
         slices.push(s);
     }
+    // SAFETY: ReadOnlyCell<T> is repr(transparent), read-only under the GIL.
+    let a_slice: &[i64] = unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<i64>(), n) };
+    let raw_slices: Vec<&[T]> = slices
+        .iter()
+        .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), n) })
+        .collect();
+
     // Validate ALL indices first so an OOB defers to numpy (exact ValueError).
-    for c in a_in.iter() {
-        let idx = c.get();
+    for &idx in a_slice {
         if idx < 0 || idx >= k {
             return Ok(None);
         }
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let flat = numpy.call_method(intern!(py, "empty"), (n,), Some(&kwargs))?;
+    let out = if let [only] = out_shape {
+        numpy.call_method1(intern!(py, "empty"), (*only, dtype_name))?
+    } else {
+        let shape = PyTuple::new(py, out_shape)?;
+        numpy.call_method1(intern!(py, "empty"), (&shape, dtype_name))?
+    };
     if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
         };
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (i, c) in a_in.iter().enumerate() {
-            let sel = c.get() as usize;
-            output[i].set(slices[sel][i].get());
+        let out_slice: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        for (i, (&sel_idx, out_slot)) in a_slice[..n].iter().zip(&mut out_slice[..n]).enumerate() {
+            let sel = sel_idx as usize;
+            *out_slot = raw_slices[sel][i];
         }
     }
-    let shape = PyTuple::new(py, out_shape.iter().copied())?;
-    Ok(Some(
-        flat.call_method1(intern!(py, "reshape"), (&shape,))?
-            .unbind(),
-    ))
+    Ok(Some(out.unbind()))
 }
 
 // Zero-copy integer np.choose for the dtypes the native path sends through the
@@ -36424,9 +36486,7 @@ fn try_zerocopy_int_choose(
         }
     }
     // Normalize the index array to contiguous int64.
-    let kw = PyDict::new(py);
-    kw.set_item(intern!(py, "dtype"), "int64")?;
-    let a64 = cached_numpy_ascontiguousarray(py)?.call((a,), Some(&kw))?;
+    let a64 = cached_numpy_ascontiguousarray(py)?.call1((a, cached_int64_type(py)?))?;
     match (kind, itemsize) {
         ('i', 8) => choose_typed::<i64>(py, numpy, &a64, &items, "int64", &a_shape),
         ('i', 4) => choose_typed::<i32>(py, numpy, &a64, &items, "int32", &a_shape),
@@ -111708,8 +111768,8 @@ fn try_zerocopy_f64_divmod(
     let (Some(c1), Some(c2)) = (b1.as_slice(py), b2.as_slice(py)) else {
         return Ok(None);
     };
+    let shape = b1.shape();
     let n = c1.len();
-    let shape: Vec<usize> = b1.shape().to_vec();
     // SAFETY: ReadOnlyCell<f64> repr(transparent); read-only under the GIL.
     let a: &[f64] = unsafe { std::slice::from_raw_parts(c1.as_ptr().cast::<f64>(), n) };
     let b: &[f64] = unsafe { std::slice::from_raw_parts(c2.as_ptr().cast::<f64>(), n) };
@@ -111729,13 +111789,19 @@ fn try_zerocopy_f64_divmod(
     if !clean {
         return Ok(None);
     }
-    let mk = |nm: &str| -> PyResult<Bound<'_, PyAny>> {
-        let kw = PyDict::new(py);
-        kw.set_item(intern!(py, "dtype"), nm)?;
-        numpy.call_method(intern!(py, "empty"), (n,), Some(&kw))
+    let f64_t = cached_float64_type(py)?;
+    let (quotient, remainder) = if let [only] = shape {
+        (
+            numpy.call_method1(intern!(py, "empty"), (*only, f64_t))?,
+            numpy.call_method1(intern!(py, "empty"), (*only, f64_t))?,
+        )
+    } else {
+        let shape_t = PyTuple::new(py, shape)?;
+        (
+            numpy.call_method1(intern!(py, "empty"), (&shape_t, f64_t))?,
+            numpy.call_method1(intern!(py, "empty"), (&shape_t, f64_t))?,
+        )
     };
-    let quotient = mk("float64")?;
-    let remainder = mk("float64")?;
     if n > 0 {
         let (Ok(qb), Ok(rb)) = (
             PyBuffer::<f64>::get(&quotient),
@@ -111775,9 +111841,6 @@ fn try_zerocopy_f64_divmod(
             kernel(q, r, a, b);
         }
     }
-    let shape_t = PyTuple::new(py, shape.iter().copied())?;
-    let quotient = quotient.call_method1(intern!(py, "reshape"), (&shape_t,))?;
-    let remainder = remainder.call_method1(intern!(py, "reshape"), (&shape_t,))?;
     if shape.is_empty() {
         let qs = quotient.get_item(())?;
         let rs = remainder.get_item(())?;
