@@ -1352,13 +1352,13 @@ macro_rules! scatter_at_atomic_arm {
             // (cache-exceeding) AND enough updates to amortize the fan-out.
             const ADD_AT_TARGET_MIN: usize = 1 << 21;
             const ADD_AT_UPDATES_MIN: usize = 1 << 21;
-            let nd = cached_ndarray_type(numpy.py())?.clone();
+            let nd = cached_ndarray_type(numpy.py())?;
             for (x, kind, isize) in [
                 (a, $kind, $isize),
                 (indices, "i", 8usize),
                 (b, $kind, $isize),
             ] {
-                if !x.is_exact_instance(&nd) {
+                if !x.is_exact_instance(nd) {
                     return Ok(None);
                 }
                 let dt = x.getattr(intern!(py, "dtype"))?;
@@ -9936,7 +9936,7 @@ fn zerocopy_f64_isclose_flat<'py>(
     rtol: f64,
     atol: f64,
     equal_nan: bool,
-) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+) -> PyResult<Option<Py<PyAny>>> {
     // CACHED TYPE, not a per-call `numpy.getattr(intern!(py, "ndarray"))` (`deadlock-audit-ei9jz`).
     // This runs on EVERY call of these routes, and the old form built a fresh `PyString`
     // from the `&str` and probed the module dict to fetch a type object that never
@@ -9963,12 +9963,12 @@ fn zerocopy_f64_isclose_flat<'py>(
     if a_buffer.shape() != b_buffer.shape() {
         return Ok(None);
     }
-    let shape: Vec<usize> = a_buffer.shape().to_vec();
+    let shape = a_buffer.shape();
     let n = a_in.len();
-    let bytes = if let [only] = shape.as_slice() {
+    let bytes = if let [only] = shape {
         numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
     } else {
-        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        let alloc_shape = PyTuple::new(py, shape)?;
         numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
     };
     if n > 0 {
@@ -10017,7 +10017,7 @@ fn zerocopy_f64_isclose_flat<'py>(
         }
     }
     let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
-    Ok(Some((flat, shape)))
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // float32 counterpart of zerocopy_f64_isclose_flat: read two same-shape f32 buffers,
@@ -10032,29 +10032,11 @@ fn zerocopy_f32_isclose_flat<'py>(
     rtol: f64,
     atol: f64,
     equal_nan: bool,
-) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
-    // CACHED TYPE, not a per-call `numpy.getattr(intern!(py, "ndarray"))` (`deadlock-audit-ei9jz`).
-    // This runs on EVERY call of these routes, and the old form built a fresh `PyString`
-    // from the `&str` and probed the module dict to fetch a type object that never
-    // changes. `is_exact_numpy_ndarray` already holds it in a `PyOnceLock`; the stage was
-    // measured at `getattr_ndarray_ns=100`.
-    //
-    // WHY CACHING A TYPE IS SAFE HERE WHERE CACHING A CALLABLE IS NOT: the failure mode is
-    // FAIL-CLOSED. The handle is used only for an identity test that decides whether to
-    // take the fast path. If it were ever stale the test returns FALSE, the route
-    // DECLINES, and the call delegates to NumPy - the incumbent's own answer, just slower.
-    // A cached bound callable has no such property: it would keep calling a replaced
-    // function and return a wrong-but-plausible array, which is why `cached_numpy` holds
-    // the module and not the callable.
+) -> PyResult<Option<Py<PyAny>>> {
     if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
         return Ok(None);
     }
-    let is_f32 = |o: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = o.getattr(intern!(py, "dtype"))?;
-        Ok(dt.getattr(intern!(py, "kind"))?.extract::<String>()? == "f"
-            && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 4)
-    };
-    if !is_f32(a)? || !is_f32(b)? {
+    if !numpy_dtype_is_f32(a) || !numpy_dtype_is_f32(b) {
         return Ok(None);
     }
     let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<f32>::get(a), PyBuffer::<f32>::get(b)) else {
@@ -10066,12 +10048,12 @@ fn zerocopy_f32_isclose_flat<'py>(
     if a_buffer.shape() != b_buffer.shape() {
         return Ok(None);
     }
-    let shape: Vec<usize> = a_buffer.shape().to_vec();
+    let shape = a_buffer.shape();
     let n = a_in.len();
-    let bytes = if let [only] = shape.as_slice() {
+    let bytes = if let [only] = shape {
         numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
     } else {
-        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        let alloc_shape = PyTuple::new(py, shape)?;
         numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
     };
     if n > 0 {
@@ -10122,7 +10104,7 @@ fn zerocopy_f32_isclose_flat<'py>(
         }
     }
     let flat = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
-    Ok(Some((flat, shape)))
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 fn try_zerocopy_f32_isclose(
@@ -10134,11 +10116,7 @@ fn try_zerocopy_f32_isclose(
     equal_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let Some((flat, shape)) = zerocopy_f32_isclose_flat(py, numpy, a, b, rtol, atol, equal_nan)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(finish_preshaped_output(flat, &shape)?))
+    zerocopy_f32_isclose_flat(py, numpy, a, b, rtol, atol, equal_nan)
 }
 
 // Zero-copy isclose(f64-array, FINITE scalar): np.isclose(a,b) = |a-b| <= atol + rtol*|b|. For
@@ -10182,12 +10160,12 @@ fn try_zerocopy_f64_isclose_array_scalar(
     };
     let numpy = cached_numpy(py)?;
     let n = cells.len();
-    let shape: Vec<usize> = buf.shape().to_vec();
+    let shape = buf.shape();
     let thresh = atol + rtol * bv.abs();
-    let bytes = if let [only] = shape.as_slice() {
+    let bytes = if let [only] = shape {
         numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
     } else {
-        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        let alloc_shape = PyTuple::new(py, shape)?;
         numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
     };
     if n > 0 {
@@ -10220,7 +10198,7 @@ fn try_zerocopy_f64_isclose_array_scalar(
         }
     }
     let as_bool = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
-    Ok(Some(finish_preshaped_output(as_bool, &shape)?))
+    finish_preshaped_output(as_bool, shape).map(Some)
 }
 
 // f32 counterpart of try_zerocopy_f64_isclose_array_scalar. isclose(f32-array, finite scalar)
@@ -10261,13 +10239,13 @@ fn try_zerocopy_f32_isclose_array_scalar(
         return Ok(None);
     };
     let n = cells.len();
-    let shape: Vec<usize> = buf.shape().to_vec();
+    let shape = buf.shape();
     let thresh = atol + rtol * bv.abs();
     let numpy = cached_numpy(py)?;
-    let bytes = if let [only] = shape.as_slice() {
+    let bytes = if let [only] = shape {
         numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
     } else {
-        let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
+        let alloc_shape = PyTuple::new(py, shape)?;
         numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
     };
     if n > 0 {
@@ -10300,7 +10278,7 @@ fn try_zerocopy_f32_isclose_array_scalar(
         }
     }
     let as_bool = bytes.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
-    Ok(Some(finish_preshaped_output(as_bool, &shape)?))
+    finish_preshaped_output(as_bool, shape).map(Some)
 }
 
 // Wrap zerocopy_f64_isclose_flat with the shared reshape / 0-d scalar handling.
@@ -10313,11 +10291,7 @@ fn try_zerocopy_f64_isclose(
     equal_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let Some((flat, shape)) = zerocopy_f64_isclose_flat(py, numpy, a, b, rtol, atol, equal_nan)?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(finish_preshaped_output(flat, &shape)?))
+    zerocopy_f64_isclose_flat(py, numpy, a, b, rtol, atol, equal_nan)
 }
 
 // True when `a / b` would raise an IEEE floating-point exception, given the
@@ -14070,8 +14044,8 @@ fn try_native_int_divmod(
 ) -> PyResult<Option<Py<PyAny>>> {
     const INT_DIVMOD_PARALLEL_MIN: usize = 1 << 18;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !a.is_exact_instance(ndarray_type) || !b.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
@@ -14738,16 +14712,17 @@ fn try_zerocopy_f32_i32_ldexp(
     let (Some(m_s), Some(e_s)) = (x1_buffer.as_slice(py), x2_buffer.as_slice(py)) else {
         return Ok(None);
     };
-    let shape = x1_buffer.shape().to_vec();
+    let shape = x1_buffer.shape();
     let n = m_s.len();
-    let flat = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, cached_float32_type(py)?))?
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(
-            intern!(py, "empty"),
-            (shape_tuple, cached_float32_type(py)?),
-        )?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float32_type(py)?))?,
+        _ => {
+            let shape_tuple = PyTuple::new(py, shape)?;
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&shape_tuple, cached_float32_type(py)?),
+            )?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -14786,7 +14761,7 @@ fn try_zerocopy_f32_i32_ldexp(
                 }
             });
     }
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // f16 sibling of try_zerocopy_f32_i32_ldexp. numpy has no f16 ALU, so np.ldexp(float16, int32) widens
@@ -14829,20 +14804,21 @@ fn try_zerocopy_f16_i32_ldexp(
     let (Some(m_s), Some(e_s)) = (x1_buffer.as_slice(py), x2_buffer.as_slice(py)) else {
         return Ok(None);
     };
-    let shape = x1_buffer.shape().to_vec();
+    let shape = x1_buffer.shape();
     let n = m_s.len();
     if n < F16_LDEXP_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let flat = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, cached_float16_type(py)?))?
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(
-            intern!(py, "empty"),
-            (shape_tuple, cached_float16_type(py)?),
-        )?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float16_type(py)?))?,
+        _ => {
+            let shape_tuple = PyTuple::new(py, shape)?;
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&shape_tuple, cached_float16_type(py)?),
+            )?
+        }
     };
     {
         let out16 = flat.call_method1(intern!(py, "view"), (u16t,))?;
@@ -14882,7 +14858,7 @@ fn try_zerocopy_f16_i32_ldexp(
                 }
             });
     }
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // Zero-copy clip for exact C-contiguous float64 ndarrays with scalar bounds.
@@ -14916,16 +14892,17 @@ fn try_zerocopy_f64_clip(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let shape = in_buffer.shape();
     let n = input.len();
-    let flat = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, cached_float64_type(py)?))?
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(
-            intern!(py, "empty"),
-            (shape_tuple, cached_float64_type(py)?),
-        )?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?,
+        _ => {
+            let shape_tuple = PyTuple::new(py, shape)?;
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&shape_tuple, cached_float64_type(py)?),
+            )?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -14938,15 +14915,15 @@ fn try_zerocopy_f64_clip(
         // bandwidth and wins for large buffers (same lever as the unary maps). The exact
         // `if v<lo {lo} else {v}` / `if t>hi {hi} else {t}` form is preserved (NaN: both
         // comparisons false -> NaN propagates, matching numpy), so it stays bit-identical.
+        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
+        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+        let in_data: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+        let out_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
         const CLIP_PARALLEL_MIN: usize = 1 << 21;
         if n >= CLIP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-            let in_data: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
             out_data
                 .par_chunks_mut(chunk)
@@ -14958,14 +14935,13 @@ fn try_zerocopy_f64_clip(
                     }
                 });
         } else {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                let v = cell.get();
+            for (s, &v) in out_data.iter_mut().zip(in_data.iter()) {
                 let t = if v < lo { lo } else { v };
-                slot.set(if t > hi { hi } else { t });
+                *s = if t > hi { hi } else { t };
             }
         }
     }
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // Zero-copy clip for exact C-contiguous float32 ndarrays with scalar bounds. The
@@ -14989,12 +14965,10 @@ fn try_zerocopy_f32_clip(
     if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
     }
-    let dtype = x.getattr(intern!(py, "dtype"))?;
-    if dtype_kind_of(x) != Some('f')
-        || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
-    {
+    if !numpy_dtype_is_f32(x) {
         return Ok(None);
     }
+    let dtype = x.getattr(intern!(py, "dtype"))?;
     // Result dtype must equal float32 (no promotion): a strong numpy-float64 scalar
     // bound would widen the result to float64, which this path cannot produce.
     let promoted = numpy
@@ -15011,16 +14985,17 @@ fn try_zerocopy_f32_clip(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let shape = in_buffer.shape();
     let n = input.len();
-    let flat = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, cached_float32_type(py)?))?
-    } else {
-        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(
-            intern!(py, "empty"),
-            (shape_tuple, cached_float32_type(py)?),
-        )?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float32_type(py)?))?,
+        _ => {
+            let shape_tuple = PyTuple::new(py, shape)?;
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&shape_tuple, cached_float32_type(py)?),
+            )?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -15032,15 +15007,15 @@ fn try_zerocopy_f32_clip(
         // The f64/int clip paths already use the same raw-slice fan-out for large
         // buffers. Keep the exact scalar comparison sequence so NaN propagation and
         // lo>hi behavior stay identical to the serial f32 path.
+        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
+        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+        let in_data: &[f32] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+        let out_data: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
         const CLIP_F32_PARALLEL_MIN: usize = 1 << 21;
         if n >= CLIP_F32_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
-            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-            let in_data: &[f32] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-            let out_data: &mut [f32] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
             out_data
                 .par_chunks_mut(chunk)
@@ -15052,14 +15027,13 @@ fn try_zerocopy_f32_clip(
                     }
                 });
         } else {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                let v = cell.get();
+            for (slot, &v) in out_data.iter_mut().zip(in_data.iter()) {
                 let t = if v < lo { lo } else { v };
-                slot.set(if t > hi { hi } else { t });
+                *slot = if t > hi { hi } else { t };
             }
         }
     }
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // Generic typed core for integer clip: clamp each element into [lo, hi] in the
@@ -15084,13 +15058,14 @@ where
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let shape = in_buffer.shape();
     let n = input.len();
-    let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, dtype))?
-    } else {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, dtype))?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, dtype))?,
+        _ => {
+            let output_shape = PyTuple::new(py, shape)?;
+            numpy.call_method1(intern!(py, "empty"), (&output_shape, dtype))?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -15106,18 +15081,17 @@ where
         // saturates memory bandwidth so the parallel clamp can't beat numpy's SIMD clip,
         // while i32/u32 win ~2.2x. Both excluded paths stay on the original serial loop
         // (no regression). Integer max/min are exact (Ord) so the clamp is bit-identical.
+        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is
+        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+        let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+        let out_data: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
         const CLIP_PARALLEL_MIN_BYTES: usize = 1 << 23;
         if std::mem::size_of::<T>() <= 4
             && n.saturating_mul(std::mem::size_of::<T>()) >= CLIP_PARALLEL_MIN_BYTES
             && rayon::current_num_threads() >= 2
         {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is
-            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-            let in_data: &[T] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
-            let out_data: &mut [T] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
             let chunk = n.div_ceil(rayon::current_num_threads());
             out_data
                 .par_chunks_mut(chunk)
@@ -15128,12 +15102,12 @@ where
                     }
                 });
         } else {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                slot.set(cell.get().max(lo).min(hi));
+            for (s, &v) in out_data.iter_mut().zip(in_data.iter()) {
+                *s = v.max(lo).min(hi);
             }
         }
     }
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // Zero-copy integer clip for exact int8/16/32/64 and uint8/16/32/64 ndarrays
@@ -15279,17 +15253,18 @@ fn try_zerocopy_f64_nan_to_num(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let shape = in_buffer.shape();
     let n = input.len();
     let numpy = cached_numpy(py)?;
-    let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?
-    } else {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(
-            intern!(py, "empty"),
-            (&output_shape, cached_float64_type(py)?),
-        )?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?,
+        _ => {
+            let output_shape = PyTuple::new(py, shape)?;
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&output_shape, cached_float64_type(py)?),
+            )?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -15318,16 +15293,16 @@ fn try_zerocopy_f64_nan_to_num(
         // (it wins from 2^16), but one constant serves both and 2^17 costs f64 nothing it was
         // not already getting. The f16 sibling gates at 2^20 and is left alone - it is not
         // measured here.
+        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
+        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+        let in_data: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+        let out_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
         const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 17;
         let threads = rayon::current_num_threads().min(n / NAN_TO_NUM_PARALLEL_MIN);
         if n >= NAN_TO_NUM_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
-            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-            let in_data: &[f64] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
-            let out_data: &mut [f64] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
             let chunk = n.div_ceil(threads);
             out_data
                 .par_chunks_mut(chunk)
@@ -15346,9 +15321,8 @@ fn try_zerocopy_f64_nan_to_num(
                     }
                 });
         } else {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                let v = cell.get();
-                let replaced = if v.is_nan() {
+            for (s, &v) in out_data.iter_mut().zip(in_data.iter()) {
+                *s = if v.is_nan() {
                     nan_rep
                 } else if v == f64::INFINITY {
                     posinf_rep
@@ -15357,11 +15331,10 @@ fn try_zerocopy_f64_nan_to_num(
                 } else {
                     v
                 };
-                slot.set(replaced);
             }
         }
     }
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // Zero-copy nan_to_num for exact C-contiguous float32 ndarrays — the float32 sibling
@@ -15396,17 +15369,18 @@ fn try_zerocopy_f32_nan_to_num(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let shape = in_buffer.shape();
     let n = input.len();
     let numpy = cached_numpy(py)?;
-    let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, cached_float32_type(py)?))?
-    } else {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(
-            intern!(py, "empty"),
-            (&output_shape, cached_float32_type(py)?),
-        )?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float32_type(py)?))?,
+        _ => {
+            let output_shape = PyTuple::new(py, shape)?;
+            numpy.call_method1(
+                intern!(py, "empty"),
+                (&output_shape, cached_float32_type(py)?),
+            )?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -15434,16 +15408,16 @@ fn try_zerocopy_f32_nan_to_num(
         // (it wins from 2^16), but one constant serves both and 2^17 costs f64 nothing it was
         // not already getting. The f16 sibling gates at 2^20 and is left alone - it is not
         // measured here.
+        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
+        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+        let in_data: &[f32] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+        let out_data: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
         const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 17;
         let threads = rayon::current_num_threads().min(n / NAN_TO_NUM_PARALLEL_MIN);
         if n >= NAN_TO_NUM_PARALLEL_MIN && threads >= 2 {
             use rayon::prelude::*;
-            // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
-            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
-            let in_data: &[f32] =
-                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
-            let out_data: &mut [f32] =
-                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
             let chunk = n.div_ceil(threads);
             out_data
                 .par_chunks_mut(chunk)
@@ -15462,9 +15436,8 @@ fn try_zerocopy_f32_nan_to_num(
                     }
                 });
         } else {
-            for (slot, cell) in output.iter().zip(input.iter()) {
-                let v = cell.get();
-                let replaced = if v.is_nan() {
+            for (s, &v) in out_data.iter_mut().zip(in_data.iter()) {
+                *s = if v.is_nan() {
                     nan_rep
                 } else if v == f32::INFINITY {
                     posinf_rep
@@ -15473,11 +15446,10 @@ fn try_zerocopy_f32_nan_to_num(
                 } else {
                     v
                 };
-                slot.set(replaced);
             }
         }
     }
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 /// The element-wise select at the heart of `np.where(cond, x, y)`, over any element type
@@ -15525,21 +15497,16 @@ fn try_zerocopy_any_dtype_where(
             return Ok(None);
         }
     }
-    if condition
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        != "b"
-    {
+    if dtype_kind_of(condition) != Some('b') {
         return Ok(None);
     }
     let x_dtype = x.getattr(intern!(py, "dtype"))?;
     if !x_dtype.eq(y.getattr(intern!(py, "dtype"))?)? {
         return Ok(None);
     }
-    let shape: Vec<usize> = condition.getattr(intern!(py, "shape"))?.extract()?;
-    if x.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()? != shape
-        || y.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()? != shape
+    let cond_shape = condition.getattr(intern!(py, "shape"))?;
+    if !cond_shape.eq(x.getattr(intern!(py, "shape"))?)?
+        || !cond_shape.eq(y.getattr(intern!(py, "shape"))?)?
     {
         return Ok(None);
     }
@@ -15573,7 +15540,6 @@ fn try_zerocopy_any_dtype_where(
     {
         return Ok(None);
     }
-    let count: usize = shape.iter().product();
 
     // The bool buffer's format is '?', which `PyBuffer::<u8>` rejects, so the condition is
     // viewed as uint8 - its bytes are 0x00/0x01. The value buffers are viewed the same way
@@ -15584,10 +15550,10 @@ fn try_zerocopy_any_dtype_where(
     // class known to make `.view(uint8)` throw; this `.ok()` is the standing guarantee for
     // any other - `np.where` must never surface an error numpy would not have surfaced,
     // so an unviewable operand falls through to the delegate instead (`deadlock-audit-nq438`).
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
+    let uint8 = cached_uint8_type(py)?;
     let as_bytes = |operand: &Bound<'_, PyAny>| -> PyResult<Option<PyBuffer<u8>>> {
         let flat = operand.call_method1(intern!(py, "reshape"), (-1i64,))?;
-        let Ok(viewed) = flat.call_method1(intern!(py, "view"), (&uint8,)) else {
+        let Ok(viewed) = flat.call_method1(intern!(py, "view"), (uint8,)) else {
             return Ok(None);
         };
         Ok(PyBuffer::<u8>::get(&viewed).ok())
@@ -15597,10 +15563,8 @@ fn try_zerocopy_any_dtype_where(
     else {
         return Ok(None);
     };
-    if cond_buffer.item_count() != count
-        || x_buffer.item_count() != count * itemsize
-        || y_buffer.item_count() != count * itemsize
-    {
+    let count = cond_buffer.item_count();
+    if x_buffer.item_count() != count * itemsize || y_buffer.item_count() != count * itemsize {
         return Ok(None);
     }
 
@@ -15657,35 +15621,25 @@ fn try_zerocopy_f64_where(
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
     // cond must be a bool dtype ndarray; other kinds keep the dtype-aware path.
-    if condition
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        != "b"
-    {
+    if dtype_kind_of(condition) != Some('b') {
         return Ok(None);
     }
-    let cond_u8 =
-        condition.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+    let cond_u8 = condition.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
     let Ok(cond_buffer) = PyBuffer::<u8>::get(&cond_u8) else {
         return Ok(None);
     };
     let Some(cond_in) = cond_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let shape: Vec<usize> = cond_buffer.shape().to_vec();
+    let shape = cond_buffer.shape();
     let n = cond_in.len();
 
     // Each of x, y is either a same-shape f64 ndarray (zero-copy buffer) or an
     // f64-extractable scalar (so `np.where(cond, arr, 0.0)` / scalar branches keep
     // the single-pass path instead of falling back to numpy). Buffers are held in
     // locals to keep them alive for the slice borrows.
-    let x_buffer = PyBuffer::<f64>::get(x)
-        .ok()
-        .filter(|b| b.shape() == shape.as_slice());
-    let y_buffer = PyBuffer::<f64>::get(y)
-        .ok()
-        .filter(|b| b.shape() == shape.as_slice());
+    let x_buffer = PyBuffer::<f64>::get(x).ok().filter(|b| b.shape() == shape);
+    let y_buffer = PyBuffer::<f64>::get(y).ok().filter(|b| b.shape() == shape);
     let x_scalar = if x_buffer.is_none() {
         x.extract::<f64>().ok()
     } else {
@@ -15725,11 +15679,12 @@ fn try_zerocopy_f64_where(
     let xs = x_scalar.unwrap_or(0.0);
     let ys = y_scalar.unwrap_or(0.0);
     let float64_type = cached_float64_type(py)?;
-    let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
-    } else {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?,
+        _ => {
+            let output_shape = PyTuple::new(py, shape)?;
+            numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -15770,31 +15725,53 @@ fn try_zerocopy_f64_where(
                             }
                         });
                 } else {
-                    for (((slot, c), xv), yv) in
-                        output.iter().zip(cond_in).zip(xa.iter()).zip(ya.iter())
-                    {
-                        slot.set(if c.get() != 0 { xv.get() } else { yv.get() });
+                    let c: &[u8] =
+                        unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
+                    let xd: &[f64] =
+                        unsafe { std::slice::from_raw_parts(xa.as_ptr().cast::<f64>(), n) };
+                    let yd: &[f64] =
+                        unsafe { std::slice::from_raw_parts(ya.as_ptr().cast::<f64>(), n) };
+                    let od: &mut [f64] =
+                        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                    for (((slot, &flag), &xv), &yv) in od.iter_mut().zip(c).zip(xd).zip(yd) {
+                        *slot = if flag != 0 { xv } else { yv };
                     }
                 }
             }
             (Some(xa), None) => {
-                for ((slot, c), xv) in output.iter().zip(cond_in).zip(xa.iter()) {
-                    slot.set(if c.get() != 0 { xv.get() } else { ys });
+                let c: &[u8] =
+                    unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
+                let xd: &[f64] =
+                    unsafe { std::slice::from_raw_parts(xa.as_ptr().cast::<f64>(), n) };
+                let od: &mut [f64] =
+                    unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                for ((slot, &flag), &xv) in od.iter_mut().zip(c).zip(xd) {
+                    *slot = if flag != 0 { xv } else { ys };
                 }
             }
             (None, Some(ya)) => {
-                for ((slot, c), yv) in output.iter().zip(cond_in).zip(ya.iter()) {
-                    slot.set(if c.get() != 0 { xs } else { yv.get() });
+                let c: &[u8] =
+                    unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
+                let yd: &[f64] =
+                    unsafe { std::slice::from_raw_parts(ya.as_ptr().cast::<f64>(), n) };
+                let od: &mut [f64] =
+                    unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                for ((slot, &flag), &yv) in od.iter_mut().zip(c).zip(yd) {
+                    *slot = if flag != 0 { xs } else { yv };
                 }
             }
             (None, None) => {
-                for (slot, c) in output.iter().zip(cond_in) {
-                    slot.set(if c.get() != 0 { xs } else { ys });
+                let c: &[u8] =
+                    unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
+                let od: &mut [f64] =
+                    unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                for (slot, &flag) in od.iter_mut().zip(c) {
+                    *slot = if flag != 0 { xs } else { ys };
                 }
             }
         }
     }
-    finish_preshaped_output(flat, &shape).map(Some)
+    finish_preshaped_output(flat, shape).map(Some)
 }
 
 // Generic typed core for np.where(cond, x, y) element-wise select with no
@@ -15809,7 +15786,7 @@ fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     x: &Bound<'py, PyAny>,
     y: &Bound<'py, PyAny>,
     parallel: bool,
-) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+) -> PyResult<Option<(Bound<'py, PyAny>, bool)>> {
     let (Ok(cond_buffer), Ok(x_buffer), Ok(y_buffer)) = (
         // `NpBool` reads the bool_ condition in its own format, so the caller no longer pays
         // `condition.view(numpy.uint8)` - a numpy method call priced at 171.9 ns.
@@ -15829,7 +15806,8 @@ fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     if cond_buffer.shape() != x_buffer.shape() || x_buffer.shape() != y_buffer.shape() {
         return Ok(None);
     }
-    let shape: Vec<usize> = x_buffer.shape().to_vec();
+    let shape = x_buffer.shape();
+    let is_0d = shape.is_empty();
     let n = x_in.len();
     // ALLOCATE WITH THE OPERAND'S OWN DTYPE OBJECT, not a `dtype_name: &str` - the same
     // modernisation `deadlock-audit-tsyfb` applied to `zerocopy_int_unary_typed` and which this
@@ -15844,11 +15822,12 @@ fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     // NORMALISES the output dtype there (`>i8` operands give `int64`), so echoing a swapped
     // descriptor would produce a result numpy never produces.
     let x_dtype = x.getattr(intern!(py, "dtype"))?;
-    let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, &x_dtype))?
-    } else {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, &x_dtype))?
+    let flat = match shape {
+        [only] => numpy.call_method1(intern!(py, "empty"), (*only, &x_dtype))?,
+        _ => {
+            let output_shape = PyTuple::new(py, shape)?;
+            numpy.call_method1(intern!(py, "empty"), (&output_shape, &x_dtype))?
+        }
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -15881,21 +15860,17 @@ fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
                     }
                 });
         } else {
-            for (((slot, cond_cell), x_cell), y_cell) in output
-                .iter()
-                .zip(cond_in.iter())
-                .zip(x_in.iter())
-                .zip(y_in.iter())
-            {
-                slot.set(if cond_cell.get().0 != 0 {
-                    x_cell.get()
-                } else {
-                    y_cell.get()
-                });
+            let c: &[u8] = unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
+            let xd: &[T] = unsafe { std::slice::from_raw_parts(x_in.as_ptr().cast::<T>(), n) };
+            let yd: &[T] = unsafe { std::slice::from_raw_parts(y_in.as_ptr().cast::<T>(), n) };
+            let od: &mut [T] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+            for (((slot, &flag), &xv), &yv) in od.iter_mut().zip(c).zip(xd).zip(yd) {
+                *slot = if flag != 0 { xv } else { yv };
             }
         }
     }
-    Ok(Some((flat, shape)))
+    Ok(Some((flat, is_0d)))
 }
 
 // Zero-copy np.where(cond, x, y) select for bool cond + same-shape same-dtype
@@ -15910,16 +15885,11 @@ fn try_zerocopy_int_where(
     y: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x.is_exact_instance(&ndarray_type) || !y.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !x.is_exact_instance(ndarray_type) || !y.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
-    if condition
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<char>()?
-        != 'b'
-    {
+    if dtype_kind_of(condition) != Some('b') {
         return Ok(None);
     }
     // No `condition.view(numpy.uint8)`: `where_typed` reads the bool_ buffer directly through
@@ -15975,10 +15945,10 @@ fn try_zerocopy_int_where(
                 return Ok(None);
             };
             match where_typed::<u16>(py, numpy, condition, &x_u, &y_u, false)? {
-                Some((flat_u16, shape)) => {
+                Some((flat_u16, is_0d)) => {
                     let flat_f =
                         flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
-                    Some((flat_f, shape))
+                    Some((flat_f, is_0d))
                 }
                 None => None,
             }
@@ -15990,10 +15960,14 @@ fn try_zerocopy_int_where(
         ('f', 4) if same_dtype => where_typed::<f32>(py, numpy, condition, x, y, true)?,
         _ => return Ok(None),
     };
-    let Some((flat, shape)) = result else {
+    let Some((flat, is_0d)) = result else {
         return Ok(None);
     };
-    finish_preshaped_output(flat, &shape).map(Some)
+    if is_0d {
+        Ok(Some(flat.get_item(())?.unbind()))
+    } else {
+        Ok(Some(flat.unbind()))
+    }
 }
 
 // Zero-copy np.where(cond, x, y) where exactly ONE of x/y is an ndarray and the other is
@@ -16011,17 +15985,12 @@ fn try_zerocopy_where_array_scalar(
     y: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if condition
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        != "b"
-    {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if dtype_kind_of(condition) != Some('b') {
         return Ok(None);
     }
-    let x_is_arr = x.is_exact_instance(&ndarray_type);
-    let y_is_arr = y.is_exact_instance(&ndarray_type);
+    let x_is_arr = x.is_exact_instance(ndarray_type);
+    let y_is_arr = y.is_exact_instance(ndarray_type);
     if x_is_arr == y_is_arr {
         return Ok(None); // need exactly one array + one scalar
     }
@@ -16038,8 +16007,10 @@ fn try_zerocopy_where_array_scalar(
         return Ok(None);
     }
     let dtype = arr.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if !matches!(kind.as_str(), "f" | "i" | "u" | "c" | "b") {
+    let Some(kind) = dtype_kind_of(arr) else {
+        return Ok(None);
+    };
+    if !matches!(kind, 'f' | 'i' | 'u' | 'c' | 'b') {
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -16053,9 +16024,9 @@ fn try_zerocopy_where_array_scalar(
     {
         return Ok(None);
     }
-    let cond_shape: Vec<usize> = condition.getattr(intern!(py, "shape"))?.extract()?;
-    let arr_shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
-    if cond_shape != arr_shape {
+    let cond_shape = condition.getattr(intern!(py, "shape"))?;
+    let arr_shape = arr.getattr(intern!(py, "shape"))?;
+    if !cond_shape.eq(&arr_shape)? {
         return Ok(None);
     }
     if !condition
@@ -16073,10 +16044,7 @@ fn try_zerocopy_where_array_scalar(
     // (vectorizable cmov/blend) — bit-identical to placing the raw bytes, but unlike a
     // per-element byte memcpy it vectorizes and beats numpy.where (like the f64 path).
     // Complex128 (itemsize 16) has no u128 buffer Element -> defer to numpy.
-    let cond_u8 = condition.call_method1(
-        intern!(py, "view"),
-        (&numpy.getattr(intern!(py, "uint8"))?,),
-    )?;
+    let cond_u8 = condition.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
     let Ok(cond_buf) = PyBuffer::<u8>::get(&cond_u8) else {
         return Ok(None);
     };
@@ -16085,9 +16053,9 @@ fn try_zerocopy_where_array_scalar(
     };
     let n = cond_cells.len();
     macro_rules! select_unsigned {
-        ($U:ty, $uname:literal) => {{
-            let un = numpy.getattr($uname)?;
-            let arr_u = arr.call_method1(intern!(py, "view"), (&un,))?;
+        ($U:ty, $cached_u_type:expr) => {{
+            let un = $cached_u_type;
+            let arr_u = arr.call_method1(intern!(py, "view"), (un,))?;
             let Ok(arr_buf) = PyBuffer::<$U>::get(&arr_u) else {
                 return Ok(None);
             };
@@ -16097,15 +16065,12 @@ fn try_zerocopy_where_array_scalar(
             if arr_in.len() != n {
                 return Ok(None);
             }
-            let sc_kwargs = PyDict::new(py);
-            sc_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
             // 1-element array (not 0-d, which can't change itemsize on view) cast to dtype.
-            let sc_arr = numpy.call_method(
+            let sc_arr = numpy.call_method1(
                 intern!(py, "full"),
-                ((1usize,), scalar_obj),
-                Some(&sc_kwargs),
+                ((1usize,), scalar_obj, &dtype),
             )?;
-            let sc_u = sc_arr.call_method1(intern!(py, "view"), (&un,))?;
+            let sc_u = sc_arr.call_method1(intern!(py, "view"), (un,))?;
             let Ok(sc_buf) = PyBuffer::<$U>::get(&sc_u) else {
                 return Ok(None);
             };
@@ -16116,33 +16081,41 @@ fn try_zerocopy_where_array_scalar(
                 return Ok(None);
             }
             let scalar_u = sc_in[0].get();
-            let out_kwargs = PyDict::new(py);
-            out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
-            let shape_tuple = PyTuple::new(py, arr_shape.iter().copied())?;
-            let out =
-                numpy.call_method(intern!(py, "empty"), (&shape_tuple,), Some(&out_kwargs))?;
+            let out = numpy.call_method1(intern!(py, "empty"), (&arr_shape, &dtype))?;
             if n > 0 {
-                let out_u = out.call_method1(intern!(py, "view"), (&un,))?;
+                let out_u = out.call_method1(intern!(py, "view"), (un,))?;
                 let Ok(out_buf) = PyBuffer::<$U>::get(&out_u) else {
                     return Ok(None);
                 };
                 let Some(out_cells) = out_buf.as_mut_slice(py) else {
                     return Ok(None);
                 };
-                for ((slot, cc), av) in out_cells.iter().zip(cond_cells.iter()).zip(arr_in.iter()) {
-                    // arr is x when scalar is y; arr is y when scalar is x.
-                    let use_arr = (cc.get() != 0) != scalar_is_x;
-                    slot.set(if use_arr { av.get() } else { scalar_u });
+                // SAFETY: ReadOnlyCell/Cell<$U> are repr(transparent); cond/arr/sc are read-only under GIL;
+                // out is fresh numpy.empty we own.
+                let out_raw: &mut [$U] =
+                    unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut $U, n) };
+                let cond_raw: &[u8] =
+                    unsafe { std::slice::from_raw_parts(cond_cells.as_ptr() as *const u8, n) };
+                let arr_raw: &[$U] =
+                    unsafe { std::slice::from_raw_parts(arr_in.as_ptr() as *const $U, n) };
+                if scalar_is_x {
+                    for ((slot, &cc), &av) in out_raw.iter_mut().zip(cond_raw.iter()).zip(arr_raw.iter()) {
+                        *slot = if cc != 0 { scalar_u } else { av };
+                    }
+                } else {
+                    for ((slot, &cc), &av) in out_raw.iter_mut().zip(cond_raw.iter()).zip(arr_raw.iter()) {
+                        *slot = if cc != 0 { av } else { scalar_u };
+                    }
                 }
             }
             return Ok(Some(out.unbind()));
         }};
     }
     match itemsize {
-        1 => select_unsigned!(u8, "uint8"),
-        2 => select_unsigned!(u16, "uint16"),
-        4 => select_unsigned!(u32, "uint32"),
-        8 => select_unsigned!(u64, "uint64"),
+        1 => select_unsigned!(u8, cached_uint8_type(py)?),
+        2 => select_unsigned!(u16, cached_uint16_type(py)?),
+        4 => select_unsigned!(u32, cached_uint32_type(py)?),
+        8 => select_unsigned!(u64, cached_uint64_type(py)?),
         _ => Ok(None),
     }
 }
@@ -16167,7 +16140,7 @@ fn try_zerocopy_f64_select(
     default: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
 
     let Ok(cond_iter) = condlist.try_iter() else {
         return Ok(None);
@@ -16195,7 +16168,7 @@ fn try_zerocopy_f64_select(
             } else if let Ok(value) = bound.extract::<f64>() {
                 default_scalar = value;
                 None
-            } else if bound.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, bound) {
+            } else if bound.is_exact_instance(ndarray_type) && numpy_dtype_is_f64(py, bound) {
                 match PyBuffer::<f64>::get(bound) {
                     Ok(buffer) => Some(buffer),
                     Err(_) => return Ok(None),
@@ -16206,38 +16179,29 @@ fn try_zerocopy_f64_select(
         }
     };
 
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
+    let uint8 = cached_uint8_type(py)?;
     let mut cond_buffers: Vec<PyBuffer<u8>> = Vec::with_capacity(k);
-    let mut shape: Option<Vec<usize>> = None;
+    let mut expected_shape: Option<Vec<usize>> = None;
     for condition in &cond_items {
-        if !condition.is_exact_instance(&ndarray_type) {
+        if !condition.is_exact_instance(ndarray_type) || dtype_kind_of(condition) != Some('b') {
             return Ok(None);
         }
-        if condition
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?
-            != "b"
-        {
-            return Ok(None);
-        }
-        let view = condition.call_method1(intern!(py, "view"), (&uint8,))?;
+        let view = condition.call_method1(intern!(py, "view"), (uint8,))?;
         let Ok(buffer) = PyBuffer::<u8>::get(&view) else {
             return Ok(None);
         };
-        let this_shape = buffer.shape().to_vec();
-        match &shape {
-            None => shape = Some(this_shape),
-            Some(existing) if *existing != this_shape => return Ok(None),
+        match &expected_shape {
+            None => expected_shape = Some(buffer.shape().to_vec()),
+            Some(existing) if existing.as_slice() != buffer.shape() => return Ok(None),
             _ => {}
         }
         cond_buffers.push(buffer);
     }
-    let shape = shape.expect("k >= 1 guarantees a shape");
+    let shape = expected_shape.expect("k >= 1 guarantees a shape");
 
     let mut choice_buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(k);
     for choice in &choice_items {
-        if !choice.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, choice) {
+        if !choice.is_exact_instance(ndarray_type) || !numpy_dtype_is_f64(py, choice) {
             return Ok(None);
         }
         let Ok(buffer) = PyBuffer::<f64>::get(choice) else {
@@ -16283,7 +16247,7 @@ fn try_zerocopy_f64_select(
     let flat = if let [only] = shape.as_slice() {
         numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
     } else {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        let output_shape = PyTuple::new(py, &shape)?;
         numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
     };
     if n > 0 {
@@ -16454,14 +16418,10 @@ fn try_zerocopy_int_select(
             }
             let uint8 = cached_uint8_type(py)?;
             let mut cond_buffers: Vec<PyBuffer<u8>> = Vec::with_capacity(k);
-            let mut shape: Option<Vec<usize>> = None;
+            let mut expected_shape: Option<Vec<usize>> = None;
             for condition in &cond_items {
                 if !condition.is_exact_instance(&ndarray_type)
-                    || condition
-                        .getattr(intern!(py, "dtype"))?
-                        .getattr(intern!(py, "kind"))?
-                        .extract::<String>()?
-                        != "b"
+                    || dtype_kind_of(condition) != Some('b')
                 {
                     return Ok(None);
                 }
@@ -16469,28 +16429,24 @@ fn try_zerocopy_int_select(
                 let Ok(buffer) = PyBuffer::<u8>::get(&view) else {
                     return Ok(None);
                 };
-                let this_shape = buffer.shape().to_vec();
-                match &shape {
-                    None => shape = Some(this_shape),
-                    Some(existing) if *existing != this_shape => return Ok(None),
+                match &expected_shape {
+                    None => expected_shape = Some(buffer.shape().to_vec()),
+                    Some(existing) if existing.as_slice() != buffer.shape() => return Ok(None),
                     _ => {}
                 }
                 cond_buffers.push(buffer);
             }
-            let shape = shape.expect("k >= 1 guarantees a shape");
+            let shape = expected_shape.expect("k >= 1 guarantees a shape");
             // With em == 2 (c128) the u64 view doubles the LAST axis, so compare
             // the ORIGINAL object's shape against the cond shape and the viewed
             // buffer's total length against em * n below (0-d c128 delegates).
             if em == 2 && shape.is_empty() {
                 return Ok(None);
             }
+            let cond_shape = cond_items[0].getattr(intern!(py, "shape"))?;
             let mut choice_buffers: Vec<PyBuffer<$t>> = Vec::with_capacity(k);
             for choice in &choice_items {
-                if choice
-                    .getattr(intern!(py, "shape"))?
-                    .extract::<Vec<usize>>()?
-                    != shape
-                {
+                if !choice.getattr(intern!(py, "shape"))?.eq(&cond_shape)? {
                     return Ok(None);
                 }
                 let view = choice.call_method1(intern!(py, "view"), (&udtype,))?;
@@ -16502,7 +16458,7 @@ fn try_zerocopy_int_select(
             let default_buffer: Option<PyBuffer<$t>> = match &default_array {
                 None => None,
                 Some(arr) => {
-                    if arr.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()? != shape {
+                    if !arr.getattr(intern!(py, "shape"))?.eq(&cond_shape)? {
                         return Ok(None);
                     }
                     let view = arr.call_method1(intern!(py, "view"), (&udtype,))?;
@@ -16548,7 +16504,7 @@ fn try_zerocopy_int_select(
                 if let [only] = shape.as_slice() {
                     numpy.call_method1(intern!(py, "empty"), (*only, &udtype))?
                 } else {
-                    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+                    let output_shape = PyTuple::new(py, &shape)?;
                     numpy.call_method1(intern!(py, "empty"), (&output_shape, &udtype))?
                 }
             } else {
@@ -16637,7 +16593,7 @@ fn try_zerocopy_int_select(
                 debug_assert_eq!(*only, n);
                 Ok(Some(typed.unbind()))
             } else {
-                let output_shape = PyTuple::new(py, shape.iter().copied())?;
+                let output_shape = PyTuple::new(py, &shape)?;
                 let output = typed
                     .call_method1(intern!(py, "reshape"), (&output_shape,))?
                     .unbind();
@@ -64666,9 +64622,9 @@ fn try_zerocopy_f64_allclose(
     equal_nan: bool,
 ) -> PyResult<Option<bool>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    let a_arr = a.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, a);
-    let b_arr = b.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, b);
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    let a_arr = a.is_exact_instance(ndarray_type) && numpy_dtype_is_f64(py, a);
+    let b_arr = b.is_exact_instance(ndarray_type) && numpy_dtype_is_f64(py, b);
     let a_buf = if a_arr {
         PyBuffer::<f64>::get(a).ok()
     } else {
@@ -64697,25 +64653,36 @@ fn try_zerocopy_f64_allclose(
             let (Some(sa), Some(sb)) = (ab.as_slice(py), bb.as_slice(py)) else {
                 return Ok(None);
             };
-            sa.iter()
-                .zip(sb.iter())
-                .all(|(x, y)| allclose_pair(x.get(), y.get(), rtol, atol, equal_nan))
+            let a_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(sa.as_ptr().cast::<f64>(), sa.len()) };
+            let b_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(sb.as_ptr().cast::<f64>(), sb.len()) };
+            a_raw
+                .iter()
+                .zip(b_raw)
+                .all(|(&x, &y)| allclose_pair(x, y, rtol, atol, equal_nan))
         }
         (Some(ab), None) => {
             let Some(bs) = b_sc else { return Ok(None) };
             let Some(sa) = ab.as_slice(py) else {
                 return Ok(None);
             };
-            sa.iter()
-                .all(|x| allclose_pair(x.get(), bs, rtol, atol, equal_nan))
+            let a_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(sa.as_ptr().cast::<f64>(), sa.len()) };
+            a_raw
+                .iter()
+                .all(|&x| allclose_pair(x, bs, rtol, atol, equal_nan))
         }
         (None, Some(bb)) => {
             let Some(as_) = a_sc else { return Ok(None) };
             let Some(sb) = bb.as_slice(py) else {
                 return Ok(None);
             };
-            sb.iter()
-                .all(|y| allclose_pair(as_, y.get(), rtol, atol, equal_nan))
+            let b_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(sb.as_ptr().cast::<f64>(), sb.len()) };
+            b_raw
+                .iter()
+                .all(|&y| allclose_pair(as_, y, rtol, atol, equal_nan))
         }
         (None, None) => return Ok(None),
     };
@@ -64737,17 +64704,9 @@ fn try_zerocopy_f32_allclose(
     equal_nan: bool,
 ) -> PyResult<Option<bool>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    let is_f32 = |o: &Bound<'_, PyAny>| -> PyResult<bool> {
-        if !o.is_exact_instance(&ndarray_type) {
-            return Ok(false);
-        }
-        let dt = o.getattr(intern!(py, "dtype"))?;
-        Ok(dt.getattr(intern!(py, "kind"))?.extract::<String>()? == "f"
-            && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 4)
-    };
-    let a_arr = is_f32(a)?;
-    let b_arr = is_f32(b)?;
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    let a_arr = a.is_exact_instance(ndarray_type) && numpy_dtype_is_f32(a);
+    let b_arr = b.is_exact_instance(ndarray_type) && numpy_dtype_is_f32(b);
     if !a_arr && !b_arr {
         return Ok(None); // need at least one f32 array
     }
@@ -64779,25 +64738,36 @@ fn try_zerocopy_f32_allclose(
             let (Some(sa), Some(sb)) = (ab.as_slice(py), bb.as_slice(py)) else {
                 return Ok(None);
             };
-            sa.iter()
-                .zip(sb.iter())
-                .all(|(x, y)| allclose_pair(x.get() as f64, y.get() as f64, rtol, atol, equal_nan))
+            let a_raw: &[f32] =
+                unsafe { std::slice::from_raw_parts(sa.as_ptr().cast::<f32>(), sa.len()) };
+            let b_raw: &[f32] =
+                unsafe { std::slice::from_raw_parts(sb.as_ptr().cast::<f32>(), sb.len()) };
+            a_raw
+                .iter()
+                .zip(b_raw)
+                .all(|(&x, &y)| allclose_pair(x as f64, y as f64, rtol, atol, equal_nan))
         }
         (Some(ab), None) => {
             let Some(bs) = b_sc else { return Ok(None) };
             let Some(sa) = ab.as_slice(py) else {
                 return Ok(None);
             };
-            sa.iter()
-                .all(|x| allclose_pair(x.get() as f64, bs, rtol, atol, equal_nan))
+            let a_raw: &[f32] =
+                unsafe { std::slice::from_raw_parts(sa.as_ptr().cast::<f32>(), sa.len()) };
+            a_raw
+                .iter()
+                .all(|&x| allclose_pair(x as f64, bs, rtol, atol, equal_nan))
         }
         (None, Some(bb)) => {
             let Some(as_) = a_sc else { return Ok(None) };
             let Some(sb) = bb.as_slice(py) else {
                 return Ok(None);
             };
-            sb.iter()
-                .all(|y| allclose_pair(as_, y.get() as f64, rtol, atol, equal_nan))
+            let b_raw: &[f32] =
+                unsafe { std::slice::from_raw_parts(sb.as_ptr().cast::<f32>(), sb.len()) };
+            b_raw
+                .iter()
+                .all(|&y| allclose_pair(as_, y as f64, rtol, atol, equal_nan))
         }
         (None, None) => return Ok(None),
     };
@@ -111743,9 +111713,9 @@ fn try_zerocopy_f64_divmod(
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
-    if !x1.is_exact_instance(&ndarray_t)
-        || !x2.is_exact_instance(&ndarray_t)
+    let ndarray_t = cached_ndarray_type(numpy.py())?;
+    if !x1.is_exact_instance(ndarray_t)
+        || !x2.is_exact_instance(ndarray_t)
         || !numpy_dtype_is_f64(py, x1)
         || !numpy_dtype_is_f64(py, x2)
     {
