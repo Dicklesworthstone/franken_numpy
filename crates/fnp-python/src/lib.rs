@@ -27309,8 +27309,7 @@ fn clip(
     // arrays, complex inputs, explicit `out` buffers, and any extra
     // kwargs (casting, where, dtype, …) fall back to np.clip so numpy's
     // full dispatch surface is preserved exactly.
-    let numpy = cached_numpy(py)?;
-    let clip_fn = numpy.getattr(intern!(py, "clip"))?;
+    let clip_fn = cached_numpy_clip(py)?;
 
     // numpy 2.0 renamed a_min/a_max -> min/max. The modern min/max spelling makes
     // each bound independently optional; the legacy a_min/a_max spelling is still
@@ -27526,15 +27525,10 @@ fn clip(
     // the promotion is a no-op so dtype parity is exact. Any failure probing
     // the promotion (e.g. an input NumPy's `result_type` rejects) also defers.
     let promotion_is_noop = (|| -> PyResult<bool> {
-        let a_arr = numpy
-            .getattr(intern!(py, "asarray"))?
-            .call1((a.bind(py),))?;
+        let a_arr = cached_numpy_asarray(py)?.call1((a.bind(py),))?;
         let input_dtype = a_arr.getattr(intern!(py, "dtype"))?;
-        let promoted_dtype = numpy.getattr(intern!(py, "result_type"))?.call1((
-            &a_arr,
-            a_min.bind(py),
-            a_max.bind(py),
-        ))?;
+        let promoted_dtype =
+            cached_numpy_result_type(py)?.call1((&a_arr, a_min.bind(py), a_max.bind(py)))?;
         promoted_dtype.eq(&input_dtype)
     })();
     if !matches!(promotion_is_noop, Ok(true)) {
@@ -28106,7 +28100,7 @@ fn append(
     // numpy's third positional parameter, so the kwargs dict was avoidable, and the
     // native path below returns without ever delegating (`deadlock-audit-1zl3e`).
     let fallback = || -> PyResult<Py<PyAny>> {
-        let append_fn = numpy.getattr(intern!(py, "append"))?;
+        let append_fn = cached_numpy_append(py)?;
         match axis {
             Some(ref a) => Ok(append_fn
                 .call1((arr.bind(py), values.bind(py), a.bind(py)))?
@@ -28201,7 +28195,7 @@ fn resize(py: Python<'_>, a: Py<PyAny>, new_shape: Py<PyAny>) -> PyResult<Py<PyA
     // Delegate the residual (object dtypes, empty/zero-size cases, exotic
     // shapes) so truncation, repetition, scalar promotion, and
     // dtype-preserving shape expansion all stay exact.
-    let resize_fn = numpy.getattr(intern!(py, "resize"))?;
+    let resize_fn = cached_numpy_resize(py)?;
     Ok(resize_fn.call1((a.bind(py), new_shape.bind(py)))?.unbind())
 }
 
@@ -28559,14 +28553,15 @@ fn insert(
     )? {
         return Ok(out);
     }
-    let insert_fn = numpy.getattr(intern!(py, "insert"))?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis) = axis {
-        kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
+    let insert_fn = cached_numpy_insert(py)?;
+    match axis {
+        Some(a) => Ok(insert_fn
+            .call1((arr.bind(py), obj.bind(py), values.bind(py), a.bind(py)))?
+            .unbind()),
+        None => Ok(insert_fn
+            .call1((arr.bind(py), obj.bind(py), values.bind(py)))?
+            .unbind()),
     }
-    Ok(insert_fn
-        .call((arr.bind(py), obj.bind(py), values.bind(py)), Some(&kwargs))?
-        .unbind())
 }
 
 // Native fast path for np.delete(arr, idx) with a SINGLE integer index on a C-contiguous
@@ -28853,14 +28848,13 @@ fn delete(
     {
         return Ok(out);
     }
-    let delete_fn = numpy.getattr(intern!(py, "delete"))?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis) = axis {
-        kwargs.set_item(intern!(py, "axis"), axis.bind(py))?;
+    let delete_fn = cached_numpy_delete(py)?;
+    match axis {
+        Some(a) => Ok(delete_fn
+            .call1((arr.bind(py), obj.bind(py), a.bind(py)))?
+            .unbind()),
+        None => Ok(delete_fn.call1((arr.bind(py), obj.bind(py)))?.unbind()),
     }
-    Ok(delete_fn
-        .call((arr.bind(py), obj.bind(py)), Some(&kwargs))?
-        .unbind())
 }
 
 // Zero-copy np.concatenate(arrays, axis=0) for C-contiguous float64 ndarrays
@@ -29378,7 +29372,6 @@ fn concatenate(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     // THE `getattr` BELONGS TO THE FALLBACK, NOT TO EVERY CALL. `np.concatenate` was
     // resolved off the live module before any gate had run, so the native zero-copy path -
     // the one this function exists for - paid a `getattr` for a callable it never invokes.
@@ -29386,7 +29379,7 @@ fn concatenate(
     // `numpy.concatenate` is still honoured, because the lookup still happens against the
     // live module at the moment of delegation) and removes it from the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
-        let concatenate_fn = numpy.getattr(intern!(py, "concatenate"))?;
+        let concatenate_fn = cached_numpy_concatenate(py)?;
         let call_kwargs = PyDict::new(py);
         if let Some(kw) = kwargs {
             for (key, value) in kw.iter() {
@@ -29493,8 +29486,7 @@ fn stack(
     // Delegate to NumPy so sequence handling, default axis insertion,
     // explicit out buffers, dtype/casting interactions, and shape
     // mismatch errors all match exactly.
-    let numpy = cached_numpy(py)?;
-    let stack_fn = numpy.getattr(intern!(py, "stack"))?;
+    let stack_fn = cached_numpy_stack(py)?;
     if args.is_empty() || args.len() > 2 {
         return Ok(stack_fn.call(args, kwargs)?.unbind());
     }
@@ -29522,7 +29514,7 @@ fn stack(
     if args.len() == 1
         && axis0
         && !has_out_dtype_or_casting
-        && let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
+        && let Ok(ndarray_type) = cached_ndarray_type(py).cloned()
         && let Ok(seq) = args.get_item(0)
         && let Ok(iter) = seq.try_iter()
     {
@@ -29571,7 +29563,7 @@ fn stack(
     {
         let collected: PyResult<Vec<_>> = iter.collect();
         if let Ok(items) = collected
-            && let Some(out) = try_native_column_interleave(py, numpy, &items)?
+            && let Some(out) = try_native_column_interleave(py, cached_numpy(py)?, &items)?
         {
             return Ok(out);
         }
@@ -58936,8 +58928,7 @@ fn arange(
 ) -> PyResult<Py<PyAny>> {
     // Always passthrough to NumPy - our Rust→NumPy export is slower.
     // See zeros() comment and perf bead franken_numpy-yx2wt.
-    let numpy = cached_numpy(py)?;
-    let arange_fn = numpy.getattr(intern!(py, "arange"))?;
+    let arange_fn = cached_numpy_arange(py)?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype.as_ref() {
         kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
@@ -59036,9 +59027,8 @@ fn linspace(
     //     50, True and False - verified against the installed interpreter - and this
     //     signature declares exactly those, so at defaults all three are dict entries and
     //     keyword parses that communicate nothing.
-    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let linspace_fn = numpy.getattr(intern!(py, "linspace"))?;
+        let linspace_fn = cached_numpy_linspace(py)?;
         let kwargs = PyDict::new(py);
         if num != 50 {
             kwargs.set_item(intern!(py, "num"), num)?;
@@ -59089,9 +59079,7 @@ fn linspace(
     };
     let resolved_dtype = match dtype.as_ref() {
         Some(dtype_val) if !dtype_val.bind(py).is_none() => {
-            let parsed = numpy
-                .getattr(intern!(py, "dtype"))?
-                .call1((dtype_val.bind(py),))?;
+            let parsed = cached_numpy_dtype(py)?.call1((dtype_val.bind(py),))?;
             let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
             match DType::parse(&name) {
                 // Only float64 stays native. float32/float16 used to run the f64
@@ -59133,13 +59121,12 @@ fn linspace(
             Err(_) => return fallback(py),
         };
         let array_py = build_numpy_array_from_ufunc(py, &array)?;
-        let step_py = numpy
-            .getattr(match resolved_dtype {
-                DType::F16 => "float16",
-                DType::F32 => "float32",
-                _ => "float64",
-            })?
-            .call1((step,))?;
+        let step_type = match resolved_dtype {
+            DType::F16 => cached_float16_type(py)?,
+            DType::F32 => cached_float32_type(py)?,
+            _ => cached_float64_type(py)?,
+        };
+        let step_py = step_type.call1((step,))?;
         let tuple = PyTuple::new(py, [array_py.bind(py), &step_py])?;
         return Ok(tuple.into_any().unbind());
     }
@@ -59163,9 +59150,8 @@ fn geomspace(
     dtype: Option<Py<PyAny>>,
     axis: isize,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let geomspace_fn = numpy.getattr(intern!(py, "geomspace"))?;
+        let geomspace_fn = cached_numpy_geomspace(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "num"), num)?;
         kwargs.set_item(intern!(py, "endpoint"), endpoint)?;
@@ -59409,7 +59395,7 @@ fn full(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let full_fn = numpy.getattr(intern!(py, "full"))?;
+        let full_fn = cached_numpy_full(py)?;
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
@@ -59516,7 +59502,7 @@ fn full_like(
     )? {
         return Ok(out);
     }
-    let full_like_fn = numpy.getattr(intern!(py, "full_like"))?;
+    let full_like_fn = cached_numpy_full_like(py)?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
@@ -59565,7 +59551,7 @@ fn zeros_like(
     )? {
         return Ok(out);
     }
-    let zeros_like_fn = numpy.getattr(intern!(py, "zeros_like"))?;
+    let zeros_like_fn = cached_numpy_zeros_like(py)?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
@@ -59612,7 +59598,7 @@ fn ones_like(
     )? {
         return Ok(out);
     }
-    let ones_like_fn = numpy.getattr(intern!(py, "ones_like"))?;
+    let ones_like_fn = cached_numpy_ones_like(py)?;
     let kwargs = PyDict::new(py);
     if let Some(dtype_val) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), dtype_val)?;
@@ -59646,8 +59632,7 @@ fn empty_like(
     // np.empty_like returns UNINITIALIZED memory (instant); the old native path
     // built+zeroed an f64 UFuncArray and converted it — ~240000x slower for int8.
     // Delegate.
-    let numpy = cached_numpy(py)?;
-    let empty_like_fn = numpy.getattr(intern!(py, "empty_like"))?;
+    let empty_like_fn = cached_numpy_empty_like(py)?;
     // `dtype`, `order`, `subok` and `shape` are POSITIONAL-or-keyword in numpy's
     // signature - only `device` is keyword-only - so the common call needs no dict at
     // all. It was building one and filling it every time, and `order` went in as a
@@ -59734,13 +59719,12 @@ fn native_asarray_like(
         None => None,
     };
 
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?.clone();
 
     // Parse requested dtype (if any).
     let requested_dtype = match dtype {
         Some(v) if !v.is_none() => Some({
-            let parsed = numpy.getattr(intern!(py, "dtype"))?.call1((v,))?;
+            let parsed = cached_numpy_dtype(py)?.call1((v,))?;
             let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
             match DType::parse(&name) {
                 Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
@@ -88353,6 +88337,22 @@ cached_numpy_attr!(cached_numpy_triu, "triu");
 cached_numpy_attr!(cached_numpy_tril, "tril");
 cached_numpy_attr!(cached_numpy_dtype, "dtype");
 cached_numpy_attr!(cached_numpy_bincount, "bincount");
+cached_numpy_attr!(cached_numpy_zeros_like, "zeros_like");
+cached_numpy_attr!(cached_numpy_ones_like, "ones_like");
+cached_numpy_attr!(cached_numpy_empty_like, "empty_like");
+cached_numpy_attr!(cached_numpy_full_like, "full_like");
+cached_numpy_attr!(cached_numpy_full, "full");
+cached_numpy_attr!(cached_numpy_arange, "arange");
+cached_numpy_attr!(cached_numpy_linspace, "linspace");
+cached_numpy_attr!(cached_numpy_logspace, "logspace");
+cached_numpy_attr!(cached_numpy_geomspace, "geomspace");
+cached_numpy_attr!(cached_numpy_concatenate, "concatenate");
+cached_numpy_attr!(cached_numpy_stack, "stack");
+cached_numpy_attr!(cached_numpy_append, "append");
+cached_numpy_attr!(cached_numpy_resize, "resize");
+cached_numpy_attr!(cached_numpy_insert, "insert");
+cached_numpy_attr!(cached_numpy_delete, "delete");
+cached_numpy_attr!(cached_numpy_clip, "clip");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
