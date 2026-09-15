@@ -61024,12 +61024,7 @@ fn native_unary_elementwise(
     if float_of(8)
         && let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)?
     {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-ei9jz`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // int64 zero-copy fast path (negative/positive/abs/square). Without it int64
     // input ran the cold extract Vec and then fell straight back to numpy below,
@@ -61037,12 +61032,7 @@ fn native_unary_elementwise(
     if int_of(8)
         && let Some((flat, shape)) = zerocopy_i64_unary_flat(py, numpy, x, op)?
     {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-tsyfb`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // int32 zero-copy fast path. Same extract-then-discard cost as int64, plus
     // the f64 round-trip mis-wrapped square (saturating cast); this keeps int32
@@ -61050,12 +61040,7 @@ fn native_unary_elementwise(
     if int_of(4)
         && let Some((flat, shape)) = zerocopy_i32_unary_flat(py, numpy, x, op)?
     {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-tsyfb`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // Narrow signed / all unsigned integer widths (int8/int16, uint8/16/32/64):
     // same extract-then-discard cost as int64, plus the f64 round-trip mis-wraps
@@ -61063,12 +61048,7 @@ fn native_unary_elementwise(
     if narrow_integral
         && let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, numpy, x, op)?
     {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-tsyfb`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // float32 zero-copy fast path. float32 input otherwise extracted to an f64
     // Vec and rebuilt (~60-360x slower), and `sign` returned float64; this keeps
@@ -61076,15 +61056,7 @@ fn native_unary_elementwise(
     if float_of(4)
         && let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)?
     {
-        // NO RESHAPE. `zerocopy_f32_unary_flat` has allocated at the FINAL shape since
-        // `deadlock-audit-ei9jz`, but this caller kept reshaping the result to the shape
-        // it already had - a no-op `reshape` plus its tuple, ~117 ns per call, on every
-        // f32 unary (`deadlock-audit-tsyfb`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // AN ndarray SUBCLASS KEEPS ITS TYPE THROUGH A NUMPY UFUNC (`deadlock-audit-1zl3e`).
     // `np.square(np.matrix(a))` is a `matrix`; every fast path above gates on
@@ -61221,12 +61193,7 @@ fn native_unary_promoting(
     // (which this promoting path widens to float) are not float64 ndarrays, so
     // they correctly fall through unchanged.
     if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)? {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-ei9jz`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // float32 SIMD-transcendentals: numpy's vectorized f32 libm beats our scalar
     // per-element f32 libm 2-12x (sin/cos/tanh ~10x) — and the scalar path even
