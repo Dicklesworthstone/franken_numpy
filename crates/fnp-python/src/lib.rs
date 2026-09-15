@@ -7798,7 +7798,7 @@ fn direct_f64_unary_output_supported(array: &UFuncArray, op: UnaryOp) -> bool {
 
 fn numpy_array_from_direct_f64_unary<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
+    _numpy: &Bound<'py, PyModule>,
     array: &UFuncArray,
     op: UnaryOp,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
@@ -7808,11 +7808,12 @@ fn numpy_array_from_direct_f64_unary<'py>(
 
     let shape = array.shape();
     let float64_type = cached_float64_type(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let output = if let [only] = shape {
-        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+        empty_fn.call1((*only, float64_type))?
     } else {
         let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (alloc_shape, float64_type))?
+        empty_fn.call1((alloc_shape, float64_type))?
     };
     if array.values().is_empty() {
         return Ok(Some(output));
@@ -8605,7 +8606,7 @@ fn zerocopy_f64_unary_flat<'py>(
     }
     // Exact ndarray type only — subclasses (matrix, masked array) must keep
     // numpy's subclass-preserving semantics via the fallback.
-    if !x.get_type().is(cached_ndarray_type(numpy.py())?) {
+    if !x.get_type().is(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     // A float64 buffer view. The dtype must be checked HERE rather than left to the buffer
@@ -8655,11 +8656,12 @@ fn zerocopy_f64_unary_flat<'py>(
     // transcendental - all of which measured 1.9-2.3x against numpy at n=256, where
     // numpy's whole call is ~350 ns.
     let float64_type = cached_float64_type(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+        empty_fn.call1((*only, float64_type))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+        empty_fn.call1((&output_shape, float64_type))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -9013,7 +9015,7 @@ fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
 // record numpy's invalid event on the slow path).
 fn zerocopy_f32_unary_flat<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
+    _numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
     op: UnaryOp,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
@@ -9034,7 +9036,7 @@ fn zerocopy_f32_unary_flat<'py>(
     ) {
         return Ok(None);
     }
-    if !x.get_type().is(cached_ndarray_type(numpy.py())?) {
+    if !x.get_type().is(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     // The dtype must be checked HERE, not left to the buffer request: `PyBuffer::<f32>::get`
@@ -9077,11 +9079,12 @@ fn zerocopy_f32_unary_flat<'py>(
     // The dtype is the operand's own object, not the string "float32": a `&str` builds a
     // fresh `PyString` per call and makes numpy re-parse it (`deadlock-audit-tsyfb`).
     let out_dtype = x.getattr(intern!(py, "dtype"))?;
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, &out_dtype))?
+        empty_fn.call1((*only, &out_dtype))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, &out_dtype))?
+        empty_fn.call1((&output_shape, &out_dtype))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -9155,7 +9158,7 @@ fn unary_map_i64<F: Fn(i64) -> i64 + Sync>(
 // non-ndarray input, or for an op outside the wrapping-closed set.
 fn zerocopy_i64_unary_flat<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
+    _numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
     op: UnaryOp,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
@@ -9165,7 +9168,7 @@ fn zerocopy_i64_unary_flat<'py>(
     ) {
         return Ok(None);
     }
-    if !x.get_type().is(cached_ndarray_type(numpy.py())?) {
+    if !x.get_type().is(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     // Exact int64 only: kind 'i', itemsize 8. Other widths/signedness (int32,
@@ -9192,11 +9195,12 @@ fn zerocopy_i64_unary_flat<'py>(
     let n = input.len();
     // Allocate at the final shape with the operand's own dtype object, same as the i32
     // sibling (`deadlock-audit-tsyfb`).
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, &dtype))?
+        empty_fn.call1((*only, &dtype))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, &dtype))?
+        empty_fn.call1((&output_shape, &dtype))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
@@ -9258,7 +9262,7 @@ fn unary_map_i32<F: Fn(i32) -> i32 + Sync>(
 // including abs/negative(i32::MIN)==i32::MIN.
 fn zerocopy_i32_unary_flat<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
+    _numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
     op: UnaryOp,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
@@ -9268,7 +9272,7 @@ fn zerocopy_i32_unary_flat<'py>(
     ) {
         return Ok(None);
     }
-    if !x.get_type().is(cached_ndarray_type(numpy.py())?) {
+    if !x.get_type().is(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
@@ -9296,11 +9300,12 @@ fn zerocopy_i32_unary_flat<'py>(
     // The dtype is already in hand from the kind/itemsize check above - passing that
     // object is both cheaper than a name and exactly numpy's own dtype.
     // Rank 1 passes a bare int, skipping a one-element tuple.
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, &dtype))?
+        empty_fn.call1((*only, &dtype))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, &dtype))?
+        empty_fn.call1((&output_shape, &dtype))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<i32>::get(&flat) else {
@@ -15247,9 +15252,7 @@ fn try_zerocopy_f64_nan_to_num(
         [only] => empty_fn.call1((*only, cached_float64_type(py)?))?,
         _ => {
             let output_shape = PyTuple::new(py, shape)?;
-            empty_fn.call1(
-                (&output_shape, cached_float64_type(py)?),
-            )?
+            empty_fn.call1((&output_shape, cached_float64_type(py)?))?
         }
     };
     if n > 0 {
@@ -15362,9 +15365,7 @@ fn try_zerocopy_f32_nan_to_num(
         [only] => empty_fn.call1((*only, cached_float32_type(py)?))?,
         _ => {
             let output_shape = PyTuple::new(py, shape)?;
-            empty_fn.call1(
-                (&output_shape, cached_float32_type(py)?),
-            )?
+            empty_fn.call1((&output_shape, cached_float32_type(py)?))?
         }
     };
     if n > 0 {
@@ -16118,8 +16119,7 @@ fn try_zerocopy_f64_select(
     choicelist: &Bound<'_, PyAny>,
     default: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    let ndarray_type = cached_ndarray_type(py)?;
 
     let Ok(cond_iter) = condlist.try_iter() else {
         return Ok(None);
@@ -16224,10 +16224,10 @@ fn try_zerocopy_f64_select(
     let n = choice_slices[0].len();
     let float64_type = cached_float64_type(py)?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+        cached_numpy_empty(py)?.call1((*only, float64_type))?
     } else {
         let output_shape = PyTuple::new(py, &shape)?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+        cached_numpy_empty(py)?.call1((&output_shape, float64_type))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
