@@ -49,6 +49,101 @@ use fnp_ufunc::{
     right_shift as ufunc_right_shift, signbit as ufunc_signbit, spacing as ufunc_spacing,
     take_float_error_events,
 };
+use fnp_runtime::{
+    CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
+};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
+
+static RUNTIME_MODE: AtomicU8 = AtomicU8::new(0); // 0 = Strict, 1 = Hardened
+static RUNTIME_LEDGER: Mutex<Option<EvidenceLedger>> = Mutex::new(None);
+
+/// Returns the active [`RuntimeMode`].
+#[must_use]
+pub fn current_runtime_mode() -> RuntimeMode {
+    match RUNTIME_MODE.load(Ordering::Relaxed) {
+        1 => RuntimeMode::Hardened,
+        _ => RuntimeMode::Strict,
+    }
+}
+
+/// Sets the active runtime mode from a string (`"strict"` or `"hardened"`).
+#[pyfunction]
+pub fn set_runtime_mode(mode: &str) -> PyResult<()> {
+    match RuntimeMode::from_wire(mode) {
+        Some(RuntimeMode::Strict) => {
+            RUNTIME_MODE.store(0, Ordering::SeqCst);
+            Ok(())
+        }
+        Some(RuntimeMode::Hardened) => {
+            RUNTIME_MODE.store(1, Ordering::SeqCst);
+            Ok(())
+        }
+        None => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid runtime mode '{mode}', expected 'strict' or 'hardened'"
+        ))),
+    }
+}
+
+/// Returns the name of the active runtime mode (`"strict"` or `"hardened"`).
+#[pyfunction]
+#[must_use]
+pub fn get_runtime_mode() -> &'static str {
+    current_runtime_mode().as_str()
+}
+
+/// Returns the count of logged runtime decisions in the active ledger.
+#[pyfunction]
+#[must_use]
+pub fn get_runtime_decision_count() -> usize {
+    if let Ok(guard) = RUNTIME_LEDGER.lock() {
+        guard.as_ref().map_or(0, |l| l.events().len())
+    } else {
+        0
+    }
+}
+
+/// Clears all recorded runtime decisions.
+#[pyfunction]
+pub fn clear_runtime_decisions() {
+    if let Ok(mut guard) = RUNTIME_LEDGER.lock()
+        && let Some(ledger) = guard.as_mut()
+    {
+        *ledger = EvidenceLedger::new();
+    }
+}
+
+/// Records a compatibility decision in the runtime ledger.
+pub fn record_runtime_decision(
+    class: CompatibilityClass,
+    risk_score: f64,
+    reason_code: &str,
+    note: &str,
+) -> DecisionAction {
+    let mode = current_runtime_mode();
+    let action = fnp_runtime::decide_compatibility(mode, class, risk_score, 0.5);
+    if let Ok(mut guard) = RUNTIME_LEDGER.lock() {
+        let ledger = guard.get_or_insert_with(EvidenceLedger::new);
+        let context = DecisionAuditContext {
+            fixture_id: "python_api".to_string(),
+            seed: 0,
+            env_fingerprint: "pyo3_boundary".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: reason_code.to_string(),
+        };
+        fnp_runtime::decide_and_record_with_context(
+            ledger,
+            mode,
+            class,
+            risk_score,
+            0.5,
+            context,
+            note.to_string(),
+        );
+    }
+    action
+}
+
 /// Crate-local shadow of `pyo3::buffer::PyBuffer` whose `get` REFUSES a buffer whose
 /// element byte order is not the host's.
 ///
@@ -76,6 +171,14 @@ impl<T: pyo3::buffer::Element> PyBuffer<T> {
     fn get(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
         let inner = pyo3::buffer::PyBuffer::<T>::get(obj)?;
         if inner.item_size() > 1 && !buffer_format_is_native_order(inner.format()) {
+            if current_runtime_mode() == RuntimeMode::Hardened {
+                record_runtime_decision(
+                    CompatibilityClass::KnownCompatible,
+                    0.95,
+                    "non_native_byte_order_decline",
+                    "buffer element byte order is not native; declining to NumPy with audit logging",
+                );
+            }
             return Err(pyo3::exceptions::PyBufferError::new_err(
                 "buffer element byte order is not native; fnp_python zero-copy routes decline non-native arrays",
             ));
@@ -35861,6 +35964,14 @@ fn nan_to_num_impl(
     posinf: Option<f64>,
     neginf: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
+    if current_runtime_mode() == RuntimeMode::Hardened {
+        record_runtime_decision(
+            CompatibilityClass::KnownCompatible,
+            0.15,
+            "nan_to_num_sanitization",
+            "nan_to_num input sanitization applied",
+        );
+    }
     // copy=False asks numpy to replace NaN/+-inf IN PLACE on the input ndarray and
     // return that same object (np.array(x, copy=False) is the input when x is already
     // an ndarray). The native fast paths below all allocate a fresh result, so for the
@@ -121247,6 +121358,15 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("lib", lib_module)?;
     }
 
+    if let Ok(mode_str) = std::env::var("FNP_RUNTIME_MODE") {
+        let _ = set_runtime_mode(&mode_str);
+    }
+
+    m.add_function(wrap_pyfunction!(set_runtime_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(get_runtime_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(get_runtime_decision_count, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_runtime_decisions, m)?)?;
+
     // `__all__` is bound LAST, deliberately. PyO3's `PyModule::add` appends the
     // added name to `__all__`, so binding it early meant every subsequent `add`
     // grew the list — 133 entries by the end of this function, including the
@@ -180279,5 +180399,114 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 );
             }
         });
+    }
+
+    #[test]
+    fn runtime_mode_integration_and_audit_ledger() {
+        use super::{
+            clear_runtime_decisions, current_runtime_mode, get_runtime_decision_count,
+            get_runtime_mode, record_runtime_decision, set_runtime_mode, CompatibilityClass,
+            RuntimeMode,
+        };
+        use pyo3::prelude::*;
+
+        // Reset mode and ledger
+        let _ = set_runtime_mode("strict");
+        clear_runtime_decisions();
+        assert_eq!(current_runtime_mode(), RuntimeMode::Strict);
+        assert_eq!(get_runtime_mode(), "strict");
+        assert_eq!(get_runtime_decision_count(), 0);
+
+        // Switch to hardened
+        set_runtime_mode("hardened").expect("set_runtime_mode hardened");
+        assert_eq!(current_runtime_mode(), RuntimeMode::Hardened);
+        assert_eq!(get_runtime_mode(), "hardened");
+
+        // Record a decision directly
+        let _action = record_runtime_decision(
+            CompatibilityClass::KnownCompatible,
+            0.2,
+            "test_reason",
+            "test note",
+        );
+        assert_eq!(get_runtime_decision_count(), 1);
+
+        clear_runtime_decisions();
+        assert_eq!(get_runtime_decision_count(), 0);
+
+        // Invalid mode rejected
+        assert!(set_runtime_mode("invalid_mode").is_err());
+
+        // Test through Python module
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "test_fnp_runtime_mode").expect("create module");
+            fnp_python(&module).expect("init fnp_python");
+
+            // Python getter
+            let py_mode: String = module
+                .getattr("get_runtime_mode")
+                .expect("get get_runtime_mode")
+                .call0()
+                .expect("call get_runtime_mode")
+                .extract()
+                .expect("extract get_runtime_mode");
+            assert_eq!(py_mode, "hardened");
+
+            // nan_to_num in hardened mode triggers decision logging
+            let test_arr = py
+                .eval(pyo3::ffi::c_str!("[1.0, float('nan'), 3.0]"), None, None)
+                .expect("eval array");
+            let _ = module
+                .getattr("nan_to_num")
+                .expect("getattr nan_to_num")
+                .call1((test_arr,))
+                .expect("call nan_to_num");
+
+            let count: usize = module
+                .getattr("get_runtime_decision_count")
+                .expect("get get_runtime_decision_count")
+                .call0()
+                .expect("call get_runtime_decision_count")
+                .extract()
+                .expect("extract count");
+            assert!(count > 0, "decision count should be > 0 in hardened mode");
+
+            // Clear decisions via module
+            module
+                .getattr("clear_runtime_decisions")
+                .expect("get clear_runtime_decisions")
+                .call0()
+                .expect("call clear_runtime_decisions");
+
+            let cleared_count: usize = module
+                .getattr("get_runtime_decision_count")
+                .expect("get count")
+                .call0()
+                .expect("call count")
+                .extract()
+                .expect("extract cleared count");
+            assert_eq!(cleared_count, 0);
+
+            // Switch back to strict mode
+            module
+                .getattr("set_runtime_mode")
+                .expect("get set_runtime_mode")
+                .call1(("strict",))
+                .expect("call set_runtime_mode strict");
+
+            let final_mode: String = module
+                .getattr("get_runtime_mode")
+                .expect("get_runtime_mode")
+                .call0()
+                .expect("call get_runtime_mode")
+                .extract()
+                .expect("extract final_mode");
+            assert_eq!(final_mode, "strict");
+        });
+
+        // Ensure state is restored
+        let _ = set_runtime_mode("strict");
+        clear_runtime_decisions();
     }
 }

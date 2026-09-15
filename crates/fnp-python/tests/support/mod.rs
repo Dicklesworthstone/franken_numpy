@@ -25,6 +25,7 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
 
 /// Newest `<child>/out/<name>` among a directory's immediate children.
@@ -159,4 +160,12 @@ pub fn fnp_script_with(extra_imports: &str, register_in_sys_modules: bool, body:
          {PARITY_PREDICATE}\
          {body}"
     )
+}
+
+/// Returns a `std::process::Command` targeting the configured NumPy oracle interpreter.
+///
+/// Defaults to `python3`, but respects `FNP_ORACLE_PYTHON` when set in the environment.
+pub fn python_command() -> Command {
+    let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    Command::new(python)
 }

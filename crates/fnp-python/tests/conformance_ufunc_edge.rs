@@ -6,10 +6,11 @@
 use std::process::Command;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let py = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let output = Command::new(&py)
         .args(["-c", script])
         .output()
-        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+        .map_err(|error| format!("{py} should be available: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
