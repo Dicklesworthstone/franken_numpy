@@ -14873,7 +14873,6 @@ fn try_zerocopy_f64_clip(
     lo: f64,
     hi: f64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
     }
@@ -14892,14 +14891,12 @@ fn try_zerocopy_f64_clip(
     };
     let shape = in_buffer.shape();
     let n = input.len();
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?,
+        [only] => empty_fn.call1((*only, cached_float64_type(py)?))?,
         _ => {
             let shape_tuple = PyTuple::new(py, shape)?;
-            numpy.call_method1(
-                intern!(py, "empty"),
-                (&shape_tuple, cached_float64_type(py)?),
-            )?
+            empty_fn.call1((&shape_tuple, cached_float64_type(py)?))?
         }
     };
     if n > 0 {
@@ -14959,7 +14956,6 @@ fn try_zerocopy_f32_clip(
     lo_f64: f64,
     hi_f64: f64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
     }
@@ -14969,9 +14965,7 @@ fn try_zerocopy_f32_clip(
     let dtype = x.getattr(intern!(py, "dtype"))?;
     // Result dtype must equal float32 (no promotion): a strong numpy-float64 scalar
     // bound would widen the result to float64, which this path cannot produce.
-    let promoted = numpy
-        .getattr(intern!(py, "result_type"))?
-        .call1((x, a_min, a_max))?;
+    let promoted = cached_numpy_result_type(py)?.call1((x, a_min, a_max))?;
     if !promoted.eq(&dtype)? {
         return Ok(None);
     }
@@ -14985,14 +14979,12 @@ fn try_zerocopy_f32_clip(
     };
     let shape = in_buffer.shape();
     let n = input.len();
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float32_type(py)?))?,
+        [only] => empty_fn.call1((*only, cached_float32_type(py)?))?,
         _ => {
             let shape_tuple = PyTuple::new(py, shape)?;
-            numpy.call_method1(
-                intern!(py, "empty"),
-                (&shape_tuple, cached_float32_type(py)?),
-            )?
+            empty_fn.call1((&shape_tuple, cached_float32_type(py)?))?
         }
     };
     if n > 0 {
@@ -15041,7 +15033,6 @@ fn try_zerocopy_f32_clip(
 // through an f64 round-trip. Branchless -> autovectorizes.
 fn clip_typed<'py, T>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
     dtype: &Bound<'py, PyAny>,
     lo: T,
@@ -15058,11 +15049,12 @@ where
     };
     let shape = in_buffer.shape();
     let n = input.len();
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, dtype))?,
+        [only] => empty_fn.call1((*only, dtype))?,
         _ => {
             let output_shape = PyTuple::new(py, shape)?;
-            numpy.call_method1(intern!(py, "empty"), (&output_shape, dtype))?
+            empty_fn.call1((&output_shape, dtype))?
         }
     };
     if n > 0 {
@@ -15129,13 +15121,10 @@ fn try_zerocopy_int_clip(
     if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
     // Result dtype must equal the input dtype (no promotion), e.g. a strong
     // numpy-int64 scalar bound on an int8 array would widen to int64 in numpy.
-    let promoted = numpy
-        .getattr(intern!(py, "result_type"))?
-        .call1((a, a_min, a_max))?;
+    let promoted = cached_numpy_result_type(py)?.call1((a, a_min, a_max))?;
     if !promoted.eq(&dtype)? {
         return Ok(None);
     }
@@ -15145,49 +15134,49 @@ fn try_zerocopy_int_clip(
             let (Ok(lo), Ok(hi)) = (a_min.extract::<i8>(), a_max.extract::<i8>()) else {
                 return Ok(None);
             };
-            clip_typed::<i8>(py, numpy, a, &dtype, lo, hi)
+            clip_typed::<i8>(py, a, &dtype, lo, hi)
         }
         ('i', 2) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<i16>(), a_max.extract::<i16>()) else {
                 return Ok(None);
             };
-            clip_typed::<i16>(py, numpy, a, &dtype, lo, hi)
+            clip_typed::<i16>(py, a, &dtype, lo, hi)
         }
         ('i', 4) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<i32>(), a_max.extract::<i32>()) else {
                 return Ok(None);
             };
-            clip_typed::<i32>(py, numpy, a, &dtype, lo, hi)
+            clip_typed::<i32>(py, a, &dtype, lo, hi)
         }
         ('i', 8) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<i64>(), a_max.extract::<i64>()) else {
                 return Ok(None);
             };
-            clip_typed::<i64>(py, numpy, a, &dtype, lo, hi)
+            clip_typed::<i64>(py, a, &dtype, lo, hi)
         }
         ('u', 1) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<u8>(), a_max.extract::<u8>()) else {
                 return Ok(None);
             };
-            clip_typed::<u8>(py, numpy, a, &dtype, lo, hi)
+            clip_typed::<u8>(py, a, &dtype, lo, hi)
         }
         ('u', 2) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<u16>(), a_max.extract::<u16>()) else {
                 return Ok(None);
             };
-            clip_typed::<u16>(py, numpy, a, &dtype, lo, hi)
+            clip_typed::<u16>(py, a, &dtype, lo, hi)
         }
         ('u', 4) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<u32>(), a_max.extract::<u32>()) else {
                 return Ok(None);
             };
-            clip_typed::<u32>(py, numpy, a, &dtype, lo, hi)
+            clip_typed::<u32>(py, a, &dtype, lo, hi)
         }
         ('u', 8) => {
             let (Ok(lo), Ok(hi)) = (a_min.extract::<u64>(), a_max.extract::<u64>()) else {
                 return Ok(None);
             };
-            clip_typed::<u64>(py, numpy, a, &dtype, lo, hi)
+            clip_typed::<u64>(py, a, &dtype, lo, hi)
         }
         _ => Ok(None),
     }
@@ -15253,13 +15242,12 @@ fn try_zerocopy_f64_nan_to_num(
     };
     let shape = in_buffer.shape();
     let n = input.len();
-    let numpy = cached_numpy(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?,
+        [only] => empty_fn.call1((*only, cached_float64_type(py)?))?,
         _ => {
             let output_shape = PyTuple::new(py, shape)?;
-            numpy.call_method1(
-                intern!(py, "empty"),
+            empty_fn.call1(
                 (&output_shape, cached_float64_type(py)?),
             )?
         }
@@ -15369,13 +15357,12 @@ fn try_zerocopy_f32_nan_to_num(
     };
     let shape = in_buffer.shape();
     let n = input.len();
-    let numpy = cached_numpy(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float32_type(py)?))?,
+        [only] => empty_fn.call1((*only, cached_float32_type(py)?))?,
         _ => {
             let output_shape = PyTuple::new(py, shape)?;
-            numpy.call_method1(
-                intern!(py, "empty"),
+            empty_fn.call1(
                 (&output_shape, cached_float32_type(py)?),
             )?
         }
@@ -15483,7 +15470,6 @@ fn try_zerocopy_any_dtype_where(
     x: &Bound<'_, PyAny>,
     y: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(py)?;
     for operand in [condition, x, y] {
         if !operand.is_exact_instance(ndarray_type)
@@ -15566,7 +15552,7 @@ fn try_zerocopy_any_dtype_where(
         return Ok(None);
     }
 
-    let out = numpy.call_method1(intern!(py, "empty_like"), (x,))?;
+    let out = cached_numpy_empty_like(py)?.call1((x,))?;
     let Some(out_buffer) = as_bytes(&out)? else {
         return Ok(None);
     };
@@ -15617,7 +15603,6 @@ fn try_zerocopy_f64_where(
     x: &Bound<'_, PyAny>,
     y: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     // cond must be a bool dtype ndarray; other kinds keep the dtype-aware path.
     if dtype_kind_of(condition) != Some('b') {
         return Ok(None);
@@ -15677,11 +15662,12 @@ fn try_zerocopy_f64_where(
     let xs = x_scalar.unwrap_or(0.0);
     let ys = y_scalar.unwrap_or(0.0);
     let float64_type = cached_float64_type(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?,
+        [only] => empty_fn.call1((*only, float64_type))?,
         _ => {
             let output_shape = PyTuple::new(py, shape)?;
-            numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+            empty_fn.call1((&output_shape, float64_type))?
         }
     };
     if n > 0 {
@@ -15779,7 +15765,6 @@ fn try_zerocopy_f64_where(
 // y.dtype == T, matching numpy's result_type(x, y) for the equal-dtype case.
 fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     cond: &Bound<'py, PyAny>,
     x: &Bound<'py, PyAny>,
     y: &Bound<'py, PyAny>,
@@ -15820,11 +15805,12 @@ fn where_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     // NORMALISES the output dtype there (`>i8` operands give `int64`), so echoing a swapped
     // descriptor would produce a result numpy never produces.
     let x_dtype = x.getattr(intern!(py, "dtype"))?;
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, &x_dtype))?,
+        [only] => empty_fn.call1((*only, &x_dtype))?,
         _ => {
             let output_shape = PyTuple::new(py, shape)?;
-            numpy.call_method1(intern!(py, "empty"), (&output_shape, &x_dtype))?
+            empty_fn.call1((&output_shape, &x_dtype))?
         }
     };
     if n > 0 {
@@ -15882,8 +15868,7 @@ fn try_zerocopy_int_where(
     x: &Bound<'_, PyAny>,
     y: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    let ndarray_type = cached_ndarray_type(py)?;
     if !x.is_exact_instance(ndarray_type) || !y.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
@@ -15910,14 +15895,14 @@ fn try_zerocopy_int_where(
         // arms saturate memory bandwidth (the all-typed candidate REGRESSED i64), so
         // they stay serial. The byte gate inside where_typed (1<<24 output bytes) still
         // keeps small/medium 4-byte selects on the serial path.
-        ('i', 1) => where_typed::<i8>(py, numpy, condition, x, y, false)?,
-        ('i', 2) => where_typed::<i16>(py, numpy, condition, x, y, false)?,
-        ('i', 4) => where_typed::<i32>(py, numpy, condition, x, y, true)?,
-        ('i', 8) => where_typed::<i64>(py, numpy, condition, x, y, false)?,
-        ('u', 1) => where_typed::<u8>(py, numpy, condition, x, y, false)?,
-        ('u', 2) => where_typed::<u16>(py, numpy, condition, x, y, false)?,
-        ('u', 4) => where_typed::<u32>(py, numpy, condition, x, y, true)?,
-        ('u', 8) => where_typed::<u64>(py, numpy, condition, x, y, false)?,
+        ('i', 1) => where_typed::<i8>(py, condition, x, y, false)?,
+        ('i', 2) => where_typed::<i16>(py, condition, x, y, false)?,
+        ('i', 4) => where_typed::<i32>(py, condition, x, y, true)?,
+        ('i', 8) => where_typed::<i64>(py, condition, x, y, false)?,
+        ('u', 1) => where_typed::<u8>(py, condition, x, y, false)?,
+        ('u', 2) => where_typed::<u16>(py, condition, x, y, false)?,
+        ('u', 4) => where_typed::<u32>(py, condition, x, y, true)?,
+        ('u', 8) => where_typed::<u64>(py, condition, x, y, false)?,
         // bool select also goes through a uint8 view, which (like the float arms)
         // bypasses PyBuffer's format check, so it likewise requires x and y to share
         // the bool dtype — otherwise e.g. where(bool_x, int8_y) must promote to int8
@@ -15925,7 +15910,7 @@ fn try_zerocopy_int_where(
         // With `NpBool` this arm needs NO views at all - it used to build three (x->uint8,
         // y->uint8, and the result back to bool_). `where_typed` reads both bool_ operands
         // directly and allocates the output with x's own bool_ descriptor.
-        ('b', 1) if same_dtype => where_typed::<NpBool>(py, numpy, condition, x, y, false)?,
+        ('b', 1) if same_dtype => where_typed::<NpBool>(py, condition, x, y, false)?,
         // float16 / float32 select is value-agnostic: pick verbatim through a
         // same-width unsigned view of x and y, reusing the existing u16/u32
         // where_typed instantiations, then view the result back to the float dtype
@@ -15942,7 +15927,7 @@ fn try_zerocopy_int_where(
             ) else {
                 return Ok(None);
             };
-            match where_typed::<u16>(py, numpy, condition, &x_u, &y_u, false)? {
+            match where_typed::<u16>(py, condition, &x_u, &y_u, false)? {
                 Some((flat_u16, is_0d)) => {
                     let flat_f =
                         flat_u16.call_method1(intern!(py, "view"), (cached_float16_type(py)?,))?;
@@ -15955,7 +15940,7 @@ fn try_zerocopy_int_where(
         // to reuse the u32 instantiation and cost THREE numpy method calls (x, y and the result
         // view-back) for nothing. `where` copies the chosen value verbatim, so selecting f32
         // bits directly is the same operation on the same bytes, NaN payloads included.
-        ('f', 4) if same_dtype => where_typed::<f32>(py, numpy, condition, x, y, true)?,
+        ('f', 4) if same_dtype => where_typed::<f32>(py, condition, x, y, true)?,
         _ => return Ok(None),
     };
     let Some((flat, is_0d)) = result else {
@@ -15982,8 +15967,7 @@ fn try_zerocopy_where_array_scalar(
     x: &Bound<'_, PyAny>,
     y: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    let ndarray_type = cached_ndarray_type(py)?;
     if dtype_kind_of(condition) != Some('b') {
         return Ok(None);
     }
@@ -16016,8 +16000,8 @@ fn try_zerocopy_where_array_scalar(
         return Ok(None);
     }
     // No value-based promotion: numpy's result must stay arr's dtype.
-    if !numpy
-        .call_method1(intern!(py, "result_type"), (arr, scalar_obj))?
+    if !cached_numpy_result_type(py)?
+        .call1((arr, scalar_obj))?
         .eq(&dtype)?
     {
         return Ok(None);
@@ -16064,10 +16048,7 @@ fn try_zerocopy_where_array_scalar(
                 return Ok(None);
             }
             // 1-element array (not 0-d, which can't change itemsize on view) cast to dtype.
-            let sc_arr = numpy.call_method1(
-                intern!(py, "full"),
-                ((1usize,), scalar_obj, &dtype),
-            )?;
+            let sc_arr = cached_numpy_full(py)?.call1(((1usize,), scalar_obj, &dtype))?;
             let sc_u = sc_arr.call_method1(intern!(py, "view"), (un,))?;
             let Ok(sc_buf) = PyBuffer::<$U>::get(&sc_u) else {
                 return Ok(None);
@@ -16079,7 +16060,7 @@ fn try_zerocopy_where_array_scalar(
                 return Ok(None);
             }
             let scalar_u = sc_in[0].get();
-            let out = numpy.call_method1(intern!(py, "empty"), (&arr_shape, &dtype))?;
+            let out = cached_numpy_empty(py)?.call1((&arr_shape, &dtype))?;
             if n > 0 {
                 let out_u = out.call_method1(intern!(py, "view"), (un,))?;
                 let Ok(out_buf) = PyBuffer::<$U>::get(&out_u) else {
