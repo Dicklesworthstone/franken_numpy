@@ -489,6 +489,18 @@ impl PyUFunc {
     }
 
     #[getter]
+    fn __name__(&self) -> &'static str {
+        self.kind.name()
+    }
+
+    #[getter]
+    fn __doc__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let numpy = cached_numpy(py)?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
+        np_ufunc.getattr(intern!(py, "__doc__")).map(|v| v.unbind())
+    }
+
+    #[getter]
     fn __signature__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let inspect = cached_inspect(py)?;
         let param_cls = inspect.getattr("Parameter")?;
@@ -61248,14 +61260,7 @@ fn native_unary_promoting(
     // float32 input is float-preserving here (only integers promote to f64), so
     // the zero-copy float32 path applies to the ops it supports (e.g. sqrt).
     if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)? {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        let output = flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // An ndarray SUBCLASS keeps its type through a numpy ufunc, and every fast path
     // above gates on `is_exact_instance` (`deadlock-audit-1zl3e`). Same guard as
