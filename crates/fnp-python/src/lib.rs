@@ -70894,40 +70894,14 @@ fn logspace(
 #[pyfunction]
 #[pyo3(signature = (a, order="K", subok=false))]
 fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let copy_fn = numpy.getattr(intern!(py, "copy"))?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "order"), order)?;
-        kwargs.set_item(intern!(py, "subok"), subok)?;
-        Ok(copy_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
-    };
-    if !matches!(order, "C" | "K" | "F") {
-        return fallback(py);
+    // np.copy is a pure typed memcpy. Delegate to NumPy's cached callable with
+    // positional arguments to avoid keyword parsing overhead (numpy owns the exact
+    // order/subok/dtype surface).
+    let copy_fn = cached_numpy_copy(py)?;
+    if order == "K" && !subok {
+        return Ok(copy_fn.call1((a.bind(py),))?.unbind());
     }
-    let a_bound = a.bind(py);
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    let source_array = numpy.call_method1(intern!(py, "asanyarray"), (a_bound,))?;
-    if subok && !source_array.is_exact_instance(&ndarray_type) {
-        return fallback(py);
-    }
-    // Resolve the actual output layout. 'C' / 'F' are explicit; 'K'
-    // inherits from source contiguity (F-contig multi-D → F output).
-    let source_shape: Vec<usize> = source_array.getattr(intern!(py, "shape"))?.extract()?;
-    let mut emit_fortran = order == "F";
-    if order == "K" && source_shape.len() >= 2 {
-        let flags = source_array.getattr(intern!(py, "flags"))?;
-        let f_contig: bool = flags.get_item("F_CONTIGUOUS")?.extract()?;
-        let c_contig: bool = flags.get_item("C_CONTIGUOUS")?.extract()?;
-        if f_contig && !c_contig {
-            emit_fortran = true;
-        }
-    }
-    // np.copy is a pure typed memcpy. The native extract -> UFuncArray -> export-bridge
-    // rebuild was 20-205x slower than numpy (copy(int8 4M) 205x), and never faster.
-    // Delegate (numpy owns the exact order/subok/dtype surface).
-    let _ = emit_fortran;
-    fallback(py)
+    Ok(copy_fn.call1((a.bind(py), order, subok))?.unbind())
 }
 
 // Fused parity scan shared by the four f64 VALUE-sort kernels (flat, lastaxis,
