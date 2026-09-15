@@ -5186,8 +5186,7 @@ fn extract_random_float_dtype(
         return Ok(DType::F64);
     }
 
-    let numpy = cached_numpy(py)?;
-    let parsed = numpy.getattr(intern!(py, "dtype"))?.call1((dtype,))?;
+    let parsed = cached_numpy_dtype(py)?.call1((dtype,))?;
     let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
     match DType::parse(&name) {
         Some(dtype @ (DType::F32 | DType::F64)) => Ok(dtype),
@@ -6931,8 +6930,7 @@ fn extract_python_dtype(
         return Ok(default);
     }
 
-    let numpy = cached_numpy(py)?;
-    let parsed = numpy.getattr(intern!(py, "dtype"))?.call1((dtype,))?;
+    let parsed = cached_numpy_dtype(py)?.call1((dtype,))?;
     let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
     DType::parse(&name)
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
@@ -26667,15 +26665,14 @@ fn fromiter(
     count: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
+    let fromiter_fn = cached_numpy_fromiter(py)?;
     if let Some(like_val) = like.as_ref()
         && !like_val.bind(py).is_none()
     {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "count"), count)?;
         kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
-        return Ok(numpy
-            .getattr(intern!(py, "fromiter"))?
+        return Ok(fromiter_fn
             .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
             .unbind());
     }
@@ -26686,8 +26683,7 @@ fn fromiter(
     // exact dtype-coercion, count, and short-iterator (ValueError) surface.
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "count"), count)?;
-    Ok(numpy
-        .getattr(intern!(py, "fromiter"))?
+    Ok(fromiter_fn
         .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
         .unbind())
 }
@@ -26702,7 +26698,6 @@ fn fromstring(
     sep: &str,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
@@ -26713,8 +26708,7 @@ fn fromstring(
         if let Some(like_val) = like.as_ref() {
             kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
         }
-        Ok(numpy
-            .getattr(intern!(py, "fromstring"))?
+        Ok(cached_numpy_fromstring(py)?
             .call((string.bind(py),), Some(&kwargs))?
             .unbind())
     };
@@ -26854,7 +26848,7 @@ fn frombuffer(
     offset: i64,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
+    let frombuffer_fn = cached_numpy_frombuffer(py)?;
     if let Some(like_val) = like.as_ref()
         && !like_val.bind(py).is_none()
     {
@@ -26865,8 +26859,7 @@ fn frombuffer(
         kwargs.set_item(intern!(py, "count"), count)?;
         kwargs.set_item(intern!(py, "offset"), offset)?;
         kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
-        return Ok(numpy
-            .getattr(intern!(py, "frombuffer"))?
+        return Ok(frombuffer_fn
             .call((buffer.bind(py),), Some(&kwargs))?
             .unbind());
     }
@@ -26878,23 +26871,19 @@ fn frombuffer(
     // finishes the whole call in 156.3 ns and fnp took 444.0 ns, 2.846x, for a function
     // that does nothing but forward. numpy's own default is `dtype=float`, i.e. float64,
     // so the held `numpy.float64` is that default written out.
-    let numpy_frombuffer = || -> PyResult<Py<PyAny>> {
-        let frombuffer_fn = numpy.getattr(intern!(py, "frombuffer"))?;
-        match dtype.as_ref() {
-            Some(dtype_val) => Ok(frombuffer_fn
-                .call1((buffer.bind(py), dtype_val.bind(py), count, offset))?
-                .unbind()),
-            None => Ok(frombuffer_fn
-                .call1((buffer.bind(py), cached_float64_type(py)?, count, offset))?
-                .unbind()),
-        }
-    };
-
+    //
     // np.frombuffer returns a ZERO-COPY VIEW that shares memory with the buffer. The
     // native path collected the buffer bytes into an owned Vec, reinterpreted, and
     // built a fresh array — ~13x slower AND semantically wrong (numpy's result shares
     // memory with the buffer; the copy did not). Delegate for the exact zero-copy view.
-    numpy_frombuffer()
+    match dtype.as_ref() {
+        Some(dtype_val) => Ok(frombuffer_fn
+            .call1((buffer.bind(py), dtype_val.bind(py), count, offset))?
+            .unbind()),
+        None => Ok(frombuffer_fn
+            .call1((buffer.bind(py), cached_float64_type(py)?, count, offset))?
+            .unbind()),
+    }
 }
 
 #[pyfunction]
@@ -59028,7 +59017,7 @@ fn linspace(
     //     signature declares exactly those, so at defaults all three are dict entries and
     //     keyword parses that communicate nothing.
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let linspace_fn = cached_numpy_linspace(py)?;
+        let linspace_fn = cached_numpy(py)?.getattr(intern!(py, "linspace"))?;
         let kwargs = PyDict::new(py);
         if num != 50 {
             kwargs.set_item(intern!(py, "num"), num)?;
@@ -59883,8 +59872,7 @@ fn asarray(
     )? {
         return Ok(native);
     }
-    let numpy = cached_numpy(py)?;
-    let asarray_fn = numpy.getattr(intern!(py, "asarray"))?;
+    let asarray_fn = cached_numpy_asarray(py)?;
     let kwargs = PyDict::new(py);
     if let Some(v) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), v)?;
@@ -59933,8 +59921,7 @@ fn asanyarray(
     )? {
         return Ok(native);
     }
-    let numpy = cached_numpy(py)?;
-    let asanyarray_fn = numpy.getattr(intern!(py, "asanyarray"))?;
+    let asanyarray_fn = cached_numpy_asanyarray(py)?;
     let kwargs = PyDict::new(py);
     if let Some(v) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), v)?;
@@ -88343,7 +88330,7 @@ cached_numpy_attr!(cached_numpy_empty_like, "empty_like");
 cached_numpy_attr!(cached_numpy_full_like, "full_like");
 cached_numpy_attr!(cached_numpy_full, "full");
 cached_numpy_attr!(cached_numpy_arange, "arange");
-cached_numpy_attr!(cached_numpy_linspace, "linspace");
+// Note: linspace is resolved against the live module per `swept_wrappers_still_resolve_numpy_at_call_time`.
 cached_numpy_attr!(cached_numpy_logspace, "logspace");
 cached_numpy_attr!(cached_numpy_geomspace, "geomspace");
 cached_numpy_attr!(cached_numpy_concatenate, "concatenate");
@@ -88353,6 +88340,10 @@ cached_numpy_attr!(cached_numpy_resize, "resize");
 cached_numpy_attr!(cached_numpy_insert, "insert");
 cached_numpy_attr!(cached_numpy_delete, "delete");
 cached_numpy_attr!(cached_numpy_clip, "clip");
+cached_numpy_attr!(cached_numpy_copy, "copy");
+cached_numpy_attr!(cached_numpy_frombuffer, "frombuffer");
+cached_numpy_attr!(cached_numpy_fromiter, "fromiter");
+cached_numpy_attr!(cached_numpy_fromstring, "fromstring");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
