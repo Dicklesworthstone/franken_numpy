@@ -67590,7 +67590,8 @@ fn recfunctions_append_fields(
     )?)?;
     let new_dtype = cached_numpy_dtype(py)?.call1((descr,))?;
 
-    let out = cached_numpy_zeros(py)?.call1((base_bound.getattr(intern!(py, "shape"))?, &new_dtype))?;
+    let out =
+        cached_numpy_zeros(py)?.call1((base_bound.getattr(intern!(py, "shape"))?, &new_dtype))?;
     for name in &old_names {
         out.set_item(name.as_str(), base_bound.get_item(name.as_str())?)?;
     }
@@ -67707,7 +67708,8 @@ fn recfunctions_merge_arrays(
     }
     let new_dtype = cached_numpy_dtype(py)?.call1((descr,))?;
 
-    let out = cached_numpy_zeros(py)?.call1((arrays[0].getattr(intern!(py, "shape"))?, &new_dtype))?;
+    let out =
+        cached_numpy_zeros(py)?.call1((arrays[0].getattr(intern!(py, "shape"))?, &new_dtype))?;
     for (i, arr) in arrays.iter().enumerate() {
         if input_field_names[i].len() == 1 {
             let field_name = &input_field_names[i][0];
@@ -67790,10 +67792,8 @@ fn recfunctions_unstructured_to_structured(
     // Allocate the target structured array (shape = source shape minus
     // the trailing axis).
     let out_shape: Vec<usize> = source_shape[..source_shape.len() - 1].to_vec();
-    let out = cached_numpy_zeros(py)?.call1((
-        PyTuple::new(py, out_shape.iter().copied())?,
-        dtype_val,
-    ))?;
+    let out =
+        cached_numpy_zeros(py)?.call1((PyTuple::new(py, out_shape.iter().copied())?, dtype_val))?;
 
     // Copy each slice [..., i] into field i of the output.
     let builtins = py.import("builtins")?;
@@ -70615,20 +70615,20 @@ fn eye(
     let has_kwargs = kwargs.is_some_and(|k| !k.is_empty());
     if !has_kwargs {
         if args.len() == 1 {
-            if let Ok(n) = args.get_item(0)?.extract::<i64>() {
-                if n >= 0 {
-                    return build_f64_eye(py, n as usize, n as usize, 0);
-                }
+            if let Ok(n) = args.get_item(0)?.extract::<i64>()
+                && n >= 0
+            {
+                return build_f64_eye(py, n as usize, n as usize, 0);
             }
-        } else if args.len() == 2 {
-            if let (Ok(n), Ok(m)) = (
+        } else if args.len() == 2
+            && let (Ok(n), Ok(m)) = (
                 args.get_item(0)?.extract::<i64>(),
                 args.get_item(1)?.extract::<i64>(),
-            ) {
-                if n >= 0 && m >= 0 {
-                    return build_f64_eye(py, n as usize, m as usize, 0);
-                }
-            }
+            )
+            && n >= 0
+            && m >= 0
+        {
+            return build_f64_eye(py, n as usize, m as usize, 0);
         }
     }
     let call_kwargs = PyDict::new(py);
@@ -88264,6 +88264,7 @@ fn numpy_ufunc_with_positional_out(
 /// This is the same shape as `cached_ndarray_type`, one attribute per expansion.
 macro_rules! cached_numpy_attr {
     ($fn_name:ident, $attr:literal) => {
+        #[allow(dead_code)]
         fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
             static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
             Ok(CACHE
