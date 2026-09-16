@@ -93465,26 +93465,24 @@ fn cumsum(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let cumsum_fn = numpy.getattr(intern!(py, "cumsum"))?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
 
     let fallback = || -> PyResult<Py<PyAny>> {
+        let cumsum_fn = numpy.getattr(intern!(py, "cumsum"))?;
+        if axis.is_none() && dtype.is_none() && out.is_none() {
+            return Ok(cumsum_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(dt) = dtype_for_fallback.as_ref() {
+        if let Some(dt) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(cumsum_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -93674,26 +93672,24 @@ fn cumprod(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let cumprod_fn = numpy.getattr(intern!(py, "cumprod"))?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
 
     let fallback = || -> PyResult<Py<PyAny>> {
+        let cumprod_fn = numpy.getattr(intern!(py, "cumprod"))?;
+        if axis.is_none() && dtype.is_none() && out.is_none() {
+            return Ok(cumprod_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(dt) = dtype_for_fallback.as_ref() {
+        if let Some(dt) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(cumprod_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -94801,10 +94797,6 @@ fn argmax(
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.argmax` was resolved off the live module
     // before any gate had run, so every call that engages natively paid a `getattr` for a
     // callable it never invokes. Moving it inside the closure keeps the property that matters -
@@ -94812,15 +94804,18 @@ fn argmax(
     // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
         let argmax_fn = numpy.getattr(intern!(py, "argmax"))?;
+        if axis.is_none() && out.is_none() && kwargs.is_none_or(|kw| kw.is_empty()) {
+            return Ok(argmax_fn.call1((a.bind(py),))?.unbind());
+        }
         let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(argmax_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .call((a.bind(py),), Some(&kw))?
             .unbind())
     };
 
@@ -95022,10 +95017,6 @@ fn argmin(
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.argmin` was resolved off the live module
     // before any gate had run, so every call that engages natively paid a `getattr` for a
     // callable it never invokes. Moving it inside the closure keeps the property that matters -
@@ -95033,15 +95024,18 @@ fn argmin(
     // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
         let argmin_fn = numpy.getattr(intern!(py, "argmin"))?;
+        if axis.is_none() && out.is_none() && kwargs.is_none_or(|kw| kw.is_empty()) {
+            return Ok(argmin_fn.call1((a.bind(py),))?.unbind());
+        }
         let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(argmin_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .call((a.bind(py),), Some(&kw))?
             .unbind())
     };
 
@@ -114262,17 +114256,18 @@ fn around(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let around_fn = numpy.getattr(intern!(py, "around"))?;
-    let a_for_fallback = a.clone_ref(py);
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let around_fn = numpy.getattr(intern!(py, "around"))?;
+        if decimals == 0 && out.as_ref().is_none_or(|o| o.bind(py).is_none()) {
+            return Ok(around_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "decimals"), decimals)?;
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(around_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -115530,17 +115525,10 @@ fn convolve(
 
 fn convolve_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let convolve_fn = numpy.getattr(intern!(py, "convolve"))?;
-    let a_for_fallback = a.clone_ref(py);
-    let v_for_fallback = v.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "mode"), mode)?;
-        Ok(convolve_fn
-            .call(
-                (a_for_fallback.bind(py), v_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
+        Ok(numpy
+            .getattr(intern!(py, "convolve"))?
+            .call1((a.bind(py), v.bind(py), mode))?
             .unbind())
     };
 
