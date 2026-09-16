@@ -22475,7 +22475,7 @@ impl PyVectorize {
     }
 
     fn call_bound(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
+        let numpy = cached_numpy(py)?;
 
         // A gufunc `signature=` changes broadcasting in ways the native
         // per-element path does not model, so delegate the whole call to
@@ -22621,7 +22621,7 @@ impl PyVectorize {
                                     output_idx + 1
                                 ))
                             })?,
-                        None => Self::infer_output_dtype(py, &numpy, value.bind(py))?,
+                        None => Self::infer_output_dtype(py, numpy, value.bind(py))?,
                     };
                     output_dtypes.push(dtype);
                 }
@@ -22852,8 +22852,8 @@ impl PyFromPyFunc {
         if let Some(out) = parsed.out {
             let out = normalize_reduce_out_argument(py, out.bind(py))?;
             let result = build_numpy_object_array_from_flat_values(py, &out_shape, &out_values)?;
-            py.import("numpy")?
-                .call_method1(intern!(py, "copyto"), (out.bind(py), result.bind(py)))?;
+            cached_numpy_copyto(py)?
+                .call1((out.bind(py), result.bind(py)))?;
             Ok(out)
         } else {
             build_numpy_scalar_or_array_from_object_values(py, &out_shape, &out_values)
@@ -26700,13 +26700,9 @@ fn count_nonzero(
 }
 
 fn is_numpy_bool_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
-    let Ok(numpy) = py.import("numpy") else {
-        return false;
-    };
-    let Ok(bool_type) = numpy.getattr(intern!(py, "bool_")) else {
-        return false;
-    };
-    value.is_instance(&bool_type).unwrap_or(false)
+    cached_bool_type(py)
+        .map(|ty| value.is_instance(ty).unwrap_or(false))
+        .unwrap_or(false)
 }
 
 #[pyfunction]
@@ -57137,7 +57133,6 @@ fn try_native_struct_isin(
     invert: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const ISIN_MIN: usize = 1 << 16;
-    let numpy = py.import("numpy")?;
     let nd = cached_ndarray_type(py)?.clone();
     if !element.is_exact_instance(&nd) || !test.is_exact_instance(&nd) {
         return Ok(None);
@@ -57178,24 +57173,27 @@ fn try_native_struct_isin(
         return Ok(None); // padding present, or degenerate width
     }
     // Any NaN or -0.0 in a float field breaks byte-equality == value-equality -> defer to numpy.
-    for name in &float_fields {
-        for arr in [element, test] {
-            let f = arr.get_item(name.as_str())?;
-            if numpy
-                .call_method1(intern!(py, "isnan"), (&f,))?
-                .call_method0(intern!(py, "any"))?
-                .extract::<bool>()?
-            {
-                return Ok(None);
-            }
-            let sb = numpy.call_method1(intern!(py, "signbit"), (&f,))?;
-            let eq0 = numpy.call_method1(intern!(py, "equal"), (&f, 0.0_f64))?;
-            if numpy
-                .call_method1(intern!(py, "logical_and"), (sb, eq0))?
-                .call_method0(intern!(py, "any"))?
-                .extract::<bool>()?
-            {
-                return Ok(None); // -0.0 present
+    if !float_fields.is_empty() {
+        let numpy = cached_numpy(py)?;
+        for name in &float_fields {
+            for arr in [element, test] {
+                let f = arr.get_item(name.as_str())?;
+                if numpy
+                    .call_method1(intern!(py, "isnan"), (&f,))?
+                    .call_method0(intern!(py, "any"))?
+                    .extract::<bool>()?
+                {
+                    return Ok(None);
+                }
+                let sb = numpy.call_method1(intern!(py, "signbit"), (&f,))?;
+                let eq0 = numpy.call_method1(intern!(py, "equal"), (&f, 0.0_f64))?;
+                if numpy
+                    .call_method1(intern!(py, "logical_and"), (sb, eq0))?
+                    .call_method0(intern!(py, "any"))?
+                    .extract::<bool>()?
+                {
+                    return Ok(None); // -0.0 present
+                }
             }
         }
     }
@@ -57225,9 +57223,9 @@ fn try_native_struct_isin(
     if n < ISIN_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let e_u8 = element.call_method1(intern!(py, "view"), (&uint8,))?;
-    let t_u8 = test.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let e_u8 = element.call_method1(intern!(py, "view"), (uint8,))?;
+    let t_u8 = test.call_method1(intern!(py, "view"), (uint8,))?;
     let (Ok(e_buf), Ok(t_buf)) = (PyBuffer::<u8>::get(&e_u8), PyBuffer::<u8>::get(&t_u8)) else {
         return Ok(None);
     };
@@ -57248,8 +57246,8 @@ fn try_native_struct_isin(
     for k in 0..m {
         set.insert(&t_data[k * itemsize..(k + 1) * itemsize]);
     }
-    let out = numpy.call_method(intern!(py, "empty"), ((n,), "bool"), None)?;
-    let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
+    let out = cached_numpy_empty(py)?.call1(((n,), "bool"))?;
+    let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
     let out_buf = PyBuffer::<u8>::get(&out_u8)?;
     let Some(out_cells) = out_buf.as_mut_slice(py) else {
         return Ok(None);
@@ -89098,6 +89096,19 @@ cached_numpy_char_attr!(cached_numpy_char_isalpha, "isalpha");
 cached_numpy_char_attr!(cached_numpy_char_isdigit, "isdigit");
 cached_numpy_char_attr!(cached_numpy_char_isalnum, "isalnum");
 cached_numpy_char_attr!(cached_numpy_char_isspace, "isspace");
+cached_numpy_char_attr!(cached_numpy_char_isupper, "isupper");
+cached_numpy_char_attr!(cached_numpy_char_islower, "islower");
+cached_numpy_char_attr!(cached_numpy_char_istitle, "istitle");
+cached_numpy_char_attr!(cached_numpy_char_partition, "partition");
+cached_numpy_char_attr!(cached_numpy_char_rpartition, "rpartition");
+cached_numpy_char_attr!(cached_numpy_char_decode, "decode");
+cached_numpy_char_attr!(cached_numpy_char_slice, "slice");
+cached_numpy_char_attr!(cached_numpy_char_expandtabs, "expandtabs");
+cached_numpy_char_attr!(cached_numpy_char_count, "count");
+cached_numpy_char_attr!(cached_numpy_char_find, "find");
+cached_numpy_char_attr!(cached_numpy_char_rfind, "rfind");
+cached_numpy_char_attr!(cached_numpy_char_index, "index");
+cached_numpy_char_attr!(cached_numpy_char_rindex, "rindex");
 
 fn cached_slogdet_result_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     static CACHE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -109698,6 +109709,9 @@ fn unicode_ispredicate_or_numpy(
         ("char", 1) => cached_numpy_char_isdigit(py)?,
         ("char", 2) => cached_numpy_char_isalnum(py)?,
         ("char", 3) => cached_numpy_char_isspace(py)?,
+        ("char", 4) => cached_numpy_char_isupper(py)?,
+        ("char", 5) => cached_numpy_char_islower(py)?,
+        ("char", 6) => cached_numpy_char_istitle(py)?,
         ("strings", 0) => cached_numpy_strings_isalpha(py)?,
         ("strings", 1) => cached_numpy_strings_isdigit(py)?,
         ("strings", 2) => cached_numpy_strings_isalnum(py)?,
@@ -112049,10 +112063,7 @@ fn strings_partition_native(py: Python<'_>, a: Py<PyAny>, sep: Py<PyAny>) -> PyR
     if let Some(out) = try_native_strings_partition(py, a.bind(py), sep.bind(py), false)? {
         return Ok(out);
     }
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr(intern!(py, "strings"))?
-        .getattr(intern!(py, "partition"))?
+    Ok(cached_numpy_strings_partition(py)?
         .call1((a.bind(py), sep.bind(py)))?
         .unbind())
 }
@@ -112062,10 +112073,7 @@ fn strings_rpartition_native(py: Python<'_>, a: Py<PyAny>, sep: Py<PyAny>) -> Py
     if let Some(out) = try_native_strings_partition(py, a.bind(py), sep.bind(py), true)? {
         return Ok(out);
     }
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr(intern!(py, "strings"))?
-        .getattr(intern!(py, "rpartition"))?
+    Ok(cached_numpy_strings_rpartition(py)?
         .call1((a.bind(py), sep.bind(py)))?
         .unbind())
 }
@@ -112085,10 +112093,7 @@ fn strings_decode_native(
     )? {
         return Ok(out);
     }
-    let numpy = cached_numpy(py)?;
-    let f = numpy
-        .getattr(intern!(py, "strings"))?
-        .getattr(intern!(py, "decode"))?;
+    let f = cached_numpy_strings_decode(py)?;
     Ok(f.call1((
         a.bind(py),
         encoding.as_ref().map(|e| e.bind(py)),
@@ -112106,10 +112111,7 @@ fn strings_mod_native(py: Python<'_>, a: Py<PyAny>, values: Py<PyAny>) -> PyResu
     if let Some(out) = try_native_strings_mod_float(py, a.bind(py), values.bind(py))? {
         return Ok(out);
     }
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr(intern!(py, "strings"))?
-        .getattr(intern!(py, "mod"))?
+    Ok(cached_numpy_strings_mod(py)?
         .call1((a.bind(py), values.bind(py)))?
         .unbind())
 }
@@ -112120,11 +112122,8 @@ fn strings_slice_native(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
     let delegate = || -> PyResult<Py<PyAny>> {
-        Ok(numpy
-            .getattr(intern!(py, "strings"))?
-            .getattr(intern!(py, "slice"))?
+        Ok(cached_numpy_strings_slice(py)?
             .call(args, kwargs)?
             .unbind())
     };
@@ -112192,10 +112191,7 @@ fn strings_expandtabs_native(
     if let Some(out) = try_zerocopy_unicode_expandtabs(py, a.bind(py), &ts_bound)? {
         return Ok(out);
     }
-    let numpy = cached_numpy(py)?;
-    let f = numpy
-        .getattr(intern!(py, "strings"))?
-        .getattr(intern!(py, "expandtabs"))?;
+    let f = cached_numpy_strings_expandtabs(py)?;
     match tabsize {
         Some(t) => Ok(f.call1((a.bind(py), t.bind(py)))?.unbind()),
         None => Ok(f.call1((a.bind(py),))?.unbind()),
