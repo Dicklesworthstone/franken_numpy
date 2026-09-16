@@ -26719,15 +26719,12 @@ fn broadcast_to(
     let subok = truthy_flag(subok)?;
     // Delegate to NumPy so broadcasting rules, readonly-view behavior,
     // dtype preservation, and incompatible-shape errors all match exactly.
-    let numpy = cached_numpy(py)?;
-    let bcast_fn = numpy.getattr(intern!(py, "broadcast_to"))?;
+    let bcast_fn = cached_numpy_broadcast_to(py)?;
     if !subok {
         return Ok(bcast_fn.call1((array.bind(py), shape.bind(py)))?.unbind());
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "subok"), true)?;
     Ok(bcast_fn
-        .call((array.bind(py), shape.bind(py)), Some(&kwargs))?
+        .call1((array.bind(py), shape.bind(py), true))?
         .unbind())
 }
 
@@ -26737,8 +26734,7 @@ fn broadcast_arrays(py: Python<'_>, args: &Bound<'_, PyTuple>, subok: bool) -> P
     // Delegate to NumPy so mixed-rank broadcasting, returned list
     // length/order, per-result dtypes, and incompatible-shape errors
     // all match exactly.
-    let numpy = cached_numpy(py)?;
-    let bcast_fn = numpy.getattr(intern!(py, "broadcast_arrays"))?;
+    let bcast_fn = cached_numpy_broadcast_arrays(py)?;
     if !subok {
         return Ok(bcast_fn.call1(args)?.unbind());
     }
@@ -26753,9 +26749,7 @@ fn py_broadcast_shapes(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py
     // Delegate to NumPy so pairwise/N-ary shape broadcasting, scalar
     // and empty-shape handling, integer-as-1-D-shape permissions, and
     // incompatible-shape ValueError surface all match exactly.
-    let numpy = cached_numpy(py)?;
-    Ok(numpy
-        .getattr(intern!(py, "broadcast_shapes"))?
+    Ok(cached_numpy_broadcast_shapes(py)?
         .call1(args)?
         .unbind())
 }
@@ -26771,15 +26765,12 @@ fn may_share_memory(
     // Passthrough to np.may_share_memory so the fast bounds-only heuristic,
     // ravel-vs-flatten distinction, strided/reversed view behavior, disjoint
     // arrays, and max_work kwarg surface all match numpy exactly.
-    let numpy = cached_numpy(py)?;
-    let may_share_fn = numpy.getattr(intern!(py, "may_share_memory"))?;
+    let may_share_fn = cached_numpy_may_share_memory(py)?;
     if max_work == 0 {
         return Ok(may_share_fn.call1((a.bind(py), b.bind(py)))?.unbind());
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "max_work"), max_work)?;
     Ok(may_share_fn
-        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .call1((a.bind(py), b.bind(py), max_work))?
         .unbind())
 }
 
@@ -27029,15 +27020,12 @@ fn shares_memory(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, max_work: i64) -> P
     // max_work permits it), view/copy behavior, stride-based disjointness,
     // and max_work kwarg surface all match numpy exactly. Unlike
     // may_share_memory, shares_memory defaults to max_work=-1 (solve).
-    let numpy = cached_numpy(py)?;
-    let shares_fn = numpy.getattr(intern!(py, "shares_memory"))?;
+    let shares_fn = cached_numpy_shares_memory(py)?;
     if max_work == -1 {
         return Ok(shares_fn.call1((a.bind(py), b.bind(py)))?.unbind());
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "max_work"), max_work)?;
     Ok(shares_fn
-        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+        .call1((a.bind(py), b.bind(py), max_work))?
         .unbind())
 }
 
@@ -31643,14 +31631,14 @@ fn try_native_lstsq_tsqr(
         return Ok(None);
     };
 
-    let float64 = numpy.getattr(intern!(py, "float64"))?;
+    let float64 = cached_float64_type(py)?;
     let as_f64_array = |values: Vec<f64>| -> PyResult<Bound<'_, PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "dtype"), &float64)?;
+        kwargs.set_item(intern!(py, "dtype"), float64)?;
         numpy.call_method(intern!(py, "array"), (values,), Some(&kwargs))
     };
     // rank is a numpy.int32 scalar in numpy's own return, not a Python int.
-    let rank_scalar = numpy.getattr(intern!(py, "int32"))?.call1((rank,))?;
+    let rank_scalar = cached_int32_type(py)?.call1((rank,))?;
     // The kernel hands back x row-major n×k. numpy squeezes the solution to (n,)
     // only for a 1-D b; for a 2-D b it stays (n, K). It deliberately does NOT
     // squeeze residuals in either case — _linalg.py says squeezing them would
@@ -31697,12 +31685,11 @@ fn lstsq(
     // default-handling path match numpy exactly across real/complex,
     // rank-deficient, and broadcasting inputs.
     let lstsq_fn = cached_numpy_linalg_lstsq(py)?;
-    let Some(value) = bound_rcond else {
-        return Ok(lstsq_fn.call1((bound_a, bound_b))?.unbind());
-    };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "rcond"), value)?;
-    Ok(lstsq_fn.call((bound_a, bound_b), Some(&kwargs))?.unbind())
+    if let Some(value) = bound_rcond {
+        Ok(lstsq_fn.call1((bound_a, bound_b, value))?.unbind())
+    } else {
+        Ok(lstsq_fn.call1((bound_a, bound_b))?.unbind())
+    }
 }
 
 #[pyfunction]
@@ -31716,14 +31703,13 @@ fn tensorsolve(
     // Delegate to NumPy so axes permutation semantics and error reporting
     // stay aligned with numpy.linalg.tensorsolve.
     let ts_fn = cached_numpy_linalg_tensorsolve(py)?;
-    let Some(axes_val) = axes else {
-        return Ok(ts_fn.call1((a.bind(py), b.bind(py)))?.unbind());
-    };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-    Ok(ts_fn
-        .call((a.bind(py), b.bind(py)), Some(&kwargs))?
-        .unbind())
+    if let Some(axes_val) = axes {
+        Ok(ts_fn
+            .call1((a.bind(py), b.bind(py), axes_val.bind(py)))?
+            .unbind())
+    } else {
+        Ok(ts_fn.call1((a.bind(py), b.bind(py)))?.unbind())
+    }
 }
 
 #[pyfunction]
@@ -31741,11 +31727,7 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
         if ind == 2 {
             return Ok(ti_fn.call1((a.bind(py),))?.unbind());
         }
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "ind"), ind)?;
-        return Ok(ti_fn
-            .call((a.bind(py),), Some(&kwargs))?
-            .unbind());
+        return Ok(ti_fn.call1((a.bind(py), ind))?.unbind());
     }
 
     let array = extract_numeric_array(py, a.bind(py), "tensorinv(a)")?;
@@ -31761,11 +31743,7 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
             if ind == 2 {
                 return Ok(ti_fn.call1((a.bind(py),))?.unbind());
             }
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "ind"), ind)?;
-            return Ok(ti_fn
-                .call((a.bind(py),), Some(&kwargs))?
-                .unbind());
+            return Ok(ti_fn.call1((a.bind(py), ind))?.unbind());
         }
     };
     build_numpy_array_from_ufunc(py, &result)
@@ -32344,7 +32322,7 @@ fn f64_predicate_delegate_if_unprofitable(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     kind: F64PredicateKind,
-    name: &Bound<'_, PyString>,
+    predicate_fn: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     if !x.is_exact_instance(cached_ndarray_type(py)?)
         || !x
@@ -32357,16 +32335,16 @@ fn f64_predicate_delegate_if_unprofitable(
     if f64_predicate_route_is_profitable(kind, nbytes) {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    Ok(Some(numpy.getattr(name)?.call1((x,))?.unbind()))
+    Ok(Some(predicate_fn.call1((x,))?.unbind()))
 }
 
 fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let signbit_fn = cached_numpy_signbit(py)?;
     if let Some(out) = f64_predicate_delegate_if_unprofitable(
         py,
         x,
         F64PredicateKind::Signbit,
-        intern!(py, "signbit"),
+        signbit_fn,
     )? {
         return Ok(out);
     }
@@ -32384,7 +32362,6 @@ fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // element-wise (~49x slower than numpy for int32). np.signbit(int) = (x < 0)
     // (unsigned -> all False) is the exact oracle, so delegate instead.
     {
-        let numpy = cached_numpy(py)?;
         if x.is_exact_instance(cached_ndarray_type(py)?) {
             let kind: String = x
                 .getattr(intern!(py, "dtype"))?
@@ -32407,13 +32384,12 @@ fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
                 return Ok(out);
             }
             if kind == "i" || kind == "u" || !c_contiguous {
-                return Ok(numpy.getattr(intern!(py, "signbit"))?.call1((x,))?.unbind());
+                return Ok(signbit_fn.call1((x,))?.unbind());
             }
         }
     }
     if ndarray_subclass_needs_numpy(py, x)? {
-        return Ok(cached_numpy(py)?
-            .getattr(intern!(py, "signbit"))?
+        return Ok(signbit_fn
             .call1((x,))?
             .unbind());
     }
@@ -32439,11 +32415,12 @@ fn signbit(
 }
 
 fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let isnan_fn = cached_numpy_isnan(py)?;
     if let Some(out) = f64_predicate_delegate_if_unprofitable(
         py,
         x,
         F64PredicateKind::Isnan,
-        intern!(py, "isnan"),
+        isnan_fn,
     )? {
         return Ok(out);
     }
@@ -32467,17 +32444,15 @@ fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // extract_numeric_array can't push a complex array through the real-valued Isnan
     // kernel and raises TypeError, so delegate complex inputs to numpy (the oracle).
     if numpy_dtype_is_complex(x) {
-        let numpy = cached_numpy(py)?;
-        return Ok(numpy.getattr(intern!(py, "isnan"))?.call1((x,))?.unbind());
+        return Ok(isnan_fn.call1((x,))?.unbind());
     }
     // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
     // predicate fast paths into the cold extract → rebuild (transpose-copy, ~100x
     // slower than numpy's strided isnan). Delegate them to numpy.
     // (`isinf_native` and `isfinite_native` already hold the module here; this one
     // re-imported it twice, at 382.5 ns apiece.)
-    let numpy = cached_numpy(py)?;
     if ndarray_subclass_needs_numpy(py, x)? {
-        return Ok(numpy.getattr(intern!(py, "isnan"))?.call1((x,))?.unbind());
+        return Ok(isnan_fn.call1((x,))?.unbind());
     }
     if x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
@@ -32485,7 +32460,7 @@ fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return Ok(numpy.getattr(intern!(py, "isnan"))?.call1((x,))?.unbind());
+        return Ok(isnan_fn.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "isnan(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isnan))
@@ -32508,11 +32483,12 @@ fn isnan(
 }
 
 fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let isinf_fn = cached_numpy_isinf(py)?;
     if let Some(out) = f64_predicate_delegate_if_unprofitable(
         py,
         x,
         F64PredicateKind::Isinf,
-        intern!(py, "isinf"),
+        isinf_fn,
     )? {
         return Ok(out);
     }
@@ -32533,14 +32509,13 @@ fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     }
     // Complex: numpy applies the predicate per-component (isinf(z)=isinf(re)|isinf(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
-    let numpy = cached_numpy(py)?;
     if numpy_dtype_is_complex(x) {
-        return Ok(numpy.getattr(intern!(py, "isinf"))?.call1((x,))?.unbind());
+        return Ok(isinf_fn.call1((x,))?.unbind());
     }
     // Non-contiguous (transposed/strided) ndarrays bail the predicate fast paths into
     // the cold extract → rebuild (transpose-copy, ~100x slower). Delegate to numpy.
     if ndarray_subclass_needs_numpy(py, x)? {
-        return Ok(numpy.getattr(intern!(py, "isinf"))?.call1((x,))?.unbind());
+        return Ok(isinf_fn.call1((x,))?.unbind());
     }
     if x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
@@ -32548,7 +32523,7 @@ fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return Ok(numpy.getattr(intern!(py, "isinf"))?.call1((x,))?.unbind());
+        return Ok(isinf_fn.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "isinf(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isinf))
@@ -32571,11 +32546,12 @@ fn isinf(
 }
 
 fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let isfinite_fn = cached_numpy_isfinite(py)?;
     if let Some(out) = f64_predicate_delegate_if_unprofitable(
         py,
         x,
         F64PredicateKind::Isfinite,
-        intern!(py, "isfinite"),
+        isfinite_fn,
     )? {
         return Ok(out);
     }
@@ -32594,18 +32570,15 @@ fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     }
     // Complex: numpy ANDs the components (isfinite(z)=isfinite(re)&isfinite(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
-    let numpy = cached_numpy(py)?;
     if numpy_dtype_is_complex(x) {
-        return Ok(numpy
-            .getattr(intern!(py, "isfinite"))?
+        return Ok(isfinite_fn
             .call1((x,))?
             .unbind());
     }
     // Non-contiguous (transposed/strided) ndarrays bail the predicate fast paths into
     // the cold extract → rebuild (transpose-copy, ~100x slower). Delegate to numpy.
     if ndarray_subclass_needs_numpy(py, x)? {
-        return Ok(numpy
-            .getattr(intern!(py, "isfinite"))?
+        return Ok(isfinite_fn
             .call1((x,))?
             .unbind());
     }
@@ -32615,8 +32588,7 @@ fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return Ok(numpy
-            .getattr(intern!(py, "isfinite"))?
+        return Ok(isfinite_fn
             .call1((x,))?
             .unbind());
     }
@@ -32777,17 +32749,16 @@ fn sign(
         return core_numpy_passthrough_interned(py, intern!(py, "sign"), args, kwargs);
     }
     let x: Py<PyAny> = args.get_item(0)?.unbind();
-    let numpy = cached_numpy(py)?;
+    let sign_fn = cached_numpy_sign(py)?;
     // A FIFTH route into the unary family, and the same guard applies: this one ends in
     // an extract-and-rebuild that cannot carry a subclass, and `np.sign(np.matrix(a))` is
     // a `matrix` (`deadlock-audit-ljn3e`).
     if ndarray_subclass_needs_numpy(py, x.bind(py))? {
-        return Ok(numpy
-            .getattr(intern!(py, "sign"))?
+        return Ok(sign_fn
             .call1((x.bind(py),))?
             .unbind());
     }
-    let arr = numpy.call_method1(intern!(py, "asarray"), (x.bind(py),))?;
+    let arr = cached_numpy_asarray(py)?.call1((x.bind(py),))?;
     let dtype_kind = arr
         .getattr(intern!(py, "dtype"))?
         .getattr(intern!(py, "kind"))?
@@ -32804,7 +32775,7 @@ fn sign(
     // signs, while complex ('c'), datetime64 ('M'), string, etc. raise numpy's
     // own error rather than our generic numeric-only TypeError.
     if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
-        return Ok(numpy.getattr(intern!(py, "sign"))?.call1((arr,))?.unbind());
+        return Ok(sign_fn.call1((arr,))?.unbind());
     }
     if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Sign)? {
         return Ok(out);
@@ -32822,7 +32793,7 @@ fn sign(
     // would be widened to f64 by extract_numeric_array; numpy keeps the input float
     // width (e.g. sign(float16) -> float16). Defer every non-f64 input to numpy.sign.
     if !numpy_dtype_is_f64(py, x.bind(py)) {
-        return Ok(numpy.getattr(intern!(py, "sign"))?.call1((arr,))?.unbind());
+        return Ok(sign_fn.call1((arr,))?.unbind());
     }
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy path into the
     // cold extract → rebuild (transpose-copy, ~5.6x slower). Delegate to numpy.
@@ -32833,7 +32804,7 @@ fn sign(
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return Ok(numpy.getattr(intern!(py, "sign"))?.call1((arr,))?.unbind());
+        return Ok(sign_fn.call1((arr,))?.unbind());
     }
     let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Sign))
@@ -32843,7 +32814,7 @@ fn native_rounding_unary(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
     op: UnaryOp,
-    numpy_name: &Bound<'_, PyString>,
+    numpy_fn: &Bound<'_, PyAny>,
     extract_label: &str,
 ) -> PyResult<Py<PyAny>> {
     // float16 floor/ceil/trunc: numpy has no native f16 ALU and emulates via widen->f32->op->
@@ -32856,7 +32827,7 @@ fn native_rounding_unary(
     // float32 -> float32, bool -> bool). extract_numeric_array canonicalizes narrow
     // widths, so the native path only matches NumPy for float64; defer the rest.
     if !numpy_dtype_is_f64(py, x) {
-        return Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind());
+        return Ok(numpy_fn.call1((x,))?.unbind());
     }
     if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
         return Ok(out);
@@ -32864,11 +32835,10 @@ fn native_rounding_unary(
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy path into the
     // cold extract → rebuild (transpose-copy, ~6x slower than numpy's strided ufunc).
     // Delegate them to numpy.
-    let numpy = cached_numpy(py)?;
     // An ndarray SUBCLASS keeps its type through a numpy ufunc; `floor`/`ceil`/`trunc`/
     // `rint` reach the family through THIS function (`deadlock-audit-1zl3e`).
     if ndarray_subclass_needs_numpy(py, x)? {
-        return Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind());
+        return Ok(numpy_fn.call1((x,))?.unbind());
     }
     if x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
@@ -32876,14 +32846,14 @@ fn native_rounding_unary(
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind());
+        return Ok(numpy_fn.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, extract_label)?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(op))
 }
 
 fn floor_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    native_rounding_unary(py, x, UnaryOp::Floor, intern!(py, "floor"), "floor(x)")
+    native_rounding_unary(py, x, UnaryOp::Floor, cached_numpy_floor(py)?, "floor(x)")
 }
 
 #[pyfunction]
@@ -32903,7 +32873,7 @@ fn floor(
 }
 
 fn ceil_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    native_rounding_unary(py, x, UnaryOp::Ceil, intern!(py, "ceil"), "ceil(x)")
+    native_rounding_unary(py, x, UnaryOp::Ceil, cached_numpy_ceil(py)?, "ceil(x)")
 }
 
 #[pyfunction]
@@ -32923,7 +32893,7 @@ fn ceil(
 }
 
 fn trunc_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-    native_rounding_unary(py, x, UnaryOp::Trunc, intern!(py, "trunc"), "trunc(x)")
+    native_rounding_unary(py, x, UnaryOp::Trunc, cached_numpy_trunc(py)?, "trunc(x)")
 }
 
 #[pyfunction]
@@ -32956,9 +32926,9 @@ fn rint_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // cannot carry a subclass (`deadlock-audit-ljn3e`). `np.rint(np.matrix(a))` is a
     // `matrix`. This route BUILDS its result, so delegation is the remedy here; the flip
     // family's cheaper no-conversion fix does not apply.
+    let rint_fn = cached_numpy_rint(py)?;
     if ndarray_subclass_needs_numpy(py, x)? {
-        return Ok(cached_numpy(py)?
-            .getattr(intern!(py, "rint"))?
+        return Ok(rint_fn
             .call1((x,))?
             .unbind());
     }
@@ -32966,7 +32936,7 @@ fn rint_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         return Ok(out);
     }
     if !numpy_dtype_is_f64(py, x) {
-        return Ok(cached_numpy_rint(py)?.call1((x,))?.unbind());
+        return Ok(rint_fn.call1((x,))?.unbind());
     }
     if let Some(out) = try_zerocopy_f64_unary(py, x, UnaryOp::Rint)? {
         return Ok(out);
@@ -32980,7 +32950,7 @@ fn rint_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return Ok(cached_numpy_rint(py)?.call1((x,))?.unbind());
+        return Ok(rint_fn.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "rint(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Rint))
@@ -85532,11 +85502,11 @@ fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny
             }
         }
     }
-    let kwargs = PyDict::new(py);
     if let Some(value) = p {
-        kwargs.set_item(intern!(py, "p"), value.bind(py))?;
+        Ok(cond_fn.call1((x.bind(py), value.bind(py)))?.unbind())
+    } else {
+        Ok(cond_fn.call1((x.bind(py),))?.unbind())
     }
-    Ok(cond_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
 }
 
 /// Maps an `ord` value to the SVD-derived matrix-norm reduction mode, or `None`
@@ -85758,15 +85728,25 @@ fn norm(
     // axis (None/int/tuple), keepdims, and 1-D vector vs 2-D matrix vs
     // batched (..., M, N) broadcasting semantics all match numpy exactly.
     let norm_fn = cached_numpy_linalg_norm(py)?;
-    let kwargs = PyDict::new(py);
-    if let Some(value) = ord {
-        kwargs.set_item(intern!(py, "ord"), value.bind(py))?;
+    if !keepdims {
+        match (&ord, &axis) {
+            (None, None) => Ok(norm_fn.call1((x.bind(py),))?.unbind()),
+            (Some(o), None) => Ok(norm_fn.call1((x.bind(py), o.bind(py)))?.unbind()),
+            (None, Some(a)) => Ok(norm_fn.call1((x.bind(py), py.None(), a.bind(py)))?.unbind()),
+            (Some(o), Some(a)) => {
+                Ok(norm_fn.call1((x.bind(py), o.bind(py), a.bind(py)))?.unbind())
+            }
+        }
+    } else {
+        Ok(norm_fn
+            .call1((
+                x.bind(py),
+                ord.as_ref().map(|o| o.bind(py)),
+                axis.as_ref().map(|a| a.bind(py)),
+                keepdims,
+            ))?
+            .unbind())
     }
-    if let Some(value) = axis {
-        kwargs.set_item(intern!(py, "axis"), value.bind(py))?;
-    }
-    kwargs.set_item(intern!(py, "keepdims"), keepdims)?;
-    Ok(norm_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -85791,16 +85771,17 @@ fn fft_shift_impl(
     py: Python<'_>,
     x: Py<PyAny>,
     axes: Option<Py<PyAny>>,
-    _inverse: bool,
-    numpy_name: &'static str,
+    inverse: bool,
+    _numpy_name: &'static str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let np_fn = numpy.getattr(intern!(py, "fft"))?.getattr(numpy_name)?;
+    let np_fn = if inverse {
+        cached_numpy_fft_ifftshift(py)?
+    } else {
+        cached_numpy_fft_fftshift(py)?
+    };
     let x_bound = x.bind(py);
     if let Some(axes_val) = axes {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
-        Ok(np_fn.call((x_bound,), Some(&kwargs))?.unbind())
+        Ok(np_fn.call1((x_bound, axes_val.bind(py)))?.unbind())
     } else {
         Ok(np_fn.call1((x_bound,))?.unbind())
     }
@@ -85820,16 +85801,12 @@ fn rfftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyRe
     // d), and numpy returns the same writeable/owndata float64 array our build did,
     // so delegate the generation to numpy. The device kwarg was validated above and
     // n==0 / d==0 already raise the same ZeroDivisionError numpy itself would.
-    let numpy = cached_numpy(py)?;
-    let rfftfreq_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "rfftfreq"))?;
+    let rfftfreq_fn = cached_numpy_fft_rfftfreq(py)?;
     if d == 1.0 {
-        return Ok(rfftfreq_fn.call1((n,))?.unbind());
+        Ok(rfftfreq_fn.call1((n,))?.unbind())
+    } else {
+        Ok(rfftfreq_fn.call1((n, d))?.unbind())
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "d"), d)?;
-    Ok(rfftfreq_fn.call((n,), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -88064,6 +88041,15 @@ fn cached_int64_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
         .bind(py))
 }
 
+fn cached_int32_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static INT32_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(INT32_TYPE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_numpy(py)?.getattr(intern!(py, "int32"))?.unbind())
+        })?
+        .bind(py))
+}
+
 /// `numpy.float64`, on the same terms - the output dtype every f64 zero-copy route allocates
 /// with, and another `PyString` per call when it is passed as `dtype="float64"`.
 fn cached_float64_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
@@ -88554,6 +88540,19 @@ cached_numpy_attr!(cached_numpy_fromstring, "fromstring");
 cached_numpy_attr!(cached_numpy_isclose, "isclose");
 cached_numpy_attr!(cached_numpy_ediff1d, "ediff1d");
 cached_numpy_attr!(cached_numpy_around, "around");
+cached_numpy_attr!(cached_numpy_broadcast_to, "broadcast_to");
+cached_numpy_attr!(cached_numpy_broadcast_arrays, "broadcast_arrays");
+cached_numpy_attr!(cached_numpy_broadcast_shapes, "broadcast_shapes");
+cached_numpy_attr!(cached_numpy_may_share_memory, "may_share_memory");
+cached_numpy_attr!(cached_numpy_shares_memory, "shares_memory");
+cached_numpy_attr!(cached_numpy_signbit, "signbit");
+cached_numpy_attr!(cached_numpy_isnan, "isnan");
+cached_numpy_attr!(cached_numpy_isinf, "isinf");
+cached_numpy_attr!(cached_numpy_isfinite, "isfinite");
+cached_numpy_attr!(cached_numpy_sign, "sign");
+cached_numpy_attr!(cached_numpy_floor, "floor");
+cached_numpy_attr!(cached_numpy_ceil, "ceil");
+cached_numpy_attr!(cached_numpy_trunc, "trunc");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
@@ -114396,20 +114395,20 @@ fn around(
     decimals: i32,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
-        let around_fn = numpy.getattr(intern!(py, "around"))?;
-        if decimals == 0 && out.as_ref().is_none_or(|o| o.bind(py).is_none()) {
-            return Ok(around_fn.call1((a.bind(py),))?.unbind());
-        }
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "decimals"), decimals)?;
+        let around_fn = cached_numpy_around(py)?;
+        let a_bound = a.bind(py);
         if let Some(o) = out.as_ref() {
-            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
+            let o_bound = o.bind(py);
+            if !o_bound.is_none() {
+                return Ok(around_fn.call1((a_bound, decimals, o_bound))?.unbind());
+            }
         }
-        Ok(around_fn
-            .call((a.bind(py),), Some(&kwargs))?
-            .unbind())
+        if decimals == 0 {
+            Ok(around_fn.call1((a_bound,))?.unbind())
+        } else {
+            Ok(around_fn.call1((a_bound, decimals))?.unbind())
+        }
     };
 
     // out= and non-native byte order both delegate whole (`deadlock-audit-2kqw3`).
@@ -114494,7 +114493,7 @@ fn around(
                 if itemsize == 16 {
                     let view = ab.call_method1(
                         intern!(py, "view"),
-                        (numpy.getattr(intern!(py, "float64"))?,),
+                        (cached_float64_type(py)?,),
                     )?;
                     if let Some(out) = try_zerocopy_f64_around(py, &view, decimals)? {
                         let restored = out.bind(py).call_method1(intern!(py, "view"), (&dtype,))?;
@@ -114503,7 +114502,7 @@ fn around(
                 } else if itemsize == 8 {
                     let view = ab.call_method1(
                         intern!(py, "view"),
-                        (numpy.getattr(intern!(py, "float32"))?,),
+                        (cached_float32_type(py)?,),
                     )?;
                     if let Some(out) = try_zerocopy_f32_around(py, &view, decimals)? {
                         let restored = out.bind(py).call_method1(intern!(py, "view"), (&dtype,))?;
@@ -115921,11 +115920,7 @@ fn isclose_impl(
                 .getattr(intern!(py, "kind"))?
                 .extract::<String>()?;
             if kind == "i" || kind == "u" || kind == "b" {
-                let numpy = cached_numpy(py)?;
-                let a_f64 = numpy.call_method1(
-                    intern!(py, "asarray"),
-                    (a_bound, numpy.getattr(intern!(py, "float64"))?),
-                )?;
+                let a_f64 = cached_numpy_asarray(py)?.call1((a_bound, cached_float64_type(py)?))?;
                 if let Some(out) =
                     try_zerocopy_f64_isclose_array_scalar(py, &a_f64, b_bound, rtol, atol)?
                 {
@@ -115936,17 +115931,9 @@ fn isclose_impl(
     }
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = cached_numpy(py)?;
-        let isclose_fn = numpy.getattr(intern!(py, "isclose"))?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "rtol"), rtol)?;
-        kwargs.set_item(intern!(py, "atol"), atol)?;
-        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
+        let isclose_fn = cached_numpy_isclose(py)?;
         Ok(isclose_fn
-            .call(
-                (a.bind(py), b.bind(py)),
-                Some(&kwargs),
-            )?
+            .call1((a.bind(py), b.bind(py), rtol, atol, equal_nan))?
             .unbind())
     };
 
@@ -118898,20 +118885,22 @@ fn ediff1d(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
-        let ediff1d_fn = numpy.getattr(intern!(py, "ediff1d"))?;
-        if to_end.is_none() && to_begin.is_none() {
-            return Ok(ediff1d_fn.call1((ary.bind(py),))?.unbind());
+        let ediff1d_fn = cached_numpy_ediff1d(py)?;
+        let ary_bound = ary.bind(py);
+        let te_bound = to_end.as_ref().map(|o| o.bind(py));
+        let tb_bound = to_begin.as_ref().map(|o| o.bind(py));
+        let te_has_val = te_bound.as_ref().is_some_and(|o| !o.is_none());
+        let tb_has_val = tb_bound.as_ref().is_some_and(|o| !o.is_none());
+        match (te_has_val, tb_has_val) {
+            (false, false) => Ok(ediff1d_fn.call1((ary_bound,))?.unbind()),
+            (true, false) => Ok(ediff1d_fn.call1((ary_bound, te_bound.unwrap()))?.unbind()),
+            (false, true) => {
+                Ok(ediff1d_fn.call1((ary_bound, py.None(), tb_bound.unwrap()))?.unbind())
+            }
+            (true, true) => {
+                Ok(ediff1d_fn.call1((ary_bound, te_bound.unwrap(), tb_bound.unwrap()))?.unbind())
+            }
         }
-        let kwargs = PyDict::new(py);
-        if let Some(ref te) = to_end {
-            kwargs.set_item(intern!(py, "to_end"), te.bind(py))?;
-        }
-        if let Some(ref tb) = to_begin {
-            kwargs.set_item(intern!(py, "to_begin"), tb.bind(py))?;
-        }
-        Ok(ediff1d_fn
-            .call((ary.bind(py),), Some(&kwargs))?
-            .unbind())
     };
 
     // A byte-swapped operand belongs to numpy, decided here for the same reason as in `diff`:
