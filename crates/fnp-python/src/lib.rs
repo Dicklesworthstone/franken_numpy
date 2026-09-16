@@ -7066,14 +7066,6 @@ fn extract_python_dtype_bound(
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
 
-fn extract_python_dtype(
-    py: Python<'_>,
-    dtype: Option<Py<PyAny>>,
-    default: DType,
-    context: &str,
-) -> PyResult<DType> {
-    extract_python_dtype_bound(py, dtype.as_ref().map(|d| d.bind(py)), default, context)
-}
 
 fn dtype_item_size(dtype: DType) -> Option<usize> {
     match dtype {
@@ -67162,9 +67154,12 @@ fn genfromtxt(
     };
 
     // Resolve target dtype — must be numeric bridge-supported.
-    let dtype_clone = dtype.as_ref().map(|v| v.clone_ref(py));
-    let parsed_dtype = match extract_python_dtype(py, dtype_clone, DType::F64, "genfromtxt(dtype)")
-    {
+    let parsed_dtype = match extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|v| v.bind(py)),
+        DType::F64,
+        "genfromtxt(dtype)",
+    ) {
         Ok(value) if dtype_supported_by_numpy_export_bridge(value) => value,
         _ => return fallback(py),
     };
