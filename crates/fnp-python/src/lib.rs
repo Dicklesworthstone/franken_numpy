@@ -1939,8 +1939,12 @@ impl PySeedSequence {
         n_words: usize,
         dtype: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let dtype =
-            extract_python_dtype(py, dtype, DType::U32, "SeedSequence.generate_state(dtype)")?;
+        let dtype = extract_python_dtype_bound(
+            py,
+            dtype.as_ref().map(|d| d.bind(py)),
+            DType::U32,
+            "SeedSequence.generate_state(dtype)",
+        )?;
         match dtype {
             DType::U32 => build_numpy_array_from_storage(
                 py,
@@ -2990,7 +2994,12 @@ impl PyRandomGenerator {
             Some(high) => (low, high),
             None => (0, low),
         };
-        let dtype = extract_python_dtype(py, dtype, DType::I64, "Generator.integers(dtype)")?;
+        let dtype = extract_python_dtype_bound(
+            py,
+            dtype.as_ref().map(|d| d.bind(py)),
+            DType::I64,
+            "Generator.integers(dtype)",
+        )?;
         validate_random_integer_dtype_bounds(low, high, dtype, endpoint)?;
         let size = random_size_from_py(py, size, "Generator.integers(size)")?;
         match dtype {
@@ -3361,7 +3370,8 @@ impl PyRandomGenerator {
         self.before_draw(py)?;
         let arr = cached_numpy_asarray(py)?.call1((x.bind(py),))?;
         let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
-        let axis_spec = extract_axis_spec(py, axis, "Generator.permuted(axis)")?;
+        let axis_spec =
+            extract_axis_spec_bound(py, axis.as_ref().map(|a| a.bind(py)), "Generator.permuted(axis)")?;
         if shape.is_empty() && axis_spec.is_none() {
             return Err(PyTypeError::new_err("len() of unsized object"));
         }
@@ -3888,7 +3898,12 @@ impl PyRandomState {
             Some(high) => (low, high),
             None => (0, low),
         };
-        let dtype = extract_python_dtype(py, dtype, DType::I64, "RandomState.randint(dtype)")?;
+        let dtype = extract_python_dtype_bound(
+            py,
+            dtype.as_ref().map(|d| d.bind(py)),
+            DType::I64,
+            "RandomState.randint(dtype)",
+        )?;
         validate_random_integer_dtype_bounds(low, high, dtype, false)?;
         if high <= low {
             return Err(PyValueError::new_err("high <= low"));
@@ -6490,13 +6505,6 @@ fn extract_axis_spec_bound(
     )))
 }
 
-fn extract_axis_spec(
-    py: Python<'_>,
-    axis: Option<Py<PyAny>>,
-    context: &str,
-) -> PyResult<Option<Vec<isize>>> {
-    extract_axis_spec_bound(py, axis.as_ref().map(|a| a.bind(py)), context)
-}
 
 fn ensure_unique_axes(axes: &[isize], ndim: usize) -> PyResult<()> {
     let mut seen = std::collections::HashSet::with_capacity(axes.len());
@@ -13104,12 +13112,7 @@ fn try_zerocopy_f32_binary(
     let Some((flat, shape)) = zerocopy_f32_binary_flat(py, &numpy, a, b, op)? else {
         return Ok(None);
     };
-    // No reshape: `zerocopy_f32_binary_flat` now allocates at the final shape.
-    let output = flat.unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 // Euclid's algorithm on unsigned magnitudes (all integer widths <= 64 fit in u64).
@@ -26602,7 +26605,7 @@ fn count_nonzero(
             } else if axis_bound.cast::<PyBool>().is_ok() || is_numpy_bool_scalar(py, axis_bound) {
                 return fallback();
             } else if axis_bound.extract::<isize>().is_ok() {
-                extract_axis_spec(py, Some(axis_obj.clone_ref(py)), "count_nonzero")?
+                extract_axis_spec_bound(py, Some(axis_bound), "count_nonzero")?
             } else if let Ok(axis_tuple) = axis_bound.cast::<PyTuple>() {
                 for item in axis_tuple.iter() {
                     if item.cast::<PyBool>().is_ok()
@@ -26612,7 +26615,7 @@ fn count_nonzero(
                         return fallback();
                     }
                 }
-                extract_axis_spec(py, Some(axis_obj.clone_ref(py)), "count_nonzero")?
+                extract_axis_spec_bound(py, Some(axis_bound), "count_nonzero")?
             } else {
                 return fallback();
             }
@@ -26651,12 +26654,7 @@ fn count_nonzero(
         return fallback();
     }
 
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 fn is_numpy_bool_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
@@ -26835,8 +26833,12 @@ fn fromstring(
         return fallback(py);
     };
 
-    let dtype_cloned = dtype.as_ref().map(|value| value.clone_ref(py));
-    let parsed_dtype = extract_python_dtype(py, dtype_cloned, DType::F64, "fromstring(dtype)")?;
+    let parsed_dtype = extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|d| d.bind(py)),
+        DType::F64,
+        "fromstring(dtype)",
+    )?;
     if !dtype_supported_by_numpy_export_bridge(parsed_dtype) {
         return fallback(py);
     }
@@ -36803,7 +36805,7 @@ fn searchsorted(
     // (wrong dtype/shape, out-of-range values) defers so numpy owns its exact
     // TypeError/IndexError surface.
     const SEARCHSORTED_SORTER_MIN: usize = 1 << 12;
-    if let Some(sobj) = sorter.as_ref().map(|v| v.clone_ref(py))
+    if let Some(sobj) = sorter.as_ref()
         && !sobj.bind(py).is_none()
     {
         let sb = sobj.bind(py);
@@ -43331,7 +43333,12 @@ fn indices(
     if let Some(out) = try_zerocopy_indices(py, &dimensions, dtype.as_ref().map(|d| d.bind(py)))? {
         return Ok(out);
     }
-    let dtype = extract_python_dtype(py, dtype, DType::I64, "indices(dtype)")?;
+    let dtype = extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|d| d.bind(py)),
+        DType::I64,
+        "indices(dtype)",
+    )?;
     let result = UFuncArray::indices(&dimensions, dtype).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
@@ -44874,8 +44881,7 @@ fn median(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "median") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "median") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -44890,17 +44896,14 @@ fn median(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    let output = build_numpy_array_from_ufunc(py, &result)?;
     if keepdims && let Some(ax) = axis {
         let Some(ndim) = orig_ndim else {
             return fallback();
         };
+        let output = build_numpy_array_from_ufunc(py, &result)?;
         return keepdims_expand_axis(py, numpy, output, ax as i64, ndim);
     }
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // Compute the unweighted covariance matrix following numpy's own algorithm:
@@ -46542,8 +46545,7 @@ fn nanmean(
     if a.values().is_empty() {
         return fallback();
     }
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanmean") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmean") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -48633,8 +48635,7 @@ fn nansum(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nansum") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nansum") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -48801,8 +48802,7 @@ fn nanprod(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanprod") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanprod") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -52017,8 +52017,7 @@ fn nanmax(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanmax") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmax") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -52219,8 +52218,7 @@ fn nanmin(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanmin") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmin") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -52513,8 +52511,7 @@ fn nanstd(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanstd") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanstd") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -52816,8 +52813,7 @@ fn nanvar(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanvar") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanvar") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -53472,8 +53468,7 @@ fn nanargmax(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanargmax") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanargmax") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -53647,8 +53642,7 @@ fn nanargmin(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanargmin") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanargmin") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -53921,8 +53915,7 @@ fn percentile(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "percentile") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "percentile") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -54168,8 +54161,7 @@ fn nanpercentile(
         Ok(value) => value,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanpercentile") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanpercentile") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -54357,8 +54349,7 @@ fn nanquantile(
         Ok(value) => value,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanquantile") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanquantile") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -66306,9 +66297,9 @@ fn fromfile(
         {
             return fallback();
         }
-        let parsed_dtype = extract_python_dtype(
+        let parsed_dtype = extract_python_dtype_bound(
             py,
-            dtype.as_ref().map(|value| value.clone_ref(py)),
+            dtype.as_ref().map(|value| value.bind(py)),
             DType::F64,
             "fromfile(dtype)",
         )?;
@@ -66350,9 +66341,9 @@ fn fromfile(
         return fallback();
     }
 
-    let parsed_dtype = extract_python_dtype(
+    let parsed_dtype = extract_python_dtype_bound(
         py,
-        dtype.as_ref().map(|value| value.clone_ref(py)),
+        dtype.as_ref().map(|value| value.bind(py)),
         DType::F64,
         "fromfile(dtype)",
     )?;
@@ -66465,8 +66456,12 @@ fn loadtxt(
     };
 
     // Resolve target dtype (default float64).
-    let dtype_clone = dtype.as_ref().map(|v| v.clone_ref(py));
-    let parsed_dtype = match extract_python_dtype(py, dtype_clone, DType::F64, "loadtxt(dtype)") {
+    let parsed_dtype = match extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|v| v.bind(py)),
+        DType::F64,
+        "loadtxt(dtype)",
+    ) {
         Ok(value) if dtype_supported_by_numpy_export_bridge(value) => value,
         _ => return fallback(py),
     };
@@ -69640,8 +69635,7 @@ fn average(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "average") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "average") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -81743,8 +81737,7 @@ fn nanmedian(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanmedian") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmedian") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -82543,8 +82536,7 @@ fn quantile(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let axis = match extract_axis_spec(py, axis_for_parse, "quantile") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "quantile") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
