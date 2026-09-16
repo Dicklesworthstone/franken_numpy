@@ -6442,11 +6442,7 @@ fn split_helper_numpy_fallback(
     let bound_indices = indices_or_sections.bind(py);
     let result = match axis {
         None | Some(0) => func.call1((bound_ary, bound_indices))?,
-        Some(axis) => {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "axis"), axis)?;
-            func.call((bound_ary, bound_indices), Some(&kwargs))?
-        }
+        Some(axis) => func.call1((bound_ary, bound_indices, axis))?,
     };
     Ok(result.unbind())
 }
@@ -6759,10 +6755,8 @@ fn masked_scalar_compare(
         if copy {
             Ok(masked_fn.call1((x.bind(py), value.bind(py)))?.unbind())
         } else {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "copy"), copy)?;
             Ok(masked_fn
-                .call((x.bind(py), value.bind(py)), Some(&kwargs))?
+                .call1((x.bind(py), value.bind(py), copy))?
                 .unbind())
         }
     };
@@ -6797,10 +6791,8 @@ fn masked_scalar_compare(
                 let result = if copy {
                     cached_numpy_ma_masked_where(py)?.call1((mask.bind(py), x.bind(py)))?
                 } else {
-                    let kwargs = PyDict::new(py);
-                    kwargs.set_item(intern!(py, "copy"), copy)?;
                     cached_numpy_ma_masked_where(py)?
-                        .call((mask.bind(py), x.bind(py)), Some(&kwargs))?
+                        .call1((mask.bind(py), x.bind(py), copy))?
                 };
                 if numpy_name == "masked_equal" {
                     result.setattr("fill_value", v)?;
@@ -6935,10 +6927,8 @@ fn masked_interval_compare(
                 .call1((x.bind(py), v1.bind(py), v2.bind(py)))?
                 .unbind())
         } else {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "copy"), copy)?;
             Ok(masked_fn
-                .call((x.bind(py), v1.bind(py), v2.bind(py)), Some(&kwargs))?
+                .call1((x.bind(py), v1.bind(py), v2.bind(py), copy))?
                 .unbind())
         }
     };
@@ -6966,10 +6956,8 @@ fn masked_interval_compare(
                 let result = if copy {
                     cached_numpy_ma_masked_where(py)?.call1((mask.bind(py), x.bind(py)))?
                 } else {
-                    let kwargs = PyDict::new(py);
-                    kwargs.set_item(intern!(py, "copy"), copy)?;
                     cached_numpy_ma_masked_where(py)?
-                        .call((mask.bind(py), x.bind(py)), Some(&kwargs))?
+                        .call1((mask.bind(py), x.bind(py), copy))?
                 };
                 return Ok(result.unbind());
             }
@@ -23422,12 +23410,9 @@ fn try_zerocopy_bincount_weighted(
     // disagrees — delegate that edge case straight to numpy for exact parity (the
     // general fallback path would otherwise produce a float64 result here).
     if x_in.is_empty() {
-        let kwb = PyDict::new(py);
-        kwb.set_item(intern!(py, "weights"), weights)?;
-        kwb.set_item(intern!(py, "minlength"), minlength)?;
         let out = numpy
             .getattr(intern!(py, "bincount"))?
-            .call((x,), Some(&kwb))?;
+            .call1((x, weights, minlength))?;
         return Ok(Some(out.unbind()));
     }
     // numpy accumulates weighted bincount in float64; cast weights to a contiguous
@@ -23668,8 +23653,6 @@ fn interp(
             _ => return fallback(), // non-scalar / zero period -> numpy (raises, or scalar-x edge)
         };
         let f64_dt = numpy.getattr(intern!(py, "float64"))?;
-        let as_f64_kw = PyDict::new(py);
-        as_f64_kw.set_item(intern!(py, "dtype"), &f64_dt)?;
         let fp_probe = numpy.call_method1(intern!(py, "asarray"), (fp.bind(py),))?;
         if fp_probe
             .getattr(intern!(py, "dtype"))?
@@ -23679,12 +23662,12 @@ fn interp(
         {
             return fallback(); // complex fp -> numpy (component-wise)
         }
-        let x_arr = numpy.call_method(intern!(py, "asarray"), (x.bind(py),), Some(&as_f64_kw))?;
+        let x_arr = numpy.call_method1(intern!(py, "asarray"), (x.bind(py), &f64_dt))?;
         if x_arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0 {
             return fallback(); // scalar x -> numpy ([x] wrap edge)
         }
-        let xp_arr = numpy.call_method(intern!(py, "asarray"), (xp.bind(py),), Some(&as_f64_kw))?;
-        let fp_arr = numpy.call_method(intern!(py, "asarray"), (&fp_probe,), Some(&as_f64_kw))?;
+        let xp_arr = numpy.call_method1(intern!(py, "asarray"), (xp.bind(py), &f64_dt))?;
+        let fp_arr = numpy.call_method1(intern!(py, "asarray"), (&fp_probe, &f64_dt))?;
         let x_mod = x_arr.call_method1(intern!(py, "__mod__"), (period_val,))?;
         let xp_mod = xp_arr.call_method1(intern!(py, "__mod__"), (period_val,))?;
         let asort = numpy.call_method1(intern!(py, "argsort"), (&xp_mod,))?;
@@ -27467,10 +27450,17 @@ fn clip(
     let a_max: Py<PyAny> = a_max.or(max).unwrap_or_else(|| py.None());
 
     let fallback = || -> PyResult<Py<PyAny>> {
-        if out.is_none() && kwargs.as_ref().map_or(true, |k| k.is_empty()) {
-            return Ok(clip_fn
-                .call1((a.bind(py), a_min.bind(py), a_max.bind(py)))?
-                .unbind());
+        let has_kwargs = kwargs.as_ref().is_some_and(|k| !k.is_empty());
+        if !has_kwargs {
+            if let Some(out_val) = out.as_ref() {
+                return Ok(clip_fn
+                    .call1((a.bind(py), a_min.bind(py), a_max.bind(py), out_val.bind(py)))?
+                    .unbind());
+            } else {
+                return Ok(clip_fn
+                    .call1((a.bind(py), a_min.bind(py), a_max.bind(py)))?
+                    .unbind());
+            }
         }
         let call_kwargs = PyDict::new(py);
         if let Some(out_val) = out.as_ref() {
@@ -27481,18 +27471,12 @@ fn clip(
                 call_kwargs.set_item(key, value)?;
             }
         }
-        if call_kwargs.is_empty() {
-            Ok(clip_fn
-                .call1((a.bind(py), a_min.bind(py), a_max.bind(py)))?
-                .unbind())
-        } else {
-            Ok(clip_fn
-                .call(
-                    (a.bind(py), a_min.bind(py), a_max.bind(py)),
-                    Some(&call_kwargs),
-                )?
-                .unbind())
-        }
+        Ok(clip_fn
+            .call(
+                (a.bind(py), a_min.bind(py), a_max.bind(py)),
+                Some(&call_kwargs),
+            )?
+            .unbind())
     };
 
     // Bail to numpy on `out`, None bounds, or any extra kwargs — these
@@ -29812,10 +29796,8 @@ fn trim_zeros(
     let fallback = || -> PyResult<Py<PyAny>> {
         let trim_zeros_fn = cached_numpy_trim_zeros(py)?;
         if let Some(axis_val) = axis.as_ref() {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
             return Ok(trim_zeros_fn
-                .call((filt.bind(py), trim), Some(&kwargs))?
+                .call1((filt.bind(py), trim, axis_val.bind(py)))?
                 .unbind());
         }
         if trim == "fb" {
@@ -29895,10 +29877,8 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
         if copy {
             Ok(masked_invalid_fn.call1((a.bind(py),))?.unbind())
         } else {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "copy"), copy)?;
             Ok(masked_invalid_fn
-                .call((a.bind(py),), Some(&kwargs))?
+                .call1((a.bind(py), copy))?
                 .unbind())
         }
     };
@@ -30258,8 +30238,14 @@ fn matrix_rank(
 ) -> PyResult<Py<PyAny>> {
     let matrix_rank_fn = cached_numpy_linalg_matrix_rank(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
-        if !hermitian && tol.is_none() && rtol.is_none() {
-            Ok(matrix_rank_fn.call1((A.bind(py),))?.unbind())
+        if rtol.is_none() {
+            if !hermitian && tol.is_none() {
+                Ok(matrix_rank_fn.call1((A.bind(py),))?.unbind())
+            } else {
+                Ok(matrix_rank_fn
+                    .call1((A.bind(py), tol.as_ref().map(|v| v.bind(py)), hermitian))?
+                    .unbind())
+            }
         } else {
             let kwargs = PyDict::new(py);
             if let Some(value) = &tol {
@@ -36210,17 +36196,12 @@ fn compress(
     let b_a = a.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let compress_fn = cached_numpy_compress(py)?;
-        if axis.is_none() && out.is_none() {
-            Ok(compress_fn.call1((b_cond, b_a))?.unbind())
+        if let Some(out_val) = out.as_ref() {
+            Ok(compress_fn.call1((b_cond, b_a, axis, out_val.bind(py)))?.unbind())
+        } else if let Some(axis) = axis {
+            Ok(compress_fn.call1((b_cond, b_a, axis))?.unbind())
         } else {
-            let kwargs = PyDict::new(py);
-            if let Some(axis) = axis {
-                kwargs.set_item(intern!(py, "axis"), axis)?;
-            }
-            if let Some(out_val) = out.as_ref() {
-                kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-            }
-            Ok(compress_fn.call((b_cond, b_a), Some(&kwargs))?.unbind())
+            Ok(compress_fn.call1((b_cond, b_a))?.unbind())
         }
     };
     // No native compaction writes into a caller-supplied buffer, so an out=
@@ -42776,9 +42757,7 @@ fn put(
         if mode == "raise" {
             Ok(put_fn.call1((b_a, b_ind, b_v))?.unbind())
         } else {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "mode"), mode)?;
-            Ok(put_fn.call((b_a, b_ind, b_v), Some(&kwargs))?.unbind())
+            Ok(put_fn.call1((b_a, b_ind, b_v, mode))?.unbind())
         }
     };
 
@@ -43674,13 +43653,8 @@ fn masked_where(
                 .call1((condition.bind(py), a.bind(py)))?
                 .unbind())
         } else {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "copy"), copy)?;
             Ok(masked_where_fn
-                .call(
-                    (condition.bind(py), a.bind(py)),
-                    Some(&kwargs),
-                )?
+                .call1((condition.bind(py), a.bind(py), copy))?
                 .unbind())
         }
     };
@@ -44284,9 +44258,7 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
     let fallback = || -> PyResult<Py<PyAny>> {
         let filled_fn = cached_numpy_ma_filled(py)?;
         if let Some(value) = fill_value.as_ref() {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "fill_value"), value.bind(py))?;
-            Ok(filled_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+            Ok(filled_fn.call1((a.bind(py), value.bind(py)))?.unbind())
         } else {
             Ok(filled_fn.call1((a.bind(py),))?.unbind())
         }
