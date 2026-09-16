@@ -4220,6 +4220,7 @@ enum StackHelperKind {
 }
 
 impl StackHelperKind {
+    #[allow(dead_code)]
     const fn context(self) -> &'static str {
         match self {
             Self::Vertical => "vstack",
@@ -4245,6 +4246,7 @@ enum SplitHelperKind {
 }
 
 impl SplitHelperKind {
+    #[allow(dead_code)]
     const fn context(self) -> &'static str {
         match self {
             Self::Equal => "split",
@@ -88881,6 +88883,8 @@ cached_numpy_submodule!(
     cached_numpy_polynomial_polynomial,
     "numpy.polynomial.polynomial"
 );
+cached_numpy_submodule!(cached_numpy_strings, "numpy.strings");
+cached_numpy_submodule!(cached_numpy_char, "numpy.char");
 
 macro_rules! cached_numpy_ma_attr {
     ($fn_name:ident, $attr:literal) => {
@@ -89005,6 +89009,95 @@ cached_numpy_fft_attr!(cached_numpy_fft_rfftn, "rfftn");
 cached_numpy_fft_attr!(cached_numpy_fft_irfftn, "irfftn");
 cached_numpy_fft_attr!(cached_numpy_fft_hfft, "hfft");
 cached_numpy_fft_attr!(cached_numpy_fft_ihfft, "ihfft");
+
+macro_rules! cached_numpy_strings_attr {
+    ($fn_name:ident, $attr:literal) => {
+        #[allow(dead_code)]
+        fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+            static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+            Ok(CACHE
+                .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+                    Ok(cached_numpy_strings(py)?
+                        .getattr(intern!(py, $attr))?
+                        .unbind())
+                })?
+                .bind(py))
+        }
+    };
+}
+
+macro_rules! cached_numpy_char_attr {
+    ($fn_name:ident, $attr:literal) => {
+        #[allow(dead_code)]
+        fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+            static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+            Ok(CACHE
+                .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+                    Ok(cached_numpy_char(py)?
+                        .getattr(intern!(py, $attr))?
+                        .unbind())
+                })?
+                .bind(py))
+        }
+    };
+}
+
+cached_numpy_strings_attr!(cached_numpy_strings_multiply, "multiply");
+cached_numpy_strings_attr!(cached_numpy_strings_mod, "mod");
+cached_numpy_strings_attr!(cached_numpy_strings_center, "center");
+cached_numpy_strings_attr!(cached_numpy_strings_ljust, "ljust");
+cached_numpy_strings_attr!(cached_numpy_strings_rjust, "rjust");
+cached_numpy_strings_attr!(cached_numpy_strings_zfill, "zfill");
+cached_numpy_strings_attr!(cached_numpy_strings_replace, "replace");
+cached_numpy_strings_attr!(cached_numpy_strings_translate, "translate");
+cached_numpy_strings_attr!(cached_numpy_strings_capitalize, "capitalize");
+cached_numpy_strings_attr!(cached_numpy_strings_title, "title");
+cached_numpy_strings_attr!(cached_numpy_strings_upper, "upper");
+cached_numpy_strings_attr!(cached_numpy_strings_lower, "lower");
+cached_numpy_strings_attr!(cached_numpy_strings_swapcase, "swapcase");
+cached_numpy_strings_attr!(cached_numpy_strings_partition, "partition");
+cached_numpy_strings_attr!(cached_numpy_strings_rpartition, "rpartition");
+cached_numpy_strings_attr!(cached_numpy_strings_decode, "decode");
+cached_numpy_strings_attr!(cached_numpy_strings_slice, "slice");
+cached_numpy_strings_attr!(cached_numpy_strings_expandtabs, "expandtabs");
+cached_numpy_strings_attr!(cached_numpy_strings_add, "add");
+cached_numpy_strings_attr!(cached_numpy_strings_strip, "strip");
+cached_numpy_strings_attr!(cached_numpy_strings_lstrip, "lstrip");
+cached_numpy_strings_attr!(cached_numpy_strings_rstrip, "rstrip");
+cached_numpy_strings_attr!(cached_numpy_strings_count, "count");
+cached_numpy_strings_attr!(cached_numpy_strings_find, "find");
+cached_numpy_strings_attr!(cached_numpy_strings_rfind, "rfind");
+cached_numpy_strings_attr!(cached_numpy_strings_index, "index");
+cached_numpy_strings_attr!(cached_numpy_strings_rindex, "rindex");
+cached_numpy_strings_attr!(cached_numpy_strings_isalpha, "isalpha");
+cached_numpy_strings_attr!(cached_numpy_strings_isdigit, "isdigit");
+cached_numpy_strings_attr!(cached_numpy_strings_isalnum, "isalnum");
+cached_numpy_strings_attr!(cached_numpy_strings_isspace, "isspace");
+cached_numpy_strings_attr!(cached_numpy_strings_isupper, "isupper");
+cached_numpy_strings_attr!(cached_numpy_strings_islower, "islower");
+cached_numpy_strings_attr!(cached_numpy_strings_istitle, "istitle");
+
+cached_numpy_char_attr!(cached_numpy_char_multiply, "multiply");
+cached_numpy_char_attr!(cached_numpy_char_mod, "mod");
+cached_numpy_char_attr!(cached_numpy_char_center, "center");
+cached_numpy_char_attr!(cached_numpy_char_ljust, "ljust");
+cached_numpy_char_attr!(cached_numpy_char_rjust, "rjust");
+cached_numpy_char_attr!(cached_numpy_char_zfill, "zfill");
+cached_numpy_char_attr!(cached_numpy_char_replace, "replace");
+cached_numpy_char_attr!(cached_numpy_char_translate, "translate");
+cached_numpy_char_attr!(cached_numpy_char_capitalize, "capitalize");
+cached_numpy_char_attr!(cached_numpy_char_title, "title");
+cached_numpy_char_attr!(cached_numpy_char_upper, "upper");
+cached_numpy_char_attr!(cached_numpy_char_lower, "lower");
+cached_numpy_char_attr!(cached_numpy_char_swapcase, "swapcase");
+cached_numpy_char_attr!(cached_numpy_char_add, "add");
+cached_numpy_char_attr!(cached_numpy_char_strip, "strip");
+cached_numpy_char_attr!(cached_numpy_char_lstrip, "lstrip");
+cached_numpy_char_attr!(cached_numpy_char_rstrip, "rstrip");
+cached_numpy_char_attr!(cached_numpy_char_isalpha, "isalpha");
+cached_numpy_char_attr!(cached_numpy_char_isdigit, "isdigit");
+cached_numpy_char_attr!(cached_numpy_char_isalnum, "isalnum");
+cached_numpy_char_attr!(cached_numpy_char_isspace, "isspace");
 
 fn cached_slogdet_result_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     static CACHE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -109071,12 +109164,16 @@ fn unicode_concat_or_numpy(
     if let Some(result) = try_zerocopy_unicode_concat(py, a.bind(py), b.bind(py))? {
         return Ok(result);
     }
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr(namespace)?
-        .getattr(intern!(py, "add"))?
-        .call1((a.bind(py), b.bind(py)))?
-        .unbind())
+    let f_owned;
+    let f = match namespace {
+        "char" => cached_numpy_char_add(py)?,
+        "strings" => cached_numpy_strings_add(py)?,
+        _ => {
+            f_owned = cached_numpy(py)?.getattr(namespace)?.getattr(intern!(py, "add"))?;
+            &f_owned
+        }
+    };
+    Ok(f.call1((a.bind(py), b.bind(py)))?.unbind())
 }
 
 // True for the ASCII codepoints str.strip()/numpy.char.strip treat as whitespace (verified to match
@@ -109211,8 +109308,19 @@ fn unicode_strip_or_numpy(
     if !chars_given && let Some(result) = try_zerocopy_unicode_strip(py, a.bind(py), mode)? {
         return Ok(result);
     }
-    let numpy = cached_numpy(py)?;
-    let f = numpy.getattr(namespace)?.getattr(method)?;
+    let f_owned;
+    let f = match (namespace, mode) {
+        ("char", 0) => cached_numpy_char_strip(py)?,
+        ("char", 1) => cached_numpy_char_lstrip(py)?,
+        ("char", 2) => cached_numpy_char_rstrip(py)?,
+        ("strings", 0) => cached_numpy_strings_strip(py)?,
+        ("strings", 1) => cached_numpy_strings_lstrip(py)?,
+        ("strings", 2) => cached_numpy_strings_rstrip(py)?,
+        _ => {
+            f_owned = cached_numpy(py)?.getattr(namespace)?.getattr(method)?;
+            &f_owned
+        }
+    };
     match chars {
         Some(c) => Ok(f.call1((a.bind(py), c.bind(py)))?.unbind()),
         None => Ok(f.call1((a.bind(py),))?.unbind()),
@@ -109584,12 +109692,25 @@ fn unicode_ispredicate_or_numpy(
     if let Some(result) = try_zerocopy_unicode_ispredicate(py, a.bind(py), mode)? {
         return Ok(result);
     }
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr(namespace)?
-        .getattr(method)?
-        .call1((a.bind(py),))?
-        .unbind())
+    let func_owned;
+    let func = match (namespace, mode) {
+        ("char", 0) => cached_numpy_char_isalpha(py)?,
+        ("char", 1) => cached_numpy_char_isdigit(py)?,
+        ("char", 2) => cached_numpy_char_isalnum(py)?,
+        ("char", 3) => cached_numpy_char_isspace(py)?,
+        ("strings", 0) => cached_numpy_strings_isalpha(py)?,
+        ("strings", 1) => cached_numpy_strings_isdigit(py)?,
+        ("strings", 2) => cached_numpy_strings_isalnum(py)?,
+        ("strings", 3) => cached_numpy_strings_isspace(py)?,
+        ("strings", 4) => cached_numpy_strings_isupper(py)?,
+        ("strings", 5) => cached_numpy_strings_islower(py)?,
+        ("strings", 6) => cached_numpy_strings_istitle(py)?,
+        _ => {
+            func_owned = cached_numpy(py)?.getattr(namespace)?.getattr(method)?;
+            &func_owned
+        }
+    };
+    Ok(func.call1((a.bind(py),))?.unbind())
 }
 
 // numpy.char/strings.multiply(a, n) repeats each string's content n times, output sized to the MAX
@@ -109982,8 +110103,21 @@ fn unicode_pad_or_numpy(
     )? {
         return Ok(out);
     }
-    let numpy = cached_numpy(py)?;
-    let f = numpy.getattr(namespace)?.getattr(method)?;
+    let f_owned;
+    let f = match (namespace, mode) {
+        ("char", 0) => cached_numpy_char_ljust(py)?,
+        ("char", 1) => cached_numpy_char_rjust(py)?,
+        ("char", 2) => cached_numpy_char_center(py)?,
+        ("char", 3) => cached_numpy_char_zfill(py)?,
+        ("strings", 0) => cached_numpy_strings_ljust(py)?,
+        ("strings", 1) => cached_numpy_strings_rjust(py)?,
+        ("strings", 2) => cached_numpy_strings_center(py)?,
+        ("strings", 3) => cached_numpy_strings_zfill(py)?,
+        _ => {
+            f_owned = cached_numpy(py)?.getattr(namespace)?.getattr(method)?;
+            &f_owned
+        }
+    };
     match fillchar {
         Some(fc) => Ok(f.call1((a.bind(py), width.bind(py), fc.bind(py)))?.unbind()),
         None => Ok(f.call1((a.bind(py), width.bind(py)))?.unbind()),
@@ -110798,7 +110932,7 @@ fn try_native_strings_mod_float(
     let Some((prefix, suffix, ffmt)) = parse_mod_float_format(&fmt_str) else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !values.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -110949,7 +111083,7 @@ fn try_native_strings_mod_float(
         fill::<f64>(
             py,
             values,
-            &numpy,
+            numpy,
             &prefix,
             &suffix,
             &ffmt,
@@ -110962,7 +111096,7 @@ fn try_native_strings_mod_float(
         fill::<f32>(
             py,
             values,
-            &numpy,
+            numpy,
             &prefix,
             &suffix,
             &ffmt,
@@ -111000,7 +111134,7 @@ fn try_native_strings_mod_int(
     let Some((prefix, suffix, ifmt)) = parse_mod_int_format(&fmt_str) else {
         return Ok(None);
     };
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     if !values.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -111132,28 +111266,28 @@ fn try_native_strings_mod_int(
 
     match (kind.as_str(), itemsize) {
         ("i", 1) => fill::<i8>(
-            py, values, &numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("i", 2) => fill::<i16>(
-            py, values, &numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("i", 4) => fill::<i32>(
-            py, values, &numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("i", 8) => fill::<i64>(
-            py, values, &numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("u", 1) => fill::<u8>(
-            py, values, &numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("u", 2) => fill::<u16>(
-            py, values, &numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("u", 4) => fill::<u32>(
-            py, values, &numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("u", 8) => fill::<u64>(
-            py, values, &numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         _ => Ok(None),
     }
@@ -111170,7 +111304,6 @@ fn unicode_search_or_numpy(
     require_found: bool,
     method: &str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
     let non_default = |o: &Option<Py<PyAny>>| o.as_ref().is_some_and(|v| !v.bind(py).is_none());
     // start/end restrict the search window -> defer (native handles the whole-string case only).
     if !non_default(&start)
@@ -111180,7 +111313,18 @@ fn unicode_search_or_numpy(
     {
         return Ok(out);
     }
-    let f = numpy.getattr(intern!(py, "strings"))?.getattr(method)?;
+    let f_owned;
+    let f = match method {
+        "count" => cached_numpy_strings_count(py)?,
+        "find" => cached_numpy_strings_find(py)?,
+        "rfind" => cached_numpy_strings_rfind(py)?,
+        "index" => cached_numpy_strings_index(py)?,
+        "rindex" => cached_numpy_strings_rindex(py)?,
+        _ => {
+            f_owned = cached_numpy(py)?.getattr(intern!(py, "strings"))?.getattr(method)?;
+            &f_owned
+        }
+    };
     let mut args: Vec<Bound<'_, PyAny>> = vec![a.bind(py).clone(), sub.bind(py).clone()];
     if let Some(s) = start.as_ref() {
         args.push(s.bind(py).clone());
@@ -111200,12 +111344,16 @@ fn unicode_multiply_or_numpy(
     if let Some(result) = try_zerocopy_unicode_multiply(py, a.bind(py), n.bind(py))? {
         return Ok(result);
     }
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr(namespace)?
-        .getattr(intern!(py, "multiply"))?
-        .call1((a.bind(py), n.bind(py)))?
-        .unbind())
+    let f_owned;
+    let f = match namespace {
+        "char" => cached_numpy_char_multiply(py)?,
+        "strings" => cached_numpy_strings_multiply(py)?,
+        _ => {
+            f_owned = cached_numpy(py)?.getattr(namespace)?.getattr(intern!(py, "multiply"))?;
+            &f_owned
+        }
+    };
+    Ok(f.call1((a.bind(py), n.bind(py)))?.unbind())
 }
 
 // char.replace / strings.replace: native ASCII non-overlapping replace, else numpy.
@@ -111228,8 +111376,15 @@ fn unicode_replace_or_numpy(
     {
         return Ok(result);
     }
-    let numpy = cached_numpy(py)?;
-    let f = numpy.getattr(namespace)?.getattr(intern!(py, "replace"))?;
+    let f_owned;
+    let f = match namespace {
+        "char" => cached_numpy_char_replace(py)?,
+        "strings" => cached_numpy_strings_replace(py)?,
+        _ => {
+            f_owned = cached_numpy(py)?.getattr(namespace)?.getattr(intern!(py, "replace"))?;
+            &f_owned
+        }
+    };
     match count {
         Some(c) => Ok(f
             .call1((a.bind(py), old.bind(py), new.bind(py), c.bind(py)))?
@@ -111256,10 +111411,15 @@ fn unicode_ascii_translate_or_numpy(
             return Ok(result);
         }
     }
-    let func = py
-        .import("numpy")?
-        .getattr(namespace)?
-        .getattr(intern!(py, "translate"))?;
+    let func_owned;
+    let func = match namespace {
+        "char" => cached_numpy_char_translate(py)?,
+        "strings" => cached_numpy_strings_translate(py)?,
+        _ => {
+            func_owned = cached_numpy(py)?.getattr(namespace)?.getattr(intern!(py, "translate"))?;
+            &func_owned
+        }
+    };
     match deletechars {
         Some(d) => Ok(func
             .call1((input.bind(py), table.bind(py), d.bind(py)))?
@@ -111281,12 +111441,18 @@ fn unicode_ascii_cap_title_or_numpy(
     if let Some(result) = try_zerocopy_bytes_ascii_cap_title(py, input.bind(py), is_title)? {
         return Ok(result);
     }
-    Ok(py
-        .import("numpy")?
-        .getattr(namespace)?
-        .getattr(method)?
-        .call1((input.bind(py),))?
-        .unbind())
+    let func_owned;
+    let func = match (namespace, is_title) {
+        ("char", false) => cached_numpy_char_capitalize(py)?,
+        ("char", true) => cached_numpy_char_title(py)?,
+        ("strings", false) => cached_numpy_strings_capitalize(py)?,
+        ("strings", true) => cached_numpy_strings_title(py)?,
+        _ => {
+            func_owned = cached_numpy(py)?.getattr(namespace)?.getattr(method)?;
+            &func_owned
+        }
+    };
+    Ok(func.call1((input.bind(py),))?.unbind())
 }
 
 fn unicode_ascii_case_or_numpy(
@@ -111301,12 +111467,20 @@ fn unicode_ascii_case_or_numpy(
     if let Some(result) = try_zerocopy_bytes_ascii_case(py, input.bind(py), method)? {
         return Ok(result);
     }
-    Ok(py
-        .import("numpy")?
-        .getattr(namespace)?
-        .getattr(method)?
-        .call1((input.bind(py),))?
-        .unbind())
+    let func_owned;
+    let func = match (namespace, method) {
+        ("char", "upper") => cached_numpy_char_upper(py)?,
+        ("char", "lower") => cached_numpy_char_lower(py)?,
+        ("char", "swapcase") => cached_numpy_char_swapcase(py)?,
+        ("strings", "upper") => cached_numpy_strings_upper(py)?,
+        ("strings", "lower") => cached_numpy_strings_lower(py)?,
+        ("strings", "swapcase") => cached_numpy_strings_swapcase(py)?,
+        _ => {
+            func_owned = cached_numpy(py)?.getattr(namespace)?.getattr(method)?;
+            &func_owned
+        }
+    };
+    Ok(func.call1((input.bind(py),))?.unbind())
 }
 
 #[pyfunction(name = "upper", signature = (a))]
