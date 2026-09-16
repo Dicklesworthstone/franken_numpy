@@ -1296,10 +1296,20 @@ impl PyUFunc {
         // method-specific excess left, so only a change to what every method does can
         // still move it.
         let args = (array.bind(py),);
-        if axis == 0 && dtype.is_none() && out.is_none() {
-            return Ok(np_ufunc
-                .call_method1(intern!(py, "accumulate"), args)?
-                .unbind());
+        if out.is_none() {
+            if let Some(d) = dtype.as_ref() {
+                return Ok(np_ufunc
+                    .call_method1(intern!(py, "accumulate"), (array.bind(py), axis, d.bind(py)))?
+                    .unbind());
+            } else if axis != 0 {
+                return Ok(np_ufunc
+                    .call_method1(intern!(py, "accumulate"), (array.bind(py), axis))?
+                    .unbind());
+            } else {
+                return Ok(np_ufunc
+                    .call_method1(intern!(py, "accumulate"), args)?
+                    .unbind());
+            }
         }
         let target = np_ufunc.getattr(intern!(py, "accumulate"))?;
         let kwargs = PyDict::new(py);
@@ -1369,10 +1379,26 @@ impl PyUFunc {
         // Same lever as `accumulate`: the fast path vectorcalls and never
         // resolves the method (`deadlock-audit-v46rn`).
         let args = (array.bind(py), indices.bind(py));
-        if axis == 0 && dtype.is_none() && out.is_none() {
-            return Ok(np_ufunc
-                .call_method1(intern!(py, "reduceat"), args)?
-                .unbind());
+        if out.is_none() {
+            if let Some(d) = dtype.as_ref() {
+                return Ok(np_ufunc
+                    .call_method1(
+                        intern!(py, "reduceat"),
+                        (array.bind(py), indices.bind(py), axis, d.bind(py)),
+                    )?
+                    .unbind());
+            } else if axis != 0 {
+                return Ok(np_ufunc
+                    .call_method1(
+                        intern!(py, "reduceat"),
+                        (array.bind(py), indices.bind(py), axis),
+                    )?
+                    .unbind());
+            } else {
+                return Ok(np_ufunc
+                    .call_method1(intern!(py, "reduceat"), args)?
+                    .unbind());
+            }
         }
         let target = np_ufunc.getattr(intern!(py, "reduceat"))?;
         let kwargs = PyDict::new(py);
@@ -30784,13 +30810,12 @@ fn svd(
     // oracle to allclose-level tolerance.
     let svd_fn = cached_numpy_linalg_svd(py)?;
     if full_matrices && compute_uv && !hermitian {
-        return Ok(svd_fn.call1((a.bind(py),))?.unbind());
+        Ok(svd_fn.call1((a.bind(py),))?.unbind())
+    } else {
+        Ok(svd_fn
+            .call1((a.bind(py), full_matrices, compute_uv, hermitian))?
+            .unbind())
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "full_matrices"), full_matrices)?;
-    kwargs.set_item(intern!(py, "compute_uv"), compute_uv)?;
-    kwargs.set_item(intern!(py, "hermitian"), hermitian)?;
-    Ok(svd_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -30801,11 +30826,10 @@ fn qr(py: Python<'_>, a: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     // byte-for-byte aligned with numpy.
     let qr_fn = cached_numpy_linalg_qr(py)?;
     if mode == "reduced" {
-        return Ok(qr_fn.call1((a.bind(py),))?.unbind());
+        Ok(qr_fn.call1((a.bind(py),))?.unbind())
+    } else {
+        Ok(qr_fn.call1((a.bind(py), mode))?.unbind())
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "mode"), mode)?;
-    Ok(qr_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
 fn should_delegate_stacked_cholesky_to_numpy(
@@ -31304,11 +31328,7 @@ fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
         if UPLO == "L" {
             Ok(eigvalsh_fn.call1((a.bind(py),))?.unbind())
         } else {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("UPLO", UPLO)?;
-            Ok(eigvalsh_fn
-                .call((a.bind(py),), Some(&kwargs))?
-                .unbind())
+            Ok(eigvalsh_fn.call1((a.bind(py), UPLO))?.unbind())
         }
     };
 
@@ -83316,11 +83336,7 @@ fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
         if UPLO == "L" {
             Ok(eigh_fn.call1((a.bind(py),))?.unbind())
         } else {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("UPLO", UPLO)?;
-            Ok(eigh_fn
-                .call((a.bind(py),), Some(&kwargs))?
-                .unbind())
+            Ok(eigh_fn.call1((a.bind(py), UPLO))?.unbind())
         }
     };
 
@@ -88535,6 +88551,9 @@ cached_numpy_attr!(cached_numpy_copy, "copy");
 cached_numpy_attr!(cached_numpy_frombuffer, "frombuffer");
 cached_numpy_attr!(cached_numpy_fromiter, "fromiter");
 cached_numpy_attr!(cached_numpy_fromstring, "fromstring");
+cached_numpy_attr!(cached_numpy_isclose, "isclose");
+cached_numpy_attr!(cached_numpy_ediff1d, "ediff1d");
+cached_numpy_attr!(cached_numpy_around, "around");
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
@@ -88680,6 +88699,25 @@ cached_numpy_linalg_attr!(cached_numpy_linalg_multi_dot, "multi_dot");
 cached_numpy_linalg_attr!(cached_numpy_linalg_cond, "cond");
 cached_numpy_linalg_attr!(cached_numpy_linalg_norm, "norm");
 cached_numpy_linalg_attr!(cached_numpy_linalg_error, "LinAlgError");
+
+macro_rules! cached_numpy_fft_attr {
+    ($fn_name:ident, $attr:literal) => {
+        fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+            static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+            Ok(CACHE
+                .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+                    Ok(cached_numpy_fft(py)?
+                        .getattr(intern!(py, $attr))?
+                        .unbind())
+                })?
+                .bind(py))
+        }
+    };
+}
+
+cached_numpy_fft_attr!(cached_numpy_fft_fftshift, "fftshift");
+cached_numpy_fft_attr!(cached_numpy_fft_ifftshift, "ifftshift");
+cached_numpy_fft_attr!(cached_numpy_fft_rfftfreq, "rfftfreq");
 
 fn cached_slogdet_result_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     static CACHE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
