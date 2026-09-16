@@ -792,6 +792,7 @@ dependencies = [
  "fnp-linalg",
  "fnp-ndarray",
  "fnp-random",
+ "fnp-runtime",
  "fnp-ufunc",
  "pyo3",
  "rayon",

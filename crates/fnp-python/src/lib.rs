@@ -49,6 +49,101 @@ use fnp_ufunc::{
     right_shift as ufunc_right_shift, signbit as ufunc_signbit, spacing as ufunc_spacing,
     take_float_error_events,
 };
+use fnp_runtime::{
+    CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
+};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
+
+static RUNTIME_MODE: AtomicU8 = AtomicU8::new(0); // 0 = Strict, 1 = Hardened
+static RUNTIME_LEDGER: Mutex<Option<EvidenceLedger>> = Mutex::new(None);
+
+/// Returns the active [`RuntimeMode`].
+#[must_use]
+pub fn current_runtime_mode() -> RuntimeMode {
+    match RUNTIME_MODE.load(Ordering::Relaxed) {
+        1 => RuntimeMode::Hardened,
+        _ => RuntimeMode::Strict,
+    }
+}
+
+/// Sets the active runtime mode from a string (`"strict"` or `"hardened"`).
+#[pyfunction]
+pub fn set_runtime_mode(mode: &str) -> PyResult<()> {
+    match RuntimeMode::from_wire(mode) {
+        Some(RuntimeMode::Strict) => {
+            RUNTIME_MODE.store(0, Ordering::SeqCst);
+            Ok(())
+        }
+        Some(RuntimeMode::Hardened) => {
+            RUNTIME_MODE.store(1, Ordering::SeqCst);
+            Ok(())
+        }
+        None => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid runtime mode '{mode}', expected 'strict' or 'hardened'"
+        ))),
+    }
+}
+
+/// Returns the name of the active runtime mode (`"strict"` or `"hardened"`).
+#[pyfunction]
+#[must_use]
+pub fn get_runtime_mode() -> &'static str {
+    current_runtime_mode().as_str()
+}
+
+/// Returns the count of logged runtime decisions in the active ledger.
+#[pyfunction]
+#[must_use]
+pub fn get_runtime_decision_count() -> usize {
+    if let Ok(guard) = RUNTIME_LEDGER.lock() {
+        guard.as_ref().map_or(0, |l| l.events().len())
+    } else {
+        0
+    }
+}
+
+/// Clears all recorded runtime decisions.
+#[pyfunction]
+pub fn clear_runtime_decisions() {
+    if let Ok(mut guard) = RUNTIME_LEDGER.lock()
+        && let Some(ledger) = guard.as_mut()
+    {
+        *ledger = EvidenceLedger::new();
+    }
+}
+
+/// Records a compatibility decision in the runtime ledger.
+pub fn record_runtime_decision(
+    class: CompatibilityClass,
+    risk_score: f64,
+    reason_code: &str,
+    note: &str,
+) -> DecisionAction {
+    let mode = current_runtime_mode();
+    let action = fnp_runtime::decide_compatibility(mode, class, risk_score, 0.5);
+    if let Ok(mut guard) = RUNTIME_LEDGER.lock() {
+        let ledger = guard.get_or_insert_with(EvidenceLedger::new);
+        let context = DecisionAuditContext {
+            fixture_id: "python_api".to_string(),
+            seed: 0,
+            env_fingerprint: "pyo3_boundary".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: reason_code.to_string(),
+        };
+        fnp_runtime::decide_and_record_with_context(
+            ledger,
+            mode,
+            class,
+            risk_score,
+            0.5,
+            context,
+            note.to_string(),
+        );
+    }
+    action
+}
+
 /// Crate-local shadow of `pyo3::buffer::PyBuffer` whose `get` REFUSES a buffer whose
 /// element byte order is not the host's.
 ///
@@ -76,6 +171,14 @@ impl<T: pyo3::buffer::Element> PyBuffer<T> {
     fn get(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
         let inner = pyo3::buffer::PyBuffer::<T>::get(obj)?;
         if inner.item_size() > 1 && !buffer_format_is_native_order(inner.format()) {
+            if current_runtime_mode() == RuntimeMode::Hardened {
+                record_runtime_decision(
+                    CompatibilityClass::KnownCompatible,
+                    0.95,
+                    "non_native_byte_order_decline",
+                    "buffer element byte order is not native; declining to NumPy with audit logging",
+                );
+            }
             return Err(pyo3::exceptions::PyBufferError::new_err(
                 "buffer element byte order is not native; fnp_python zero-copy routes decline non-native arrays",
             ));
@@ -383,6 +486,18 @@ impl PyUFunc {
 
     fn __repr__(&self) -> String {
         format!("<ufunc '{}'>", self.kind.name())
+    }
+
+    #[getter]
+    fn __name__(&self) -> &'static str {
+        self.kind.name()
+    }
+
+    #[getter]
+    fn __doc__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let numpy = cached_numpy(py)?;
+        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
+        np_ufunc.getattr(intern!(py, "__doc__")).map(|v| v.unbind())
     }
 
     #[getter]
@@ -1824,8 +1939,12 @@ impl PySeedSequence {
         n_words: usize,
         dtype: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let dtype =
-            extract_python_dtype(py, dtype, DType::U32, "SeedSequence.generate_state(dtype)")?;
+        let dtype = extract_python_dtype_bound(
+            py,
+            dtype.as_ref().map(|d| d.bind(py)),
+            DType::U32,
+            "SeedSequence.generate_state(dtype)",
+        )?;
         match dtype {
             DType::U32 => build_numpy_array_from_storage(
                 py,
@@ -2875,7 +2994,12 @@ impl PyRandomGenerator {
             Some(high) => (low, high),
             None => (0, low),
         };
-        let dtype = extract_python_dtype(py, dtype, DType::I64, "Generator.integers(dtype)")?;
+        let dtype = extract_python_dtype_bound(
+            py,
+            dtype.as_ref().map(|d| d.bind(py)),
+            DType::I64,
+            "Generator.integers(dtype)",
+        )?;
         validate_random_integer_dtype_bounds(low, high, dtype, endpoint)?;
         let size = random_size_from_py(py, size, "Generator.integers(size)")?;
         match dtype {
@@ -3246,7 +3370,8 @@ impl PyRandomGenerator {
         self.before_draw(py)?;
         let arr = cached_numpy_asarray(py)?.call1((x.bind(py),))?;
         let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
-        let axis_spec = extract_axis_spec(py, axis, "Generator.permuted(axis)")?;
+        let axis_spec =
+            extract_axis_spec_bound(py, axis.as_ref().map(|a| a.bind(py)), "Generator.permuted(axis)")?;
         if shape.is_empty() && axis_spec.is_none() {
             return Err(PyTypeError::new_err("len() of unsized object"));
         }
@@ -3773,7 +3898,12 @@ impl PyRandomState {
             Some(high) => (low, high),
             None => (0, low),
         };
-        let dtype = extract_python_dtype(py, dtype, DType::I64, "RandomState.randint(dtype)")?;
+        let dtype = extract_python_dtype_bound(
+            py,
+            dtype.as_ref().map(|d| d.bind(py)),
+            DType::I64,
+            "RandomState.randint(dtype)",
+        )?;
         validate_random_integer_dtype_bounds(low, high, dtype, false)?;
         if high <= low {
             return Err(PyValueError::new_err("high <= low"));
@@ -4128,7 +4258,7 @@ fn generate_os_entropy_int(py: Python<'_>, pool_size: usize) -> PyResult<(Vec<u3
     for &w in &words {
         bytes.extend_from_slice(&w.to_le_bytes());
     }
-    let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+    let int_type = cached_builtins_int(py)?;
     let bytes_obj = pyo3::types::PyBytes::new(py, &bytes);
     let py_int = int_type.call_method1(
         intern!(py, "from_bytes"),
@@ -4138,7 +4268,7 @@ fn generate_os_entropy_int(py: Python<'_>, pool_size: usize) -> PyResult<(Vec<u3
 }
 
 fn coerce_int_to_uint32_words(py: Python<'_>, val: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
-    let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+    let int_type = cached_builtins_int(py)?;
     let py_int = if val.is_instance_of::<pyo3::types::PyInt>() {
         val.clone()
     } else {
@@ -4205,10 +4335,10 @@ fn coerce_to_uint32_words(value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
             .strip_prefix("0x")
             .or_else(|| trimmed.strip_prefix("0X"))
         {
-            let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+            let int_type = cached_builtins_int(py)?;
             int_type.call1((hex, 16))?
         } else if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
-            let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+            let int_type = cached_builtins_int(py)?;
             int_type.call1((trimmed,))?
         } else {
             return Err(PyValueError::new_err("unrecognized seed string"));
@@ -4243,7 +4373,7 @@ fn coerce_to_uint32_words(value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
         .unwrap_or(false);
 
     if is_numpy_int {
-        let int_type = cached_builtins(py)?.getattr(intern!(py, "int"))?;
+        let int_type = cached_builtins_int(py)?;
         let py_int = int_type.call1((value,))?;
         return coerce_int_to_uint32_words(py, &py_int);
     }
@@ -4336,9 +4466,7 @@ fn bit_generator_numpy_name(kind: BitGeneratorKind) -> &'static str {
 }
 
 fn py_int_from_u128<'py>(py: Python<'py>, value: u128) -> PyResult<Bound<'py, PyAny>> {
-    cached_builtins(py)?
-        .getattr(intern!(py, "int"))?
-        .call1((value.to_string(),))
+    Ok(value.into_pyobject(py)?.into_any())
 }
 
 fn bit_generator_schema_entry_u64(entries: &[(String, u64)], key: &str) -> PyResult<u64> {
@@ -6343,16 +6471,15 @@ fn split_helper_default(
     split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis)
 }
 
-fn extract_axis_spec(
-    py: Python<'_>,
-    axis: Option<Py<PyAny>>,
+fn extract_axis_spec_bound(
+    _py: Python<'_>,
+    axis: Option<&Bound<'_, PyAny>>,
     context: &str,
 ) -> PyResult<Option<Vec<isize>>> {
     let Some(axis) = axis else {
         return Ok(None);
     };
 
-    let axis = axis.bind(py);
     if axis.is_none() {
         return Ok(None);
     }
@@ -6377,6 +6504,7 @@ fn extract_axis_spec(
         "{context}: axis must be an integer, tuple/list of integers, or None",
     )))
 }
+
 
 fn ensure_unique_axes(axes: &[isize], ndim: usize) -> PyResult<()> {
     let mut seen = std::collections::HashSet::with_capacity(axes.len());
@@ -6628,20 +6756,19 @@ fn masked_scalar_compare(
     numpy_name: &Bound<'_, PyString>,
     op: BinaryOp,
 ) -> PyResult<Py<PyAny>> {
-    let x_for_fallback = x.clone_ref(py);
-    let value_for_fallback = value.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         // `cached_numpy_ma` is the module handle AND the `ma` attribute in one pointer deref;
         // this used to import numpy and read `.ma` off it on every fallback call.
         let masked_fn = cached_numpy_ma(py)?.getattr(numpy_name)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-        Ok(masked_fn
-            .call(
-                (x_for_fallback.bind(py), value_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
+        if copy {
+            Ok(masked_fn.call1((x.bind(py), value.bind(py)))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "copy"), copy)?;
+            Ok(masked_fn
+                .call((x.bind(py), value.bind(py)), Some(&kwargs))?
+                .unbind())
+        }
     };
 
     // Fast path: a PLAIN float64 ndarray x (not already masked) + a scalar float value.
@@ -6671,10 +6798,14 @@ fn masked_scalar_compare(
             {
                 // masked_where (numpy's own internal path for these wrappers) shrinks an
                 // all-False mask to nomask, matching numpy exactly.
-                let kwargs = PyDict::new(py);
-                kwargs.set_item(intern!(py, "copy"), copy)?;
-                let result = cached_numpy_ma_masked_where(py)?
-                    .call((mask.bind(py), x.bind(py)), Some(&kwargs))?;
+                let result = if copy {
+                    cached_numpy_ma_masked_where(py)?.call1((mask.bind(py), x.bind(py)))?
+                } else {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item(intern!(py, "copy"), copy)?;
+                    cached_numpy_ma_masked_where(py)?
+                        .call((mask.bind(py), x.bind(py)), Some(&kwargs))?
+                };
                 if numpy_name == "masked_equal" {
                     result.setattr("fill_value", v)?;
                 }
@@ -6799,25 +6930,21 @@ fn masked_interval_compare(
     numpy_name: &Bound<'_, PyString>,
     outside: bool,
 ) -> PyResult<Py<PyAny>> {
-    let x_for_fallback = x.clone_ref(py);
-    let v1_for_fallback = v1.clone_ref(py);
-    let v2_for_fallback = v2.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         // `cached_numpy_ma` is the module handle AND the `ma` attribute in one pointer deref;
         // this used to import numpy and read `.ma` off it on every fallback call.
         let masked_fn = cached_numpy_ma(py)?.getattr(numpy_name)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-        Ok(masked_fn
-            .call(
-                (
-                    x_for_fallback.bind(py),
-                    v1_for_fallback.bind(py),
-                    v2_for_fallback.bind(py),
-                ),
-                Some(&kwargs),
-            )?
-            .unbind())
+        if copy {
+            Ok(masked_fn
+                .call1((x.bind(py), v1.bind(py), v2.bind(py)))?
+                .unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "copy"), copy)?;
+            Ok(masked_fn
+                .call((x.bind(py), v1.bind(py), v2.bind(py)), Some(&kwargs))?
+                .unbind())
+        }
     };
 
     // Fast path: a PLAIN float64 ndarray x + scalar float bounds. masked_inside masks
@@ -6840,11 +6967,15 @@ fn masked_interval_compare(
                 }
             };
             if let Some(mask) = try_zerocopy_f64_predicate(py, x.bind(py), pred)? {
-                let kwargs = PyDict::new(py);
-                kwargs.set_item(intern!(py, "copy"), copy)?;
-                return Ok(cached_numpy_ma_masked_where(py)?
-                    .call((mask.bind(py), x.bind(py)), Some(&kwargs))?
-                    .unbind());
+                let result = if copy {
+                    cached_numpy_ma_masked_where(py)?.call1((mask.bind(py), x.bind(py)))?
+                } else {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item(intern!(py, "copy"), copy)?;
+                    cached_numpy_ma_masked_where(py)?
+                        .call((mask.bind(py), x.bind(py)), Some(&kwargs))?
+                };
+                return Ok(result.unbind());
             }
         }
     }
@@ -6915,9 +7046,9 @@ fn masked_interval_compare(
     build_numpy_masked_array(py, &result)
 }
 
-fn extract_python_dtype(
+fn extract_python_dtype_bound(
     py: Python<'_>,
-    dtype: Option<Py<PyAny>>,
+    dtype: Option<&Bound<'_, PyAny>>,
     default: DType,
     context: &str,
 ) -> PyResult<DType> {
@@ -6925,7 +7056,6 @@ fn extract_python_dtype(
         return Ok(default);
     };
 
-    let dtype = dtype.bind(py);
     if dtype.is_none() {
         return Ok(default);
     }
@@ -6935,6 +7065,7 @@ fn extract_python_dtype(
     DType::parse(&name)
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
+
 
 fn dtype_item_size(dtype: DType) -> Option<usize> {
     match dtype {
@@ -12973,12 +13104,7 @@ fn try_zerocopy_f32_binary(
     let Some((flat, shape)) = zerocopy_f32_binary_flat(py, &numpy, a, b, op)? else {
         return Ok(None);
     };
-    // No reshape: `zerocopy_f32_binary_flat` now allocates at the final shape.
-    let output = flat.unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
+    finish_preshaped_output(flat, &shape).map(Some)
 }
 
 // Euclid's algorithm on unsigned magnitudes (all integer widths <= 64 fit in u64).
@@ -21717,10 +21843,7 @@ fn build_numpy_array_from_ufunc_fortran(py: Python<'_>, array: &UFuncArray) -> P
 
 fn build_numpy_scalar_or_array(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
     let output = build_numpy_array_from_ufunc(py, array)?;
-    if array.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    finish_preshaped_output(output.into_bound(py), array.shape())
 }
 
 fn build_numpy_masked_array(py: Python<'_>, array: &MaskedArray) -> PyResult<Py<PyAny>> {
@@ -21761,12 +21884,7 @@ fn build_numpy_scalar_or_array_from_ufunc(
     py: Python<'_>,
     array: &UFuncArray,
 ) -> PyResult<Py<PyAny>> {
-    let output = build_numpy_array_from_ufunc(py, array)?;
-    if array.shape().is_empty() {
-        Ok(output.bind(py).get_item(())?.unbind())
-    } else {
-        Ok(output)
-    }
+    build_numpy_scalar_or_array(py, array)
 }
 
 fn build_numpy_index_tuple_from_ufuncs(
@@ -25133,16 +25251,15 @@ fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_flatnonzero(py, a.bind(py))? {
         return Ok(out);
     }
-    let a_for_fallback = a.clone_ref(py);
-    let a = match extract_numeric_array(py, a.bind(py), "flatnonzero(a)") {
+    let array = match extract_numeric_array(py, a.bind(py), "flatnonzero(a)") {
         Ok(array) => array,
         Err(_) => {
             return Ok(cached_numpy_flatnonzero(py)?
-                .call1((a_for_fallback.bind(py),))?
+                .call1((a.bind(py),))?
                 .unbind());
         }
     };
-    let result = a.flatnonzero();
+    let result = array.flatnonzero();
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -25165,16 +25282,15 @@ fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_argwhere(py, a.bind(py))? {
         return Ok(out);
     }
-    let a_for_fallback = a.clone_ref(py);
-    let a = match extract_numeric_array(py, a.bind(py), "argwhere(a)") {
+    let array = match extract_numeric_array(py, a.bind(py), "argwhere(a)") {
         Ok(array) => array,
         Err(_) => {
             return Ok(cached_numpy_argwhere(py)?
-                .call1((a_for_fallback.bind(py),))?
+                .call1((a.bind(py),))?
                 .unbind());
         }
     };
-    let result = a.argwhere();
+    let result = array.argwhere();
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -26367,22 +26483,20 @@ fn count_nonzero(
     axis: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let fn_obj = cached_numpy_count_nonzero(py)?;
-        if axis_for_fallback.is_none() && !keepdims {
-            return Ok(fn_obj.call1((a_for_fallback.bind(py),))?.unbind());
+        if axis.is_none() && !keepdims {
+            return Ok(fn_obj.call1((a.bind(py),))?.unbind());
         }
         let kwargs = PyDict::new(py);
-        if let Some(ax) = &axis_for_fallback {
+        if let Some(ax) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
         if keepdims {
             kwargs.set_item(intern!(py, "keepdims"), true)?;
         }
         Ok(fn_obj
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -26483,7 +26597,7 @@ fn count_nonzero(
             } else if axis_bound.cast::<PyBool>().is_ok() || is_numpy_bool_scalar(py, axis_bound) {
                 return fallback();
             } else if axis_bound.extract::<isize>().is_ok() {
-                extract_axis_spec(py, Some(axis_obj.clone_ref(py)), "count_nonzero")?
+                extract_axis_spec_bound(py, Some(axis_bound), "count_nonzero")?
             } else if let Ok(axis_tuple) = axis_bound.cast::<PyTuple>() {
                 for item in axis_tuple.iter() {
                     if item.cast::<PyBool>().is_ok()
@@ -26493,7 +26607,7 @@ fn count_nonzero(
                         return fallback();
                     }
                 }
-                extract_axis_spec(py, Some(axis_obj.clone_ref(py)), "count_nonzero")?
+                extract_axis_spec_bound(py, Some(axis_bound), "count_nonzero")?
             } else {
                 return fallback();
             }
@@ -26532,12 +26646,7 @@ fn count_nonzero(
         return fallback();
     }
 
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 fn is_numpy_bool_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
@@ -26716,8 +26825,12 @@ fn fromstring(
         return fallback(py);
     };
 
-    let dtype_cloned = dtype.as_ref().map(|value| value.clone_ref(py));
-    let parsed_dtype = extract_python_dtype(py, dtype_cloned, DType::F64, "fromstring(dtype)")?;
+    let parsed_dtype = extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|d| d.bind(py)),
+        DType::F64,
+        "fromstring(dtype)",
+    )?;
     if !dtype_supported_by_numpy_export_bridge(parsed_dtype) {
         return fallback(py);
     }
@@ -27321,31 +27434,28 @@ fn clip(
     let a_min: Py<PyAny> = a_min.or(min).unwrap_or_else(|| py.None());
     let a_max: Py<PyAny> = a_max.or(max).unwrap_or_else(|| py.None());
 
-    let a_for_fallback = a.clone_ref(py);
-    let a_min_for_fallback = a_min.clone_ref(py);
-    let a_max_for_fallback = a_max.clone_ref(py);
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let kwargs_snapshot: Option<Py<PyDict>> = kwargs.map(|k| k.clone().unbind());
     let fallback = || -> PyResult<Py<PyAny>> {
         let call_kwargs = PyDict::new(py);
-        if let Some(out) = out_for_fallback.as_ref() {
-            call_kwargs.set_item(intern!(py, "out"), out.bind(py))?;
+        if let Some(out_val) = out.as_ref() {
+            call_kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
         }
-        if let Some(k) = kwargs_snapshot.as_ref() {
-            for (key, value) in k.bind(py).iter() {
+        if let Some(k) = kwargs {
+            for (key, value) in k.iter() {
                 call_kwargs.set_item(key, value)?;
             }
         }
-        Ok(clip_fn
-            .call(
-                (
-                    a_for_fallback.bind(py),
-                    a_min_for_fallback.bind(py),
-                    a_max_for_fallback.bind(py),
-                ),
-                Some(&call_kwargs),
-            )?
-            .unbind())
+        if call_kwargs.is_empty() {
+            Ok(clip_fn
+                .call1((a.bind(py), a_min.bind(py), a_max.bind(py)))?
+                .unbind())
+        } else {
+            Ok(clip_fn
+                .call(
+                    (a.bind(py), a_min.bind(py), a_max.bind(py)),
+                    Some(&call_kwargs),
+                )?
+                .unbind())
+        }
     };
 
     // Bail to numpy on `out`, None bounds, or any extra kwargs — these
@@ -27416,24 +27526,22 @@ fn clip(
     // are finite here — NaN bounds already deferred above) and far faster; fall back if it does
     // not engage. bool input: numpy.clip is the parity reference (the native f64 bridge is ~680x
     // slower) — defer.
-    if a.bind(py).is_exact_instance(cached_ndarray_type(py)?) {
-        let kind = a
-            .bind(py)
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        let itemsize = a
-            .bind(py)
-            .getattr(intern!(py, "dtype"))?
-            .getattr(intern!(py, "itemsize"))?
-            .extract::<usize>()?;
-        if kind == "f" && itemsize == 2 {
-            if let Some(out) = try_zerocopy_f16_clip(py, a.bind(py), min_val, max_val)? {
-                return Ok(out);
+    if a.bind(py).is_exact_instance(cached_ndarray_type(py)?)
+        && let Some(kind) = dtype_kind_of(a.bind(py))
+    {
+        if kind == 'f' {
+            let itemsize = a
+                .bind(py)
+                .getattr(intern!(py, "dtype"))?
+                .getattr(intern!(py, "itemsize"))?
+                .extract::<usize>()?;
+            if itemsize == 2 {
+                if let Some(out) = try_zerocopy_f16_clip(py, a.bind(py), min_val, max_val)? {
+                    return Ok(out);
+                }
+                return fallback();
             }
-            return fallback();
-        }
-        if kind == "b" {
+        } else if kind == 'b' {
             return fallback();
         }
     }
@@ -29664,26 +29772,20 @@ fn trim_zeros(
     trim: &str,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let filt_for_fallback = filt.clone_ref(py);
-    let trim_owned = trim.to_string();
-    let axis_for_fallback = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let trim_zeros_fn = cached_numpy_trim_zeros(py)?;
-        if let Some(axis_val) = axis_for_fallback.as_ref() {
+        if let Some(axis_val) = axis.as_ref() {
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
             return Ok(trim_zeros_fn
-                .call(
-                    (filt_for_fallback.bind(py), trim_owned.as_str()),
-                    Some(&kwargs),
-                )?
+                .call((filt.bind(py), trim), Some(&kwargs))?
                 .unbind());
         }
-        if trim_owned == "fb" {
-            Ok(trim_zeros_fn.call1((filt_for_fallback.bind(py),))?.unbind())
+        if trim == "fb" {
+            Ok(trim_zeros_fn.call1((filt.bind(py),))?.unbind())
         } else {
             Ok(trim_zeros_fn
-                .call1((filt_for_fallback.bind(py), trim_owned.as_str()))?
+                .call1((filt.bind(py), trim))?
                 .unbind())
         }
     };
@@ -29751,14 +29853,17 @@ fn trim_zeros(
 #[pyfunction]
 #[pyo3(signature = (a, copy=true))]
 fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
-    let a_for_fallback = a.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let masked_invalid_fn = cached_numpy_ma_masked_invalid(py)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-        Ok(masked_invalid_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
-            .unbind())
+        if copy {
+            Ok(masked_invalid_fn.call1((a.bind(py),))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "copy"), copy)?;
+            Ok(masked_invalid_fn
+                .call((a.bind(py),), Some(&kwargs))?
+                .unbind())
+        }
     };
 
     if !copy {
@@ -29775,10 +29880,8 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
             && numpy_dtype_is_f64(py, a.bind(py))
             && let Some(mask) = try_zerocopy_f64_predicate(py, a.bind(py), |v| !v.is_finite())?
         {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "copy"), copy)?;
             return Ok(cached_numpy_ma_masked_where(py)?
-                .call((mask.bind(py), a.bind(py)), Some(&kwargs))?
+                .call1((mask.bind(py), a.bind(py)))?
                 .unbind());
         }
     }
@@ -29830,35 +29933,23 @@ fn fix_invalid(
     copy: bool,
     fill_value: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let a_for_fallback = a.clone_ref(py);
-    let mask_for_fallback = mask.as_ref().map(|value| value.clone_ref(py));
-    let fill_value_for_fallback = fill_value.as_ref().map(|value| value.clone_ref(py));
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let fix_invalid_fn = cached_numpy_ma_fix_invalid(py)?;
-        let kwargs = PyDict::new(py);
-        if let Some(mask_val) = &mask_for_fallback {
-            kwargs.set_item(intern!(py, "mask"), mask_val.bind(py))?;
-        }
+    let fix_invalid_fn = cached_numpy_ma_fix_invalid(py)?;
+    if mask.is_none() && copy && fill_value.is_none() {
+        return Ok(fix_invalid_fn.call1((a.bind(py),))?.unbind());
+    }
+    let kwargs = PyDict::new(py);
+    if let Some(mask_val) = &mask {
+        kwargs.set_item(intern!(py, "mask"), mask_val.bind(py))?;
+    }
+    if !copy {
         kwargs.set_item(intern!(py, "copy"), copy)?;
-        if let Some(fill_value_val) = &fill_value_for_fallback {
-            kwargs.set_item(intern!(py, "fill_value"), fill_value_val.bind(py))?;
-        }
-        Ok(fix_invalid_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
-            .unbind())
-    };
-
-    // numpy.ma.fix_invalid is the parity reference and the prior Rust extract -> fix
-    // -> rebuild path both (a) ran ~22x slower (114ms vs 5ms @4M) and (b) diverged
-    // from numpy on non-f64 inputs (bead ris7w): for a PLAIN integer array numpy
-    // leaves .mask as `nomask` while the port produced a full-False array, and an
-    // integer `fill_value` override was wrongly copied onto the output's fill_value
-    // (numpy uses it only as the REPLACEMENT value, keeping the dtype-default fill).
-    // numpy treats fill_value/mask/copy natively across every dtype (int/f32/f64/
-    // complex), so defer the whole copy=True surface to it — faster AND exactly
-    // correct. (The f64-only route shipped in 85284df3 fixed the f64 fill bug; this
-    // generalizes the same fix to int/complex and the nomask-shrink divergence.)
-    fallback()
+    }
+    if let Some(fill_value_val) = &fill_value {
+        kwargs.set_item(intern!(py, "fill_value"), fill_value_val.bind(py))?;
+    }
+    Ok(fix_invalid_fn
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 fn minimum_fill_value_for_supported_dtype(py: Python<'_>, dtype: DType) -> PyResult<Py<PyAny>> {
@@ -30129,21 +30220,22 @@ fn matrix_rank(
     rtol: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let matrix_rank_fn = cached_numpy_linalg_matrix_rank(py)?;
-    let a_for_fallback = A.clone_ref(py);
-    let tol_for_fallback = tol.as_ref().map(|value| value.clone_ref(py));
-    let rtol_for_fallback = rtol.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        if let Some(value) = &tol_for_fallback {
-            kwargs.set_item(intern!(py, "tol"), value.bind(py))?;
+        if !hermitian && tol.is_none() && rtol.is_none() {
+            Ok(matrix_rank_fn.call1((A.bind(py),))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            if let Some(value) = &tol {
+                kwargs.set_item(intern!(py, "tol"), value.bind(py))?;
+            }
+            kwargs.set_item(intern!(py, "hermitian"), hermitian)?;
+            if let Some(value) = &rtol {
+                kwargs.set_item(intern!(py, "rtol"), value.bind(py))?;
+            }
+            Ok(matrix_rank_fn
+                .call((A.bind(py),), Some(&kwargs))?
+                .unbind())
         }
-        kwargs.set_item(intern!(py, "hermitian"), hermitian)?;
-        if let Some(value) = &rtol_for_fallback {
-            kwargs.set_item(intern!(py, "rtol"), value.bind(py))?;
-        }
-        Ok(matrix_rank_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
-            .unbind())
     };
 
     if hermitian || tol.is_some() || rtol.is_some() {
@@ -30466,11 +30558,9 @@ fn bool_matrix_power_bitpacked(
 #[pyo3(signature = (a, n))]
 fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let matrix_power_fn = cached_numpy_linalg_matrix_power(py)?;
-    let a_for_fallback = a.clone_ref(py);
-    let n_for_fallback = n.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(matrix_power_fn
-            .call1((a_for_fallback.bind(py), n_for_fallback.bind(py)))?
+            .call1((a.bind(py), n.bind(py)))?
             .unbind())
     };
 
@@ -30483,7 +30573,7 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
     // asarray(a) after the stacked-square validation. For exact ndarrays, that is
     // the same object, so avoid the extra NumPy call and preserve alias semantics.
     if power == 1 && matrix_power_one_exact_ndarray_can_return_input(py, a.bind(py))? {
-        return Ok(a);
+        return Ok(a.clone_ref(py));
     }
 
     // n==0 still delegates to NumPy's identity allocation.
@@ -30584,9 +30674,8 @@ fn matrix_power_one_exact_ndarray_can_return_input(
 #[pyo3(signature = (a,))]
 fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let slogdet_fn = cached_numpy_linalg_slogdet(py)?;
-    let a_for_fallback = a.clone_ref(py);
     let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(slogdet_fn.call1((a_for_fallback.bind(py),))?.unbind()) };
+        || -> PyResult<Py<PyAny>> { Ok(slogdet_fn.call1((a.bind(py),))?.unbind()) };
 
     // STALE-CLIFF UPDATE (2026-06-20): the old gate routed n>=832 single-matrix
     // slogdet to the native LU on the same now-gone OpenBLAS getrf cliff as det().
@@ -30974,11 +31063,9 @@ fn solve_repeated_f64_square_stack(
 #[pyo3(signature = (a, b))]
 fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let solve_fn = cached_numpy_linalg_solve(py)?;
-    let a_for_fallback = a.clone_ref(py);
-    let b_for_fallback = b.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(solve_fn
-            .call1((a_for_fallback.bind(py), b_for_fallback.bind(py)))?
+            .call1((a.bind(py), b.bind(py)))?
             .unbind())
     };
 
@@ -31184,13 +31271,16 @@ fn try_zerocopy_f64_eigvalsh_diagonal(
 #[allow(non_snake_case)]
 fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
     let eigvalsh_fn = cached_numpy_linalg_eigvalsh(py)?;
-    let a_for_fallback = a.clone_ref(py);
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("UPLO", UPLO)?;
     let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(eigvalsh_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
-            .unbind())
+        if UPLO == "L" {
+            Ok(eigvalsh_fn.call1((a.bind(py),))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("UPLO", UPLO)?;
+            Ok(eigvalsh_fn
+                .call((a.bind(py),), Some(&kwargs))?
+                .unbind())
+        }
     };
 
     if let Some(result) = try_zerocopy_f64_eigvalsh_diagonal(py, a.bind(py), UPLO)? {
@@ -35861,6 +35951,14 @@ fn nan_to_num_impl(
     posinf: Option<f64>,
     neginf: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
+    if current_runtime_mode() == RuntimeMode::Hardened {
+        record_runtime_decision(
+            CompatibilityClass::KnownCompatible,
+            0.15,
+            "nan_to_num_sanitization",
+            "nan_to_num input sanitization applied",
+        );
+    }
     // copy=False asks numpy to replace NaN/+-inf IN PLACE on the input ndarray and
     // return that same object (np.array(x, copy=False) is the input when x is already
     // an ndarray). The native fast paths below all allocate a fresh result, so for the
@@ -36699,7 +36797,8 @@ fn searchsorted(
     // (wrong dtype/shape, out-of-range values) defers so numpy owns its exact
     // TypeError/IndexError surface.
     const SEARCHSORTED_SORTER_MIN: usize = 1 << 12;
-    if let Some(sobj) = sorter.as_ref().map(|v| v.clone_ref(py))
+    let mut clear_sorter = false;
+    if let Some(sobj) = sorter.as_ref()
         && !sobj.bind(py).is_none()
     {
         let sb = sobj.bind(py);
@@ -36722,13 +36821,16 @@ fn searchsorted(
                 // a/sorter clones, so any downstream defer still hands numpy the
                 // exact original call).
                 a = a_arr.clone().unbind();
-                sorter = None;
+                clear_sorter = true;
                 gathered = true;
             }
         }
         if !gathered {
             return delegate_numpy_searchsorted(py, &a_arr, v_bound, side, Some(sb));
         }
+    }
+    if clear_sorter {
+        sorter = None;
     }
     // UNCONDITIONAL ON EVERY CALL (`deadlock-audit-v46rn`): this ran two non-interned
     // `getattr`s and extracted a one-character answer into a HEAP STRING, before any
@@ -43227,7 +43329,12 @@ fn indices(
     if let Some(out) = try_zerocopy_indices(py, &dimensions, dtype.as_ref().map(|d| d.bind(py)))? {
         return Ok(out);
     }
-    let dtype = extract_python_dtype(py, dtype, DType::I64, "indices(dtype)")?;
+    let dtype = extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|d| d.bind(py)),
+        DType::I64,
+        "indices(dtype)",
+    )?;
     let result = UFuncArray::indices(&dimensions, dtype).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
@@ -43503,18 +43610,22 @@ fn masked_where(
     a: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    let condition_for_fallback = condition.clone_ref(py);
-    let a_for_fallback = a.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let masked_where_fn = cached_numpy_ma_masked_where(py)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-        Ok(masked_where_fn
-            .call(
-                (condition_for_fallback.bind(py), a_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
+        if copy {
+            Ok(masked_where_fn
+                .call1((condition.bind(py), a.bind(py)))?
+                .unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "copy"), copy)?;
+            Ok(masked_where_fn
+                .call(
+                    (condition.bind(py), a.bind(py)),
+                    Some(&kwargs),
+                )?
+                .unbind())
+        }
     };
 
     if !copy {
@@ -44110,14 +44221,15 @@ where
 #[pyfunction]
 #[pyo3(signature = (a, fill_value=None))]
 fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let fill_value_for_fallback = fill_value.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let filled_fn = cached_numpy_ma_filled(py)?;
-        let kwargs = PyDict::new(py);
-        if let Some(value) = &fill_value_for_fallback {
+        if let Some(value) = fill_value.as_ref() {
+            let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "fill_value"), value.bind(py))?;
+            Ok(filled_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+        } else {
+            Ok(filled_fn.call1((a.bind(py),))?.unbind())
         }
-        Ok(filled_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
     // Zero-copy fast path for the common case: a float64 MaskedArray (contiguous data +
@@ -44237,27 +44349,21 @@ fn mask_or(
     copy: bool,
     shrink: bool,
 ) -> PyResult<Py<PyAny>> {
-    let m1_for_fallback = m1.clone_ref(py);
-    let m2_for_fallback = m2.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let mask_or_fn = cached_numpy_ma_mask_or(py)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-        kwargs.set_item(intern!(py, "shrink"), shrink)?;
-        Ok(mask_or_fn
-            .call(
-                (m1_for_fallback.bind(py), m2_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
-    };
-
     // mask_or is a pure boolean OR of two masks with nomask/shrink/copy handling.
     // The previous path extracted BOTH operands into f64 UFuncArrays, OR-ed, and
     // rebuilt (~101ms @4M) where numpy does a single bool logical_or (~113us) — a
     // ~890x gap. numpy.ma.mask_or is the parity reference and handles the nomask,
     // shrink, copy and shape-mismatch (ValueError) cases natively, so defer to it.
-    fallback()
+    let mask_or_fn = cached_numpy_ma_mask_or(py)?;
+    if !copy && shrink {
+        return Ok(mask_or_fn.call1((m1.bind(py), m2.bind(py)))?.unbind());
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "copy"), copy)?;
+    kwargs.set_item(intern!(py, "shrink"), shrink)?;
+    Ok(mask_or_fn
+        .call((m1.bind(py), m2.bind(py)), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -44686,9 +44792,15 @@ fn median(
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let median_fn = numpy.getattr(intern!(py, "median"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let median_fn = numpy.getattr(intern!(py, "median"))?;
+        if axis.is_none()
+            && out.is_none()
+            && !overwrite_input
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+        {
+            return Ok(median_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -44765,7 +44877,7 @@ fn median(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "median") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "median") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -44780,17 +44892,14 @@ fn median(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    let output = build_numpy_array_from_ufunc(py, &result)?;
     if keepdims && let Some(ax) = axis {
         let Some(ndim) = orig_ndim else {
             return fallback();
         };
+        let output = build_numpy_array_from_ufunc(py, &result)?;
         return keepdims_expand_axis(py, numpy, output, ax as i64, ndim);
     }
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // Compute the unweighted covariance matrix following numpy's own algorithm:
@@ -45511,6 +45620,16 @@ fn cov(
     };
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let cov_fn = numpy.getattr(intern!(py, "cov"))?;
+        if y.is_none()
+            && matches!(rowvar, RowvarArg::NotGiven)
+            && !bias
+            && ddof.is_none()
+            && fweights.is_none()
+            && aweights.is_none()
+            && dtype.is_none()
+        {
+            return Ok(cov_fn.call1((m.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(y_val) = y.as_ref() {
             kwargs.set_item(intern!(py, "y"), y_val.bind(py))?;
@@ -45744,6 +45863,9 @@ fn corrcoef(
     };
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let corrcoef_fn = numpy.getattr(intern!(py, "corrcoef"))?;
+        if y.is_none() && matches!(rowvar, RowvarArg::NotGiven) && dtype.is_none() {
+            return Ok(corrcoef_fn.call1((x.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(y_val) = y.as_ref() {
             kwargs.set_item(intern!(py, "y"), y_val.bind(py))?;
@@ -45903,18 +46025,17 @@ fn corrcoef(
 #[pyfunction]
 #[pyo3(signature = (a, b, fill_value=true))]
 fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyResult<Py<PyAny>> {
-    let a_for_fallback = a.clone_ref(py);
-    let b_for_fallback = b.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let allequal_fn = cached_numpy_ma_allequal(py)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "fill_value"), fill_value)?;
-        Ok(allequal_fn
-            .call(
-                (a_for_fallback.bind(py), b_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
+        if fill_value {
+            Ok(allequal_fn.call1((a.bind(py), b.bind(py)))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "fill_value"), fill_value)?;
+            Ok(allequal_fn
+                .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+                .unbind())
+        }
     };
 
     // Zero-copy early-exit fast path: a,b both f64 (MaskedArray or plain ndarray) of
@@ -46255,9 +46376,16 @@ fn nanmean(
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanmean_fn = numpy.getattr(intern!(py, "nanmean"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanmean_fn = numpy.getattr(intern!(py, "nanmean"))?;
+        if axis.is_none()
+            && dtype.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && matches!(r#where, WhereArg::Absent)
+        {
+            return Ok(nanmean_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -46395,14 +46523,7 @@ fn nanmean(
     // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
     // into the cold extract → scalar scan (3-9x slower than numpy's cache-blocked
     // strided reduction). Delegate them to numpy (same parity).
-    if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
-        && !a
-            .bind(py)
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    if noncontiguous_ndarray(numpy, a.bind(py))? {
         return fallback();
     }
     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
@@ -46420,7 +46541,7 @@ fn nanmean(
     if a.values().is_empty() {
         return fallback();
     }
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanmean") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmean") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -46950,10 +47071,11 @@ fn keepdims_reshape_scalar(
 // cold extract → rebuild that transpose-copies the data — far slower than numpy's
 // strided ufunc kernels — so callers delegate them to numpy instead.
 fn noncontiguous_ndarray(numpy: &Bound<'_, PyModule>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
-    Ok(x.is_exact_instance(cached_ndarray_type(numpy.py())?)
+    let py = numpy.py();
+    Ok(x.is_exact_instance(cached_ndarray_type(py)?)
         && !x
-            .getattr("flags")?
-            .getattr("c_contiguous")?
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?)
 }
 
@@ -48355,9 +48477,17 @@ fn nansum(
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nansum_fn = numpy.getattr(intern!(py, "nansum"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nansum_fn = numpy.getattr(intern!(py, "nansum"))?;
+        if axis.is_none()
+            && dtype.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && initial.is_none()
+            && matches!(r#where, WhereArg::Absent)
+        {
+            return Ok(nansum_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -48486,14 +48616,7 @@ fn nansum(
     // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
     // into the cold extract → scalar scan (3-9x slower than numpy's cache-blocked
     // strided reduction). Delegate them to numpy (same parity).
-    if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
-        && !a
-            .bind(py)
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    if noncontiguous_ndarray(numpy, a.bind(py))? {
         return fallback();
     }
     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
@@ -48508,7 +48631,7 @@ fn nansum(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nansum") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nansum") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -48537,9 +48660,17 @@ fn nanprod(
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanprod_fn = numpy.getattr(intern!(py, "nanprod"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanprod_fn = numpy.getattr(intern!(py, "nanprod"))?;
+        if axis.is_none()
+            && dtype.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && initial.is_none()
+            && matches!(r#where, WhereArg::Absent)
+        {
+            return Ok(nanprod_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -48574,9 +48705,8 @@ fn nanprod(
 
     // A `keepdims` only numpy can interpret has no native meaning - see `nanmax`
     // (`deadlock-audit-30d18`).
-    let keepdims = match keepdims.native() {
-        Some(value) => Some(value),
-        None => return fallback(),
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
     };
 
     // Native parallel complex128/complex64 nanprod along the LAST (contiguous) axis, ABOVE the
@@ -48593,7 +48723,7 @@ fn nanprod(
         };
         if let Some(k) = ax_isize
             && let Some(out) =
-                try_zerocopy_complex_nanprod_lastaxis(py, a.bind(py), k, keepdims.unwrap_or(false))?
+                try_zerocopy_complex_nanprod_lastaxis(py, a.bind(py), k, keepdims)?
         {
             return Ok(out);
         }
@@ -48606,7 +48736,7 @@ fn nanprod(
             py,
             a.bind(py),
             ax.bind(py),
-            keepdims.unwrap_or(false),
+            keepdims,
             true,
         )?
     {
@@ -48630,7 +48760,7 @@ fn nanprod(
     if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(out) = try_zerocopy_f64_nanprod_flat(py, a.bind(py))?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             return keepdims_reshape_scalar(py, numpy, a.bind(py), out);
         }
         return Ok(out);
@@ -48641,7 +48771,7 @@ fn nanprod(
         && !axis_val.bind(py).is_none()
         && let Some(out) = try_zerocopy_f64_nanprod_axis(py, a.bind(py), axis_val.bind(py))?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -48668,13 +48798,13 @@ fn nanprod(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanprod") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanprod") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
-    let result = match a.nanprod(axis, keepdims.unwrap_or(false)) {
+    let result = match a.nanprod(axis, keepdims) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
@@ -51715,9 +51845,16 @@ fn nanmax(
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanmax_fn = numpy.getattr(intern!(py, "nanmax"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanmax_fn = numpy.getattr(intern!(py, "nanmax"))?;
+        if axis.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && initial.is_none()
+            && matches!(r#where, WhereArg::Absent)
+        {
+            return Ok(nanmax_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -51749,12 +51886,9 @@ fn nanmax(
     }
 
     // A `keepdims` only numpy can interpret - an explicit `None`, a numpy bool, an int - has no
-    // native meaning, so hand the raw object back. Shadowing to `Option<bool>` (not `bool`) keeps
-    // every native site below reading `keepdims.unwrap_or(false)` as it already did; the closure
-    // above still holds the original three-state value (`deadlock-audit-30d18`).
-    let keepdims = match keepdims.native() {
-        Some(value) => Some(value),
-        None => return fallback(),
+    // native meaning, so hand the raw object back.
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
     };
 
     // f16 FLAT nanmax (axis=None): numpy widens f16->f32 skip-NaN (~31ms@16M, ~5x f64); native
@@ -51764,7 +51898,7 @@ fn nanmax(
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(out) = try_zerocopy_f16_nanextreme_flat(py, a.bind(py), true)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -51785,7 +51919,7 @@ fn nanmax(
         && let Ok(ax_i) = axis_val.bind(py).extract::<isize>()
         && let Some(out) = try_zerocopy_f16_nanextreme_axis(py, a.bind(py), Some(ax_i), true)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -51801,7 +51935,7 @@ fn nanmax(
         && let Some(out) =
             try_zerocopy_f32_nanextreme_axis(py, a.bind(py), axis_val.bind(py), true)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -51830,7 +51964,7 @@ fn nanmax(
     if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(out) = try_zerocopy_f64_nanextreme(py, a.bind(py), true)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -51851,7 +51985,7 @@ fn nanmax(
         && let Some(out) =
             try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), true)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -51864,14 +51998,7 @@ fn nanmax(
     // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
     // into the cold extract → scalar scan (slower than numpy's cache-blocked strided
     // reduction). Delegate them to numpy (same parity).
-    if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
-        && !a
-            .bind(py)
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    if noncontiguous_ndarray(numpy, a.bind(py))? {
         return fallback();
     }
     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
@@ -51886,13 +52013,13 @@ fn nanmax(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanmax") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmax") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
-    let result = match a.nanmax(axis, keepdims.unwrap_or(false)) {
+    let result = match a.nanmax(axis, keepdims) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
@@ -51913,9 +52040,16 @@ fn nanmin(
     r#where: WhereArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanmin_fn = numpy.getattr(intern!(py, "nanmin"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanmin_fn = numpy.getattr(intern!(py, "nanmin"))?;
+        if axis.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && initial.is_none()
+            && matches!(r#where, WhereArg::Absent)
+        {
+            return Ok(nanmin_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -51946,9 +52080,8 @@ fn nanmin(
 
     // A `keepdims` only numpy can interpret has no native meaning - see `nanmax`
     // (`deadlock-audit-30d18`).
-    let keepdims = match keepdims.native() {
-        Some(value) => Some(value),
-        None => return fallback(),
+    let Some(keepdims) = keepdims.native() else {
+        return fallback();
     };
 
     // f16 FLAT nanmin (axis=None): numpy widens f16->f32 skip-NaN (~32ms@16M, ~5x f64); native
@@ -51958,7 +52091,7 @@ fn nanmin(
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(out) = try_zerocopy_f16_nanextreme_flat(py, a.bind(py), false)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -51979,7 +52112,7 @@ fn nanmin(
         && let Ok(ax_i) = axis_val.bind(py).extract::<isize>()
         && let Some(out) = try_zerocopy_f16_nanextreme_axis(py, a.bind(py), Some(ax_i), false)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -51994,7 +52127,7 @@ fn nanmin(
         && let Some(out) =
             try_zerocopy_f32_nanextreme_axis(py, a.bind(py), axis_val.bind(py), false)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -52032,7 +52165,7 @@ fn nanmin(
     if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(out) = try_zerocopy_f64_nanextreme(py, a.bind(py), false)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -52053,7 +52186,7 @@ fn nanmin(
         && let Some(out) =
             try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), false)?
     {
-        if keepdims.unwrap_or(false) {
+        if keepdims {
             let ndim = a
                 .bind(py)
                 .getattr(intern!(py, "ndim"))?
@@ -52066,14 +52199,7 @@ fn nanmin(
     // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
     // into the cold extract → scalar scan (slower than numpy's cache-blocked strided
     // reduction). Delegate them to numpy (same parity).
-    if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
-        && !a
-            .bind(py)
-            .getattr(intern!(py, "flags"))?
-            .getattr(intern!(py, "c_contiguous"))?
-            .extract::<bool>()?
-    {
+    if noncontiguous_ndarray(numpy, a.bind(py))? {
         return fallback();
     }
     // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
@@ -52088,13 +52214,13 @@ fn nanmin(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanmin") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmin") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
-    let result = match a.nanmin(axis, keepdims.unwrap_or(false)) {
+    let result = match a.nanmin(axis, keepdims) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
@@ -52119,9 +52245,19 @@ fn nanstd(
     correction: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanstd_fn = numpy.getattr(intern!(py, "nanstd"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanstd_fn = numpy.getattr(intern!(py, "nanstd"))?;
+        if axis.is_none()
+            && dtype.is_none()
+            && out.is_none()
+            && ddof.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && matches!(r#where, WhereArg::Absent)
+            && mean.is_none()
+            && correction.is_none()
+        {
+            return Ok(nanstd_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -52371,7 +52507,7 @@ fn nanstd(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanstd") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanstd") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -52391,11 +52527,7 @@ fn nanstd(
     if contains_nan_value(&result) {
         return fallback();
     }
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -52414,9 +52546,19 @@ fn nanvar(
     correction: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanvar_fn = numpy.getattr(intern!(py, "nanvar"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanvar_fn = numpy.getattr(intern!(py, "nanvar"))?;
+        if axis.is_none()
+            && dtype.is_none()
+            && out.is_none()
+            && ddof.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && matches!(r#where, WhereArg::Absent)
+            && mean.is_none()
+            && correction.is_none()
+        {
+            return Ok(nanvar_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -52667,7 +52809,7 @@ fn nanvar(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanvar") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanvar") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -52684,11 +52826,7 @@ fn nanvar(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // Zero-copy parallel flat nanargmax/nanargmin (axis=None) for C-contiguous f64 ndarrays.
@@ -53183,9 +53321,11 @@ fn nanargmax(
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanargmax_fn = numpy.getattr(intern!(py, "nanargmax"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanargmax_fn = numpy.getattr(intern!(py, "nanargmax"))?;
+        if axis.is_none() && out.is_none() && matches!(keepdims, KeepdimsArg::NotGiven) {
+            return Ok(nanargmax_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -53213,11 +53353,10 @@ fn nanargmax(
     let Some(keepdims) = keepdims.native() else {
         return fallback();
     };
-    let keepdims = Some(keepdims);
     // keepdims-on-axis: the gate used to bail on ANY keepdims, forgoing the ~0.45x native win.
     // Skip the no-keepdims fast paths when keepdims is set; the general path re-inserts the reduced
     // axis via expand_dims (axis=None+keepdims -> all-ones reshape, delegated). (BlackThrush 2026-06-22.)
-    let keep = keepdims == Some(true);
+    let keep = keepdims;
 
     // Integer/bool input cannot contain NaN, so nanargmax == the plain argmax
     // byte-exactly (numpy's _replace_nan returns non-inexact arrays untouched
@@ -53234,9 +53373,7 @@ fn nanargmax(
             .unwrap_or(false)
     {
         let kw = PyDict::new(py);
-        if let Some(k) = keepdims {
-            kw.set_item(intern!(py, "keepdims"), k)?;
-        }
+        kw.set_item(intern!(py, "keepdims"), keepdims)?;
         return argmax(py, a, axis, out, Some(&kw));
     }
     if !keep {
@@ -53327,7 +53464,7 @@ fn nanargmax(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanargmax") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanargmax") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -53364,9 +53501,11 @@ fn nanargmin(
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanargmin_fn = numpy.getattr(intern!(py, "nanargmin"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanargmin_fn = numpy.getattr(intern!(py, "nanargmin"))?;
+        if axis.is_none() && out.is_none() && matches!(keepdims, KeepdimsArg::NotGiven) {
+            return Ok(nanargmin_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -53386,14 +53525,15 @@ fn nanargmin(
     {
         return fallback();
     }
+    // Past this point the native paths need a plain bool; a value only numpy can interpret has
+    // already been handed back above via the subclass gate or is handled here.
     let Some(keepdims) = keepdims.native() else {
         return fallback();
     };
-    let keepdims = Some(keepdims);
     // keepdims-on-axis: the gate used to bail on ANY keepdims, forgoing the ~0.45x native win.
     // Skip the no-keepdims fast paths when keepdims is set; the general path re-inserts the reduced
     // axis via expand_dims (axis=None+keepdims -> all-ones reshape, delegated). (BlackThrush 2026-06-22.)
-    let keep = keepdims == Some(true);
+    let keep = keepdims;
 
     // Integer/bool input cannot contain NaN: route to FNP's argmin (native
     // int/bool axis kernels) - see the nanargmax twin for the pinned contract.
@@ -53406,9 +53546,7 @@ fn nanargmin(
             .unwrap_or(false)
     {
         let kw = PyDict::new(py);
-        if let Some(k) = keepdims {
-            kw.set_item(intern!(py, "keepdims"), k)?;
-        }
+        kw.set_item(intern!(py, "keepdims"), keepdims)?;
         return argmin(py, a, axis, out, Some(&kw));
     }
     if !keep {
@@ -53500,7 +53638,7 @@ fn nanargmin(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanargmin") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanargmin") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -53542,9 +53680,19 @@ fn percentile(
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let percentile_fn = numpy.getattr(intern!(py, "percentile"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let percentile_fn = numpy.getattr(intern!(py, "percentile"))?;
+        if axis.is_none()
+            && out.is_none()
+            && !overwrite_input
+            && method.is_none()
+            && !keepdims
+            && weights.is_none()
+        {
+            return Ok(percentile_fn
+                .call1((a.bind(py), q.bind(py)))?
+                .unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -53763,7 +53911,7 @@ fn percentile(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "percentile") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "percentile") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -53861,9 +54009,20 @@ fn nanpercentile(
     interpolation: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanpercentile_fn = numpy.getattr(intern!(py, "nanpercentile"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanpercentile_fn = numpy.getattr(intern!(py, "nanpercentile"))?;
+        if axis.is_none()
+            && out.is_none()
+            && !overwrite_input
+            && method.is_none()
+            && !keepdims
+            && weights.is_none()
+            && interpolation.is_none()
+        {
+            return Ok(nanpercentile_fn
+                .call1((a.bind(py), q.bind(py)))?
+                .unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -53998,7 +54157,7 @@ fn nanpercentile(
         Ok(value) => value,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanpercentile") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanpercentile") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -54042,9 +54201,20 @@ fn nanquantile(
     interpolation: Option<String>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanquantile_fn = numpy.getattr(intern!(py, "nanquantile"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanquantile_fn = numpy.getattr(intern!(py, "nanquantile"))?;
+        if axis.is_none()
+            && out.is_none()
+            && !overwrite_input
+            && method.is_none()
+            && !keepdims
+            && weights.is_none()
+            && interpolation.is_none()
+        {
+            return Ok(nanquantile_fn
+                .call1((a.bind(py), q.bind(py)))?
+                .unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -54175,7 +54345,7 @@ fn nanquantile(
         Ok(value) => value,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanquantile") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanquantile") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -56217,85 +56387,82 @@ fn intersect1d(
     // tuple-return semantics left to numpy) and for complex /
     // integer-sidecar / mixed-dtype inputs so numpy's dispatch surface
     // stays exact.
-    let numpy = cached_numpy(py)?;
-    let intersect1d_fn = numpy.getattr(intern!(py, "intersect1d"))?;
-    let ar1_for_fallback = ar1.clone_ref(py);
-    let ar2_for_fallback = ar2.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
+    if assume_unique || return_indices {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "assume_unique"), assume_unique)?;
         kwargs.set_item(intern!(py, "return_indices"), return_indices)?;
-        Ok(intersect1d_fn
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "intersect1d"))?
             .call(
-                (ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)),
+                (ar1.bind(py), ar2.bind(py)),
                 Some(&kwargs),
             )?
+            .unbind());
+    }
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(cached_numpy(py)?
+            .getattr(intern!(py, "intersect1d"))?
+            .call1((ar1.bind(py), ar2.bind(py)))?
             .unbind())
     };
-    if assume_unique || return_indices {
-        return fallback();
-    }
+    let numpy = cached_numpy(py)?;
     // Flatten normalization (see setop_flatten_view); delegates keep the
-    // ORIGINAL args via the fallback clones above.
-    let ar1 = setop_flatten_view(numpy, ar1.bind(py))?.unbind();
-    let ar2 = setop_flatten_view(numpy, ar2.bind(py))?.unbind();
+    // ORIGINAL args via ar1/ar2 in fallback above.
+    let ar1_flat = setop_flatten_view(numpy, ar1.bind(py))?;
+    let ar2_flat = setop_flatten_view(numpy, ar2.bind(py))?;
     if let Some(r) =
-        try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Intersect)?
+        try_narrow_int_setop_native(py, &ar1_flat, &ar2_flat, NarrowSetOp::Intersect)?
     {
         return Ok(r);
     }
     // WIDE ints (4/8-byte): par_sort+dedup+merge, full-range exact (the
     // extract-precise route raises past 2^53 and numpy's fallback probed
     // 11.5-12.1s at 8M/8M wide int64).
-    if let Some(r) = try_native_wide_int_setop(py, ar1.bind(py), ar2.bind(py), DtSetOp::Intersect)?
+    if let Some(r) = try_native_wide_int_setop(py, &ar1_flat, &ar2_flat, DtSetOp::Intersect)?
     {
         return Ok(r);
     }
-    if let Some(r) = try_zerocopy_f64_intersect1d_native(py, ar1.bind(py), ar2.bind(py))? {
+    if let Some(r) = try_zerocopy_f64_intersect1d_native(py, &ar1_flat, &ar2_flat)? {
         return Ok(r);
     }
     // Fixed-width unicode ('U', same width, Latin-1) intersect = unique(a) filtered to members of set(b).
     if let Some(r) =
-        try_native_string_intersect_setdiff(py, numpy, ar1.bind(py), ar2.bind(py), false)?
+        try_native_string_intersect_setdiff(py, numpy, &ar1_flat, &ar2_flat, false)?
     {
         return Ok(r);
     }
     // Structured intersect = struct-unique(a) filtered to members of set(b) (~7.9s @1M+1M).
     if let Some(r) =
-        try_native_struct_intersect_setdiff(py, numpy, ar1.bind(py), ar2.bind(py), false)?
+        try_native_struct_intersect_setdiff(py, numpy, &ar1_flat, &ar2_flat, false)?
     {
         return Ok(r);
     }
     // Complex128 intersect = c128-unique(a) filtered to members of set(b); finite/non-(-0.0) only.
     if let Some(r) =
-        try_native_c128_intersect_setdiff(py, numpy, ar1.bind(py), ar2.bind(py), false)?
+        try_native_c128_intersect_setdiff(py, numpy, &ar1_flat, &ar2_flat, false)?
     {
         return Ok(r);
     }
     // datetime64/timedelta64 intersect via the int64 view -> fast int64 intersect (~2.0s numpy delegate).
-    if !assume_unique
-        && !return_indices
-        && let Some(r) =
-            try_native_datetime_setop(py, ar1.bind(py), ar2.bind(py), DtSetOp::Intersect)?
+    if let Some(r) =
+        try_native_datetime_setop(py, &ar1_flat, &ar2_flat, DtSetOp::Intersect)?
     {
         return Ok(r);
     }
     // float16 intersect via exact f32 widening (numpy f16 set-ops ~172ms, no SIMD).
-    if !assume_unique
-        && !return_indices
-        && let Some(r) =
-            try_native_f16_setop(py, numpy, ar1.bind(py), ar2.bind(py), DtSetOp::Intersect)?
+    if let Some(r) =
+        try_native_f16_setop(py, numpy, &ar1_flat, &ar2_flat, DtSetOp::Intersect)?
     {
         return Ok(r);
     }
-    if setop_inputs_are_float(py, ar1.bind(py), ar2.bind(py))? {
+    if setop_inputs_are_float(py, &ar1_flat, &ar2_flat)? {
         return fallback();
     }
-    let a = match extract_precise_numeric_array(py, ar1.bind(py), "intersect1d(ar1)") {
+    let a = match extract_precise_numeric_array(py, &ar1_flat, "intersect1d(ar1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let b = match extract_precise_numeric_array(py, ar2.bind(py), "intersect1d(ar2)") {
+    let b = match extract_precise_numeric_array(py, &ar2_flat, "intersect1d(ar2)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -56318,59 +56485,57 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
     // union of the two flattened inputs. Falls back to np.union1d for
     // complex/structured/string inputs and for dtype mixes that would
     // require numpy's coercion rules (e.g. int64 ∪ float64 → float64).
-    let numpy = cached_numpy(py)?;
-    let union1d_fn = numpy.getattr(intern!(py, "union1d"))?;
-    let ar1_for_fallback = ar1.clone_ref(py);
-    let ar2_for_fallback = ar2.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(union1d_fn
-            .call1((ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)))?
+        Ok(cached_numpy(py)?
+            .getattr(intern!(py, "union1d"))?
+            .call1((ar1.bind(py), ar2.bind(py)))?
             .unbind())
     };
+    let numpy = cached_numpy(py)?;
     // Flatten normalization (see setop_flatten_view); delegates keep the
-    // ORIGINAL args via the fallback clones above.
-    let ar1 = setop_flatten_view(numpy, ar1.bind(py))?.unbind();
-    let ar2 = setop_flatten_view(numpy, ar2.bind(py))?.unbind();
+    // ORIGINAL args via ar1/ar2 in fallback above.
+    let ar1_flat = setop_flatten_view(numpy, ar1.bind(py))?;
+    let ar2_flat = setop_flatten_view(numpy, ar2.bind(py))?;
     if let Some(r) =
-        try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Union)?
+        try_narrow_int_setop_native(py, &ar1_flat, &ar2_flat, NarrowSetOp::Union)?
     {
         return Ok(r);
     }
     // WIDE ints (4/8-byte): par_sort+dedup+merge, full-range exact (the
     // extract-precise route raises past 2^53 and numpy's fallback probed
     // 11.5-12.1s at 8M/8M wide int64).
-    if let Some(r) = try_native_wide_int_setop(py, ar1.bind(py), ar2.bind(py), DtSetOp::Union)? {
+    if let Some(r) = try_native_wide_int_setop(py, &ar1_flat, &ar2_flat, DtSetOp::Union)? {
         return Ok(r);
     }
     // Fixed-width unicode ('U', same width, Latin-1) union = sorted-unique of concat. numpy's string
     // union1d does 2-3 slow per-record sorts (~3.2s @2M+2M); this reuses the native 'U' unique path.
-    if let Some(r) = try_native_string_union1d(py, numpy, ar1.bind(py), ar2.bind(py))? {
+    if let Some(r) = try_native_string_union1d(py, numpy, &ar1_flat, &ar2_flat)? {
         return Ok(r);
     }
     // Structured union = struct-unique(concat) (~2.9s @1M+1M).
-    if let Some(r) = try_native_struct_union1d(py, numpy, ar1.bind(py), ar2.bind(py))? {
+    if let Some(r) = try_native_struct_union1d(py, numpy, &ar1_flat, &ar2_flat)? {
         return Ok(r);
     }
     // Complex128 union = c128-unique(concat) (~3.1s @2M+2M); finite/non-(-0.0) only.
-    if let Some(r) = try_native_c128_union1d(py, numpy, ar1.bind(py), ar2.bind(py))? {
+    if let Some(r) = try_native_c128_union1d(py, numpy, &ar1_flat, &ar2_flat)? {
         return Ok(r);
     }
     // datetime64/timedelta64 union via the int64 view -> fast int64 union (~1.2s numpy delegate); NaT defer.
-    if let Some(r) = try_native_datetime_setop(py, ar1.bind(py), ar2.bind(py), DtSetOp::Union)? {
+    if let Some(r) = try_native_datetime_setop(py, &ar1_flat, &ar2_flat, DtSetOp::Union)? {
         return Ok(r);
     }
     // float16 union via exact f32 widening (numpy f16 set-ops ~172ms, no SIMD).
-    if let Some(r) = try_native_f16_setop(py, numpy, ar1.bind(py), ar2.bind(py), DtSetOp::Union)? {
+    if let Some(r) = try_native_f16_setop(py, numpy, &ar1_flat, &ar2_flat, DtSetOp::Union)? {
         return Ok(r);
     }
-    if setop_inputs_are_float(py, ar1.bind(py), ar2.bind(py))? {
+    if setop_inputs_are_float(py, &ar1_flat, &ar2_flat)? {
         return fallback();
     }
-    let a = match extract_precise_numeric_array(py, ar1.bind(py), "union1d(ar1)") {
+    let a = match extract_precise_numeric_array(py, &ar1_flat, "union1d(ar1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let b = match extract_precise_numeric_array(py, ar2.bind(py), "union1d(ar2)") {
+    let b = match extract_precise_numeric_array(py, &ar2_flat, "union1d(ar2)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -56400,77 +56565,78 @@ fn setdiff1d(
     // Native setdiff1d via UFuncArray::setdiff1d. Falls back to numpy
     // when assume_unique=true (subtly different semantics preserving
     // order) or for complex / mixed-dtype / integer-sidecar inputs.
-    let numpy = cached_numpy(py)?;
-    let setdiff1d_fn = numpy.getattr(intern!(py, "setdiff1d"))?;
-    let ar1_for_fallback = ar1.clone_ref(py);
-    let ar2_for_fallback = ar2.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
+    if assume_unique {
         let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "assume_unique"), assume_unique)?;
-        Ok(setdiff1d_fn
+        kwargs.set_item(intern!(py, "assume_unique"), true)?;
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "setdiff1d"))?
             .call(
-                (ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)),
+                (ar1.bind(py), ar2.bind(py)),
                 Some(&kwargs),
             )?
+            .unbind());
+    }
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(cached_numpy(py)?
+            .getattr(intern!(py, "setdiff1d"))?
+            .call1((ar1.bind(py), ar2.bind(py)))?
             .unbind())
     };
-    if assume_unique {
-        return fallback();
-    }
+    let numpy = cached_numpy(py)?;
     // Flatten normalization (see setop_flatten_view); delegates keep the
-    // ORIGINAL args via the fallback clones above.
-    let ar1 = setop_flatten_view(numpy, ar1.bind(py))?.unbind();
-    let ar2 = setop_flatten_view(numpy, ar2.bind(py))?.unbind();
+    // ORIGINAL args via ar1/ar2 in fallback above.
+    let ar1_flat = setop_flatten_view(numpy, ar1.bind(py))?;
+    let ar2_flat = setop_flatten_view(numpy, ar2.bind(py))?;
     if let Some(r) =
-        try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Setdiff)?
+        try_narrow_int_setop_native(py, &ar1_flat, &ar2_flat, NarrowSetOp::Setdiff)?
     {
         return Ok(r);
     }
     // WIDE ints (4/8-byte): par_sort+dedup+merge, full-range exact (the
     // extract-precise route raises past 2^53 and numpy's fallback probed
     // 11.5-12.1s at 8M/8M wide int64).
-    if let Some(r) = try_native_wide_int_setop(py, ar1.bind(py), ar2.bind(py), DtSetOp::Setdiff)? {
+    if let Some(r) = try_native_wide_int_setop(py, &ar1_flat, &ar2_flat, DtSetOp::Setdiff)? {
         return Ok(r);
     }
     // f64 small-output setdiff: par_sort + subtract-merge (twin of the intersect
     // arm; tie-dense and NaN/-0.0 inputs defer inside).
-    if let Some(r) = try_zerocopy_f64_setdiff1d_native(py, ar1.bind(py), ar2.bind(py))? {
+    if let Some(r) = try_zerocopy_f64_setdiff1d_native(py, &ar1_flat, &ar2_flat)? {
         return Ok(r);
     }
     // Fixed-width unicode ('U', same width, Latin-1) setdiff = unique(a) filtered to non-members of set(b).
     if let Some(r) =
-        try_native_string_intersect_setdiff(py, numpy, ar1.bind(py), ar2.bind(py), true)?
+        try_native_string_intersect_setdiff(py, numpy, &ar1_flat, &ar2_flat, true)?
     {
         return Ok(r);
     }
     // Structured setdiff = struct-unique(a) filtered to non-members of set(b) (~2.6s @1M+1M).
     if let Some(r) =
-        try_native_struct_intersect_setdiff(py, numpy, ar1.bind(py), ar2.bind(py), true)?
+        try_native_struct_intersect_setdiff(py, numpy, &ar1_flat, &ar2_flat, true)?
     {
         return Ok(r);
     }
     // Complex128 setdiff = c128-unique(a) filtered to non-members of set(b); finite/non-(-0.0) only.
-    if let Some(r) = try_native_c128_intersect_setdiff(py, numpy, ar1.bind(py), ar2.bind(py), true)?
+    if let Some(r) = try_native_c128_intersect_setdiff(py, numpy, &ar1_flat, &ar2_flat, true)?
     {
         return Ok(r);
     }
     // datetime64/timedelta64 setdiff via the int64 view -> fast int64 setdiff; NaT defer.
-    if let Some(r) = try_native_datetime_setop(py, ar1.bind(py), ar2.bind(py), DtSetOp::Setdiff)? {
+    if let Some(r) = try_native_datetime_setop(py, &ar1_flat, &ar2_flat, DtSetOp::Setdiff)? {
         return Ok(r);
     }
     // float16 setdiff via exact f32 widening (numpy f16 set-ops ~172ms, no SIMD).
-    if let Some(r) = try_native_f16_setop(py, numpy, ar1.bind(py), ar2.bind(py), DtSetOp::Setdiff)?
+    if let Some(r) = try_native_f16_setop(py, numpy, &ar1_flat, &ar2_flat, DtSetOp::Setdiff)?
     {
         return Ok(r);
     }
-    if setop_inputs_are_float(py, ar1.bind(py), ar2.bind(py))? {
+    if setop_inputs_are_float(py, &ar1_flat, &ar2_flat)? {
         return fallback();
     }
-    let a = match extract_precise_numeric_array(py, ar1.bind(py), "setdiff1d(ar1)") {
+    let a = match extract_precise_numeric_array(py, &ar1_flat, "setdiff1d(ar1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let b = match extract_precise_numeric_array(py, ar2.bind(py), "setdiff1d(ar2)") {
+    let b = match extract_precise_numeric_array(py, &ar2_flat, "setdiff1d(ar2)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -56500,75 +56666,73 @@ fn setxor1d(
     // Native setxor1d via UFuncArray::setxor1d. Falls back to numpy
     // when assume_unique=true or when dtype coercion/error behavior
     // belongs to numpy's object/string/complex dispatch.
-    let numpy = cached_numpy(py)?;
-    let setxor1d_fn = numpy.getattr(intern!(py, "setxor1d"))?;
-    let ar1_for_fallback = ar1.clone_ref(py);
-    let ar2_for_fallback = ar2.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
+    if assume_unique {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "assume_unique"), assume_unique)?;
-        Ok(setxor1d_fn
-            .call(
-                (ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "setxor1d"))?
+            .call((ar1.bind(py), ar2.bind(py)), Some(&kwargs))?
+            .unbind());
+    }
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(cached_numpy(py)?
+            .getattr(intern!(py, "setxor1d"))?
+            .call1((ar1.bind(py), ar2.bind(py)))?
             .unbind())
     };
-    if assume_unique {
-        return fallback();
-    }
+    let numpy = cached_numpy(py)?;
     // Flatten normalization (see setop_flatten_view); delegates keep the
-    // ORIGINAL args via the fallback clones above.
-    let ar1 = setop_flatten_view(numpy, ar1.bind(py))?.unbind();
-    let ar2 = setop_flatten_view(numpy, ar2.bind(py))?.unbind();
+    // ORIGINAL args via ar1/ar2 in fallback above.
+    let ar1_flat = setop_flatten_view(numpy, ar1.bind(py))?;
+    let ar2_flat = setop_flatten_view(numpy, ar2.bind(py))?;
     if let Some(r) =
-        try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Setxor)?
+        try_narrow_int_setop_native(py, &ar1_flat, &ar2_flat, NarrowSetOp::Setxor)?
     {
         return Ok(r);
     }
     // WIDE ints (4/8-byte): par_sort+dedup+merge, full-range exact (the
     // extract-precise route raises past 2^53 and numpy's fallback probed
     // 11.5-12.1s at 8M/8M wide int64).
-    if let Some(r) = try_native_wide_int_setop(py, ar1.bind(py), ar2.bind(py), DtSetOp::Setxor)? {
+    if let Some(r) = try_native_wide_int_setop(py, &ar1_flat, &ar2_flat, DtSetOp::Setxor)? {
         return Ok(r);
     }
-    if let Some(r) = try_zerocopy_f32_eighth_setxor1d(py, ar1.bind(py), ar2.bind(py))? {
+    if let Some(r) = try_zerocopy_f32_eighth_setxor1d(py, &ar1_flat, &ar2_flat)? {
         return Ok(r);
     }
     // Fixed-width unicode ('U', same width, Latin-1) symmetric difference via source-tagged sort.
-    if let Some(r) = try_native_string_setxor(py, numpy, ar1.bind(py), ar2.bind(py))? {
+    if let Some(r) = try_native_string_setxor(py, numpy, &ar1_flat, &ar2_flat)? {
         return Ok(r);
     }
     // Structured symmetric difference = struct-unique(concat) filtered to records in exactly one (~7.4s @1M+1M).
-    if let Some(r) = try_native_struct_setxor1d(py, numpy, ar1.bind(py), ar2.bind(py))? {
+    if let Some(r) = try_native_struct_setxor1d(py, numpy, &ar1_flat, &ar2_flat)? {
         return Ok(r);
     }
     // datetime64/timedelta64 setxor via the int64 view -> fast int64 setxor; NaT defer.
-    if let Some(r) = try_native_datetime_setop(py, ar1.bind(py), ar2.bind(py), DtSetOp::Setxor)? {
+    if let Some(r) = try_native_datetime_setop(py, &ar1_flat, &ar2_flat, DtSetOp::Setxor)? {
         return Ok(r);
     }
     // float16 setxor via exact f32 widening (numpy f16 set-ops ~172ms, no SIMD).
-    if let Some(r) = try_native_f16_setop(py, numpy, ar1.bind(py), ar2.bind(py), DtSetOp::Setxor)? {
+    if let Some(r) = try_native_f16_setop(py, numpy, &ar1_flat, &ar2_flat, DtSetOp::Setxor)? {
         return Ok(r);
     }
     // complex128 symmetric difference on a dense integer-valued grid (numpy delegates c128 to a serial sort).
     {
         let nd = cached_ndarray_type(numpy.py())?.clone();
-        if c128_setop_gate(ar1.bind(py), ar2.bind(py), &nd)?
+        if c128_setop_gate(&ar1_flat, &ar2_flat, &nd)?
             && let Some(r) =
-                try_native_c128_setxor_dense_integral(py, numpy, ar1.bind(py), ar2.bind(py))?
+                try_native_c128_setxor_dense_integral(py, numpy, &ar1_flat, &ar2_flat)?
         {
             return Ok(r);
         }
     }
-    if setop_inputs_are_float(py, ar1.bind(py), ar2.bind(py))? {
+    if setop_inputs_are_float(py, &ar1_flat, &ar2_flat)? {
         return fallback();
     }
-    let a = match extract_precise_numeric_array(py, ar1.bind(py), "setxor1d(ar1)") {
+    let a = match extract_precise_numeric_array(py, &ar1_flat, "setxor1d(ar1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let b = match extract_precise_numeric_array(py, ar2.bind(py), "setxor1d(ar2)") {
+    let b = match extract_precise_numeric_array(py, &ar2_flat, "setxor1d(ar2)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -56603,24 +56767,30 @@ fn isin(
     // for complex / integer-sidecar / mixed-dtype inputs and for the
     // tuned assume_unique / kind="table"/"sort" back-ends so their
     // semantics match numpy exactly.
-    let numpy = cached_numpy(py)?;
-    let isin_fn = numpy.getattr(intern!(py, "isin"))?;
-    let element_for_fallback = element.clone_ref(py);
-    let test_for_fallback = test_elements.clone_ref(py);
-    let kind_for_fallback = kind.as_ref().map(|v| v.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "assume_unique"), assume_unique)?;
-        kwargs.set_item(intern!(py, "invert"), invert)?;
-        if let Some(kind_val) = kind_for_fallback.as_ref() {
-            kwargs.set_item(intern!(py, "kind"), kind_val.bind(py))?;
+        let numpy = cached_numpy(py)?;
+        let isin_fn = numpy.getattr(intern!(py, "isin"))?;
+        let has_kind = kind.as_ref().is_some_and(|v| !v.bind(py).is_none());
+        if !assume_unique && !invert && !has_kind {
+            Ok(isin_fn
+                .call1((element.bind(py), test_elements.bind(py)))?
+                .unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "assume_unique"), assume_unique)?;
+            kwargs.set_item(intern!(py, "invert"), invert)?;
+            if let Some(kind_val) = kind.as_ref()
+                && !kind_val.bind(py).is_none()
+            {
+                kwargs.set_item(intern!(py, "kind"), kind_val.bind(py))?;
+            }
+            Ok(isin_fn
+                .call(
+                    (element.bind(py), test_elements.bind(py)),
+                    Some(&kwargs),
+                )?
+                .unbind())
         }
-        Ok(isin_fn
-            .call(
-                (element_for_fallback.bind(py), test_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
     };
     // Non-native byte order on either operand delegates whole (`deadlock-audit-2kqw3`).
     if assume_unique
@@ -56675,7 +56845,7 @@ fn isin(
     }
     // float16 membership: widen exact to f32, route to the fast f32 hashed isin (numpy f16 ~168ms).
     if let Some(out) =
-        try_native_f16_isin(py, numpy, element.bind(py), test_elements.bind(py), invert)?
+        try_native_f16_isin(py, cached_numpy(py)?, element.bind(py), test_elements.bind(py), invert)?
     {
         return Ok(out);
     }
@@ -56703,7 +56873,7 @@ fn isin(
         }
         let elem_b = element.bind(py);
         let test_b = test_elements.bind(py);
-        let nd = cached_ndarray_type(numpy.py())?.clone();
+        let nd = cached_ndarray_type(py)?.clone();
         let elem_flat = ravel_if_nd(&nd, elem_b)?;
         let test_flat = ravel_if_nd(&nd, test_b)?;
         if elem_flat.is_some() || test_flat.is_some() {
@@ -60901,12 +61071,7 @@ fn native_unary_elementwise(
     if float_of(8)
         && let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)?
     {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-ei9jz`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // int64 zero-copy fast path (negative/positive/abs/square). Without it int64
     // input ran the cold extract Vec and then fell straight back to numpy below,
@@ -60914,12 +61079,7 @@ fn native_unary_elementwise(
     if int_of(8)
         && let Some((flat, shape)) = zerocopy_i64_unary_flat(py, numpy, x, op)?
     {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-tsyfb`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // int32 zero-copy fast path. Same extract-then-discard cost as int64, plus
     // the f64 round-trip mis-wrapped square (saturating cast); this keeps int32
@@ -60927,12 +61087,7 @@ fn native_unary_elementwise(
     if int_of(4)
         && let Some((flat, shape)) = zerocopy_i32_unary_flat(py, numpy, x, op)?
     {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-tsyfb`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // Narrow signed / all unsigned integer widths (int8/int16, uint8/16/32/64):
     // same extract-then-discard cost as int64, plus the f64 round-trip mis-wraps
@@ -60940,12 +61095,7 @@ fn native_unary_elementwise(
     if narrow_integral
         && let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, numpy, x, op)?
     {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-tsyfb`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // float32 zero-copy fast path. float32 input otherwise extracted to an f64
     // Vec and rebuilt (~60-360x slower), and `sign` returned float64; this keeps
@@ -60953,15 +61103,7 @@ fn native_unary_elementwise(
     if float_of(4)
         && let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)?
     {
-        // NO RESHAPE. `zerocopy_f32_unary_flat` has allocated at the FINAL shape since
-        // `deadlock-audit-ei9jz`, but this caller kept reshaping the result to the shape
-        // it already had - a no-op `reshape` plus its tuple, ~117 ns per call, on every
-        // f32 unary (`deadlock-audit-tsyfb`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // AN ndarray SUBCLASS KEEPS ITS TYPE THROUGH A NUMPY UFUNC (`deadlock-audit-1zl3e`).
     // `np.square(np.matrix(a))` is a `matrix`; every fast path above gates on
@@ -61098,12 +61240,7 @@ fn native_unary_promoting(
     // (which this promoting path widens to float) are not float64 ndarrays, so
     // they correctly fall through unchanged.
     if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)? {
-        // No reshape: the helper allocates at the final shape (`deadlock-audit-ei9jz`).
-        let output = flat.unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // float32 SIMD-transcendentals: numpy's vectorized f32 libm beats our scalar
     // per-element f32 libm 2-12x (sin/cos/tanh ~10x) — and the scalar path even
@@ -61137,14 +61274,7 @@ fn native_unary_promoting(
     // float32 input is float-preserving here (only integers promote to f64), so
     // the zero-copy float32 path applies to the ops it supports (e.g. sqrt).
     if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)? {
-        let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        let output = flat
-            .call_method1(intern!(py, "reshape"), (&output_shape,))?
-            .unbind();
-        if shape.is_empty() {
-            return Ok(output.bind(py).get_item(())?.unbind());
-        }
-        return Ok(output);
+        return finish_preshaped_output(flat, &shape);
     }
     // An ndarray SUBCLASS keeps its type through a numpy ufunc, and every fast path
     // above gates on `is_exact_instance` (`deadlock-audit-1zl3e`). Same guard as
@@ -62717,25 +62847,6 @@ fn array_equal(
     // numpy reads `equal_nan` for TRUTHINESS - `np.array_equal(a, b, 0)` is an ordinary call
     // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
     let equal_nan = truthy_flag(equal_nan)?;
-    // Native array_equal via UFuncArray::array_equal_nan. Falls back to
-    // numpy for complex / integer-sidecar / mixed-dtype / non-numeric
-    // inputs so numpy's dispatch surface (object arrays, strings, etc.)
-    // stays exact. The return is a builtin Python bool (not np.bool_),
-    // matching numpy's documented return type.
-    let numpy = cached_numpy(py)?;
-    let array_equal_fn = numpy.getattr(intern!(py, "array_equal"))?;
-    let a1_for_fallback = a1.clone_ref(py);
-    let a2_for_fallback = a2.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
-        Ok(array_equal_fn
-            .call(
-                (a1_for_fallback.bind(py), a2_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
-    };
     // Zero-copy early-exit for two f64 ndarrays: numpy's array_equal materialises
     // the whole `a1 == a2` boolean array then reduces, and our extract path copies
     // both inputs first; reading the buffers directly and bailing on the first
@@ -62746,6 +62857,24 @@ fn array_equal(
             .into_any()
             .unbind());
     }
+    // Native array_equal via UFuncArray::array_equal_nan. Falls back to
+    // numpy for complex / integer-sidecar / mixed-dtype / non-numeric
+    // inputs so numpy's dispatch surface (object arrays, strings, etc.)
+    // stays exact. The return is a builtin Python bool (not np.bool_),
+    // matching numpy's documented return type.
+    let numpy = cached_numpy(py)?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let array_equal_fn = numpy.getattr(intern!(py, "array_equal"))?;
+        if !equal_nan {
+            Ok(array_equal_fn.call1((a1.bind(py), a2.bind(py)))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
+            Ok(array_equal_fn
+                .call((a1.bind(py), a2.bind(py)), Some(&kwargs))?
+                .unbind())
+        }
+    };
     // Non-contiguous (transposed/strided) ndarray operands bail the zero-copy
     // early-exit fold into the cold extract → rebuild (transpose-copy, ~45x slower).
     // Delegate to numpy.
@@ -62989,13 +63118,6 @@ fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAn
     // entries agree. Non-broadcastable shapes return False (matches numpy);
     // non-numeric / complex / integer-sidecar inputs defer to numpy so the
     // object-dtype / structured surfaces stay exact.
-    let numpy = cached_numpy(py)?;
-    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        Ok(numpy
-            .getattr(intern!(py, "array_equiv"))?
-            .call1((a1.bind(py), a2.bind(py)))?
-            .unbind())
-    };
     // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar, before
     // the cold extract + broadcast-compare. numpy's array_equiv builds the full
     // comparison too, so the differ case returns almost immediately.
@@ -63005,6 +63127,14 @@ fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAn
             .into_any()
             .unbind());
     }
+    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        let numpy = cached_numpy(py)?;
+        Ok(numpy
+            .getattr(intern!(py, "array_equiv"))?
+            .call1((a1.bind(py), a2.bind(py)))?
+            .unbind())
+    };
+    let numpy = cached_numpy(py)?;
     // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
     if noncontiguous_ndarray(numpy, a1.bind(py))? || noncontiguous_ndarray(numpy, a2.bind(py))? {
         return fallback(py);
@@ -64799,27 +64929,6 @@ fn allclose_impl(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Py<PyAny>> {
-    // Native allclose via UFuncArray::allclose_equal_nan. Delegates to
-    // numpy for complex/structured/string inputs, integer-sidecar mixed
-    // arrays, and shape-mismatch broadcast failures so numpy's full
-    // dispatch surface (including bytes/object coercion) stays exact.
-    let numpy = cached_numpy(py)?;
-    let allclose_fn = numpy.getattr(intern!(py, "allclose"))?;
-    let a_for_fallback = a.clone_ref(py);
-    let b_for_fallback = b.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "rtol"), rtol)?;
-        kwargs.set_item(intern!(py, "atol"), atol)?;
-        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
-        Ok(allclose_fn
-            .call(
-                (a_for_fallback.bind(py), b_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
-    };
-
     // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar.
     // numpy.allclose returns a Python bool (`bool(all(isclose(...)))`), not numpy.bool_;
     // verified on numpy 2.4.3 (`deadlock-audit-7evbk`).
@@ -64833,6 +64942,22 @@ fn allclose_impl(
     {
         return Ok(PyBool::new(py, verdict).to_owned().into_any().unbind());
     }
+
+    // Native allclose via UFuncArray::allclose_equal_nan. Delegates to
+    // numpy for complex/structured/string inputs, integer-sidecar mixed
+    // arrays, and shape-mismatch broadcast failures so numpy's full
+    // dispatch surface (including bytes/object coercion) stays exact.
+    let numpy = cached_numpy(py)?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let allclose_fn = numpy.getattr(intern!(py, "allclose"))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "rtol"), rtol)?;
+        kwargs.set_item(intern!(py, "atol"), atol)?;
+        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
+        Ok(allclose_fn
+            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
     // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
     if noncontiguous_ndarray(numpy, a.bind(py))? || noncontiguous_ndarray(numpy, b.bind(py))? {
         return fallback();
@@ -64881,18 +65006,16 @@ fn fix(py: Python<'_>, x: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAn
     // positives. Integer input passes through unchanged; NaN propagates.
     // Falls back to np.fix for complex/object/structured inputs so
     // numpy's coercion surface stays exact.
-    let numpy = cached_numpy(py)?;
-    let fix_fn = numpy.getattr(intern!(py, "fix"))?;
-    let x_for_fallback = x.clone_ref(py);
-    let out_for_fallback = out.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
-        match out_for_fallback.as_ref() {
+        let numpy = cached_numpy(py)?;
+        let fix_fn = numpy.getattr(intern!(py, "fix"))?;
+        match out.as_ref() {
             // numpy.fix's second parameter is positional-or-keyword `out`, and it
             // returns that same object; forward it verbatim.
             Some(out_val) => Ok(fix_fn
-                .call1((x_for_fallback.bind(py), out_val.bind(py)))?
+                .call1((x.bind(py), out_val.bind(py)))?
                 .unbind()),
-            None => Ok(fix_fn.call1((x_for_fallback.bind(py),))?.unbind()),
+            None => Ok(fix_fn.call1((x.bind(py),))?.unbind()),
         }
     };
 
@@ -66170,9 +66293,9 @@ fn fromfile(
         {
             return fallback();
         }
-        let parsed_dtype = extract_python_dtype(
+        let parsed_dtype = extract_python_dtype_bound(
             py,
-            dtype.as_ref().map(|value| value.clone_ref(py)),
+            dtype.as_ref().map(|value| value.bind(py)),
             DType::F64,
             "fromfile(dtype)",
         )?;
@@ -66214,9 +66337,9 @@ fn fromfile(
         return fallback();
     }
 
-    let parsed_dtype = extract_python_dtype(
+    let parsed_dtype = extract_python_dtype_bound(
         py,
-        dtype.as_ref().map(|value| value.clone_ref(py)),
+        dtype.as_ref().map(|value| value.bind(py)),
         DType::F64,
         "fromfile(dtype)",
     )?;
@@ -66329,8 +66452,12 @@ fn loadtxt(
     };
 
     // Resolve target dtype (default float64).
-    let dtype_clone = dtype.as_ref().map(|v| v.clone_ref(py));
-    let parsed_dtype = match extract_python_dtype(py, dtype_clone, DType::F64, "loadtxt(dtype)") {
+    let parsed_dtype = match extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|v| v.bind(py)),
+        DType::F64,
+        "loadtxt(dtype)",
+    ) {
         Ok(value) if dtype_supported_by_numpy_export_bridge(value) => value,
         _ => return fallback(py),
     };
@@ -67031,9 +67158,12 @@ fn genfromtxt(
     };
 
     // Resolve target dtype — must be numeric bridge-supported.
-    let dtype_clone = dtype.as_ref().map(|v| v.clone_ref(py));
-    let parsed_dtype = match extract_python_dtype(py, dtype_clone, DType::F64, "genfromtxt(dtype)")
-    {
+    let parsed_dtype = match extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|v| v.bind(py)),
+        DType::F64,
+        "genfromtxt(dtype)",
+    ) {
         Ok(value) if dtype_supported_by_numpy_export_bridge(value) => value,
         _ => return fallback(py),
     };
@@ -69340,34 +69470,37 @@ fn average(
     // so delegating straight to numpy is parity, while the old code ran two
     // np.asarray dtype probes and then the slower native kernel (~1.55x). Delegate
     // up front for every dtype; weighted and per-axis cases keep their native wins.
+    let numpy = cached_numpy(py)?;
     if matches!(&keepdims, KeepdimsArg::NotGiven)
         && !returned
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && weights.as_ref().is_none_or(|w| w.bind(py).is_none())
     {
-        return Ok(py
-            .import("numpy")?
+        return Ok(numpy
             .getattr(intern!(py, "average"))?
             .call1((a.bind(py),))?
             .unbind());
     }
-    let numpy = cached_numpy(py)?;
-    let avg_fn = numpy.getattr(intern!(py, "average"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let a_for_fallback = a.clone_ref(py);
-    let weights_for_fallback = weights.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let avg_fn = numpy.getattr(intern!(py, "average"))?;
+        if axis.is_none()
+            && weights.is_none()
+            && !returned
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+        {
+            return Ok(avg_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
-        if let Some(weights_val) = weights_for_fallback.as_ref() {
+        if let Some(weights_val) = weights.as_ref() {
             kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "returned"), returned)?;
         keepdims.set_numpy_kwarg(py, &kwargs)?;
         Ok(avg_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -69501,7 +69634,7 @@ fn average(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "average") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "average") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -70694,13 +70827,16 @@ fn eye(
         }
     };
 
-    let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
-
     if order != "C" || n < 0 || m.is_some_and(|value| value < 0) {
         return fallback();
     }
 
-    let dtype = match extract_python_dtype(py, dtype_for_parse, DType::F64, "eye(dtype)") {
+    let dtype = match extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|value| value.bind(py)),
+        DType::F64,
+        "eye(dtype)",
+    ) {
         Ok(dtype) => dtype,
         Err(_) => return fallback(),
     };
@@ -70770,12 +70906,15 @@ fn identity(
         return fallback();
     }
 
-    let dtype_for_parse = dtype.as_ref().map(|value| value.clone_ref(py));
-    let parsed_dtype =
-        match extract_python_dtype(py, dtype_for_parse, DType::F64, "identity(dtype)") {
-            Ok(dtype) => dtype,
-            Err(_) => return fallback(),
-        };
+    let parsed_dtype = match extract_python_dtype_bound(
+        py,
+        dtype.as_ref().map(|value| value.bind(py)),
+        DType::F64,
+        "identity(dtype)",
+    ) {
+        Ok(dtype) => dtype,
+        Err(_) => return fallback(),
+    };
     if parsed_dtype == DType::F64 {
         return build_f64_eye(py, n as usize, n as usize, 0);
     }
@@ -81522,9 +81661,11 @@ fn nanmedian(
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let nanmedian_fn = numpy.getattr(intern!(py, "nanmedian"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let nanmedian_fn = numpy.getattr(intern!(py, "nanmedian"))?;
+        if axis.is_none() && out.is_none() && !overwrite_input && matches!(keepdims, KeepdimsArg::NotGiven) {
+            return Ok(nanmedian_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -81595,7 +81736,7 @@ fn nanmedian(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "nanmedian") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmedian") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -81632,21 +81773,21 @@ fn ma_average(
     weights: Option<Py<PyAny>>,
     returned: bool,
 ) -> PyResult<Py<PyAny>> {
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let a_for_fallback = a.clone_ref(py);
-    let weights_for_fallback = weights.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let avg_fn = cached_numpy_ma_average(py)?;
+        if axis.is_none() && weights.is_none() && !returned {
+            return Ok(avg_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
         }
-        if let Some(weights_val) = weights_for_fallback.as_ref() {
+        if let Some(weights_val) = weights.as_ref() {
             kwargs.set_item(intern!(py, "weights"), weights_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "returned"), returned)?;
         Ok(avg_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -81665,7 +81806,11 @@ fn ma_average(
     let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "ma_average(a)")? else {
         return fallback();
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "ma_average") {
+    let axis = match extract_axis_spec_bound(
+        py,
+        axis.as_ref().map(|value| value.bind(py)),
+        "ma_average",
+    ) {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -82149,9 +82294,17 @@ fn quantile(
     weights: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let quantile_fn = numpy.getattr(intern!(py, "quantile"))?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let quantile_fn = numpy.getattr(intern!(py, "quantile"))?;
+        if axis.is_none()
+            && out.is_none()
+            && !overwrite_input
+            && method.is_none()
+            && !keepdims
+            && weights.is_none()
+        {
+            return Ok(quantile_fn.call1((a.bind(py), q.bind(py)))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -82382,7 +82535,7 @@ fn quantile(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let axis = match extract_axis_spec(py, axis_for_parse, "quantile") {
+    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "quantile") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
         Ok(Some(_)) => return fallback(),
@@ -82725,26 +82878,28 @@ fn make_mask(
     shrink: bool,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let m_for_fallback = m.clone_ref(py);
-    let dtype_for_fallback = dtype.as_ref().map(|value| value.clone_ref(py));
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let make_mask_fn = cached_numpy_ma_make_mask(py)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "copy"), copy)?;
-        kwargs.set_item(intern!(py, "shrink"), shrink)?;
-        if let Some(dtype_val) = &dtype_for_fallback {
-            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
-        }
-        Ok(make_mask_fn
-            .call((m_for_fallback.bind(py),), Some(&kwargs))?
-            .unbind())
-    };
-
     let source = m.bind(py);
     let nomask = cached_numpy_ma_nomask(py)?;
     if source.is(nomask) {
         return Ok(nomask.clone().unbind());
     }
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let make_mask_fn = cached_numpy_ma_make_mask(py)?;
+        if !copy && shrink && dtype.as_ref().is_none_or(|d| d.bind(py).is_none()) {
+            return Ok(make_mask_fn.call1((m.bind(py),))?.unbind());
+        }
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "copy"), copy)?;
+        kwargs.set_item(intern!(py, "shrink"), shrink)?;
+        if let Some(dtype_val) = dtype.as_ref().filter(|d| !d.bind(py).is_none()) {
+            kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
+        }
+        Ok(make_mask_fn
+            .call((m.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
     if let Some(dtype_val) = &dtype
         && !dtype_val.bind(py).is_none()
     {
@@ -82763,25 +82918,25 @@ fn make_mask(
 #[pyfunction]
 #[pyo3(signature = (shape, dtype=None))]
 fn masked_all(py: Python<'_>, shape: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    let dtype_for_fallback = dtype.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let masked_all_fn = cached_numpy_ma_masked_all(py)?;
-        let kwargs = PyDict::new(py);
-        if let Some(dtype_val) = &dtype_for_fallback {
+        if let Some(dtype_val) = dtype.as_ref().filter(|d| !d.bind(py).is_none()) {
+            let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
+            return Ok(masked_all_fn
+                .call((shape.bind(py),), Some(&kwargs))?
+                .unbind());
         }
-        Ok(masked_all_fn
-            .call((shape.bind(py),), Some(&kwargs))?
-            .unbind())
+        Ok(masked_all_fn.call1((shape.bind(py),))?.unbind())
     };
 
     let shape = match extract_index_shape(py, shape.bind(py), "masked_all") {
         Ok(shape) => shape,
         Err(_) => return fallback(),
     };
-    let dtype = match extract_python_dtype(
+    let dtype = match extract_python_dtype_bound(
         py,
-        dtype.as_ref().map(|value| value.clone_ref(py)),
+        dtype.as_ref().map(|value| value.bind(py)),
         DType::F64,
         "masked_all",
     ) {
@@ -83075,13 +83230,16 @@ fn ifftn(
 #[allow(non_snake_case)]
 fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
     let eigh_fn = cached_numpy_linalg_eigh(py)?;
-    let a_for_fallback = a.clone_ref(py);
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("UPLO", UPLO)?;
     let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(eigh_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
-            .unbind())
+        if UPLO == "L" {
+            Ok(eigh_fn.call1((a.bind(py),))?.unbind())
+        } else {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("UPLO", UPLO)?;
+            Ok(eigh_fn
+                .call((a.bind(py),), Some(&kwargs))?
+                .unbind())
+        }
     };
 
     // STALE-CLIFF class (2026-06-21, same as det/slogdet/inv/solve/eigvalsh): the
@@ -84121,8 +84279,6 @@ fn masked_values(
     copy: bool,
     shrink: bool,
 ) -> PyResult<Py<PyAny>> {
-    let x_for_fallback = x.clone_ref(py);
-    let value_for_fallback = value.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let masked_values_fn = cached_numpy_ma_masked_values(py)?;
         let kwargs = PyDict::new(py);
@@ -84132,7 +84288,7 @@ fn masked_values(
         kwargs.set_item(intern!(py, "shrink"), shrink)?;
         Ok(masked_values_fn
             .call(
-                (x_for_fallback.bind(py), value_for_fallback.bind(py)),
+                (x.bind(py), value.bind(py)),
                 Some(&kwargs),
             )?
             .unbind())
@@ -84209,30 +84365,20 @@ fn ma_ediff1d(
     to_end: Option<Py<PyAny>>,
     to_begin: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let arr_any = cached_numpy_asanyarray(py)?.call1((arr.bind(py),))?;
-    let input_is_masked_array = arr_any.is_instance(cached_numpy_ma_masked_array(py)?)?;
-    let fill_value = if input_is_masked_array {
-        arr_any.getattr(intern!(py, "fill_value"))?.unbind()
-    } else {
-        cached_numpy_ma_default_fill_value(py)?
-            .call1((&arr_any,))?
-            .unbind()
-    };
-
-    let arr_for_fallback = arr.clone_ref(py);
-    let to_end_for_fallback = to_end.as_ref().map(|value| value.clone_ref(py));
-    let to_begin_for_fallback = to_begin.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let ma_ediff1d_fn = cached_numpy_ma_ediff1d(py)?;
+        if to_end.is_none() && to_begin.is_none() {
+            return Ok(ma_ediff1d_fn.call1((arr.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
-        if let Some(value) = &to_end_for_fallback {
+        if let Some(value) = to_end.as_ref() {
             kwargs.set_item(intern!(py, "to_end"), value.bind(py))?;
         }
-        if let Some(value) = &to_begin_for_fallback {
+        if let Some(value) = to_begin.as_ref() {
             kwargs.set_item(intern!(py, "to_begin"), value.bind(py))?;
         }
         Ok(ma_ediff1d_fn
-            .call((arr_for_fallback.bind(py),), Some(&kwargs))?
+            .call((arr.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -84267,7 +84413,7 @@ fn ma_ediff1d(
             .map_err(|err| map_ma_error("ma_ediff1d", err))?
     };
 
-    let begin = match to_begin {
+    let begin = match to_begin.as_ref() {
         Some(value) => {
             match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_begin)")? {
                 Some(value) => Some(value.ravel()),
@@ -84276,7 +84422,7 @@ fn ma_ediff1d(
         }
         None => None,
     };
-    let end = match to_end {
+    let end = match to_end.as_ref() {
         Some(value) => {
             match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_end)")? {
                 Some(value) => Some(value.ravel()),
@@ -84296,10 +84442,18 @@ fn ma_ediff1d(
             .map_err(|err| map_ma_error("ma_ediff1d", err))?,
     };
 
+    let arr_any = cached_numpy_asanyarray(py)?.call1((arr.bind(py),))?;
+    let input_is_masked_array = arr_any.is_instance(cached_numpy_ma_masked_array(py)?)?;
+    let fill_value = if input_is_masked_array {
+        arr_any.getattr(intern!(py, "fill_value"))?
+    } else {
+        cached_numpy_ma_default_fill_value(py)?.call1((&arr_any,))?
+    };
+
     let py_result = build_numpy_masked_array(py, &result)?;
     py_result
         .bind(py)
-        .call_method1(intern!(py, "set_fill_value"), (fill_value.bind(py),))?;
+        .call_method1(intern!(py, "set_fill_value"), (&fill_value,))?;
     // numpy.ma.ediff1d uses an explicit all-False bool mask (not the
     // nomask scalar) ONLY when to_begin or to_end is provided — in that
     // case numpy's concat path synthesises an explicit mask for the
@@ -85544,26 +85698,14 @@ fn fft_shift_impl(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let np_fn = numpy.getattr(intern!(py, "fft"))?.getattr(numpy_name)?;
-    let x_for_fallback = x.clone_ref(py);
-    let axes_for_fallback = axes.as_ref().map(|v| v.clone_ref(py));
-    let fallback = || -> PyResult<Py<PyAny>> {
+    let x_bound = x.bind(py);
+    if let Some(axes_val) = axes {
         let kwargs = PyDict::new(py);
-        if let Some(value) = axes_for_fallback.as_ref() {
-            kwargs.set_item(intern!(py, "axes"), value.bind(py))?;
-        }
-        Ok(np_fn
-            .call((x_for_fallback.bind(py),), Some(&kwargs))?
-            .unbind())
-    };
-
-    // Passthrough to np.fft.{i}fftshift. The native roll-based path
-    // (UFuncArray::roll/roll_multi) matches numpy's algorithm — a circular shift is
-    // a pure data move — but pays the Py<->Rust bridge's per-call full-size
-    // allocations (extracted Vec + rolled buffer + exported buffer), running
-    // 14-72x slower on non-trivial arrays (1M f64: native 13.1ms vs numpy 0.18ms;
-    // even N=1000 is 1.24x). A circular shift can at best tie numpy, so route to
-    // numpy — same rationale as sort/norm/partition. Parity is exact (it IS numpy).
-    fallback()
+        kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
+        Ok(np_fn.call((x_bound,), Some(&kwargs))?.unbind())
+    } else {
+        Ok(np_fn.call1((x_bound,))?.unbind())
+    }
 }
 
 #[pyfunction]
@@ -87158,11 +87300,10 @@ fn try_zerocopy_put_along_axis(
     let Some(axis) = axis else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !arr.is_exact_instance(&ndarray_type)
-        || !indices.is_exact_instance(&ndarray_type)
-        || !values.is_exact_instance(&ndarray_type)
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !arr.is_exact_instance(ndarray_type)
+        || !indices.is_exact_instance(ndarray_type)
+        || !values.is_exact_instance(ndarray_type)
     {
         return Ok(None);
     }
@@ -87236,6 +87377,7 @@ fn try_zerocopy_put_along_axis(
         4 => "uint32",
         _ => "uint64",
     };
+    let numpy = cached_numpy(py)?;
     let mover = numpy.getattr(mover_name)?;
     let arr_u = arr.call_method1(intern!(py, "view"), (&mover,))?;
     let val_u = values.call_method1(intern!(py, "view"), (&mover,))?;
@@ -87256,10 +87398,10 @@ fn put_along_axis(
     values: Py<PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
-    let arr_for_fallback = arr.clone_ref(py);
-    let indices_for_fallback = indices.clone_ref(py);
-    let values_for_fallback = values.clone_ref(py);
-    let invoke_fallback = || -> PyResult<Py<PyAny>> {
+    let arr_bound = arr.bind(py);
+    let _ = arr_bound.getattr(intern!(py, "ndim"))?;
+
+    let fallback = || -> PyResult<Py<PyAny>> {
         let put_along_axis_fn = cached_numpy_put_along_axis(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(
@@ -87272,20 +87414,18 @@ fn put_along_axis(
         Ok(put_along_axis_fn
             .call(
                 (
-                    arr_for_fallback.bind(py),
-                    indices_for_fallback.bind(py),
-                    values_for_fallback.bind(py),
+                    arr.bind(py),
+                    indices.bind(py),
+                    values.bind(py),
                 ),
                 Some(&kwargs),
             )?
             .unbind())
     };
-    let arr = arr.bind(py);
-    let _ = arr.getattr(intern!(py, "ndim"))?;
 
     // complex128 (16-byte, no primitive mover) delegates; complex64 (8-byte) scatters via the
     // byte-view path below just like any other 8-byte dtype.
-    let arr_dtype_o = arr.getattr(intern!(py, "dtype"))?;
+    let arr_dtype_o = arr_bound.getattr(intern!(py, "dtype"))?;
     let dtype_kind = arr_dtype_o
         .getattr(intern!(py, "kind"))?
         .extract::<String>()?;
@@ -87295,14 +87435,14 @@ fn put_along_axis(
             .extract::<usize>()?
             != 8
     {
-        return invoke_fallback();
+        return fallback();
     }
 
     // Zero-copy in-place typed scatter (explicit axis, equal non-axis dims, int64
     // indices, same-dtype same-shape values); writes straight into arr's buffer and
     // skips the cold extract + copy-back. Bit-identical; broadcast/scalar values,
     // axis=None, OOB indices, and other layouts fall through.
-    if try_zerocopy_put_along_axis(py, arr, indices.bind(py), values.bind(py), axis)?.is_some() {
+    if try_zerocopy_put_along_axis(py, arr_bound, indices.bind(py), values.bind(py), axis)?.is_some() {
         return Ok(py.None());
     }
 
@@ -87312,7 +87452,7 @@ fn put_along_axis(
     // numpy even though only the indexed cells change (int8 scatter 576x). numpy
     // writes only the indexed elements in place and owns the IndexError surface, so
     // delegate. (The zero-copy in-place same-dtype-array fast path above is kept.)
-    invoke_fallback()
+    fallback()
 }
 
 // Generic per-axis gather core for take_along_axis, parameterized by a mover type
@@ -87438,9 +87578,8 @@ fn try_zerocopy_take_along_axis(
     let Some(axis) = axis else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !arr.is_exact_instance(&ndarray_type) || !indices.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !arr.is_exact_instance(ndarray_type) || !indices.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let idx_dtype = indices.getattr(intern!(py, "dtype"))?;
@@ -87505,6 +87644,7 @@ fn try_zerocopy_take_along_axis(
             .getattr(intern!(py, "name"))?
             .extract::<String>()?,
     );
+    let numpy = cached_numpy(py)?;
     let arr_u = arr.call_method1(intern!(py, "view"), (numpy.getattr(mover_name)?,))?;
     let flat = match itemsize {
         1 => gather_along_typed::<u8>(py, numpy, &arr_u, idx_in, "uint8", outer, la, li, inner)?,
@@ -87532,48 +87672,14 @@ fn take_along_axis(
     indices: Py<PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
-    let arr_for_fallback = arr.clone_ref(py);
-    let indices_for_fallback = indices.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let take_along_axis_fn = cached_numpy_take_along_axis(py)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(
-            "axis",
-            match axis {
-                Some(axis) => axis.into_pyobject(py)?.into_any(),
-                None => py.None().into_bound(py),
-            },
-        )?;
-        Ok(take_along_axis_fn
-            .call(
-                (arr_for_fallback.bind(py), indices_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
-    };
-
-    // Check for complex dtype and fallback to numpy
-    let numpy = cached_numpy(py)?;
-    let arr_dtype_o = numpy
-        .call_method1(intern!(py, "asarray"), (arr.bind(py),))?
-        .getattr(intern!(py, "dtype"))?;
-    let dtype_kind = arr_dtype_o
-        .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    let dtype_itemsize = arr_dtype_o
-        .getattr(intern!(py, "itemsize"))?
-        .extract::<usize>()?;
-    // complex128 (16-byte, no primitive mover) delegates; complex64 (8-byte) is handled by the
-    // byte-view gather below just like every other 8-byte dtype.
-    if dtype_kind == "c" && dtype_itemsize != 8 {
-        return fallback();
-    }
+    let arr_bound = arr.bind(py);
+    let indices_bound = indices.bind(py);
 
     // Zero-copy per-axis typed gather (explicit axis, equal non-axis dims, int64
     // indices); covers int/float/bool/complex64 via a uintN bit-view. Skips the cold extract +
     // rebuild. Bit-identical; broadcast, axis=None, OOB indices, and other layouts
     // fall through.
-    if let Some(out) = try_zerocopy_take_along_axis(py, arr.bind(py), indices.bind(py), axis)? {
+    if let Some(out) = try_zerocopy_take_along_axis(py, arr_bound, indices_bound, axis)? {
         return Ok(out);
     }
 
@@ -87583,7 +87689,21 @@ fn take_along_axis(
     // across the export bridge — 2.5-5.3x slower than numpy. numpy's take_along_axis
     // is a strided gather that owns the exact broadcast + IndexError surface, so
     // delegate. (The zero-copy equal-non-axis-dim fast path above is kept.)
-    fallback()
+    let take_along_axis_fn = cached_numpy_take_along_axis(py)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(
+        "axis",
+        match axis {
+            Some(axis) => axis.into_pyobject(py)?.into_any(),
+            None => py.None().into_bound(py),
+        },
+    )?;
+    Ok(take_along_axis_fn
+        .call(
+            (arr_bound, indices_bound),
+            Some(&kwargs),
+        )?
+        .unbind())
 }
 
 /// The process-lifetime `numpy` module handle, imported once instead of on every call.
@@ -87634,6 +87754,15 @@ fn cached_builtins(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     Ok(BUILTINS_MODULE
         .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
             Ok(py.import("builtins")?.unbind())
+        })?
+        .bind(py))
+}
+
+fn cached_builtins_int(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static BUILTINS_INT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(BUILTINS_INT
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_builtins(py)?.getattr(intern!(py, "int"))?.unbind())
         })?
         .bind(py))
 }
@@ -90130,36 +90259,38 @@ fn prod(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let numpy = cached_numpy(py)?;
-    let prod_fn = numpy.getattr(intern!(py, "prod"))?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let initial_for_fallback = initial.as_ref().map(|v| v.clone_ref(py));
-    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
 
     let fallback = || -> PyResult<Py<PyAny>> {
+        let prod_fn = cached_numpy(py)?.getattr(intern!(py, "prod"))?;
+        if axis.is_none()
+            && dtype.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && initial.is_none()
+            && where_.is_none()
+            && kwargs.is_none_or(|kw| kw.is_empty())
+        {
+            return Ok(prod_fn.call1((a.bind(py),))?.unbind());
+        }
         let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(dt) = dtype_for_fallback.as_ref() {
+        if let Some(dt) = dtype.as_ref() {
             kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         keepdims.set_numpy_kwarg(py, &kw)?;
-        if let Some(init) = initial_for_fallback.as_ref() {
+        if let Some(init) = initial.as_ref() {
             kw.set_item(intern!(py, "initial"), init.bind(py))?;
         }
-        if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item(intern!(py, "where"), w.bind(py))?;
+        if let Some(w) = where_.as_ref() {
+            kw.set_item(intern!(py, "where"), w)?;
         }
         Ok(prod_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .call((a.bind(py),), Some(&kw))?
             .unbind())
     };
 
@@ -90183,9 +90314,8 @@ fn prod(
     }
 
     // A `keepdims` only numpy can interpret - an explicit `None`, a numpy bool, an int - has no
-    // native meaning, so hand the raw object back rather than guessing at it. Shadowing here
-    // keeps every kernel below on a plain `bool`; the closure above still holds the original.
-    let Some(keepdims) = keepdims.native() else {
+    // native meaning, so hand the raw object back rather than guessing at it.
+    let Some(keepdims_bool) = keepdims.native() else {
         return fallback();
     };
 
@@ -90209,21 +90339,21 @@ fn prod(
     // slower on the contiguous axis than the strided outer axes; fan the independent lanes across the
     // rayon pool (bit-exact, see complex_prod_lastaxis_typed). Other axes/dtypes fall through to the
     // f64/int/extract paths (numpy is already SIMD-fast on the outer axes).
-    if let Some(out) = try_zerocopy_complex_prod_lastaxis(py, a.bind(py), axis_val, keepdims)? {
+    if let Some(out) = try_zerocopy_complex_prod_lastaxis(py, a.bind(py), axis_val, keepdims_bool)? {
         return Ok(out);
     }
 
     // Zero-copy sequential product reduction for C-contiguous f64 ndarrays; skips
     // the cold extract + reduce-build Vecs. numpy.prod multiplies sequentially, so
     // this is bit-identical. Tuple axes and other dtypes fall through.
-    if let Some(out) = try_zerocopy_f64_prod(py, a.bind(py), axis_val, keepdims)? {
+    if let Some(out) = try_zerocopy_f64_prod(py, a.bind(py), axis_val, keepdims_bool)? {
         return Ok(out);
     }
 
     // Zero-copy integer prod (full reduction): wrapping product with numpy's
     // accumulator promotion (signed->int64, unsigned->uint64). Skips the cold,
     // for-wide-ints lossy extract Vec. keepdims/per-axis/non-integer fall through.
-    if !keepdims && let Some(out) = try_zerocopy_int_prod(py, a.bind(py), axis_val)? {
+    if !keepdims_bool && let Some(out) = try_zerocopy_int_prod(py, a.bind(py), axis_val)? {
         return Ok(out);
     }
 
@@ -90245,8 +90375,8 @@ fn prod(
     // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
     // fast paths into the cold extract → native fold (~47x slower than numpy's
     // cache-blocked strided reduction). Delegate them to numpy.
-    if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
+    if let Ok(ndarray_type) = cached_ndarray_type(py)
+        && a.bind(py).is_exact_instance(ndarray_type)
         && !a
             .bind(py)
             .getattr(intern!(py, "flags"))?
@@ -90263,16 +90393,12 @@ fn prod(
     };
 
     // Call native Rust reduce_prod
-    let result = match array.reduce_prod(axis_val, keepdims) {
+    let result = match array.reduce_prod(axis_val, keepdims_bool) {
         Ok(r) => r,
         Err(_) => return fallback(),
     };
 
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -90324,6 +90450,14 @@ fn mean(
     }
     // Passthrough to NumPy for everything else - see sum() comment
     let mean_fn = numpy.getattr(intern!(py, "mean"))?;
+    if axis.is_none()
+        && dtype.is_none()
+        && out.is_none()
+        && matches!(keepdims, KeepdimsArg::NotGiven)
+        && kwargs.is_none_or(|kw| kw.is_empty())
+    {
+        return Ok(mean_fn.call1((a.bind(py),))?.unbind());
+    }
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
         kw.set_item(intern!(py, "axis"), ax.bind(py))?;
@@ -90419,7 +90553,7 @@ fn parse_ddof_arg(value: &Bound<'_, PyAny>) -> PyResult<DdofArg> {
 // (11ms probed) and the conversion copy alone would lose.
 fn var_std_int_input_to_f64(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     a: &Py<PyAny>,
     dtype: &Option<Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
@@ -90428,8 +90562,7 @@ fn var_std_int_input_to_f64(
         return Ok(None);
     }
     let ab = a.bind(py);
-    let ndt = cached_ndarray_type(numpy.py())?.clone();
-    if !ab.is_exact_instance(&ndt) {
+    if !ab.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let Ok(kind) = ab
@@ -90453,7 +90586,7 @@ fn var_std_int_input_to_f64(
     Ok(Some(
         ab.call_method1(
             intern!(py, "astype"),
-            (numpy.getattr(intern!(py, "float64"))?,),
+            (cached_float64_type(py)?,),
         )?
         .unbind(),
     ))
@@ -90501,8 +90634,7 @@ fn py_std(
         && let DdofArg::Native(d) = &ddof
         && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
     {
-        return Ok(numpy
-            .getattr(intern!(py, "float64"))?
+        return Ok(cached_float64_type(py)?
             .call1((v.sqrt(),))?
             .unbind());
     }
@@ -90583,6 +90715,15 @@ fn py_std(
         return Ok(o);
     }
     let std_fn = numpy.getattr(intern!(py, "std"))?;
+    if axis.is_none()
+        && dtype.is_none()
+        && out.is_none()
+        && matches!(ddof, DdofArg::Native(0))
+        && matches!(keepdims, KeepdimsArg::NotGiven)
+        && kwargs.is_none_or(|kw| kw.is_empty())
+    {
+        return Ok(std_fn.call1((a.bind(py),))?.unbind());
+    }
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
         kw.set_item(intern!(py, "axis"), ax.bind(py))?;
@@ -90639,7 +90780,7 @@ fn var(
         && let DdofArg::Native(d) = &ddof
         && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
     {
-        return Ok(numpy.getattr(intern!(py, "float64"))?.call1((v,))?.unbind());
+        return Ok(cached_float64_type(py)?.call1((v,))?.unbind());
     }
     // Native last-axis fast path — see py_std. take_sqrt = false for var.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -90715,6 +90856,15 @@ fn var(
         return Ok(o);
     }
     let var_fn = numpy.getattr(intern!(py, "var"))?;
+    if axis.is_none()
+        && dtype.is_none()
+        && out.is_none()
+        && matches!(ddof, DdofArg::Native(0))
+        && matches!(keepdims, KeepdimsArg::NotGiven)
+        && kwargs.is_none_or(|kw| kw.is_empty())
+    {
+        return Ok(var_fn.call1((a.bind(py),))?.unbind());
+    }
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
         kw.set_item(intern!(py, "axis"), ax.bind(py))?;
@@ -91200,12 +91350,6 @@ fn py_min(
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let initial_for_fallback = initial.as_ref().map(|v| v.clone_ref(py));
-    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
-
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.min` was resolved off the live module
     // before any gate had run, so every call that engages natively paid a `getattr` for a
     // callable it never invokes. Moving it inside the closure keeps the property that matters -
@@ -91213,21 +91357,30 @@ fn py_min(
     // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
         let min_fn = numpy.getattr(intern!(py, "min"))?;
+        if axis.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && initial.is_none()
+            && where_.is_none()
+            && kwargs.is_none_or(|kw| kw.is_empty())
+        {
+            return Ok(min_fn.call1((a.bind(py),))?.unbind());
+        }
         let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         keepdims.set_numpy_kwarg(py, &kw)?;
-        if let Some(init) = initial_for_fallback.as_ref() {
+        if let Some(init) = initial.as_ref() {
             kw.set_item(intern!(py, "initial"), init.bind(py))?;
         }
-        if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item(intern!(py, "where"), w.bind(py))?;
+        if let Some(w) = where_.as_ref() {
+            kw.set_item(intern!(py, "where"), w)?;
         }
-        Ok(min_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
+        Ok(min_fn.call((a.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, initial, or where parameters
@@ -91401,11 +91554,7 @@ fn py_min(
         Err(_) => return fallback(),
     };
 
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // Native Rust max with fallback for unsupported parameters.
@@ -91424,12 +91573,6 @@ fn py_max(
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let initial_for_fallback = initial.as_ref().map(|v| v.clone_ref(py));
-    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
-
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.max` was resolved off the live module
     // before any gate had run, so every call that engages natively paid a `getattr` for a
     // callable it never invokes. Moving it inside the closure keeps the property that matters -
@@ -91437,21 +91580,30 @@ fn py_max(
     // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
         let max_fn = numpy.getattr(intern!(py, "max"))?;
+        if axis.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && initial.is_none()
+            && where_.is_none()
+            && kwargs.is_none_or(|kw| kw.is_empty())
+        {
+            return Ok(max_fn.call1((a.bind(py),))?.unbind());
+        }
         let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         keepdims.set_numpy_kwarg(py, &kw)?;
-        if let Some(init) = initial_for_fallback.as_ref() {
+        if let Some(init) = initial.as_ref() {
             kw.set_item(intern!(py, "initial"), init.bind(py))?;
         }
-        if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item(intern!(py, "where"), w.bind(py))?;
+        if let Some(w) = where_.as_ref() {
+            kw.set_item(intern!(py, "where"), w)?;
         }
-        Ok(max_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
+        Ok(max_fn.call((a.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, initial, or where parameters
@@ -91607,11 +91759,7 @@ fn py_max(
         Err(_) => return fallback(),
     };
 
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // amax is an alias for max
@@ -91662,26 +91810,28 @@ fn all(
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
-    let all_fn = numpy.getattr(intern!(py, "all"))?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
-
     let fallback = || -> PyResult<Py<PyAny>> {
+        let all_fn = numpy.getattr(intern!(py, "all"))?;
+        if axis.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && where_.is_none()
+            && kwargs.is_none_or(|kw| kw.is_empty())
+        {
+            return Ok(all_fn.call1((a.bind(py),))?.unbind());
+        }
         let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         keepdims.set_numpy_kwarg(py, &kw)?;
-        if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item(intern!(py, "where"), w.bind(py))?;
+        if let Some(w) = where_.as_ref() {
+            kw.set_item(intern!(py, "where"), w)?;
         }
-        Ok(all_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
+        Ok(all_fn.call((a.bind(py),), Some(&kw))?.unbind())
     };
 
     // Non-native byte order delegates whole (`deadlock-audit-2kqw3`).
@@ -91768,11 +91918,7 @@ fn all(
         Err(_) => return fallback(),
     };
 
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // Native Rust any with fallback for unsupported parameters.
@@ -91788,26 +91934,28 @@ fn any(
 ) -> PyResult<Py<PyAny>> {
     let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
     let numpy = cached_numpy(py)?;
-    let any_fn = numpy.getattr(intern!(py, "any"))?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
-
     let fallback = || -> PyResult<Py<PyAny>> {
+        let any_fn = numpy.getattr(intern!(py, "any"))?;
+        if axis.is_none()
+            && out.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && where_.is_none()
+            && kwargs.is_none_or(|kw| kw.is_empty())
+        {
+            return Ok(any_fn.call1((a.bind(py),))?.unbind());
+        }
         let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         keepdims.set_numpy_kwarg(py, &kw)?;
-        if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item(intern!(py, "where"), w.bind(py))?;
+        if let Some(w) = where_.as_ref() {
+            kw.set_item(intern!(py, "where"), w)?;
         }
-        Ok(any_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
+        Ok(any_fn.call((a.bind(py),), Some(&kw))?.unbind())
     };
 
     // Fallback for out, keepdims, or where parameters
@@ -91892,11 +92040,7 @@ fn any(
         Err(_) => return fallback(),
     };
 
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // Per-lane complex cumsum along the LAST (contiguous) axis. numpy's complex cumsum is a single-threaded
@@ -93321,26 +93465,24 @@ fn cumsum(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let cumsum_fn = numpy.getattr(intern!(py, "cumsum"))?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
 
     let fallback = || -> PyResult<Py<PyAny>> {
+        let cumsum_fn = numpy.getattr(intern!(py, "cumsum"))?;
+        if axis.is_none() && dtype.is_none() && out.is_none() {
+            return Ok(cumsum_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(dt) = dtype_for_fallback.as_ref() {
+        if let Some(dt) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(cumsum_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -93530,26 +93672,24 @@ fn cumprod(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let cumprod_fn = numpy.getattr(intern!(py, "cumprod"))?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
 
     let fallback = || -> PyResult<Py<PyAny>> {
+        let cumprod_fn = numpy.getattr(intern!(py, "cumprod"))?;
+        if axis.is_none() && dtype.is_none() && out.is_none() {
+            return Ok(cumprod_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(dt) = dtype_for_fallback.as_ref() {
+        if let Some(dt) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dt.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(cumprod_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -94657,10 +94797,6 @@ fn argmax(
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.argmax` was resolved off the live module
     // before any gate had run, so every call that engages natively paid a `getattr` for a
     // callable it never invokes. Moving it inside the closure keeps the property that matters -
@@ -94668,15 +94804,18 @@ fn argmax(
     // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
         let argmax_fn = numpy.getattr(intern!(py, "argmax"))?;
+        if axis.is_none() && out.is_none() && kwargs.is_none_or(|kw| kw.is_empty()) {
+            return Ok(argmax_fn.call1((a.bind(py),))?.unbind());
+        }
         let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(argmax_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .call((a.bind(py),), Some(&kw))?
             .unbind())
     };
 
@@ -94727,10 +94866,10 @@ fn argmax(
     // datetime64/timedelta64 are int64-backed and their argmin/argmax by int64 ordering == temporal
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal
     // reduce). NaT (i64::MIN) has subtle numpy arg semantics -> defer if any NaT is present.
-    let a = if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndt)
-        && let Ok(kind) = a
-            .bind(py)
+    let a_bound = a.bind(py);
+    let dt_view = if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
+        && a_bound.is_exact_instance(&ndt)
+        && let Ok(kind) = a_bound
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
             .and_then(|k| k.extract::<String>())
@@ -94738,32 +94877,31 @@ fn argmax(
     {
         if numpy
             .getattr(intern!(py, "isnat"))?
-            .call1((a.bind(py),))?
+            .call1((a_bound,))?
             .call_method0(intern!(py, "any"))?
             .extract::<bool>()?
         {
             return fallback();
         }
-        a.bind(py)
-            .call_method1(intern!(py, "view"), ("int64",))?
-            .unbind()
+        Some(a_bound.call_method1(intern!(py, "view"), ("int64",))?)
     } else {
-        a
+        None
     };
+    let a_eff = dt_view.as_ref().unwrap_or(a_bound);
 
     // Zero-copy integer fast path (axis=None): scan the buffer for the first
     // maximum directly instead of widening to an f64 Vec (~55x slower for int64).
-    if let Some(out) = try_zerocopy_int_argextreme(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_int_argextreme(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Single-pass SIMD f64 fast path (axis=None): ~5-13x faster than the cold
     // extract_precise → reduce_argmax scalar scan (NaN arrays defer to numpy).
-    if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_f64_argextreme(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Flat bool argmax (np.argmax(cond) find-first-True): bool missed the int/f64 paths and fell
     // to the cold bool->f64 extract (~36000x). Short-circuit u64-word scan for the first True.
-    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Narrow ints (1/2-byte) along the LAST axis: numpy's SIMD argmax (16-64
@@ -94774,7 +94912,7 @@ fn argmax(
     // arms in try_zerocopy_int_argextreme_axis. (Flat narrow ints are split
     // in try_zerocopy_int_argextreme above.)
     if let Some(ax) = axis_val
-        && let Ok(dt) = a.bind(py).getattr(intern!(py, "dtype"))
+        && let Ok(dt) = a_eff.getattr(intern!(py, "dtype"))
         && let Ok(k) = dt
             .getattr(intern!(py, "kind"))
             .and_then(|x| x.extract::<String>())
@@ -94784,7 +94922,7 @@ fn argmax(
             .and_then(|x| x.extract::<usize>())
             .map(|s| s <= 2)
             .unwrap_or(false)
-        && a.bind(py)
+        && a_eff
             .getattr(intern!(py, "ndim"))
             .and_then(|n| n.extract::<usize>())
             .map(|nd| {
@@ -94798,37 +94936,37 @@ fn argmax(
     // Zero-copy contiguous last-axis fast path (f64 SIMD + every int width): the
     // per-axis extract_precise → reduce_argmax path was ~3x (f64) to ~50x (int64)
     // slower than numpy.
-    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f64 fast path (e.g. argmax(M, axis=0)): see argmin.
-    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f32 fast path (f32 had no arg-axis path -> delegated ~parity).
-    if let Some(out) = try_zerocopy_f32_argextreme_axis(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_f32_argextreme_axis(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f16 fast path: numpy widens f16->f32 per column; native strided
     // parallel scan is bit-exact (index-based, defers NaN) and far faster.
-    if let Some(out) = try_zerocopy_f16_argextreme_axis(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_f16_argextreme_axis(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis integer fast path (e.g. argmax(int_M, axis=0)).
-    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // f16 FLAT argmax: numpy widens f16->f32 to scan (~68ms@16M). A direct uint16-view parallel
     // argextreme is bit-exact (index-based, defers NaN) and far faster.
     if axis_val.is_none()
-        && numpy_dtype_is_f16(a.bind(py))
-        && let Some(out) = try_zerocopy_f16_argextreme_flat(py, a.bind(py), true)?
+        && numpy_dtype_is_f16(a_eff)
+        && let Some(out) = try_zerocopy_f16_argextreme_flat(py, a_eff, true)?
     {
         return Ok(out);
     }
     // f32/f16 argmax: numpy's native argextreme beats fnp's widening extract->scan
     // (~1.3-35x slower); delegate.
-    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
+    if numpy_dtype_is_f32(a_eff) || numpy_dtype_is_f16(a_eff) {
         return fallback();
     }
 
@@ -94836,9 +94974,8 @@ fn argmax(
     // fast paths into the cold extract → native scan (~1.4-2.8x slower than numpy's
     // strided argextreme). Delegate them to numpy.
     if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
-        && !a
-            .bind(py)
+        && a_eff.is_exact_instance(&ndarray_type)
+        && !a_eff
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
@@ -94847,7 +94984,7 @@ fn argmax(
     }
 
     // Extract input array
-    let array = match extract_precise_numeric_array(py, a.bind(py), "argmax(a)") {
+    let array = match extract_precise_numeric_array(py, a_eff, "argmax(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
@@ -94878,10 +95015,6 @@ fn argmin(
     let keepdims_arg = kwargs.and_then(|kw| kw.get_item("keepdims").ok().flatten());
     let numpy = cached_numpy(py)?;
 
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-
     // THE DELEGATE LOOKUP BELONGS TO THE FALLBACK. `numpy.argmin` was resolved off the live module
     // before any gate had run, so every call that engages natively paid a `getattr` for a
     // callable it never invokes. Moving it inside the closure keeps the property that matters -
@@ -94889,15 +95022,18 @@ fn argmin(
     // the live module at the moment of delegation - and takes it off the fast path.
     let fallback = || -> PyResult<Py<PyAny>> {
         let argmin_fn = numpy.getattr(intern!(py, "argmin"))?;
+        if axis.is_none() && out.is_none() && kwargs.is_none_or(|kw| kw.is_empty()) {
+            return Ok(argmin_fn.call1((a.bind(py),))?.unbind());
+        }
         let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kw.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kw.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(argmin_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
+            .call((a.bind(py),), Some(&kw))?
             .unbind())
     };
 
@@ -94952,10 +95088,10 @@ fn argmin(
     // datetime64/timedelta64 are int64-backed and their argmin/argmax by int64 ordering == temporal
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal
     // reduce). NaT (i64::MIN) has subtle numpy arg semantics -> defer if any NaT is present.
-    let a = if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndt)
-        && let Ok(kind) = a
-            .bind(py)
+    let a_bound = a.bind(py);
+    let dt_view = if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
+        && a_bound.is_exact_instance(&ndt)
+        && let Ok(kind) = a_bound
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
             .and_then(|k| k.extract::<String>())
@@ -94963,39 +95099,38 @@ fn argmin(
     {
         if numpy
             .getattr(intern!(py, "isnat"))?
-            .call1((a.bind(py),))?
+            .call1((a_bound,))?
             .call_method0(intern!(py, "any"))?
             .extract::<bool>()?
         {
             return fallback();
         }
-        a.bind(py)
-            .call_method1(intern!(py, "view"), ("int64",))?
-            .unbind()
+        Some(a_bound.call_method1(intern!(py, "view"), ("int64",))?)
     } else {
-        a
+        None
     };
+    let a_eff = dt_view.as_ref().unwrap_or(a_bound);
 
     // Zero-copy integer fast path (axis=None): scan the buffer for the first
     // minimum directly instead of widening to an f64 Vec (~55x slower for int64).
-    if let Some(out) = try_zerocopy_int_argextreme(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_int_argextreme(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Single-pass SIMD f64 fast path (axis=None): ~5-13x faster than the cold
     // extract_precise → reduce_argmin scalar scan (NaN arrays defer to numpy).
-    if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_f64_argextreme(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Flat bool argmin (find-first-False): same cold-extract gap as argmax; short-circuit
     // u64-word scan skipping all-True words for the first False.
-    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Narrow ints (1/2-byte) along the LAST axis: numpy's SIMD argmin beats
     // the scalar per-lane scan there; NON-last axes fall through to the
     // native narrow arms (see the argmax twin for the pinned 57x asymmetry).
     if let Some(ax) = axis_val
-        && let Ok(dt) = a.bind(py).getattr(intern!(py, "dtype"))
+        && let Ok(dt) = a_eff.getattr(intern!(py, "dtype"))
         && let Ok(k) = dt
             .getattr(intern!(py, "kind"))
             .and_then(|x| x.extract::<String>())
@@ -95005,7 +95140,7 @@ fn argmin(
             .and_then(|x| x.extract::<usize>())
             .map(|s| s <= 2)
             .unwrap_or(false)
-        && a.bind(py)
+        && a_eff
             .getattr(intern!(py, "ndim"))
             .and_then(|n| n.extract::<usize>())
             .map(|nd| {
@@ -95019,39 +95154,39 @@ fn argmin(
     // Zero-copy contiguous last-axis fast path (f64 SIMD + every int width): the
     // per-axis extract_precise → reduce_argmin path was ~3x (f64) to ~50x (int64)
     // slower than numpy.
-    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f64 fast path (e.g. argmin(M, axis=0)): the per-axis
     // extract_precise → reduce_argmin path copies the whole array then scans
     // strided per-column (~2.8x numpy on a 1000x1000). Defers NaN to numpy.
-    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f32 fast path (f32 had no arg-axis path -> delegated ~parity).
-    if let Some(out) = try_zerocopy_f32_argextreme_axis(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_f32_argextreme_axis(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f16 fast path: numpy widens f16->f32 per column; native strided
     // parallel scan is bit-exact (index-based, defers NaN) and far faster.
-    if let Some(out) = try_zerocopy_f16_argextreme_axis(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_f16_argextreme_axis(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis integer fast path (e.g. argmin(int_M, axis=0)).
-    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // f16 FLAT argmin: numpy widens f16->f32 to scan (~68ms@16M). A direct uint16-view parallel
     // argextreme is bit-exact (index-based, defers NaN) and far faster.
     if axis_val.is_none()
-        && numpy_dtype_is_f16(a.bind(py))
-        && let Some(out) = try_zerocopy_f16_argextreme_flat(py, a.bind(py), false)?
+        && numpy_dtype_is_f16(a_eff)
+        && let Some(out) = try_zerocopy_f16_argextreme_flat(py, a_eff, false)?
     {
         return Ok(out);
     }
     // f32/f16 argmin: numpy's native argextreme beats fnp's widening extract->scan
     // (~1.3-34x slower); delegate.
-    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
+    if numpy_dtype_is_f32(a_eff) || numpy_dtype_is_f16(a_eff) {
         return fallback();
     }
 
@@ -95059,9 +95194,8 @@ fn argmin(
     // fast paths into the cold extract → native scan (~1.4-2.8x slower than numpy's
     // strided argextreme). Delegate them to numpy.
     if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
-        && !a
-            .bind(py)
+        && a_eff.is_exact_instance(&ndarray_type)
+        && !a_eff
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
@@ -95070,7 +95204,7 @@ fn argmin(
     }
 
     // Extract input array
-    let array = match extract_precise_numeric_array(py, a.bind(py), "argmin(a)") {
+    let array = match extract_precise_numeric_array(py, a_eff, "argmin(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
@@ -113090,23 +113224,21 @@ fn ptp(
     #[pyo3(from_py_with = parse_keepdims_arg)] keepdims: KeepdimsArg,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let ptp_fn = numpy.getattr(intern!(py, "ptp"))?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-
     let fallback = || -> PyResult<Py<PyAny>> {
+        let ptp_fn = numpy.getattr(intern!(py, "ptp"))?;
+        if axis.is_none() && out.is_none() && matches!(keepdims, KeepdimsArg::NotGiven) {
+            return Ok(ptp_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
-        if let Some(ax) = axis_for_fallback.as_ref() {
+        if let Some(ax) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
         }
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         keepdims.set_numpy_kwarg(py, &kwargs)?;
         Ok(ptp_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -114120,17 +114252,18 @@ fn around(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let around_fn = numpy.getattr(intern!(py, "around"))?;
-    let a_for_fallback = a.clone_ref(py);
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let around_fn = numpy.getattr(intern!(py, "around"))?;
+        if decimals == 0 && out.as_ref().is_none_or(|o| o.bind(py).is_none()) {
+            return Ok(around_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "decimals"), decimals)?;
-        if let Some(o) = out_for_fallback.as_ref() {
+        if let Some(o) = out.as_ref() {
             kwargs.set_item(intern!(py, "out"), o.bind(py))?;
         }
         Ok(around_fn
-            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .call((a.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -115388,17 +115521,10 @@ fn convolve(
 
 fn convolve_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let convolve_fn = numpy.getattr(intern!(py, "convolve"))?;
-    let a_for_fallback = a.clone_ref(py);
-    let v_for_fallback = v.clone_ref(py);
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "mode"), mode)?;
-        Ok(convolve_fn
-            .call(
-                (a_for_fallback.bind(py), v_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
+        Ok(numpy
+            .getattr(intern!(py, "convolve"))?
+            .call1((a.bind(py), v.bind(py), mode))?
             .unbind())
     };
 
@@ -115500,8 +115626,6 @@ fn correlate(
 
 fn correlate_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let a_for_fallback = a.clone_ref(py);
-    let v_for_fallback = v.clone_ref(py);
     // The handle is fetched INSIDE the closure and `mode` goes positionally: it is
     // numpy's third positional parameter, so the kwargs dict (and the `PyString` the
     // non-interned `mode` key built inside it) were both avoidable, and the native
@@ -115509,7 +115633,7 @@ fn correlate_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyR
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr(intern!(py, "correlate"))?
-            .call1((a_for_fallback.bind(py), v_for_fallback.bind(py), mode))?
+            .call1((a.bind(py), v.bind(py), mode))?
             .unbind())
     };
 
@@ -115609,23 +115733,6 @@ fn isclose_impl(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let isclose_fn = numpy.getattr(intern!(py, "isclose"))?;
-    let a_for_fallback = a.clone_ref(py);
-    let b_for_fallback = b.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "rtol"), rtol)?;
-        kwargs.set_item(intern!(py, "atol"), atol)?;
-        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
-        Ok(isclose_fn
-            .call(
-                (a_for_fallback.bind(py), b_for_fallback.bind(py)),
-                Some(&kwargs),
-            )?
-            .unbind())
-    };
-
     // Zero-copy fast path: same-shape f64 C-contiguous ndarray operands read
     // both buffers and write the predicate straight to the output, skipping the
     // three cold extract/build Vecs. Bit-identical; all else falls through.
@@ -115658,9 +115765,9 @@ fn isclose_impl(
     {
         let a_bound = a.bind(py);
         let b_bound = b.bind(py);
-        let ndarray_t = cached_ndarray_type(numpy.py())?.clone();
-        if a_bound.is_exact_instance(&ndarray_t)
-            && !b_bound.is_instance(&ndarray_t)?
+        let ndarray_t = cached_ndarray_type(py)?;
+        if a_bound.is_exact_instance(ndarray_t)
+            && !b_bound.is_instance(ndarray_t)?
             && !b_bound.hasattr("__len__")?
             && b_bound.extract::<f64>().is_ok_and(f64::is_finite)
         {
@@ -115669,6 +115776,7 @@ fn isclose_impl(
                 .getattr(intern!(py, "kind"))?
                 .extract::<String>()?;
             if kind == "i" || kind == "u" || kind == "b" {
+                let numpy = cached_numpy(py)?;
                 let a_f64 = numpy.call_method1(
                     intern!(py, "asarray"),
                     (a_bound, numpy.getattr(intern!(py, "float64"))?),
@@ -115681,6 +115789,23 @@ fn isclose_impl(
             }
         }
     }
+
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = cached_numpy(py)?;
+        let isclose_fn = numpy.getattr(intern!(py, "isclose"))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "rtol"), rtol)?;
+        kwargs.set_item(intern!(py, "atol"), atol)?;
+        kwargs.set_item(intern!(py, "equal_nan"), equal_nan)?;
+        Ok(isclose_fn
+            .call(
+                (a.bind(py), b.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+
+    let numpy = cached_numpy(py)?;
     // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
     if noncontiguous_ndarray(numpy, a.bind(py))? || noncontiguous_ndarray(numpy, b.bind(py))? {
         return fallback();
@@ -118627,20 +118752,20 @@ fn ediff1d(
     to_begin: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let ediff1d_fn = numpy.getattr(intern!(py, "ediff1d"))?;
-    let ary_ref = ary.clone_ref(py);
-    let to_end_ref = to_end.as_ref().map(|v| v.clone_ref(py));
-    let to_begin_ref = to_begin.as_ref().map(|v| v.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let ediff1d_fn = numpy.getattr(intern!(py, "ediff1d"))?;
+        if to_end.is_none() && to_begin.is_none() {
+            return Ok(ediff1d_fn.call1((ary.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
-        if let Some(te) = to_end_ref.as_ref() {
+        if let Some(ref te) = to_end {
             kwargs.set_item(intern!(py, "to_end"), te.bind(py))?;
         }
-        if let Some(tb) = to_begin_ref.as_ref() {
+        if let Some(ref tb) = to_begin {
             kwargs.set_item(intern!(py, "to_begin"), tb.bind(py))?;
         }
         Ok(ediff1d_fn
-            .call((ary_ref.bind(py),), Some(&kwargs))?
+            .call((ary.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -118752,7 +118877,7 @@ fn ediff1d(
 
     let mut parts: Vec<UFuncArray> = Vec::with_capacity(3);
 
-    if let Some(tb) = to_begin {
+    if let Some(ref tb) = to_begin {
         let tb_array = match extract_precise_numeric_array(py, tb.bind(py), "ediff1d(to_begin)") {
             Ok(arr) => arr.ravel(),
             Err(_) => return fallback(),
@@ -118763,7 +118888,7 @@ fn ediff1d(
 
     parts.push(diff_result);
 
-    if let Some(te) = to_end {
+    if let Some(ref te) = to_end {
         let te_array = match extract_precise_numeric_array(py, te.bind(py), "ediff1d(to_end)") {
             Ok(arr) => arr.ravel(),
             Err(_) => return fallback(),
@@ -121246,6 +121371,15 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_submodule(&lib_module)?;
         m.add("lib", lib_module)?;
     }
+
+    if let Ok(mode_str) = std::env::var("FNP_RUNTIME_MODE") {
+        let _ = set_runtime_mode(&mode_str);
+    }
+
+    m.add_function(wrap_pyfunction!(set_runtime_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(get_runtime_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(get_runtime_decision_count, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_runtime_decisions, m)?)?;
 
     // `__all__` is bound LAST, deliberately. PyO3's `PyModule::add` appends the
     // added name to `__all__`, so binding it early meant every subsequent `add`
@@ -180279,5 +180413,114 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 );
             }
         });
+    }
+
+    #[test]
+    fn runtime_mode_integration_and_audit_ledger() {
+        use super::{
+            clear_runtime_decisions, current_runtime_mode, get_runtime_decision_count,
+            get_runtime_mode, record_runtime_decision, set_runtime_mode, CompatibilityClass,
+            RuntimeMode,
+        };
+        use pyo3::prelude::*;
+
+        // Reset mode and ledger
+        let _ = set_runtime_mode("strict");
+        clear_runtime_decisions();
+        assert_eq!(current_runtime_mode(), RuntimeMode::Strict);
+        assert_eq!(get_runtime_mode(), "strict");
+        assert_eq!(get_runtime_decision_count(), 0);
+
+        // Switch to hardened
+        set_runtime_mode("hardened").expect("set_runtime_mode hardened");
+        assert_eq!(current_runtime_mode(), RuntimeMode::Hardened);
+        assert_eq!(get_runtime_mode(), "hardened");
+
+        // Record a decision directly
+        let _action = record_runtime_decision(
+            CompatibilityClass::KnownCompatible,
+            0.2,
+            "test_reason",
+            "test note",
+        );
+        assert_eq!(get_runtime_decision_count(), 1);
+
+        clear_runtime_decisions();
+        assert_eq!(get_runtime_decision_count(), 0);
+
+        // Invalid mode rejected
+        assert!(set_runtime_mode("invalid_mode").is_err());
+
+        // Test through Python module
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "test_fnp_runtime_mode").expect("create module");
+            fnp_python(&module).expect("init fnp_python");
+
+            // Python getter
+            let py_mode: String = module
+                .getattr("get_runtime_mode")
+                .expect("get get_runtime_mode")
+                .call0()
+                .expect("call get_runtime_mode")
+                .extract()
+                .expect("extract get_runtime_mode");
+            assert_eq!(py_mode, "hardened");
+
+            // nan_to_num in hardened mode triggers decision logging
+            let test_arr = py
+                .eval(pyo3::ffi::c_str!("[1.0, float('nan'), 3.0]"), None, None)
+                .expect("eval array");
+            let _ = module
+                .getattr("nan_to_num")
+                .expect("getattr nan_to_num")
+                .call1((test_arr,))
+                .expect("call nan_to_num");
+
+            let count: usize = module
+                .getattr("get_runtime_decision_count")
+                .expect("get get_runtime_decision_count")
+                .call0()
+                .expect("call get_runtime_decision_count")
+                .extract()
+                .expect("extract count");
+            assert!(count > 0, "decision count should be > 0 in hardened mode");
+
+            // Clear decisions via module
+            module
+                .getattr("clear_runtime_decisions")
+                .expect("get clear_runtime_decisions")
+                .call0()
+                .expect("call clear_runtime_decisions");
+
+            let cleared_count: usize = module
+                .getattr("get_runtime_decision_count")
+                .expect("get count")
+                .call0()
+                .expect("call count")
+                .extract()
+                .expect("extract cleared count");
+            assert_eq!(cleared_count, 0);
+
+            // Switch back to strict mode
+            module
+                .getattr("set_runtime_mode")
+                .expect("get set_runtime_mode")
+                .call1(("strict",))
+                .expect("call set_runtime_mode strict");
+
+            let final_mode: String = module
+                .getattr("get_runtime_mode")
+                .expect("get_runtime_mode")
+                .call0()
+                .expect("call get_runtime_mode")
+                .extract()
+                .expect("extract final_mode");
+            assert_eq!(final_mode, "strict");
+        });
+
+        // Ensure state is restored
+        let _ = set_runtime_mode("strict");
+        clear_runtime_decisions();
     }
 }

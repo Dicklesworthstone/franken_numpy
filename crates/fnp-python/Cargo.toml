@@ -39,6 +39,7 @@ fnp-ufunc = { path = "../fnp-ufunc", version = "0.3.0" }
 fnp-linalg = { path = "../fnp-linalg", version = "0.3.0" }
 fnp-random = { path = "../fnp-random", version = "0.3.0" }
 fnp-io = { path = "../fnp-io", version = "0.3.0" }
+fnp-runtime = { path = "../fnp-runtime", version = "0.3.0" }
 rayon.workspace = true
 
 [dev-dependencies]
