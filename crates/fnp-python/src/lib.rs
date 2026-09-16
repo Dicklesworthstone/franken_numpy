@@ -4226,6 +4226,13 @@ impl StackHelperKind {
             Self::Horizontal => "hstack",
         }
     }
+
+    fn resolve(self, py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+        match self {
+            Self::Vertical => cached_numpy_vstack(py),
+            Self::Horizontal => cached_numpy_hstack(py),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -4245,6 +4252,16 @@ impl SplitHelperKind {
             Self::Horizontal => "hsplit",
             Self::Vertical => "vsplit",
             Self::Depth => "dsplit",
+        }
+    }
+
+    fn resolve(self, py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+        match self {
+            Self::Equal => cached_numpy_split(py),
+            Self::Flexible => cached_numpy_array_split(py),
+            Self::Horizontal => cached_numpy_hsplit(py),
+            Self::Vertical => cached_numpy_vsplit(py),
+            Self::Depth => cached_numpy_dsplit(py),
         }
     }
 }
@@ -6411,11 +6428,11 @@ fn stack_helper_numpy_fallback(
     dtype: Option<Py<PyAny>>,
     casting: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
+    let func = kind.resolve(py)?;
     let has_dtype = dtype.as_ref().is_some_and(|d| !d.bind(py).is_none());
     let has_casting = casting.is_some();
     if !has_dtype && !has_casting {
-        return Ok(numpy.getattr(kind.context())?.call1((tup.bind(py),))?.unbind());
+        return Ok(func.call1((tup.bind(py),))?.unbind());
     }
     let kwargs = PyDict::new(py);
     if let Some(dtype) = dtype
@@ -6427,9 +6444,7 @@ fn stack_helper_numpy_fallback(
         kwargs.set_item(intern!(py, "casting"), casting)?;
     }
 
-    let result = numpy
-        .getattr(kind.context())?
-        .call((tup.bind(py),), Some(&kwargs))?;
+    let result = func.call((tup.bind(py),), Some(&kwargs))?;
     Ok(result.unbind())
 }
 
@@ -6462,8 +6477,7 @@ fn split_helper_numpy_fallback(
     indices_or_sections: Py<PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let func = numpy.getattr(kind.context())?;
+    let func = kind.resolve(py)?;
     let bound_ary = ary.bind(py);
     let bound_indices = indices_or_sections.bind(py);
     let result = match axis {
@@ -7167,11 +7181,11 @@ fn numpy_savez_call(
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
     let mut positional = Vec::with_capacity(args.len() + 1);
-    positional.push(file.clone_ref(py));
+    positional.push(file.bind(py).clone());
     for arg in args.iter() {
-        positional.push(arg.unbind());
+        positional.push(arg);
     }
-    let positional = PyTuple::new(py, positional.iter().map(|arg| arg.bind(py)))?;
+    let positional = PyTuple::new(py, positional)?;
     let call_kwargs = PyDict::new(py);
     if let Some(kwds) = kwds {
         for (key, value) in kwds.iter() {
@@ -41955,7 +41969,7 @@ fn vstack(
     // atleast_2d promotion is a no-op when every input is already 2-D), so reuse
     // the zero-copy axis-0 concatenate. Requires all inputs to be 2-D f64 ndarrays
     // (1-D inputs would be promoted to rows, which is a different result).
-    if let Ok(numpy) = py.import("numpy")
+    if let Ok(numpy) = cached_numpy(py)
         && let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
         && let Ok(iter) = tup.bind(py).try_iter()
     {
@@ -42023,11 +42037,7 @@ fn row_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // `vstack` - deprecated in 2.0, removed since - so falling back to `vstack` is the same
     // function, not an approximation, and it keeps `fnp.row_stack` working on both the 2.4.3
     // that still has it and the 2.5.2 that does not.
-    let numpy = cached_numpy(py)?;
-    let stack = match numpy.getattr(intern!(py, "row_stack")) {
-        Ok(function) => function,
-        Err(_) => numpy.getattr(intern!(py, "vstack"))?,
-    };
+    let stack = cached_numpy_row_stack(py)?;
     Ok(stack.call1((tup.bind(py),))?.unbind())
 }
 
@@ -42056,7 +42066,7 @@ fn hstack(
     // ndim>=2 inputs. When all inputs are f64 ndarrays of the same dimensionality,
     // reuse the zero-copy concatenate at the right axis. Mixed dims / other dtypes
     // fall through (numpy applies its own promotion/validation).
-    if let Ok(numpy) = py.import("numpy")
+    if let Ok(numpy) = cached_numpy(py)
         && let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
         && let Ok(iter) = tup.bind(py).try_iter()
         && let Ok(items) = iter.collect::<PyResult<Vec<_>>>()
@@ -42356,8 +42366,7 @@ fn dstack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
                 .unbind());
         }
     }
-    Ok(numpy
-        .getattr(intern!(py, "dstack"))?
+    Ok(cached_numpy_dstack(py)?
         .call1((tup.bind(py),))?
         .unbind())
 }
@@ -42498,8 +42507,7 @@ fn column_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
             return Ok(out);
         }
     }
-    Ok(numpy
-        .getattr(intern!(py, "column_stack"))?
+    Ok(cached_numpy_column_stack(py)?
         .call1((tup.bind(py),))?
         .unbind())
 }
@@ -44054,20 +44062,27 @@ fn fft(
     // The import is the same 656 ns shape converted on the ufunc methods, and the two
     // `getattr`s were non-interned - `numpy.fft` then `.fft` - so each built and hashed a
     // fresh `PyString` on every call.
-    let numpy = cached_numpy(py)?;
-    let fft_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "fft"))?;
-    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
-        return Ok(fft_fn.call1((a.bind(py),))?.unbind());
+    let fft_fn = cached_numpy_fft_fft(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axis == -1 {
+                if let Some(n_val) = n {
+                    return Ok(fft_fn.call1((a_bound, n_val))?.unbind());
+                } else {
+                    return Ok(fft_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(fft_fn.call1((a_bound, n, axis))?.unbind());
+            }
+        } else {
+            return Ok(fft_fn.call1((a_bound, n, axis, norm))?.unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
         kwargs.set_item(intern!(py, "n"), n_val)?;
     }
-    // numpy's own default for `fft` is axis=-1, verified against the
-    // installed interpreter - sending it costs a dict entry and a keyword parse
-    // to communicate the default (`deadlock-audit-v46rn`).
     if axis != -1 {
         kwargs.set_item(intern!(py, "axis"), axis)?;
     }
@@ -55374,12 +55389,35 @@ fn rfftn(
     // complex with the last transformed axis having length n//2+1.
     // Covers optional shape `s`, axes selection (default: all axes),
     // norm conventions ('backward'/'ortho'/'forward'), and `out=`.
-    let numpy = cached_numpy(py)?;
-    let rfftn_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "rfftn"))?;
-    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
-        return Ok(rfftn_fn.call1((a.bind(py),))?.unbind());
+    let rfftn_fn = cached_numpy_fft_rfftn(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axes.is_none() {
+                if let Some(s_val) = s {
+                    return Ok(rfftn_fn.call1((a_bound, s_val.bind(py)))?.unbind());
+                } else {
+                    return Ok(rfftn_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(rfftn_fn
+                    .call1((
+                        a_bound,
+                        s.as_ref().map(|x| x.bind(py)),
+                        axes.as_ref().map(|x| x.bind(py)),
+                    ))?
+                    .unbind());
+            }
+        } else {
+            return Ok(rfftn_fn
+                .call1((
+                    a_bound,
+                    s.as_ref().map(|x| x.bind(py)),
+                    axes.as_ref().map(|x| x.bind(py)),
+                    norm,
+                ))?
+                .unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -55407,12 +55445,35 @@ fn irfftn(
     norm: Option<String>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let irfftn_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "irfftn"))?;
-    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
-        return Ok(irfftn_fn.call1((a.bind(py),))?.unbind());
+    let irfftn_fn = cached_numpy_fft_irfftn(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axes.is_none() {
+                if let Some(s_val) = s {
+                    return Ok(irfftn_fn.call1((a_bound, s_val.bind(py)))?.unbind());
+                } else {
+                    return Ok(irfftn_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(irfftn_fn
+                    .call1((
+                        a_bound,
+                        s.as_ref().map(|x| x.bind(py)),
+                        axes.as_ref().map(|x| x.bind(py)),
+                    ))?
+                    .unbind());
+            }
+        } else {
+            return Ok(irfftn_fn
+                .call1((
+                    a_bound,
+                    s.as_ref().map(|x| x.bind(py)),
+                    axes.as_ref().map(|x| x.bind(py)),
+                    norm,
+                ))?
+                .unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -83122,12 +83183,22 @@ fn ifft(
     // length n, axis selector, norm conventions ('backward'/'ortho'/
     // 'forward'), optional `out=` destination, and complex output dtype
     // all match numpy exactly.
-    let numpy = cached_numpy(py)?;
-    let ifft_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "ifft"))?;
-    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
-        return Ok(ifft_fn.call1((a.bind(py),))?.unbind());
+    let ifft_fn = cached_numpy_fft_ifft(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axis == -1 {
+                if let Some(n_val) = n {
+                    return Ok(ifft_fn.call1((a_bound, n_val))?.unbind());
+                } else {
+                    return Ok(ifft_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(ifft_fn.call1((a_bound, n, axis))?.unbind());
+            }
+        } else {
+            return Ok(ifft_fn.call1((a_bound, n, axis, norm))?.unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
@@ -83161,12 +83232,35 @@ fn fft2(
     // Passthrough to np.fft.fft2 so the 2-D FFT matches numpy exactly
     // across optional shape `s`, axes tuple/list input, norm conventions,
     // and optional `out=` destination. Output is complex.
-    let numpy = cached_numpy(py)?;
-    let fft2_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "fft2"))?;
-    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
-        return Ok(fft2_fn.call1((a.bind(py),))?.unbind());
+    let fft2_fn = cached_numpy_fft_fft2(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axes.is_none() {
+                if let Some(s_val) = s {
+                    return Ok(fft2_fn.call1((a_bound, s_val.bind(py)))?.unbind());
+                } else {
+                    return Ok(fft2_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(fft2_fn
+                    .call1((
+                        a_bound,
+                        s.as_ref().map(|x| x.bind(py)),
+                        axes.as_ref().map(|x| x.bind(py)),
+                    ))?
+                    .unbind());
+            }
+        } else {
+            return Ok(fft2_fn
+                .call1((
+                    a_bound,
+                    s.as_ref().map(|x| x.bind(py)),
+                    axes.as_ref().map(|x| x.bind(py)),
+                    norm,
+                ))?
+                .unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -83198,12 +83292,35 @@ fn ifft2(
     // exactly across optional shape `s`, axes tuple (default (-2, -1)),
     // norm conventions ('backward'/'ortho'/'forward'), and optional
     // `out=` destination. Output is complex.
-    let numpy = cached_numpy(py)?;
-    let ifft2_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "ifft2"))?;
-    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
-        return Ok(ifft2_fn.call1((a.bind(py),))?.unbind());
+    let ifft2_fn = cached_numpy_fft_ifft2(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axes.is_none() {
+                if let Some(s_val) = s {
+                    return Ok(ifft2_fn.call1((a_bound, s_val.bind(py)))?.unbind());
+                } else {
+                    return Ok(ifft2_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(ifft2_fn
+                    .call1((
+                        a_bound,
+                        s.as_ref().map(|x| x.bind(py)),
+                        axes.as_ref().map(|x| x.bind(py)),
+                    ))?
+                    .unbind());
+            }
+        } else {
+            return Ok(ifft2_fn
+                .call1((
+                    a_bound,
+                    s.as_ref().map(|x| x.bind(py)),
+                    axes.as_ref().map(|x| x.bind(py)),
+                    norm,
+                ))?
+                .unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -83236,12 +83353,35 @@ fn fftn(
     // (default: all axes), norm conventions
     // ('backward'/'ortho'/'forward'), and optional `out=` destination.
     // Output is complex.
-    let numpy = cached_numpy(py)?;
-    let fftn_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "fftn"))?;
-    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
-        return Ok(fftn_fn.call1((a.bind(py),))?.unbind());
+    let fftn_fn = cached_numpy_fft_fftn(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axes.is_none() {
+                if let Some(s_val) = s {
+                    return Ok(fftn_fn.call1((a_bound, s_val.bind(py)))?.unbind());
+                } else {
+                    return Ok(fftn_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(fftn_fn
+                    .call1((
+                        a_bound,
+                        s.as_ref().map(|x| x.bind(py)),
+                        axes.as_ref().map(|x| x.bind(py)),
+                    ))?
+                    .unbind());
+            }
+        } else {
+            return Ok(fftn_fn
+                .call1((
+                    a_bound,
+                    s.as_ref().map(|x| x.bind(py)),
+                    axes.as_ref().map(|x| x.bind(py)),
+                    norm,
+                ))?
+                .unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -83274,12 +83414,35 @@ fn ifftn(
     // (default: all axes), norm conventions
     // ('backward'/'ortho'/'forward'), and optional `out=` destination.
     // Output is complex.
-    let numpy = cached_numpy(py)?;
-    let ifftn_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "ifftn"))?;
-    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
-        return Ok(ifftn_fn.call1((a.bind(py),))?.unbind());
+    let ifftn_fn = cached_numpy_fft_ifftn(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axes.is_none() {
+                if let Some(s_val) = s {
+                    return Ok(ifftn_fn.call1((a_bound, s_val.bind(py)))?.unbind());
+                } else {
+                    return Ok(ifftn_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(ifftn_fn
+                    .call1((
+                        a_bound,
+                        s.as_ref().map(|x| x.bind(py)),
+                        axes.as_ref().map(|x| x.bind(py)),
+                    ))?
+                    .unbind());
+            }
+        } else {
+            return Ok(ifftn_fn
+                .call1((
+                    a_bound,
+                    s.as_ref().map(|x| x.bind(py)),
+                    axes.as_ref().map(|x| x.bind(py)),
+                    norm,
+                ))?
+                .unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -85843,12 +86006,22 @@ fn rfft(
     norm: Option<String>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let rfft_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "rfft"))?;
-    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
-        return Ok(rfft_fn.call1((a.bind(py),))?.unbind());
+    let rfft_fn = cached_numpy_fft_rfft(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axis == -1 {
+                if let Some(n_val) = n {
+                    return Ok(rfft_fn.call1((a_bound, n_val))?.unbind());
+                } else {
+                    return Ok(rfft_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(rfft_fn.call1((a_bound, n, axis))?.unbind());
+            }
+        } else {
+            return Ok(rfft_fn.call1((a_bound, n, axis, norm))?.unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
@@ -85880,12 +86053,22 @@ fn irfft(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     validate_irfft_norm(norm.as_deref())?;
-    let numpy = cached_numpy(py)?;
-    let irfft_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "irfft"))?;
-    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
-        return Ok(irfft_fn.call1((a.bind(py),))?.unbind());
+    let irfft_fn = cached_numpy_fft_irfft(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axis == -1 {
+                if let Some(n) = n {
+                    return Ok(irfft_fn.call1((a_bound, n))?.unbind());
+                } else {
+                    return Ok(irfft_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(irfft_fn.call1((a_bound, n, axis))?.unbind());
+            }
+        } else {
+            return Ok(irfft_fn.call1((a_bound, n, axis, norm))?.unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(n) = n {
@@ -85920,12 +86103,22 @@ fn hfft(
     // returning a real spectrum. Optional truncation/zero-padding length
     // n, axis selector, norm conventions ('backward'/'ortho'/'forward'),
     // and optional `out=` destination all match numpy exactly.
-    let numpy = cached_numpy(py)?;
-    let hfft_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "hfft"))?;
-    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
-        return Ok(hfft_fn.call1((a.bind(py),))?.unbind());
+    let hfft_fn = cached_numpy_fft_hfft(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axis == -1 {
+                if let Some(n_val) = n {
+                    return Ok(hfft_fn.call1((a_bound, n_val))?.unbind());
+                } else {
+                    return Ok(hfft_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(hfft_fn.call1((a_bound, n, axis))?.unbind());
+            }
+        } else {
+            return Ok(hfft_fn.call1((a_bound, n, axis, norm))?.unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
@@ -85956,12 +86149,22 @@ fn ihfft(
     norm: Option<String>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let ihfft_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "ihfft"))?;
-    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
-        return Ok(ihfft_fn.call1((a.bind(py),))?.unbind());
+    let ihfft_fn = cached_numpy_fft_ihfft(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axis == -1 {
+                if let Some(n_val) = n {
+                    return Ok(ihfft_fn.call1((a_bound, n_val))?.unbind());
+                } else {
+                    return Ok(ihfft_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(ihfft_fn.call1((a_bound, n, axis))?.unbind());
+            }
+        } else {
+            return Ok(ihfft_fn.call1((a_bound, n, axis, norm))?.unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
@@ -85996,12 +86199,35 @@ fn rfft2(
     // `s`, axes tuple/list (default (-2, -1) in numpy), norm conventions,
     // and optional `out=` destination all match numpy exactly. Output
     // last-axis length is s[-1]//2+1; output dtype is complex.
-    let numpy = cached_numpy(py)?;
-    let rfft2_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "rfft2"))?;
-    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
-        return Ok(rfft2_fn.call1((a.bind(py),))?.unbind());
+    let rfft2_fn = cached_numpy_fft_rfft2(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axes.is_none() {
+                if let Some(s_val) = s {
+                    return Ok(rfft2_fn.call1((a_bound, s_val.bind(py)))?.unbind());
+                } else {
+                    return Ok(rfft2_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(rfft2_fn
+                    .call1((
+                        a_bound,
+                        s.as_ref().map(|x| x.bind(py)),
+                        axes.as_ref().map(|x| x.bind(py)),
+                    ))?
+                    .unbind());
+            }
+        } else {
+            return Ok(rfft2_fn
+                .call1((
+                    a_bound,
+                    s.as_ref().map(|x| x.bind(py)),
+                    axes.as_ref().map(|x| x.bind(py)),
+                    norm,
+                ))?
+                .unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -86033,12 +86259,35 @@ fn irfft2(
     // `s`, axes tuple/list (default (-2, -1) in numpy), norm conventions,
     // and optional `out=` destination all match numpy exactly. Output
     // dtype is real (float64).
-    let numpy = cached_numpy(py)?;
-    let irfft2_fn = numpy
-        .getattr(intern!(py, "fft"))?
-        .getattr(intern!(py, "irfft2"))?;
-    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
-        return Ok(irfft2_fn.call1((a.bind(py),))?.unbind());
+    let irfft2_fn = cached_numpy_fft_irfft2(py)?;
+    if out.is_none() {
+        let a_bound = a.bind(py);
+        if norm.is_none() {
+            if axes.is_none() {
+                if let Some(s_val) = s {
+                    return Ok(irfft2_fn.call1((a_bound, s_val.bind(py)))?.unbind());
+                } else {
+                    return Ok(irfft2_fn.call1((a_bound,))?.unbind());
+                }
+            } else {
+                return Ok(irfft2_fn
+                    .call1((
+                        a_bound,
+                        s.as_ref().map(|x| x.bind(py)),
+                        axes.as_ref().map(|x| x.bind(py)),
+                    ))?
+                    .unbind());
+            }
+        } else {
+            return Ok(irfft2_fn
+                .call1((
+                    a_bound,
+                    s.as_ref().map(|x| x.bind(py)),
+                    axes.as_ref().map(|x| x.bind(py)),
+                    norm,
+                ))?
+                .unbind());
+        }
     }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
@@ -88553,6 +88802,30 @@ cached_numpy_attr!(cached_numpy_sign, "sign");
 cached_numpy_attr!(cached_numpy_floor, "floor");
 cached_numpy_attr!(cached_numpy_ceil, "ceil");
 cached_numpy_attr!(cached_numpy_trunc, "trunc");
+cached_numpy_attr!(cached_numpy_vstack, "vstack");
+cached_numpy_attr!(cached_numpy_hstack, "hstack");
+cached_numpy_attr!(cached_numpy_column_stack, "column_stack");
+cached_numpy_attr!(cached_numpy_dstack, "dstack");
+cached_numpy_attr!(cached_numpy_split, "split");
+cached_numpy_attr!(cached_numpy_array_split, "array_split");
+cached_numpy_attr!(cached_numpy_hsplit, "hsplit");
+cached_numpy_attr!(cached_numpy_vsplit, "vsplit");
+cached_numpy_attr!(cached_numpy_dsplit, "dsplit");
+
+#[allow(dead_code)]
+fn cached_numpy_row_stack(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(CACHE
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            let numpy = cached_numpy(py)?;
+            let func = match numpy.getattr(intern!(py, "row_stack")) {
+                Ok(f) => f,
+                Err(_) => numpy.getattr(intern!(py, "vstack"))?,
+            };
+            Ok(func.unbind())
+        })?
+        .bind(py))
+}
 
 /// Generates a cached accessor for one numpy SUBMODULE.
 ///
@@ -88701,6 +88974,7 @@ cached_numpy_linalg_attr!(cached_numpy_linalg_error, "LinAlgError");
 
 macro_rules! cached_numpy_fft_attr {
     ($fn_name:ident, $attr:literal) => {
+        #[allow(dead_code)]
         fn $fn_name(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
             static CACHE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
             Ok(CACHE
@@ -88717,6 +88991,20 @@ macro_rules! cached_numpy_fft_attr {
 cached_numpy_fft_attr!(cached_numpy_fft_fftshift, "fftshift");
 cached_numpy_fft_attr!(cached_numpy_fft_ifftshift, "ifftshift");
 cached_numpy_fft_attr!(cached_numpy_fft_rfftfreq, "rfftfreq");
+cached_numpy_fft_attr!(cached_numpy_fft_fft, "fft");
+cached_numpy_fft_attr!(cached_numpy_fft_ifft, "ifft");
+cached_numpy_fft_attr!(cached_numpy_fft_fft2, "fft2");
+cached_numpy_fft_attr!(cached_numpy_fft_ifft2, "ifft2");
+cached_numpy_fft_attr!(cached_numpy_fft_fftn, "fftn");
+cached_numpy_fft_attr!(cached_numpy_fft_ifftn, "ifftn");
+cached_numpy_fft_attr!(cached_numpy_fft_rfft, "rfft");
+cached_numpy_fft_attr!(cached_numpy_fft_irfft, "irfft");
+cached_numpy_fft_attr!(cached_numpy_fft_rfft2, "rfft2");
+cached_numpy_fft_attr!(cached_numpy_fft_irfft2, "irfft2");
+cached_numpy_fft_attr!(cached_numpy_fft_rfftn, "rfftn");
+cached_numpy_fft_attr!(cached_numpy_fft_irfftn, "irfftn");
+cached_numpy_fft_attr!(cached_numpy_fft_hfft, "hfft");
+cached_numpy_fft_attr!(cached_numpy_fft_ihfft, "ihfft");
 
 fn cached_slogdet_result_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     static CACHE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
