@@ -1,0 +1,11 @@
+# rustfmt cannot format crates/fnp-python/src/lib.rs.
+#
+# That file is a ~180,000-line / 7.6 MB generated PyO3 binding surface (6,245
+# `intern!` invocations). rustfmt's memory use is superlinear in file size, and a
+# single `cargo fmt --check` over it allocated ~95 GB RSS -- livelocking a 215 GB
+# host three times on 2026-09-15 (load 339, memory PSI 99, no OOM kill) before a
+# watchdog was installed. Every other file in the workspace formats fine: a bisect
+# of all 506 .rs files under a 4 GB cap found this one file and no other.
+#
+# `ignore` is a nightly rustfmt option; this workspace builds on nightly.
+ignore = ["crates/fnp-python/src/lib.rs"]
