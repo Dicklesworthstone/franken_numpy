@@ -11189,7 +11189,7 @@ fn zerocopy_f64_binary_flat<'py>(
 /// lane, whatever overlap the buffers have.
 fn zerocopy_f64_binary_flat_with_out<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
+    _numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
     b: &Bound<'py, PyAny>,
     op: BinaryOp,
@@ -11283,7 +11283,7 @@ fn zerocopy_f64_binary_flat_with_out<'py>(
         // NumPy resolve that string to a descriptor. `numpy.empty` is now fetched with an
         // interned key and handed the descriptor directly. Output allocation is the largest
         // named stage left on this route.
-        let np_empty = numpy.getattr(intern!(py, "empty"))?;
+        let np_empty = cached_numpy_empty(py)?;
         let dtype = cached_float64_dtype(py)?;
         if let [only] = shape.as_slice() {
             np_empty.call1((*only, dtype))?
@@ -13786,7 +13786,7 @@ fn try_native_timedelta_addsub(
     let numpy = cached_numpy(py)?;
     let a_dt = a.getattr(intern!(py, "dtype"))?;
     let b_dt = b.getattr(intern!(py, "dtype"))?;
-    let dd = numpy.getattr(intern!(py, "datetime_data"))?;
+    let dd = cached_numpy_datetime_data(py)?;
     let a_unit: (String, usize) = dd.call1((&a_dt,))?.extract()?;
     let b_unit: (String, usize) = dd.call1((&b_dt,))?.extract()?;
     if a_unit != b_unit {
@@ -13826,10 +13826,10 @@ fn try_native_timedelta_addsub(
     if n < TD_ADDSUB_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
-    let i64t = numpy.getattr(intern!(py, "int64"))?;
+    let i64t = cached_int64_type(py)?;
     let (Ok(a_i), Ok(b_i)) = (
-        a.call_method1(intern!(py, "view"), (&i64t,)),
-        b.call_method1(intern!(py, "view"), (&i64t,)),
+        a.call_method1(intern!(py, "view"), (i64t,)),
+        b.call_method1(intern!(py, "view"), (i64t,)),
     ) else {
         return Ok(None);
     };
@@ -13889,10 +13889,10 @@ fn try_native_timedelta_floordiv(
     }
     let numpy = cached_numpy(py)?;
     // View both as int64 (timedelta64 is int64 internally; NaT == i64::MIN).
-    let i64t = numpy.getattr(intern!(py, "int64"))?;
+    let i64t = cached_int64_type(py)?;
     let (Ok(a_i), Ok(b_i)) = (
-        a.call_method1(intern!(py, "view"), (&i64t,)),
-        b.call_method1(intern!(py, "view"), (&i64t,)),
+        a.call_method1(intern!(py, "view"), (i64t,)),
+        b.call_method1(intern!(py, "view"), (i64t,)),
     ) else {
         return Ok(None);
     };
@@ -13964,7 +13964,7 @@ fn try_native_timedelta_remainder(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let i64t = numpy.getattr(intern!(py, "int64"))?;
+    let i64t = cached_int64_type(py)?;
     let (Ok(a_i), Ok(b_i)) = (
         a.call_method1(intern!(py, "view"), (&i64t,)),
         b.call_method1(intern!(py, "view"), (&i64t,)),
@@ -17320,8 +17320,7 @@ fn try_zerocopy_f64_compress(
     if axis.is_some() {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?.clone();
     if !a.is_exact_instance(&ndarray_type) || !condition.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
@@ -17334,7 +17333,7 @@ fn try_zerocopy_f64_compress(
         return Ok(None);
     }
     let cond_u8 =
-        condition.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+        condition.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
     let (Ok(cond_buffer), Ok(arr_buffer)) =
         (PyBuffer::<u8>::get(&cond_u8), PyBuffer::<f64>::get(a))
     else {
@@ -17350,7 +17349,7 @@ fn try_zerocopy_f64_compress(
         return Ok(None);
     }
     let count = count_true_u8_prefix(cond_in, m);
-    let flat = numpy.call_method1(intern!(py, "empty"), (count, cached_float64_type(py)?))?;
+    let flat = cached_numpy_empty(py)?.call1((count, cached_float64_type(py)?))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
@@ -19159,7 +19158,7 @@ fn try_zerocopy_accumulate_bitwise(
         ("u", 8) => bacc!(u64, "uint64"),
         ("b", 1) => {
             let viewed =
-                array.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+                array.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
             let combine: fn(u8, u8) -> u8 = match op {
                 0 => bit_and::<u8>,
                 1 => bit_or::<u8>,
@@ -19169,7 +19168,7 @@ fn try_zerocopy_accumulate_bitwise(
                 Some(flat_u8) => Ok(Some(
                     flat_u8
                         .bind(py)
-                        .call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?
+                        .call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?
                         .unbind(),
                 )),
                 None => Ok(None),
@@ -88811,6 +88810,9 @@ cached_numpy_attr!(cached_numpy_array_split, "array_split");
 cached_numpy_attr!(cached_numpy_hsplit, "hsplit");
 cached_numpy_attr!(cached_numpy_vsplit, "vsplit");
 cached_numpy_attr!(cached_numpy_dsplit, "dsplit");
+cached_numpy_attr!(cached_numpy_interp, "interp");
+cached_numpy_attr!(cached_numpy_argsort, "argsort");
+cached_numpy_attr!(cached_numpy_logical_not, "logical_not");
 
 #[allow(dead_code)]
 fn cached_numpy_row_stack(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
