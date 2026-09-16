@@ -23615,24 +23615,39 @@ fn interp(
     // raising "unexpected keyword".
     let fallback = || -> PyResult<Py<PyAny>> {
         let interp_fn = numpy.getattr(intern!(py, "interp"))?;
-        if left.is_none() && right.is_none() && period.is_none() {
-            return Ok(interp_fn
-                .call1((x.bind(py), xp.bind(py), fp.bind(py)))?
-                .unbind());
-        }
-        let kwargs = PyDict::new(py);
-        if let Some(l) = left.as_ref() {
-            kwargs.set_item(intern!(py, "left"), l.bind(py))?;
-        }
-        if let Some(r) = right.as_ref() {
-            kwargs.set_item(intern!(py, "right"), r.bind(py))?;
-        }
+        let b_x = x.bind(py);
+        let b_xp = xp.bind(py);
+        let b_fp = fp.bind(py);
         if let Some(p) = period.as_ref() {
-            kwargs.set_item(intern!(py, "period"), p.bind(py))?;
+            Ok(interp_fn
+                .call1((
+                    b_x,
+                    b_xp,
+                    b_fp,
+                    left.as_ref().map(|l| l.bind(py)),
+                    right.as_ref().map(|r| r.bind(py)),
+                    p.bind(py),
+                ))?
+                .unbind())
+        } else if let Some(r) = right.as_ref() {
+            Ok(interp_fn
+                .call1((
+                    b_x,
+                    b_xp,
+                    b_fp,
+                    left.as_ref().map(|l| l.bind(py)),
+                    r.bind(py),
+                ))?
+                .unbind())
+        } else if let Some(l) = left.as_ref() {
+            Ok(interp_fn
+                .call1((b_x, b_xp, b_fp, l.bind(py)))?
+                .unbind())
+        } else {
+            Ok(interp_fn
+                .call1((b_x, b_xp, b_fp))?
+                .unbind())
         }
-        Ok(interp_fn
-            .call((x.bind(py), xp.bind(py), fp.bind(py)), Some(&kwargs))?
-            .unbind())
     };
 
     // Non-native byte order on any operand delegates whole (`deadlock-audit-2kqw3`).
@@ -25316,20 +25331,26 @@ fn take(
     let b_indices = indices.bind(py);
     let fallback = || -> PyResult<Py<PyAny>> {
         let take_fn = cached_numpy_take(py)?;
-        if axis.is_none() && out.is_none() && mode == "raise" {
-            Ok(take_fn.call1((b_a, b_indices))?.unbind())
+        if mode != "raise" {
+            Ok(take_fn
+                .call1((
+                    b_a,
+                    b_indices,
+                    axis,
+                    out.as_ref().map(|o| o.bind(py)),
+                    mode,
+                ))?
+                .unbind())
+        } else if let Some(out_val) = out.as_ref() {
+            Ok(take_fn
+                .call1((b_a, b_indices, axis, out_val.bind(py)))?
+                .unbind())
+        } else if let Some(axis) = axis {
+            Ok(take_fn
+                .call1((b_a, b_indices, axis))?
+                .unbind())
         } else {
-            let kwargs = PyDict::new(py);
-            if let Some(axis) = axis {
-                kwargs.set_item(intern!(py, "axis"), axis)?;
-            }
-            if let Some(out_val) = out.as_ref() {
-                kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
-            }
-            if mode != "raise" {
-                kwargs.set_item(intern!(py, "mode"), mode)?;
-            }
-            Ok(take_fn.call((b_a, b_indices), Some(&kwargs))?.unbind())
+            Ok(take_fn.call1((b_a, b_indices))?.unbind())
         }
     };
 
@@ -26489,19 +26510,19 @@ fn count_nonzero(
 ) -> PyResult<Py<PyAny>> {
     let fallback = || -> PyResult<Py<PyAny>> {
         let fn_obj = cached_numpy_count_nonzero(py)?;
-        if axis.is_none() && !keepdims {
-            return Ok(fn_obj.call1((a.bind(py),))?.unbind());
-        }
-        let kwargs = PyDict::new(py);
-        if let Some(ax) = axis.as_ref() {
-            kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
-        }
+        let b_a = a.bind(py);
         if keepdims {
+            let kwargs = PyDict::new(py);
+            if let Some(ax) = axis.as_ref() {
+                kwargs.set_item(intern!(py, "axis"), ax.bind(py))?;
+            }
             kwargs.set_item(intern!(py, "keepdims"), true)?;
+            Ok(fn_obj.call((b_a,), Some(&kwargs))?.unbind())
+        } else if let Some(ax) = axis.as_ref() {
+            Ok(fn_obj.call1((b_a, ax.bind(py)))?.unbind())
+        } else {
+            Ok(fn_obj.call1((b_a,))?.unbind())
         }
-        Ok(fn_obj
-            .call((a.bind(py),), Some(&kwargs))?
-            .unbind())
     };
 
     // `np.count_nonzero` delegates axis forms to an ndarray subclass. In
