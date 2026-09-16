@@ -471,6 +471,11 @@ impl PyUFunc {
     ) -> PyResult<Py<PyAny>> {
         let numpy = cached_numpy(py)?;
         let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
+        if signature.is_none() && casting.is_none() {
+            return Ok(np_ufunc
+                .call_method1(intern!(py, "resolve_dtypes"), (dtypes.bind(py),))?
+                .unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(sig) = signature.as_ref() {
             kwargs.set_item(intern!(py, "signature"), sig.bind(py))?;
@@ -6381,27 +6386,24 @@ fn stack_helper_numpy_fallback(
     casting: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let has_dtype = dtype.as_ref().is_some_and(|d| !d.bind(py).is_none());
+    let has_casting = casting.is_some();
+    if !has_dtype && !has_casting {
+        return Ok(numpy.getattr(kind.context())?.call1((tup.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
-    let mut has_kwargs = false;
-
     if let Some(dtype) = dtype
         && !dtype.bind(py).is_none()
     {
         kwargs.set_item(intern!(py, "dtype"), dtype.bind(py))?;
-        has_kwargs = true;
     }
     if let Some(casting) = casting {
         kwargs.set_item(intern!(py, "casting"), casting)?;
-        has_kwargs = true;
     }
 
-    let result = if has_kwargs {
-        numpy
-            .getattr(kind.context())?
-            .call((tup.bind(py),), Some(&kwargs))?
-    } else {
-        numpy.getattr(kind.context())?.call1((tup.bind(py),))?
-    };
+    let result = numpy
+        .getattr(kind.context())?
+        .call((tup.bind(py),), Some(&kwargs))?;
     Ok(result.unbind())
 }
 
@@ -6435,22 +6437,16 @@ fn split_helper_numpy_fallback(
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    let has_kwargs = if let Some(axis) = axis {
-        kwargs.set_item(intern!(py, "axis"), axis)?;
-        true
-    } else {
-        false
-    };
-
-    let result = if has_kwargs {
-        numpy
-            .getattr(kind.context())?
-            .call((ary.bind(py), indices_or_sections.bind(py)), Some(&kwargs))?
-    } else {
-        numpy
-            .getattr(kind.context())?
-            .call1((ary.bind(py), indices_or_sections.bind(py)))?
+    let func = numpy.getattr(kind.context())?;
+    let bound_ary = ary.bind(py);
+    let bound_indices = indices_or_sections.bind(py);
+    let result = match axis {
+        None | Some(0) => func.call1((bound_ary, bound_indices))?,
+        Some(axis) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "axis"), axis)?;
+            func.call((bound_ary, bound_indices), Some(&kwargs))?
+        }
     };
     Ok(result.unbind())
 }
@@ -7551,14 +7547,17 @@ fn structured_to_unstructured(
     // Delegate to numpy.lib.recfunctions so scalar records, nested subarrays,
     // casting rules, and dtype inference match NumPy exactly.
     let recfunctions = cached_numpy_recfunctions(py)?;
+    let s2u_fn = recfunctions.getattr(intern!(py, "structured_to_unstructured"))?;
+    if dtype.is_none() && !copy && casting == "unsafe" {
+        return Ok(s2u_fn.call1((arr.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(dtype) = dtype {
         kwargs.set_item(intern!(py, "dtype"), dtype.bind(py))?;
     }
     kwargs.set_item(intern!(py, "copy"), copy)?;
     kwargs.set_item(intern!(py, "casting"), casting)?;
-    Ok(recfunctions
-        .getattr(intern!(py, "structured_to_unstructured"))?
+    Ok(s2u_fn
         .call((arr.bind(py),), Some(&kwargs))?
         .unbind())
 }
@@ -23615,6 +23614,12 @@ fn interp(
     // bounds. Mirror numpy's signature so these kwargs are accepted instead of
     // raising "unexpected keyword".
     let fallback = || -> PyResult<Py<PyAny>> {
+        let interp_fn = numpy.getattr(intern!(py, "interp"))?;
+        if left.is_none() && right.is_none() && period.is_none() {
+            return Ok(interp_fn
+                .call1((x.bind(py), xp.bind(py), fp.bind(py)))?
+                .unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(l) = left.as_ref() {
             kwargs.set_item(intern!(py, "left"), l.bind(py))?;
@@ -23625,8 +23630,7 @@ fn interp(
         if let Some(p) = period.as_ref() {
             kwargs.set_item(intern!(py, "period"), p.bind(py))?;
         }
-        Ok(numpy
-            .getattr(intern!(py, "interp"))?
+        Ok(interp_fn
             .call((x.bind(py), xp.bind(py), fp.bind(py)), Some(&kwargs))?
             .unbind())
     };
@@ -26686,12 +26690,13 @@ fn broadcast_to(
     // Delegate to NumPy so broadcasting rules, readonly-view behavior,
     // dtype preservation, and incompatible-shape errors all match exactly.
     let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    if subok {
-        kwargs.set_item(intern!(py, "subok"), true)?;
+    let bcast_fn = numpy.getattr(intern!(py, "broadcast_to"))?;
+    if !subok {
+        return Ok(bcast_fn.call1((array.bind(py), shape.bind(py)))?.unbind());
     }
-    Ok(numpy
-        .getattr(intern!(py, "broadcast_to"))?
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "subok"), true)?;
+    Ok(bcast_fn
         .call((array.bind(py), shape.bind(py)), Some(&kwargs))?
         .unbind())
 }
@@ -26703,14 +26708,13 @@ fn broadcast_arrays(py: Python<'_>, args: &Bound<'_, PyTuple>, subok: bool) -> P
     // length/order, per-result dtypes, and incompatible-shape errors
     // all match exactly.
     let numpy = cached_numpy(py)?;
-    let kwargs = PyDict::new(py);
-    if subok {
-        kwargs.set_item(intern!(py, "subok"), true)?;
+    let bcast_fn = numpy.getattr(intern!(py, "broadcast_arrays"))?;
+    if !subok {
+        return Ok(bcast_fn.call1(args)?.unbind());
     }
-    Ok(numpy
-        .getattr(intern!(py, "broadcast_arrays"))?
-        .call(args, Some(&kwargs))?
-        .unbind())
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "subok"), true)?;
+    Ok(bcast_fn.call(args, Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -26738,10 +26742,13 @@ fn may_share_memory(
     // ravel-vs-flatten distinction, strided/reversed view behavior, disjoint
     // arrays, and max_work kwarg surface all match numpy exactly.
     let numpy = cached_numpy(py)?;
+    let may_share_fn = numpy.getattr(intern!(py, "may_share_memory"))?;
+    if max_work == 0 {
+        return Ok(may_share_fn.call1((a.bind(py), b.bind(py)))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "max_work"), max_work)?;
-    Ok(numpy
-        .getattr(intern!(py, "may_share_memory"))?
+    Ok(may_share_fn
         .call((a.bind(py), b.bind(py)), Some(&kwargs))?
         .unbind())
 }
@@ -26771,6 +26778,11 @@ fn fromiter(
     // extract loop was ~13x slower than numpy's C coercion loop and cannot beat it
     // (each element is a Python round-trip either way), so delegate. numpy owns the
     // exact dtype-coercion, count, and short-iterator (ValueError) surface.
+    if count == -1 {
+        return Ok(fromiter_fn
+            .call1((iter.bind(py), dtype.bind(py)))?
+            .unbind());
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "count"), count)?;
     Ok(fromiter_fn
@@ -26988,10 +27000,13 @@ fn shares_memory(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, max_work: i64) -> P
     // and max_work kwarg surface all match numpy exactly. Unlike
     // may_share_memory, shares_memory defaults to max_work=-1 (solve).
     let numpy = cached_numpy(py)?;
+    let shares_fn = numpy.getattr(intern!(py, "shares_memory"))?;
+    if max_work == -1 {
+        return Ok(shares_fn.call1((a.bind(py), b.bind(py)))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "max_work"), max_work)?;
-    Ok(numpy
-        .getattr(intern!(py, "shares_memory"))?
+    Ok(shares_fn
         .call((a.bind(py), b.bind(py)), Some(&kwargs))?
         .unbind())
 }
@@ -27043,9 +27058,7 @@ fn int_clip_arrays_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send + S
     if a_in.len() != total || l_in.len() != bound_len || h_in.len() != bound_len {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape.to_vec(),), Some(&kwargs))?;
+    let out = numpy.call_method1(intern!(py, "empty"), (shape, dtype_name))?;
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
@@ -27435,6 +27448,11 @@ fn clip(
     let a_max: Py<PyAny> = a_max.or(max).unwrap_or_else(|| py.None());
 
     let fallback = || -> PyResult<Py<PyAny>> {
+        if out.is_none() && kwargs.as_ref().map_or(true, |k| k.is_empty()) {
+            return Ok(clip_fn
+                .call1((a.bind(py), a_min.bind(py), a_max.bind(py)))?
+                .unbind());
+        }
         let call_kwargs = PyDict::new(py);
         if let Some(out_val) = out.as_ref() {
             call_kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
@@ -30760,6 +30778,9 @@ fn svd(
     // SVD algorithm that bit-matches LAPACK or (b) relax the parity
     // oracle to allclose-level tolerance.
     let svd_fn = cached_numpy_linalg_svd(py)?;
+    if full_matrices && compute_uv && !hermitian {
+        return Ok(svd_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "full_matrices"), full_matrices)?;
     kwargs.set_item(intern!(py, "compute_uv"), compute_uv)?;
@@ -30774,6 +30795,9 @@ fn qr(py: Python<'_>, a: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     // deprecated compatibility modes, and stacked (..., M, N) semantics stay
     // byte-for-byte aligned with numpy.
     let qr_fn = cached_numpy_linalg_qr(py)?;
+    if mode == "reduced" {
+        return Ok(qr_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "mode"), mode)?;
     Ok(qr_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
@@ -31648,10 +31672,11 @@ fn lstsq(
     // default-handling path match numpy exactly across real/complex,
     // rank-deficient, and broadcasting inputs.
     let lstsq_fn = cached_numpy_linalg_lstsq(py)?;
+    let Some(value) = bound_rcond else {
+        return Ok(lstsq_fn.call1((bound_a, bound_b))?.unbind());
+    };
     let kwargs = PyDict::new(py);
-    if let Some(value) = bound_rcond {
-        kwargs.set_item(intern!(py, "rcond"), value)?;
-    }
+    kwargs.set_item(intern!(py, "rcond"), value)?;
     Ok(lstsq_fn.call((bound_a, bound_b), Some(&kwargs))?.unbind())
 }
 
@@ -31665,11 +31690,13 @@ fn tensorsolve(
 ) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy so axes permutation semantics and error reporting
     // stay aligned with numpy.linalg.tensorsolve.
+    let ts_fn = cached_numpy_linalg_tensorsolve(py)?;
+    let Some(axes_val) = axes else {
+        return Ok(ts_fn.call1((a.bind(py), b.bind(py)))?.unbind());
+    };
     let kwargs = PyDict::new(py);
-    if let Some(axes) = axes {
-        kwargs.set_item(intern!(py, "axes"), axes.bind(py))?;
-    }
-    Ok(cached_numpy_linalg_tensorsolve(py)?
+    kwargs.set_item(intern!(py, "axes"), axes_val.bind(py))?;
+    Ok(ts_fn
         .call((a.bind(py), b.bind(py)), Some(&kwargs))?
         .unbind())
 }
@@ -31685,9 +31712,13 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
 
     // Complex arrays must fall back to numpy
     if dtype_kind == "c" {
+        let ti_fn = cached_numpy_linalg_tensorinv(py)?;
+        if ind == 2 {
+            return Ok(ti_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "ind"), ind)?;
-        return Ok(cached_numpy_linalg_tensorinv(py)?
+        return Ok(ti_fn
             .call((a.bind(py),), Some(&kwargs))?
             .unbind());
     }
@@ -31701,9 +31732,13 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
         // message match numpy (sibling tensorsolve/inv already do). The
         // success path stays native.
         Err(_) => {
+            let ti_fn = cached_numpy_linalg_tensorinv(py)?;
+            if ind == 2 {
+                return Ok(ti_fn.call1((a.bind(py),))?.unbind());
+            }
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "ind"), ind)?;
-            return Ok(cached_numpy_linalg_tensorinv(py)?
+            return Ok(ti_fn
                 .call((a.bind(py),), Some(&kwargs))?
                 .unbind());
         }
@@ -42981,6 +43016,11 @@ fn copyto(
     // selection, casting policy checks, and shape-mismatch errors stay
     // exactly aligned with numpy.
     let copyto_fn = cached_numpy_copyto(py)?;
+    if casting == "same_kind" && !r#where.is_supplied() {
+        return Ok(copyto_fn
+            .call1((dst.bind(py), src.bind(py)))?
+            .unbind());
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "casting"), casting)?;
     r#where.apply(py, &kwargs)?;
@@ -44037,6 +44077,9 @@ fn fft(
     let fft_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "fft"))?;
+    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
+        return Ok(fft_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
         kwargs.set_item(intern!(py, "n"), n_val)?;
@@ -44376,6 +44419,9 @@ fn ma_count(
 ) -> PyResult<Py<PyAny>> {
     let fallback = || -> PyResult<Py<PyAny>> {
         let count_fn = cached_numpy_ma_count(py)?;
+        if axis.is_none() && keepdims.is_none() {
+            return Ok(count_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(axis_val) = axis.as_ref() {
             kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
@@ -55142,13 +55188,14 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
     let keys_bound = keys.bind(py);
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let lexsort_fn = numpy.getattr(intern!(py, "lexsort"))?;
-        let kwargs = PyDict::new(py);
         // numpy's own default for `lexsort` is axis=-1, verified against the
         // installed interpreter - sending it costs a dict entry and a keyword parse
         // to communicate the default (`deadlock-audit-v46rn`).
-        if axis != -1 {
-            kwargs.set_item(intern!(py, "axis"), axis)?;
+        if axis == -1 {
+            return Ok(lexsort_fn.call1((keys_bound,))?.unbind());
         }
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "axis"), axis)?;
         Ok(lexsort_fn.call((keys_bound,), Some(&kwargs))?.unbind())
     };
 
@@ -55352,6 +55399,9 @@ fn rfftn(
     let rfftn_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "rfftn"))?;
+    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
+        return Ok(rfftn_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
         kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
@@ -55382,6 +55432,9 @@ fn irfftn(
     let irfftn_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "irfftn"))?;
+    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
+        return Ok(irfftn_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
         kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
@@ -60024,6 +60077,14 @@ fn asarray(
         return Ok(native);
     }
     let asarray_fn = cached_numpy_asarray(py)?;
+    if dtype_bound.is_none()
+        && order_bound.is_none()
+        && copy_bound.is_none()
+        && device_bound.is_none()
+        && like_bound.is_none()
+    {
+        return Ok(asarray_fn.call1((a_bound,))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(v) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), v)?;
@@ -60073,6 +60134,14 @@ fn asanyarray(
         return Ok(native);
     }
     let asanyarray_fn = cached_numpy_asanyarray(py)?;
+    if dtype_bound.is_none()
+        && order_bound.is_none()
+        && copy_bound.is_none()
+        && device_bound.is_none()
+        && like_bound.is_none()
+    {
+        return Ok(asanyarray_fn.call1((a_bound,))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(v) = dtype_bound {
         kwargs.set_item(intern!(py, "dtype"), v)?;
@@ -60103,6 +60172,9 @@ fn ascontiguousarray(
     let numpy = cached_numpy(py)?;
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         let asc_fn = cached_numpy_ascontiguousarray(py)?;
+        if dtype.is_none() && like.is_none() {
+            return Ok(asc_fn.call1((a.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
@@ -60670,6 +60742,9 @@ fn angle(py: Python<'_>, z: Py<PyAny>, deg: Option<&Bound<'_, PyAny>>) -> PyResu
     }
     // Pass original value to NumPy to preserve scalar return type.
     let angle_fn = numpy.getattr(intern!(py, "angle"))?;
+    if !deg {
+        return Ok(angle_fn.call1((z.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "deg"), deg)?;
     Ok(angle_fn.call((z.bind(py),), Some(&kwargs))?.unbind())
@@ -62715,6 +62790,10 @@ fn unwrap(
     // numpy applies its own default. `period` is keyword-only in modern
     // numpy and defaults to 2*pi.
     let numpy = cached_numpy(py)?;
+    let unwrap_fn = numpy.getattr(intern!(py, "unwrap"))?;
+    if discont.is_none() && axis == -1 && period.is_none() {
+        return Ok(unwrap_fn.call1((p.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(discont_val) = discont {
         kwargs.set_item(intern!(py, "discont"), discont_val.bind(py))?;
@@ -62728,8 +62807,7 @@ fn unwrap(
     if let Some(period_val) = period {
         kwargs.set_item(intern!(py, "period"), period_val.bind(py))?;
     }
-    Ok(numpy
-        .getattr(intern!(py, "unwrap"))?
+    Ok(unwrap_fn
         .call((p.bind(py),), Some(&kwargs))?
         .unbind())
 }
@@ -83069,6 +83147,9 @@ fn ifft(
     let ifft_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "ifft"))?;
+    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
+        return Ok(ifft_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
         kwargs.set_item(intern!(py, "n"), n_val)?;
@@ -83105,6 +83186,9 @@ fn fft2(
     let fft2_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "fft2"))?;
+    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
+        return Ok(fft2_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
         kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
@@ -83139,6 +83223,9 @@ fn ifft2(
     let ifft2_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "ifft2"))?;
+    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
+        return Ok(ifft2_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
         kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
@@ -83174,6 +83261,9 @@ fn fftn(
     let fftn_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "fftn"))?;
+    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
+        return Ok(fftn_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
         kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
@@ -83209,6 +83299,9 @@ fn ifftn(
     let ifftn_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "ifftn"))?;
+    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
+        return Ok(ifftn_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
         kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
@@ -85723,12 +85816,15 @@ fn rfftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyRe
     // so delegate the generation to numpy. The device kwarg was validated above and
     // n==0 / d==0 already raise the same ZeroDivisionError numpy itself would.
     let numpy = cached_numpy(py)?;
+    let rfftfreq_fn = numpy
+        .getattr(intern!(py, "fft"))?
+        .getattr(intern!(py, "rfftfreq"))?;
+    if d == 1.0 {
+        return Ok(rfftfreq_fn.call1((n,))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "d"), d)?;
-    Ok(numpy
-        .getattr(intern!(py, "fft"))?
-        .call_method(intern!(py, "rfftfreq"), (n,), Some(&kwargs))?
-        .unbind())
+    Ok(rfftfreq_fn.call((n,), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -85766,6 +85862,12 @@ fn rfft(
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let rfft_fn = numpy
+        .getattr(intern!(py, "fft"))?
+        .getattr(intern!(py, "rfft"))?;
+    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
+        return Ok(rfft_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
         kwargs.set_item(intern!(py, "n"), n_val)?;
@@ -85782,10 +85884,7 @@ fn rfft(
     if let Some(out_val) = out {
         kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
-    Ok(numpy
-        .getattr(intern!(py, "fft"))?
-        .call_method(intern!(py, "rfft"), (a.bind(py),), Some(&kwargs))?
-        .unbind())
+    Ok(rfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -85800,6 +85899,12 @@ fn irfft(
 ) -> PyResult<Py<PyAny>> {
     validate_irfft_norm(norm.as_deref())?;
     let numpy = cached_numpy(py)?;
+    let irfft_fn = numpy
+        .getattr(intern!(py, "fft"))?
+        .getattr(intern!(py, "irfft"))?;
+    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
+        return Ok(irfft_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(n) = n {
         kwargs.set_item(intern!(py, "n"), n)?;
@@ -85816,10 +85921,7 @@ fn irfft(
     if let Some(out_val) = out {
         kwargs.set_item(intern!(py, "out"), out_val.bind(py))?;
     }
-    Ok(numpy
-        .getattr(intern!(py, "fft"))?
-        .call_method(intern!(py, "irfft"), (a.bind(py),), Some(&kwargs))?
-        .unbind())
+    Ok(irfft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -85840,6 +85942,9 @@ fn hfft(
     let hfft_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "hfft"))?;
+    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
+        return Ok(hfft_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
         kwargs.set_item(intern!(py, "n"), n_val)?;
@@ -85873,6 +85978,9 @@ fn ihfft(
     let ihfft_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "ihfft"))?;
+    if n.is_none() && axis == -1 && norm.is_none() && out.is_none() {
+        return Ok(ihfft_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(n_val) = n {
         kwargs.set_item(intern!(py, "n"), n_val)?;
@@ -85910,6 +86018,9 @@ fn rfft2(
     let rfft2_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "rfft2"))?;
+    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
+        return Ok(rfft2_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
         kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
@@ -85944,6 +86055,9 @@ fn irfft2(
     let irfft2_fn = numpy
         .getattr(intern!(py, "fft"))?
         .getattr(intern!(py, "irfft2"))?;
+    if s.is_none() && axes.is_none() && norm.is_none() && out.is_none() {
+        return Ok(irfft2_fn.call1((a.bind(py),))?.unbind());
+    }
     let kwargs = PyDict::new(py);
     if let Some(s_val) = s {
         kwargs.set_item(intern!(py, "s"), s_val.bind(py))?;
@@ -88227,7 +88341,11 @@ fn core_numpy_passthrough_interned(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
+    let target = numpy.getattr(name)?;
+    if kwargs.is_none_or(|k| k.is_empty()) {
+        return Ok(target.call1(args)?.unbind());
+    }
+    Ok(target.call(args, kwargs)?.unbind())
 }
 
 /// Reads a flag argument the way NumPy does: by TRUTHINESS, not by type.
