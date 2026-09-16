@@ -17034,7 +17034,6 @@ fn try_zerocopy_any_roll_axis(
     shift_scalar: i64,
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if !matches!(kind.as_str(), "b" | "i" | "u" | "f") {
@@ -17070,7 +17069,7 @@ fn try_zerocopy_any_roll_axis(
         return Ok(None);
     };
     let total_bytes = input.len();
-    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
+    let out = cached_numpy_empty_like(py)?.call1((a,))?;
     if total_bytes > 0 && axis_len > 0 {
         let s = (((shift_scalar % axis_len as i64) + axis_len as i64) % axis_len as i64) as usize;
         let Ok(out_u8) = out.call_method1(intern!(py, "view"), (uint8,)) else {
@@ -17130,8 +17129,7 @@ fn try_zerocopy_f64_roll_2d_multi(
     shifts: &[i64],
     axes: &[i64],
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?.clone();
     if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
@@ -17159,7 +17157,7 @@ fn try_zerocopy_f64_roll_2d_multi(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
+    let out = cached_numpy_empty_like(py)?.call1((a,))?;
     if rows > 0 && cols > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -17211,7 +17209,6 @@ fn try_zerocopy_any_roll_2d_multi(
     shifts: &[i64],
     axes: &[i64],
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
@@ -17242,7 +17239,7 @@ fn try_zerocopy_any_roll_2d_multi(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
+    let out = cached_numpy_empty_like(py)?.call1((a,))?;
     if rows > 0 && cols > 0 {
         let Ok(out_bytes) = out.call_method1(intern!(py, "view"), (uint8,)) else {
             return Ok(None);
@@ -62597,7 +62594,6 @@ impl UnwrapFloat for f32 {
 //   ph    = (|dd| < pi || NaN) ? correction : 0   (NaN flows into cum like numpy cumsum)
 fn unwrap_fill_typed<T: UnwrapFloat>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     p: &Bound<'_, PyAny>,
     row: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
@@ -62607,7 +62603,7 @@ fn unwrap_fill_typed<T: UnwrapFloat>(
     let Some(p_in) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let out_arr = numpy.call_method1(intern!(py, "empty_like"), (p,))?;
+    let out_arr = cached_numpy_empty_like(py)?.call1((p,))?;
     let Ok(out_buffer) = PyBuffer::<T>::get(&out_arr) else {
         return Ok(None);
     };
@@ -62680,7 +62676,6 @@ fn try_native_unwrap_default(
     p: &Bound<'_, PyAny>,
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !p.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -62712,8 +62707,8 @@ fn try_native_unwrap_default(
         return Ok(None);
     }
     match itemsize {
-        8 => unwrap_fill_typed::<f64>(py, numpy, p, row),
-        4 => unwrap_fill_typed::<f32>(py, numpy, p, row),
+        8 => unwrap_fill_typed::<f64>(py, p, row),
+        4 => unwrap_fill_typed::<f32>(py, p, row),
         _ => Ok(None), // float16 / longdouble -> delegate
     }
 }
@@ -108367,9 +108362,7 @@ fn try_zerocopy_unicode_ascii_case(
     if !matches!(method, "upper" | "lower" | "swapcase") {
         return Ok(None); // unknown op -> delegate to numpy
     }
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !input.is_exact_instance(&ndarray_type) {
+    if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dtype = input.getattr(intern!(py, "dtype"))?;
@@ -108384,8 +108377,8 @@ fn try_zerocopy_unicode_ascii_case(
         return Ok(None);
     }
 
-    let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
-    let codepoints = input.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
+    let uint32_dtype = cached_uint32_type(py)?;
+    let codepoints = input.call_method1(intern!(py, "view"), (uint32_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
         return Ok(None);
     };
@@ -108412,7 +108405,7 @@ fn try_zerocopy_unicode_ascii_case(
         return Ok(None);
     }
 
-    let codepoints_out = numpy.call_method1(intern!(py, "empty_like"), (&codepoints,))?;
+    let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
     let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
         return Ok(None);
     };
@@ -108467,7 +108460,6 @@ fn try_zerocopy_bytes_ascii_case(
     if !matches!(method, "upper" | "lower" | "swapcase") {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -108480,8 +108472,8 @@ fn try_zerocopy_bytes_ascii_case(
     {
         return Ok(None);
     }
-    let uint8_dtype = numpy.getattr(intern!(py, "uint8"))?;
-    let bytes_view = input.call_method1(intern!(py, "view"), (&uint8_dtype,))?;
+    let uint8_dtype = cached_uint8_type(py)?;
+    let bytes_view = input.call_method1(intern!(py, "view"), (uint8_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u8>::get(&bytes_view) else {
         return Ok(None);
     };
@@ -108496,9 +108488,9 @@ fn try_zerocopy_bytes_ascii_case(
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
     let cin: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
-    let out = numpy.call_method1(intern!(py, "empty_like"), (input,))?;
+    let out = cached_numpy_empty_like(py)?.call1((input,))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&uint8_dtype,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (uint8_dtype,))?;
         let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
