@@ -115630,8 +115630,6 @@ fn correlate(
 
 fn correlate_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let a_for_fallback = a.clone_ref(py);
-    let v_for_fallback = v.clone_ref(py);
     // The handle is fetched INSIDE the closure and `mode` goes positionally: it is
     // numpy's third positional parameter, so the kwargs dict (and the `PyString` the
     // non-interned `mode` key built inside it) were both avoidable, and the native
@@ -115639,7 +115637,7 @@ fn correlate_impl(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyR
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr(intern!(py, "correlate"))?
-            .call1((a_for_fallback.bind(py), v_for_fallback.bind(py), mode))?
+            .call1((a.bind(py), v.bind(py), mode))?
             .unbind())
     };
 
@@ -118758,20 +118756,20 @@ fn ediff1d(
     to_begin: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
-    let ediff1d_fn = numpy.getattr(intern!(py, "ediff1d"))?;
-    let ary_ref = ary.clone_ref(py);
-    let to_end_ref = to_end.as_ref().map(|v| v.clone_ref(py));
-    let to_begin_ref = to_begin.as_ref().map(|v| v.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
+        let ediff1d_fn = numpy.getattr(intern!(py, "ediff1d"))?;
+        if to_end.is_none() && to_begin.is_none() {
+            return Ok(ediff1d_fn.call1((ary.bind(py),))?.unbind());
+        }
         let kwargs = PyDict::new(py);
-        if let Some(te) = to_end_ref.as_ref() {
+        if let Some(ref te) = to_end {
             kwargs.set_item(intern!(py, "to_end"), te.bind(py))?;
         }
-        if let Some(tb) = to_begin_ref.as_ref() {
+        if let Some(ref tb) = to_begin {
             kwargs.set_item(intern!(py, "to_begin"), tb.bind(py))?;
         }
         Ok(ediff1d_fn
-            .call((ary_ref.bind(py),), Some(&kwargs))?
+            .call((ary.bind(py),), Some(&kwargs))?
             .unbind())
     };
 
@@ -118883,7 +118881,7 @@ fn ediff1d(
 
     let mut parts: Vec<UFuncArray> = Vec::with_capacity(3);
 
-    if let Some(tb) = to_begin {
+    if let Some(ref tb) = to_begin {
         let tb_array = match extract_precise_numeric_array(py, tb.bind(py), "ediff1d(to_begin)") {
             Ok(arr) => arr.ravel(),
             Err(_) => return fallback(),
@@ -118894,7 +118892,7 @@ fn ediff1d(
 
     parts.push(diff_result);
 
-    if let Some(te) = to_end {
+    if let Some(ref te) = to_end {
         let te_array = match extract_precise_numeric_array(py, te.bind(py), "ediff1d(to_end)") {
             Ok(arr) => arr.ravel(),
             Err(_) => return fallback(),
