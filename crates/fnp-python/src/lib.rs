@@ -94866,10 +94866,10 @@ fn argmax(
     // datetime64/timedelta64 are int64-backed and their argmin/argmax by int64 ordering == temporal
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal
     // reduce). NaT (i64::MIN) has subtle numpy arg semantics -> defer if any NaT is present.
-    let a = if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndt)
-        && let Ok(kind) = a
-            .bind(py)
+    let a_bound = a.bind(py);
+    let dt_view = if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
+        && a_bound.is_exact_instance(&ndt)
+        && let Ok(kind) = a_bound
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
             .and_then(|k| k.extract::<String>())
@@ -94877,32 +94877,31 @@ fn argmax(
     {
         if numpy
             .getattr(intern!(py, "isnat"))?
-            .call1((a.bind(py),))?
+            .call1((a_bound,))?
             .call_method0(intern!(py, "any"))?
             .extract::<bool>()?
         {
             return fallback();
         }
-        a.bind(py)
-            .call_method1(intern!(py, "view"), ("int64",))?
-            .unbind()
+        Some(a_bound.call_method1(intern!(py, "view"), ("int64",))?)
     } else {
-        a
+        None
     };
+    let a_eff = dt_view.as_ref().unwrap_or(a_bound);
 
     // Zero-copy integer fast path (axis=None): scan the buffer for the first
     // maximum directly instead of widening to an f64 Vec (~55x slower for int64).
-    if let Some(out) = try_zerocopy_int_argextreme(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_int_argextreme(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Single-pass SIMD f64 fast path (axis=None): ~5-13x faster than the cold
     // extract_precise → reduce_argmax scalar scan (NaN arrays defer to numpy).
-    if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_f64_argextreme(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Flat bool argmax (np.argmax(cond) find-first-True): bool missed the int/f64 paths and fell
     // to the cold bool->f64 extract (~36000x). Short-circuit u64-word scan for the first True.
-    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Narrow ints (1/2-byte) along the LAST axis: numpy's SIMD argmax (16-64
@@ -94913,7 +94912,7 @@ fn argmax(
     // arms in try_zerocopy_int_argextreme_axis. (Flat narrow ints are split
     // in try_zerocopy_int_argextreme above.)
     if let Some(ax) = axis_val
-        && let Ok(dt) = a.bind(py).getattr(intern!(py, "dtype"))
+        && let Ok(dt) = a_eff.getattr(intern!(py, "dtype"))
         && let Ok(k) = dt
             .getattr(intern!(py, "kind"))
             .and_then(|x| x.extract::<String>())
@@ -94923,7 +94922,7 @@ fn argmax(
             .and_then(|x| x.extract::<usize>())
             .map(|s| s <= 2)
             .unwrap_or(false)
-        && a.bind(py)
+        && a_eff
             .getattr(intern!(py, "ndim"))
             .and_then(|n| n.extract::<usize>())
             .map(|nd| {
@@ -94937,37 +94936,37 @@ fn argmax(
     // Zero-copy contiguous last-axis fast path (f64 SIMD + every int width): the
     // per-axis extract_precise → reduce_argmax path was ~3x (f64) to ~50x (int64)
     // slower than numpy.
-    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f64 fast path (e.g. argmax(M, axis=0)): see argmin.
-    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f32 fast path (f32 had no arg-axis path -> delegated ~parity).
-    if let Some(out) = try_zerocopy_f32_argextreme_axis(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_f32_argextreme_axis(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f16 fast path: numpy widens f16->f32 per column; native strided
     // parallel scan is bit-exact (index-based, defers NaN) and far faster.
-    if let Some(out) = try_zerocopy_f16_argextreme_axis(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_f16_argextreme_axis(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis integer fast path (e.g. argmax(int_M, axis=0)).
-    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, true)? {
+    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a_eff, axis_val, true)? {
         return Ok(out);
     }
     // f16 FLAT argmax: numpy widens f16->f32 to scan (~68ms@16M). A direct uint16-view parallel
     // argextreme is bit-exact (index-based, defers NaN) and far faster.
     if axis_val.is_none()
-        && numpy_dtype_is_f16(a.bind(py))
-        && let Some(out) = try_zerocopy_f16_argextreme_flat(py, a.bind(py), true)?
+        && numpy_dtype_is_f16(a_eff)
+        && let Some(out) = try_zerocopy_f16_argextreme_flat(py, a_eff, true)?
     {
         return Ok(out);
     }
     // f32/f16 argmax: numpy's native argextreme beats fnp's widening extract->scan
     // (~1.3-35x slower); delegate.
-    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
+    if numpy_dtype_is_f32(a_eff) || numpy_dtype_is_f16(a_eff) {
         return fallback();
     }
 
@@ -94975,9 +94974,8 @@ fn argmax(
     // fast paths into the cold extract → native scan (~1.4-2.8x slower than numpy's
     // strided argextreme). Delegate them to numpy.
     if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
-        && !a
-            .bind(py)
+        && a_eff.is_exact_instance(&ndarray_type)
+        && !a_eff
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
@@ -94986,7 +94984,7 @@ fn argmax(
     }
 
     // Extract input array
-    let array = match extract_precise_numeric_array(py, a.bind(py), "argmax(a)") {
+    let array = match extract_precise_numeric_array(py, a_eff, "argmax(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
@@ -95090,10 +95088,10 @@ fn argmin(
     // datetime64/timedelta64 are int64-backed and their argmin/argmax by int64 ordering == temporal
     // ordering, so route through the int64 fast paths (bit-exact indices, ~17x vs numpy's temporal
     // reduce). NaT (i64::MIN) has subtle numpy arg semantics -> defer if any NaT is present.
-    let a = if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndt)
-        && let Ok(kind) = a
-            .bind(py)
+    let a_bound = a.bind(py);
+    let dt_view = if let Ok(ndt) = cached_ndarray_type(numpy.py()).cloned()
+        && a_bound.is_exact_instance(&ndt)
+        && let Ok(kind) = a_bound
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
             .and_then(|k| k.extract::<String>())
@@ -95101,39 +95099,38 @@ fn argmin(
     {
         if numpy
             .getattr(intern!(py, "isnat"))?
-            .call1((a.bind(py),))?
+            .call1((a_bound,))?
             .call_method0(intern!(py, "any"))?
             .extract::<bool>()?
         {
             return fallback();
         }
-        a.bind(py)
-            .call_method1(intern!(py, "view"), ("int64",))?
-            .unbind()
+        Some(a_bound.call_method1(intern!(py, "view"), ("int64",))?)
     } else {
-        a
+        None
     };
+    let a_eff = dt_view.as_ref().unwrap_or(a_bound);
 
     // Zero-copy integer fast path (axis=None): scan the buffer for the first
     // minimum directly instead of widening to an f64 Vec (~55x slower for int64).
-    if let Some(out) = try_zerocopy_int_argextreme(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_int_argextreme(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Single-pass SIMD f64 fast path (axis=None): ~5-13x faster than the cold
     // extract_precise → reduce_argmin scalar scan (NaN arrays defer to numpy).
-    if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_f64_argextreme(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Flat bool argmin (find-first-False): same cold-extract gap as argmax; short-circuit
     // u64-word scan skipping all-True words for the first False.
-    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Narrow ints (1/2-byte) along the LAST axis: numpy's SIMD argmin beats
     // the scalar per-lane scan there; NON-last axes fall through to the
     // native narrow arms (see the argmax twin for the pinned 57x asymmetry).
     if let Some(ax) = axis_val
-        && let Ok(dt) = a.bind(py).getattr(intern!(py, "dtype"))
+        && let Ok(dt) = a_eff.getattr(intern!(py, "dtype"))
         && let Ok(k) = dt
             .getattr(intern!(py, "kind"))
             .and_then(|x| x.extract::<String>())
@@ -95143,7 +95140,7 @@ fn argmin(
             .and_then(|x| x.extract::<usize>())
             .map(|s| s <= 2)
             .unwrap_or(false)
-        && a.bind(py)
+        && a_eff
             .getattr(intern!(py, "ndim"))
             .and_then(|n| n.extract::<usize>())
             .map(|nd| {
@@ -95157,39 +95154,39 @@ fn argmin(
     // Zero-copy contiguous last-axis fast path (f64 SIMD + every int width): the
     // per-axis extract_precise → reduce_argmin path was ~3x (f64) to ~50x (int64)
     // slower than numpy.
-    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f64 fast path (e.g. argmin(M, axis=0)): the per-axis
     // extract_precise → reduce_argmin path copies the whole array then scans
     // strided per-column (~2.8x numpy on a 1000x1000). Defers NaN to numpy.
-    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f32 fast path (f32 had no arg-axis path -> delegated ~parity).
-    if let Some(out) = try_zerocopy_f32_argextreme_axis(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_f32_argextreme_axis(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis f16 fast path: numpy widens f16->f32 per column; native strided
     // parallel scan is bit-exact (index-based, defers NaN) and far faster.
-    if let Some(out) = try_zerocopy_f16_argextreme_axis(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_f16_argextreme_axis(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // Zero-copy non-last-axis integer fast path (e.g. argmin(int_M, axis=0)).
-    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, false)? {
+    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a_eff, axis_val, false)? {
         return Ok(out);
     }
     // f16 FLAT argmin: numpy widens f16->f32 to scan (~68ms@16M). A direct uint16-view parallel
     // argextreme is bit-exact (index-based, defers NaN) and far faster.
     if axis_val.is_none()
-        && numpy_dtype_is_f16(a.bind(py))
-        && let Some(out) = try_zerocopy_f16_argextreme_flat(py, a.bind(py), false)?
+        && numpy_dtype_is_f16(a_eff)
+        && let Some(out) = try_zerocopy_f16_argextreme_flat(py, a_eff, false)?
     {
         return Ok(out);
     }
     // f32/f16 argmin: numpy's native argextreme beats fnp's widening extract->scan
     // (~1.3-34x slower); delegate.
-    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
+    if numpy_dtype_is_f32(a_eff) || numpy_dtype_is_f16(a_eff) {
         return fallback();
     }
 
@@ -95197,9 +95194,8 @@ fn argmin(
     // fast paths into the cold extract → native scan (~1.4-2.8x slower than numpy's
     // strided argextreme). Delegate them to numpy.
     if let Ok(ndarray_type) = cached_ndarray_type(numpy.py()).cloned()
-        && a.bind(py).is_exact_instance(&ndarray_type)
-        && !a
-            .bind(py)
+        && a_eff.is_exact_instance(&ndarray_type)
+        && !a_eff
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
@@ -95208,7 +95204,7 @@ fn argmin(
     }
 
     // Extract input array
-    let array = match extract_precise_numeric_array(py, a.bind(py), "argmin(a)") {
+    let array = match extract_precise_numeric_array(py, a_eff, "argmin(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
