@@ -27233,9 +27233,7 @@ fn float_clip_arrays_typed<T: pyo3::buffer::Element + Copy + PartialOrd + Send +
     if a_in.len() != total || l_in.len() != bound_len || h_in.len() != bound_len {
         return Ok(None);
     }
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape.to_vec(),), Some(&kwargs))?;
+    let out = numpy.call_method1(intern!(py, "empty"), (shape, dtype_name))?;
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
@@ -36295,10 +36293,8 @@ fn select(
     let fallback = || -> PyResult<Py<PyAny>> {
         let select_fn = cached_numpy_select(py)?;
         if let Some(default) = default.as_ref() {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "default"), default.bind(py))?;
             Ok(select_fn
-                .call((b_condlist, b_choicelist), Some(&kwargs))?
+                .call1((b_condlist, b_choicelist, default.bind(py)))?
                 .unbind())
         } else {
             Ok(select_fn.call1((b_condlist, b_choicelist))?.unbind())
@@ -84273,13 +84269,15 @@ fn try_native_int_multi_dot(
 fn multi_dot(py: Python<'_>, arrays: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     let multi_dot_fn = cached_numpy_linalg_multi_dot(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
         if let Some(value) = out.as_ref() {
+            let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "out"), value.bind(py))?;
+            Ok(multi_dot_fn
+                .call((arrays.bind(py),), Some(&kwargs))?
+                .unbind())
+        } else {
+            Ok(multi_dot_fn.call1((arrays.bind(py),))?.unbind())
         }
-        Ok(multi_dot_fn
-            .call((arrays.bind(py),), Some(&kwargs))?
-            .unbind())
     };
 
     // INTEGER chains: numpy has no BLAS for ints (slow no-BLAS matmul chain), so route
@@ -85387,9 +85385,7 @@ fn outer(
         if let Some(ref value) = out {
             let b_out = value.bind(py);
             if !b_out.is_none() {
-                let kwargs = PyDict::new(py);
-                kwargs.set_item(intern!(py, "out"), b_out)?;
-                return Ok(outer_fn.call((b_a, b_b), Some(&kwargs))?.unbind());
+                return Ok(outer_fn.call1((b_a, b_b, b_out))?.unbind());
             }
         }
         Ok(outer_fn.call1((b_a, b_b))?.unbind())
