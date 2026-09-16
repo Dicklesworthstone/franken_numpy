@@ -36797,6 +36797,7 @@ fn searchsorted(
     // (wrong dtype/shape, out-of-range values) defers so numpy owns its exact
     // TypeError/IndexError surface.
     const SEARCHSORTED_SORTER_MIN: usize = 1 << 12;
+    let mut clear_sorter = false;
     if let Some(sobj) = sorter.as_ref()
         && !sobj.bind(py).is_none()
     {
@@ -36820,13 +36821,16 @@ fn searchsorted(
                 // a/sorter clones, so any downstream defer still hands numpy the
                 // exact original call).
                 a = a_arr.clone().unbind();
-                sorter = None;
+                clear_sorter = true;
                 gathered = true;
             }
         }
         if !gathered {
             return delegate_numpy_searchsorted(py, &a_arr, v_bound, side, Some(sb));
         }
+    }
+    if clear_sorter {
+        sorter = None;
     }
     // UNCONDITIONAL ON EVERY CALL (`deadlock-audit-v46rn`): this ran two non-interned
     // `getattr`s and extracted a one-character answer into a HEAP STRING, before any
