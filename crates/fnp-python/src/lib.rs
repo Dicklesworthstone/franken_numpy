@@ -17361,9 +17361,7 @@ fn try_zerocopy_f64_compress_axis(
     a: &Bound<'_, PyAny>,
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type) || !condition.is_exact_instance(&ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, condition)? {
         return Ok(None);
     }
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
@@ -17378,15 +17376,18 @@ fn try_zerocopy_f64_compress_axis(
     if dtype_kind_of(condition) != Some('b') {
         return Ok(None);
     }
-    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let ndim = shape.len() as isize;
-    let ax = if axis < 0 { axis + ndim } else { axis };
-    if ax < 0 || ax >= ndim {
+    let Some(ax) = normalize_axis(axis, a.getattr(intern!(py, "ndim"))?.extract::<usize>()?) else {
         return Ok(None);
-    }
-    let ax = ax as usize;
-    let axis_len = shape[ax];
+    };
     let Ok(arr_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = arr_buffer.shape().to_vec();
+    let axis_len = shape[ax];
+    let (Ok(cond_len), Ok(cond_ndim)) = (
+        condition.getattr(intern!(py, "size"))?.extract::<usize>(),
+        condition.getattr(intern!(py, "ndim"))?.extract::<usize>(),
+    ) else {
         return Ok(None);
     };
     if !arr_buffer.is_c_contiguous() {
@@ -17421,11 +17422,12 @@ fn try_zerocopy_f64_compress_axis(
     out_shape[ax] = count;
     let out_elems = outer * count * inner;
     let float64_type = cached_float64_type(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = out_shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+        empty_fn.call1((*only, float64_type))?
     } else {
         let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+        empty_fn.call1((&output_shape, float64_type))?
     };
     if out_elems > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -17468,7 +17470,6 @@ fn compact_typed<
     T: pyo3::buffer::Element + Copy + Send + Sync,
 >(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     cond_view: &Bound<'py, PyAny>,
     arr_src: &Bound<'py, PyAny>,
     dtype_name: &str,
@@ -17497,6 +17498,7 @@ fn compact_typed<
     // serial loop (both ~2.2 GB/s at 16M/50% measured - far off machine
     // bandwidth); the parallel form is a different design.
     const COMPACT_PAR_MIN: usize = 1 << 19;
+    let empty_fn = cached_numpy_empty(py)?;
     if m >= COMPACT_PAR_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
         // SAFETY: ReadOnlyCell<C>/<T> are repr(transparent); read-only under the GIL.
@@ -17509,7 +17511,7 @@ fn compact_typed<
             .map(|c| c.iter().filter(|&&v| pred(v)).count())
             .collect();
         let total: usize = counts.iter().sum();
-        let flat = numpy.call_method1(intern!(py, "empty"), (total, dtype_name))?;
+        let flat = empty_fn.call1((total, dtype_name))?;
         if total > 0 {
             let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
                 return Ok(None);
@@ -17544,7 +17546,7 @@ fn compact_typed<
         return Ok(Some(flat.unbind()));
     }
     let count = cond_in.iter().filter(|cell| pred(cell.get())).count();
-    let flat = numpy.call_method1(intern!(py, "empty"), (count, dtype_name))?;
+    let flat = empty_fn.call1((count, dtype_name))?;
     if count > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
             return Ok(None);
