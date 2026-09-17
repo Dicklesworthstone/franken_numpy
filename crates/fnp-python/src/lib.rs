@@ -1198,11 +1198,11 @@ impl PyUFunc {
                 && let Ok(kind) = arr
                     .getattr(intern!(py, "dtype"))
                     .and_then(|d| d.getattr(intern!(py, "kind")))
-                    .and_then(|k| k.extract::<String>())
+                    .and_then(|k| k.extract::<char>())
             {
                 let routable = match self.kind {
-                    UFuncKind::Add => matches!(kind.as_str(), "f" | "c" | "m"),
-                    _ => matches!(kind.as_str(), "f" | "c"),
+                    UFuncKind::Add => matches!(kind, 'f' | 'c' | 'm'),
+                    _ => matches!(kind, 'f' | 'c'),
                 };
                 if routable {
                     let axis_obj = axis.into_pyobject(py)?.into_any().unbind();
@@ -1248,8 +1248,8 @@ impl PyUFunc {
                 .getattr(intern!(py, "dtype"))
                 .ok()
                 .and_then(|d| d.getattr(intern!(py, "kind")).ok())
-                .and_then(|k| k.extract::<String>().ok())
-                .map(|k| k == "b")
+                .and_then(|k| k.extract::<char>().ok())
+                .map(|k| k == 'b')
                 .unwrap_or(false);
             if is_bool {
                 let op = match self.kind {
@@ -4413,8 +4413,8 @@ fn coerce_to_uint32_words(value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
         .map(|dt| {
             dt.getattr(intern!(py, "kind"))
                 .map(|k| {
-                    if let Ok(ks) = k.extract::<String>() {
-                        ks == "i" || ks == "u"
+                    if let Ok(ks) = k.extract::<char>() {
+                        ks == 'i' || ks == 'u'
                     } else {
                         false
                     }
@@ -17377,8 +17377,8 @@ fn try_zerocopy_f64_compress(
     if condition
         .getattr(intern!(py, "dtype"))?
         .getattr(intern!(py, "kind"))?
-        .extract::<String>()?
-        != "b"
+        .extract::<char>()?
+        != 'b'
     {
         return Ok(None);
     }
@@ -21518,8 +21518,8 @@ fn try_zerocopy_f64_ediff1d(
         let kind = arr
             .getattr(intern!(py, "dtype"))?
             .getattr(intern!(py, "kind"))?
-            .extract::<String>()?;
-        if !matches!(kind.as_str(), "b" | "i" | "u" | "f") {
+            .extract::<char>()?;
+        if !matches!(kind, 'b' | 'i' | 'u' | 'f') {
             return Ok(None);
         }
         let flat = arr
@@ -23692,8 +23692,8 @@ fn interp(
         if fp_probe
             .getattr(intern!(py, "dtype"))?
             .getattr(intern!(py, "kind"))?
-            .extract::<String>()?
-            == "c"
+            .extract::<char>()?
+            == 'c'
         {
             return fallback(); // complex fp -> numpy (component-wise)
         }
@@ -24161,8 +24161,8 @@ fn trapezoid_impl(
     let int_kind = |v: &Bound<'_, PyAny>| -> bool {
         v.getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-            .map(|k| k == "i" || k == "u")
+            .and_then(|k| k.extract::<char>())
+            .map(|k| k == 'i' || k == 'u')
             .unwrap_or(false)
     };
     if int_kind(y.bind(py)) || x.as_ref().is_some_and(|xv| int_kind(xv.bind(py))) {
@@ -26323,10 +26323,10 @@ fn try_zerocopy_any_all(
     let kind = a
         .getattr(intern!(py, "dtype"))?
         .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
+        .extract::<char>()?;
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?;
-    match kind.as_str() {
-        "b" => {
+    match kind {
+        'b' => {
             let a_u8: Bound<'_, PyAny> =
                 a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
             let Ok(buffer) = PyBuffer::<u8>::get(&a_u8) else {
@@ -26359,7 +26359,7 @@ fn try_zerocopy_any_all(
                 input[i].get() != 0
             })
         }
-        "f" if numpy_dtype_is_f64(py, a) => {
+        'f' if numpy_dtype_is_f64(py, a) => {
             let Ok(buffer) = PyBuffer::<f64>::get(a) else {
                 return Ok(None);
             };
@@ -26388,7 +26388,7 @@ fn try_zerocopy_any_all(
                 input[i].get() != 0.0
             })
         }
-        "i" | "u" => {
+        'i' | 'u' => {
             // Integer any/all: truthiness is v != 0 (a total nonzero test, no NaN
             // hazard), so the shared block / row-wise folds autovectorize. The
             // fallback widened ints to an f64 Vec and ran the strided reduce
@@ -26397,35 +26397,35 @@ fn try_zerocopy_any_all(
                 .getattr(intern!(py, "dtype"))?
                 .getattr(intern!(py, "itemsize"))?
                 .extract::<usize>()?;
-            match (kind.as_str(), itemsize) {
-                ("i", 1) => {
+            match (kind, itemsize) {
+                ('i', 1) => {
                     zerocopy_any_all_buf::<i8, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
-                ("i", 2) => {
+                ('i', 2) => {
                     zerocopy_any_all_buf::<i16, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
-                ("i", 4) => {
+                ('i', 4) => {
                     zerocopy_any_all_buf::<i32, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
-                ("i", 8) => {
+                ('i', 8) => {
                     zerocopy_any_all_buf::<i64, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
-                ("u", 1) => {
+                ('u', 1) => {
                     zerocopy_any_all_buf::<u8, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
-                ("u", 2) => {
+                ('u', 2) => {
                     zerocopy_any_all_buf::<u16, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
-                ("u", 4) => {
+                ('u', 4) => {
                     zerocopy_any_all_buf::<u32, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
-                ("u", 8) => {
+                ('u', 8) => {
                     zerocopy_any_all_buf::<u64, _>(py, numpy, a, axis, is_all, &shape, |v| v != 0)
                 }
                 _ => Ok(None),
             }
         }
-        "f" => {
+        'f' => {
             // float32 any/all (the f64 arm above is guarded): truthiness is v != 0.0
             // (NaN truthy, -0.0 falsy, matching numpy). The fallback widened to an
             // f64 Vec and ran the strided reduce (~28-40x slower).
@@ -30734,8 +30734,8 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         && a.bind(py)
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-            .map(|k| k == "f")
+            .and_then(|k| k.extract::<char>())
+            .map(|k| k == 'f')
             .unwrap_or(false)
     {
         return fallback();
@@ -30917,8 +30917,8 @@ fn cholesky(
             .bind(py)
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-            .map(|k| k == "f")
+            .and_then(|k| k.extract::<char>())
+            .map(|k| k == 'f')
             .unwrap_or(false);
         if shape
             .as_ref()
@@ -31344,8 +31344,8 @@ fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
         && a.bind(py)
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-            .map(|k| k == "f")
+            .and_then(|k| k.extract::<char>())
+            .map(|k| k == 'f')
             .unwrap_or(false)
     {
         return fallback();
@@ -31445,8 +31445,8 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         && bound
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-            .map(|k| k == "f")
+            .and_then(|k| k.extract::<char>())
+            .map(|k| k == 'f')
             .unwrap_or(false)
     {
         return Ok(det_fn.call1((bound,))?.unbind());
@@ -44282,23 +44282,23 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
         && let Ok(dt) = data_obj.getattr(intern!(py, "dtype"))
         && let Ok(kind) = dt
             .getattr(intern!(py, "kind"))
-            .and_then(|k| k.extract::<String>())
+            .and_then(|k| k.extract::<char>())
         && let Ok(isz) = dt
             .getattr(intern!(py, "itemsize"))
             .and_then(|s| s.extract::<usize>())
     {
         let fv = fill_value.as_ref().map(|v| v.bind(py));
         let ab = a.bind(py);
-        let res = match (kind.as_str(), isz) {
-            ("i", 8) => try_zerocopy_ma_filled_typed::<i64>(py, ab, fv, "int64")?,
-            ("i", 4) => try_zerocopy_ma_filled_typed::<i32>(py, ab, fv, "int32")?,
-            ("i", 2) => try_zerocopy_ma_filled_typed::<i16>(py, ab, fv, "int16")?,
-            ("i", 1) => try_zerocopy_ma_filled_typed::<i8>(py, ab, fv, "int8")?,
-            ("u", 8) => try_zerocopy_ma_filled_typed::<u64>(py, ab, fv, "uint64")?,
-            ("u", 4) => try_zerocopy_ma_filled_typed::<u32>(py, ab, fv, "uint32")?,
-            ("u", 2) => try_zerocopy_ma_filled_typed::<u16>(py, ab, fv, "uint16")?,
-            ("u", 1) => try_zerocopy_ma_filled_typed::<u8>(py, ab, fv, "uint8")?,
-            ("f", 4) => try_zerocopy_ma_filled_typed::<f32>(py, ab, fv, "float32")?,
+        let res = match (kind, isz) {
+            ('i', 8) => try_zerocopy_ma_filled_typed::<i64>(py, ab, fv, "int64")?,
+            ('i', 4) => try_zerocopy_ma_filled_typed::<i32>(py, ab, fv, "int32")?,
+            ('i', 2) => try_zerocopy_ma_filled_typed::<i16>(py, ab, fv, "int16")?,
+            ('i', 1) => try_zerocopy_ma_filled_typed::<i8>(py, ab, fv, "int8")?,
+            ('u', 8) => try_zerocopy_ma_filled_typed::<u64>(py, ab, fv, "uint64")?,
+            ('u', 4) => try_zerocopy_ma_filled_typed::<u32>(py, ab, fv, "uint32")?,
+            ('u', 2) => try_zerocopy_ma_filled_typed::<u16>(py, ab, fv, "uint16")?,
+            ('u', 1) => try_zerocopy_ma_filled_typed::<u8>(py, ab, fv, "uint8")?,
+            ('f', 4) => try_zerocopy_ma_filled_typed::<f32>(py, ab, fv, "float32")?,
             _ => None,
         };
         if let Some(out) = res {
@@ -46245,8 +46245,8 @@ fn numpy_dtype_is_integer(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool
     let kind = a
         .getattr(intern!(py, "dtype"))?
         .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    Ok(kind == "i" || kind == "u")
+        .extract::<char>()?;
+    Ok(kind == 'i' || kind == 'u')
 }
 
 // Direct exact-f64 np.nansum(axis=...) for C-contiguous ndarrays. The generic
@@ -48895,7 +48895,7 @@ fn try_zerocopy_f64_nanprod_axis(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -49176,9 +49176,9 @@ fn try_zerocopy_f64_nanextreme(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    if kind != "f" || itemsize != 8 {
+    if kind != 'f' || itemsize != 8 {
         return Ok(None);
     }
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
@@ -49226,7 +49226,7 @@ fn try_zerocopy_f64_nanextreme_axis(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -49595,7 +49595,7 @@ fn try_zerocopy_f64_nanmean_axis(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -49862,7 +49862,7 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
     {
         return Ok(None);
@@ -50085,7 +50085,7 @@ fn try_zerocopy_f64_nanvar_axis(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -50206,7 +50206,7 @@ fn try_zerocopy_f32_nanmean_last_axis(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
     {
         return Ok(None);
@@ -50317,7 +50317,7 @@ fn try_zerocopy_f32_nanvar_last_axis(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
     {
         return Ok(None);
@@ -50743,7 +50743,7 @@ fn try_zerocopy_f32_var_nonlast_axis(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
     {
         return Ok(None);
@@ -51086,7 +51086,7 @@ fn try_zerocopy_f32_nanvar_nonlast_axis(
     }
     let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
     {
         return Ok(None);
@@ -52291,8 +52291,8 @@ fn nanstd(
         && a.bind(py)
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-            .map(|k| k == "i" || k == "u" || k == "b")
+            .and_then(|k| k.extract::<char>())
+            .map(|k| k == 'i' || k == 'u' || k == 'b')
             .unwrap_or(false)
     {
         let ddof_arg = match ddof.as_ref() {
@@ -52595,8 +52595,8 @@ fn nanvar(
         && a.bind(py)
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-            .map(|k| k == "i" || k == "u" || k == "b")
+            .and_then(|k| k.extract::<char>())
+            .map(|k| k == 'i' || k == 'u' || k == 'b')
             .unwrap_or(false)
     {
         let ddof_arg = match ddof.as_ref() {
@@ -53366,8 +53366,8 @@ fn nanargmax(
         || a.bind(py)
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-            .map(|k| k == "b")
+            .and_then(|k| k.extract::<char>())
+            .map(|k| k == 'b')
             .unwrap_or(false)
     {
         let kw = PyDict::new(py);
@@ -53539,8 +53539,8 @@ fn nanargmin(
         || a.bind(py)
             .getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
-            .and_then(|k| k.extract::<String>())
-            .map(|k| k == "b")
+            .and_then(|k| k.extract::<char>())
+            .map(|k| k == 'b')
             .unwrap_or(false)
     {
         let kw = PyDict::new(py);
