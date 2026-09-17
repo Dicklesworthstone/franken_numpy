@@ -308,23 +308,16 @@ fn strict_gate_verdict(effect: PairStats, null: PairStats) -> &'static str {
 fn report_median_ci_gate(row: &str, effect: PairStats, null: PairStats) {
     let null_half_width = null_half_width_of(null);
     let required_delta = (2.0 * null_half_width).max(0.01);
-    let effect_delta = effect.ratio_median - 1.0;
-    let outside_null_ci =
-        effect.ratio_median < null.ratio_ci_low || effect.ratio_median > null.ratio_ci_high;
     // HARMONISED 2026-08-17 (deadlock-audit-7xcq2): the verdict is now the SAME rule
     // fnp-python's contract_gate_verdict applies, so a row's verdict no longer depends on
     // which crate measured it. Decided on 19 real gate rows (10 live + 9 historical) scored
-    // under BOTH rules with ZERO divergences, so harmonising rejects nothing that was ever
-    // observed to pass, and the bead's stated fear - "a gate that starts rejecting
-    // historical rows wholesale" - is empirically absent here. The old rule is still
-    // computed and emitted as verdict_legacy_weak so banked rows stay comparable.
-    let _ = (outside_null_ci, effect_delta);
+    // under BOTH rules with ZERO divergences. verdict_legacy_weak sunset reached 2026-09-17 (deadlock-audit-5l9iv).
     let verdict = strict_gate_verdict(effect, null);
     println!(
         "MEDIAN_CI_GATE row={row} verdict={verdict} effect_ratio={:.6} \
          effect_ci95=[{:.6},{:.6}] effect_ci_excludes_one={} \
          null_ci95=[{:.6},{:.6}] null_half_width={:.6} required_2x_delta={required_delta:.6} \
-         null_straddles_unity={} null_bias={:.6} verdict_legacy_weak={} \
+         null_straddles_unity={} null_bias={:.6} \
          gate_rule=canonical_matches_fnp_python \
          cv_is_provenance_only=true",
         effect.ratio_median,
@@ -336,28 +329,7 @@ fn report_median_ci_gate(row: &str, effect: PairStats, null: PairStats) {
         null_half_width,
         null_straddles_unity(null),
         null_bias(null),
-        legacy_weak_verdict(effect, null),
     );
-}
-
-/// The rule these files used BEFORE 2026-08-17, kept ONLY so banked rows stay comparable.
-///
-/// It never consults the EFFECT's CI - only its median, against the null envelope - so it
-/// can stamp DECIDABLE_WIN on an effect that is not statistically distinguishable from
-/// no-change. It is no longer the verdict; it is emitted as verdict_legacy_weak so a reader
-/// holding an old row can tell whether that row would still pass under today's rule.
-fn legacy_weak_verdict(effect: PairStats, null: PairStats) -> &'static str {
-    let required_delta = (2.0 * null_half_width_of(null)).max(0.01);
-    let effect_delta = effect.ratio_median - 1.0;
-    let outside_null_ci =
-        effect.ratio_median < null.ratio_ci_low || effect.ratio_median > null.ratio_ci_high;
-    if outside_null_ci && effect_delta >= required_delta {
-        "DECIDABLE_WIN"
-    } else if outside_null_ci && effect_delta <= -required_delta {
-        "DECIDABLE_REGRESSION"
-    } else {
-        "UNDECIDED"
-    }
 }
 
 /// Builds a `PairStats` carrying only the four fields the gate reads, for the self-check.
@@ -422,23 +394,7 @@ fn verify_median_ci_gate_semantics() {
         "UNDECIDED",
         "an effect whose own CI contains 1.0 is not distinguishable from no-change"
     );
-    // ...and the LEGACY rule called those same numbers a win. The divergence stays pinned in
-    // executable form AFTER the harmonisation, because it is the reason the harmonisation
-    // happened and because verdict_legacy_weak is still emitted: a reader comparing an old
-    // banked row against a new one needs this pair to keep its meaning.
-    assert_eq!(
-        legacy_weak_verdict(wide_effect, null),
-        "DECIDABLE_WIN",
-        "the pre-2026-08-17 rule certified this pair on median alone; if that stops being \
-         true then verdict_legacy_weak no longer reproduces the old rule and banked rows \
-         can no longer be compared against it"
-    );
-    // And the SHIPPED verdict must now refuse it - the harmonisation itself, pinned.
-    assert_eq!(
-        strict_gate_verdict(wide_effect, null),
-        "UNDECIDED",
-        "after harmonisation the emitted verdict must be the canonical one"
-    );
+
     // A properly separated effect must still WIN under the strict rule, or the strict
     // verdict is merely rejecting everything and carries no information.
     assert_eq!(
