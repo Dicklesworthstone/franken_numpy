@@ -12033,12 +12033,12 @@ fn try_zerocopy_f16_nan_to_num(
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let out_u16 = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, u16t))?
+        empty_fn.call1((n, u16t))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (shape_tuple, u16t))?
+        empty_fn.call1((shape_tuple, u16t))?
     };
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
@@ -12116,12 +12116,12 @@ fn try_zerocopy_f16_clip(
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let out_u16 = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, u16t))?
+        empty_fn.call1((n, u16t))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (shape_tuple, u16t))?
+        empty_fn.call1((shape_tuple, u16t))?
     };
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
@@ -12843,8 +12843,8 @@ fn try_zerocopy_f16_compare(
     let (Some(a_in), Some(b_in)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
-    let out_u8 = numpy.call_method1(intern!(py, "empty"), (&a_shape, cached_uint8_type(py)?))?;
+    let empty_fn = cached_numpy_empty(py)?;
+    let out_u8 = empty_fn.call1((&a_shape, cached_uint8_type(py)?))?;
     {
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
@@ -12922,8 +12922,8 @@ where
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
-    let out_u8 = numpy.call_method1(intern!(py, "empty"), (&shape, cached_uint8_type(py)?))?;
+    let empty_fn = cached_numpy_empty(py)?;
+    let out_u8 = empty_fn.call1((&shape, cached_uint8_type(py)?))?;
     {
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
@@ -12966,7 +12966,6 @@ where
 // only (no broadcast), n >= gate. Everything else -> Ok(None).
 fn zerocopy_f32_binary_flat<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
     b: &Bound<'py, PyAny>,
     op: BinaryOp,
@@ -13073,11 +13072,13 @@ fn zerocopy_f32_binary_flat<'py>(
     // Safe for the writer below at any rank: `numpy.empty` is C-contiguous by default and
     // `PyBuffer::as_mut_slice` requires only `!readonly() && is_c_contiguous()` - it does
     // NOT require `ndim == 1`, so the flat write loop is unchanged.
+    let empty_fn = cached_numpy_empty(py)?;
+    let f32_type = cached_float32_type(py)?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, "float32"))?
+        empty_fn.call1((*only, f32_type))?
     } else {
         let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&alloc_shape, "float32"))?
+        empty_fn.call1((&alloc_shape, f32_type))?
     };
     {
         let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
@@ -13114,14 +13115,7 @@ fn try_zerocopy_f32_binary(
     b: &Bound<'_, PyAny>,
     op: BinaryOp,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // Cached module handle rather than a fresh `py.import("numpy")` on every
-    // call. This probe runs on the f32 arm of the delegating binary route and
-    // declines far more often than it engages, so the import was pure decline
-    // cost - 400 ns on thinkstation1 against a 2394 ns whole-call floor
-    // (`deadlock-audit-ei9jz`). `.clone()` keeps the owned `Bound` that the rest
-    // of this function passes on as `&numpy`. See `cached_numpy`.
-    let numpy = cached_numpy(py)?.clone();
-    let Some((flat, shape)) = zerocopy_f32_binary_flat(py, &numpy, a, b, op)? else {
+    let Some((flat, shape)) = zerocopy_f32_binary_flat(py, a, b, op)? else {
         return Ok(None);
     };
     finish_preshaped_output(flat, &shape).map(Some)
@@ -13148,7 +13142,6 @@ fn euclid_u64(mut a: u64, mut b: u64) -> u64 {
 // broadcast), n >= gate. Everything else -> Ok(None).
 fn gcd_binary_typed<T, FM, FR>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     name: &str,
@@ -13171,11 +13164,12 @@ where
     }
     let shape = a_buf.shape();
     let n = a_in.len();
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape {
-        numpy.call_method1(intern!(py, "empty"), (*only, name))?
+        empty_fn.call1((*only, name))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, name))?
+        empty_fn.call1((&output_shape, name))?
     };
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -13244,10 +13238,9 @@ fn try_native_int_gcd(
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    let numpy = cached_numpy(py)?;
     macro_rules! gk {
         ($t:ty, $name:literal, $mag:expr, $res:expr) => {
-            gcd_binary_typed::<$t, _, _>(py, numpy, a, b, $name, $mag, $res)
+            gcd_binary_typed::<$t, _, _>(py, a, b, $name, $mag, $res)
         };
     }
     match (kind, itemsize) {
@@ -13276,7 +13269,6 @@ fn try_native_int_gcd(
 // (widths < 64 can't overflow u64 so the from_mag truncation is the wrap; width 64 wraps in u64).
 fn lcm_binary_typed<T, FM, FR>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     name: &str,
@@ -13299,11 +13291,12 @@ where
     }
     let shape = a_buf.shape();
     let n = a_in.len();
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape {
-        numpy.call_method1(intern!(py, "empty"), (*only, name))?
+        empty_fn.call1((*only, name))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, name))?
+        empty_fn.call1((&output_shape, name))?
     };
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -13377,10 +13370,9 @@ fn try_native_int_lcm(
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    let numpy = cached_numpy(py)?;
     macro_rules! lk {
         ($t:ty, $name:literal, $mag:expr, $res:expr) => {
-            lcm_binary_typed::<$t, _, _>(py, numpy, a, b, $name, $mag, $res)
+            lcm_binary_typed::<$t, _, _>(py, a, b, $name, $mag, $res)
         };
     }
     match (kind, itemsize) {
@@ -13409,7 +13401,6 @@ fn try_native_int_lcm(
 #[allow(clippy::too_many_arguments)]
 fn pow_binary_typed<T, FMUL, FEXP>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     name: &str,
@@ -13433,11 +13424,12 @@ where
     }
     let shape = a_buf.shape();
     let n = a_in.len();
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape {
-        numpy.call_method1(intern!(py, "empty"), (*only, name))?
+        empty_fn.call1((*only, name))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, name))?
+        empty_fn.call1((&output_shape, name))?
     };
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -13544,12 +13536,10 @@ fn try_native_int_power(
             return Ok(None);
         }
     }
-    let numpy = cached_numpy(py)?;
     macro_rules! pk {
         ($t:ty, $name:literal) => {
             pow_binary_typed::<$t, _, _>(
                 py,
-                numpy,
                 a,
                 b,
                 $name,
@@ -13583,7 +13573,6 @@ fn try_native_int_power(
 // numpy.empty out). Used by floor_divide and remainder (the per-element op is the closure).
 fn int_binary_map_typed<T, F>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     name: &str,
@@ -13604,11 +13593,12 @@ where
     }
     let shape = a_buf.shape();
     let n = a_in.len();
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape {
-        numpy.call_method1(intern!(py, "empty"), (*only, name))?
+        empty_fn.call1((*only, name))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, name))?
+        empty_fn.call1((&output_shape, name))?
     };
     {
         let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
@@ -13705,12 +13695,11 @@ fn try_native_int_floordiv(
     if zero {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     // Signed: floored division toward -inf (adjust truncated quotient by -1 when remainder is
     // non-zero and its sign differs from the divisor's). Unsigned: plain division (divisor != 0).
     macro_rules! fk_signed {
         ($t:ty, $name:literal) => {
-            int_binary_map_typed::<$t, _>(py, numpy, a, b, $name, |x: $t, y: $t| {
+            int_binary_map_typed::<$t, _>(py, a, b, $name, |x: $t, y: $t| {
                 let q = x.wrapping_div(y);
                 let r = x.wrapping_rem(y);
                 if r != 0 && (r < 0) != (y < 0) {
@@ -13723,7 +13712,7 @@ fn try_native_int_floordiv(
     }
     macro_rules! fk_unsigned {
         ($t:ty, $name:literal) => {
-            int_binary_map_typed::<$t, _>(py, numpy, a, b, $name, |x: $t, y: $t| x / y)
+            int_binary_map_typed::<$t, _>(py, a, b, $name, |x: $t, y: $t| x / y)
         };
     }
     match (kind, itemsize) {
@@ -13774,7 +13763,6 @@ fn try_native_timedelta_addsub(
     if !matches!(ak, 'M' | 'm') || !matches!(bk, 'M' | 'm') {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     let a_dt = a.getattr(intern!(py, "dtype"))?;
     let b_dt = b.getattr(intern!(py, "dtype"))?;
     let dd = cached_numpy_datetime_data(py)?;
@@ -13794,8 +13782,7 @@ fn try_native_timedelta_addsub(
             } else {
                 format!("{}{}", a_unit.1, a_unit.0)
             };
-            numpy
-                .getattr(intern!(py, "dtype"))?
+            cached_numpy_dtype(py)?
                 .call1((format!("timedelta64[{unit_str}]"),))?
         }
         _ => return Ok(None), // dt+dt / td-dt are invalid -> let numpy raise
@@ -13824,7 +13811,7 @@ fn try_native_timedelta_addsub(
     ) else {
         return Ok(None);
     };
-    let result = int_binary_map_typed::<i64, _>(py, numpy, &a_i, &b_i, "int64", move |x, y| {
+    let result = int_binary_map_typed::<i64, _>(py, &a_i, &b_i, "int64", move |x, y| {
         if x == i64::MIN || y == i64::MIN {
             i64::MIN
         } else if is_add {
@@ -13878,7 +13865,6 @@ fn try_native_timedelta_floordiv(
     if n < TD_FLOORDIV_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     // View both as int64 (timedelta64 is int64 internally; NaT == i64::MIN).
     let i64t = cached_int64_type(py)?;
     let (Ok(a_i), Ok(b_i)) = (
@@ -13905,7 +13891,7 @@ fn try_native_timedelta_floordiv(
         }
     }
     // Floored int64 division of the raw counts (no NaT/zero here) -> int64 result.
-    int_binary_map_typed::<i64, _>(py, numpy, &a_i, &b_i, "int64", |x: i64, y: i64| {
+    int_binary_map_typed::<i64, _>(py, &a_i, &b_i, "int64", |x: i64, y: i64| {
         let q = x.wrapping_div(y);
         let r = x.wrapping_rem(y);
         if r != 0 && (r < 0) != (y < 0) {
@@ -13954,7 +13940,6 @@ fn try_native_timedelta_remainder(
     if n < TD_REM_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     let i64t = cached_int64_type(py)?;
     let (Ok(a_i), Ok(b_i)) = (
         a.call_method1(intern!(py, "view"), (&i64t,)),
@@ -13980,7 +13965,7 @@ fn try_native_timedelta_remainder(
     }
     // Floored remainder (sign of divisor) of the raw counts -> int64, then view back to timedelta.
     let int_res =
-        int_binary_map_typed::<i64, _>(py, numpy, &a_i, &b_i, "int64", |x: i64, y: i64| {
+        int_binary_map_typed::<i64, _>(py, &a_i, &b_i, "int64", |x: i64, y: i64| {
             let r = x.wrapping_rem(y);
             if r != 0 && (r < 0) != (y < 0) {
                 r.wrapping_add(y)
@@ -14070,10 +14055,9 @@ fn try_native_int_remainder(
     if zero {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     macro_rules! rk_signed {
         ($t:ty, $name:literal) => {
-            int_binary_map_typed::<$t, _>(py, numpy, a, b, $name, |x: $t, y: $t| {
+            int_binary_map_typed::<$t, _>(py, a, b, $name, |x: $t, y: $t| {
                 let r = x.wrapping_rem(y);
                 if r != 0 && (r < 0) != (y < 0) {
                     r.wrapping_add(y)
@@ -14085,7 +14069,7 @@ fn try_native_int_remainder(
     }
     macro_rules! rk_unsigned {
         ($t:ty, $name:literal) => {
-            int_binary_map_typed::<$t, _>(py, numpy, a, b, $name, |x: $t, y: $t| x % y)
+            int_binary_map_typed::<$t, _>(py, a, b, $name, |x: $t, y: $t| x % y)
         };
     }
     match (kind, itemsize) {
@@ -14108,7 +14092,6 @@ fn try_native_int_remainder(
 // rules verified for floor_divide and remainder. Defers on any zero divisor.
 fn divmod_typed<T, F>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     name: &str,
@@ -14127,14 +14110,15 @@ where
     if a_buf.shape() != b_buf.shape() {
         return Ok(None);
     }
-    let shape: Vec<usize> = a_buf.shape().to_vec();
+    let shape = a_buf.shape();
     let n = a_in.len();
+    let empty_fn = cached_numpy_empty(py)?;
     let mk = |nm: &str| -> PyResult<Bound<'_, PyAny>> {
-        if let [only] = shape.as_slice() {
-            numpy.call_method1(intern!(py, "empty"), (*only, nm))
+        if let [only] = shape {
+            empty_fn.call1((*only, nm))
         } else {
             let shape_t = PyTuple::new(py, shape.iter().copied())?;
-            numpy.call_method1(intern!(py, "empty"), (shape_t, nm))
+            empty_fn.call1((shape_t, nm))
         }
     };
     let quotient = mk(name)?;
@@ -14192,13 +14176,17 @@ fn try_native_int_divmod(
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const INT_DIVMOD_PARALLEL_MIN: usize = 1 << 18;
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?;
-    if !a.is_exact_instance(ndarray_type) || !b.is_exact_instance(ndarray_type) {
+    if !is_exact_numpy_ndarray(py, a)? || !is_exact_numpy_ndarray(py, b)? {
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
     if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
+        return Ok(None);
+    }
+    let Some(kind) = dtype_kind_of(a) else {
+        return Ok(None);
+    };
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let is_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
@@ -14219,7 +14207,6 @@ fn try_native_int_divmod(
     if n < INT_DIVMOD_PARALLEL_MIN || threads < 2 {
         return Ok(None);
     }
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     macro_rules! has_zero {
         ($t:ty) => {{
@@ -14234,15 +14221,15 @@ fn try_native_int_divmod(
             }
         }};
     }
-    let zero = match (kind.as_str(), itemsize) {
-        ("i", 1) => has_zero!(i8),
-        ("i", 2) => has_zero!(i16),
-        ("i", 4) => has_zero!(i32),
-        ("i", 8) => has_zero!(i64),
-        ("u", 1) => has_zero!(u8),
-        ("u", 2) => has_zero!(u16),
-        ("u", 4) => has_zero!(u32),
-        ("u", 8) => has_zero!(u64),
+    let zero = match (kind, itemsize) {
+        ('i', 1) => has_zero!(i8),
+        ('i', 2) => has_zero!(i16),
+        ('i', 4) => has_zero!(i32),
+        ('i', 8) => has_zero!(i64),
+        ('u', 1) => has_zero!(u8),
+        ('u', 2) => has_zero!(u16),
+        ('u', 4) => has_zero!(u32),
+        ('u', 8) => has_zero!(u64),
         _ => return Ok(None),
     };
     if zero {
@@ -14250,7 +14237,7 @@ fn try_native_int_divmod(
     }
     macro_rules! dm_signed {
         ($t:ty, $name:literal) => {
-            divmod_typed::<$t, _>(py, &numpy, a, b, $name, |x: $t, y: $t| {
+            divmod_typed::<$t, _>(py, a, b, $name, |x: $t, y: $t| {
                 let mut q = x.wrapping_div(y);
                 let mut r = x.wrapping_rem(y);
                 if r != 0 && (r < 0) != (y < 0) {
@@ -14263,18 +14250,18 @@ fn try_native_int_divmod(
     }
     macro_rules! dm_unsigned {
         ($t:ty, $name:literal) => {
-            divmod_typed::<$t, _>(py, &numpy, a, b, $name, |x: $t, y: $t| (x / y, x % y))
+            divmod_typed::<$t, _>(py, a, b, $name, |x: $t, y: $t| (x / y, x % y))
         };
     }
-    match (kind.as_str(), itemsize) {
-        ("i", 1) => dm_signed!(i8, "int8"),
-        ("i", 2) => dm_signed!(i16, "int16"),
-        ("i", 4) => dm_signed!(i32, "int32"),
-        ("i", 8) => dm_signed!(i64, "int64"),
-        ("u", 1) => dm_unsigned!(u8, "uint8"),
-        ("u", 2) => dm_unsigned!(u16, "uint16"),
-        ("u", 4) => dm_unsigned!(u32, "uint32"),
-        ("u", 8) => dm_unsigned!(u64, "uint64"),
+    match (kind, itemsize) {
+        ('i', 1) => dm_signed!(i8, "int8"),
+        ('i', 2) => dm_signed!(i16, "int16"),
+        ('i', 4) => dm_signed!(i32, "int32"),
+        ('i', 8) => dm_signed!(i64, "int64"),
+        ('u', 1) => dm_unsigned!(u8, "uint8"),
+        ('u', 2) => dm_unsigned!(u16, "uint16"),
+        ('u', 4) => dm_unsigned!(u32, "uint32"),
+        ('u', 8) => dm_unsigned!(u64, "uint64"),
         _ => Ok(None),
     }
 }
@@ -14518,8 +14505,8 @@ fn try_zerocopy_f16_unary_widen(
         }
         _ => {}
     }
-    let numpy = cached_numpy(py)?;
-    let out_u16 = numpy.call_method1(intern!(py, "empty"), (&shape, u16t))?;
+    let empty_fn = cached_numpy_empty(py)?;
+    let out_u16 = empty_fn.call1((&shape, u16t))?;
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
             return Ok(None);
@@ -14761,7 +14748,6 @@ fn try_zerocopy_f64_i32_ldexp(
     x1: &Bound<'_, PyAny>,
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
         return Ok(None);
     }
@@ -14782,14 +14768,13 @@ fn try_zerocopy_f64_i32_ldexp(
 
     let shape = x1_buffer.shape();
     let n = mantissas.len();
+    let empty_fn = cached_numpy_empty(py)?;
+    let f64_type = cached_float64_type(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float64_type(py)?))?,
+        [only] => empty_fn.call1((*only, f64_type))?,
         _ => {
             let shape_tuple = PyTuple::new(py, shape)?;
-            numpy.call_method1(
-                intern!(py, "empty"),
-                (&shape_tuple, cached_float64_type(py)?),
-            )?
+            empty_fn.call1((&shape_tuple, f64_type))?
         }
     };
     if n > 0 {
@@ -14844,7 +14829,6 @@ fn try_zerocopy_f32_i32_ldexp(
     x1: &Bound<'_, PyAny>,
     x2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, x1)? || !is_exact_numpy_ndarray(py, x2)? {
         return Ok(None);
     }
@@ -14863,14 +14847,13 @@ fn try_zerocopy_f32_i32_ldexp(
     };
     let shape = x1_buffer.shape();
     let n = m_s.len();
+    let empty_fn = cached_numpy_empty(py)?;
+    let f32_type = cached_float32_type(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float32_type(py)?))?,
+        [only] => empty_fn.call1((*only, f32_type))?,
         _ => {
             let shape_tuple = PyTuple::new(py, shape)?;
-            numpy.call_method1(
-                intern!(py, "empty"),
-                (&shape_tuple, cached_float32_type(py)?),
-            )?
+            empty_fn.call1((&shape_tuple, f32_type))?
         }
     };
     if n > 0 {
@@ -14958,15 +14941,13 @@ fn try_zerocopy_f16_i32_ldexp(
     if n < F16_LDEXP_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
+    let f16_type = cached_float16_type(py)?;
     let flat = match shape {
-        [only] => numpy.call_method1(intern!(py, "empty"), (*only, cached_float16_type(py)?))?,
+        [only] => empty_fn.call1((*only, f16_type))?,
         _ => {
             let shape_tuple = PyTuple::new(py, shape)?;
-            numpy.call_method1(
-                intern!(py, "empty"),
-                (&shape_tuple, cached_float16_type(py)?),
-            )?
+            empty_fn.call1((&shape_tuple, f16_type))?
         }
     };
     {
@@ -114175,11 +114156,11 @@ fn try_native_temporal_astype(
     if n < TEMPORAL_ASTYPE_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let i64t = numpy.getattr(intern!(py, "int64"))?;
-    let Ok(a_i) = arr.call_method1(intern!(py, "view"), (&i64t,)) else {
+    let i64t = cached_int64_type(py)?;
+    let Ok(a_i) = arr.call_method1(intern!(py, "view"), (i64t,)) else {
         return Ok(None);
     };
-    let result = int_binary_map_typed::<i64, _>(py, numpy, &a_i, &a_i, "int64", move |x, _| {
+    let result = int_binary_map_typed::<i64, _>(py, &a_i, &a_i, "int64", move |x, _| {
         if x == i64::MIN {
             i64::MIN
         } else if is_downcast {
