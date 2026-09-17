@@ -9539,7 +9539,6 @@ fn unary_map_int<T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T) -> T + 
 #[inline]
 fn zerocopy_int_unary_typed<'py, T, N, A, S>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
     op: UnaryOp,
     neg: N,
@@ -9567,11 +9566,12 @@ where
     // a numpy dtype parse on every call. Allocating in shape also retires the caller's
     // per-call `reshape`. Rank 1 passes a bare int.
     let dtype = x.getattr(intern!(py, "dtype"))?;
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, &dtype))?
+        empty_fn.call1((*only, &dtype))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, &dtype))?
+        empty_fn.call1((&output_shape, &dtype))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
@@ -9641,7 +9641,6 @@ fn ndarray_is_byteswapped(py: Python<'_>, x: &Bound<'_, PyAny>) -> bool {
 
 fn zerocopy_narrow_int_unary_flat<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
     op: UnaryOp,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
@@ -9651,7 +9650,7 @@ fn zerocopy_narrow_int_unary_flat<'py>(
     ) {
         return Ok(None);
     }
-    if !x.get_type().is(cached_ndarray_type(numpy.py())?) {
+    if !x.get_type().is(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
@@ -9665,7 +9664,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
     match (kind, itemsize) {
         ('i', 1) => zerocopy_int_unary_typed::<i8, _, _, _>(
             py,
-            numpy,
             x,
             op,
             |v| v.wrapping_neg(),
@@ -9674,7 +9672,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
         ),
         ('i', 2) => zerocopy_int_unary_typed::<i16, _, _, _>(
             py,
-            numpy,
             x,
             op,
             |v| v.wrapping_neg(),
@@ -9683,7 +9680,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
         ),
         ('u', 1) => zerocopy_int_unary_typed::<u8, _, _, _>(
             py,
-            numpy,
             x,
             op,
             |v| v.wrapping_neg(),
@@ -9692,7 +9688,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
         ),
         ('u', 2) => zerocopy_int_unary_typed::<u16, _, _, _>(
             py,
-            numpy,
             x,
             op,
             |v| v.wrapping_neg(),
@@ -9701,7 +9696,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
         ),
         ('u', 4) => zerocopy_int_unary_typed::<u32, _, _, _>(
             py,
-            numpy,
             x,
             op,
             |v| v.wrapping_neg(),
@@ -9710,7 +9704,6 @@ fn zerocopy_narrow_int_unary_flat<'py>(
         ),
         ('u', 8) => zerocopy_int_unary_typed::<u64, _, _, _>(
             py,
-            numpy,
             x,
             op,
             |v| v.wrapping_neg(),
@@ -9768,11 +9761,10 @@ fn try_zerocopy_f32_unary(
 #[inline]
 fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
     pred: F,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
-    if !x.get_type().is(cached_ndarray_type(numpy.py())?) {
+    if !x.get_type().is(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     // DECLINE WITHOUT RAISING. `PyBuffer::<f64>::get` says no to a non-f64 array by RAISING a
@@ -9816,11 +9808,13 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
     // shape, so an n-D result then needs no reshape either. 1-D stays an int argument
     // (`np.empty(n, u8)` 166.7 ns vs `np.empty((n,), u8)` 202.9 ns) and 0-d allocates
     // one element, because a 0-d buffer yields NO slice to write through.
+    let empty_fn = cached_numpy_empty(py)?;
+    let u8_type = cached_uint8_type(py)?;
     let bytes = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+        empty_fn.call1((*only, u8_type))?
     } else {
         let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+        empty_fn.call1((alloc_shape, u8_type))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -9872,7 +9866,6 @@ const ISNAN_MASK_BYTE_LUT: [u64; 256] = predicate_mask_byte_lut();
 // packed mask bytes without a per-element Rust-bool conversion.
 fn zerocopy_f64_isnan_flat<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
     use std::simd::Simd;
@@ -9896,11 +9889,13 @@ fn zerocopy_f64_isnan_flat<'py>(
     };
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
+    let empty_fn = cached_numpy_empty(py)?;
+    let u8_type = cached_uint8_type(py)?;
     let bytes = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+        empty_fn.call1((*only, u8_type))?
     } else {
         let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+        empty_fn.call1((alloc_shape, u8_type))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -9937,8 +9932,7 @@ fn zerocopy_f64_isnan_flat<'py>(
 }
 
 fn try_zerocopy_f64_isnan(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let Some((flat, shape)) = zerocopy_f64_isnan_flat(py, numpy, x)? else {
+    let Some((flat, shape)) = zerocopy_f64_isnan_flat(py, x)? else {
         return Ok(None);
     };
     Ok(Some(finish_preshaped_output(flat, &shape)?))
@@ -9951,7 +9945,6 @@ fn try_zerocopy_f64_isnan(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
 #[inline]
 fn zerocopy_f64_unary_flat_with<'py, F: Fn(f64) -> f64>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
     f: F,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
@@ -9974,11 +9967,12 @@ fn zerocopy_f64_unary_flat_with<'py, F: Fn(f64) -> f64>(
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let float64_type = cached_float64_type(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let flat = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, float64_type))?
+        empty_fn.call1((*only, float64_type))?
     } else {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&output_shape, float64_type))?
+        empty_fn.call1((&output_shape, float64_type))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
@@ -10000,11 +9994,7 @@ fn try_zerocopy_f64_predicate<F: Fn(f64) -> bool>(
     x: &Bound<'_, PyAny>,
     pred: F,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // `py.import("numpy")` is 382.5 ns/call on this host, not a `sys.modules` lookup
-    // (`numpy-import-per-call-is-382ns`), and this is the FIRST gate `isnan`/`isinf`/
-    // `isfinite`/`signbit` reach on their commonest operand.
-    let numpy = cached_numpy(py)?;
-    let Some((flat, shape)) = zerocopy_f64_predicate_flat(py, numpy, x, pred)? else {
+    let Some((flat, shape)) = zerocopy_f64_predicate_flat(py, x, pred)? else {
         return Ok(None);
     };
     Ok(Some(finish_preshaped_output(flat, &shape)?))
@@ -10017,7 +10007,6 @@ fn try_zerocopy_f64_predicate<F: Fn(f64) -> bool>(
 // otherwise extracted to an f64 Vec (~170-272x slower).
 fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
     pred: F,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
@@ -10041,11 +10030,13 @@ fn zerocopy_f32_predicate_flat<'py, F: Fn(f32) -> bool>(
     let n = input.len();
     // Positional dtype, held type objects and shape-preserving allocation, same as the
     // f64 sibling above.
+    let empty_fn = cached_numpy_empty(py)?;
+    let u8_type = cached_uint8_type(py)?;
     let bytes = if let [only] = shape.as_slice() {
-        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+        empty_fn.call1((*only, u8_type))?
     } else {
         let alloc_shape = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+        empty_fn.call1((alloc_shape, u8_type))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -10071,9 +10062,7 @@ fn try_zerocopy_f32_predicate<F: Fn(f32) -> bool>(
     x: &Bound<'_, PyAny>,
     pred: F,
 ) -> PyResult<Option<Py<PyAny>>> {
-    // Held module handle and the reshape skip, same as the f64 wrapper.
-    let numpy = cached_numpy(py)?;
-    let Some((flat, shape)) = zerocopy_f32_predicate_flat(py, numpy, x, pred)? else {
+    let Some((flat, shape)) = zerocopy_f32_predicate_flat(py, x, pred)? else {
         return Ok(None);
     };
     Ok(Some(finish_preshaped_output(flat, &shape)?))
@@ -10093,7 +10082,6 @@ fn try_zerocopy_f32_predicate<F: Fn(f32) -> bool>(
 // non-ndarray operands.
 fn zerocopy_f64_isclose_flat<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
     b: &Bound<'py, PyAny>,
     rtol: f64,
@@ -10128,11 +10116,13 @@ fn zerocopy_f64_isclose_flat<'py>(
     }
     let shape = a_buffer.shape();
     let n = a_in.len();
+    let empty_fn = cached_numpy_empty(py)?;
+    let u8_type = cached_uint8_type(py)?;
     let bytes = if let [only] = shape {
-        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+        empty_fn.call1((*only, u8_type))?
     } else {
         let alloc_shape = PyTuple::new(py, shape)?;
-        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+        empty_fn.call1((alloc_shape, u8_type))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -10189,7 +10179,6 @@ fn zerocopy_f64_isclose_flat<'py>(
 // bit-identical to the extract path it replaces. Both operands must be f32 ndarrays.
 fn zerocopy_f32_isclose_flat<'py>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
     b: &Bound<'py, PyAny>,
     rtol: f64,
@@ -10213,11 +10202,13 @@ fn zerocopy_f32_isclose_flat<'py>(
     }
     let shape = a_buffer.shape();
     let n = a_in.len();
+    let empty_fn = cached_numpy_empty(py)?;
+    let u8_type = cached_uint8_type(py)?;
     let bytes = if let [only] = shape {
-        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+        empty_fn.call1((*only, u8_type))?
     } else {
         let alloc_shape = PyTuple::new(py, shape)?;
-        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+        empty_fn.call1((alloc_shape, u8_type))?
     };
     if n > 0 {
         let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
@@ -10278,8 +10269,7 @@ fn try_zerocopy_f32_isclose(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    zerocopy_f32_isclose_flat(py, numpy, a, b, rtol, atol, equal_nan)
+    zerocopy_f32_isclose_flat(py, a, b, rtol, atol, equal_nan)
 }
 
 // Zero-copy isclose(f64-array, FINITE scalar): np.isclose(a,b) = |a-b| <= atol + rtol*|b|. For
@@ -10321,15 +10311,16 @@ fn try_zerocopy_f64_isclose_array_scalar(
     let Some(cells) = buf.as_slice(py) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
     let n = cells.len();
     let shape = buf.shape();
     let thresh = atol + rtol * bv.abs();
+    let empty_fn = cached_numpy_empty(py)?;
+    let u8_type = cached_uint8_type(py)?;
     let bytes = if let [only] = shape {
-        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+        empty_fn.call1((*only, u8_type))?
     } else {
         let alloc_shape = PyTuple::new(py, shape)?;
-        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+        empty_fn.call1((alloc_shape, u8_type))?
     };
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
@@ -10404,12 +10395,13 @@ fn try_zerocopy_f32_isclose_array_scalar(
     let n = cells.len();
     let shape = buf.shape();
     let thresh = atol + rtol * bv.abs();
-    let numpy = cached_numpy(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
+    let u8_type = cached_uint8_type(py)?;
     let bytes = if let [only] = shape {
-        numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+        empty_fn.call1((*only, u8_type))?
     } else {
         let alloc_shape = PyTuple::new(py, shape)?;
-        numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+        empty_fn.call1((alloc_shape, u8_type))?
     };
     if n > 0 {
         let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
@@ -10453,8 +10445,7 @@ fn try_zerocopy_f64_isclose(
     atol: f64,
     equal_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    zerocopy_f64_isclose_flat(py, numpy, a, b, rtol, atol, equal_nan)
+    zerocopy_f64_isclose_flat(py, a, b, rtol, atol, equal_nan)
 }
 
 // True when `a / b` would raise an IEEE floating-point exception, given the
@@ -32634,8 +32625,7 @@ fn spacing(
     // into the np.empty output (no extract-to-Vec + rebuild, which was ~6x slower than
     // numpy from the extra full-size copies + cold page faults). The per-element formula
     // is byte-identical to ufunc_spacing (UFuncArray::spacing).
-    let numpy = cached_numpy(py)?;
-    if let Some((flat, shape)) = zerocopy_f64_unary_flat_with(py, numpy, x.bind(py), |v| {
+    if let Some((flat, shape)) = zerocopy_f64_unary_flat_with(py, x.bind(py), |v| {
         if v.is_nan() || v.is_infinite() {
             f64::NAN
         } else if v == 0.0 {
@@ -61115,7 +61105,7 @@ fn native_unary_elementwise(
     // same extract-then-discard cost as int64, plus the f64 round-trip mis-wraps
     // square. Keeps each width native with wrapping ops, bit-identical to numpy.
     if narrow_integral
-        && let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, numpy, x, op)?
+        && let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, x, op)?
     {
         return finish_preshaped_output(flat, &shape);
     }
