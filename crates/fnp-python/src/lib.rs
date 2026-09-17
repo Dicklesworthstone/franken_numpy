@@ -11666,8 +11666,8 @@ fn try_zerocopy_f16_binary_widen(
     let (Some(a_in), Some(b_in)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
-    let out_u16 = numpy.call_method1(intern!(py, "empty"), (&a_shape, u16t))?;
+    let empty_fn = cached_numpy_empty(py)?;
+    let out_u16 = empty_fn.call1((&a_shape, u16t))?;
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
             return Ok(None);
