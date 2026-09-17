@@ -17034,7 +17034,6 @@ fn try_zerocopy_any_roll_axis(
     shift_scalar: i64,
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if !matches!(kind.as_str(), "b" | "i" | "u" | "f") {
@@ -17070,7 +17069,7 @@ fn try_zerocopy_any_roll_axis(
         return Ok(None);
     };
     let total_bytes = input.len();
-    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
+    let out = cached_numpy_empty_like(py)?.call1((a,))?;
     if total_bytes > 0 && axis_len > 0 {
         let s = (((shift_scalar % axis_len as i64) + axis_len as i64) % axis_len as i64) as usize;
         let Ok(out_u8) = out.call_method1(intern!(py, "view"), (uint8,)) else {
@@ -17130,8 +17129,7 @@ fn try_zerocopy_f64_roll_2d_multi(
     shifts: &[i64],
     axes: &[i64],
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?.clone();
     if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
@@ -17159,7 +17157,7 @@ fn try_zerocopy_f64_roll_2d_multi(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
+    let out = cached_numpy_empty_like(py)?.call1((a,))?;
     if rows > 0 && cols > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -17211,7 +17209,6 @@ fn try_zerocopy_any_roll_2d_multi(
     shifts: &[i64],
     axes: &[i64],
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     let dtype = a.getattr(intern!(py, "dtype"))?;
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
     if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
@@ -17242,7 +17239,7 @@ fn try_zerocopy_any_roll_2d_multi(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let out = numpy.call_method1(intern!(py, "empty_like"), (a,))?;
+    let out = cached_numpy_empty_like(py)?.call1((a,))?;
     if rows > 0 && cols > 0 {
         let Ok(out_bytes) = out.call_method1(intern!(py, "view"), (uint8,)) else {
             return Ok(None);
@@ -26119,7 +26116,7 @@ fn axis_any_all_fold<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
     out_shape.remove(axu);
     let flat_u8 = numpy_array_from_slice_shaped(py, numpy, &result, "uint8", &out_shape)?;
     let flat_bool =
-        flat_u8.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "bool_"))?,))?;
+        flat_u8.call_method1(intern!(py, "view"), (cached_bool_type(py)?,))?;
     finish_preshaped_output(flat_bool, &out_shape).map(Some)
 }
 
@@ -26215,7 +26212,7 @@ where
             return Ok(None);
         }
         let value = block_any_all(input, is_all, truthy);
-        let scalar = numpy.getattr(intern!(py, "bool_"))?.call1((value,))?;
+        let scalar = cached_bool_type(py)?.call1((value,))?;
         return Ok(Some(scalar.unbind()));
     }
     if let Some(ax) = axis
@@ -26246,7 +26243,7 @@ fn try_zerocopy_any_all(
     match kind.as_str() {
         "b" => {
             let a_u8: Bound<'_, PyAny> =
-                a.call_method1(intern!(py, "view"), (numpy.getattr(intern!(py, "uint8"))?,))?;
+                a.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
             let Ok(buffer) = PyBuffer::<u8>::get(&a_u8) else {
                 return Ok(None);
             };
@@ -26264,7 +26261,7 @@ fn try_zerocopy_any_all(
                 } else {
                     block_any_u8(input)
                 };
-                let scalar = numpy.getattr(intern!(py, "bool_"))?.call1((value,))?;
+                let scalar = cached_bool_type(py)?.call1((value,))?;
                 return Ok(Some(scalar.unbind()));
             }
             if let Some(ax) = axis
@@ -26293,7 +26290,7 @@ fn try_zerocopy_any_all(
                 } else {
                     block_any_f64(input)
                 };
-                let scalar = numpy.getattr(intern!(py, "bool_"))?.call1((value,))?;
+                let scalar = cached_bool_type(py)?.call1((value,))?;
                 return Ok(Some(scalar.unbind()));
             }
             if let Some(ax) = axis
@@ -26363,7 +26360,7 @@ fn try_zerocopy_any_all(
 
 fn finish_any_all<F: Fn(usize) -> bool>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     n: usize,
     shape: &[usize],
     axis: Option<isize>,
@@ -26386,7 +26383,7 @@ fn finish_any_all<F: Fn(usize) -> bool>(
         None => {
             // numpy.all/any(axis=None) returns a numpy.bool_ scalar, not a Python bool.
             let value = reduce(0..n);
-            let scalar = numpy.getattr(intern!(py, "bool_"))?.call1((value,))?;
+            let scalar = cached_bool_type(py)?.call1((value,))?;
             Ok(Some(scalar.unbind()))
         }
         Some(ax) => {
@@ -26403,10 +26400,10 @@ fn finish_any_all<F: Fn(usize) -> bool>(
             out_shape.remove(axu);
             let out_elems = outer * inner;
             let flat_u8 = if let [only] = out_shape.as_slice() {
-                numpy.call_method1(intern!(py, "empty"), (*only, cached_uint8_type(py)?))?
+                cached_numpy_empty(py)?.call1((*only, cached_uint8_type(py)?))?
             } else {
                 let alloc_shape = PyTuple::new(py, &out_shape)?;
-                numpy.call_method1(intern!(py, "empty"), (alloc_shape, cached_uint8_type(py)?))?
+                cached_numpy_empty(py)?.call1((alloc_shape, cached_uint8_type(py)?))?
             };
             if out_elems > 0 {
                 let Ok(out_buffer) = PyBuffer::<u8>::get(&flat_u8) else {
@@ -56719,8 +56716,8 @@ fn setxor1d(
     }
     // complex128 symmetric difference on a dense integer-valued grid (numpy delegates c128 to a serial sort).
     {
-        let nd = cached_ndarray_type(numpy.py())?.clone();
-        if c128_setop_gate(&ar1_flat, &ar2_flat, &nd)?
+        let nd = cached_ndarray_type(py)?;
+        if c128_setop_gate(&ar1_flat, &ar2_flat, nd)?
             && let Some(r) =
                 try_native_c128_setxor_dense_integral(py, numpy, &ar1_flat, &ar2_flat)?
         {
@@ -57185,7 +57182,6 @@ fn try_native_struct_isin(
 // present in `set_records`; the two record slices must share the fixed `itemsize`.
 fn struct_filter_by_set(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     base: &Bound<'_, PyAny>,
     set_data: &[u8],
     m: usize,
@@ -57194,8 +57190,8 @@ fn struct_filter_by_set(
 ) -> PyResult<Option<Py<PyAny>>> {
     use rayon::prelude::*;
     let nu = base.len()?;
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let base_u8 = base.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let base_u8 = base.call_method1(intern!(py, "view"), (uint8,))?;
     let Ok(base_buf) = PyBuffer::<u8>::get(&base_u8) else {
         return Ok(None);
     };
@@ -57213,9 +57209,9 @@ fn struct_filter_by_set(
     for k in 0..m {
         set.insert(&set_data[k * itemsize..(k + 1) * itemsize]);
     }
-    let mask = numpy.call_method(intern!(py, "empty"), ((nu,), "bool"), None)?;
+    let mask = cached_numpy_empty(py)?.call1(((nu,), cached_bool_type(py)?))?;
     {
-        let mask_u8 = mask.call_method1(intern!(py, "view"), (&uint8,))?;
+        let mask_u8 = mask.call_method1(intern!(py, "view"), (uint8,))?;
         let mask_buf = PyBuffer::<u8>::get(&mask_u8)?;
         let Some(mask_cells) = mask_buf.as_mut_slice(py) else {
             return Ok(None);
@@ -57327,8 +57323,8 @@ fn try_native_struct_intersect_setdiff(
     b: &Bound<'_, PyAny>,
     is_diff: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let nd = cached_ndarray_type(numpy.py())?.clone();
-    let Some(itemsize) = struct_setop_gate(a, b, &nd)? else {
+    let nd = cached_ndarray_type(py)?;
+    let Some(itemsize) = struct_setop_gate(a, b, nd)? else {
         return Ok(None);
     };
     // Dense mixed integral/float records can use bitplane set algebra before the generic unique+hash filter.
@@ -57349,8 +57345,8 @@ fn try_native_struct_intersect_setdiff(
     };
     let ua = ua.bind(py);
     let nb = b_flat.len()?;
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let b_u8 = b_flat.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let b_u8 = b_flat.call_method1(intern!(py, "view"), (uint8,))?;
     let Ok(b_buf) = PyBuffer::<u8>::get(&b_u8) else {
         return Ok(None);
     };
@@ -57364,7 +57360,7 @@ fn try_native_struct_intersect_setdiff(
     let b_data: &[u8] =
         unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<u8>(), nb * itemsize) };
     // intersect keeps ua records IN set(b); setdiff keeps those NOT in set(b).
-    struct_filter_by_set(py, numpy, ua, b_data, nb, itemsize, !is_diff)
+    struct_filter_by_set(py, ua, b_data, nb, itemsize, !is_diff)
 }
 
 #[derive(Clone, Copy)]
@@ -57546,9 +57542,9 @@ fn try_native_struct_intersect_setdiff_int_float_bitplanes(
     if na == 0 || total_records < TOTAL_MIN {
         return Ok(None);
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let a_u8 = a_flat.call_method1(intern!(py, "view"), (&uint8,))?;
-    let b_u8 = b_flat.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let a_u8 = a_flat.call_method1(intern!(py, "view"), (uint8,))?;
+    let b_u8 = b_flat.call_method1(intern!(py, "view"), (uint8,))?;
     let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<u8>::get(&a_u8), PyBuffer::<u8>::get(&b_u8)) else {
         return Ok(None);
     };
@@ -57674,9 +57670,9 @@ fn try_native_struct_setxor1d_int_float_dense(
     if total_records < (1 << 16) {
         return Ok(None);
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let a_u8 = a_flat.call_method1(intern!(py, "view"), (&uint8,))?;
-    let b_u8 = b_flat.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let a_u8 = a_flat.call_method1(intern!(py, "view"), (uint8,))?;
+    let b_u8 = b_flat.call_method1(intern!(py, "view"), (uint8,))?;
     let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<u8>::get(&a_u8), PyBuffer::<u8>::get(&b_u8)) else {
         return Ok(None);
     };
@@ -57760,8 +57756,8 @@ fn try_native_struct_setxor1d(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let nd = cached_ndarray_type(numpy.py())?.clone();
-    let Some(itemsize) = struct_setop_gate(a, b, &nd)? else {
+    let nd = cached_ndarray_type(py)?;
+    let Some(itemsize) = struct_setop_gate(a, b, nd)? else {
         return Ok(None);
     };
     let a_flat = a.call_method0(intern!(py, "ravel"))?;
@@ -57784,10 +57780,10 @@ fn try_native_struct_setxor1d(
     let na = a_flat.len()?;
     let nb = b_flat.len()?;
     use rayon::prelude::*;
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let a_u8 = a_flat.call_method1(intern!(py, "view"), (&uint8,))?;
-    let b_u8 = b_flat.call_method1(intern!(py, "view"), (&uint8,))?;
-    let uc_u8 = uc.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let a_u8 = a_flat.call_method1(intern!(py, "view"), (uint8,))?;
+    let b_u8 = b_flat.call_method1(intern!(py, "view"), (uint8,))?;
+    let uc_u8 = uc.call_method1(intern!(py, "view"), (uint8,))?;
     let (Ok(a_buf), Ok(b_buf), Ok(uc_buf)) = (
         PyBuffer::<u8>::get(&a_u8),
         PyBuffer::<u8>::get(&b_u8),
@@ -58171,8 +58167,8 @@ fn try_native_c128_union1d(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let nd = cached_ndarray_type(numpy.py())?.clone();
-    if !c128_setop_gate(a, b, &nd)? {
+    let nd = cached_ndarray_type(py)?;
+    if !c128_setop_gate(a, b, nd)? {
         return Ok(None);
     }
     if let Some(out) = try_native_c128_union1d_dense_integral(py, numpy, a, b)? {
@@ -58436,8 +58432,8 @@ fn try_native_c128_intersect_setdiff(
     b: &Bound<'_, PyAny>,
     is_diff: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let nd = cached_ndarray_type(numpy.py())?.clone();
-    if !c128_setop_gate(a, b, &nd)? {
+    let nd = cached_ndarray_type(py)?;
+    if !c128_setop_gate(a, b, nd)? {
         return Ok(None);
     }
     if let Some(out) = try_native_c128_intersect_setdiff_dense_integral(py, numpy, a, b, is_diff)? {
@@ -58461,8 +58457,8 @@ fn try_native_c128_intersect_setdiff(
         return Ok(None);
     }
     let nb = b_flat.len()?;
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let b_u8 = b_flat.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let b_u8 = b_flat.call_method1(intern!(py, "view"), (uint8,))?;
     let Ok(b_buf) = PyBuffer::<u8>::get(&b_u8) else {
         return Ok(None);
     };
@@ -58475,7 +58471,7 @@ fn try_native_c128_intersect_setdiff(
     // SAFETY: ReadOnlyCell<u8> repr(transparent); read-only under the GIL.
     let b_data: &[u8] =
         unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<u8>(), nb * 16) };
-    struct_filter_by_set(py, numpy, ua, b_data, nb, 16, !is_diff)
+    struct_filter_by_set(py, ua, b_data, nb, 16, !is_diff)
 }
 
 // np.in1d is the 1-D form of np.isin: it FLATTENS ar1 and always returns a 1-D
@@ -62597,7 +62593,6 @@ impl UnwrapFloat for f32 {
 //   ph    = (|dd| < pi || NaN) ? correction : 0   (NaN flows into cum like numpy cumsum)
 fn unwrap_fill_typed<T: UnwrapFloat>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     p: &Bound<'_, PyAny>,
     row: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
@@ -62607,7 +62602,7 @@ fn unwrap_fill_typed<T: UnwrapFloat>(
     let Some(p_in) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let out_arr = numpy.call_method1(intern!(py, "empty_like"), (p,))?;
+    let out_arr = cached_numpy_empty_like(py)?.call1((p,))?;
     let Ok(out_buffer) = PyBuffer::<T>::get(&out_arr) else {
         return Ok(None);
     };
@@ -62680,7 +62675,6 @@ fn try_native_unwrap_default(
     p: &Bound<'_, PyAny>,
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !p.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -62712,8 +62706,8 @@ fn try_native_unwrap_default(
         return Ok(None);
     }
     match itemsize {
-        8 => unwrap_fill_typed::<f64>(py, numpy, p, row),
-        4 => unwrap_fill_typed::<f32>(py, numpy, p, row),
+        8 => unwrap_fill_typed::<f64>(py, p, row),
+        4 => unwrap_fill_typed::<f32>(py, p, row),
         _ => Ok(None), // float16 / longdouble -> delegate
     }
 }
@@ -104155,8 +104149,8 @@ fn try_native_unique_struct_valuelex(
             return Ok(None);
         }
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let u8v = item.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let u8v = item.call_method1(intern!(py, "view"), (uint8,))?;
     let Ok(buffer) = PyBuffer::<u8>::get(&u8v) else {
         return Ok(None);
     };
@@ -104200,11 +104194,9 @@ fn try_native_unique_struct_valuelex(
         }
     }
     let nu = keep.len();
-    let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
-    let out = numpy.call_method(intern!(py, "empty"), (nu,), Some(&out_kwargs))?;
+    let out = cached_numpy_empty(py)?.call1((nu, &dtype))?;
     {
-        let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
+        let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
         let Ok(ob) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
@@ -104336,8 +104328,8 @@ fn try_native_struct_sort_valuelex(
             return Ok(None);
         }
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let u8v = a.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let u8v = a.call_method1(intern!(py, "view"), (uint8,))?;
     let Ok(buffer) = PyBuffer::<u8>::get(&u8v) else {
         return Ok(None);
     };
@@ -104365,11 +104357,9 @@ fn try_native_struct_sort_valuelex(
     };
     let mut perm: Vec<u32> = (0..n as u32).collect();
     perm.par_sort_unstable_by(|&i, &j| key(i).cmp(key(j)));
-    let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
-    let out = numpy.call_method(intern!(py, "empty"), (n,), Some(&out_kwargs))?;
+    let out = cached_numpy_empty(py)?.call1((n, &dtype))?;
     {
-        let out_u8 = out.call_method1(intern!(py, "view"), (&uint8,))?;
+        let out_u8 = out.call_method1(intern!(py, "view"), (uint8,))?;
         let Ok(ob) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
@@ -104478,8 +104468,8 @@ fn try_native_argsort_struct_stable(
             return Ok(None);
         }
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let u8v = a.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let u8v = a.call_method1(intern!(py, "view"), (uint8,))?;
     let Ok(buffer) = PyBuffer::<u8>::get(&u8v) else {
         return Ok(None);
     };
@@ -104507,7 +104497,7 @@ fn try_native_argsort_struct_stable(
     };
     let mut perm: Vec<u32> = (0..n as u32).collect();
     perm.par_sort_unstable_by(|&i, &j| key(i).cmp(key(j)).then_with(|| i.cmp(&j)));
-    let out = numpy.call_method(intern!(py, "empty"), ((n,), "intp"), None)?;
+    let out = cached_numpy_empty(py)?.call1((n, cached_intp_type(py)?))?;
     let out_buf = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buf.as_mut_slice(py) else {
         return Ok(None);
@@ -104623,8 +104613,8 @@ fn try_native_struct_argsort_valuelex(
             return Ok(None);
         }
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let u8v = a.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let u8v = a.call_method1(intern!(py, "view"), (uint8,))?;
     let Ok(buffer) = PyBuffer::<u8>::get(&u8v) else {
         return Ok(None);
     };
@@ -104655,7 +104645,7 @@ fn try_native_struct_argsort_valuelex(
     if perm.windows(2).any(|pair| key(pair[0]) == key(pair[1])) {
         return Ok(None);
     }
-    let out = numpy.call_method(intern!(py, "empty"), ((n,), "intp"), None)?;
+    let out = cached_numpy_empty(py)?.call1((n, cached_intp_type(py)?))?;
     let out_buf = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buf.as_mut_slice(py) else {
         return Ok(None);
@@ -104772,8 +104762,8 @@ fn try_native_unique_struct_valuelex_full(
             return Ok(None);
         }
     }
-    let uint8 = numpy.getattr(intern!(py, "uint8"))?;
-    let u8v = item.call_method1(intern!(py, "view"), (&uint8,))?;
+    let uint8 = cached_uint8_type(py)?;
+    let u8v = item.call_method1(intern!(py, "view"), (uint8,))?;
     let Ok(buffer) = PyBuffer::<u8>::get(&u8v) else {
         return Ok(None);
     };
@@ -104828,11 +104818,9 @@ fn try_native_unique_struct_valuelex_full(
         }
     }
     let u = group_starts.len();
-    let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
-    let unique_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&out_kwargs))?;
+    let unique_arr = cached_numpy_empty(py)?.call1((u, &dtype))?;
     {
-        let out_u8 = unique_arr.call_method1(intern!(py, "view"), (&uint8,))?;
+        let out_u8 = unique_arr.call_method1(intern!(py, "view"), (uint8,))?;
         let Ok(ob) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
         };
@@ -104848,9 +104836,7 @@ fn try_native_unique_struct_valuelex_full(
     }
     let mut outs: Vec<Bound<'_, PyAny>> = vec![unique_arr];
     if ret_index {
-        let ikw = PyDict::new(py);
-        ikw.set_item(intern!(py, "dtype"), "intp")?;
-        let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
+        let idx_arr = cached_numpy_empty(py)?.call1((u, cached_intp_type(py)?))?;
         let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
         };
@@ -104865,9 +104851,7 @@ fn try_native_unique_struct_valuelex_full(
         outs.push(idx_arr);
     }
     if ret_inverse {
-        let vkw = PyDict::new(py);
-        vkw.set_item(intern!(py, "dtype"), "intp")?;
-        let inv_arr = numpy.call_method(intern!(py, "empty"), (n,), Some(&vkw))?;
+        let inv_arr = cached_numpy_empty(py)?.call1((n, cached_intp_type(py)?))?;
         let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
         };
@@ -104884,9 +104868,7 @@ fn try_native_unique_struct_valuelex_full(
         outs.push(inv_arr.call_method1(intern!(py, "reshape"), (shape.clone(),))?);
     }
     if ret_counts {
-        let ckw = PyDict::new(py);
-        ckw.set_item(intern!(py, "dtype"), "intp")?;
-        let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
+        let cnt_arr = cached_numpy_empty(py)?.call1((u, cached_intp_type(py)?))?;
         let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
         };
@@ -104958,7 +104940,7 @@ fn try_native_unique_struct_int64(
     let n = item.len()?;
     // View as (n, nfields) int64; each original record is now a row of nfields int64 in field order.
     let iview = item
-        .call_method1(intern!(py, "view"), ("int64",))?
+        .call_method1(intern!(py, "view"), (cached_int64_type(py)?,))?
         .call_method1(intern!(py, "reshape"), ((n, nfields),))?;
     match try_native_unique_rows_lexsort_int(py, &iview)? {
         Some(ivu) => {
@@ -105030,7 +105012,7 @@ fn try_native_unique_struct_int64_full(
         return Ok(None);
     }
     let iview = item
-        .call_method1(intern!(py, "view"), ("int64",))?
+        .call_method1(intern!(py, "view"), (cached_int64_type(py)?,))?
         .call_method1(intern!(py, "reshape"), ((n, nfields),))?;
     match try_native_unique_rows_lexsort_int_full(py, &iview, ret_index, ret_inverse, ret_counts)? {
         Some(t) => {
@@ -106226,7 +106208,6 @@ fn try_native_unique_rows_lexsort_int(
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN_ROWS: usize = 1 << 16;
-    let numpy = cached_numpy(py)?;
     if !item.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -106251,7 +106232,7 @@ fn try_native_unique_rows_lexsort_int(
         return Ok(None);
     }
     let signed = kind == "i";
-    let iview = item.call_method1(intern!(py, "view"), ("int64",))?;
+    let iview = item.call_method1(intern!(py, "view"), (cached_int64_type(py)?,))?;
     let Ok(buffer) = PyBuffer::<i64>::get(&iview) else {
         return Ok(None);
     };
@@ -106302,11 +106283,9 @@ fn try_native_unique_rows_lexsort_int(
     }
     let nu = keep.len();
     // Fresh (n_unique, ncols) same-dtype output; parallel gather from srt.
-    let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
-    let out = numpy.call_method(intern!(py, "empty"), ((nu, ncols),), Some(&out_kwargs))?;
+    let out = cached_numpy_empty(py)?.call1(((nu, ncols), &dtype))?;
     {
-        let oview = out.call_method1(intern!(py, "view"), ("int64",))?;
+        let oview = out.call_method1(intern!(py, "view"), (cached_int64_type(py)?,))?;
         let Ok(out_buffer) = PyBuffer::<i64>::get(&oview) else {
             return Ok(None);
         };
@@ -106662,7 +106641,6 @@ fn try_native_unique_rows_lexsort_int_full(
     ret_counts: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN_ROWS: usize = 1 << 16;
-    let numpy = cached_numpy(py)?;
     if !item.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -106687,7 +106665,7 @@ fn try_native_unique_rows_lexsort_int_full(
         return Ok(None);
     }
     let signed = kind == "i";
-    let iview = item.call_method1(intern!(py, "view"), ("int64",))?;
+    let iview = item.call_method1(intern!(py, "view"), (cached_int64_type(py)?,))?;
     let Ok(buffer) = PyBuffer::<i64>::get(&iview) else {
         return Ok(None);
     };
@@ -106738,11 +106716,9 @@ fn try_native_unique_rows_lexsort_int_full(
     }
     let u = group_starts.len();
     // unique rows (u, ncols) same dtype.
-    let out_kwargs = PyDict::new(py);
-    out_kwargs.set_item(intern!(py, "dtype"), &dtype)?;
-    let unique_arr = numpy.call_method(intern!(py, "empty"), ((u, ncols),), Some(&out_kwargs))?;
+    let unique_arr = cached_numpy_empty(py)?.call1(((u, ncols), &dtype))?;
     {
-        let oview = unique_arr.call_method1(intern!(py, "view"), ("int64",))?;
+        let oview = unique_arr.call_method1(intern!(py, "view"), (cached_int64_type(py)?,))?;
         let Ok(ob) = PyBuffer::<i64>::get(&oview) else {
             return Ok(None);
         };
@@ -106760,9 +106736,7 @@ fn try_native_unique_rows_lexsort_int_full(
     let mut outs: Vec<Bound<'_, PyAny>> = vec![unique_arr];
     // return_index: min original index per group = perm[group_start].
     if ret_index {
-        let ikw = PyDict::new(py);
-        ikw.set_item(intern!(py, "dtype"), "intp")?;
-        let idx_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ikw))?;
+        let idx_arr = cached_numpy_empty(py)?.call1(((u,), cached_intp_type(py)?))?;
         let Ok(ib) = PyBuffer::<i64>::get(&idx_arr) else {
             return Ok(None);
         };
@@ -106778,9 +106752,7 @@ fn try_native_unique_rows_lexsort_int_full(
     }
     // return_inverse: for each ORIGINAL row, its unique-row (group) index.
     if ret_inverse {
-        let vkw = PyDict::new(py);
-        vkw.set_item(intern!(py, "dtype"), "intp")?;
-        let inv_arr = numpy.call_method(intern!(py, "empty"), (rows,), Some(&vkw))?;
+        let inv_arr = cached_numpy_empty(py)?.call1(((rows,), cached_intp_type(py)?))?;
         let Ok(vb) = PyBuffer::<i64>::get(&inv_arr) else {
             return Ok(None);
         };
@@ -106799,9 +106771,7 @@ fn try_native_unique_rows_lexsort_int_full(
     }
     // return_counts: group sizes.
     if ret_counts {
-        let ckw = PyDict::new(py);
-        ckw.set_item(intern!(py, "dtype"), "intp")?;
-        let cnt_arr = numpy.call_method(intern!(py, "empty"), (u,), Some(&ckw))?;
+        let cnt_arr = cached_numpy_empty(py)?.call1(((u,), cached_intp_type(py)?))?;
         let Ok(cb) = PyBuffer::<i64>::get(&cnt_arr) else {
             return Ok(None);
         };
@@ -106828,7 +106798,6 @@ fn try_native_unique_rows_composite(
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     use rayon::prelude::*;
-    let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, item)? {
         return Ok(None);
     }
@@ -106850,9 +106819,7 @@ fn try_native_unique_rows_composite(
     if n < UNIQUE_ROWS_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let kw = PyDict::new(py);
-    kw.set_item(intern!(py, "dtype"), "int64")?;
-    let i64arr = numpy.call_method(intern!(py, "ascontiguousarray"), (item,), Some(&kw))?;
+    let i64arr = cached_numpy_ascontiguousarray(py)?.call1((item, cached_int64_type(py)?))?;
     let Ok(buf) = PyBuffer::<i64>::get(&i64arr) else {
         return Ok(None);
     };
@@ -106917,9 +106884,7 @@ fn try_native_unique_rows_composite(
     comp.dedup();
     let u = comp.len();
     // Decode each unique composite back to a row (col value = (comp / mult_j) % span_j + min_j).
-    let out_kw = PyDict::new(py);
-    out_kw.set_item(intern!(py, "dtype"), "int64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), ((u, k),), Some(&out_kw))?;
+    let flat = cached_numpy_empty(py)?.call1(((u, k), cached_int64_type(py)?))?;
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -106956,7 +106921,6 @@ fn try_native_unique_cols_composite(
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     use rayon::prelude::*;
-    let numpy = cached_numpy(py)?;
     if !is_exact_numpy_ndarray(py, item)?
         || item.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 2
     {
@@ -106978,9 +106942,7 @@ fn try_native_unique_cols_composite(
     if rows > UNIQUE_COLS_MAX_ROWS || cols < UNIQUE_COLS_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    let kw = PyDict::new(py);
-    kw.set_item(intern!(py, "dtype"), "int64")?;
-    let i64arr = numpy.call_method(intern!(py, "ascontiguousarray"), (item,), Some(&kw))?;
+    let i64arr = cached_numpy_ascontiguousarray(py)?.call1((item, cached_int64_type(py)?))?;
     let Ok(buf) = PyBuffer::<i64>::get(&i64arr) else {
         return Ok(None);
     };
@@ -107025,9 +106987,7 @@ fn try_native_unique_cols_composite(
     comp.par_sort_unstable();
     comp.dedup();
     let unique_cols = comp.len();
-    let out_kw = PyDict::new(py);
-    out_kw.set_item(intern!(py, "dtype"), "int64")?;
-    let flat = numpy.call_method(intern!(py, "empty"), ((rows, unique_cols),), Some(&out_kw))?;
+    let flat = cached_numpy_empty(py)?.call1(((rows, unique_cols), cached_int64_type(py)?))?;
     {
         let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
             return Ok(None);
@@ -107067,7 +107027,6 @@ fn try_native_unique_cols_composite(
 // worth (or fit) a bucket array, so the caller keeps the sort path.
 fn unique_counting_typed<'py, T: pyo3::buffer::Element + Copy>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     item: &Bound<'py, PyAny>,
     dtype_name: &str,
     widen: fn(T) -> i128,
@@ -107108,9 +107067,7 @@ fn unique_counting_typed<'py, T: pyo3::buffer::Element + Copy>(
         seen[(widen(c.get()) - mn) as usize] = true;
     }
     let count = seen.iter().filter(|&&b| b).count();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), dtype_name)?;
-    let out = numpy.call_method(intern!(py, "empty"), (count,), Some(&kwargs))?;
+    let out = cached_numpy_empty(py)?.call1(((count,), dtype_name))?;
     if count > 0 {
         let Ok(obuf) = PyBuffer::<T>::get(&out) else {
             return Ok(None);
@@ -107134,9 +107091,7 @@ fn unique_counting_typed<'py, T: pyo3::buffer::Element + Copy>(
 // ndarray; dispatched by (kind, itemsize). Wide ranges / non-contiguous / empty
 // inputs return None so the caller keeps the existing sort path.
 fn try_zerocopy_int_unique(py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !item.is_exact_instance(&ndarray_type) {
+    if !item.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if !item
@@ -107206,7 +107161,7 @@ fn try_zerocopy_int_unique(py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<
             }
             let values = &buf[..len];
             let out =
-                numpy.call_method1(intern!(py, "empty"), (values.len(), cached_bool_type(py)?))?;
+                cached_numpy_empty(py)?.call1(((values.len(),), cached_bool_type(py)?))?;
             if !values.is_empty() {
                 let Ok(out_buffer) = PyBuffer::<NpBool>::get(&out) else {
                     return Ok(None);
@@ -107221,28 +107176,28 @@ fn try_zerocopy_int_unique(py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<
             Some(out)
         }
         ("i", 1) => {
-            unique_counting_typed::<i8>(py, numpy, item, "int8", |x| x as i128, |v| v as i8)?
+            unique_counting_typed::<i8>(py, item, "int8", |x| x as i128, |v| v as i8)?
         }
         ("i", 2) => {
-            unique_counting_typed::<i16>(py, numpy, item, "int16", |x| x as i128, |v| v as i16)?
+            unique_counting_typed::<i16>(py, item, "int16", |x| x as i128, |v| v as i16)?
         }
         ("i", 4) => {
-            unique_counting_typed::<i32>(py, numpy, item, "int32", |x| x as i128, |v| v as i32)?
+            unique_counting_typed::<i32>(py, item, "int32", |x| x as i128, |v| v as i32)?
         }
         ("i", 8) => {
-            unique_counting_typed::<i64>(py, numpy, item, "int64", |x| x as i128, |v| v as i64)?
+            unique_counting_typed::<i64>(py, item, "int64", |x| x as i128, |v| v as i64)?
         }
         ("u", 1) => {
-            unique_counting_typed::<u8>(py, numpy, item, "uint8", |x| x as i128, |v| v as u8)?
+            unique_counting_typed::<u8>(py, item, "uint8", |x| x as i128, |v| v as u8)?
         }
         ("u", 2) => {
-            unique_counting_typed::<u16>(py, numpy, item, "uint16", |x| x as i128, |v| v as u16)?
+            unique_counting_typed::<u16>(py, item, "uint16", |x| x as i128, |v| v as u16)?
         }
         ("u", 4) => {
-            unique_counting_typed::<u32>(py, numpy, item, "uint32", |x| x as i128, |v| v as u32)?
+            unique_counting_typed::<u32>(py, item, "uint32", |x| x as i128, |v| v as u32)?
         }
         ("u", 8) => {
-            unique_counting_typed::<u64>(py, numpy, item, "uint64", |x| x as i128, |v| v as u64)?
+            unique_counting_typed::<u64>(py, item, "uint64", |x| x as i128, |v| v as u64)?
         }
         _ => return Ok(None),
     };
@@ -107261,7 +107216,6 @@ fn try_zerocopy_int_unique(py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     py: Python<'py>,
-    numpy: &Bound<'py, PyModule>,
     item: &Bound<'py, PyAny>,
     dtype_name: &str,
     widen: fn(T) -> i128,
@@ -107354,9 +107308,7 @@ fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     }
     let count = uvals.len();
     // Build the unique-values array in the input dtype.
-    let ukw = PyDict::new(py);
-    ukw.set_item(intern!(py, "dtype"), dtype_name)?;
-    let uarr = numpy.call_method(intern!(py, "empty"), (count,), Some(&ukw))?;
+    let uarr = cached_numpy_empty(py)?.call1(((count,), dtype_name))?;
     {
         let Ok(ub) = PyBuffer::<T>::get(&uarr) else {
             return Ok(None);
@@ -107370,9 +107322,7 @@ fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     }
     // Helper: build an intp array from a Vec<i64>.
     let build_i64 = |data: &[i64]| -> PyResult<Option<Bound<'py, PyAny>>> {
-        let kw = PyDict::new(py);
-        kw.set_item(intern!(py, "dtype"), "intp")?;
-        let arr = numpy.call_method(intern!(py, "empty"), (data.len(),), Some(&kw))?;
+        let arr = cached_numpy_empty(py)?.call1(((data.len(),), cached_intp_type(py)?))?;
         let Ok(ab) = PyBuffer::<i64>::get(&arr) else {
             return Ok(None);
         };
@@ -107401,9 +107351,7 @@ fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
         None
     };
     let inverse_arr = if want_inverse {
-        let kw = PyDict::new(py);
-        kw.set_item(intern!(py, "dtype"), "intp")?;
-        let inv = numpy.call_method(intern!(py, "empty"), (n,), Some(&kw))?;
+        let inv = cached_numpy_empty(py)?.call1(((n,), cached_intp_type(py)?))?;
         {
             let Ok(ib) = PyBuffer::<i64>::get(&inv) else {
                 return Ok(None);
@@ -107435,9 +107383,7 @@ fn try_zerocopy_int_unique_full(
     want_inverse: bool,
     want_counts: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !item.is_exact_instance(&ndarray_type) {
+    if !item.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     if !item
@@ -107458,7 +107404,6 @@ fn try_zerocopy_int_unique_full(
         ($t:ty, $name:expr, $narrow:expr) => {
             unique_counting_full_typed::<$t>(
                 py,
-                &numpy,
                 item,
                 $name,
                 |x| x as i128,
@@ -108367,9 +108312,7 @@ fn try_zerocopy_unicode_ascii_case(
     if !matches!(method, "upper" | "lower" | "swapcase") {
         return Ok(None); // unknown op -> delegate to numpy
     }
-    let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !input.is_exact_instance(&ndarray_type) {
+    if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dtype = input.getattr(intern!(py, "dtype"))?;
@@ -108384,8 +108327,8 @@ fn try_zerocopy_unicode_ascii_case(
         return Ok(None);
     }
 
-    let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
-    let codepoints = input.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
+    let uint32_dtype = cached_uint32_type(py)?;
+    let codepoints = input.call_method1(intern!(py, "view"), (uint32_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
         return Ok(None);
     };
@@ -108412,7 +108355,7 @@ fn try_zerocopy_unicode_ascii_case(
         return Ok(None);
     }
 
-    let codepoints_out = numpy.call_method1(intern!(py, "empty_like"), (&codepoints,))?;
+    let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
     let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
         return Ok(None);
     };
@@ -108467,7 +108410,6 @@ fn try_zerocopy_bytes_ascii_case(
     if !matches!(method, "upper" | "lower" | "swapcase") {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -108480,8 +108422,8 @@ fn try_zerocopy_bytes_ascii_case(
     {
         return Ok(None);
     }
-    let uint8_dtype = numpy.getattr(intern!(py, "uint8"))?;
-    let bytes_view = input.call_method1(intern!(py, "view"), (&uint8_dtype,))?;
+    let uint8_dtype = cached_uint8_type(py)?;
+    let bytes_view = input.call_method1(intern!(py, "view"), (uint8_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u8>::get(&bytes_view) else {
         return Ok(None);
     };
@@ -108496,9 +108438,9 @@ fn try_zerocopy_bytes_ascii_case(
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
     let cin: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
-    let out = numpy.call_method1(intern!(py, "empty_like"), (input,))?;
+    let out = cached_numpy_empty_like(py)?.call1((input,))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&uint8_dtype,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (uint8_dtype,))?;
         let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
@@ -108539,7 +108481,6 @@ fn try_zerocopy_unicode_ascii_cap_title(
     input: &Bound<'_, PyAny>,
     is_title: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -108559,8 +108500,8 @@ fn try_zerocopy_unicode_ascii_cap_title(
         return Ok(None);
     }
     let w = itemsize / 4; // codepoints per fixed-width string slot
-    let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
-    let codepoints = input.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
+    let uint32_dtype = cached_uint32_type(py)?;
+    let codepoints = input.call_method1(intern!(py, "view"), (uint32_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
         return Ok(None);
     };
@@ -108588,7 +108529,7 @@ fn try_zerocopy_unicode_ascii_cap_title(
     if non_ascii {
         return Ok(None);
     }
-    let codepoints_out = numpy.call_method1(intern!(py, "empty_like"), (&codepoints,))?;
+    let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
     let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
         return Ok(None);
     };
@@ -108668,7 +108609,6 @@ fn try_zerocopy_bytes_ascii_cap_title(
     input: &Bound<'_, PyAny>,
     is_title: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -108685,8 +108625,8 @@ fn try_zerocopy_bytes_ascii_cap_title(
     if w == 0 {
         return Ok(None);
     }
-    let uint8_dtype = numpy.getattr(intern!(py, "uint8"))?;
-    let bytes_view = input.call_method1(intern!(py, "view"), (&uint8_dtype,))?;
+    let uint8_dtype = cached_uint8_type(py)?;
+    let bytes_view = input.call_method1(intern!(py, "view"), (uint8_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u8>::get(&bytes_view) else {
         return Ok(None);
     };
@@ -108704,9 +108644,9 @@ fn try_zerocopy_bytes_ascii_cap_title(
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
     let cin: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
-    let out = numpy.call_method1(intern!(py, "empty_like"), (input,))?;
+    let out = cached_numpy_empty_like(py)?.call1((input,))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&uint8_dtype,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (uint8_dtype,))?;
         let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
@@ -108777,7 +108717,6 @@ fn try_zerocopy_unicode_ascii_translate(
         }
         lookup[ki as usize] = vi as u32;
     }
-    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -108796,8 +108735,8 @@ fn try_zerocopy_unicode_ascii_translate(
     if itemsize == 0 || itemsize % 4 != 0 {
         return Ok(None);
     }
-    let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
-    let codepoints = input.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
+    let uint32_dtype = cached_uint32_type(py)?;
+    let codepoints = input.call_method1(intern!(py, "view"), (uint32_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
         return Ok(None);
     };
@@ -108822,7 +108761,7 @@ fn try_zerocopy_unicode_ascii_translate(
     if non_ascii {
         return Ok(None);
     }
-    let codepoints_out = numpy.call_method1(intern!(py, "empty_like"), (&codepoints,))?;
+    let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
     let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
         return Ok(None);
     };
@@ -108874,7 +108813,6 @@ fn try_zerocopy_bytes_translate(
     }
     let mut lookup = [0u8; 256];
     lookup.copy_from_slice(&tbytes);
-    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -108893,8 +108831,8 @@ fn try_zerocopy_bytes_translate(
     if itemsize == 0 {
         return Ok(None);
     }
-    let uint8_dtype = numpy.getattr(intern!(py, "uint8"))?;
-    let bytes_view = input.call_method1(intern!(py, "view"), (&uint8_dtype,))?;
+    let uint8_dtype = cached_uint8_type(py)?;
+    let bytes_view = input.call_method1(intern!(py, "view"), (uint8_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u8>::get(&bytes_view) else {
         return Ok(None);
     };
@@ -108908,7 +108846,7 @@ fn try_zerocopy_bytes_translate(
     use rayon::prelude::*;
     // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
     let cin: &[u8] = unsafe { std::slice::from_raw_parts(bytes_in.as_ptr().cast::<u8>(), n) };
-    let out = numpy.call_method1(intern!(py, "empty_like"), (&bytes_view,))?;
+    let out = cached_numpy_empty_like(py)?.call1((&bytes_view,))?;
     let Ok(out_buffer) = PyBuffer::<u8>::get(&out) else {
         return Ok(None);
     };
@@ -108949,14 +108887,13 @@ fn try_zerocopy_bytes_translate(
 #[allow(clippy::too_many_arguments)]
 fn run_concat<E>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     shape: &[usize],
     wa: usize,
     wb: usize,
     kind_prefix: &str,
-    view_name: &str,
+    view_dtype: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>>
 where
     E: pyo3::buffer::Element + Copy + PartialEq + Send + Sync + From<u8>,
@@ -108969,10 +108906,9 @@ where
     if n == 0 || wout == 0 || n.saturating_mul(wout) < CHAR_CONCAT_MIN {
         return Ok(None);
     }
-    let view_dtype = numpy.getattr(view_name)?;
     let (Ok(va), Ok(vb)) = (
-        a.call_method1(intern!(py, "view"), (&view_dtype,)),
-        b.call_method1(intern!(py, "view"), (&view_dtype,)),
+        a.call_method1(intern!(py, "view"), (view_dtype,)),
+        b.call_method1(intern!(py, "view"), (view_dtype,)),
     ) else {
         return Ok(None);
     };
@@ -108992,9 +108928,9 @@ where
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{wout}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&view_dtype,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
         let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
@@ -109035,9 +108971,8 @@ fn try_zerocopy_unicode_concat(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let ndarray = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray) || !b.is_exact_instance(&ndarray) {
+    let ndarray = cached_ndarray_type(py)?;
+    if !a.is_exact_instance(ndarray) || !b.is_exact_instance(ndarray) {
         return Ok(None);
     }
     let (dta, dtb) = (
@@ -109072,9 +109007,27 @@ fn try_zerocopy_unicode_concat(
             if isa % 4 != 0 || isb % 4 != 0 {
                 return Ok(None);
             }
-            run_concat::<u32>(py, numpy, a, b, &shape, isa / 4, isb / 4, "U", "uint32")
+            run_concat::<u32>(
+                py,
+                a,
+                b,
+                &shape,
+                isa / 4,
+                isb / 4,
+                "U",
+                cached_uint32_type(py)?,
+            )
         }
-        ("S", "S") => run_concat::<u8>(py, numpy, a, b, &shape, isa, isb, "S", "uint8"),
+        ("S", "S") => run_concat::<u8>(
+            py,
+            a,
+            b,
+            &shape,
+            isa,
+            isb,
+            "S",
+            cached_uint8_type(py)?,
+        ),
         _ => Ok(None),
     }
 }
@@ -109119,7 +109072,6 @@ fn try_zerocopy_unicode_strip(
     input: &Bound<'_, PyAny>,
     mode: u8,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -109139,8 +109091,8 @@ fn try_zerocopy_unicode_strip(
         return Ok(None);
     }
     let w = itemsize / 4;
-    let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
-    let codepoints = input.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
+    let uint32_dtype = cached_uint32_type(py)?;
+    let codepoints = input.call_method1(intern!(py, "view"), (uint32_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
         return Ok(None);
     };
@@ -109164,7 +109116,7 @@ fn try_zerocopy_unicode_strip(
     if non_ascii {
         return Ok(None);
     }
-    let codepoints_out = numpy.call_method1(intern!(py, "empty_like"), (&codepoints,))?;
+    let codepoints_out = cached_numpy_empty_like(py)?.call1((&codepoints,))?;
     let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
         return Ok(None);
     };
@@ -109265,21 +109217,19 @@ fn unicode_strip_or_numpy(
 #[allow(clippy::too_many_arguments)]
 fn run_replace<E>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     shape: &[usize],
     w: usize,
     old: &[E],
     new: &[E],
     kind_prefix: &str,
-    view_name: &str,
+    view_dtype: &Bound<'_, PyAny>,
     non_ascii_gate: bool,
 ) -> PyResult<Option<Py<PyAny>>>
 where
     E: pyo3::buffer::Element + Copy + PartialEq + PartialOrd + Send + Sync + From<u8>,
 {
-    let view_dtype = numpy.getattr(view_name)?;
-    let cells_view = a.call_method1(intern!(py, "view"), (&view_dtype,))?;
+    let cells_view = a.call_method1(intern!(py, "view"), (view_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<E>::get(&cells_view) else {
         return Ok(None);
     };
@@ -109338,9 +109288,9 @@ where
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{maxlen}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&view_dtype,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
         let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
@@ -109390,7 +109340,6 @@ fn try_zerocopy_unicode_replace(
     old: &Bound<'_, PyAny>,
     new: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -109427,14 +109376,13 @@ fn try_zerocopy_unicode_replace(
             }
             run_replace::<u32>(
                 py,
-                numpy,
                 a,
                 &shape,
                 itemsize / 4,
                 &old_cp,
                 &new_cp,
                 "U",
-                "uint32",
+                cached_uint32_type(py)?,
                 true,
             )
         }
@@ -109450,7 +109398,15 @@ fn try_zerocopy_unicode_replace(
                 return Ok(None);
             }
             run_replace::<u8>(
-                py, numpy, a, &shape, itemsize, &old_b, &new_b, "S", "uint8", false,
+                py,
+                a,
+                &shape,
+                itemsize,
+                &old_b,
+                &new_b,
+                "S",
+                cached_uint8_type(py)?,
+                false,
             )
         }
         _ => Ok(None),
@@ -109467,7 +109423,6 @@ fn try_zerocopy_unicode_ispredicate(
     input: &Bound<'_, PyAny>,
     mode: u8,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -109488,8 +109443,8 @@ fn try_zerocopy_unicode_ispredicate(
     }
     let w = itemsize / 4;
     let shape: Vec<usize> = input.getattr(intern!(py, "shape"))?.extract()?;
-    let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
-    let codepoints = input.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
+    let uint32_dtype = cached_uint32_type(py)?;
+    let codepoints = input.call_method1(intern!(py, "view"), (uint32_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
         return Ok(None);
     };
@@ -109527,14 +109482,14 @@ fn try_zerocopy_unicode_ispredicate(
         }
     };
     let n = total / w;
-    let bool_dtype = numpy.getattr(intern!(py, "bool_"))?;
+    let bool_dtype = cached_bool_type(py)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let kwargs = PyDict::new(py);
-    kwargs.set_item(intern!(py, "dtype"), &bool_dtype)?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    kwargs.set_item(intern!(py, "dtype"), bool_dtype)?;
+    let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
-        let u8_dtype = numpy.getattr(intern!(py, "uint8"))?;
-        let out_view = out.call_method1(intern!(py, "view"), (&u8_dtype,))?;
+        let u8_dtype = cached_uint8_type(py)?;
+        let out_view = out.call_method1(intern!(py, "view"), (u8_dtype,))?;
         let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
             return Ok(None);
         };
@@ -109668,19 +109623,17 @@ fn mul_build<E: Copy + PartialEq + From<u8>>(slot: &[E], oslot: &mut [E], reps: 
 #[allow(clippy::too_many_arguments)]
 fn run_multiply<E>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     shape: &[usize],
     w: usize,
     reps: usize,
     kind_prefix: &str,
-    view_name: &str,
+    view_dtype: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>>
 where
     E: pyo3::buffer::Element + Copy + PartialEq + Send + Sync + From<u8>,
 {
-    let view_dtype = numpy.getattr(view_name)?;
-    let cells_view = a.call_method1(intern!(py, "view"), (&view_dtype,))?;
+    let cells_view = a.call_method1(intern!(py, "view"), (view_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<E>::get(&cells_view) else {
         return Ok(None);
     };
@@ -109715,9 +109668,9 @@ where
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{maxlen}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&view_dtype,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
         let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
@@ -109753,7 +109706,6 @@ fn try_zerocopy_unicode_multiply(
         return Ok(None); // n<=0 -> numpy (empty strings, U1 edge)
     }
     let reps = reps as usize;
-    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -109775,13 +109727,21 @@ fn try_zerocopy_unicode_multiply(
             if itemsize == 0 || itemsize % 4 != 0 {
                 return Ok(None);
             }
-            run_multiply::<u32>(py, numpy, a, &shape, itemsize / 4, reps, "U", "uint32")
+            run_multiply::<u32>(
+                py,
+                a,
+                &shape,
+                itemsize / 4,
+                reps,
+                "U",
+                cached_uint32_type(py)?,
+            )
         }
         "S" => {
             if itemsize == 0 {
                 return Ok(None);
             }
-            run_multiply::<u8>(py, numpy, a, &shape, itemsize, reps, "S", "uint8")
+            run_multiply::<u8>(py, a, &shape, itemsize, reps, "S", cached_uint8_type(py)?)
         }
         _ => Ok(None),
     }
@@ -109868,7 +109828,6 @@ fn pad_build<E: Copy + PartialEq + From<u8>>(
 #[allow(clippy::too_many_arguments)]
 fn run_pad<E>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     shape: &[usize],
     w: usize,
@@ -109876,13 +109835,12 @@ fn run_pad<E>(
     fill: E,
     mode: u8,
     kind_prefix: &str,
-    view_name: &str,
+    view_dtype: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>>
 where
     E: pyo3::buffer::Element + Copy + PartialEq + Send + Sync + From<u8>,
 {
-    let view_dtype = numpy.getattr(view_name)?;
-    let cells_view = a.call_method1(intern!(py, "view"), (&view_dtype,))?;
+    let cells_view = a.call_method1(intern!(py, "view"), (view_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<E>::get(&cells_view) else {
         return Ok(None);
     };
@@ -109915,9 +109873,9 @@ where
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{out_w}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&view_dtype,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
         let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
@@ -109949,7 +109907,6 @@ fn try_zerocopy_unicode_pad(
         return Ok(None);
     }
     let width = width as usize;
-    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -109987,7 +109944,17 @@ fn try_zerocopy_unicode_pad(
                     }
                 }
             };
-            run_pad::<u32>(py, numpy, a, &shape, w, width, fill, mode, "U", "uint32")
+            run_pad::<u32>(
+                py,
+                a,
+                &shape,
+                w,
+                width,
+                fill,
+                mode,
+                "U",
+                cached_uint32_type(py)?,
+            )
         }
         "S" => {
             if itemsize == 0 {
@@ -110007,7 +109974,17 @@ fn try_zerocopy_unicode_pad(
                     b[0]
                 }
             };
-            run_pad::<u8>(py, numpy, a, &shape, w, width, fill, mode, "S", "uint8")
+            run_pad::<u8>(
+                py,
+                a,
+                &shape,
+                w,
+                width,
+                fill,
+                mode,
+                "S",
+                cached_uint8_type(py)?,
+            )
         }
         _ => Ok(None),
     }
@@ -110066,19 +110043,17 @@ fn unicode_pad_or_numpy(
 #[allow(clippy::too_many_arguments)]
 fn run_expandtabs<E>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     shape: &[usize],
     w: usize,
     tabsize: usize,
     kind_prefix: &str,
-    view_name: &str,
+    view_dtype: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>>
 where
     E: pyo3::buffer::Element + Copy + PartialEq + Send + Sync + From<u8>,
 {
-    let view_dtype = numpy.getattr(view_name)?;
-    let cells_view = a.call_method1(intern!(py, "view"), (&view_dtype,))?;
+    let cells_view = a.call_method1(intern!(py, "view"), (view_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<E>::get(&cells_view) else {
         return Ok(None);
     };
@@ -110134,9 +110109,9 @@ where
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{out_w}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&view_dtype,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
         let Ok(ob) = PyBuffer::<E>::get(&out_view) else {
             return Ok(None);
         };
@@ -110195,7 +110170,6 @@ fn try_zerocopy_unicode_expandtabs(
         return Ok(None);
     }
     let tabsize = tabsize as usize;
-    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -110218,13 +110192,29 @@ fn try_zerocopy_unicode_expandtabs(
             if itemsize == 0 || itemsize % 4 != 0 {
                 return Ok(None);
             }
-            run_expandtabs::<u32>(py, numpy, a, &shape, itemsize / 4, tabsize, "U", "uint32")
+            run_expandtabs::<u32>(
+                py,
+                a,
+                &shape,
+                itemsize / 4,
+                tabsize,
+                "U",
+                cached_uint32_type(py)?,
+            )
         }
         "S" => {
             if itemsize == 0 {
                 return Ok(None);
             }
-            run_expandtabs::<u8>(py, numpy, a, &shape, itemsize, tabsize, "S", "uint8")
+            run_expandtabs::<u8>(
+                py,
+                a,
+                &shape,
+                itemsize,
+                tabsize,
+                "S",
+                cached_uint8_type(py)?,
+            )
         }
         _ => Ok(None),
     }
@@ -110251,7 +110241,6 @@ fn try_zerocopy_unicode_search(
         return Ok(None); // empty-sub edge (count=len+1, find=0) -> numpy
     }
     let sub_cp: Vec<u32> = sub_str.chars().map(|c| c as u32).collect();
-    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -110270,8 +110259,8 @@ fn try_zerocopy_unicode_search(
     }
     let w = itemsize / 4;
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
-    let codepoints = a.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
+    let uint32_dtype = cached_uint32_type(py)?;
+    let codepoints = a.call_method1(intern!(py, "view"), (uint32_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
         return Ok(None);
     };
@@ -110331,9 +110320,9 @@ fn try_zerocopy_unicode_search(
             }
         }
     };
-    let intp = numpy.getattr(intern!(py, "intp"))?;
+    let intp = cached_intp_type(py)?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method1(intern!(py, "empty"), (shape_tuple, intp))?;
+    let out = cached_numpy_empty(py)?.call1((shape_tuple, intp))?;
     {
         let Ok(ob) = PyBuffer::<i64>::get(&out) else {
             return Ok(None);
@@ -110377,7 +110366,6 @@ fn try_zerocopy_unicode_slice(
     if step == 0 {
         return Ok(None); // numpy raises ValueError -> delegate
     }
-    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -110396,8 +110384,8 @@ fn try_zerocopy_unicode_slice(
     }
     let w = itemsize / 4; // output width = input width (matches numpy — a slice is never longer)
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
-    let codepoints = a.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
+    let uint32_dtype = cached_uint32_type(py)?;
+    let codepoints = a.call_method1(intern!(py, "view"), (uint32_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
         return Ok(None);
     };
@@ -110455,9 +110443,9 @@ fn try_zerocopy_unicode_slice(
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), format!("U{w}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
-        let out_view = out.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
+        let out_view = out.call_method1(intern!(py, "view"), (uint32_dtype,))?;
         let Ok(ob) = PyBuffer::<u32>::get(&out_view) else {
             return Ok(None);
         };
@@ -110860,7 +110848,6 @@ fn try_native_strings_mod_float(
     let Some((prefix, suffix, ffmt)) = parse_mod_float_format(&fmt_str) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
     if !values.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -110889,7 +110876,6 @@ fn try_native_strings_mod_float(
     fn fill<T>(
         py: Python<'_>,
         values: &Bound<'_, PyAny>,
-        numpy: &Bound<'_, PyModule>,
         prefix: &[u32],
         suffix: &[u32],
         ffmt: &FloatFmt,
@@ -110932,12 +110918,16 @@ fn try_native_strings_mod_float(
             format!("{}{out_w}", if as_bytes { "S" } else { "U" }),
         )?;
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+        let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
         {
             // 'S' -> uint8 element view, 'U' -> uint32 codepoint view. The float writer is byte-based
             // (StackW::buf is [u8]); 'S' writes those bytes directly, 'U' widens each to a codepoint.
-            let view_dtype = numpy.getattr(if as_bytes { "uint8" } else { "uint32" })?;
-            let out_view = out.call_method1(intern!(py, "view"), (&view_dtype,))?;
+            let view_dtype = if as_bytes {
+                cached_uint8_type(py)?
+            } else {
+                cached_uint32_type(py)?
+            };
+            let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
             if as_bytes {
                 let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
                     return Ok(None);
@@ -111011,7 +111001,6 @@ fn try_native_strings_mod_float(
         fill::<f64>(
             py,
             values,
-            numpy,
             &prefix,
             &suffix,
             &ffmt,
@@ -111024,7 +111013,6 @@ fn try_native_strings_mod_float(
         fill::<f32>(
             py,
             values,
-            numpy,
             &prefix,
             &suffix,
             &ffmt,
@@ -111062,7 +111050,6 @@ fn try_native_strings_mod_int(
     let Some((prefix, suffix, ifmt)) = parse_mod_int_format(&fmt_str) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
     if !values.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -111089,7 +111076,6 @@ fn try_native_strings_mod_int(
     fn fill<T>(
         py: Python<'_>,
         values: &Bound<'_, PyAny>,
-        numpy: &Bound<'_, PyModule>,
         prefix: &[u32],
         suffix: &[u32],
         ifmt: &IntFmt,
@@ -111128,11 +111114,15 @@ fn try_native_strings_mod_int(
             format!("{}{out_w}", if as_bytes { "S" } else { "U" }),
         )?;
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+        let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
         {
             // 'S' -> uint8 element view, 'U' -> uint32 codepoint view; write_int_fmt is generic over both.
-            let view_dtype = numpy.getattr(if as_bytes { "uint8" } else { "uint32" })?;
-            let out_view = out.call_method1(intern!(py, "view"), (&view_dtype,))?;
+            let view_dtype = if as_bytes {
+                cached_uint8_type(py)?
+            } else {
+                cached_uint32_type(py)?
+            };
+            let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
             if as_bytes {
                 let Ok(ob) = PyBuffer::<u8>::get(&out_view) else {
                     return Ok(None);
@@ -111194,28 +111184,28 @@ fn try_native_strings_mod_int(
 
     match (kind.as_str(), itemsize) {
         ("i", 1) => fill::<i8>(
-            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("i", 2) => fill::<i16>(
-            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("i", 4) => fill::<i32>(
-            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("i", 8) => fill::<i64>(
-            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("u", 1) => fill::<u8>(
-            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("u", 2) => fill::<u16>(
-            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("u", 4) => fill::<u32>(
-            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         ("u", 8) => fill::<u64>(
-            py, values, numpy, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
+            py, values, &prefix, &suffix, &ifmt, &shape, n, as_bytes,
         ),
         _ => Ok(None),
     }
@@ -111703,21 +111693,19 @@ fn encoding_is_ascii_compatible(
 #[allow(clippy::too_many_arguments)]
 fn run_partition<E>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     w: usize,
     sep: &[E],
     from_right: bool,
     kind_prefix: &str,
-    view_name: &str,
+    view_dtype: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>>
 where
     E: pyo3::buffer::Element + Copy + PartialEq + Send + Sync + From<u8>,
 {
     let sl = sep.len();
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let view_dtype = numpy.getattr(view_name)?;
-    let cells_view = a.call_method1(intern!(py, "view"), (&view_dtype,))?;
+    let cells_view = a.call_method1(intern!(py, "view"), (view_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<E>::get(&cells_view) else {
         return Ok(None);
     };
@@ -111774,10 +111762,10 @@ where
             let kwargs = PyDict::new(py);
             kwargs.set_item(intern!(py, "dtype"), format!("{kind_prefix}{width}"))?; // width >= 1 (0-width parts deferred)
             let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-            let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+            let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
             let wout = width;
             {
-                let out_view = out.call_method1(intern!(py, "view"), (&view_dtype,))?;
+                let out_view = out.call_method1(intern!(py, "view"), (view_dtype,))?;
                 let ob = PyBuffer::<E>::get(&out_view)
                     .map_err(|e| PyValueError::new_err(e.to_string()))?;
                 let co = ob
@@ -111833,7 +111821,6 @@ fn try_native_strings_partition(
     sep: &Bound<'_, PyAny>,
     from_right: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -111861,15 +111848,15 @@ fn try_native_strings_partition(
             if itemsize == 0 || itemsize % 4 != 0 {
                 return Ok(None);
             }
+            let uint32_type = cached_uint32_type(py)?;
             run_partition::<u32>(
                 py,
-                numpy,
                 a,
                 itemsize / 4,
                 &sep_cp,
                 from_right,
                 "U",
-                "uint32",
+                uint32_type,
             )
         }
         "S" => {
@@ -111882,7 +111869,8 @@ fn try_native_strings_partition(
             if itemsize == 0 {
                 return Ok(None);
             }
-            run_partition::<u8>(py, numpy, a, itemsize, &sep_b, from_right, "S", "uint8")
+            let uint8_type = cached_uint8_type(py)?;
+            run_partition::<u8>(py, a, itemsize, &sep_b, from_right, "S", uint8_type)
         }
         _ => Ok(None),
     }
@@ -111899,7 +111887,6 @@ fn try_native_strings_decode(
     if !encoding_is_ascii_compatible(encoding, errors) {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -111917,7 +111904,7 @@ fn try_native_strings_decode(
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let uint8_dtype = numpy.getattr(intern!(py, "uint8"))?;
+    let uint8_dtype = cached_uint8_type(py)?;
     let bytes_view = a.call_method1(intern!(py, "view"), (&uint8_dtype,))?;
     let Ok(in_buffer) = PyBuffer::<u8>::get(&bytes_view) else {
         return Ok(None);
@@ -111944,9 +111931,9 @@ fn try_native_strings_decode(
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), format!("U{out_w}"))?;
     let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-    let out = numpy.call_method(intern!(py, "empty"), (shape_tuple,), Some(&kwargs))?;
+    let out = cached_numpy_empty(py)?.call((shape_tuple,), Some(&kwargs))?;
     {
-        let uint32_dtype = numpy.getattr(intern!(py, "uint32"))?;
+        let uint32_dtype = cached_uint32_type(py)?;
         let out_view = out.call_method1(intern!(py, "view"), (&uint32_dtype,))?;
         let Ok(ob) = PyBuffer::<u32>::get(&out_view) else {
             return Ok(None);
