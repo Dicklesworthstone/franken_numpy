@@ -12033,12 +12033,12 @@ fn try_zerocopy_f16_nan_to_num(
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let out_u16 = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, u16t))?
+        empty_fn.call1((n, u16t))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (shape_tuple, u16t))?
+        empty_fn.call1((shape_tuple, u16t))?
     };
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
@@ -12116,12 +12116,12 @@ fn try_zerocopy_f16_clip(
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
+    let empty_fn = cached_numpy_empty(py)?;
     let out_u16 = if shape.len() == 1 {
-        numpy.call_method1(intern!(py, "empty"), (n, u16t))?
+        empty_fn.call1((n, u16t))?
     } else {
         let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (shape_tuple, u16t))?
+        empty_fn.call1((shape_tuple, u16t))?
     };
     {
         let Ok(out_buf) = PyBuffer::<u16>::get(&out_u16) else {
@@ -12843,8 +12843,8 @@ fn try_zerocopy_f16_compare(
     let (Some(a_in), Some(b_in)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
-    let out_u8 = numpy.call_method1(intern!(py, "empty"), (&a_shape, cached_uint8_type(py)?))?;
+    let empty_fn = cached_numpy_empty(py)?;
+    let out_u8 = empty_fn.call1((&a_shape, cached_uint8_type(py)?))?;
     {
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
@@ -12922,8 +12922,8 @@ where
     let Some(x_in) = x_buf.as_slice(py) else {
         return Ok(None);
     };
-    let numpy = cached_numpy(py)?;
-    let out_u8 = numpy.call_method1(intern!(py, "empty"), (&shape, cached_uint8_type(py)?))?;
+    let empty_fn = cached_numpy_empty(py)?;
+    let out_u8 = empty_fn.call1((&shape, cached_uint8_type(py)?))?;
     {
         let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
             return Ok(None);
