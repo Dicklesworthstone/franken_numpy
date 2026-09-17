@@ -1501,14 +1501,14 @@ macro_rules! scatter_at_atomic_arm {
             let nd = cached_ndarray_type(numpy.py())?;
             for (x, kind, isize) in [
                 (a, $kind, $isize),
-                (indices, "i", 8usize),
+                (indices, 'i', 8usize),
                 (b, $kind, $isize),
             ] {
                 if !x.is_exact_instance(nd) {
                     return Ok(None);
                 }
                 let dt = x.getattr(intern!(py, "dtype"))?;
-                if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != kind
+                if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != kind
                     || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != isize
                     || x.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
                     || !x
@@ -1579,10 +1579,10 @@ macro_rules! scatter_at_atomic_arm {
 }
 macro_rules! scatter_at_op_family {
     ($add:ident, $i64:ident, $u64:ident, $i32:ident, $u32:ident, $op:ident) => {
-        scatter_at_atomic_arm!($i64, i64, std::sync::atomic::AtomicI64, "i", 8usize, $op);
-        scatter_at_atomic_arm!($u64, u64, std::sync::atomic::AtomicU64, "u", 8usize, $op);
-        scatter_at_atomic_arm!($i32, i32, std::sync::atomic::AtomicI32, "i", 4usize, $op);
-        scatter_at_atomic_arm!($u32, u32, std::sync::atomic::AtomicU32, "u", 4usize, $op);
+        scatter_at_atomic_arm!($i64, i64, std::sync::atomic::AtomicI64, 'i', 8usize, $op);
+        scatter_at_atomic_arm!($u64, u64, std::sync::atomic::AtomicU64, 'u', 8usize, $op);
+        scatter_at_atomic_arm!($i32, i32, std::sync::atomic::AtomicI32, 'i', 4usize, $op);
+        scatter_at_atomic_arm!($u32, u32, std::sync::atomic::AtomicU32, 'u', 4usize, $op);
         fn $add(
             py: Python<'_>,
             numpy: &Bound<'_, PyModule>,
@@ -4561,6 +4561,11 @@ fn numpy_array_from_u32_list<'py>(
 }
 
 fn py_array_to_u64_vec(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<Vec<u64>> {
+    if let Ok(buffer) = PyBuffer::<u64>::get(value)
+        && let Ok(values) = buffer.to_vec(value.py())
+    {
+        return Ok(values);
+    }
     value
         .call_method0("tolist")?
         .extract::<Vec<u64>>()
@@ -4572,6 +4577,11 @@ fn py_array_to_u64_vec(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<V
 }
 
 fn py_array_to_u32_vec(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<Vec<u32>> {
+    if let Ok(buffer) = PyBuffer::<u32>::get(value)
+        && let Ok(values) = buffer.to_vec(value.py())
+    {
+        return Ok(values);
+    }
     value
         .call_method0("tolist")?
         .extract::<Vec<u32>>()
@@ -4581,6 +4591,7 @@ fn py_array_to_u32_vec(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<V
             ))
         })
 }
+
 
 fn default_bit_generator_schema_entries(
     kind: BitGeneratorKind,
@@ -5163,7 +5174,12 @@ fn random_state_state_keys_from_py(py: Python<'_>, value: &Bound<'_, PyAny>) -> 
     {
         return Ok(vec);
     }
-    let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
+    let ndim = array.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+    let flat = if ndim == 1 {
+        array
+    } else {
+        array.call_method1(intern!(py, "reshape"), (-1,))?
+    };
     numpy_cast_contiguous_to_vec::<u32>(py, &flat, "uint32")
 }
 
@@ -5750,7 +5766,12 @@ fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResu
     {
         return Ok(vec);
     }
-    let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
+    let ndim = array.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+    let flat = if ndim == 1 {
+        array
+    } else {
+        array.call_method1(intern!(py, "reshape"), (-1,))?
+    };
     numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")
 }
 
@@ -5771,7 +5792,12 @@ fn extract_random_u64_population(
         {
             vec
         } else {
-            let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
+            let ndim = array.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+            let flat = if ndim == 1 {
+                array
+            } else {
+                array.call_method1(intern!(py, "reshape"), (-1,))?
+            };
             numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?
         }
     };
@@ -6029,8 +6055,12 @@ fn try_extract_numeric_array(
     let shape = array
         .getattr(intern!(py, "shape"))?
         .extract::<Vec<usize>>()?;
-    let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
     let dtype = array.getattr(intern!(py, "dtype"))?;
+    let flat = if shape.len() == 1 {
+        array
+    } else {
+        array.call_method1(intern!(py, "reshape"), (-1,))?
+    };
     // `kind` as a char. `str(dtype)` is 1639.2 ns against `dtype.kind` at 20.2 ns (timeit,
     // numpy 2.4.3, installed interpreter) - it is not a C getset, it runs numpy's pure-Python
     // name machinery - so the name is read only where it is formatted, on the raising
@@ -6086,8 +6116,12 @@ fn extract_precise_numeric_array(
     let shape = array
         .getattr(intern!(py, "shape"))?
         .extract::<Vec<usize>>()?;
-    let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
     let dtype = array.getattr(intern!(py, "dtype"))?;
+    let flat = if shape.len() == 1 {
+        array
+    } else {
+        array.call_method1(intern!(py, "reshape"), (-1,))?
+    };
     let dtype_name = dtype.getattr(intern!(py, "name"))?.extract::<String>()?;
     let parsed_dtype = DType::parse(&dtype_name).ok_or_else(|| {
         PyTypeError::new_err(format!(
@@ -6138,11 +6172,15 @@ fn extract_index_vector(
 ) -> PyResult<Vec<usize>> {
     let numpy = cached_numpy(py)?;
     let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
-    let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
-    let indices = flat
-        .call_method1(intern!(py, "astype"), ("int64",))?
-        .call_method0(intern!(py, "tolist"))?
-        .extract::<Vec<i64>>()?;
+    let shape = array
+        .getattr(intern!(py, "shape"))?
+        .extract::<Vec<usize>>()?;
+    let flat = if shape.len() == 1 {
+        array
+    } else {
+        array.call_method1(intern!(py, "reshape"), (-1,))?
+    };
+    let indices = numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?;
 
     indices
         .into_iter()
@@ -6166,8 +6204,12 @@ fn extract_integer_array(
     let shape = array
         .getattr(intern!(py, "shape"))?
         .extract::<Vec<usize>>()?;
-    let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
     let dtype = array.getattr(intern!(py, "dtype"))?;
+    let flat = if shape.len() == 1 {
+        array
+    } else {
+        array.call_method1(intern!(py, "reshape"), (-1,))?
+    };
     // Same shape as `extract_numeric_array`: the name is 1639.2 ns of pure-Python dtype
     // machinery, was read on every call, and is consumed by the failure arm alone.
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
@@ -6225,18 +6267,19 @@ fn extract_index_shape(
         });
     }
 
-    let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
+    let flat = if ndim == 1 {
+        array
+    } else {
+        array.call_method1(intern!(py, "reshape"), (-1,))?
+    };
     if flat.getattr(intern!(py, "size"))?.extract::<usize>()? == 0 {
         return Ok(vec![]);
     }
 
     let dtype = flat.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    match kind.as_str() {
-        "i" => flat
-            .call_method1(intern!(py, "astype"), ("int64",))?
-            .call_method0(intern!(py, "tolist"))?
-            .extract::<Vec<i64>>()?
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    match kind {
+        'i' => numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?
             .into_iter()
             .map(|dim| {
                 usize::try_from(dim).map_err(|_| {
@@ -6244,10 +6287,7 @@ fn extract_index_shape(
                 })
             })
             .collect(),
-        "u" => flat
-            .call_method1(intern!(py, "astype"), ("uint64",))?
-            .call_method0(intern!(py, "tolist"))?
-            .extract::<Vec<u64>>()?
+        'u' => numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?
             .into_iter()
             .map(|dim| {
                 usize::try_from(dim).map_err(|_| {
@@ -6281,14 +6321,16 @@ fn extract_take_indices(
         && array
             .getattr(intern!(py, "dtype"))?
             .getattr(intern!(py, "kind"))?
-            .extract::<String>()?
-            == "f"
+            .extract::<char>()?
+            == 'f'
     {
-        for v in array
-            .call_method1(intern!(py, "reshape"), (-1,))?
-            .call_method0(intern!(py, "tolist"))?
-            .extract::<Vec<f64>>()?
-        {
+        let ndim = array.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+        let flat = if ndim == 1 {
+            array.clone()
+        } else {
+            array.call_method1(intern!(py, "reshape"), (-1,))?
+        };
+        for v in numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")? {
             if v.is_nan() {
                 return Err(PyValueError::new_err("cannot convert float NaN to integer"));
             }
@@ -6640,6 +6682,11 @@ fn extract_array_shape(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<Vec<usize>> {
+    if let Ok(shape_attr) = value.getattr(intern!(py, "shape"))
+        && let Ok(shape) = shape_attr.extract::<Vec<usize>>()
+    {
+        return Ok(shape);
+    }
     let numpy = cached_numpy(py)?;
     let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
     array
@@ -7647,7 +7694,13 @@ fn normalize_meshgrid_inputs(
     args.iter()
         .map(|value| {
             let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
-            Ok(array.call_method1(intern!(py, "reshape"), (-1,))?.unbind())
+            let ndim = array.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
+            let flat = if ndim == 1 {
+                array
+            } else {
+                array.call_method1(intern!(py, "reshape"), (-1,))?
+            };
+            Ok(flat.unbind())
         })
         .collect()
 }
@@ -15689,8 +15742,13 @@ fn try_zerocopy_any_dtype_where(
     // any other - `np.where` must never surface an error numpy would not have surfaced,
     // so an unviewable operand falls through to the delegate instead (`deadlock-audit-nq438`).
     let uint8 = cached_uint8_type(py)?;
+    let is_1d = cond_shape.len()? == 1;
     let as_bytes = |operand: &Bound<'_, PyAny>| -> PyResult<Option<PyBuffer<u8>>> {
-        let flat = operand.call_method1(intern!(py, "reshape"), (-1i64,))?;
+        let flat = if is_1d {
+            operand.clone()
+        } else {
+            operand.call_method1(intern!(py, "reshape"), (-1i64,))?
+        };
         let Ok(viewed) = flat.call_method1(intern!(py, "view"), (uint8,)) else {
             return Ok(None);
         };
@@ -16461,7 +16519,7 @@ fn try_zerocopy_int_select(
         return Ok(None);
     }
     let dt = choice_items[0].getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     // BOOL choices are excluded: numpy computes result_type(*choices, default)
     // and the default is the python int 0 EVEN WHEN OMITTED, so bool choices
     // promote to int64 (gate-caught) - numpy owns that surface. c64 rides the
@@ -16469,7 +16527,7 @@ fn try_zerocopy_int_select(
     // c128 uses a u64-pair view and fills one logical element at a time: scan
     // conditions once, then move both words together. Complex scalar defaults
     // restrict to exactly 0.
-    if !matches!(kind.as_str(), "i" | "u" | "c" | "f") {
+    if !matches!(kind, 'i' | 'u' | 'c' | 'f') {
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -16484,17 +16542,17 @@ fn try_zerocopy_int_select(
     // Scalar default: numpy's weak promotion keeps the choice dtype for an
     // in-range python int, and the filled value's BITS are the int cast to the
     // dtype. Bool choices accept only 0/False (anything else can promote).
-    let (lo, hi): (i128, i128) = match (kind.as_str(), itemsize) {
-        ("i", w) => (-(1i128 << (w * 8 - 1)), (1i128 << (w * 8 - 1)) - 1),
-        ("u", w) => (0, (1i128 << (w * 8)) - 1),
-        ("c", 8) | ("c", 16) => (0, 0),
+    let (lo, hi): (i128, i128) = match (kind, itemsize) {
+        ('i', w) => (-(1i128 << (w * 8 - 1)), (1i128 << (w * 8 - 1)) - 1),
+        ('u', w) => (0, (1i128 << (w * 8)) - 1),
+        ('c', 8) | ('c', 16) => (0, 0),
         // f32 (float64 stays on the dedicated kernel; f16 is out of scope):
         // the (lo, hi) bound below applies to python-INT defaults, capped at
         // the f32-exact integer range so the int -> f32 cast cannot round
         // (numpy may convert big python ints through a different path).
         // Python-FLOAT defaults cast f64 -> f32, the same single rounding
-        // numpy applies; parsed in the kind == "f" branch below.
-        ("f", 4) => (-(1i128 << 24), 1i128 << 24),
+        // numpy applies; parsed in the kind == 'f' branch below.
+        ('f', 4) => (-(1i128 << 24), 1i128 << 24),
         _ => return Ok(None),
     };
     // default_bits carries the FILL VALUE's raw bits in the unsigned move
@@ -16509,14 +16567,14 @@ fn try_zerocopy_int_select(
                 return Ok(None);
             }
             default_array = Some(bound.clone());
-        } else if kind == "f" && bound.is_instance_of::<pyo3::types::PyFloat>() {
+        } else if kind == 'f' && bound.is_instance_of::<pyo3::types::PyFloat>() {
             let v = bound.extract::<f64>()?;
             default_bits = (v as f32).to_bits() as i128;
         } else if let Ok(v) = bound.extract::<i128>() {
             if v < lo || v > hi {
                 return Ok(None); // out of range -> numpy promotes; delegate
             }
-            default_bits = if kind == "f" {
+            default_bits = if kind == 'f' {
                 (v as f32).to_bits() as i128
             } else {
                 v
@@ -16528,9 +16586,9 @@ fn try_zerocopy_int_select(
     // View choices (and array default) to the same-width unsigned dtype and run
     // the generic fused pass; view the flat result back to the original dtype.
     // Element multiplier: u64 units moved per logical element (c128 = 2).
-    let em: usize = if kind == "c" && itemsize == 16 { 2 } else { 1 };
-    let uname: &str = match (kind.as_str(), itemsize) {
-        ("c", 8) | ("c", 16) => "uint64",
+    let em: usize = if kind == 'c' && itemsize == 16 { 2 } else { 1 };
+    let uname: &str = match (kind, itemsize) {
+        ('c', 8) | ('c', 16) => "uint64",
         (_, 1) => "uint8",
         (_, 2) => "uint16",
         (_, 4) => "uint32", // int32/uint32/float32 all move as u32
@@ -16887,8 +16945,8 @@ fn try_zerocopy_any_roll(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'b' | 'i' | 'u' | 'f' | 'c') {
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -17033,8 +17091,8 @@ fn try_zerocopy_any_roll_axis(
     axis: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if !matches!(kind.as_str(), "b" | "i" | "u" | "f") {
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'b' | 'i' | 'u' | 'f') {
         return Ok(None);
     }
     let itemsize = a_dtype
@@ -17208,8 +17266,8 @@ fn try_zerocopy_any_roll_2d_multi(
     axes: &[i64],
 ) -> PyResult<Option<Py<PyAny>>> {
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'b' | 'i' | 'u' | 'f' | 'c') {
         return Ok(None);
     }
     let Ok((rows, cols)) = a.getattr(intern!(py, "shape"))?.extract::<(usize, usize)>() else {
@@ -17659,15 +17717,15 @@ fn try_zerocopy_any_compact(
         return Ok(None);
     }
     let c_dtype = cond.getattr(intern!(py, "dtype"))?;
-    let c_kind = c_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let c_kind = c_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let c_itemsize = c_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
     let a_dtype = arr.getattr(intern!(py, "dtype"))?;
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     // Only fixed-width int/uint/float/bool; complex (kind 'c') and anything else
     // keep their existing fast paths.
-    if !matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+    if !matches!(kind, 'i' | 'u' | 'f' | 'b') {
         return Ok(None);
     }
     let itemsize = a_dtype
@@ -17703,25 +17761,25 @@ fn try_zerocopy_any_compact(
             }
         };
     }
-    let compacted = match (c_kind.as_str(), c_itemsize) {
-        ("b", _) | ("i" | "u", 1) => {
+    let compacted = match (c_kind, c_itemsize) {
+        ('b', _) | ('i' | 'u', 1) => {
             let cv = cond.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
             with_arr!(u8, cv, |v: u8| v != 0)
         }
-        ("i" | "u", 2) => {
+        ('i' | 'u', 2) => {
             let cv = cond.call_method1(intern!(py, "view"), (cached_uint16_type(py)?,))?;
             with_arr!(u16, cv, |v: u16| v != 0)
         }
-        ("i" | "u", 4) => {
+        ('i' | 'u', 4) => {
             let cv = cond.call_method1(intern!(py, "view"), (cached_uint32_type(py)?,))?;
             with_arr!(u32, cv, |v: u32| v != 0)
         }
-        ("i" | "u", 8) => {
+        ('i' | 'u', 8) => {
             let cv = cond.call_method1(intern!(py, "view"), (cached_uint64_type(py)?,))?;
             with_arr!(u64, cv, |v: u64| v != 0)
         }
-        ("f", 8) => with_arr!(f64, cond.clone(), |v: f64| v != 0.0),
-        ("f", 4) => with_arr!(f32, cond.clone(), |v: f32| v != 0.0),
+        ('f', 8) => with_arr!(f64, cond.clone(), |v: f64| v != 0.0),
+        ('f', 4) => with_arr!(f32, cond.clone(), |v: f32| v != 0.0),
         _ => return Ok(None),
     };
     match compacted {
@@ -19072,7 +19130,7 @@ fn try_zerocopy_accumulate_extremum(
         return Ok(None);
     }
     let dt = array.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     macro_rules! acc {
         ($t:ty, $name:literal, $mx:expr, $mn:expr) => {{
@@ -19080,17 +19138,17 @@ fn try_zerocopy_accumulate_extremum(
             accumulate_extremum_typed::<$t>(py, &numpy, array, $name, combine)
         }};
     }
-    match (kind.as_str(), itemsize) {
-        ("f", 8) => acc!(f64, "float64", np_fmax, np_fmin),
-        ("f", 4) => acc!(f32, "float32", np_fmax_f32, np_fmin_f32),
-        ("i", 1) => acc!(i8, "int8", ord_max::<i8>, ord_min::<i8>),
-        ("i", 2) => acc!(i16, "int16", ord_max::<i16>, ord_min::<i16>),
-        ("i", 4) => acc!(i32, "int32", ord_max::<i32>, ord_min::<i32>),
-        ("i", 8) => acc!(i64, "int64", ord_max::<i64>, ord_min::<i64>),
-        ("u", 1) => acc!(u8, "uint8", ord_max::<u8>, ord_min::<u8>),
-        ("u", 2) => acc!(u16, "uint16", ord_max::<u16>, ord_min::<u16>),
-        ("u", 4) => acc!(u32, "uint32", ord_max::<u32>, ord_min::<u32>),
-        ("u", 8) => acc!(u64, "uint64", ord_max::<u64>, ord_min::<u64>),
+    match (kind, itemsize) {
+        ('f', 8) => acc!(f64, "float64", np_fmax, np_fmin),
+        ('f', 4) => acc!(f32, "float32", np_fmax_f32, np_fmin_f32),
+        ('i', 1) => acc!(i8, "int8", ord_max::<i8>, ord_min::<i8>),
+        ('i', 2) => acc!(i16, "int16", ord_max::<i16>, ord_min::<i16>),
+        ('i', 4) => acc!(i32, "int32", ord_max::<i32>, ord_min::<i32>),
+        ('i', 8) => acc!(i64, "int64", ord_max::<i64>, ord_min::<i64>),
+        ('u', 1) => acc!(u8, "uint8", ord_max::<u8>, ord_min::<u8>),
+        ('u', 2) => acc!(u16, "uint16", ord_max::<u16>, ord_min::<u16>),
+        ('u', 4) => acc!(u32, "uint32", ord_max::<u32>, ord_min::<u32>),
+        ('u', 8) => acc!(u64, "uint64", ord_max::<u64>, ord_min::<u64>),
         _ => Ok(None),
     }
 }
@@ -19129,7 +19187,7 @@ fn try_zerocopy_accumulate_bitwise(
         return Ok(None);
     }
     let dt = array.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     macro_rules! bacc {
         ($t:ty, $name:literal) => {{
@@ -19141,16 +19199,16 @@ fn try_zerocopy_accumulate_bitwise(
             accumulate_extremum_typed::<$t>(py, &numpy, array, $name, combine)
         }};
     }
-    match (kind.as_str(), itemsize) {
-        ("i", 1) => bacc!(i8, "int8"),
-        ("i", 2) => bacc!(i16, "int16"),
-        ("i", 4) => bacc!(i32, "int32"),
-        ("i", 8) => bacc!(i64, "int64"),
-        ("u", 1) => bacc!(u8, "uint8"),
-        ("u", 2) => bacc!(u16, "uint16"),
-        ("u", 4) => bacc!(u32, "uint32"),
-        ("u", 8) => bacc!(u64, "uint64"),
-        ("b", 1) => {
+    match (kind, itemsize) {
+        ('i', 1) => bacc!(i8, "int8"),
+        ('i', 2) => bacc!(i16, "int16"),
+        ('i', 4) => bacc!(i32, "int32"),
+        ('i', 8) => bacc!(i64, "int64"),
+        ('u', 1) => bacc!(u8, "uint8"),
+        ('u', 2) => bacc!(u16, "uint16"),
+        ('u', 4) => bacc!(u32, "uint32"),
+        ('u', 8) => bacc!(u64, "uint64"),
+        ('b', 1) => {
             let viewed =
                 array.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
             let combine: fn(u8, u8) -> u8 = match op {
@@ -20750,7 +20808,7 @@ fn try_zerocopy_any_tile_multidim(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? == "c" {
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c' {
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -21243,20 +21301,20 @@ fn try_zerocopy_int_diff(
     if !dtype_is_native_order(&dtype) {
         return Ok(None);
     }
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    let result = match (kind.as_str(), itemsize) {
-        ("i", 1) => diff_typed::<i8, _>(py, a, "int8", axis, |x, y| x.wrapping_sub(y))?,
-        ("i", 2) => diff_typed::<i16, _>(py, a, "int16", axis, |x, y| x.wrapping_sub(y))?,
-        ("i", 4) => diff_typed::<i32, _>(py, a, "int32", axis, |x, y| x.wrapping_sub(y))?,
-        ("i", 8) => diff_typed::<i64, _>(py, a, "int64", axis, |x, y| x.wrapping_sub(y))?,
-        ("u", 1) => diff_typed::<u8, _>(py, a, "uint8", axis, |x, y| x.wrapping_sub(y))?,
-        ("u", 2) => diff_typed::<u16, _>(py, a, "uint16", axis, |x, y| x.wrapping_sub(y))?,
-        ("u", 4) => diff_typed::<u32, _>(py, a, "uint32", axis, |x, y| x.wrapping_sub(y))?,
-        ("u", 8) => diff_typed::<u64, _>(py, a, "uint64", axis, |x, y| x.wrapping_sub(y))?,
+    let result = match (kind, itemsize) {
+        ('i', 1) => diff_typed::<i8, _>(py, a, "int8", axis, |x, y| x.wrapping_sub(y))?,
+        ('i', 2) => diff_typed::<i16, _>(py, a, "int16", axis, |x, y| x.wrapping_sub(y))?,
+        ('i', 4) => diff_typed::<i32, _>(py, a, "int32", axis, |x, y| x.wrapping_sub(y))?,
+        ('i', 8) => diff_typed::<i64, _>(py, a, "int64", axis, |x, y| x.wrapping_sub(y))?,
+        ('u', 1) => diff_typed::<u8, _>(py, a, "uint8", axis, |x, y| x.wrapping_sub(y))?,
+        ('u', 2) => diff_typed::<u16, _>(py, a, "uint16", axis, |x, y| x.wrapping_sub(y))?,
+        ('u', 4) => diff_typed::<u32, _>(py, a, "uint32", axis, |x, y| x.wrapping_sub(y))?,
+        ('u', 8) => diff_typed::<u64, _>(py, a, "uint64", axis, |x, y| x.wrapping_sub(y))?,
         _ => return Ok(None),
     };
     let Some((flat, out_shape)) = result else {
@@ -21284,7 +21342,7 @@ fn try_zerocopy_f32_diff(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
     {
         return Ok(None);
@@ -21596,20 +21654,20 @@ fn try_zerocopy_int_ediff1d(py: Python<'_>, ary: &Bound<'_, PyAny>) -> PyResult<
     if !dtype_is_native_order(&dtype) {
         return Ok(None);
     }
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    match (kind.as_str(), itemsize) {
-        ("i", 1) => ediff1d_typed::<i8, _>(py, ary, "int8", |x, y| x.wrapping_sub(y)),
-        ("i", 2) => ediff1d_typed::<i16, _>(py, ary, "int16", |x, y| x.wrapping_sub(y)),
-        ("i", 4) => ediff1d_typed::<i32, _>(py, ary, "int32", |x, y| x.wrapping_sub(y)),
-        ("i", 8) => ediff1d_typed::<i64, _>(py, ary, "int64", |x, y| x.wrapping_sub(y)),
-        ("u", 1) => ediff1d_typed::<u8, _>(py, ary, "uint8", |x, y| x.wrapping_sub(y)),
-        ("u", 2) => ediff1d_typed::<u16, _>(py, ary, "uint16", |x, y| x.wrapping_sub(y)),
-        ("u", 4) => ediff1d_typed::<u32, _>(py, ary, "uint32", |x, y| x.wrapping_sub(y)),
-        ("u", 8) => ediff1d_typed::<u64, _>(py, ary, "uint64", |x, y| x.wrapping_sub(y)),
+    match (kind, itemsize) {
+        ('i', 1) => ediff1d_typed::<i8, _>(py, ary, "int8", |x, y| x.wrapping_sub(y)),
+        ('i', 2) => ediff1d_typed::<i16, _>(py, ary, "int16", |x, y| x.wrapping_sub(y)),
+        ('i', 4) => ediff1d_typed::<i32, _>(py, ary, "int32", |x, y| x.wrapping_sub(y)),
+        ('i', 8) => ediff1d_typed::<i64, _>(py, ary, "int64", |x, y| x.wrapping_sub(y)),
+        ('u', 1) => ediff1d_typed::<u8, _>(py, ary, "uint8", |x, y| x.wrapping_sub(y)),
+        ('u', 2) => ediff1d_typed::<u16, _>(py, ary, "uint16", |x, y| x.wrapping_sub(y)),
+        ('u', 4) => ediff1d_typed::<u32, _>(py, ary, "uint32", |x, y| x.wrapping_sub(y)),
+        ('u', 8) => ediff1d_typed::<u64, _>(py, ary, "uint64", |x, y| x.wrapping_sub(y)),
         _ => Ok(None),
     }
 }
@@ -22089,13 +22147,14 @@ fn extract_frompyfunc_where_mask(
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), builtins.getattr(intern!(py, "bool"))?)?;
     let mask = numpy.call_method(intern!(py, "asarray"), (where_value,), Some(&kwargs))?;
-    let shape = PyTuple::new(py, shape.iter().copied())?;
-    let broadcast = numpy.call_method1(intern!(py, "broadcast_to"), (mask, shape))?;
-    let flat = broadcast.call_method1(intern!(py, "reshape"), (-1,))?;
-    Ok(Some(
-        flat.call_method0(intern!(py, "tolist"))?
-            .extract::<Vec<bool>>()?,
-    ))
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let broadcast = numpy.call_method1(intern!(py, "broadcast_to"), (mask, shape_tuple))?;
+    let flat = if shape.len() == 1 {
+        broadcast
+    } else {
+        broadcast.call_method1(intern!(py, "reshape"), (-1,))?
+    };
+    Ok(Some(numpy_bool_to_vec(py, &flat)?))
 }
 
 struct ParsedFromPyFuncReduce {
@@ -22258,6 +22317,7 @@ impl PyFromPyFunc {
         let flat_len =
             element_count(&out_shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
         let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+        let is_1d = out_shape.len() == 1;
         let mut broadcasted_inputs = Vec::with_capacity(input_arrays.len());
 
         for array in input_arrays {
@@ -22265,7 +22325,11 @@ impl PyFromPyFunc {
                 intern!(py, "broadcast_to"),
                 (array.bind(py), output_shape.clone()),
             )?;
-            let flattened = broadcasted.call_method1(intern!(py, "reshape"), (-1,))?;
+            let flattened = if is_1d {
+                broadcasted
+            } else {
+                broadcasted.call_method1(intern!(py, "reshape"), (-1,))?
+            };
             let list = flattened.call_method0(intern!(py, "tolist"))?;
             broadcasted_inputs.push(list.extract::<Vec<Py<PyAny>>>()?);
         }
@@ -22471,6 +22535,7 @@ impl PyVectorize {
             element_count(&out_shape).map_err(|err| PyValueError::new_err(err.to_string()))?
         };
         let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+        let is_1d = out_shape.len() == 1;
 
         let mut prepared_slots = Vec::with_capacity(slots.len());
         for slot in slots {
@@ -22483,7 +22548,11 @@ impl PyVectorize {
                         intern!(py, "broadcast_to"),
                         (array.bind(py), output_shape.clone()),
                     )?;
-                    let flattened = broadcasted.call_method1(intern!(py, "reshape"), (-1,))?;
+                    let flattened = if is_1d {
+                        broadcasted
+                    } else {
+                        broadcasted.call_method1(intern!(py, "reshape"), (-1,))?
+                    };
                     let values = flattened
                         .call_method0(intern!(py, "tolist"))?
                         .extract::<Vec<Py<PyAny>>>()?;
@@ -23077,21 +23146,21 @@ fn try_zerocopy_digitize(
     // digitize right=False ≡ searchsorted side="right" (probe<=key); right=True ≡
     // side="left" (probe<key).
     let right_probe = !right;
-    let kind = x_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = x_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = x_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
-    let out = match (kind.as_str(), itemsize) {
-        ("f", 8) => digitize_typed::<f64>(py, numpy, x, bins, right_probe)?,
-        ("f", 4) => digitize_typed::<f32>(py, numpy, x, bins, right_probe)?,
-        ("i", 1) => digitize_typed::<i8>(py, numpy, x, bins, right_probe)?,
-        ("i", 2) => digitize_typed::<i16>(py, numpy, x, bins, right_probe)?,
-        ("i", 4) => digitize_typed::<i32>(py, numpy, x, bins, right_probe)?,
-        ("i", 8) => digitize_typed::<i64>(py, numpy, x, bins, right_probe)?,
-        ("u", 1) => digitize_typed::<u8>(py, numpy, x, bins, right_probe)?,
-        ("u", 2) => digitize_typed::<u16>(py, numpy, x, bins, right_probe)?,
-        ("u", 4) => digitize_typed::<u32>(py, numpy, x, bins, right_probe)?,
-        ("u", 8) => digitize_typed::<u64>(py, numpy, x, bins, right_probe)?,
+    let out = match (kind, itemsize) {
+        ('f', 8) => digitize_typed::<f64>(py, numpy, x, bins, right_probe)?,
+        ('f', 4) => digitize_typed::<f32>(py, numpy, x, bins, right_probe)?,
+        ('i', 1) => digitize_typed::<i8>(py, numpy, x, bins, right_probe)?,
+        ('i', 2) => digitize_typed::<i16>(py, numpy, x, bins, right_probe)?,
+        ('i', 4) => digitize_typed::<i32>(py, numpy, x, bins, right_probe)?,
+        ('i', 8) => digitize_typed::<i64>(py, numpy, x, bins, right_probe)?,
+        ('u', 1) => digitize_typed::<u8>(py, numpy, x, bins, right_probe)?,
+        ('u', 2) => digitize_typed::<u16>(py, numpy, x, bins, right_probe)?,
+        ('u', 4) => digitize_typed::<u32>(py, numpy, x, bins, right_probe)?,
+        ('u', 8) => digitize_typed::<u64>(py, numpy, x, bins, right_probe)?,
         _ => return Ok(None),
     };
     Ok(out.map(|o| o.unbind()))
@@ -23221,7 +23290,7 @@ fn try_zerocopy_bincount(
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "i"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -23352,7 +23421,7 @@ fn try_zerocopy_bincount_weighted(
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "i"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'i'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -23438,15 +23507,19 @@ fn bincount(
     // a safe-cast TypeError — even integer-valued floats. Match that (reporting
     // the original input dtype) instead of silently truncating. Read the dtype
     // from the source object since extraction upcasts e.g. float32 -> float64.
-    let numpy = cached_numpy(py)?;
-    let input_dtype = numpy
-        .getattr(intern!(py, "asarray"))?
-        .call1((x.bind(py),))?
-        .getattr(intern!(py, "dtype"))?;
+    let input_dtype = if let Ok(dtype) = x.bind(py).getattr(intern!(py, "dtype")) {
+        dtype
+    } else {
+        let numpy = cached_numpy(py)?;
+        numpy
+            .getattr(intern!(py, "asarray"))?
+            .call1((x.bind(py),))?
+            .getattr(intern!(py, "dtype"))?
+    };
     let kind = input_dtype
         .getattr(intern!(py, "kind"))?
-        .extract::<String>()?;
-    if kind == "f" || kind == "c" {
+        .extract::<char>()?;
+    if kind == 'f' || kind == 'c' {
         let src = input_dtype
             .getattr(intern!(py, "name"))?
             .extract::<String>()?;
@@ -23468,7 +23541,7 @@ fn bincount(
     // narrow buffer DIRECTLY and tally -> WIN ~0.18x like int64. int64 handled above; uint64
     // (overflow risk) + weighted keep the general path.
     if weights.as_ref().is_none_or(|w| w.bind(py).is_none())
-        && (kind == "i" || kind == "u")
+        && (kind == 'i' || kind == 'u')
         && input_dtype
             .getattr(intern!(py, "itemsize"))?
             .extract::<usize>()?
@@ -23478,28 +23551,28 @@ fn bincount(
         let it = input_dtype
             .getattr(intern!(py, "itemsize"))?
             .extract::<usize>()?;
-        let direct: PyResult<Option<Py<PyAny>>> = match (kind.as_str(), it) {
-            ("i", 1) => match PyBuffer::<i8>::get(xb) {
+        let direct: PyResult<Option<Py<PyAny>>> = match (kind, it) {
+            ('i', 1) => match PyBuffer::<i8>::get(xb) {
                 Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
                 _ => Ok(None),
             },
-            ("i", 2) => match PyBuffer::<i16>::get(xb) {
+            ('i', 2) => match PyBuffer::<i16>::get(xb) {
                 Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
                 _ => Ok(None),
             },
-            ("i", 4) => match PyBuffer::<i32>::get(xb) {
+            ('i', 4) => match PyBuffer::<i32>::get(xb) {
                 Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
                 _ => Ok(None),
             },
-            ("u", 1) => match PyBuffer::<u8>::get(xb) {
+            ('u', 1) => match PyBuffer::<u8>::get(xb) {
                 Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
                 _ => Ok(None),
             },
-            ("u", 2) => match PyBuffer::<u16>::get(xb) {
+            ('u', 2) => match PyBuffer::<u16>::get(xb) {
                 Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
                 _ => Ok(None),
             },
-            ("u", 4) => match PyBuffer::<u32>::get(xb) {
+            ('u', 4) => match PyBuffer::<u32>::get(xb) {
                 Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
                 _ => Ok(None),
             },
@@ -23510,6 +23583,7 @@ fn bincount(
         }
         // Fallback for narrow array-like that isn't a direct-bufferable ndarray (e.g. a Python
         // list): cast to int64 and reuse the int64 tally (still avoids the cold f64 extract).
+        let numpy = cached_numpy(py)?;
         let xi = numpy
             .getattr(intern!(py, "asarray"))?
             .call1((x.bind(py),))?
@@ -23779,7 +23853,7 @@ fn try_zerocopy_f64_trapezoid_flat(
         return Ok(None);
     }
     let dtype = y.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -23845,7 +23919,7 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
         return Ok(None);
     }
     let dtype = y.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -23935,7 +24009,7 @@ fn try_zerocopy_f32_trapezoid(
         return Ok(None);
     }
     let dtype = y.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
     {
         return Ok(None);
@@ -27100,8 +27174,8 @@ fn try_zerocopy_int_clip_arrays(
             return Ok(None);
         }
     }
-    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    let kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let itemsize = a_dtype
@@ -27127,15 +27201,15 @@ fn try_zerocopy_int_clip_arrays(
     if total < CLIP_ARRAYS_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
-    match (kind.as_str(), itemsize) {
-        ("i", 1) => int_clip_arrays_typed::<i8>(py, numpy, a, lo, hi, &shape, form, "int8"),
-        ("i", 2) => int_clip_arrays_typed::<i16>(py, numpy, a, lo, hi, &shape, form, "int16"),
-        ("i", 4) => int_clip_arrays_typed::<i32>(py, numpy, a, lo, hi, &shape, form, "int32"),
-        ("i", 8) => int_clip_arrays_typed::<i64>(py, numpy, a, lo, hi, &shape, form, "int64"),
-        ("u", 1) => int_clip_arrays_typed::<u8>(py, numpy, a, lo, hi, &shape, form, "uint8"),
-        ("u", 2) => int_clip_arrays_typed::<u16>(py, numpy, a, lo, hi, &shape, form, "uint16"),
-        ("u", 4) => int_clip_arrays_typed::<u32>(py, numpy, a, lo, hi, &shape, form, "uint32"),
-        ("u", 8) => int_clip_arrays_typed::<u64>(py, numpy, a, lo, hi, &shape, form, "uint64"),
+    match (kind, itemsize) {
+        ('i', 1) => int_clip_arrays_typed::<i8>(py, numpy, a, lo, hi, &shape, form, "int8"),
+        ('i', 2) => int_clip_arrays_typed::<i16>(py, numpy, a, lo, hi, &shape, form, "int16"),
+        ('i', 4) => int_clip_arrays_typed::<i32>(py, numpy, a, lo, hi, &shape, form, "int32"),
+        ('i', 8) => int_clip_arrays_typed::<i64>(py, numpy, a, lo, hi, &shape, form, "int64"),
+        ('u', 1) => int_clip_arrays_typed::<u8>(py, numpy, a, lo, hi, &shape, form, "uint8"),
+        ('u', 2) => int_clip_arrays_typed::<u16>(py, numpy, a, lo, hi, &shape, form, "uint16"),
+        ('u', 4) => int_clip_arrays_typed::<u32>(py, numpy, a, lo, hi, &shape, form, "uint32"),
+        ('u', 8) => int_clip_arrays_typed::<u64>(py, numpy, a, lo, hi, &shape, form, "uint64"),
         _ => Ok(None),
     }
 }
@@ -27274,7 +27348,7 @@ fn try_zerocopy_float_clip_arrays(
             return Ok(None);
         }
     }
-    if a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f" {
+    if a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f' {
         return Ok(None);
     }
     let itemsize = a_dtype
@@ -27619,12 +27693,9 @@ fn try_native_repeat_array(
         return Ok(None);
     }
     let rdt = repeats.getattr(intern!(py, "dtype"))?;
-    if !matches!(
-        rdt.getattr(intern!(py, "kind"))?
-            .extract::<String>()?
-            .as_str(),
-        "i" | "u"
-    ) || rdt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+    let rdt_kind = rdt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if (rdt_kind != 'i' && rdt_kind != 'u')
+        || rdt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
         || !repeats
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
@@ -27633,8 +27704,8 @@ fn try_native_repeat_array(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c")
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'b' | 'i' | 'u' | 'f' | 'c')
         || !a
             .getattr(intern!(py, "flags"))?
             .getattr(intern!(py, "c_contiguous"))?
@@ -27781,8 +27852,8 @@ fn try_native_repeat_scalar(
     }
     let k = k_i as usize;
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'b' | 'i' | 'u' | 'f' | 'c') {
         return Ok(None);
     }
     if !a
@@ -28383,7 +28454,7 @@ fn try_zerocopy_f64_insert_scalar(
         return Ok(None);
     }
     let dtype = arr.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -28470,8 +28541,8 @@ fn try_native_insert_block(
         return Ok(None); // scalar / list / non-ndarray values -> defer
     }
     let dtype = arr.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c")
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if !matches!(kind, 'b' | 'i' | 'u' | 'f' | 'c')
         || !dtype.eq(&values.getattr(intern!(py, "dtype"))?)?
         || values.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
     {
@@ -28638,7 +28709,7 @@ fn try_zerocopy_f64_delete_scalar(
         return Ok(None);
     }
     let dtype = arr.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -28717,9 +28788,9 @@ fn try_native_delete_via_compress(
             return Ok(None);
         }
         let dtype = arr.getattr(intern!(py, "dtype"))?;
-        let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+        let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
         let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-        if !matches!(kind.as_str(), "b" | "i" | "u" | "f")
+        if !matches!(kind, 'b' | 'i' | 'u' | 'f')
             || !matches!(itemsize, 1 | 2 | 4 | 8)
             || !arr
                 .getattr(intern!(py, "flags"))?
@@ -29331,10 +29402,10 @@ fn try_zerocopy_bytes_concatenate(
         return Ok(None);
     }
     let dt0 = items[0].getattr(intern!(py, "dtype"))?;
-    let kind = dt0.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dt0.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dt0.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     // Only fixed-width 1/2/4/8-byte dtypes have a uintN mover; complex128 (16) defers.
-    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") || !matches!(itemsize, 1 | 2 | 4 | 8) {
+    if !matches!(kind, 'b' | 'i' | 'u' | 'f' | 'c') || !matches!(itemsize, 1 | 2 | 4 | 8) {
         return Ok(None);
     }
     let mover_name = match itemsize {
@@ -29351,7 +29422,7 @@ fn try_zerocopy_bytes_concatenate(
             return Ok(None);
         }
         let d = item.getattr(intern!(py, "dtype"))?;
-        if d.getattr(intern!(py, "kind"))?.extract::<String>()? != kind
+        if d.getattr(intern!(py, "kind"))?.extract::<char>()? != kind
             || d.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != itemsize
         {
             return Ok(None); // mixed dtype → numpy would promote; defer
@@ -29678,7 +29749,7 @@ fn try_zerocopy_trim_zeros(
     }
     let n = shape[0];
     let dtype = filt.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     macro_rules! bounds_uint {
         ($view_dt:literal, $T:ty) => {{
@@ -29692,12 +29763,12 @@ fn try_zerocopy_trim_zeros(
             nonzero_bounds(s, |v: $T| v != 0)
         }};
     }
-    let bounds = match (kind.as_str(), itemsize) {
-        ("b", _) | ("i" | "u", 1) => bounds_uint!("uint8", u8),
-        ("i" | "u", 2) => bounds_uint!("uint16", u16),
-        ("i" | "u", 4) => bounds_uint!("uint32", u32),
-        ("i" | "u", 8) => bounds_uint!("uint64", u64),
-        ("f", 8) => {
+    let bounds = match (kind, itemsize) {
+        ('b', _) | ('i' | 'u', 1) => bounds_uint!("uint8", u8),
+        ('i' | 'u', 2) => bounds_uint!("uint16", u16),
+        ('i' | 'u', 4) => bounds_uint!("uint32", u32),
+        ('i' | 'u', 8) => bounds_uint!("uint64", u64),
+        ('f', 8) => {
             let Ok(buf) = PyBuffer::<f64>::get(filt) else {
                 return Ok(None);
             };
@@ -29706,7 +29777,7 @@ fn try_zerocopy_trim_zeros(
             };
             nonzero_bounds(s, |v: f64| v != 0.0)
         }
-        ("f", 4) => {
+        ('f', 4) => {
             let Ok(buf) = PyBuffer::<f32>::get(filt) else {
                 return Ok(None);
             };
@@ -29956,14 +30027,14 @@ fn minimum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .unbind());
     }
 
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if matches!(kind.as_str(), "O" | "S" | "U" | "V") {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if matches!(kind, 'O' | 'S' | 'U' | 'V') {
         return Ok(py.None());
     }
 
-    let parsed_dtype = match kind.as_str() {
-        "M" => DType::DateTime64,
-        "m" => DType::TimeDelta64,
+    let parsed_dtype = match kind {
+        'M' => DType::DateTime64,
+        'm' => DType::TimeDelta64,
         _ => {
             let name = dtype.getattr(intern!(py, "name"))?.extract::<String>()?;
             DType::parse(&name).ok_or_else(|| {
@@ -30024,14 +30095,14 @@ fn maximum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .unbind());
     }
 
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if matches!(kind.as_str(), "O" | "S" | "U" | "V") {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if matches!(kind, 'O' | 'S' | 'U' | 'V') {
         return Ok(py.None());
     }
 
-    let parsed_dtype = match kind.as_str() {
-        "M" => DType::DateTime64,
-        "m" => DType::TimeDelta64,
+    let parsed_dtype = match kind {
+        'M' => DType::DateTime64,
+        'm' => DType::TimeDelta64,
         _ => {
             let name = dtype.getattr(intern!(py, "name"))?.extract::<String>()?;
             DType::parse(&name).ok_or_else(|| {
@@ -30447,7 +30518,7 @@ fn try_native_int_matrix_power(
         &ac
     };
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     let dim = shape[0];
     macro_rules! mp {
@@ -30465,19 +30536,19 @@ fn try_native_int_matrix_power(
             )
         };
     }
-    match (kind.as_str(), itemsize) {
-        ("i", 1) => mp!(i8, "int8"),
-        ("i", 2) => mp!(i16, "int16"),
-        ("i", 4) => mp!(i32, "int32"),
-        ("i", 8) => mp!(i64, "int64"),
-        ("u", 1) => mp!(u8, "uint8"),
-        ("u", 2) => mp!(u16, "uint16"),
-        ("u", 4) => mp!(u32, "uint32"),
-        ("u", 8) => mp!(u64, "uint64"),
+    match (kind, itemsize) {
+        ('i', 1) => mp!(i8, "int8"),
+        ('i', 2) => mp!(i16, "int16"),
+        ('i', 4) => mp!(i32, "int32"),
+        ('i', 8) => mp!(i64, "int64"),
+        ('u', 1) => mp!(u8, "uint8"),
+        ('u', 2) => mp!(u16, "uint16"),
+        ('u', 4) => mp!(u32, "uint32"),
+        ('u', 8) => mp!(u64, "uint64"),
         // bool A^n is OR-AND reachability: binary exponentiation where every
         // multiply is the bitpacked bool GEMM (dim >= 64 = exactly the 2-D
         // work gate, so steps never bounce off it).
-        ("b", 1) => bool_matrix_power_bitpacked(py, numpy, a, power),
+        ('b', 1) => bool_matrix_power_bitpacked(py, numpy, a, power),
         _ => Ok(None),
     }
 }
@@ -32002,7 +32073,7 @@ fn try_zerocopy_isinf_signed(
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
-    if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "f" {
+    if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f' {
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -33590,7 +33661,7 @@ fn zerocopy_multiply_add_complex(
                 return Ok(None);
             }
             let dtype = operand.getattr(intern!(py, "dtype"))?;
-            if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+            if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
                 || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != itemsize
             {
                 return Ok(None);
@@ -33970,7 +34041,7 @@ fn zerocopy_multiply_add_out_complex(
                 return Ok(None);
             }
             let dtype = operand.getattr(intern!(py, "dtype"))?;
-            if dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+            if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
                 || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != itemsize
             {
                 return Ok(None);
@@ -35999,7 +36070,7 @@ fn nan_to_num_impl(
         let xb = x.bind(py);
         if xb.is_exact_instance(cached_ndarray_type(py)?) {
             let dtype = xb.getattr(intern!(py, "dtype"))?;
-            let is_complex = dtype.getattr(intern!(py, "kind"))?.extract::<String>()? == "c";
+            let is_complex = dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c';
             let ndim = xb.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
             if is_complex && ndim >= 1 {
                 let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
@@ -39808,22 +39879,22 @@ fn try_zerocopy_histogram(
         a
     };
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    match (kind.as_str(), itemsize) {
-        ("f", 2) => try_zerocopy_histogram_f16(py, numpy, a, nbins),
-        ("f", 4) => histogram_f32(py, numpy, a, nbins),
-        ("f", 8) => histogram_typed::<f64>(py, numpy, a, nbins, |x| x, true, |_| true),
-        ("i", 1) => histogram_typed::<i8>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("i", 2) => histogram_typed::<i16>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("i", 4) => histogram_typed::<i32>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("i", 8) => {
+    match (kind, itemsize) {
+        ('f', 2) => try_zerocopy_histogram_f16(py, numpy, a, nbins),
+        ('f', 4) => histogram_f32(py, numpy, a, nbins),
+        ('f', 8) => histogram_typed::<f64>(py, numpy, a, nbins, |x| x, true, |_| true),
+        ('i', 1) => histogram_typed::<i8>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ('i', 2) => histogram_typed::<i16>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ('i', 4) => histogram_typed::<i32>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ('i', 8) => {
             histogram_typed::<i64>(py, numpy, a, nbins, |x| x as f64, false, i64_is_f64_exact)
         }
-        ("u", 1) => histogram_typed::<u8>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("u", 2) => histogram_typed::<u16>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("u", 4) => histogram_typed::<u32>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
-        ("u", 8) => {
+        ('u', 1) => histogram_typed::<u8>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ('u', 2) => histogram_typed::<u16>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ('u', 4) => histogram_typed::<u32>(py, numpy, a, nbins, |x| x as f64, false, |_| true),
+        ('u', 8) => {
             histogram_typed::<u64>(py, numpy, a, nbins, |x| x as f64, false, u64_is_f64_exact)
         }
         _ => Ok(None),
@@ -42596,7 +42667,13 @@ fn try_zerocopy_any_put(
         .getattr(intern!(py, "asarray"))?
         .call((v,), Some(&kw_v))
     {
-        Ok(arr) => arr.call_method1(intern!(py, "reshape"), ((-1isize,),))?,
+        Ok(arr) => {
+            if arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 1 {
+                arr
+            } else {
+                arr.call_method1(intern!(py, "reshape"), ((-1isize,),))?
+            }
+        }
         Err(_) => {
             let kwp = PyDict::new(py);
             kwp.set_item(intern!(py, "mode"), "raise")?;
@@ -55982,8 +56059,16 @@ fn try_narrow_int_setop_native(
     ) {
         return Ok(None);
     }
-    let af = a.call_method1(intern!(py, "reshape"), (-1,))?;
-    let bf = b.call_method1(intern!(py, "reshape"), (-1,))?;
+    let af = if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 1 {
+        a
+    } else {
+        a.call_method1(intern!(py, "reshape"), (-1,))?
+    };
+    let bf = if b.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 1 {
+        b
+    } else {
+        b.call_method1(intern!(py, "reshape"), (-1,))?
+    };
     let result = match parsed {
         // Fixed-domain narrow ints: the whole value domain is a small constant
         // bitmap, no min/max scan needed.
@@ -66229,7 +66314,11 @@ fn tofile(
         Ok(path) => path,
         Err(_) => return fallback(),
     };
-    let flat = array.call_method1(intern!(py, "reshape"), (-1,))?;
+    let flat = if array.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 1 {
+        array.clone()
+    } else {
+        array.call_method1(intern!(py, "reshape"), (-1,))?
+    };
     let values = match numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64") {
         Ok(values) => values,
         Err(_) => return fallback(),
