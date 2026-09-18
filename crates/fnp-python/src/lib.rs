@@ -69498,11 +69498,11 @@ fn native_f64_reduction_preserves_dtype(py: Python<'_>, value: &Bound<'_, PyAny>
         let numpy = cached_numpy(py)?;
         let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
         let dtype = array.getattr(intern!(py, "dtype"))?;
-        let kind: String = dtype.getattr(intern!(py, "kind"))?.extract()?;
+        let kind: char = dtype.getattr(intern!(py, "kind"))?.extract()?;
         let itemsize: usize = dtype.getattr(intern!(py, "itemsize"))?.extract()?;
-        Ok(match kind.as_str() {
-            "b" | "i" | "u" => true,
-            "f" => itemsize == 8,
+        Ok(match kind {
+            'b' | 'i' | 'u' => true,
+            'f' => itemsize == 8,
             _ => false,
         })
     };
@@ -69520,11 +69520,11 @@ fn native_minmax_preserves_dtype(py: Python<'_>, value: &Bound<'_, PyAny>) -> bo
         let numpy = cached_numpy(py)?;
         let array = numpy.call_method1(intern!(py, "asarray"), (value,))?;
         let dtype = array.getattr(intern!(py, "dtype"))?;
-        let kind: String = dtype.getattr(intern!(py, "kind"))?.extract()?;
+        let kind: char = dtype.getattr(intern!(py, "kind"))?.extract()?;
         let itemsize: usize = dtype.getattr(intern!(py, "itemsize"))?.extract()?;
-        Ok(match kind.as_str() {
-            "b" => true,
-            "i" | "u" | "f" => itemsize == 8,
+        Ok(match kind {
+            'b' => true,
+            'i' | 'u' | 'f' => itemsize == 8,
             _ => false,
         })
     };
@@ -78040,7 +78040,7 @@ fn c128_argsort_view_f64<'py>(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
     {
         return Ok(None);
@@ -78417,7 +78417,7 @@ fn c64_argsort_view_f32<'py>(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -79292,7 +79292,7 @@ fn try_native_float_argsort_default_radix(
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f" {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f' {
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
     match dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? {
@@ -79342,8 +79342,8 @@ fn try_native_int_argsort_default_radix(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let n = a.len()?;
@@ -79351,13 +79351,13 @@ fn try_native_int_argsort_default_radix(
         return Ok(None);
     }
     match (
-        kind.as_str(),
+        kind,
         dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?,
     ) {
-        ("i", 4) => argsort_stable_radix::<i32>(py, numpy, a, n, true),
-        ("i", 8) => argsort_stable_radix::<i64>(py, numpy, a, n, true),
-        ("u", 4) => argsort_stable_radix::<u32>(py, numpy, a, n, true),
-        ("u", 8) => argsort_stable_radix::<u64>(py, numpy, a, n, true),
+        ('i', 4) => argsort_stable_radix::<i32>(py, numpy, a, n, true),
+        ('i', 8) => argsort_stable_radix::<i64>(py, numpy, a, n, true),
+        ('u', 4) => argsort_stable_radix::<u32>(py, numpy, a, n, true),
+        ('u', 8) => argsort_stable_radix::<u64>(py, numpy, a, n, true),
         _ => Ok(None),
     }
 }
@@ -79437,8 +79437,8 @@ fn try_native_argsort_stable_flat(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" && kind != "f" {
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' && kind != 'f' {
         return Ok(None);
     }
     let n: usize = a
@@ -79450,27 +79450,27 @@ fn try_native_argsort_stable_flat(
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    match (kind.as_str(), itemsize) {
+    match (kind, itemsize) {
         // Narrow ints: the bucket space (256 / 65,536) always fits argsort_stable_counting's
         // RANGE_MAX = 1<<20, so these land on the parallel counting-prefix stable argsort
         // (numpy's stable path here is a serial mergesort; the value-sort sibling of this
         // lever measured numpy's narrow-int handling at 325.9 ms @8M i16).
-        ("i", 1) => int_argsort_stable::<i8>(py, numpy, a, n),
-        ("i", 2) => int_argsort_stable::<i16>(py, numpy, a, n),
-        ("u", 1) => int_argsort_stable::<u8>(py, numpy, a, n),
-        ("u", 2) => int_argsort_stable::<u16>(py, numpy, a, n),
-        ("i", 4) => int_argsort_stable::<i32>(py, numpy, a, n),
-        ("i", 8) => int_argsort_stable::<i64>(py, numpy, a, n),
-        ("u", 4) => int_argsort_stable::<u32>(py, numpy, a, n),
-        ("u", 8) => int_argsort_stable::<u64>(py, numpy, a, n),
+        ('i', 1) => int_argsort_stable::<i8>(py, numpy, a, n),
+        ('i', 2) => int_argsort_stable::<i16>(py, numpy, a, n),
+        ('u', 1) => int_argsort_stable::<u8>(py, numpy, a, n),
+        ('u', 2) => int_argsort_stable::<u16>(py, numpy, a, n),
+        ('i', 4) => int_argsort_stable::<i32>(py, numpy, a, n),
+        ('i', 8) => int_argsort_stable::<i64>(py, numpy, a, n),
+        ('u', 4) => int_argsort_stable::<u32>(py, numpy, a, n),
+        ('u', 8) => int_argsort_stable::<u64>(py, numpy, a, n),
         // Float: LSD radix on IEEE-linearized keys (gather-free) first — NaN included natively (all NaNs
         // share one maximal key -> stable last-by-index == numpy); oversize/buffer-shape defers fall to the
         // comparison path (which handles ties natively but still defers NaN -> numpy).
-        ("f", 4) => match argsort_stable_radix_f32(py, numpy, a, n, false)? {
+        ('f', 4) => match argsort_stable_radix_f32(py, numpy, a, n, false)? {
             FloatArgsortRadixOutcome::Done(out) => Ok(Some(out)),
             _ => argsort_stable_typed::<f32>(py, numpy, a, n, true),
         },
-        ("f", 8) => match argsort_stable_radix_f64(py, numpy, a, n, false)? {
+        ('f', 8) => match argsort_stable_radix_f64(py, numpy, a, n, false)? {
             FloatArgsortRadixOutcome::Done(out) => Ok(Some(out)),
             _ => argsort_stable_typed::<f64>(py, numpy, a, n, true),
         },
@@ -79482,7 +79482,7 @@ fn try_native_argsort_stable_flat(
         // matches numpy's stable tie-by-index for mixed zeros); NaN needs no defer either —
         // f16 NaN widens to f32 NaN and the radix key maps all NaNs to one maximal key,
         // exactly as for native f32.
-        ("f", 2) => {
+        ('f', 2) => {
             let widened = a.call_method1(
                 intern!(py, "astype"),
                 (numpy.getattr(intern!(py, "float32"))?,),
@@ -79510,8 +79510,8 @@ fn try_native_datetime_argsort_stable(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if (kind != "M" && kind != "m") || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if (kind != 'M' && kind != 'm') || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
     }
@@ -79749,7 +79749,7 @@ fn try_native_complex_argsort_stable(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c" {
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c' {
         return Ok(None);
     }
     if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
@@ -79805,8 +79805,8 @@ fn try_native_int_argsort_flat(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let n: usize = a
@@ -79818,11 +79818,11 @@ fn try_native_int_argsort_flat(
         return Ok(None);
     }
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    match (kind.as_str(), itemsize) {
-        ("i", 4) => int_argsort_flat_typed::<i32>(py, numpy, a, n),
-        ("i", 8) => int_argsort_flat_typed::<i64>(py, numpy, a, n),
-        ("u", 4) => int_argsort_flat_typed::<u32>(py, numpy, a, n),
-        ("u", 8) => int_argsort_flat_typed::<u64>(py, numpy, a, n),
+    match (kind, itemsize) {
+        ('i', 4) => int_argsort_flat_typed::<i32>(py, numpy, a, n),
+        ('i', 8) => int_argsort_flat_typed::<i64>(py, numpy, a, n),
+        ('u', 4) => int_argsort_flat_typed::<u32>(py, numpy, a, n),
+        ('u', 8) => int_argsort_flat_typed::<u64>(py, numpy, a, n),
         _ => Ok(None),
     }
 }
@@ -79850,8 +79850,8 @@ fn try_native_datetime_argsort_flat(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if (kind != "M" && kind != "m") || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if (kind != 'M' && kind != 'm') || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
     }
