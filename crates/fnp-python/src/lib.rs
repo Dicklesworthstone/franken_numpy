@@ -72779,7 +72779,7 @@ fn try_zerocopy_c64_sort_midaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -73348,11 +73348,11 @@ fn try_native_string_sort_lastaxis(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "U" && kind != "S" {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'U' && kind != 'S' {
         return Ok(None);
     }
-    let is_bytes = kind == "S";
+    let is_bytes = kind == 'S';
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize == 0 || itemsize > 4096 || (!is_bytes && !itemsize.is_multiple_of(4)) {
         return Ok(None);
@@ -73473,11 +73473,11 @@ macro_rules! string_nonlast_prologue {
             return Ok(None);
         }
         let dtype = $a.getattr("dtype")?;
-        let kind = dtype.getattr("kind")?.extract::<String>()?;
-        if kind != "U" && kind != "S" {
+        let kind = dtype.getattr("kind")?.extract::<char>()?;
+        if kind != 'U' && kind != 'S' {
             return Ok(None);
         }
-        let is_bytes = kind == "S";
+        let is_bytes = kind == 'S';
         let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
         if itemsize == 0 || itemsize > 4096 || (!is_bytes && !itemsize.is_multiple_of(4)) {
             return Ok(None);
@@ -73642,11 +73642,11 @@ fn try_native_string_sort_flat(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "U" && kind != "S" {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'U' && kind != 'S' {
         return Ok(None);
     }
-    let is_bytes = kind == "S"; // 'S' records are already byte-ordered == numpy order (no wide-char scan)
+    let is_bytes = kind == 'S'; // 'S' records are already byte-ordered == numpy order (no wide-char scan)
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize == 0 || itemsize > 4096 || (!is_bytes && !itemsize.is_multiple_of(4)) {
         return Ok(None);
@@ -73689,7 +73689,7 @@ fn try_native_string_sort_flat(
     // cache-cold memcmp record chase. Latin-1 S9..16 / U9..16 use the same order-preserving
     // representation split across two u64 words; wider records keep the memcmp path. Equal records are
     // byte-identical, so any tie order yields the same sorted output. The gather below is unchanged.
-    let perm: Vec<u32> = match packed_string_key_width(&kind, itemsize)
+    let perm: Vec<u32> = match packed_string_key_width(kind, itemsize)
         .and_then(|kw| pack_fixed_width_string_keys(in_data, n, itemsize, kw, is_bytes))
     {
         Some(keys) => {
@@ -73697,7 +73697,7 @@ fn try_native_string_sort_flat(
             pairs.par_sort_unstable();
             pairs.iter().map(|&(_, i)| i).collect()
         }
-        None => match packed_wide_string_key_width(&kind, itemsize)
+        None => match packed_wide_string_key_width(kind, itemsize)
             .and_then(|kw| pack_fixed_width_wide_string_keys(in_data, n, itemsize, kw, is_bytes))
         {
             Some(keys) => {
@@ -73769,11 +73769,11 @@ fn try_native_string_argsort_stable(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "U" && kind != "S" {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'U' && kind != 'S' {
         return Ok(None);
     }
-    let is_bytes = kind == "S";
+    let is_bytes = kind == 'S';
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize == 0 || itemsize > 4096 || (!is_bytes && !itemsize.is_multiple_of(4)) {
         return Ok(None);
@@ -73807,7 +73807,7 @@ fn try_native_string_argsort_stable(
     // without chasing two cache-cold records per compare. The packed key captures every codepoint of the record,
     // so key equality == record equality and the index tie-break gives numpy's stable argsort exactly. Wider
     // records / wide (>0xFF) codepoints fall through to the memcmp path below (pack returns None on wide bytes).
-    if let Some(key_width) = packed_string_key_width(&kind, itemsize)
+    if let Some(key_width) = packed_string_key_width(kind, itemsize)
         && let Some(keys) = pack_fixed_width_string_keys(in_data, n, itemsize, key_width, is_bytes)
     {
         let mut pairs: Vec<(u64, u32)> = (0..n as u32).map(|i| (keys[i as usize], i)).collect();
@@ -73860,10 +73860,10 @@ fn try_native_string_argsort_stable(
     Ok(Some(out.unbind()))
 }
 
-fn packed_string_key_width(kind: &str, itemsize: usize) -> Option<usize> {
+fn packed_string_key_width(kind: char, itemsize: usize) -> Option<usize> {
     match kind {
-        "S" if (1..=8).contains(&itemsize) => Some(itemsize),
-        "U" if itemsize.is_multiple_of(4) && (1..=8).contains(&(itemsize / 4)) => {
+        'S' if (1..=8).contains(&itemsize) => Some(itemsize),
+        'U' if itemsize.is_multiple_of(4) && (1..=8).contains(&(itemsize / 4)) => {
             Some(itemsize / 4)
         }
         _ => None,
@@ -73878,18 +73878,18 @@ struct PackedWideStringKey {
 
 // 'U' 9..=16 codepoints or 'S' 9..=16 bytes: records one packed-u64 key cannot hold but a
 // (high, low) two-word key can. 'S' needs no Latin-1 gate (bytes are already in numpy order).
-fn packed_wide_string_key_width(kind: &str, itemsize: usize) -> Option<usize> {
+fn packed_wide_string_key_width(kind: char, itemsize: usize) -> Option<usize> {
     match kind {
-        "S" if (9..=16).contains(&itemsize) => Some(itemsize),
-        "U" if itemsize.is_multiple_of(4) && (9..=16).contains(&(itemsize / 4)) => {
+        'S' if (9..=16).contains(&itemsize) => Some(itemsize),
+        'U' if itemsize.is_multiple_of(4) && (9..=16).contains(&(itemsize / 4)) => {
             Some(itemsize / 4)
         }
         _ => None,
     }
 }
 
-fn packed_string_dtype_has_native_layout(dtype: &Bound<'_, PyAny>, kind: &str) -> PyResult<bool> {
-    Ok(kind == "S" || dtype.getattr("isnative")?.extract::<bool>()?)
+fn packed_string_dtype_has_native_layout(dtype: &Bound<'_, PyAny>, kind: char) -> PyResult<bool> {
+    Ok(kind == 'S' || dtype.getattr("isnative")?.extract::<bool>()?)
 }
 
 fn pack_fixed_width_wide_string_keys(
@@ -74048,7 +74048,7 @@ fn try_packed_string_union1d(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     dtype: &Bound<'_, PyAny>,
-    kind: &str,
+    kind: char,
     itemsize: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN: usize = 1 << 16;
@@ -74057,7 +74057,7 @@ fn try_packed_string_union1d(
     if narrow_width.is_none() && wide_width.is_none() {
         return Ok(None);
     }
-    let is_bytes = kind == "S";
+    let is_bytes = kind == 'S';
     let na: usize = a
         .getattr(intern!(py, "shape"))?
         .extract::<Vec<usize>>()?
@@ -74134,7 +74134,7 @@ fn try_packed_string_setxor(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     dtype: &Bound<'_, PyAny>,
-    kind: &str,
+    kind: char,
     itemsize: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
     const MIN: usize = 1 << 16;
@@ -74143,7 +74143,7 @@ fn try_packed_string_setxor(
     if narrow_width.is_none() && wide_width.is_none() {
         return Ok(None);
     }
-    let is_bytes = kind == "S";
+    let is_bytes = kind == 'S';
     let na: usize = a
         .getattr(intern!(py, "shape"))?
         .extract::<Vec<usize>>()?
@@ -74275,13 +74275,13 @@ fn try_native_string_union1d(
     }
     let a_dt = a.getattr(intern!(py, "dtype"))?;
     let b_dt = b.getattr(intern!(py, "dtype"))?;
-    let a_kind = a_dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    let b_kind = b_dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let a_kind = a_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let b_kind = b_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = a_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    let native_layout = packed_string_dtype_has_native_layout(&a_dt, &a_kind)?
-        && packed_string_dtype_has_native_layout(&b_dt, &b_kind)?;
+    let native_layout = packed_string_dtype_has_native_layout(&a_dt, a_kind)?
+        && packed_string_dtype_has_native_layout(&b_dt, b_kind)?;
     // Both 'U' or both 'S' (same kind — mixing would trigger numpy's coercion), same width.
-    if !(a_kind == "U" || a_kind == "S")
+    if !(a_kind == 'U' || a_kind == 'S')
         || a_kind != b_kind
         || itemsize != b_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?
         || !native_layout
@@ -74292,7 +74292,7 @@ fn try_native_string_union1d(
     let a_flat = a.call_method0(intern!(py, "ravel"))?;
     let b_flat = b.call_method0(intern!(py, "ravel"))?;
     if let Some(out) =
-        try_packed_string_union1d(py, numpy, &a_flat, &b_flat, &a_dt, &a_kind, itemsize)?
+        try_packed_string_union1d(py, numpy, &a_flat, &b_flat, &a_dt, a_kind, itemsize)?
     {
         return Ok(Some(out));
     }
@@ -74321,16 +74321,16 @@ fn try_native_string_intersect_setdiff(
     }
     let a_dt = a.getattr(intern!(py, "dtype"))?;
     let b_dt = b.getattr(intern!(py, "dtype"))?;
-    let a_kind = a_dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    let b_kind = b_dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let a_kind = a_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let b_kind = b_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     // Both 'U' or both 'S' (same kind — mixing would change record layout / trigger numpy coercion).
-    if !(a_kind == "U" || a_kind == "S") || a_kind != b_kind {
+    if !(a_kind == 'U' || a_kind == 'S') || a_kind != b_kind {
         return Ok(None);
     }
-    let is_bytes = a_kind == "S";
+    let is_bytes = a_kind == 'S';
     let itemsize = a_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    let native_layout = packed_string_dtype_has_native_layout(&a_dt, &a_kind)?
-        && packed_string_dtype_has_native_layout(&b_dt, &b_kind)?;
+    let native_layout = packed_string_dtype_has_native_layout(&a_dt, a_kind)?
+        && packed_string_dtype_has_native_layout(&b_dt, b_kind)?;
     if itemsize == 0
         || itemsize > 4096
         || (!is_bytes && !itemsize.is_multiple_of(4))
@@ -74381,7 +74381,7 @@ fn try_native_string_intersect_setdiff(
     if !is_bytes && (wide(&a_data) || wide(&b_data)) {
         return Ok(None);
     }
-    if let Some(key_width) = packed_string_key_width(&a_kind, itemsize) {
+    if let Some(key_width) = packed_string_key_width(a_kind, itemsize) {
         let mut a_keys =
             match pack_fixed_width_string_keys(&a_data, na, itemsize, key_width, is_bytes) {
                 Some(keys) => keys,
@@ -74431,7 +74431,7 @@ fn try_native_string_intersect_setdiff(
     // and the output unpacks from the keys alone. Replaces the memcmp record-sort + FNV
     // membership fallback these widths used (profiled at U16[1M] unique: 32% record-comparator
     // sort + 21% memcmp + 10% memmove).
-    if let Some(key_width) = packed_wide_string_key_width(&a_kind, itemsize) {
+    if let Some(key_width) = packed_wide_string_key_width(a_kind, itemsize) {
         let mut a_keys =
             match pack_fixed_width_wide_string_keys(&a_data, na, itemsize, key_width, is_bytes) {
                 Some(keys) => keys,
@@ -74545,16 +74545,16 @@ fn try_native_string_setxor(
     }
     let a_dt = a.getattr(intern!(py, "dtype"))?;
     let b_dt = b.getattr(intern!(py, "dtype"))?;
-    let a_kind = a_dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    let b_kind = b_dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let a_kind = a_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    let b_kind = b_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     // Both 'U' or both 'S' (same kind — mixing would change record layout).
-    if !(a_kind == "U" || a_kind == "S") || a_kind != b_kind {
+    if !(a_kind == 'U' || a_kind == 'S') || a_kind != b_kind {
         return Ok(None);
     }
-    let is_bytes = a_kind == "S";
+    let is_bytes = a_kind == 'S';
     let itemsize = a_dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    let native_layout = packed_string_dtype_has_native_layout(&a_dt, &a_kind)?
-        && packed_string_dtype_has_native_layout(&b_dt, &b_kind)?;
+    let native_layout = packed_string_dtype_has_native_layout(&a_dt, a_kind)?
+        && packed_string_dtype_has_native_layout(&b_dt, b_kind)?;
     if itemsize == 0
         || itemsize > 4096
         || (!is_bytes && !itemsize.is_multiple_of(4))
@@ -74572,7 +74572,7 @@ fn try_native_string_setxor(
     if !contig(a)? || !contig(b)? {
         return Ok(None);
     }
-    if let Some(out) = try_packed_string_setxor(py, numpy, a, b, &a_dt, &a_kind, itemsize)? {
+    if let Some(out) = try_packed_string_setxor(py, numpy, a, b, &a_dt, a_kind, itemsize)? {
         return Ok(Some(out));
     }
     let na: usize = a
@@ -74690,14 +74690,14 @@ fn try_native_string_unique_flat(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "U" && kind != "S" {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'U' && kind != 'S' {
         return Ok(None);
     }
-    if !packed_string_dtype_has_native_layout(&dtype, &kind)? {
+    if !packed_string_dtype_has_native_layout(&dtype, kind)? {
         return Ok(None);
     }
-    let is_bytes = kind == "S"; // 'S' records are already byte-ordered == numpy order (no wide-char scan)
+    let is_bytes = kind == 'S'; // 'S' records are already byte-ordered == numpy order (no wide-char scan)
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize == 0 || itemsize > 4096 || (!is_bytes && !itemsize.is_multiple_of(4)) {
         return Ok(None);
@@ -74737,13 +74737,13 @@ fn try_native_string_unique_flat(
     // order-preservingly into a big-endian u64. Latin-1 U9..16 and S9..16 use a lexicographic
     // pair of u64 words. Both key sorts replace the cache-cold memcmp record chase; remaining
     // wider records keep the memcmp path. The gather/dedup below is unchanged.
-    let perm: Vec<u32> = if let Some(keys) = packed_string_key_width(&kind, itemsize)
+    let perm: Vec<u32> = if let Some(keys) = packed_string_key_width(kind, itemsize)
         .and_then(|kw| pack_fixed_width_string_keys(&in_data, n, itemsize, kw, is_bytes))
     {
         let mut pairs: Vec<(u64, u32)> = (0..n as u32).map(|i| (keys[i as usize], i)).collect();
         pairs.par_sort_unstable();
         pairs.iter().map(|&(_, i)| i).collect()
-    } else if let Some(keys) = packed_wide_string_key_width(&kind, itemsize)
+    } else if let Some(keys) = packed_wide_string_key_width(kind, itemsize)
         .and_then(|kw| pack_fixed_width_wide_string_keys(&in_data, n, itemsize, kw, is_bytes))
     {
         let mut pairs: Vec<(PackedWideStringKey, u32)> =
@@ -74812,11 +74812,11 @@ fn try_native_string_unique_full(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "U" && kind != "S" {
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'U' && kind != 'S' {
         return Ok(None);
     }
-    let is_bytes = kind == "S";
+    let is_bytes = kind == 'S';
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if itemsize == 0 || itemsize > 4096 || (!is_bytes && !itemsize.is_multiple_of(4)) {
         return Ok(None);
@@ -74862,7 +74862,7 @@ fn try_native_string_unique_full(
     // equal-record run) tie-break that return_index/inverse/counts depend on. Records
     // wider than two words keep the memcmp comparator. Downstream grouping/gather is
     // unchanged.
-    let perm: Vec<u32> = match packed_string_key_width(&kind, itemsize)
+    let perm: Vec<u32> = match packed_string_key_width(kind, itemsize)
         .and_then(|kw| pack_fixed_width_string_keys(in_data, n, itemsize, kw, is_bytes))
     {
         Some(keys) => {
@@ -74870,7 +74870,7 @@ fn try_native_string_unique_full(
             pairs.par_sort_unstable();
             pairs.iter().map(|&(_, i)| i).collect()
         }
-        None => match packed_wide_string_key_width(&kind, itemsize)
+        None => match packed_wide_string_key_width(kind, itemsize)
             .and_then(|kw| pack_fixed_width_wide_string_keys(in_data, n, itemsize, kw, is_bytes))
         {
             Some(keys) => {
@@ -75071,8 +75071,8 @@ fn try_native_datetime_isin(
         return Ok(None);
     }
     let e_dt = element.getattr(intern!(py, "dtype"))?;
-    let e_kind = e_dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if (e_kind != "M" && e_kind != "m") || !e_dt.eq(&test.getattr(intern!(py, "dtype"))?)? {
+    let e_kind = e_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if (e_kind != 'M' && e_kind != 'm') || !e_dt.eq(&test.getattr(intern!(py, "dtype"))?)? {
         return Ok(None);
     }
     if datetime_has_nat(py, element)? || datetime_has_nat(py, test)? {
@@ -75960,8 +75960,11 @@ fn try_native_string_searchsorted(
 ) -> PyResult<Option<Py<PyAny>>> {
     const QUERY_MIN: usize = 1 << 16;
     let a_dtype = a_arr.getattr(intern!(py, "dtype"))?;
-    let a_kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    let is_bytes = a_kind == "S"; // 'S' bytes are always byte-ordered == numpy order (no wide-char scan)
+    let a_kind = a_dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if a_kind != 'U' && a_kind != 'S' {
+        return Ok(None);
+    }
+    let is_bytes = a_kind == 'S'; // 'S' bytes are always byte-ordered == numpy order (no wide-char scan)
     let itemsize = a_dtype
         .getattr(intern!(py, "itemsize"))?
         .extract::<usize>()?;
@@ -75981,7 +75984,7 @@ fn try_native_string_searchsorted(
         return Ok(None);
     }
     let v_dtype = v.getattr(intern!(py, "dtype"))?;
-    if v_dtype.getattr(intern!(py, "kind"))?.extract::<String>()? != a_kind
+    if v_dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != a_kind
         || v_dtype
             .getattr(intern!(py, "itemsize"))?
             .extract::<usize>()?
@@ -76030,7 +76033,7 @@ fn try_native_string_searchsorted(
         unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<u8>(), m * itemsize) };
     let right = side == "right";
     if m <= u32::MAX as usize
-        && let Some(key_width) = packed_string_key_width(&a_kind, itemsize)
+        && let Some(key_width) = packed_string_key_width(a_kind, itemsize)
     {
         let a_keys = pack_fixed_width_string_keys(a_data, n, itemsize, key_width, is_bytes);
         let v_keys = pack_fixed_width_string_keys(v_data, m, itemsize, key_width, is_bytes);
@@ -76135,8 +76138,8 @@ fn try_native_datetime_sort_flat(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if (kind != "M" && kind != "m")
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if (kind != 'M' && kind != 'm')
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -76204,8 +76207,8 @@ fn try_native_datetime_sort_axes(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if (kind != "M" && kind != "m")
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if (kind != 'M' && kind != 'm')
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -76422,8 +76425,8 @@ fn try_native_int_sort_lastaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
@@ -76438,18 +76441,18 @@ fn try_native_int_sort_lastaxis(
     }
     let n = rows * cols;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    match (kind.as_str(), itemsize) {
+    match (kind, itemsize) {
         // Narrow ints: same per-lane parallel value sort (byte-exact any kind - a lane's
         // sorted multiset is unique). numpy's per-lane narrow-int sort is the same serial
         // path the flat counting lever measured at 325.9 ms @8M i16 (ledger 2026-07-10).
-        ("i", 1) => int_sort_lastaxis_typed::<i8>(py, numpy, a, &shape, rows, cols, n, "int8"),
-        ("i", 2) => int_sort_lastaxis_typed::<i16>(py, numpy, a, &shape, rows, cols, n, "int16"),
-        ("u", 1) => int_sort_lastaxis_typed::<u8>(py, numpy, a, &shape, rows, cols, n, "uint8"),
-        ("u", 2) => int_sort_lastaxis_typed::<u16>(py, numpy, a, &shape, rows, cols, n, "uint16"),
-        ("i", 4) => int_sort_lastaxis_typed::<i32>(py, numpy, a, &shape, rows, cols, n, "int32"),
-        ("i", 8) => int_sort_lastaxis_typed::<i64>(py, numpy, a, &shape, rows, cols, n, "int64"),
-        ("u", 4) => int_sort_lastaxis_typed::<u32>(py, numpy, a, &shape, rows, cols, n, "uint32"),
-        ("u", 8) => int_sort_lastaxis_typed::<u64>(py, numpy, a, &shape, rows, cols, n, "uint64"),
+        ('i', 1) => int_sort_lastaxis_typed::<i8>(py, numpy, a, &shape, rows, cols, n, "int8"),
+        ('i', 2) => int_sort_lastaxis_typed::<i16>(py, numpy, a, &shape, rows, cols, n, "int16"),
+        ('u', 1) => int_sort_lastaxis_typed::<u8>(py, numpy, a, &shape, rows, cols, n, "uint8"),
+        ('u', 2) => int_sort_lastaxis_typed::<u16>(py, numpy, a, &shape, rows, cols, n, "uint16"),
+        ('i', 4) => int_sort_lastaxis_typed::<i32>(py, numpy, a, &shape, rows, cols, n, "int32"),
+        ('i', 8) => int_sort_lastaxis_typed::<i64>(py, numpy, a, &shape, rows, cols, n, "int64"),
+        ('u', 4) => int_sort_lastaxis_typed::<u32>(py, numpy, a, &shape, rows, cols, n, "uint32"),
+        ('u', 8) => int_sort_lastaxis_typed::<u64>(py, numpy, a, &shape, rows, cols, n, "uint64"),
         _ => Ok(None),
     }
 }
@@ -76535,8 +76538,8 @@ fn try_native_int_sort_axis0(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
@@ -76551,11 +76554,11 @@ fn try_native_int_sort_axis0(
     }
     let n = rows * cols;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    match (kind.as_str(), itemsize) {
-        ("i", 4) => int_sort_axis0_typed::<i32>(py, numpy, a, &shape, rows, cols, n, "int32"),
-        ("i", 8) => int_sort_axis0_typed::<i64>(py, numpy, a, &shape, rows, cols, n, "int64"),
-        ("u", 4) => int_sort_axis0_typed::<u32>(py, numpy, a, &shape, rows, cols, n, "uint32"),
-        ("u", 8) => int_sort_axis0_typed::<u64>(py, numpy, a, &shape, rows, cols, n, "uint64"),
+    match (kind, itemsize) {
+        ('i', 4) => int_sort_axis0_typed::<i32>(py, numpy, a, &shape, rows, cols, n, "int32"),
+        ('i', 8) => int_sort_axis0_typed::<i64>(py, numpy, a, &shape, rows, cols, n, "int64"),
+        ('u', 4) => int_sort_axis0_typed::<u32>(py, numpy, a, &shape, rows, cols, n, "uint32"),
+        ('u', 8) => int_sort_axis0_typed::<u64>(py, numpy, a, &shape, rows, cols, n, "uint64"),
         _ => Ok(None),
     }
 }
@@ -76650,8 +76653,8 @@ fn try_native_int_sort_midaxis(
         return Ok(None);
     };
     let dt = a.getattr(intern!(py, "dtype"))?;
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
@@ -76667,17 +76670,17 @@ fn try_native_int_sort_midaxis(
     }
     let n = outer * alen * inner;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
-    match (kind.as_str(), itemsize) {
-        ("i", 4) => {
+    match (kind, itemsize) {
+        ('i', 4) => {
             int_sort_midaxis_typed::<i32>(py, numpy, a, &shape, outer, alen, inner, n, "int32")
         }
-        ("i", 8) => {
+        ('i', 8) => {
             int_sort_midaxis_typed::<i64>(py, numpy, a, &shape, outer, alen, inner, n, "int64")
         }
-        ("u", 4) => {
+        ('u', 4) => {
             int_sort_midaxis_typed::<u32>(py, numpy, a, &shape, outer, alen, inner, n, "uint32")
         }
-        ("u", 8) => {
+        ('u', 8) => {
             int_sort_midaxis_typed::<u64>(py, numpy, a, &shape, outer, alen, inner, n, "uint64")
         }
         _ => Ok(None),
