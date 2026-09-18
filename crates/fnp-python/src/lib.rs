@@ -72589,7 +72589,7 @@ fn try_zerocopy_c64_sort_lastaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -72673,7 +72673,7 @@ fn try_zerocopy_c64_sort_axis0(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
