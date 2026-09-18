@@ -69847,7 +69847,7 @@ fn try_zerocopy_f64_average_flat(
     }
     let is_f64 = |x: &Bound<'_, PyAny>| -> PyResult<bool> {
         let dt = x.getattr(intern!(py, "dtype"))?;
-        Ok(dt.getattr(intern!(py, "kind"))?.extract::<String>()? == "f"
+        Ok(dt.getattr(intern!(py, "kind"))?.extract::<char>()? == 'f'
             && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 8)
     };
     if !is_f64(a)? || !is_f64(weights)? {
@@ -69927,7 +69927,7 @@ fn try_zerocopy_f64_average_axis(
     let numpy = cached_numpy(py)?;
     let is_f64 = |x: &Bound<'_, PyAny>| -> PyResult<bool> {
         let dt = x.getattr(intern!(py, "dtype"))?;
-        Ok(dt.getattr(intern!(py, "kind"))?.extract::<String>()? == "f"
+        Ok(dt.getattr(intern!(py, "kind"))?.extract::<char>()? == 'f'
             && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 8)
     };
     if !is_f64(a)? {
@@ -71412,7 +71412,7 @@ fn try_zerocopy_c128_sort_flat(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
     {
         return Ok(None);
@@ -71489,7 +71489,7 @@ fn try_zerocopy_c128_unique_flat(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
     {
         return Ok(None);
@@ -71709,7 +71709,7 @@ fn try_zerocopy_c128_isin(
     let e_dt = element.getattr(intern!(py, "dtype"))?;
     let t_dt = test.getattr(intern!(py, "dtype"))?;
     let ok = |d: &Bound<'_, PyAny>| -> PyResult<bool> {
-        Ok(d.getattr(intern!(py, "kind"))?.extract::<String>()? == "c"
+        Ok(d.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c'
             && d.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 16)
     };
     if !ok(&e_dt)? || !ok(&t_dt)? {
@@ -71932,7 +71932,7 @@ fn try_zerocopy_c64_isin(
     }
     let ok = |d: &Bound<'_, PyAny>| -> PyResult<bool> {
         let dt = d.getattr(intern!(py, "dtype"))?;
-        Ok(dt.getattr(intern!(py, "kind"))?.extract::<String>()? == "c"
+        Ok(dt.getattr(intern!(py, "kind"))?.extract::<char>()? == 'c'
             && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 8)
     };
     if !ok(element)? || !ok(test)? {
@@ -72031,7 +72031,7 @@ fn try_zerocopy_c64_unique_flat(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -72120,8 +72120,8 @@ fn try_native_datetime_unique_flat(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
-    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if (kind != "M" && kind != "m")
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if (kind != 'M' && kind != 'm')
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -72194,7 +72194,7 @@ fn try_zerocopy_c128_sort_lastaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
     {
         return Ok(None);
@@ -72280,7 +72280,7 @@ fn try_zerocopy_c128_sort_axis0(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
     {
         return Ok(None);
@@ -72389,7 +72389,7 @@ fn try_zerocopy_c128_sort_midaxis(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
     {
         return Ok(None);
@@ -72513,7 +72513,7 @@ fn try_zerocopy_c64_sort_flat(
         return Ok(None);
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "c"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
