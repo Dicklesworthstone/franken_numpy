@@ -66716,7 +66716,7 @@ fn loadtxt(
                     };
                     let arr = build_numpy_array_from_storage(py, &shape, flat_storage)?;
                     if unpack {
-                        Ok(arr.bind(py).getattr("T")?.unbind())
+                        Ok(arr.bind(py).getattr(intern!(py, "T"))?.unbind())
                     } else {
                         Ok(arr)
                     }
@@ -66996,7 +66996,7 @@ fn loadtxt(
 
     // Parse rows of tokens.
     let skip_count = skiprows.max(0) as usize;
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut rows: Vec<Vec<&str>> = Vec::new();
     for (lineno, raw_line) in text.lines().enumerate() {
         if lineno < skip_count {
             continue;
@@ -67010,14 +67010,14 @@ fn loadtxt(
         if trimmed.is_empty() {
             continue;
         }
-        let tokens: Vec<String> = match delimiter {
-            None => trimmed.split_whitespace().map(|s| s.to_string()).collect(),
+        let tokens: Vec<&str> = match delimiter {
+            None => trimmed.split_whitespace().collect(),
             Some(sep) if sep.chars().all(char::is_whitespace) => {
-                trimmed.split_whitespace().map(|s| s.to_string()).collect()
+                trimmed.split_whitespace().collect()
             }
-            Some(sep) => trimmed.split(sep).map(|s| s.trim().to_string()).collect(),
+            Some(sep) => trimmed.split(sep).map(str::trim).collect(),
         };
-        let selected: Vec<String> = if let Some(cols) = use_columns.as_ref() {
+        let selected: Vec<&str> = if let Some(cols) = use_columns.as_ref() {
             let mut out = Vec::with_capacity(cols.len());
             for &col in cols {
                 let idx = if col < 0 {
@@ -67028,7 +67028,7 @@ fn loadtxt(
                 if idx >= tokens.len() {
                     return fallback(py);
                 }
-                out.push(tokens[idx].clone());
+                out.push(tokens[idx]);
             }
             out
         } else {
@@ -67130,7 +67130,7 @@ fn loadtxt(
         // (np.loadtxt actually returns `ret.T` itself, not a tuple,
         // despite the docs).
         let arr_bound = arr.bind(py);
-        let transposed = arr_bound.getattr("T")?;
+        let transposed = arr_bound.getattr(intern!(py, "T"))?;
         Ok(transposed.unbind())
     } else {
         Ok(arr)
@@ -67169,7 +67169,11 @@ fn genfromtxt(
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let initial_pos = fname.bind(py).call_method0(intern!(py, "tell")).ok();
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        if let Some(ref pos) = initial_pos {
+            let _ = fname.bind(py).call_method1(intern!(py, "seek"), (pos,));
+        }
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
@@ -67258,14 +67262,16 @@ fn genfromtxt(
 
     // Extract text (StringIO, file-like, or file path).
     let fname_bound = fname.bind(py);
-    let text: String = if let Ok(s) = fname_bound.extract::<String>() {
-        match std::fs::read_to_string(&s) {
-            Ok(value) => value,
+    let read_buf;
+    let text: std::borrow::Cow<'_, str> = if let Ok(s) = fname_bound.extract::<&str>() {
+        match std::fs::read_to_string(s) {
+            Ok(value) => std::borrow::Cow::Owned(value),
             Err(_) => return fallback(py),
         }
     } else if let Ok(result) = fname_bound.call_method0(intern!(py, "read")) {
-        match result.extract::<String>() {
-            Ok(value) => value,
+        read_buf = result;
+        match read_buf.extract::<&str>() {
+            Ok(value) => std::borrow::Cow::Borrowed(value),
             Err(_) => return fallback(py),
         }
     } else {
@@ -67347,7 +67353,7 @@ fn genfromtxt(
                     };
                     let arr = build_numpy_array_from_storage(py, &shape, flat_storage)?;
                     if unpack == Some(true) {
-                        Ok(arr.bind(py).getattr("T")?.unbind())
+                        Ok(arr.bind(py).getattr(intern!(py, "T"))?.unbind())
                     } else {
                         Ok(arr)
                     }
@@ -67408,7 +67414,7 @@ fn genfromtxt(
                     };
                     let arr = build_numpy_array_from_storage(py, &shape, flat_storage)?;
                     if unpack == Some(true) {
-                        Ok(arr.bind(py).getattr("T")?.unbind())
+                        Ok(arr.bind(py).getattr(intern!(py, "T"))?.unbind())
                     } else {
                         Ok(arr)
                     }
@@ -67427,7 +67433,7 @@ fn genfromtxt(
     }
     let usable_lines = &all_lines[skip_h..all_lines.len() - skip_f];
 
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut rows: Vec<Vec<&str>> = Vec::new();
     for raw_line in usable_lines {
         let effective = match raw_line.split_once(comments) {
             Some((lhs, _)) => lhs,
@@ -67437,14 +67443,14 @@ fn genfromtxt(
         if trimmed.is_empty() {
             continue;
         }
-        let tokens: Vec<String> = match delimiter {
-            None => trimmed.split_whitespace().map(|s| s.to_string()).collect(),
+        let tokens: Vec<&str> = match delimiter {
+            None => trimmed.split_whitespace().collect(),
             Some(sep) if sep.chars().all(char::is_whitespace) => {
-                trimmed.split_whitespace().map(|s| s.to_string()).collect()
+                trimmed.split_whitespace().collect()
             }
-            Some(sep) => trimmed.split(sep).map(|s| s.trim().to_string()).collect(),
+            Some(sep) => trimmed.split(sep).map(str::trim).collect(),
         };
-        let selected: Vec<String> = if let Some(cols) = use_columns.as_ref() {
+        let selected: Vec<&str> = if let Some(cols) = use_columns.as_ref() {
             let mut out = Vec::with_capacity(cols.len());
             for &col in cols {
                 let idx = if col < 0 {
@@ -67455,7 +67461,7 @@ fn genfromtxt(
                 if idx >= tokens.len() {
                     return fallback(py);
                 }
-                out.push(tokens[idx].clone());
+                out.push(tokens[idx]);
             }
             out
         } else {
@@ -67541,7 +67547,7 @@ fn genfromtxt(
 
     if unpack == Some(true) {
         let arr_bound = arr.bind(py);
-        let transposed = arr_bound.getattr("T")?;
+        let transposed = arr_bound.getattr(intern!(py, "T"))?;
         Ok(transposed.unbind())
     } else {
         Ok(arr)
