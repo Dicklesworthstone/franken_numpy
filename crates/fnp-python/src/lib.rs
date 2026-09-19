@@ -108921,14 +108921,14 @@ fn try_zerocopy_bytes_translate(
     input: &Bound<'_, PyAny>,
     table: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let Ok(tbytes) = table.extract::<Vec<u8>>() else {
+    let Ok(tbytes) = table.extract::<&[u8]>() else {
         return Ok(None); // dict table ('U') / other -> not the bytes fast path
     };
     if tbytes.len() != 256 || tbytes[0] != 0 {
         return Ok(None); // not a maketrans 256-table, or NUL is remapped (would corrupt padding) -> numpy
     }
     let mut lookup = [0u8; 256];
-    lookup.copy_from_slice(&tbytes);
+    lookup.copy_from_slice(tbytes);
     if !input.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -109475,7 +109475,7 @@ fn try_zerocopy_unicode_replace(
     // gates non-ASCII (str.replace is Unicode-aware); 'S' extracts bytes old/new and needs no ASCII gate.
     match kind {
         'U' => {
-            let (Ok(old_str), Ok(new_str)) = (old.extract::<String>(), new.extract::<String>())
+            let (Ok(old_str), Ok(new_str)) = (old.extract::<&str>(), new.extract::<&str>())
             else {
                 return Ok(None); // array old/new (broadcast) -> numpy
             };
@@ -109503,7 +109503,7 @@ fn try_zerocopy_unicode_replace(
             )
         }
         'S' => {
-            let (Ok(old_b), Ok(new_b)) = (old.extract::<Vec<u8>>(), new.extract::<Vec<u8>>())
+            let (Ok(old_b), Ok(new_b)) = (old.extract::<&[u8]>(), new.extract::<&[u8]>())
             else {
                 return Ok(None); // array old/new / str-not-bytes -> numpy
             };
@@ -109518,8 +109518,8 @@ fn try_zerocopy_unicode_replace(
                 a,
                 &shape,
                 itemsize,
-                &old_b,
-                &new_b,
+                old_b,
+                new_b,
                 "S",
                 cached_uint8_type(py)?,
                 false,
@@ -110050,7 +110050,7 @@ fn try_zerocopy_unicode_pad(
             let fill: u32 = match fillchar {
                 None => 32,
                 Some(fc) => {
-                    let Ok(s) = fc.extract::<String>() else {
+                    let Ok(s) = fc.extract::<&str>() else {
                         return Ok(None);
                     };
                     let mut it = s.chars();
@@ -110081,7 +110081,7 @@ fn try_zerocopy_unicode_pad(
             let fill: u8 = match fillchar {
                 None => 32,
                 Some(fc) => {
-                    let Ok(b) = fc.extract::<Vec<u8>>() else {
+                    let Ok(b) = fc.extract::<&[u8]>() else {
                         return Ok(None);
                     };
                     if b.len() != 1 {
@@ -110349,7 +110349,7 @@ fn try_zerocopy_unicode_search(
     require_found: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     // sub must be a scalar python str (array sub -> broadcast -> numpy). Non-empty only.
-    let sub_str: String = match sub.extract::<String>() {
+    let sub_str: &str = match sub.extract::<&str>() {
         Ok(s) => s,
         Err(_) => return Ok(None),
     };
@@ -110948,20 +110948,20 @@ fn try_native_strings_mod_float(
     // 'U' format = str -> 'U' output; 'S' format = bytes -> 'S' output. numpy picks the output kind from the
     // format's dtype and the bytes output is the ASCII re-encoding of the str output (float digits/sign/./e/
     // inf/nan are all ASCII). A bytes format must be ASCII (the printf conversions + literals we handle are).
-    let (fmt_str, as_bytes) = if let Ok(s) = fmt.extract::<String>() {
+    let (fmt_str, as_bytes) = if let Ok(s) = fmt.extract::<&str>() {
         (s, false)
-    } else if let Ok(b) = fmt.extract::<Vec<u8>>() {
+    } else if let Ok(b) = fmt.extract::<&[u8]>() {
         if b.iter().any(|&x| x >= 128) {
             return Ok(None); // non-ASCII bytes in the format -> numpy
         }
-        match String::from_utf8(b) {
+        match std::str::from_utf8(b) {
             Ok(s) => (s, true),
             Err(_) => return Ok(None),
         }
     } else {
         return Ok(None); // array of formats (broadcast) -> numpy
     };
-    let Some((prefix, suffix, ffmt)) = parse_mod_float_format(&fmt_str) else {
+    let Some((prefix, suffix, ffmt)) = parse_mod_float_format(fmt_str) else {
         return Ok(None);
     };
     if !values.is_exact_instance(cached_ndarray_type(py)?) {
@@ -111150,20 +111150,20 @@ fn try_native_strings_mod_int(
 ) -> PyResult<Option<Py<PyAny>>> {
     // 'U' format = str -> 'U' output; 'S' format = bytes -> 'S' output. numpy picks the output kind from the
     // format's dtype. A bytes format must be ASCII (the printf conversions + literals we handle are ASCII).
-    let (fmt_str, as_bytes) = if let Ok(s) = fmt.extract::<String>() {
+    let (fmt_str, as_bytes) = if let Ok(s) = fmt.extract::<&str>() {
         (s, false)
-    } else if let Ok(b) = fmt.extract::<Vec<u8>>() {
+    } else if let Ok(b) = fmt.extract::<&[u8]>() {
         if b.iter().any(|&x| x >= 128) {
             return Ok(None); // non-ASCII bytes in the format -> numpy
         }
-        match String::from_utf8(b) {
+        match std::str::from_utf8(b) {
             Ok(s) => (s, true),
             Err(_) => return Ok(None),
         }
     } else {
         return Ok(None); // array of formats (broadcast) -> numpy
     };
-    let Some((prefix, suffix, ifmt)) = parse_mod_int_format(&fmt_str) else {
+    let Some((prefix, suffix, ifmt)) = parse_mod_int_format(fmt_str) else {
         return Ok(None);
     };
     if !values.is_exact_instance(cached_ndarray_type(py)?) {
@@ -111789,11 +111789,16 @@ fn encoding_is_ascii_compatible(
     match encoding {
         None => true,
         Some(enc) if enc.is_none() => true,
-        Some(enc) => match enc.extract::<String>() {
-            Ok(s) => matches!(
-                s.to_lowercase().as_str(),
-                "utf-8" | "utf8" | "ascii" | "us-ascii" | "latin-1" | "latin1" | "iso-8859-1"
-            ),
+        Some(enc) => match enc.extract::<&str>() {
+            Ok(s) => {
+                s.eq_ignore_ascii_case("utf-8")
+                    || s.eq_ignore_ascii_case("utf8")
+                    || s.eq_ignore_ascii_case("ascii")
+                    || s.eq_ignore_ascii_case("us-ascii")
+                    || s.eq_ignore_ascii_case("latin-1")
+                    || s.eq_ignore_ascii_case("latin1")
+                    || s.eq_ignore_ascii_case("iso-8859-1")
+            }
             Err(_) => false,
         },
     }
@@ -111954,7 +111959,7 @@ fn try_native_strings_partition(
     // from the input dtype; the partition kernel is byte-for-byte identical (no ASCII assumptions).
     match kind {
         'U' => {
-            let Ok(sep_str) = sep.extract::<String>() else {
+            let Ok(sep_str) = sep.extract::<&str>() else {
                 return Ok(None);
             };
             if sep_str.is_empty() {
@@ -111976,7 +111981,7 @@ fn try_native_strings_partition(
             )
         }
         'S' => {
-            let Ok(sep_b) = sep.extract::<Vec<u8>>() else {
+            let Ok(sep_b) = sep.extract::<&[u8]>() else {
                 return Ok(None);
             };
             if sep_b.is_empty() {
@@ -111986,7 +111991,7 @@ fn try_native_strings_partition(
                 return Ok(None);
             }
             let uint8_type = cached_uint8_type(py)?;
-            run_partition::<u8>(py, a, itemsize, &sep_b, from_right, "S", uint8_type)
+            run_partition::<u8>(py, a, itemsize, sep_b, from_right, "S", uint8_type)
         }
         _ => Ok(None),
     }
@@ -112291,10 +112296,10 @@ fn resolve_numpy_submodule<'py>(
 }
 
 fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
-    let dict_any = from.getattr("__dict__")?;
+    let dict_any = from.getattr(intern!(from.py(), "__dict__"))?;
     let dict = dict_any.cast::<PyDict>()?;
     for (key, value) in dict.iter() {
-        if let Ok(name) = key.extract::<String>() {
+        if let Ok(name) = key.extract::<&str>() {
             to.setattr(name, value)?;
         }
     }
@@ -116381,8 +116386,8 @@ fn isclose_impl(
             let kind = a_bound
                 .getattr(intern!(py, "dtype"))?
                 .getattr(intern!(py, "kind"))?
-                .extract::<String>()?;
-            if kind == "i" || kind == "u" || kind == "b" {
+                .extract::<char>()?;
+            if kind == 'i' || kind == 'u' || kind == 'b' {
                 let a_f64 = cached_numpy_asarray(py)?.call1((a_bound, cached_float64_type(py)?))?;
                 if let Some(out) =
                     try_zerocopy_f64_isclose_array_scalar(py, &a_f64, b_bound, rtol, atol)?
@@ -116784,8 +116789,8 @@ fn histogram2d(
     if (2..=6).contains(&args.len())
         && kwargs.is_none_or(|kw| {
             kw.keys().into_iter().all(|key| {
-                key.extract::<String>()
-                    .map(|k| k == "bins" || k == "range" || k == "weights" || k == "density")
+                key.extract::<&str>()
+                    .map(|k| matches!(k, "bins" | "range" | "weights" | "density"))
                     .unwrap_or(false)
             })
         })
@@ -117042,8 +117047,8 @@ fn histogramdd(
     if (1..=4).contains(&args.len())
         && kwargs.is_none_or(|kw| {
             kw.keys().into_iter().all(|key| {
-                key.extract::<String>()
-                    .map(|k| k == "bins" || k == "range" || k == "weights" || k == "density")
+                key.extract::<&str>()
+                    .map(|k| matches!(k, "bins" | "range" | "weights" | "density"))
                     .unwrap_or(false)
             })
         })
@@ -117478,8 +117483,8 @@ fn busday_count(
     if BUSDAY_NATIVE_ROUTE_BEATS_NUMPY
         && kwargs.is_none_or(|kw| {
             kw.keys().into_iter().all(|key| {
-                key.extract::<String>()
-                    .map(|k| k == "weekmask" || k == "holidays")
+                key.extract::<&str>()
+                    .map(|k| matches!(k, "weekmask" | "holidays"))
                     .unwrap_or(false)
             })
         })
@@ -117680,8 +117685,8 @@ fn busday_offset(
     if BUSDAY_NATIVE_ROUTE_BEATS_NUMPY
         && kwargs.is_none_or(|kw| {
             kw.keys().into_iter().all(|key| {
-                key.extract::<String>()
-                    .map(|k| k == "roll" || k == "weekmask" || k == "holidays")
+                key.extract::<&str>()
+                    .map(|k| matches!(k, "roll" | "weekmask" | "holidays"))
                     .unwrap_or(false)
             })
         })
@@ -117737,8 +117742,8 @@ fn is_busday(
     // the incumbent, which returns False for NaT.
     if kwargs.is_none_or(|kw| {
         kw.keys().into_iter().all(|key| {
-            key.extract::<String>()
-                .map(|k| k == "weekmask" || k == "holidays")
+            key.extract::<&str>()
+                .map(|k| matches!(k, "weekmask" | "holidays"))
                 .unwrap_or(false)
         })
     }) && BUSDAY_NATIVE_ROUTE_BEATS_NUMPY
@@ -117781,7 +117786,7 @@ fn parse_busday_weekmask(weekmask: Option<&Bound<'_, PyAny>>) -> PyResult<Option
     if value.is_none() {
         return Ok(None);
     }
-    if let Ok(text) = value.extract::<String>() {
+    if let Ok(text) = value.extract::<&str>() {
         let bytes = text.as_bytes();
         if bytes.len() != 7 || bytes.iter().any(|b| !matches!(b, b'0' | b'1')) {
             return Ok(None);
@@ -117922,10 +117927,10 @@ fn parse_busday_roll(roll: Option<&Bound<'_, PyAny>>) -> PyResult<Option<BusdayR
     let Some(value) = roll else {
         return Ok(Some(BusdayRoll::Raise));
     };
-    let Ok(text) = value.extract::<String>() else {
+    let Ok(text) = value.extract::<&str>() else {
         return Ok(None);
     };
-    Ok(match text.as_str() {
+    Ok(match text {
         "raise" => Some(BusdayRoll::Raise),
         "nat" => Some(BusdayRoll::Nat),
         "forward" | "following" => Some(BusdayRoll::Forward),
@@ -118767,20 +118772,20 @@ fn native_format_float(
             "min_digits",
         ]
     };
-    let mut given: Vec<(String, Bound<'_, PyAny>)> = Vec::new();
+    let mut given: Vec<(&'static str, Bound<'_, PyAny>)> = Vec::new();
     if let Some(kwargs) = kwargs {
         for (key, value) in kwargs.iter() {
-            let Ok(key) = key.extract::<String>() else {
+            let Ok(key_str) = key.extract::<&str>() else {
                 return Ok(None);
             };
-            if !allowed.contains(&key.as_str()) {
+            let Some(&canonical) = allowed.iter().find(|&&a| a == key_str) else {
                 return Ok(None);
-            }
-            given.push((key, value));
+            };
+            given.push((canonical, value));
         }
     }
     let lookup = |name: &str| -> Option<&Bound<'_, PyAny>> {
-        given.iter().find(|(k, _)| k == name).map(|(_, v)| v)
+        given.iter().find(|(k, _)| *k == name).map(|(_, v)| v)
     };
 
     // Flags and `trim` are forwarded verbatim; anything but an exact bool / a str is numpy's
@@ -118896,8 +118901,8 @@ fn binary_repr(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kw| {
         kw.keys().into_iter().all(|key| {
-            key.extract::<String>()
-                .map(|k| k == "num" || k == "width")
+            key.extract::<&str>()
+                .map(|k| matches!(k, "num" | "width"))
                 .unwrap_or(false)
         })
     }) && args.len() <= 2
@@ -119107,8 +119112,8 @@ fn base_repr(
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kw| {
         kw.keys().into_iter().all(|key| {
-            key.extract::<String>()
-                .map(|k| k == "number" || k == "base" || k == "padding")
+            key.extract::<&str>()
+                .map(|k| matches!(k, "number" | "base" | "padding"))
                 .unwrap_or(false)
         })
     }) && args.len() <= 3
@@ -119295,8 +119300,8 @@ fn native_array_str(
     const OPTIONALS: [&str; 3] = ["max_line_width", "precision", "suppress_small"];
     if !kwargs.is_none_or(|kw| {
         kw.keys().into_iter().all(|key| {
-            key.extract::<String>()
-                .map(|k| k == "a" || OPTIONALS.contains(&k.as_str()))
+            key.extract::<&str>()
+                .map(|k| k == "a" || OPTIONALS.contains(&k))
                 .unwrap_or(false)
         })
     }) || args.len() > 4
