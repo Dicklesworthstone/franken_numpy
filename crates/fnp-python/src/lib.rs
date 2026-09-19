@@ -21990,10 +21990,11 @@ fn build_meshgrid_numpy_outputs(
 }
 
 fn frompyfunc_display_name(callable: &Bound<'_, PyAny>) -> String {
-    let base_name = callable
-        .getattr("__name__")
-        .and_then(|name| name.extract::<String>())
-        .unwrap_or_else(|_| "pyfunc".to_string());
+    let name_obj = callable.getattr(intern!(callable.py(), "__name__")).ok();
+    let base_name = name_obj
+        .as_ref()
+        .and_then(|name| name.extract::<&str>().ok())
+        .unwrap_or("pyfunc");
     format!("{base_name} (vectorized)")
 }
 
@@ -23542,9 +23543,8 @@ fn bincount(
         .getattr(intern!(py, "kind"))?
         .extract::<char>()?;
     if kind == 'f' || kind == 'c' {
-        let src = input_dtype
-            .getattr(intern!(py, "name"))?
-            .extract::<String>()?;
+        let src_attr = input_dtype.getattr(intern!(py, "name"))?;
+        let src = src_attr.extract::<&str>()?;
         return Err(PyTypeError::new_err(format!(
             "Cannot cast array data from dtype('{src}') to dtype('int64') \
              according to the rule 'safe'"
@@ -26874,10 +26874,10 @@ fn fromstring(
 
     // Accept either str or bytes input (numpy decodes bytes as ASCII).
     let string_bound = string.bind(py);
-    let text: String = if let Ok(value) = string_bound.extract::<String>() {
+    let text: &str = if let Ok(value) = string_bound.extract::<&str>() {
         value
-    } else if let Ok(bytes) = string_bound.extract::<Vec<u8>>() {
-        match String::from_utf8(bytes) {
+    } else if let Ok(bytes) = string_bound.extract::<&[u8]>() {
+        match std::str::from_utf8(bytes) {
             Ok(value) => value,
             Err(_) => return fallback(py),
         }
@@ -30058,8 +30058,9 @@ fn minimum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
         'M' => DType::DateTime64,
         'm' => DType::TimeDelta64,
         _ => {
-            let name = dtype.getattr(intern!(py, "name"))?.extract::<String>()?;
-            DType::parse(&name).ok_or_else(|| {
+            let name_attr = dtype.getattr(intern!(py, "name"))?;
+            let name = name_attr.extract::<&str>()?;
+            DType::parse(name).ok_or_else(|| {
                 PyTypeError::new_err(format!("minimum_fill_value: unsupported dtype {name}"))
             })?
         }
@@ -30126,8 +30127,9 @@ fn maximum_fill_value(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
         'M' => DType::DateTime64,
         'm' => DType::TimeDelta64,
         _ => {
-            let name = dtype.getattr(intern!(py, "name"))?.extract::<String>()?;
-            DType::parse(&name).ok_or_else(|| {
+            let name_attr = dtype.getattr(intern!(py, "name"))?;
+            let name = name_attr.extract::<&str>()?;
+            DType::parse(name).ok_or_else(|| {
                 PyTypeError::new_err(format!("maximum_fill_value: unsupported dtype {name}"))
             })?
         }
@@ -59302,8 +59304,9 @@ fn linspace(
     let resolved_dtype = match dtype.as_ref() {
         Some(dtype_val) if !dtype_val.bind(py).is_none() => {
             let parsed = cached_numpy_dtype(py)?.call1((dtype_val.bind(py),))?;
-            let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
-            match DType::parse(&name) {
+            let name_attr = parsed.getattr(intern!(py, "name"))?;
+            let name = name_attr.extract::<&str>()?;
+            match DType::parse(name) {
                 // Only float64 stays native. float32/float16 used to run the f64
                 // build then convert across the export bridge (~13x slower than
                 // numpy's typed linspace); delegate them to numpy (the exact oracle).
@@ -59947,8 +59950,9 @@ fn native_asarray_like(
     let requested_dtype = match dtype {
         Some(v) if !v.is_none() => Some({
             let parsed = cached_numpy_dtype(py)?.call1((v,))?;
-            let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
-            match DType::parse(&name) {
+            let name_attr = parsed.getattr(intern!(py, "name"))?;
+            let name = name_attr.extract::<&str>()?;
+            match DType::parse(name) {
                 Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
                 _ => return Ok(None),
             }
@@ -59983,11 +59987,10 @@ fn native_asarray_like(
         let dtype_match = match requested_dtype {
             None => true,
             Some(want) => {
-                let source_dtype_name = a
-                    .getattr(intern!(py, "dtype"))?
-                    .getattr(intern!(py, "name"))?
-                    .extract::<String>()?;
-                DType::parse(&source_dtype_name) == Some(want)
+                let source_dtype = a.getattr(intern!(py, "dtype"))?;
+                let name_attr = source_dtype.getattr(intern!(py, "name"))?;
+                let source_dtype_name = name_attr.extract::<&str>()?;
+                DType::parse(source_dtype_name) == Some(want)
             }
         };
         if dtype_match {
@@ -60031,11 +60034,10 @@ fn native_asarray_like(
     // build path below; only the always-delegated conversion case short-circuits.
     if let Some(want) = requested_dtype
         && input_is_ndarray_family
-        && let Ok(src_name) = a
-            .getattr(intern!(py, "dtype"))
-            .and_then(|d| d.getattr(intern!(py, "name")))
-            .and_then(|n| n.extract::<String>())
-        && DType::parse(&src_name) != Some(want)
+        && let Ok(src_dtype) = a.getattr(intern!(py, "dtype"))
+        && let Ok(src_name_attr) = src_dtype.getattr(intern!(py, "name"))
+        && let Ok(src_name) = src_name_attr.extract::<&str>()
+        && DType::parse(src_name) != Some(want)
     {
         return Ok(None);
     }
@@ -60233,8 +60235,9 @@ fn ascontiguousarray(
             let parsed = numpy
                 .getattr(intern!(py, "dtype"))?
                 .call1((dtype_val.bind(py),))?;
-            let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
-            match DType::parse(&name) {
+            let name_attr = parsed.getattr(intern!(py, "name"))?;
+            let name = name_attr.extract::<&str>()?;
+            match DType::parse(name) {
                 Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
                 _ => return fallback(py),
             }
@@ -60274,11 +60277,10 @@ fn ascontiguousarray(
         && match dtype_requested {
             None => true,
             Some(want) => {
-                let source_dtype_name = source_array
-                    .getattr(intern!(py, "dtype"))?
-                    .getattr(intern!(py, "name"))?
-                    .extract::<String>()?;
-                DType::parse(&source_dtype_name) == Some(want)
+                let source_dtype = source_array.getattr(intern!(py, "dtype"))?;
+                let name_attr = source_dtype.getattr(intern!(py, "name"))?;
+                let source_dtype_name = name_attr.extract::<&str>()?;
+                DType::parse(source_dtype_name) == Some(want)
             }
         };
     if identity_ok {
@@ -66318,10 +66320,9 @@ fn tofile(
     if sep.is_empty() || format != "%s" {
         return fallback();
     }
-    let dtype_name = array
-        .getattr(intern!(py, "dtype"))?
-        .getattr(intern!(py, "name"))?
-        .extract::<String>()?;
+    let dtype = array.getattr(intern!(py, "dtype"))?;
+    let name_attr = dtype.getattr(intern!(py, "name"))?;
+    let dtype_name = name_attr.extract::<&str>()?;
     let c_contiguous = array
         .getattr(intern!(py, "flags"))?
         .getattr(intern!(py, "c_contiguous"))?
