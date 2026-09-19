@@ -4380,7 +4380,7 @@ fn coerce_to_uint32_words(value: &Bound<'_, PyAny>) -> PyResult<Vec<u32>> {
         return Ok(data.to_vec());
     }
 
-    if let Ok(s) = value.extract::<String>() {
+    if let Ok(s) = value.extract::<&str>() {
         let trimmed = s.trim();
         let py_int = if let Some(hex) = trimmed
             .strip_prefix("0x")
@@ -4732,7 +4732,7 @@ fn py_state_u128(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<u128> {
     if let Ok(value) = value.extract::<u128>() {
         return Ok(value);
     }
-    let text = value.extract::<String>()?;
+    let text = value.extract::<&str>()?;
     text.parse::<u128>().map_err(|_| {
         PyValueError::new_err(format!(
             "bit-generator state field {field_name:?} must be an unsigned integer"
@@ -4744,7 +4744,7 @@ fn py_state_u64(value: &Bound<'_, PyAny>, field_name: &str) -> PyResult<u64> {
     if let Ok(value) = value.extract::<u64>() {
         return Ok(value);
     }
-    let text = value.extract::<String>()?;
+    let text = value.extract::<&str>()?;
     text.parse::<u64>().map_err(|_| {
         PyValueError::new_err(format!(
             "bit-generator state field {field_name:?} must be a u64-compatible integer"
@@ -4806,8 +4806,9 @@ fn numpy_pcg_state_schema_entries(
 
 fn py_bit_generator_state_from_dict(state: &Bound<'_, PyAny>) -> PyResult<BitGeneratorState> {
     let dict = state.cast::<PyDict>()?;
-    let kind_name = required_dict_item(dict, "bit_generator")?.extract::<String>()?;
-    let kind = bit_generator_kind_from_state_name(&kind_name)?;
+    let bg_item = required_dict_item(dict, "bit_generator")?;
+    let kind_name = bg_item.extract::<&str>()?;
+    let kind = bit_generator_kind_from_state_name(kind_name)?;
 
     let state_dict = required_dict_item(dict, "state")?;
     let state_dict = state_dict.cast::<PyDict>()?;
@@ -5219,7 +5220,8 @@ fn random_state_state_from_legacy_tuple(
             "state tuple must have length 3 or 5 for RandomState",
         ));
     }
-    let algorithm = tuple.get_item(0)?.extract::<String>()?;
+    let algo_item = tuple.get_item(0)?;
+    let algorithm = algo_item.extract::<&str>()?;
     if algorithm != "MT19937" {
         return Err(PyValueError::new_err(
             "set_state can only be used with legacy MT19937 state",
@@ -5248,7 +5250,8 @@ fn random_state_state_from_dict(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
 ) -> PyResult<RandomStateState> {
-    let algorithm = required_dict_item(dict, "bit_generator")?.extract::<String>()?;
+    let bg_item = required_dict_item(dict, "bit_generator")?;
+    let algorithm = bg_item.extract::<&str>()?;
     if algorithm != "MT19937" {
         return Err(PyValueError::new_err(
             "set_state can only be used with legacy MT19937 state",
@@ -5390,8 +5393,9 @@ fn extract_random_float_dtype(
     }
 
     let parsed = cached_numpy_dtype(py)?.call1((dtype,))?;
-    let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
-    match DType::parse(&name) {
+    let name_attr = parsed.getattr(intern!(py, "name"))?;
+    let name = name_attr.extract::<&str>()?;
+    match DType::parse(name) {
         Some(dtype @ (DType::F32 | DType::F64)) => Ok(dtype),
         _ => Err(PyTypeError::new_err(format!(
             "Unsupported dtype dtype('{name}') for {}",
@@ -5436,7 +5440,9 @@ fn resolve_random_out(
 }
 
 fn validate_random_out_dtype(out: &Bound<'_, PyAny>, dtype: DType) -> PyResult<()> {
-    let out_dtype = out.getattr("dtype")?.getattr("name")?.extract::<String>()?;
+    let dtype_attr = out.getattr("dtype")?;
+    let name_attr = dtype_attr.getattr("name")?;
+    let out_dtype = name_attr.extract::<&str>()?;
     let expected_dtype = random_float_numpy_dtype_name(dtype);
     if out_dtype == expected_dtype {
         Ok(())
@@ -6122,8 +6128,9 @@ fn extract_precise_numeric_array(
     } else {
         array.call_method1(intern!(py, "reshape"), (-1,))?
     };
-    let dtype_name = dtype.getattr(intern!(py, "name"))?.extract::<String>()?;
-    let parsed_dtype = DType::parse(&dtype_name).ok_or_else(|| {
+    let name_attr = dtype.getattr(intern!(py, "name"))?;
+    let dtype_name = name_attr.extract::<&str>()?;
+    let parsed_dtype = DType::parse(dtype_name).ok_or_else(|| {
         PyTypeError::new_err(format!(
             "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
         ))
@@ -6819,8 +6826,10 @@ fn extract_filled_scalar_storage(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<Option<FilledScalarStorage>> {
-    let type_name = value.get_type().name()?.extract::<String>()?;
-    match type_name.as_str() {
+    let py_type = value.get_type();
+    let type_name_bound = py_type.name()?;
+    let type_name = type_name_bound.extract::<&str>()?;
+    match type_name {
         "bool" => Ok(Some(FilledScalarStorage::Storage(ArrayStorage::Bool(
             vec![value.extract::<bool>()?],
         )))),
@@ -7160,8 +7169,9 @@ fn extract_python_dtype_bound(
     }
 
     let parsed = cached_numpy_dtype(py)?.call1((dtype,))?;
-    let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
-    DType::parse(&name)
+    let name_attr = parsed.getattr(intern!(py, "name"))?;
+    let name = name_attr.extract::<&str>()?;
+    DType::parse(name)
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
 
@@ -7628,7 +7638,8 @@ fn validate_cpu_device_kwarg(py: Python<'_>, device: Option<Py<PyAny>>) -> PyRes
         return Ok(());
     }
 
-    let device_text = device.str()?.extract::<String>()?;
+    let device_str = device.str()?;
+    let device_text = device_str.extract::<&str>()?;
     if device_text == "cpu" {
         return Ok(());
     }
@@ -7926,7 +7937,7 @@ fn axis_concatenator_array(
     value: &Bound<'_, PyAny>,
     kind: AxisConcatenatorKind,
 ) -> PyResult<Option<UFuncArray>> {
-    if value.extract::<String>().is_ok() {
+    if value.extract::<&str>().is_ok() {
         return Ok(None);
     }
 
@@ -22492,7 +22503,7 @@ impl PyVectorize {
                 let otypes = otypes.bind(py);
                 let dtype_fn = numpy.getattr(intern!(py, "dtype"))?;
                 let mut resolved = Vec::new();
-                if let Ok(codes) = otypes.extract::<String>() {
+                if let Ok(codes) = otypes.extract::<&str>() {
                     for code in codes.chars() {
                         resolved.push(dtype_fn.call1((code.to_string(),))?.unbind());
                     }
@@ -101109,7 +101120,8 @@ fn try_einsum_transpose_view(
             }
         }
     }
-    let Ok(subscripts) = args.get_item(0)?.extract::<&str>() else {
+    let arg0 = args.get_item(0)?;
+    let Ok(subscripts) = arg0.extract::<&str>() else {
         return Ok(None);
     };
     let Some((inp, outp)) = subscripts.split_once("->") else {
