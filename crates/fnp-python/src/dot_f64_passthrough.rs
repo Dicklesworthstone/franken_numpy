@@ -42,16 +42,16 @@ pub(super) fn try_full_thread_f64_dot(
         return Ok(None);
     }
 
-    let numpy = py.import("numpy")?;
-    let ndarray = numpy.getattr(intern!(py, "ndarray"))?;
-    if !a.is_exact_instance(&ndarray)
-        || !b.is_exact_instance(&ndarray)
+    let ndarray = crate::cached_ndarray_type(py)?;
+    if !a.is_exact_instance(ndarray)
+        || !b.is_exact_instance(ndarray)
         || !dtype_is_f64(py, a)?
         || !dtype_is_f64(py, b)?
     {
         return Ok(None);
     }
 
+    let numpy = crate::cached_numpy(py)?;
     Ok(Some(
         numpy
             .getattr(intern!(py, "dot"))?

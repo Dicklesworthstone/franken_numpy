@@ -49740,7 +49740,7 @@ fn try_zerocopy_f64_nanmean_axis0(
         }
     }
     if any_empty {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(intern!(py, "warn"), ("Mean of empty slice", &category))?;
     }
@@ -49848,7 +49848,7 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
         }
     }
     if any_empty.load(Ordering::Relaxed) {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(intern!(py, "warn"), ("Mean of empty slice", &category))?;
     }
@@ -49972,7 +49972,7 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
         }
     }
     if any_empty.load(Ordering::Relaxed) {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(intern!(py, "warn"), ("Mean of empty slice", &category))?;
     }
@@ -50305,7 +50305,7 @@ fn try_zerocopy_f32_nanmean_last_axis(
     let any_empty = results.iter().any(|&(_, e)| e);
     let out: Vec<f32> = results.into_iter().map(|(m, _)| m).collect();
     if any_empty {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(intern!(py, "warn"), ("Mean of empty slice", &category))?;
     }
@@ -61437,7 +61437,7 @@ fn emit_native_float_warnings(py: Python<'_>) -> PyResult<()> {
     if events.is_empty() {
         return Ok(());
     }
-    let warnings = py.import("warnings")?;
+    let warnings = cached_warnings(py)?;
     let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
     for event in events {
         if matches!(event.mode, FloatErrorMode::Warn) {
@@ -67999,7 +67999,7 @@ fn recfunctions_unstructured_to_structured(
         cached_numpy_zeros(py)?.call1((PyTuple::new(py, out_shape.iter().copied())?, dtype_val))?;
 
     // Copy each slice [..., i] into field i of the output.
-    let builtins = py.import("builtins")?;
+    let builtins = cached_builtins(py)?;
     let slice_ctor = builtins.getattr(intern!(py, "slice"))?;
     let all_slice = slice_ctor.call1((py.None(), py.None()))?;
     for (i, name) in field_names.iter().enumerate() {
@@ -85771,8 +85771,8 @@ fn norm(
     // AXIS forms only: the FLAT form gate-measured 0.969x (numpy's flat int
     // chain is one pass + BLAS nrm2 - the conversion copy buys nothing).
     let x = if axis.as_ref().is_some_and(|v| !v.bind(py).is_none()) {
-        let numpy = py.import("numpy")?;
-        match var_std_int_input_to_f64(py, &numpy, &x, &None)? {
+        let numpy = cached_numpy(py)?;
+        match var_std_int_input_to_f64(py, numpy, &x, &None)? {
             Some(converted) => converted,
             None => x,
         }
@@ -86554,26 +86554,25 @@ fn try_zerocopy_repeat_each(
     v: &Bound<'_, PyAny>,
     times: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let dtype = v.getattr(intern!(py, "dtype"))?;
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     if !matches!(itemsize, 1 | 2 | 4 | 8) {
         return Ok(None);
     }
-    let mover_name = match itemsize {
-        1 => "uint8",
-        2 => "uint16",
-        4 => "uint32",
-        _ => "uint64",
+    let (mover, mover_name) = match itemsize {
+        1 => (numpy.getattr(intern!(py, "uint8"))?, intern!(py, "uint8")),
+        2 => (numpy.getattr(intern!(py, "uint16"))?, intern!(py, "uint16")),
+        4 => (numpy.getattr(intern!(py, "uint32"))?, intern!(py, "uint32")),
+        _ => (numpy.getattr(intern!(py, "uint64"))?, intern!(py, "uint64")),
     };
-    let mover = numpy.getattr(mover_name)?;
     let v_view = v.call_method1(intern!(py, "view"), (&mover,))?;
     fn fill<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
         py: Python<'py>,
         numpy: &Bound<'py, PyModule>,
         v_view: &Bound<'py, PyAny>,
         times: usize,
-        mover_name: &str,
+        mover_name: &Bound<'py, pyo3::types::PyString>,
     ) -> PyResult<Option<(Bound<'py, PyAny>, usize)>> {
         let Ok(in_buf) = PyBuffer::<T>::get(v_view) else {
             return Ok(None);
@@ -86608,8 +86607,10 @@ fn try_zerocopy_repeat_each(
                     unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
                 out_data
                     .par_chunks_mut(times)
-                    .enumerate()
-                    .for_each(|(i, row)| row.fill(in_data[i]));
+                    .zip(in_data.par_iter())
+                    .for_each(|(row, &val)| {
+                        row.fill(val);
+                    });
             } else {
                 for (i, c) in input.iter().enumerate() {
                     let val = c.get();
@@ -86622,10 +86623,10 @@ fn try_zerocopy_repeat_each(
         Ok(Some((out, m)))
     }
     let res = match itemsize {
-        1 => fill::<u8>(py, &numpy, &v_view, times, mover_name)?,
-        2 => fill::<u16>(py, &numpy, &v_view, times, mover_name)?,
-        4 => fill::<u32>(py, &numpy, &v_view, times, mover_name)?,
-        _ => fill::<u64>(py, &numpy, &v_view, times, mover_name)?,
+        1 => fill::<u8>(py, numpy, &v_view, times, mover_name)?,
+        2 => fill::<u16>(py, numpy, &v_view, times, mover_name)?,
+        4 => fill::<u32>(py, numpy, &v_view, times, mover_name)?,
+        _ => fill::<u64>(py, numpy, &v_view, times, mover_name)?,
     };
     let Some((out, m)) = res else {
         return Ok(None);
@@ -88103,7 +88104,7 @@ fn take_along_axis(
 ///    is why only the module handle is held. If the import fails, `get_or_try_init`
 ///    leaves the cell uninitialised, so a later successful import still populates it
 ///    and the error surface is unchanged (`ImportError` on every failing call).
-fn cached_numpy(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
+pub(crate) fn cached_numpy(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
     static NUMPY_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
     Ok(NUMPY_MODULE
         .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
@@ -88231,7 +88232,7 @@ fn cached_functools(py: Python<'_>) -> PyResult<&Bound<'_, PyModule>> {
 ///
 /// SAFE TO CACHE: `numpy.ndarray` is bound once at module import and is not reassigned by any
 /// supported use. Caching it is the same bet `cached_numpy` already makes about the module itself.
-fn cached_ndarray_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+pub(crate) fn cached_ndarray_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
     static NDARRAY_TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
     Ok(NDARRAY_TYPE
         .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
@@ -102200,34 +102201,34 @@ fn einsum(
                             }
                             return Ok(mm.call1((&x1, &x2))?.unbind());
                         } else if norm == "ij,kj->ik" || norm == "ij,kj" {
-                            let numpy = py.import("numpy")?;
+                            let numpy = cached_numpy(py)?;
                             let bt = numpy.call_method1(
                                 intern!(py, "ascontiguousarray"),
-                                (x2.getattr("T")?,),
+                                (x2.getattr(intern!(py, "T"))?,),
                             )?;
                             if let Some(result) = try_native_int_matmul(py, &x1, &bt)? {
                                 return Ok(result);
                             }
-                            return Ok(mm.call1((&x1, x2.getattr("T")?))?.unbind());
+                            return Ok(mm.call1((&x1, x2.getattr(intern!(py, "T"))?))?.unbind());
                         } else if norm == "ji,jk->ik" || norm == "ji,jk" {
-                            let numpy = py.import("numpy")?;
+                            let numpy = cached_numpy(py)?;
                             let at = numpy.call_method1(
                                 intern!(py, "ascontiguousarray"),
-                                (x1.getattr("T")?,),
+                                (x1.getattr(intern!(py, "T"))?,),
                             )?;
                             if let Some(result) = try_native_int_matmul(py, &at, &x2)? {
                                 return Ok(result);
                             }
-                            return Ok(mm.call1((x1.getattr("T")?, &x2))?.unbind());
+                            return Ok(mm.call1((x1.getattr(intern!(py, "T"))?, &x2))?.unbind());
                         } else if let Some(swap_b) = einsum_batched_transposed_spec(&norm) {
                             // Batched transposed bool idioms: bitpacked batched
                             // GEMM after one contiguous swapaxes copy (numpy
                             // bool einsum 72.6ms at (8,256,256) vs ~3ms native);
                             // declined gates fall through to the delegate.
-                            let numpy = py.import("numpy")?;
+                            let numpy = cached_numpy(py)?;
                             if swap_b {
                                 let x2t = numpy.call_method1(
-                                    "ascontiguousarray",
+                                    intern!(py, "ascontiguousarray"),
                                     (x2.call_method1(intern!(py, "swapaxes"), (-1, -2))?,),
                                 )?;
                                 if let Some(result) = try_native_int_batched_matmul(py, &x1, &x2t)?
@@ -102236,7 +102237,7 @@ fn einsum(
                                 }
                             } else {
                                 let x1t = numpy.call_method1(
-                                    "ascontiguousarray",
+                                    intern!(py, "ascontiguousarray"),
                                     (x1.call_method1(intern!(py, "swapaxes"), (-1, -2))?,),
                                 )?;
                                 if let Some(result) = try_native_int_batched_matmul(py, &x1t, &x2)?
@@ -102271,10 +102272,10 @@ fn einsum(
                             // numpy's OWN matmul-transpose route is SLOWER than
                             // its einsum here (153.6ms), so declined gates fall
                             // through to the plain delegate, never a reroute.
-                            let numpy = py.import("numpy")?;
+                            let numpy = cached_numpy(py)?;
                             if swap_b {
                                 let x2t = numpy.call_method1(
-                                    "ascontiguousarray",
+                                    intern!(py, "ascontiguousarray"),
                                     (x2.call_method1(intern!(py, "swapaxes"), (-1, -2))?,),
                                 )?;
                                 if let Some(result) = try_native_int_batched_matmul(py, &x1, &x2t)?
@@ -102283,7 +102284,7 @@ fn einsum(
                                 }
                             } else {
                                 let x1t = numpy.call_method1(
-                                    "ascontiguousarray",
+                                    intern!(py, "ascontiguousarray"),
                                     (x1.call_method1(intern!(py, "swapaxes"), (-1, -2))?,),
                                 )?;
                                 if let Some(result) = try_native_int_batched_matmul(py, &x1t, &x2)?
@@ -102293,20 +102294,20 @@ fn einsum(
                             }
                         } else if norm == "ij,kj->ik" || norm == "ij,kj" {
                             // a @ b.T: transpose-copy b once, then the GEMM.
-                            let numpy = py.import("numpy")?;
+                            let numpy = cached_numpy(py)?;
                             let bt = numpy.call_method1(
                                 intern!(py, "ascontiguousarray"),
-                                (x2.getattr("T")?,),
+                                (x2.getattr(intern!(py, "T"))?,),
                             )?;
                             if let Some(result) = try_native_int_matmul(py, &x1, &bt)? {
                                 return Ok(result);
                             }
                         } else if norm == "ji,jk->ik" || norm == "ji,jk" {
                             // a.T @ b: transpose-copy a once, then the GEMM.
-                            let numpy = py.import("numpy")?;
+                            let numpy = cached_numpy(py)?;
                             let at = numpy.call_method1(
                                 intern!(py, "ascontiguousarray"),
-                                (x1.getattr("T")?,),
+                                (x1.getattr(intern!(py, "T"))?,),
                             )?;
                             if let Some(result) = try_native_int_matmul(py, &at, &x2)? {
                                 return Ok(result);
@@ -102755,7 +102756,7 @@ fn einsum_operand_dtype_policy(
     if args.len() < 2 || args.get_item(0)?.extract::<&str>().is_err() {
         return Ok(EinsumDtypePolicy::Native);
     }
-    let numpy = py.import("numpy")?;
+    let numpy = cached_numpy(py)?;
     let mut operand_arrays: Vec<Bound<'_, PyAny>> = Vec::with_capacity(args.len() - 1);
     let mut all_float64 = true;
     for i in 1..args.len() {
@@ -102783,9 +102784,6 @@ fn einsum_operand_dtype_policy(
     })
 }
 
-/// Native einsum fast path: returns `Some(result)` when the call is the common
-/// real-float, string-subscripts form our kernel handles, else `None` (caller
-/// falls back to numpy).
 #[derive(Clone, Copy)]
 enum EinsumSingleDiagonalKind {
     Trace,
@@ -102882,7 +102880,7 @@ fn is_exact_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<
 fn build_f64_scalar(py: Python<'_>, value: f64) -> PyResult<Py<PyAny>> {
     static NUMPY_FLOAT64_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
     let float64_type = NUMPY_FLOAT64_TYPE.get_or_try_init(py, || -> PyResult<Py<PyType>> {
-        let ty = py.import("numpy")?.getattr(intern!(py, "float64"))?;
+        let ty = cached_numpy(py)?.getattr(intern!(py, "float64"))?;
         Ok(ty.cast_into::<PyType>()?.unbind())
     })?;
     Ok(float64_type.bind(py).call1((value,))?.unbind())
@@ -105241,20 +105239,20 @@ fn unique(
         // Parallel memcmp sort+dedup for large flat fixed-width unicode ('U', Latin-1; wide
         // codepoints >= 0x100 defer). numpy's per-record string comparator is ~5x slower.
         {
-            let numpy = py.import("numpy")?;
-            if let Some(out) = try_native_string_unique_flat(py, &numpy, &item)? {
+            let numpy = cached_numpy(py)?;
+            if let Some(out) = try_native_string_unique_flat(py, numpy, &item)? {
                 return Ok(out);
             }
             // Parallel lexicographic sort+dedup for large flat complex128 (numpy ~2.8s @2M; NaN/-0.0 defer).
-            if let Some(out) = try_zerocopy_c128_unique_flat(py, &numpy, &item)? {
+            if let Some(out) = try_zerocopy_c128_unique_flat(py, numpy, &item)? {
                 return Ok(out);
             }
             // complex64 twin (f32 pairs).
-            if let Some(out) = try_zerocopy_c64_unique_flat(py, &numpy, &item)? {
+            if let Some(out) = try_zerocopy_c64_unique_flat(py, numpy, &item)? {
                 return Ok(out);
             }
             // datetime64/timedelta64 unique via int64 sort+dedup (numpy ~665ms @2M; NaT defer).
-            if let Some(out) = try_native_datetime_unique_flat(py, &numpy, &item)? {
+            if let Some(out) = try_native_datetime_unique_flat(py, numpy, &item)? {
                 return Ok(out);
             }
             // structured all-int64-field 1-D unique via int64-view row-unique (numpy ~776ms @1M).
@@ -105263,11 +105261,11 @@ fn unique(
             }
             // Mixed-field structured (int/uint/bool/float, any width): value-lex via a memcmp-comparable
             // byte-transform record sort (numpy ~778ms @1M i8+f8; float fields defer NaN/-0.0).
-            if let Some(out) = try_native_unique_struct_valuelex(py, &numpy, &item)? {
+            if let Some(out) = try_native_unique_struct_valuelex(py, numpy, &item)? {
                 return Ok(out);
             }
             // float16 unique: widen exact to f32, unique, narrow result back to f16 (numpy f16 ~170ms @4M).
-            if let Some(out) = try_native_f16_unique(py, &numpy, &item)? {
+            if let Some(out) = try_native_f16_unique(py, numpy, &item)? {
                 return Ok(out);
             }
         }
@@ -105321,8 +105319,8 @@ fn unique(
                 return Ok(out);
             }
             {
-                let numpy = py.import("numpy")?;
-                if let Some(out) = try_native_string_unique_full(py, &numpy, &item, ri, rinv, rc)? {
+                let numpy = cached_numpy(py)?;
+                if let Some(out) = try_native_string_unique_full(py, numpy, &item, ri, rinv, rc)? {
                     return Ok(out);
                 }
             }
@@ -105452,14 +105450,14 @@ fn unique(
                 }
                 None if ri || rinv || rc => {
                     // 1-D structured all-int64 factorize (record group-by) via the int64-view row _full.
-                    let numpy = py.import("numpy")?;
                     if let Some(out) = try_native_unique_struct_int64_full(py, &item, ri, rinv, rc)?
                     {
                         return Ok(out);
                     }
                     // 1-D MIXED-field structured factorize via the byte-transform value-lex sort (numpy ~1.24s @1M).
+                    let numpy = cached_numpy(py)?;
                     if let Some(out) =
-                        try_native_unique_struct_valuelex_full(py, &numpy, &item, ri, rinv, rc)?
+                        try_native_unique_struct_valuelex_full(py, numpy, &item, ri, rinv, rc)?
                     {
                         return Ok(out);
                     }
