@@ -100293,7 +100293,8 @@ fn try_native_f16_einsum_chain3(
     if !opt.is_instance_of::<pyo3::types::PyBool>() || !opt.extract::<bool>()? {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     let sb = spec.as_bytes();
@@ -102732,7 +102733,7 @@ fn einsum_operand_dtype_policy(
     // Only the string-subscript form (`einsum("ij,jk->ik", a, b, ...)`) has operands at
     // args[1..]; the interleaved-list form and empty calls fall through to einsum_native,
     // which returns None for them, so leaving them Native is harmless.
-    if args.len() < 2 || args.get_item(0)?.extract::<String>().is_err() {
+    if args.len() < 2 || args.get_item(0)?.extract::<&str>().is_err() {
         return Ok(EinsumDtypePolicy::Native);
     }
     let numpy = py.import("numpy")?;
