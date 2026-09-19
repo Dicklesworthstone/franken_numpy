@@ -16553,7 +16553,7 @@ fn try_zerocopy_int_select(
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     // Every choice must share the EXACT dtype (mixed dtypes -> numpy promotion).
     for choice in &choice_items[1..] {
-        if !choice.is_exact_instance(&ndarray_type)
+        if !choice.is_exact_instance(ndarray_type)
             || !choice.getattr(intern!(py, "dtype"))?.eq(&dt)?
         {
             return Ok(None);
@@ -16582,7 +16582,7 @@ fn try_zerocopy_int_select(
     if let Some(d) = default {
         let bound = d.bind(py);
         if bound.is_none() {
-        } else if bound.is_exact_instance(&ndarray_type) {
+        } else if bound.is_exact_instance(ndarray_type) {
             if !bound.getattr(intern!(py, "dtype"))?.eq(&dt)? {
                 return Ok(None);
             }
@@ -16630,7 +16630,7 @@ fn try_zerocopy_int_select(
             let mut cond_buffers: Vec<PyBuffer<u8>> = Vec::with_capacity(k);
             let mut expected_shape: Option<Vec<usize>> = None;
             for condition in &cond_items {
-                if !condition.is_exact_instance(&ndarray_type)
+                if !condition.is_exact_instance(ndarray_type)
                     || dtype_kind_of(condition) != Some('b')
                 {
                     return Ok(None);
@@ -17731,7 +17731,6 @@ fn try_zerocopy_any_compact(
     cond: &Bound<'_, PyAny>,
     arr: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(py)?;
     if !arr.is_exact_instance(ndarray_type) || !cond.is_exact_instance(ndarray_type) {
         return Ok(None);
@@ -27173,10 +27172,10 @@ fn try_zerocopy_int_clip_arrays(
 ) -> PyResult<Option<Py<PyAny>>> {
     const CLIP_ARRAYS_PARALLEL_MIN: usize = 1 << 20;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?;
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
     for operand in [a, lo, hi] {
-        if !operand.is_exact_instance(&ndarray_type) {
+        if !operand.is_exact_instance(ndarray_type) {
             return Ok(None);
         }
         // All three must share ONE integer dtype (mixed dtypes promote in
@@ -27348,10 +27347,10 @@ fn try_zerocopy_float_clip_arrays(
 ) -> PyResult<Option<Py<PyAny>>> {
     const CLIP_ARRAYS_PARALLEL_MIN: usize = 1 << 20;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?;
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
     for operand in [a, lo, hi] {
-        if !operand.is_exact_instance(&ndarray_type) {
+        if !operand.is_exact_instance(ndarray_type) {
             return Ok(None);
         }
         // All three must share ONE float dtype (mixed promotes; defer).
@@ -27703,10 +27702,10 @@ fn try_native_repeat_array(
         return Ok(None);
     }
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !a.is_exact_instance(&ndarray_type)
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !a.is_exact_instance(ndarray_type)
         || a.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0
-        || !repeats.is_exact_instance(&ndarray_type)
+        || !repeats.is_exact_instance(ndarray_type)
     {
         return Ok(None);
     }
@@ -27851,12 +27850,12 @@ fn try_native_repeat_scalar(
     // Rebound rather than replaced: the use below is `is_instance`, not
     // `is_exact_instance`, so it deliberately admits ndarray SUBCLASSES and the
     // cached exact-type check would silently narrow it (`deadlock-audit-v46rn`).
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?;
     // Scalar integer count only (a per-element repeats array won't extract to i64 -> defer).
     if a.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0 {
         return Ok(None);
     }
-    if repeats.is_instance(&ndarray_type).unwrap_or(false)
+    if repeats.is_instance(ndarray_type).unwrap_or(false)
         || repeats.is_instance_of::<pyo3::types::PyList>()
         || repeats.is_instance_of::<pyo3::types::PyTuple>()
     {
