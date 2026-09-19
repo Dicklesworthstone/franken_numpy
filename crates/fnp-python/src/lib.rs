@@ -7269,7 +7269,7 @@ fn collect_native_npz_entries(
 
 fn numpy_savez_call(
     py: Python<'_>,
-    function_name: &str,
+    compressed: bool,
     file: &Py<PyAny>,
     args: &Bound<'_, PyTuple>,
     allow_pickle: bool,
@@ -7289,8 +7289,12 @@ fn numpy_savez_call(
         }
     }
     call_kwargs.set_item(intern!(py, "allow_pickle"), allow_pickle)?;
-    Ok(numpy
-        .getattr(function_name)?
+    let func = if compressed {
+        numpy.getattr(intern!(py, "savez_compressed"))?
+    } else {
+        numpy.getattr(intern!(py, "savez"))?
+    };
+    Ok(func
         .call(&positional, Some(&call_kwargs))?
         .unbind())
 }
@@ -7303,12 +7307,7 @@ fn savez_impl(
     kwds: Option<&Bound<'_, PyDict>>,
     compressed: bool,
 ) -> PyResult<Py<PyAny>> {
-    let function_name = if compressed {
-        "savez_compressed"
-    } else {
-        "savez"
-    };
-    let fallback = || numpy_savez_call(py, function_name, &file, args, allow_pickle, kwds);
+    let fallback = || numpy_savez_call(py, compressed, &file, args, allow_pickle, kwds);
 
     let file_bound = file.bind(py);
     if !file_bound.hasattr(intern!(py, "write"))? {
@@ -7322,7 +7321,7 @@ fn savez_impl(
         .iter()
         .map(|entry| {
             (
-                entry.name.as_str(),
+                entry.name.as_ref(),
                 entry.array.shape(),
                 entry.array.values(),
                 entry.dtype,
