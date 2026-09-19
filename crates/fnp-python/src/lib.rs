@@ -97708,11 +97708,12 @@ fn try_native_f16_einsum_matmul(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Explicit "AB,BC->AC" with three distinct ASCII-letter labels only.
-    let bytes: Vec<u8> = spec.bytes().collect();
+    let bytes = spec.as_bytes();
     if bytes.len() != 9
         || bytes[2] != b','
         || bytes[5] != b'-'
@@ -97884,11 +97885,12 @@ fn try_native_f16_einsum_matmul_transposed(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Explicit "AB,CB->AC" with three distinct ASCII-letter labels only.
-    let bytes: Vec<u8> = spec.bytes().collect();
+    let bytes = spec.as_bytes();
     if bytes.len() != 9
         || bytes[2] != b','
         || bytes[5] != b'-'
@@ -98103,11 +98105,12 @@ fn try_native_f16_einsum_matmul_gram(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Explicit "AB,AC->BC" with three distinct ASCII-letter labels only.
-    let bytes: Vec<u8> = spec.bytes().collect();
+    let bytes = spec.as_bytes();
     if bytes.len() != 9
         || bytes[2] != b','
         || bytes[5] != b'-'
@@ -98249,7 +98252,8 @@ fn try_native_f16_einsum_full_contraction(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Explicit full contraction "X,X->" (scalar output) where X is 1..=3
@@ -98260,7 +98264,7 @@ fn try_native_f16_einsum_full_contraction(
     // an m*n=8193 buffer-straddling case; artifact fullcontract_f16_verify.py).
     // Repeated letters inside X (diagonal semantics) and mismatched label
     // orders ('ij,ji->' - non-coalescible transposed iteration) are excluded.
-    let bytes: Vec<u8> = spec.bytes().collect();
+    let bytes = spec.as_bytes();
     let total = bytes.len();
     if !(5..=9).contains(&total) || !(total - 3).is_multiple_of(2) {
         return Ok(None);
@@ -98389,11 +98393,12 @@ fn try_native_f16_einsum_matmul_batched(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Explicit "ABC,ACD->ABD" with four distinct ASCII-letter labels only.
-    let bytes: Vec<u8> = spec.bytes().collect();
+    let bytes = spec.as_bytes();
     if bytes.len() != 12
         || bytes[3] != b','
         || bytes[7] != b'-'
@@ -98577,11 +98582,12 @@ fn try_native_f16_einsum_transposed_batched(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Explicit "ABC,ADC->ABD" with four distinct ASCII-letter labels only.
-    let bytes: Vec<u8> = spec.bytes().collect();
+    let bytes = spec.as_bytes();
     if bytes.len() != 12
         || bytes[3] != b','
         || bytes[7] != b'-'
@@ -98767,12 +98773,13 @@ fn try_native_f16_einsum_gram_batched(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Explicit "ABC,ABD->ACD" (summed label SECOND in both operands, batch
     // first) with four distinct ASCII-letter labels only.
-    let bytes: Vec<u8> = spec.bytes().collect();
+    let bytes = spec.as_bytes();
     if bytes.len() != 12
         || bytes[3] != b','
         || bytes[7] != b'-'
@@ -98926,12 +98933,13 @@ fn try_native_f16_einsum_elementwise(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Explicit "X,X->X" where X is 1..=3 distinct ASCII letters repeated
     // verbatim in all three positions.
-    let bytes: Vec<u8> = spec.bytes().collect();
+    let bytes = spec.as_bytes();
     let total = bytes.len();
     if !(6..=12).contains(&total) || !total.is_multiple_of(3) {
         return Ok(None);
@@ -101887,13 +101895,22 @@ fn einsum(
     if let Some(result) = try_native_f16_einsum_chain3(py, args, kwargs)? {
         return Ok(result);
     }
+    let spec_item = if !args.is_empty() {
+        args.get_item(0).ok()
+    } else {
+        None
+    };
+    let spec_str: Option<&str> = match &spec_item {
+        Some(item) => item.extract::<&str>().ok(),
+        None => None,
+    };
     // Single-operand ELLIPSIS einsum: the native kernel handles ellipsis catastrophically slowly
     // — "...ij->...ji" (transpose) is 1000-5000x (numpy returns an O(1) view), "...ij->...i"/
     // "...ii->...i" (reduce/diagonal) 1.9-5.4x. No single-operand ellipsis form can hit a native
     // win, so delegate them all to numpy. (Multi-operand ellipsis is handled below / kept native
     // for the GEMM case.) (BlackThrush 2026-06-22.)
     if args.len() == 2
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && let Some(spec) = spec_str
         && spec.contains("...")
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
@@ -101906,8 +101923,8 @@ fn einsum(
     // everything else). The winning two-operand contractions and the
     // transpose/diagonal views are excluded.
     if args.len() == 2
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_single_reduce(&spec)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_single_reduce(spec)
     {
         if kwargs.is_none() || kwargs.is_some_and(|k| k.is_empty()) {
             if let Some(result) = try_native_f16_einsum_reduce(py, args)? {
@@ -101926,8 +101943,8 @@ fn einsum(
     // "iij->ij", "ii"=trace) that the plain-"ii->i" fast path above misses: the generic
     // native kernel is 43-1339x slower than numpy's strided diagonal -> delegate for parity.
     if args.len() == 2
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_single_diag(&spec)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_single_diag(spec)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
@@ -101936,8 +101953,8 @@ fn einsum(
     // (the small all-vector 2-op outer "i,j->ij" is kept native by the detector — it wins).
     // (BlackThrush 2026-06-22; cf single-reduce / single-diag delegates above.)
     if args.len() >= 3
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_outer(&spec)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_outer(spec)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
@@ -101945,16 +101962,16 @@ fn einsum(
     // tensor-vector "ijk,k->ij" 3-12x). The fast matvec-RIGHT "ij,j->i" is kept native by the
     // detector. (bead x6ndg, BlackThrush 2026-06-22.)
     if args.len() == 3
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_slow_vector_contraction(&spec)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_slow_vector_contraction(spec)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // Batched vector contraction ("bij,bj->bi" 4x, "bi,bij->bj" 8x, "bijk,bk->bij" 3x): the
     // per-batch GEMV loop loses to numpy's batched build. (bead x6ndg, BlackThrush 2026-06-22.)
     if args.len() == 3
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_batched_vector_contraction(&spec)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_batched_vector_contraction(spec)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
@@ -101962,16 +101979,16 @@ fn einsum(
     // index makes the operand a diagonal -> never GEMM-able -> native kernel loses 10-41x. Delegate.
     // (bead x6ndg, BlackThrush 2026-06-23.)
     if args.len() == 3
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_diagonal_2op(&spec)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_diagonal_2op(spec)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
     // 2-operand ellipsis non-GEMM ("i...,i->..." dot 42x, "...ij,...j->...i" batched-matvec 3.2x):
     // ellipsis-batched-matmul stays native (wins). (bead x6ndg, BlackThrush 2026-06-23.)
     if args.len() == 3
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_ellipsis_2op_nongemm(&spec)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_ellipsis_2op_nongemm(spec)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
@@ -101979,8 +101996,8 @@ fn einsum(
     // native kernel won't reshape into one GEMM. The op1-multi-free mirror "bij,jk->bik" WINS and
     // is kept native. (bead x6ndg, BlackThrush 2026-06-22.)
     if args.len() == 3
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_op2_multifree_contraction(&spec)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_op2_multifree_contraction(spec)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
@@ -101991,8 +102008,8 @@ fn einsum(
     // and all 2-label forms WIN natively and are excluded by the detector (>=3 labels + the
     // prefix test). Delegate the matched forms to numpy.einsum for parity. (BlackThrush 2026-06-27.)
     if args.len() == 3
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_allshared_nonprefix_contraction(&spec, args.len() - 1)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_allshared_nonprefix_contraction(spec, args.len() - 1)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
@@ -102003,8 +102020,8 @@ fn einsum(
     // in op2 ("ij,jk->ik" GEMM) makes op2 not a subset (excluded). Delegate to numpy.einsum.
     // (BlackThrush 2026-06-27.)
     if args.len() == 3
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_op2_subset_multicontract(&spec, args.len() - 1)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_op2_subset_multicontract(spec, args.len() - 1)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
@@ -102014,8 +102031,8 @@ fn einsum(
     // numpy. The SAME-ORDER form ("ij,ij->") is a contiguous reduction that WINS natively and is
     // excluded (g0 == g1). Delegate to numpy.einsum. (BlackThrush 2026-06-27.)
     if args.len() == 3
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_transposed_full_contraction(&spec, args.len() - 1)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_transposed_full_contraction(spec, args.len() - 1)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
@@ -102024,8 +102041,8 @@ fn einsum(
     // native generic sum-of-products kernel by 10-27x. GEMM chains and outer-introducing forms
     // are excluded by the detector because no operand contains the whole label universe.
     if args.len() >= 4
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_hub_contraction(&spec, args.len() - 1)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_hub_contraction(spec, args.len() - 1)
     {
         return core_numpy_passthrough_interned(py, intern!(py, "einsum"), args, kwargs);
     }
@@ -102042,11 +102059,11 @@ fn einsum(
     // the transposed/out-of-order form or any size mismatch, and 3+ operands aren't routed to
     // it. Only with no special kwargs so we never have to re-translate them.
     if (kwargs.is_none() || kwargs.is_some_and(|k| k.is_empty()))
-        && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_nocontract(&spec, args.len() - 1)
+        && let Some(spec) = spec_str
+        && einsum_spec_is_nocontract(spec, args.len() - 1)
     {
         if args.len() == 3
-            && let Some(result) = try_einsum_broadcast_mul_2op(py, &spec, args)?
+            && let Some(result) = try_einsum_broadcast_mul_2op(py, spec, args)?
         {
             return Ok(result);
         }
@@ -102854,10 +102871,11 @@ fn try_buffered_f64_einsum_single_diagonal(
     if args.len() != 2 || !einsum_kwargs_are_native_eligible(kwargs)? {
         return Ok(None);
     }
-    let Ok(subscripts) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(subscripts) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
-    let Some(kind) = parse_single_operand_diagonal_einsum(&subscripts) else {
+    let Some(kind) = parse_single_operand_diagonal_einsum(subscripts) else {
         return Ok(None);
     };
     let operand = args.get_item(1)?;
