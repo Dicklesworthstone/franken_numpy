@@ -32365,7 +32365,7 @@ fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // (unsigned -> all False) is the exact oracle, so delegate instead.
     {
         if x.is_exact_instance(cached_ndarray_type(py)?) {
-            let kind: String = x
+            let kind: char = x
                 .getattr(intern!(py, "dtype"))?
                 .getattr(intern!(py, "kind"))?
                 .extract()?;
@@ -32380,12 +32380,12 @@ fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             // widen extract (~19ms/1M); uint went to numpy. (signed int is NOT
             // constant -> keep delegating.)
             if c_contiguous
-                && (kind == "u" || kind == "b")
+                && (kind == 'u' || kind == 'b')
                 && let Some(out) = try_const_bool_integral(py, x, false)?
             {
                 return Ok(out);
             }
-            if kind == "i" || kind == "u" || !c_contiguous {
+            if kind == 'i' || kind == 'u' || !c_contiguous {
                 return Ok(signbit_fn.call1((x,))?.unbind());
             }
         }
@@ -99052,16 +99052,16 @@ fn try_native_f64f32_einsum_elementwise(
     if !is_exact_numpy_ndarray(py, &x1)? || !is_exact_numpy_ndarray(py, &x2)? {
         return Ok(None);
     }
-    let dtype_of = |v: &Bound<'_, PyAny>| -> PyResult<(String, usize)> {
+    let dtype_of = |v: &Bound<'_, PyAny>| -> PyResult<(char, usize)> {
         let dt = v.getattr(intern!(py, "dtype"))?;
         Ok((
-            dt.getattr(intern!(py, "kind"))?.extract::<String>()?,
+            dt.getattr(intern!(py, "kind"))?.extract::<char>()?,
             dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?,
         ))
     };
     let (k1, s1) = dtype_of(&x1)?;
     let (k2, s2) = dtype_of(&x2)?;
-    if k1 != "f" || k2 != "f" || s1 != s2 || !(s1 == 4 || s1 == 8) {
+    if k1 != 'f' || k2 != 'f' || s1 != s2 || !(s1 == 4 || s1 == 8) {
         return Ok(None);
     }
     let is_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
@@ -99229,16 +99229,16 @@ fn try_native_einsum_broadcast_elementwise(
     if !full_op.is_exact_instance(&ndarray_type) || !vec_op.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let dtype_of = |v: &Bound<'_, PyAny>| -> PyResult<(String, usize)> {
+    let dtype_of = |v: &Bound<'_, PyAny>| -> PyResult<(char, usize)> {
         let dt = v.getattr(intern!(py, "dtype"))?;
         Ok((
-            dt.getattr(intern!(py, "kind"))?.extract::<String>()?,
+            dt.getattr(intern!(py, "kind"))?.extract::<char>()?,
             dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?,
         ))
     };
     let (k1, s1) = dtype_of(&full_op)?;
     let (k2, s2) = dtype_of(&vec_op)?;
-    if k1 != "f" || k2 != "f" || s1 != s2 || !(s1 == 2 || s1 == 4 || s1 == 8) {
+    if k1 != 'f' || k2 != 'f' || s1 != s2 || !(s1 == 2 || s1 == 4 || s1 == 8) {
         return Ok(None);
     }
     let is_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
@@ -99459,7 +99459,7 @@ fn try_native_f16_einsum_reduce(
         return Ok(None);
     }
     let dt = x1.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
     {
         return Ok(None);
@@ -99749,7 +99749,7 @@ fn try_native_f64_einsum_reduce(
         return Ok(None);
     }
     let dt = x1.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
     {
         return Ok(None);
@@ -100015,7 +100015,7 @@ fn try_native_f32_einsum_reduce(
         return Ok(None);
     }
     let dt = x1.getattr(intern!(py, "dtype"))?;
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
     {
         return Ok(None);
@@ -100275,7 +100275,7 @@ fn try_native_f16_einsum_chain3(
         let Ok(dt) = v.getattr(intern!(py, "dtype")) else {
             return Ok(false);
         };
-        Ok(dt.getattr(intern!(py, "kind"))?.extract::<String>()? == "f"
+        Ok(dt.getattr(intern!(py, "kind"))?.extract::<char>()? == 'f'
             && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 2)
     };
     if !is_f16(&x1)? || !is_f16(&x2)? || !is_f16(&x3)? {
@@ -100348,10 +100348,10 @@ fn try_native_int_tensordot(
     if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
         return Ok(None);
     }
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     // "b" reshapes into the same 2-D GEMM route; the dispatcher picks the
     // bitpacked OR-AND kernel for it.
-    if kind != "i" && kind != "u" && kind != "b" {
+    if kind != 'i' && kind != 'u' && kind != 'b' {
         return Ok(None);
     }
     let is_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
@@ -100450,8 +100450,8 @@ fn try_native_int_tensordot_tuple_axes(
     if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
         return Ok(None);
     }
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
     let notin_a: Vec<usize> = (0..an).filter(|d| !ax_a.contains(d)).collect();
@@ -100519,10 +100519,10 @@ fn try_native_int_inner(
     if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
         return Ok(None);
     }
-    let kind = dt.getattr(intern!(py, "kind"))?.extract::<String>()?;
+    let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     // "b" contracts through the same a @ b^T 2-D GEMM route; the dispatcher
     // picks the bitpacked OR-AND kernel for it.
-    if kind != "i" && kind != "u" && kind != "b" {
+    if kind != 'i' && kind != 'u' && kind != 'b' {
         return Ok(None);
     }
     let is_contig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
@@ -100599,7 +100599,7 @@ fn try_native_f16_tensordot(
     if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
         return Ok(None);
     }
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
     {
         return Ok(None);
@@ -100658,7 +100658,7 @@ fn try_native_f16_inner(
     if !dt.eq(b.getattr(intern!(py, "dtype"))?)? {
         return Ok(None);
     }
-    if dt.getattr(intern!(py, "kind"))?.extract::<String>()? != "f"
+    if dt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2
     {
         return Ok(None);
