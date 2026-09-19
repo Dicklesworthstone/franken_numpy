@@ -49740,7 +49740,7 @@ fn try_zerocopy_f64_nanmean_axis0(
         }
     }
     if any_empty {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(intern!(py, "warn"), ("Mean of empty slice", &category))?;
     }
@@ -49848,7 +49848,7 @@ fn try_zerocopy_f64_nanmean_nonlast_axis(
         }
     }
     if any_empty.load(Ordering::Relaxed) {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(intern!(py, "warn"), ("Mean of empty slice", &category))?;
     }
@@ -49972,7 +49972,7 @@ fn try_zerocopy_f32_nanmean_nonlast_axis(
         }
     }
     if any_empty.load(Ordering::Relaxed) {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(intern!(py, "warn"), ("Mean of empty slice", &category))?;
     }
@@ -50305,7 +50305,7 @@ fn try_zerocopy_f32_nanmean_last_axis(
     let any_empty = results.iter().any(|&(_, e)| e);
     let out: Vec<f32> = results.into_iter().map(|(m, _)| m).collect();
     if any_empty {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(intern!(py, "warn"), ("Mean of empty slice", &category))?;
     }
