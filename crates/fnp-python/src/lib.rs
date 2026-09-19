@@ -16530,12 +16530,12 @@ fn try_zerocopy_int_select(
     default: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?;
     let Ok(choice_iter) = choicelist.try_iter() else {
         return Ok(None);
     };
     let choice_items: Vec<Bound<'_, PyAny>> = choice_iter.collect::<PyResult<Vec<_>>>()?;
-    if choice_items.is_empty() || !choice_items[0].is_exact_instance(&ndarray_type) {
+    if choice_items.is_empty() || !choice_items[0].is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let dt = choice_items[0].getattr(intern!(py, "dtype"))?;
@@ -17732,8 +17732,8 @@ fn try_zerocopy_any_compact(
     arr: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !arr.is_exact_instance(&ndarray_type) || !cond.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !arr.is_exact_instance(ndarray_type) || !cond.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let c_dtype = cond.getattr(intern!(py, "dtype"))?;
@@ -23149,8 +23149,8 @@ fn try_zerocopy_digitize(
     right: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x.is_exact_instance(&ndarray_type) || !bins.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !x.is_exact_instance(ndarray_type) || !bins.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     if x.getattr(intern!(py, "ndim"))?.extract::<usize>()? < 1
@@ -23304,8 +23304,8 @@ fn try_zerocopy_bincount(
     minlength: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !x.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
@@ -23435,8 +23435,8 @@ fn try_zerocopy_bincount_weighted(
     minlength: i64,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !x.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let dtype = x.getattr(intern!(py, "dtype"))?;
@@ -23794,10 +23794,10 @@ fn try_zerocopy_f64_interp(
     right: Option<f64>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x.is_exact_instance(&ndarray_type)
-        || !xp.is_exact_instance(&ndarray_type)
-        || !fp.is_exact_instance(&ndarray_type)
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if !x.is_exact_instance(ndarray_type)
+        || !xp.is_exact_instance(ndarray_type)
+        || !fp.is_exact_instance(ndarray_type)
     {
         return Ok(None);
     }
@@ -25498,8 +25498,8 @@ fn take(
         };
         if let Some(scalar_index) = scalar_index {
             let a_bound = b_a;
-            let ndarray_type = cached_ndarray_type(py)?.clone();
-            if a_bound.is_exact_instance(&ndarray_type) {
+            let ndarray_type = cached_ndarray_type(py)?;
+            if a_bound.is_exact_instance(ndarray_type) {
                 let ndim = a_bound.getattr(intern!(py, "ndim"))?.extract::<usize>()?;
                 let flattened = if ndim == 1 {
                     Some(a_bound.clone())
