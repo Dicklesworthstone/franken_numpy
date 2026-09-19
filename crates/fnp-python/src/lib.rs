@@ -7311,7 +7311,7 @@ fn savez_impl(
     let fallback = || numpy_savez_call(py, function_name, &file, args, allow_pickle, kwds);
 
     let file_bound = file.bind(py);
-    if !file_bound.hasattr("write")? {
+    if !file_bound.hasattr(intern!(py, "write"))? {
         return fallback();
     }
 
@@ -56205,24 +56205,19 @@ enum DtSetOp {
 fn numpy_at_least_2_4(py: Python<'_>) -> bool {
     static NP_GE_2_4: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *NP_GE_2_4.get_or_init(|| {
-        py.import("numpy")
-            .and_then(|np| np.getattr(intern!(py, "__version__")))
-            .and_then(|v| v.extract::<String>())
-            .map(|v| {
-                let mut it = v.split('.');
-                let major: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                let minor: u32 = it
-                    .next()
-                    .map(|s| {
-                        s.chars()
-                            .take_while(|c| c.is_ascii_digit())
-                            .collect::<String>()
-                    })
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                (major, minor) >= (2, 4)
+        let Ok(np) = cached_numpy(py) else { return false };
+        let Ok(version_obj) = np.getattr(intern!(py, "__version__")) else { return false };
+        let Ok(v) = version_obj.extract::<&str>() else { return false };
+        let mut it = v.split('.');
+        let major: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let minor: u32 = it
+            .next()
+            .and_then(|s| {
+                let digits = s.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+                digits.parse().ok()
             })
-            .unwrap_or(false)
+            .unwrap_or(0);
+        (major, minor) >= (2, 4)
     })
 }
 
@@ -66096,7 +66091,7 @@ fn save(
     }
 
     let file_bound = file.bind(py);
-    if !file_bound.hasattr("write")? {
+    if !file_bound.hasattr(intern!(py, "write"))? {
         return fallback();
     }
 
@@ -66174,19 +66169,21 @@ fn load(
     }
 
     let file_bound = file.bind(py);
-    let bytes = if let Ok(read_result) = file_bound.call_method0(intern!(py, "read")) {
-        match read_result.extract::<Vec<u8>>() {
-            Ok(bytes) => bytes,
+    let read_buf;
+    let bytes: std::borrow::Cow<'_, [u8]> = if let Ok(read_result) = file_bound.call_method0(intern!(py, "read")) {
+        read_buf = read_result;
+        match read_buf.extract::<&[u8]>() {
+            Ok(bytes) => std::borrow::Cow::Borrowed(bytes),
             Err(_) => return fallback(),
         }
-    } else if let Ok(raw) = file_bound.extract::<Vec<u8>>() {
-        raw
+    } else if let Ok(raw) = file_bound.extract::<&[u8]>() {
+        std::borrow::Cow::Borrowed(raw)
     } else if let Ok(path_obj) = cached_os(py)?
         .getattr(intern!(py, "fspath"))?
         .call1((file_bound,))
         && let Ok(path) = path_obj.extract::<&str>()
     {
-        std::fs::read(path).map_err(|err| PyOSError::new_err(err.to_string()))?
+        std::borrow::Cow::Owned(std::fs::read(path).map_err(|err| PyOSError::new_err(err.to_string()))?)
     } else {
         return fallback();
     };
@@ -66226,7 +66223,7 @@ fn load_via_numpy_bytes(
     max_header_size: usize,
 ) -> PyResult<Py<PyAny>> {
     let io = cached_io(py)?;
-    let buffer = io.getattr("BytesIO")?.call1((PyBytes::new(py, bytes),))?;
+    let buffer = io.getattr(intern!(py, "BytesIO"))?.call1((PyBytes::new(py, bytes),))?;
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "allow_pickle"), allow_pickle)?;
     kwargs.set_item(intern!(py, "fix_imports"), fix_imports)?;
@@ -66293,10 +66290,7 @@ fn tofile(
     sep: &str,
     format: &str,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = cached_numpy(py)?;
-    let array = numpy
-        .getattr(intern!(py, "asarray"))?
-        .call1((a.bind(py),))?;
+    let array = cached_numpy_asarray(py)?.call1((a.bind(py),))?;
     let fallback = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "sep"), sep)?;
@@ -66324,12 +66318,12 @@ fn tofile(
         return fallback();
     }
 
-    let path = match py
-        .import("os")?
-        .getattr(intern!(py, "fspath"))?
-        .call1((fid.bind(py),))
-        .and_then(|path| path.extract::<String>())
-    {
+    let os = cached_os(py)?;
+    let path_obj = match os.getattr(intern!(py, "fspath"))?.call1((fid.bind(py),)) {
+        Ok(path) => path,
+        Err(_) => return fallback(),
+    };
+    let path = match path_obj.extract::<&str>() {
         Ok(path) => path,
         Err(_) => return fallback(),
     };
@@ -66406,16 +66400,21 @@ fn fromfile(
         }
 
         let file_bound = file.bind(py);
-        let text = if let Ok(path_obj) = py
-            .import("os")?
+        let os = cached_os(py)?;
+        let path_obj = os
             .getattr(intern!(py, "fspath"))?
-            .call1((file_bound,))
-            && let Ok(path) = path_obj.extract::<&str>()
+            .call1((file_bound,));
+        let read_buf;
+        let text: std::borrow::Cow<'_, str> = if let Ok(ref path_bound) = path_obj
+            && let Ok(path) = path_bound.extract::<&str>()
         {
-            std::fs::read_to_string(path).map_err(|err| PyOSError::new_err(err.to_string()))?
+            std::borrow::Cow::Owned(
+                std::fs::read_to_string(path).map_err(|err| PyOSError::new_err(err.to_string()))?,
+            )
         } else if let Ok(result) = file_bound.call_method0(intern!(py, "read")) {
-            match result.extract::<String>() {
-                Ok(value) => value,
+            read_buf = result;
+            match read_buf.extract::<&str>() {
+                Ok(value) => std::borrow::Cow::Borrowed(value),
                 Err(_) => return fallback(),
             }
         } else {
@@ -66454,12 +66453,12 @@ fn fromfile(
         Ok(path) => path,
         Err(_) => return fallback(),
     };
-    let path = match path_obj.extract::<String>() {
+    let path = match path_obj.extract::<&str>() {
         Ok(path) => path,
         Err(_) => return fallback(),
     };
 
-    let bytes = std::fs::read(&path).map_err(|err| PyOSError::new_err(err.to_string()))?;
+    let bytes = std::fs::read(path).map_err(|err| PyOSError::new_err(err.to_string()))?;
     if offset < 0 || offset as usize > bytes.len() {
         return Err(PyValueError::new_err(format!(
             "offset must be non-negative and no greater than buffer length ({})",
@@ -66543,10 +66542,17 @@ fn loadtxt(
     // Resolve text content from fname. Accept StringIO, file-like with
     // .read() method, or str path (via open).
     let fname_bound = fname.bind(py);
-    let text: String = if let Ok(s) = fname_bound.extract::<String>() {
+    let read_buf;
+    let text: std::borrow::Cow<'_, str> = if let Ok(s) = fname_bound.extract::<&str>() {
         // Treat as file path.
-        match std::fs::read_to_string(&s) {
-            Ok(value) => value,
+        match std::fs::read_to_string(s) {
+            Ok(value) => std::borrow::Cow::Owned(value),
+            Err(_) => return fallback(py),
+        }
+    } else if let Ok(result) = fname_bound.call_method0(intern!(py, "read")) {
+        read_buf = result;
+        match read_buf.extract::<&str>() {
+            Ok(value) => std::borrow::Cow::Borrowed(value),
             Err(_) => return fallback(py),
         }
     } else {
@@ -66565,7 +66571,7 @@ fn loadtxt(
     };
     let native_f64_request = match dtype.as_ref() {
         None => true,
-        Some(value) => value.bind(py).is(&numpy.getattr(intern!(py, "float64"))?),
+        Some(value) => value.bind(py).is(cached_float64_type(py)?),
     };
 
     // Resolve usecols. None → all columns. Int → single col. List<int>.
