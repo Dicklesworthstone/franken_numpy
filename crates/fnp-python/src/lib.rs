@@ -66184,9 +66184,9 @@ fn load(
     } else if let Ok(path_obj) = cached_os(py)?
         .getattr(intern!(py, "fspath"))?
         .call1((file_bound,))
-        && let Ok(path) = path_obj.extract::<String>()
+        && let Ok(path) = path_obj.extract::<&str>()
     {
-        std::fs::read(&path).map_err(|err| PyOSError::new_err(err.to_string()))?
+        std::fs::read(path).map_err(|err| PyOSError::new_err(err.to_string()))?
     } else {
         return fallback();
     };
@@ -66410,9 +66410,9 @@ fn fromfile(
             .import("os")?
             .getattr(intern!(py, "fspath"))?
             .call1((file_bound,))
-            && let Ok(path) = path_obj.extract::<String>()
+            && let Ok(path) = path_obj.extract::<&str>()
         {
-            std::fs::read_to_string(&path).map_err(|err| PyOSError::new_err(err.to_string()))?
+            std::fs::read_to_string(path).map_err(|err| PyOSError::new_err(err.to_string()))?
         } else if let Ok(result) = file_bound.call_method0(intern!(py, "read")) {
             match result.extract::<String>() {
                 Ok(value) => value,
