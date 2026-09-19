@@ -99056,12 +99056,13 @@ fn try_native_f64f32_einsum_elementwise(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Explicit "X,X->X", X = 1..=3 distinct ASCII letters (same parse as the
     // f16 sibling).
-    let bytes: Vec<u8> = spec.bytes().collect();
+    let bytes = spec.as_bytes();
     let total = bytes.len();
     if !(6..=12).contains(&total) || !total.is_multiple_of(3) {
         return Ok(None);
@@ -99213,12 +99214,13 @@ fn try_native_einsum_broadcast_elementwise(
     if args.len() != 3 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // "FULL,V->FULL" or "V,FULL->FULL" where FULL is 2..=3 distinct ASCII
     // letters and V is ONE letter of FULL (any axis - first/middle/last).
-    let clean: Vec<u8> = spec.bytes().collect();
+    let clean = spec.as_bytes();
     let Some(comma) = clean.iter().position(|&c| c == b',') else {
         return Ok(None);
     };
@@ -99447,7 +99449,8 @@ fn try_native_f16_einsum_reduce(
     if args.len() != 2 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Split "INP->OUT": INP = 1..=3 distinct ASCII letters; OUT must be a
@@ -99737,7 +99740,8 @@ fn try_native_f64_einsum_reduce(
     if args.len() != 2 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Split "INP->OUT": INP = 1..=3 distinct ASCII letters; OUT must be a
@@ -100003,7 +100007,8 @@ fn try_native_f32_einsum_reduce(
     if args.len() != 2 {
         return Ok(None);
     }
-    let Ok(spec) = args.get_item(0)?.extract::<String>() else {
+    let spec_item = args.get_item(0)?;
+    let Ok(spec) = spec_item.extract::<&str>() else {
         return Ok(None);
     };
     // Split "INP->OUT": INP = 1..=3 distinct ASCII letters; OUT must be a
