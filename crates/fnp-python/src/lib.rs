@@ -87122,7 +87122,7 @@ fn parse_diag_indices_args<'py>(
     }
     if let Some(kwargs) = kwargs {
         for key in kwargs.keys() {
-            let Ok(name) = key.extract::<String>() else {
+            let Ok(name) = key.extract::<&str>() else {
                 return Ok(None);
             };
             match NAMES.iter().position(|candidate| *candidate == name) {
@@ -87132,7 +87132,7 @@ fn parse_diag_indices_args<'py>(
                         // "got multiple values for argument" error.
                         return Ok(None);
                     }
-                    slots[index] = kwargs.get_item(name.as_str())?;
+                    slots[index] = kwargs.get_item(name)?;
                 }
                 None => return Ok(None),
             }
@@ -87212,7 +87212,7 @@ fn parse_tril_triu_indices_args<'py>(
     }
     if let Some(kwargs) = kwargs {
         for (key, val) in kwargs.iter() {
-            let Ok(name) = key.extract::<String>() else {
+            let Ok(name) = key.extract::<&str>() else {
                 return Ok(None);
             };
             match NAMES.iter().position(|candidate| *candidate == name) {
@@ -87271,7 +87271,7 @@ fn parse_indices_from_args<'py>(
     }
     if let Some(kwargs) = kwargs {
         for (key, val) in kwargs.iter() {
-            let Ok(name) = key.extract::<String>() else {
+            let Ok(name) = key.extract::<&str>() else {
                 return Ok(None);
             };
             match NAMES.iter().position(|candidate| *candidate == name) {
@@ -89143,8 +89143,8 @@ fn has_unrecognized_kwargs(kwargs: Option<&Bound<'_, PyDict>>, allowed: &[&str])
         return Ok(false);
     };
     for (key, _) in kwargs.iter() {
-        let key = key.extract::<String>()?;
-        if !allowed.contains(&key.as_str()) {
+        let key = key.extract::<&str>()?;
+        if !allowed.contains(&key) {
             return Ok(true);
         }
     }
@@ -101101,7 +101101,7 @@ fn try_einsum_transpose_view(
     if let Some(kw) = kwargs {
         for key in kw.keys() {
             if key
-                .extract::<String>()
+                .extract::<&str>()
                 .map(|k| k != "optimize")
                 .unwrap_or(true)
             {
@@ -101109,7 +101109,7 @@ fn try_einsum_transpose_view(
             }
         }
     }
-    let Ok(subscripts) = args.get_item(0)?.extract::<String>() else {
+    let Ok(subscripts) = args.get_item(0)?.extract::<&str>() else {
         return Ok(None);
     };
     let Some((inp, outp)) = subscripts.split_once("->") else {
@@ -102805,7 +102805,7 @@ fn parse_single_operand_reduction_2d_einsum(
 fn einsum_kwargs_are_native_eligible(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<bool> {
     if let Some(kw) = kwargs {
         for key in kw.keys() {
-            let name: String = key.extract()?;
+            let name: &str = key.extract()?;
             if name != "optimize" {
                 return Ok(false);
             }
@@ -105251,7 +105251,7 @@ fn unique(
         let mut allowed_only = true;
         let (mut ri, mut rinv, mut rc) = (false, false, false);
         for (k, v) in kw.iter() {
-            match k.extract::<String>()?.as_str() {
+            match k.extract::<&str>()? {
                 "return_index" => ri = v.extract()?,
                 "return_inverse" => rinv = v.extract()?,
                 "return_counts" => rc = v.extract()?,
@@ -105288,7 +105288,7 @@ fn unique(
         let mut ok_kwargs = true;
         let (mut ri, mut rinv, mut rc) = (false, false, false);
         for (k, v) in kw.iter() {
-            match k.extract::<String>()?.as_str() {
+            match k.extract::<&str>()? {
                 "axis" if v.is_none() => axis = None,
                 "axis" => match v.extract::<i64>() {
                     Ok(value) => axis = Some(value),
