@@ -66364,7 +66364,11 @@ fn fromfile(
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let initial_pos = file.bind(py).call_method0(intern!(py, "tell")).ok();
     let fallback = || -> PyResult<Py<PyAny>> {
+        if let Some(ref pos) = initial_pos {
+            let _ = file.bind(py).call_method1(intern!(py, "seek"), (pos,));
+        }
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
@@ -66490,7 +66494,11 @@ fn loadtxt(
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    let initial_pos = fname.bind(py).call_method0(intern!(py, "tell")).ok();
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
+        if let Some(ref pos) = initial_pos {
+            let _ = fname.bind(py).call_method1(intern!(py, "seek"), (pos,));
+        }
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
