@@ -56061,20 +56061,16 @@ fn try_narrow_int_setop_native(
     let numpy = cached_numpy(py)?;
     let a = numpy.call_method1(intern!(py, "asarray"), (ar1,))?;
     let b = numpy.call_method1(intern!(py, "asarray"), (ar2,))?;
-    let adt = a
-        .getattr(intern!(py, "dtype"))?
-        .str()?
-        .extract::<String>()?;
-    let bdt = b
-        .getattr(intern!(py, "dtype"))?
-        .str()?
-        .extract::<String>()?;
+    let adt_str = a.getattr(intern!(py, "dtype"))?.str()?;
+    let adt = adt_str.extract::<&str>()?;
+    let bdt_str = b.getattr(intern!(py, "dtype"))?.str()?;
+    let bdt = bdt_str.extract::<&str>()?;
     if adt != bdt {
         return Ok(None);
     }
     // Only same-dtype integer inputs are bitmap-eligible; bail early otherwise so
     // we don't pay the reshape/buffer read for floats/complex/strings.
-    let parsed = DType::parse(&adt);
+    let parsed = DType::parse(adt);
     if !matches!(
         parsed,
         Some(
@@ -59928,17 +59924,14 @@ fn native_asarray_like(
     // Resolve requested order: None (no requirement), 'C', 'F', 'K', 'A'.
     let requested_order: Option<&str> = match order {
         Some(v) if v.is_none() => None,
-        Some(v) => match v.extract::<String>() {
-            Ok(s) if matches!(s.as_str(), "C" | "F" | "K" | "A") => {
-                // Store as 'static by mapping through a match below.
-                match s.as_str() {
-                    "C" => Some("C"),
-                    "F" => Some("F"),
-                    "K" => Some("K"),
-                    "A" => Some("A"),
-                    _ => return Ok(None),
-                }
-            }
+        Some(v) => match v.extract::<&str>() {
+            Ok(s) => match s {
+                "C" => Some("C"),
+                "F" => Some("F"),
+                "K" => Some("K"),
+                "A" => Some("A"),
+                _ => return Ok(None),
+            },
             _ => return Ok(None),
         },
         None => None,
@@ -69312,7 +69305,7 @@ fn linalg_matrix_norm(
     // 2 = nuclear (sum). None = not an SVD-derived order.
     let svd_mode: Option<u8> = ord.as_ref().and_then(|ord_val| {
         let bound = ord_val.bind(py);
-        if let Ok(text) = bound.extract::<String>() {
+        if let Ok(text) = bound.extract::<&str>() {
             if text == "nuc" { Some(2) } else { None }
         } else if let Ok(f) = bound.extract::<f64>() {
             if f == 2.0 {
@@ -69452,8 +69445,9 @@ fn asfortranarray(
             let parsed = numpy
                 .getattr(intern!(py, "dtype"))?
                 .call1((dtype_val.bind(py),))?;
-            let name = parsed.getattr(intern!(py, "name"))?.extract::<String>()?;
-            match DType::parse(&name) {
+            let name_attr = parsed.getattr(intern!(py, "name"))?;
+            let name = name_attr.extract::<&str>()?;
+            match DType::parse(name) {
                 Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
                 _ => return fallback(py),
             }
@@ -69480,11 +69474,10 @@ fn asfortranarray(
         && match requested_dtype {
             None => true,
             Some(want) => {
-                let source_dtype_name = source_array
-                    .getattr(intern!(py, "dtype"))?
-                    .getattr(intern!(py, "name"))?
-                    .extract::<String>()?;
-                DType::parse(&source_dtype_name) == Some(want)
+                let source_dtype = source_array.getattr(intern!(py, "dtype"))?;
+                let name_attr = source_dtype.getattr(intern!(py, "name"))?;
+                let source_dtype_name = name_attr.extract::<&str>()?;
+                DType::parse(source_dtype_name) == Some(want)
             }
         };
     if identity_ok {
@@ -70912,22 +70905,22 @@ fn eye(
             None => None,
         }
     };
-    let order = if args.len() >= 5 {
-        match args.get_item(4)?.extract::<String>() {
-            Ok(value) => value,
+    let order_is_c = if args.len() >= 5 {
+        match args.get_item(4)?.extract::<&str>() {
+            Ok(value) => value == "C",
             Err(_) => return fallback(),
         }
     } else {
         match call_kwargs.get_item("order")? {
-            Some(value) => match value.extract::<String>() {
-                Ok(value) => value,
+            Some(value) => match value.extract::<&str>() {
+                Ok(value) => value == "C",
                 Err(_) => return fallback(),
             },
-            None => String::from("C"),
+            None => true,
         }
     };
 
-    if order != "C" || n < 0 || m.is_some_and(|value| value < 0) {
+    if !order_is_c || n < 0 || m.is_some_and(|value| value < 0) {
         return fallback();
     }
 
@@ -85679,7 +85672,7 @@ fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny
 /// (sigma_min), 2 = nuclear (sum of singular values).
 fn svd_matrix_norm_mode(py: Python<'_>, ord: &Py<PyAny>) -> Option<u8> {
     let bound = ord.bind(py);
-    if let Ok(text) = bound.extract::<String>() {
+    if let Ok(text) = bound.extract::<&str>() {
         if text == "nuc" { Some(2) } else { None }
     } else if let Ok(f) = bound.extract::<f64>() {
         if f == 2.0 {
@@ -85850,7 +85843,7 @@ fn norm(
             None => true,
             Some(o) => o
                 .bind(py)
-                .extract::<String>()
+                .extract::<&str>()
                 .is_ok_and(|s| s == "fro" || s == "f"),
         };
         if is_fro
@@ -86775,10 +86768,10 @@ fn try_zerocopy_ravel_c(
     let mode_kind: u8 = match mode {
         None => 0,
         Some(m) if m.is_none() => 0,
-        Some(m) => match m.extract::<String>() {
-            Ok(s) if s == "raise" => 0,
-            Ok(s) if s == "clip" => 1,
-            Ok(s) if s == "wrap" => 2,
+        Some(m) => match m.extract::<&str>() {
+            Ok("raise") => 0,
+            Ok("clip") => 1,
+            Ok("wrap") => 2,
             _ => return Ok(None),
         },
     };
@@ -87984,17 +87977,14 @@ fn try_zerocopy_take_along_axis(
         return Ok(None);
     };
     // View arr's raw bits as the unsigned integer of matching width, gather, view back.
-    let (mover_name, orig_name): (&str, String) = (
-        match itemsize {
-            1 => "uint8",
-            2 => "uint16",
-            4 => "uint32",
-            _ => "uint64",
-        },
-        arr_dtype
-            .getattr(intern!(py, "name"))?
-            .extract::<String>()?,
-    );
+    let mover_name: &str = match itemsize {
+        1 => "uint8",
+        2 => "uint16",
+        4 => "uint32",
+        _ => "uint64",
+    };
+    let orig_name_attr = arr_dtype.getattr(intern!(py, "name"))?;
+    let orig_name = orig_name_attr.extract::<&str>()?;
     let numpy = cached_numpy(py)?;
     let arr_u = arr.call_method1(intern!(py, "view"), (numpy.getattr(mover_name)?,))?;
     let flat = match itemsize {
@@ -88014,7 +88004,7 @@ fn try_zerocopy_take_along_axis(
     let Some(flat) = flat else {
         return Ok(None);
     };
-    let restored = flat.call_method1(intern!(py, "view"), (numpy.getattr(orig_name.as_str())?,))?;
+    let restored = flat.call_method1(intern!(py, "view"), (numpy.getattr(orig_name)?,))?;
     finish_preshaped_output(restored, &s_idx).map(Some)
 }
 
@@ -116429,7 +116419,7 @@ fn parse_nan_cumulative_args<'py>(
     let mut axis_val: Option<isize> = None;
     if let Some(kw) = kwargs {
         for (k, v) in kw.iter() {
-            match k.extract::<String>()?.as_str() {
+            match k.extract::<&str>()? {
                 "axis" => {
                     if !v.is_none() {
                         match v.extract::<isize>() {
@@ -116931,7 +116921,7 @@ fn histogram2d_native(
     let mut nbins_obj: Option<Bound<'_, PyAny>> = None;
     if let Some(kw) = kwargs {
         for (key, value) in kw.iter() {
-            match key.extract::<String>()?.as_str() {
+            match key.extract::<&str>()? {
                 "bins" => nbins_obj = Some(value),
                 // Anything that changes binning/normalization goes to numpy.
                 _ => return Ok(None),
@@ -117338,7 +117328,7 @@ fn histogramdd_native(
     let mut bins_obj: Option<Bound<'_, PyAny>> = None;
     if let Some(kw) = kwargs {
         for (key, value) in kw.iter() {
-            match key.extract::<String>()?.as_str() {
+            match key.extract::<&str>()? {
                 "bins" => bins_obj = Some(value),
                 _ => return Ok(None),
             }
