@@ -49430,7 +49430,7 @@ fn try_zerocopy_f64_nanextreme_axis(
     }
     if any_all_nan {
         // Reproduce numpy's single "All-NaN slice encountered" RuntimeWarning.
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(
             intern!(py, "warn"),
@@ -49589,7 +49589,7 @@ fn try_zerocopy_f32_nanextreme_axis(
         return Ok(None);
     }
     if any_all_nan {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(
             intern!(py, "warn"),
@@ -49661,7 +49661,7 @@ fn try_zerocopy_f64_nanmean_axis(
         }
     }
     if any_empty {
-        let warnings = py.import("warnings")?;
+        let warnings = cached_warnings(py)?;
         let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
         warnings.call_method1(intern!(py, "warn"), ("Mean of empty slice", &category))?;
     }
