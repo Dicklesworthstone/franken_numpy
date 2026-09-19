@@ -14714,15 +14714,15 @@ fn try_zerocopy_f64_binary_into(
     if !f64_out_route_is_worth_taking(op, a) {
         return Ok(None);
     }
-    let numpy = cached_numpy(py)?.clone();
+    let numpy = cached_numpy(py)?;
     // PARITY GATE for the probed binary transcendentals (`deadlock-audit-0cwkm`):
     // power/float_power decline when live NumPy is not byte-equal to the libm
     // call this route emits. Declining is the caller's ordinary delegation path.
-    if probed_f64_binary(op).is_some() && !numpy_f64_native_binary_is_byte_exact(py, &numpy, op) {
+    if probed_f64_binary(op).is_some() && !numpy_f64_native_binary_is_byte_exact(py, numpy, op) {
         return Ok(None);
     }
     let Some((written, _shape)) =
-        zerocopy_f64_binary_flat_with_out(py, &numpy, a, b, op, Some(out))?
+        zerocopy_f64_binary_flat_with_out(py, numpy, a, b, op, Some(out))?
     else {
         return Ok(None);
     };
@@ -14739,14 +14739,13 @@ fn try_zerocopy_f64_binary(
     // call. This probe runs on the f64 arm of the delegating binary route and
     // declines far more often than it engages, so the import was pure decline
     // cost - 400 ns on thinkstation1 against a 2394 ns whole-call floor
-    // (`deadlock-audit-ei9jz`). `.clone()` keeps the owned `Bound` that the rest
-    // of this function passes on as `&numpy`. See `cached_numpy`.
-    let numpy = cached_numpy(py)?.clone();
+    // (`deadlock-audit-ei9jz`).
+    let numpy = cached_numpy(py)?;
     // PARITY GATE - see try_zerocopy_f64_binary_into (`deadlock-audit-0cwkm`).
-    if probed_f64_binary(op).is_some() && !numpy_f64_native_binary_is_byte_exact(py, &numpy, op) {
+    if probed_f64_binary(op).is_some() && !numpy_f64_native_binary_is_byte_exact(py, numpy, op) {
         return Ok(None);
     }
-    let Some((flat, shape)) = zerocopy_f64_binary_flat(py, &numpy, a, b, op)? else {
+    let Some((flat, shape)) = zerocopy_f64_binary_flat(py, numpy, a, b, op)? else {
         return Ok(None);
     };
     // `zerocopy_f64_binary_flat` now allocates at the FINAL shape, so there is nothing
@@ -17206,8 +17205,8 @@ fn try_zerocopy_f64_roll_2d_multi(
     shifts: &[i64],
     axes: &[i64],
 ) -> PyResult<Option<Py<PyAny>>> {
-    let ndarray_type = cached_ndarray_type(py)?.clone();
-    if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !a.is_exact_instance(ndarray_type) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
@@ -17391,8 +17390,8 @@ fn try_zerocopy_f64_compress(
     if axis.is_some() {
         return Ok(None);
     }
-    let ndarray_type = cached_ndarray_type(py)?.clone();
-    if !a.is_exact_instance(&ndarray_type) || !condition.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !a.is_exact_instance(ndarray_type) || !condition.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     if condition
@@ -21513,8 +21512,7 @@ fn try_zerocopy_f64_ediff1d(
     to_begin: Option<&Py<PyAny>>,
     to_end: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let ndarray_type = cached_ndarray_type(py)?.clone();
-    if !ary.is_exact_instance(&ndarray_type) {
+    if !ary.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let Ok(in_buffer) = PyBuffer::<f64>::get(ary) else {
@@ -21666,8 +21664,7 @@ fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T)
 // Returns None when to_begin/to_end are present (handled by the general path), a
 // non-integer dtype, or a non-ndarray input.
 fn try_zerocopy_int_ediff1d(py: Python<'_>, ary: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    let ndarray_type = cached_ndarray_type(py)?.clone();
-    if !ary.is_exact_instance(&ndarray_type) {
+    if !ary.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
     let dtype = ary.getattr(intern!(py, "dtype"))?;
