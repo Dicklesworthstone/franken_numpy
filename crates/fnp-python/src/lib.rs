@@ -28092,8 +28092,8 @@ fn try_zerocopy_append_flat(
     values: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !arr.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !arr.is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let arr_dtype = arr.getattr(intern!(py, "dtype"))?;
@@ -28114,7 +28114,7 @@ fn try_zerocopy_append_flat(
     // with no dtype/order returns an exact ndarray UNCHANGED, so the call was a
     // round-trip through numpy for an object it hands straight back - and `append`'s
     // commonest form passes two arrays.
-    let v_arr = if values.is_exact_instance(&ndarray_type) {
+    let v_arr = if values.is_exact_instance(ndarray_type) {
         values.clone()
     } else {
         numpy.getattr(intern!(py, "asarray"))?.call1((values,))?
@@ -28553,8 +28553,8 @@ fn try_native_insert_block(
     let Ok(idx_raw) = obj.extract::<i64>() else {
         return Ok(None); // array / slice obj -> merge case -> defer
     };
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !arr.is_exact_instance(&ndarray_type) || !values.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !arr.is_exact_instance(ndarray_type) || !values.is_exact_instance(ndarray_type) {
         return Ok(None); // scalar / list / non-ndarray values -> defer
     }
     let dtype = arr.getattr(intern!(py, "dtype"))?;
@@ -28788,8 +28788,8 @@ fn try_native_delete_via_compress(
     arr: &Bound<'_, PyAny>,
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !arr.is_exact_instance(&ndarray_type)
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !arr.is_exact_instance(ndarray_type)
         || arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
     {
         return Ok(None);
@@ -29123,11 +29123,11 @@ fn concatenate_native_is_profitable(
     let Ok(iter) = arrays_seq.try_iter() else {
         return Ok(true);
     };
-    let ndarray_type = cached_ndarray_type(py)?.clone();
+    let ndarray_type = cached_ndarray_type(py)?;
     let mut total: usize = 0;
     for item in iter {
         let item = item?;
-        if !item.is_exact_instance(&ndarray_type) {
+        if !item.is_exact_instance(ndarray_type) {
             return Ok(true);
         }
         if let Some(known) = cached_sniff_dtypes(py)
@@ -29151,7 +29151,7 @@ fn try_zerocopy_f64_concatenate(
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?;
     let Ok(iter) = arrays_seq.try_iter() else {
         return Ok(None);
     };
@@ -29162,7 +29162,7 @@ fn try_zerocopy_f64_concatenate(
     let mut buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(items.len());
     let mut shapes: Vec<Vec<usize>> = Vec::with_capacity(items.len());
     for item in &items {
-        if !item.is_exact_instance(&ndarray_type) {
+        if !item.is_exact_instance(ndarray_type) {
             return Ok(None);
         }
         // ONE dtype READ ANSWERING BOTH QUESTIONS, BY IDENTITY.
@@ -29404,7 +29404,7 @@ fn try_zerocopy_bytes_concatenate(
     axis: isize,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?;
     let Ok(iter) = arrays_seq.try_iter() else {
         return Ok(None);
     };
@@ -29415,7 +29415,7 @@ fn try_zerocopy_bytes_concatenate(
     // items[0].dtype is read up front to pick the mover width; guard that it is an
     // ndarray first, else array_like inputs (Python lists) raise AttributeError
     // here instead of falling through to the general extract / numpy path.
-    if !items[0].is_exact_instance(&ndarray_type) {
+    if !items[0].is_exact_instance(ndarray_type) {
         return Ok(None);
     }
     let dt0 = items[0].getattr(intern!(py, "dtype"))?;
@@ -29435,7 +29435,7 @@ fn try_zerocopy_bytes_concatenate(
     let mut shapes: Vec<Vec<usize>> = Vec::with_capacity(items.len());
     let mut views: Vec<Bound<'_, PyAny>> = Vec::with_capacity(items.len());
     for item in &items {
-        if !item.is_exact_instance(&ndarray_type) {
+        if !item.is_exact_instance(ndarray_type) {
             return Ok(None);
         }
         let d = item.getattr(intern!(py, "dtype"))?;
@@ -29751,13 +29751,13 @@ fn try_zerocopy_trim_zeros(
     mode: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray_type = cached_ndarray_type(py)?;
     // `is_instance`, so an ndarray SUBCLASS takes this path too (`deadlock-audit-ljn3e`).
     // This route returns `filt[lo:hi]` - INDEXING, which preserves the subclass, exactly
     // as in the flip family. Excluding subclasses here did not protect anything: it just
     // dropped them into the extract residual below, which rebuilds a plain `ndarray` and
     // STRIPS the type. So admitting them is both the correctness fix and the fast path.
-    if !filt.is_instance(&ndarray_type)? {
+    if !filt.is_instance(ndarray_type)? {
         return Ok(None);
     }
     let shape: Vec<usize> = filt.getattr(intern!(py, "shape"))?.extract()?;
