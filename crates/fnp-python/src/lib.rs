@@ -29646,14 +29646,14 @@ fn stack(
     if args.len() == 1
         && axis0
         && !has_out_dtype_or_casting
-        && let Ok(ndarray_type) = cached_ndarray_type(py).cloned()
+        && let Ok(ndarray_type) = cached_ndarray_type(py)
         && let Ok(seq) = args.get_item(0)
         && let Ok(iter) = seq.try_iter()
     {
         let items: PyResult<Vec<_>> = iter.collect();
         if let Ok(items) = items
             && !items.is_empty()
-            && items.iter().all(|it| it.is_exact_instance(&ndarray_type))
+            && items.iter().all(|it| it.is_exact_instance(ndarray_type))
         {
             let shape_of = |it: &Bound<'_, PyAny>| -> Option<Vec<usize>> {
                 it.getattr(intern!(py, "shape"))
@@ -35169,11 +35169,11 @@ fn logaddexp2(
     // Broadcast the scalar with np.full and re-run the fast PARALLEL array/array kernel (~6.5x): np.
     // full(~3ms) + the kernel(~8ms) beats numpy's ~72ms. Bit-identical (each element = op.apply(x,h)).
     {
-        let nd = cached_ndarray_type(numpy.py())?.clone();
+        let nd = cached_ndarray_type(numpy.py())?;
         let x1b = x1.bind(py);
         let x2b = x2.bind(py);
         let is_arr = |o: &Bound<'_, PyAny>| -> bool {
-            o.is_instance(&nd).unwrap_or(false)
+            o.is_instance(nd).unwrap_or(false)
                 && o.getattr(intern!(py, "ndim"))
                     .and_then(|d| d.extract::<usize>())
                     .map(|d| d >= 1)
@@ -39077,8 +39077,8 @@ fn histogram(
     if let Some(out) = try_zerocopy_histogram(py, a_bound, nbins)? {
         return Ok(out);
     }
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if a_bound.is_exact_instance(&ndarray_type) {
+    let ndarray_type = cached_ndarray_type(numpy.py())?;
+    if a_bound.is_exact_instance(ndarray_type) {
         let dtype = a_bound.getattr(intern!(py, "dtype"))?;
         if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'f'
             && matches!(
@@ -39743,9 +39743,9 @@ fn try_zerocopy_histogram_edges(
     const HIST_EDGES_MIN: usize = 1 << 20;
     const MAX_BINS: usize = 1 << 16;
     const BLOCK: usize = 1 << 16;
-    let nd = cached_ndarray_type(numpy.py())?.clone();
+    let nd = cached_ndarray_type(numpy.py())?;
     for x in [a, edges] {
-        if !x.is_exact_instance(&nd)
+        if !x.is_exact_instance(nd)
             || !numpy_dtype_is_f64(py, x)
             || !x
                 .getattr(intern!(py, "flags"))?
