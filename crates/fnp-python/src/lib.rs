@@ -33882,7 +33882,7 @@ where
 /// intermediate mutation of `out` that a single fused pass would not reproduce.
 fn zerocopy_multiply_add_out_typed<T>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     c: &Bound<'_, PyAny>,
@@ -34492,9 +34492,9 @@ fn zerocopy_subtract_multiply_add_typed<T>(
 where
     T: MultiplyAddValue,
 {
-    let ndarray = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray = cached_ndarray_type(py)?;
     for operand in [a, b, c, d] {
-        if !operand.is_exact_instance(&ndarray) {
+        if !operand.is_exact_instance(ndarray) {
             return Ok(None);
         }
     }
@@ -34575,9 +34575,9 @@ fn zerocopy_pairwise_multiply_add_typed<T>(
 where
     T: MultiplyAddValue,
 {
-    let ndarray = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray = cached_ndarray_type(py)?;
     for operand in [a, b, c, d] {
-        if !operand.is_exact_instance(&ndarray) {
+        if !operand.is_exact_instance(ndarray) {
             return Ok(None);
         }
     }
@@ -34652,7 +34652,7 @@ where
 /// incumbent ufunc observes mutations made by the preceding in-place ufunc.
 fn zerocopy_subtract_multiply_add_out_typed<T>(
     py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
+    _numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
     c: &Bound<'_, PyAny>,
@@ -34662,9 +34662,9 @@ fn zerocopy_subtract_multiply_add_out_typed<T>(
 where
     T: MultiplyAddValue,
 {
-    let ndarray = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray = cached_ndarray_type(py)?;
     for operand in [a, b, c, d, output] {
-        if !operand.is_exact_instance(&ndarray) {
+        if !operand.is_exact_instance(ndarray) {
             return Ok(None);
         }
     }
