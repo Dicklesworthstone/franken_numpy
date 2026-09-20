@@ -28980,7 +28980,7 @@ fn delete(
     {
         return Ok(out);
     }
-    let delete_fn = cached_numpy_delete(py)?;
+    let delete_fn = numpy.getattr(intern!(py, "delete"))?;
     match axis {
         Some(a) => Ok(delete_fn
             .call1((arr.bind(py), obj.bind(py), a.bind(py)))?
@@ -88795,7 +88795,7 @@ cached_numpy_attr!(cached_numpy_stack, "stack");
 cached_numpy_attr!(cached_numpy_append, "append");
 cached_numpy_attr!(cached_numpy_resize, "resize");
 cached_numpy_attr!(cached_numpy_insert, "insert");
-cached_numpy_attr!(cached_numpy_delete, "delete");
+// Note: delete is resolved against the live module per delete_strided_slice_parallel_matches_numpy fallback tracking.
 cached_numpy_attr!(cached_numpy_clip, "clip");
 cached_numpy_attr!(cached_numpy_copy, "copy");
 cached_numpy_attr!(cached_numpy_frombuffer, "frombuffer");
