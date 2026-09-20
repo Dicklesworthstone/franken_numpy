@@ -32641,8 +32641,8 @@ fn isfinite(
 fn try_zerocopy_f32_spacing(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     const F32_SPACING_PARALLEL_MIN: usize = 1 << 18;
     let numpy = cached_numpy(py)?;
-    let ndarray_type = cached_ndarray_type(numpy.py())?.clone();
-    if !x.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f32(x) {
+    let ndarray_type = cached_ndarray_type(py)?;
+    if !x.is_exact_instance(ndarray_type) || !numpy_dtype_is_f32(x) {
         return Ok(None);
     }
     if !x
@@ -33674,9 +33674,9 @@ fn zerocopy_multiply_add_complex(
         if !std::arch::is_x86_feature_detected!("fma") {
             return Ok(None);
         }
-        let ndarray = cached_ndarray_type(numpy.py())?.clone();
+        let ndarray = cached_ndarray_type(py)?;
         for operand in [a, b, c] {
-            if !operand.is_exact_instance(&ndarray) {
+            if !operand.is_exact_instance(ndarray) {
                 return Ok(None);
             }
             let dtype = operand.getattr(intern!(py, "dtype"))?;
@@ -33809,9 +33809,9 @@ fn zerocopy_multiply_add_typed<T>(
 where
     T: MultiplyAddValue,
 {
-    let ndarray = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray = cached_ndarray_type(py)?;
     for operand in [a, b, c] {
-        if !operand.is_exact_instance(&ndarray) {
+        if !operand.is_exact_instance(ndarray) {
             return Ok(None);
         }
     }
@@ -33891,9 +33891,9 @@ fn zerocopy_multiply_add_out_typed<T>(
 where
     T: MultiplyAddValue,
 {
-    let ndarray = cached_ndarray_type(numpy.py())?.clone();
+    let ndarray = cached_ndarray_type(py)?;
     for operand in [a, b, c, output] {
-        if !operand.is_exact_instance(&ndarray) {
+        if !operand.is_exact_instance(ndarray) {
             return Ok(None);
         }
     }
@@ -34054,9 +34054,9 @@ fn zerocopy_multiply_add_out_complex(
         if !std::arch::is_x86_feature_detected!("fma") {
             return Ok(None);
         }
-        let ndarray = cached_ndarray_type(numpy.py())?.clone();
+        let ndarray = cached_ndarray_type(py)?;
         for operand in [a, b, c, output] {
-            if !operand.is_exact_instance(&ndarray) {
+            if !operand.is_exact_instance(ndarray) {
                 return Ok(None);
             }
             let dtype = operand.getattr(intern!(py, "dtype"))?;
