@@ -89119,14 +89119,12 @@ fn clone_py_kwargs<'py>(
     py: Python<'py>,
     kwargs: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let cloned = PyDict::new(py);
-    if let Some(kwargs) = kwargs {
-        for (key, value) in kwargs.iter() {
-            cloned.set_item(key, value)?;
-        }
+    match kwargs {
+        Some(kw) if !kw.is_empty() => kw.copy(),
+        _ => Ok(PyDict::new(py)),
     }
-    Ok(cloned)
 }
+
 
 fn has_unrecognized_kwargs(kwargs: Option<&Bound<'_, PyDict>>, allowed: &[&str]) -> PyResult<bool> {
     let Some(kwargs) = kwargs else {
