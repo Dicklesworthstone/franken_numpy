@@ -15095,8 +15095,8 @@ fn try_zerocopy_f16_i32_ldexp(
 fn try_zerocopy_f64_clip(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
-    lo: f64,
-    hi: f64,
+    lo: Option<f64>,
+    hi: Option<f64>,
 ) -> PyResult<Option<Py<PyAny>>> {
     if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
@@ -15135,12 +15135,37 @@ fn try_zerocopy_f64_clip(
         // bandwidth and wins for large buffers (same lever as the unary maps). The exact
         // `if v<lo {lo} else {v}` / `if t>hi {hi} else {t}` form is preserved (NaN: both
         // comparisons false -> NaN propagates, matching numpy), so it stays bit-identical.
+        // For one-sided clip (lo is Some xor hi is Some), numpy treats it as maximum/minimum
+        // where equal operands return the second operand (rhs), preserving signed zeros.
         // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
         // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
         let in_data: &[f64] =
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
         let out_data: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+
+        let clamp_slice = |out: &mut [f64], inp: &[f64]| match (lo, hi) {
+            (Some(l), Some(h)) => {
+                for (s, &v) in out.iter_mut().zip(inp.iter()) {
+                    let t = if v < l { l } else { v };
+                    *s = if t > h { h } else { t };
+                }
+            }
+            (Some(l), None) => {
+                for (s, &v) in out.iter_mut().zip(inp.iter()) {
+                    *s = if v.is_nan() || v > l { v } else { l };
+                }
+            }
+            (None, Some(h)) => {
+                for (s, &v) in out.iter_mut().zip(inp.iter()) {
+                    *s = if v.is_nan() || v < h { v } else { h };
+                }
+            }
+            (None, None) => {
+                out.copy_from_slice(inp);
+            }
+        };
+
         const CLIP_PARALLEL_MIN: usize = 1 << 21;
         if n >= CLIP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
@@ -15149,16 +15174,10 @@ fn try_zerocopy_f64_clip(
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
                 .for_each(|(o, i)| {
-                    for (s, &v) in o.iter_mut().zip(i.iter()) {
-                        let t = if v < lo { lo } else { v };
-                        *s = if t > hi { hi } else { t };
-                    }
+                    clamp_slice(o, i);
                 });
         } else {
-            for (s, &v) in out_data.iter_mut().zip(in_data.iter()) {
-                let t = if v < lo { lo } else { v };
-                *s = if t > hi { hi } else { t };
-            }
+            clamp_slice(out_data, in_data);
         }
     }
     finish_preshaped_output(flat, shape).map(Some)
@@ -15178,8 +15197,8 @@ fn try_zerocopy_f32_clip(
     x: &Bound<'_, PyAny>,
     a_min: &Bound<'_, PyAny>,
     a_max: &Bound<'_, PyAny>,
-    lo_f64: f64,
-    hi_f64: f64,
+    lo_f64: Option<f64>,
+    hi_f64: Option<f64>,
 ) -> PyResult<Option<Py<PyAny>>> {
     if !is_exact_numpy_ndarray(py, x)? {
         return Ok(None);
@@ -15190,12 +15209,17 @@ fn try_zerocopy_f32_clip(
     let dtype = x.getattr(intern!(py, "dtype"))?;
     // Result dtype must equal float32 (no promotion): a strong numpy-float64 scalar
     // bound would widen the result to float64, which this path cannot produce.
-    let promoted = cached_numpy_result_type(py)?.call1((x, a_min, a_max))?;
+    let promoted = match (lo_f64.is_some(), hi_f64.is_some()) {
+        (true, true) => cached_numpy_result_type(py)?.call1((x, a_min, a_max))?,
+        (true, false) => cached_numpy_result_type(py)?.call1((x, a_min))?,
+        (false, true) => cached_numpy_result_type(py)?.call1((x, a_max))?,
+        (false, false) => return Ok(None),
+    };
     if !promoted.eq(&dtype)? {
         return Ok(None);
     }
-    let lo = lo_f64 as f32;
-    let hi = hi_f64 as f32;
+    let lo = lo_f64.map(|v| v as f32);
+    let hi = hi_f64.map(|v| v as f32);
     let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
         return Ok(None);
     };
@@ -15228,6 +15252,29 @@ fn try_zerocopy_f32_clip(
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
         let out_data: &mut [f32] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+
+        let clamp_slice = |out: &mut [f32], inp: &[f32]| match (lo, hi) {
+            (Some(l), Some(h)) => {
+                for (slot, &v) in out.iter_mut().zip(inp.iter()) {
+                    let t = if v < l { l } else { v };
+                    *slot = if t > h { h } else { t };
+                }
+            }
+            (Some(l), None) => {
+                for (slot, &v) in out.iter_mut().zip(inp.iter()) {
+                    *slot = if v.is_nan() || v > l { v } else { l };
+                }
+            }
+            (None, Some(h)) => {
+                for (slot, &v) in out.iter_mut().zip(inp.iter()) {
+                    *slot = if v.is_nan() || v < h { v } else { h };
+                }
+            }
+            (None, None) => {
+                out.copy_from_slice(inp);
+            }
+        };
+
         const CLIP_F32_PARALLEL_MIN: usize = 1 << 21;
         if n >= CLIP_F32_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
@@ -15236,16 +15283,10 @@ fn try_zerocopy_f32_clip(
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
                 .for_each(|(o, i)| {
-                    for (slot, &v) in o.iter_mut().zip(i.iter()) {
-                        let t = if v < lo { lo } else { v };
-                        *slot = if t > hi { hi } else { t };
-                    }
+                    clamp_slice(o, i);
                 });
         } else {
-            for (slot, &v) in out_data.iter_mut().zip(in_data.iter()) {
-                let t = if v < lo { lo } else { v };
-                *slot = if t > hi { hi } else { t };
-            }
+            clamp_slice(out_data, in_data);
         }
     }
     finish_preshaped_output(flat, shape).map(Some)
@@ -15260,8 +15301,8 @@ fn clip_typed<'py, T>(
     py: Python<'py>,
     a: &Bound<'py, PyAny>,
     dtype: &Bound<'py, PyAny>,
-    lo: T,
-    hi: T,
+    lo: Option<T>,
+    hi: Option<T>,
 ) -> PyResult<Option<Py<PyAny>>>
 where
     T: pyo3::buffer::Element + Copy + Ord + Send + Sync,
@@ -15301,6 +15342,28 @@ where
         let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
         let out_data: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+
+        let clamp_slice = |out: &mut [T], inp: &[T]| match (lo, hi) {
+            (Some(l), Some(h)) => {
+                for (s, &v) in out.iter_mut().zip(inp.iter()) {
+                    *s = v.max(l).min(h);
+                }
+            }
+            (Some(l), None) => {
+                for (s, &v) in out.iter_mut().zip(inp.iter()) {
+                    *s = v.max(l);
+                }
+            }
+            (None, Some(h)) => {
+                for (s, &v) in out.iter_mut().zip(inp.iter()) {
+                    *s = v.min(h);
+                }
+            }
+            (None, None) => {
+                out.copy_from_slice(inp);
+            }
+        };
+
         const CLIP_PARALLEL_MIN_BYTES: usize = 1 << 23;
         if std::mem::size_of::<T>() <= 4
             && n.saturating_mul(std::mem::size_of::<T>()) >= CLIP_PARALLEL_MIN_BYTES
@@ -15312,14 +15375,10 @@ where
                 .par_chunks_mut(chunk)
                 .zip(in_data.par_chunks(chunk))
                 .for_each(|(o, i)| {
-                    for (s, &v) in o.iter_mut().zip(i.iter()) {
-                        *s = v.max(lo).min(hi);
-                    }
+                    clamp_slice(o, i);
                 });
         } else {
-            for (s, &v) in out_data.iter_mut().zip(in_data.iter()) {
-                *s = v.max(lo).min(hi);
-            }
+            clamp_slice(out_data, in_data);
         }
     }
     finish_preshaped_output(flat, shape).map(Some)
@@ -15347,59 +15406,138 @@ fn try_zerocopy_int_clip(
         return Ok(None);
     }
     let dtype = a.getattr(intern!(py, "dtype"))?;
+    let has_min = !a_min.is_none();
+    let has_max = !a_max.is_none();
     // Result dtype must equal the input dtype (no promotion), e.g. a strong
     // numpy-int64 scalar bound on an int8 array would widen to int64 in numpy.
-    let promoted = cached_numpy_result_type(py)?.call1((a, a_min, a_max))?;
+    let promoted = match (has_min, has_max) {
+        (true, true) => cached_numpy_result_type(py)?.call1((a, a_min, a_max))?,
+        (true, false) => cached_numpy_result_type(py)?.call1((a, a_min))?,
+        (false, true) => cached_numpy_result_type(py)?.call1((a, a_max))?,
+        (false, false) => return Ok(None),
+    };
     if !promoted.eq(&dtype)? {
         return Ok(None);
     }
     let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
     match (kind, itemsize) {
         ('i', 1) => {
-            let (Ok(lo), Ok(hi)) = (a_min.extract::<i8>(), a_max.extract::<i8>()) else {
-                return Ok(None);
+            let lo = if has_min {
+                let Ok(val) = a_min.extract::<i8>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
+            };
+            let hi = if has_max {
+                let Ok(val) = a_max.extract::<i8>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
             };
             clip_typed::<i8>(py, a, &dtype, lo, hi)
         }
         ('i', 2) => {
-            let (Ok(lo), Ok(hi)) = (a_min.extract::<i16>(), a_max.extract::<i16>()) else {
-                return Ok(None);
+            let lo = if has_min {
+                let Ok(val) = a_min.extract::<i16>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
+            };
+            let hi = if has_max {
+                let Ok(val) = a_max.extract::<i16>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
             };
             clip_typed::<i16>(py, a, &dtype, lo, hi)
         }
         ('i', 4) => {
-            let (Ok(lo), Ok(hi)) = (a_min.extract::<i32>(), a_max.extract::<i32>()) else {
-                return Ok(None);
+            let lo = if has_min {
+                let Ok(val) = a_min.extract::<i32>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
+            };
+            let hi = if has_max {
+                let Ok(val) = a_max.extract::<i32>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
             };
             clip_typed::<i32>(py, a, &dtype, lo, hi)
         }
         ('i', 8) => {
-            let (Ok(lo), Ok(hi)) = (a_min.extract::<i64>(), a_max.extract::<i64>()) else {
-                return Ok(None);
+            let lo = if has_min {
+                let Ok(val) = a_min.extract::<i64>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
+            };
+            let hi = if has_max {
+                let Ok(val) = a_max.extract::<i64>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
             };
             clip_typed::<i64>(py, a, &dtype, lo, hi)
         }
         ('u', 1) => {
-            let (Ok(lo), Ok(hi)) = (a_min.extract::<u8>(), a_max.extract::<u8>()) else {
-                return Ok(None);
+            let lo = if has_min {
+                let Ok(val) = a_min.extract::<u8>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
+            };
+            let hi = if has_max {
+                let Ok(val) = a_max.extract::<u8>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
             };
             clip_typed::<u8>(py, a, &dtype, lo, hi)
         }
         ('u', 2) => {
-            let (Ok(lo), Ok(hi)) = (a_min.extract::<u16>(), a_max.extract::<u16>()) else {
-                return Ok(None);
+            let lo = if has_min {
+                let Ok(val) = a_min.extract::<u16>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
+            };
+            let hi = if has_max {
+                let Ok(val) = a_max.extract::<u16>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
             };
             clip_typed::<u16>(py, a, &dtype, lo, hi)
         }
         ('u', 4) => {
-            let (Ok(lo), Ok(hi)) = (a_min.extract::<u32>(), a_max.extract::<u32>()) else {
-                return Ok(None);
+            let lo = if has_min {
+                let Ok(val) = a_min.extract::<u32>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
+            };
+            let hi = if has_max {
+                let Ok(val) = a_max.extract::<u32>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
             };
             clip_typed::<u32>(py, a, &dtype, lo, hi)
         }
         ('u', 8) => {
-            let (Ok(lo), Ok(hi)) = (a_min.extract::<u64>(), a_max.extract::<u64>()) else {
-                return Ok(None);
+            let lo = if has_min {
+                let Ok(val) = a_min.extract::<u64>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
+            };
+            let hi = if has_max {
+                let Ok(val) = a_max.extract::<u64>() else { return Ok(None); };
+                Some(val)
+            } else {
+                None
             };
             clip_typed::<u64>(py, a, &dtype, lo, hi)
         }
@@ -27492,11 +27630,12 @@ fn clip(
             .unbind())
     };
 
-    // Bail to numpy on `out`, None bounds, or any extra kwargs — these
+    // Bail to numpy on `out`, both bounds None, or any extra kwargs — these
     // exercise the broader clip surface.
+    let has_min = !a_min.bind(py).is_none();
+    let has_max = !a_max.bind(py).is_none();
     if out.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || a_min.bind(py).is_none()
-        || a_max.bind(py).is_none()
+        || (!has_min && !has_max)
         || kwargs.is_some_and(|k| !k.is_empty())
     {
         return fallback();
@@ -27519,41 +27658,44 @@ fn clip(
         return Ok(out);
     }
 
-    // Both bounds must be real scalars - decided WITHOUT raising
+    // Bounds must be real scalars - decided WITHOUT raising
     // (`deadlock-audit-v46rn`).
     //
-    // The two `extract`s below fail for exactly two inputs, and each failure sets a Python
+    // The `extract`s below fail for non-scalar inputs, and each failure sets a Python
     // exception, wraps it in a `PyErr` and discards both. Neither input is exotic:
-    // `np.clip(a, 0, None)` and `np.clip(a, None, 3)` are ordinary NumPy usage, and a
-    // one-sided clip therefore paid an exception on EVERY call. A caught `float()` failure
-    // measures 129 ns against 23 ns for a type test.
+    // `np.clip(a, 0, None)` and `np.clip(a, None, 3)` are ordinary NumPy usage.
     //
     // `is_none` is a pointer comparison. `arg_cannot_be_scalar` is the same narrow
     // predicate the spaced builders use - only an EXACT ndarray with `ndim >= 1` fails the
     // conversion, so 0-d arrays and every NumPy scalar width keep the native path they
     // have today.
-    if a_min.bind(py).is_none()
-        || a_max.bind(py).is_none()
-        || arg_cannot_be_scalar(py, a_min.bind(py))
-        || arg_cannot_be_scalar(py, a_max.bind(py))
+    if (has_min && arg_cannot_be_scalar(py, a_min.bind(py)))
+        || (has_max && arg_cannot_be_scalar(py, a_max.bind(py)))
     {
         return fallback();
     }
-    let Ok(min_val) = a_min.bind(py).extract::<f64>() else {
-        return fallback();
+    let min_val = if has_min {
+        let Ok(v) = a_min.bind(py).extract::<f64>() else {
+            return fallback();
+        };
+        if v.is_nan() {
+            return fallback();
+        }
+        Some(v)
+    } else {
+        None
     };
-    let Ok(max_val) = a_max.bind(py).extract::<f64>() else {
-        return fallback();
+    let max_val = if has_max {
+        let Ok(v) = a_max.bind(py).extract::<f64>() else {
+            return fallback();
+        };
+        if v.is_nan() {
+            return fallback();
+        }
+        Some(v)
+    } else {
+        None
     };
-
-    // A NaN bound makes numpy.clip return all-NaN: clip == minimum(maximum(a, lo),
-    // hi) and numpy.maximum/minimum propagate NaN, so a NaN low or high bound poisons
-    // every element. The comparison-form clamp in the zero-copy paths below does not
-    // (v < NaN / t > NaN are false), so defer any NaN bound to numpy for exact parity
-    // across all dtypes (this also corrects the pre-existing f64 path).
-    if min_val.is_nan() || max_val.is_nan() {
-        return fallback();
-    }
 
     // float16: numpy widens f16->f32 to clamp (~149ms@16M, the biggest f16 elementwise gap).
     // The native parallel uint16-view clamp is bit-exact (verified full domain; min_val/max_val
@@ -27570,7 +27712,9 @@ fn clip(
                 .getattr(intern!(py, "itemsize"))?
                 .extract::<usize>()?;
             if itemsize == 2 {
-                if let Some(out) = try_zerocopy_f16_clip(py, a.bind(py), min_val, max_val)? {
+                if let (Some(lo), Some(hi)) = (min_val, max_val)
+                    && let Some(out) = try_zerocopy_f16_clip(py, a.bind(py), lo, hi)?
+                {
                     return Ok(out);
                 }
                 return fallback();
@@ -27639,15 +27783,24 @@ fn clip(
     let promotion_is_noop = (|| -> PyResult<bool> {
         let a_arr = cached_numpy_asarray(py)?.call1((a.bind(py),))?;
         let input_dtype = a_arr.getattr(intern!(py, "dtype"))?;
-        let promoted_dtype =
-            cached_numpy_result_type(py)?.call1((&a_arr, a_min.bind(py), a_max.bind(py)))?;
+        let promoted_dtype = match (has_min, has_max) {
+            (true, true) => {
+                cached_numpy_result_type(py)?.call1((&a_arr, a_min.bind(py), a_max.bind(py)))?
+            }
+            (true, false) => cached_numpy_result_type(py)?.call1((&a_arr, a_min.bind(py)))?,
+            (false, true) => cached_numpy_result_type(py)?.call1((&a_arr, a_max.bind(py)))?,
+            (false, false) => return Ok(true),
+        };
         promoted_dtype.eq(&input_dtype)
     })();
     if !matches!(promotion_is_noop, Ok(true)) {
         return fallback();
     }
 
-    let result = array.clip(min_val, max_val);
+    let (Some(min_v), Some(max_v)) = (min_val, max_val) else {
+        return fallback();
+    };
+    let result = array.clip(min_v, max_v);
     build_numpy_scalar_or_array(py, &result)
 }
 
