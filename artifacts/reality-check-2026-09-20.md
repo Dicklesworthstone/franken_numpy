@@ -217,23 +217,32 @@ Work-graph health (`bv --robot-triage`):
 
 ## 8. Phase 2: Bridge Plan
 
-### Action Item 1: Resolve Conformance Fixture Divergence (Unblock CI Gate G2)
-1. **Target:** `crates/fnp-conformance/fixtures/rng_adversarial_cases.json` and `crates/fnp-conformance/src/lib.rs`.
-2. **Action:**
-   - Either update case `rng_seedsequence_empty_entropy` to assert `Ok(())` (documenting the shift from error to OS entropy sourcing per bead `franken_numpy-iqo31`),
-   - Or replace the case with a genuinely illegal input (e.g. attempting to generate state with zero/overflowing parameters) that produces an intentional contract violation.
-3. **Verification:** Run `rch exec -- cargo test -p fnp-conformance --test rng_adversarial_cases` and verify exit code 0.
+### Action Item 1: Resolve Conformance Fixture Divergence (Unblock CI Gate G2) — RESOLVED
+- **Status:** **CLOSED & VERIFIED** (Bead `deadlock-audit-ci-fix-seedsequence-empty-entropy-2hwty`, commit `199f4013`).
+- **Changes Landed:**
+  - `crates/fnp-random/src/lib.rs`: fixed pickle test to use `pool_size: 0` for invalid snapshot test; updated `seed_sequence_errors_map_to_contract_reason_codes` to test invalid pool size; added `seed_sequence_empty_entropy_is_valid` test.
+  - `crates/fnp-conformance/src/lib.rs`: updated `seedsequence_empty_entropy` dispatch to `SeedSequence::with_spawn_key(&[], &[], 0)` which legitimately triggers `GenerateStateContractViolation`.
+- **RCH Verification Proof:**
+  - `fnp-random` tests: `448 passed; 0 failed; finished in 9.51s`
+  - `rng_adversarial_suite_is_green`: `1 passed; 0 failed; finished in 0.01s`
+  - `core_suites_are_green`: `1 passed; 0 failed; finished in 0.26s`
+  - `codebase_hygiene`: `12 passed; 0 failed; finished in 1.31s`
+  - `ledger_hygiene`: `25 passed; 0 failed; finished in 0.11s`
+  - Workspace clippy: `cargo clippy --workspace --all-targets -- -D warnings` exits 0 (191 crates clean)
 
-### Action Item 2: Synchronize Machine-Checkable Documentation Claims
-1. Update `README.md` and `AGENTS.md`:
-   - Crates: 10 -> 11 (adding `crates/fnp-random-core`).
-   - Version: 0.2.0 -> 0.3.0.
-   - Unsafe forbid: 9/10 -> 10/11 crates.
-   - `pub fn`: 1,626 -> 1,643.
-   - Tests: 8,691 -> 8,715.
-   - Commits: 7,300+ -> 7,631.
-   - Closed beads: 2,786 -> 2,833.
-   - CI Status Badge & Block: Record that Ledger Hygiene is 100% green; update G2 failure reason to the adversarial RNG fixture sync.
+### Action Item 2: Synchronize Machine-Checkable Documentation Claims — RESOLVED
+- **Status:** **CLOSED & VERIFIED** (Bead `deadlock-audit-docs-sync-reality-check-metrics-5vye0`, commit `088bc187`).
+- **Changes Landed:**
+  - Synchronized `README.md` and `AGENTS.md`:
+    - Crates: 10 -> 11 (added `fnp-random-core`)
+    - Version: 0.2.0 -> 0.3.0
+    - Unsafe forbid: 9/10 -> 10 of 11 crates
+    - `pub fn` count: 1,626 -> 1,643
+    - Test count: 8,691 -> 8,716 (full per-crate table updated)
+    - Closed beads: 2,786 -> 2,835
+    - Total commits: 7,300+ -> 7,631
+    - CI status badges and text updated to reflect G1/G9 green and G2 local verification clean.
+  - Pushed to `origin main` and synchronized to `origin master`.
 
 ### Action Item 3: Execute the Remaining 8 Performance Beads
 1. **Wrapper Floor (`deadlock-audit-1uf80`, `deadlock-audit-omyno`):** Extract shared helpers for the 62 repeated reshape sites to reduce binary footprint and inline-cache miss rate.
@@ -245,4 +254,4 @@ Work-graph health (`bv --robot-triage`):
 
 ## 9. Conclusion
 
-FrankenNumPy is in an outstanding, world-class condition. The codebase is clean, completely stub-free, and delivers 100% of NumPy's public surface in safe Rust. The historical ledger hygiene issue that blocked CI for weeks is completely cured. Fixing the single RNG fixture synchronization mismatch will turn CI gate G2 green and unlock full automated pipeline verification across all 9 gates.
+FrankenNumPy is in an outstanding, world-class condition. The codebase is clean, completely stub-free, and delivers 100% of NumPy's public surface in safe Rust. The historical ledger hygiene issue that blocked CI for weeks is completely cured, and the SeedSequence empty-entropy contract divergence has been resolved and verified with clean test passes across the workspace. With these two major blockers eliminated, the project is positioned for full end-to-end CI green status and final performance micro-optimization.
