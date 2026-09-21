@@ -25,10 +25,7 @@
       "artifacts/phase2c/FNP-P2C-009/contract_table.md"
     ],
     "reason_code": "io_header_schema_invalid",
-    "shape": [
-      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-      1, 1
-    ],
+    "shape": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
     "fortran_order": false,
     "dtype_descr": "<f8",
     "header_len": 128
@@ -324,10 +321,7 @@
       "artifacts/phase2c/FNP-P2C-009/contract_table.md"
     ],
     "reason_code": "io_header_schema_invalid",
-    "shape": [
-      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-      1, 1, 1, 1
-    ],
+    "shape": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
     "fortran_order": true,
     "dtype_descr": "<i4",
     "header_len": 128
@@ -512,10 +506,7 @@
       "artifacts/phase2c/FNP-P2C-009/contract_table.md"
     ],
     "reason_code": "io_header_schema_invalid",
-    "shape": [
-      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-      1, 1, 1, 1, 1, 1, 1, 1, 1
-    ],
+    "shape": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
     "fortran_order": true,
     "dtype_descr": "<f4",
     "header_len": 256

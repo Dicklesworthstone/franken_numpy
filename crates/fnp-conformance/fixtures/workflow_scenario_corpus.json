@@ -316,7 +316,10 @@
       }
     ],
     "links": {
-      "differential_fixture_ids": ["broadcast_incompatible", "stride_tricks_rank_mismatch_error"],
+      "differential_fixture_ids": [
+        "broadcast_incompatible",
+        "stride_tricks_rank_mismatch_error"
+      ],
       "e2e_script_paths": [
         "scripts/e2e/run_shape_contract_journey.sh",
         "scripts/e2e/run_security_policy_gate.sh"
@@ -364,7 +367,9 @@
       }
     ],
     "links": {
-      "differential_fixture_ids": ["sum_axis0_no_keepdims"],
+      "differential_fixture_ids": [
+        "sum_axis0_no_keepdims"
+      ],
       "e2e_script_paths": [
         "scripts/e2e/run_workflow_scenario_gate.sh",
         "scripts/e2e/run_security_policy_gate.sh"
@@ -1569,7 +1574,9 @@
       }
     ],
     "links": {
-      "differential_fixture_ids": ["sum_all_no_keepdims"],
+      "differential_fixture_ids": [
+        "sum_all_no_keepdims"
+      ],
       "e2e_script_paths": [
         "scripts/e2e/run_workflow_scenario_gate.sh",
         "scripts/e2e/run_security_policy_gate.sh"

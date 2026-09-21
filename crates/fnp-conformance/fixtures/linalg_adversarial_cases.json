@@ -30,7 +30,10 @@
       "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
     ],
     "reason_code": "linalg_solver_singularity",
-    "matrix": [[1.0, 2.0], [2.0, 4.0]],
+    "matrix": [
+      [1.0, 2.0],
+      [2.0, 4.0]
+    ],
     "rhs": [3.0, 6.0]
   },
   {
@@ -269,7 +272,10 @@
       "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
     ],
     "reason_code": "linalg_shape_contract_violation",
-    "matrix": [[2.0, 1.0], [1.0, 2.0]],
+    "matrix": [
+      [2.0, 1.0],
+      [1.0, 2.0]
+    ],
     "rhs": [3.0]
   },
   {
@@ -286,7 +292,10 @@
       "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
     ],
     "reason_code": "linalg_solver_singularity",
-    "matrix": [[0.0, 0.0], [0.0, 0.0]],
+    "matrix": [
+      [0.0, 0.0],
+      [0.0, 0.0]
+    ],
     "rhs": [1.0, 1.0]
   },
   {
@@ -475,7 +484,10 @@
       "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
     ],
     "reason_code": "linalg_shape_contract_violation",
-    "matrix": [[3.0, 1.0], [1.0, 3.0]],
+    "matrix": [
+      [3.0, 1.0],
+      [1.0, 3.0]
+    ],
     "rhs": [1.0, 2.0, 3.0]
   },
   {
@@ -577,7 +589,10 @@
       "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
     ],
     "reason_code": "linalg_shape_contract_violation",
-    "matrix": [[1.0, 0.0], [0.0, 1.0]],
+    "matrix": [
+      [1.0, 0.0],
+      [0.0, 1.0]
+    ],
     "rhs": []
   },
   {
@@ -611,7 +626,10 @@
       "crates/fnp-conformance/fixtures/linalg_adversarial_cases.json"
     ],
     "reason_code": "linalg_cholesky_contract_violation",
-    "matrix": [[1.0, 2.0], [2.0, 1.0]]
+    "matrix": [
+      [1.0, 2.0],
+      [2.0, 1.0]
+    ]
   },
   {
     "id": "linalg_inv_nearly_singular",
@@ -628,6 +646,9 @@
     ],
     "reason_code": "linalg_solver_singularity",
     "shape": [2, 2],
-    "matrix": [[1.0, 1.0], [1.0, 1.0]]
+    "matrix": [
+      [1.0, 1.0],
+      [1.0, 1.0]
+    ]
   }
 ]

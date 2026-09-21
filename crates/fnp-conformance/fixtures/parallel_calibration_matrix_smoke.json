@@ -14,8 +14,13 @@
     {
       "workload_id": "broadcast_add_32x32_by_32",
       "operation": "broadcast_add",
-      "shape": [32, 32],
-      "rhs_shape": [32],
+      "shape": [
+        32,
+        32
+      ],
+      "rhs_shape": [
+        32
+      ],
       "axis": null,
       "keepdims": false,
       "input_elements_per_run": 1024,
@@ -25,7 +30,10 @@
       "min_elements_per_chunk": 128,
       "expected_chunk_count": 4,
       "serial": {
-        "samples_ms": [10.0, 12.0],
+        "samples_ms": [
+          10.0,
+          12.0
+        ],
         "p50_ms": 10.0,
         "p95_ms": 12.0,
         "p99_ms": 12.0,
@@ -33,7 +41,10 @@
         "max_ms": 12.0
       },
       "parallel": {
-        "samples_ms": [8.0, 10.0],
+        "samples_ms": [
+          8.0,
+          10.0
+        ],
         "p50_ms": 8.0,
         "p95_ms": 10.0,
         "p99_ms": 10.0,

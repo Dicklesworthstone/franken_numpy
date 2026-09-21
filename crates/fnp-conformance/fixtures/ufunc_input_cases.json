@@ -2,11 +2,27 @@
   {
     "id": "add_broadcast_2x3_plus_3",
     "op": "add",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [10.0, 20.0, 30.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      10.0,
+      20.0,
+      30.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -23,11 +39,27 @@
   {
     "id": "sub_same_shape_2x2",
     "op": "sub",
-    "lhs_shape": [2, 2],
-    "lhs_values": [7.0, 8.0, 9.0, 10.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      7.0,
+      8.0,
+      9.0,
+      10.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 2],
-    "rhs_values": [1.0, 2.0, 3.0, 4.0],
+    "rhs_shape": [
+      2,
+      2
+    ],
+    "rhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -44,11 +76,21 @@
   {
     "id": "mul_scalar_broadcast",
     "op": "mul",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.5],
+    "rhs_values": [
+      0.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -65,11 +107,21 @@
   {
     "id": "div_vector_by_scalar",
     "op": "div",
-    "lhs_shape": [3],
-    "lhs_values": [8.0, 10.0, 12.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      8.0,
+      10.0,
+      12.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [2.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -86,11 +138,21 @@
   {
     "id": "add_fixed_signature_string_i32",
     "op": "add",
-    "lhs_shape": [2],
-    "lhs_values": [1.0, 2.0],
+    "lhs_shape": [
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0
+    ],
     "lhs_dtype": "i32",
-    "rhs_shape": [2],
-    "rhs_values": [3.0, 4.0],
+    "rhs_shape": [
+      2
+    ],
+    "rhs_values": [
+      3.0,
+      4.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -109,11 +171,19 @@
   {
     "id": "add_sig_signature_conflict",
     "op": "add",
-    "lhs_shape": [1],
-    "lhs_values": [1.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "i32",
-    "rhs_shape": [1],
-    "rhs_values": [2.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -133,11 +203,19 @@
   {
     "id": "add_signature_dtype_conflict",
     "op": "add",
-    "lhs_shape": [1],
-    "lhs_values": [1.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "i32",
-    "rhs_shape": [1],
-    "rhs_values": [2.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -157,11 +235,19 @@
   {
     "id": "add_invalid_fixed_signature_string",
     "op": "add",
-    "lhs_shape": [1],
-    "lhs_values": [1.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "i32",
-    "rhs_shape": [1],
-    "rhs_values": [2.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -180,11 +266,28 @@
   {
     "id": "add_gufunc_signature_vector_ok",
     "op": "add",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 3],
-    "rhs_values": [10.0, 20.0, 30.0],
+    "rhs_shape": [
+      1,
+      3
+    ],
+    "rhs_values": [
+      10.0,
+      20.0,
+      30.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -204,11 +307,27 @@
   {
     "id": "add_gufunc_signature_core_dim_mismatch",
     "op": "add",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 1],
-    "rhs_values": [10.0, 20.0],
+    "rhs_shape": [
+      2,
+      1
+    ],
+    "rhs_values": [
+      10.0,
+      20.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -228,11 +347,31 @@
   {
     "id": "matmul_basic_2d",
     "op": "matmul",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3, 2],
-    "rhs_values": [7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "rhs_shape": [
+      3,
+      2
+    ],
+    "rhs_values": [
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -249,11 +388,45 @@
   {
     "id": "matmul_batched_2x2x3_by_2x3x2",
     "op": "matmul",
-    "lhs_shape": [2, 2, 3],
-    "lhs_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+    "lhs_shape": [
+      2,
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 3, 2],
-    "rhs_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+    "rhs_shape": [
+      2,
+      3,
+      2
+    ],
+    "rhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -270,11 +443,35 @@
   {
     "id": "matmul_core_dim_mismatch",
     "op": "matmul",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 5],
-    "rhs_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+    "rhs_shape": [
+      2,
+      5
+    ],
+    "rhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -291,8 +488,18 @@
   {
     "id": "sum_all_no_keepdims",
     "op": "sum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -312,8 +519,18 @@
   {
     "id": "sum_axis1_keepdims",
     "op": "sum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -333,8 +550,18 @@
   {
     "id": "sum_axis0_no_keepdims",
     "op": "sum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -354,11 +581,33 @@
   {
     "id": "add_broadcast_2x1x3x1_plus_1x4x1x1",
     "op": "add",
-    "lhs_shape": [2, 1, 3, 1],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 4, 1, 1],
-    "rhs_values": [10.0, 20.0, 30.0, 40.0],
+    "rhs_shape": [
+      1,
+      4,
+      1,
+      1
+    ],
+    "rhs_values": [
+      10.0,
+      20.0,
+      30.0,
+      40.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -375,11 +624,31 @@
   {
     "id": "mul_broadcast_2x2x2_by_1x2x1",
     "op": "mul",
-    "lhs_shape": [2, 2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_shape": [
+      2,
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 2, 1],
-    "rhs_values": [2.0, -1.0],
+    "rhs_shape": [
+      1,
+      2,
+      1
+    ],
+    "rhs_values": [
+      2.0,
+      -1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -396,10 +665,37 @@
   {
     "id": "sum_axis2_keepdims_2x2x3x2",
     "op": "sum",
-    "lhs_shape": [2, 2, 3, 2],
+    "lhs_shape": [
+      2,
+      2,
+      3,
+      2
+    ],
     "lhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
-      18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0,
+      24.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -420,9 +716,29 @@
   {
     "id": "sum_axis0_no_keepdims_2x2x2x2",
     "op": "sum",
-    "lhs_shape": [2, 2, 2, 2],
+    "lhs_shape": [
+      2,
+      2,
+      2,
+      2
+    ],
     "lhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -443,11 +759,26 @@
   {
     "id": "add_shape_mismatch_2x2_vs_3x1",
     "op": "add",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3, 1],
-    "rhs_values": [1.0, 2.0, 3.0],
+    "rhs_shape": [
+      3,
+      1
+    ],
+    "rhs_values": [
+      1.0,
+      2.0,
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -465,8 +796,16 @@
   {
     "id": "sum_axis_out_of_bounds",
     "op": "sum",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -487,12 +826,43 @@
   {
     "id": "add_shape_mismatch_2x1x3x1_vs_2x4x2",
     "op": "add",
-    "lhs_shape": [2, 1, 3, 1],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 4, 2],
+    "rhs_shape": [
+      2,
+      4,
+      2
+    ],
     "rhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0
     ],
     "rhs_dtype": "f64",
     "axis": null,
@@ -511,9 +881,29 @@
   {
     "id": "sum_axis_out_of_bounds_4d",
     "op": "sum",
-    "lhs_shape": [2, 2, 2, 2],
+    "lhs_shape": [
+      2,
+      2,
+      2,
+      2
+    ],
     "lhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -535,8 +925,13 @@
   {
     "id": "mul_missing_rhs_shape",
     "op": "mul",
-    "lhs_shape": [2],
-    "lhs_values": [1.0, 2.0],
+    "lhs_shape": [
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -557,11 +952,35 @@
   {
     "id": "add_broadcast_1x2x1x3x1_plus_1x1x4x1x1",
     "op": "add",
-    "lhs_shape": [1, 2, 1, 3, 1],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      1,
+      2,
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 1, 4, 1, 1],
-    "rhs_values": [10.0, -2.0, 0.5, 3.0],
+    "rhs_shape": [
+      1,
+      1,
+      4,
+      1,
+      1
+    ],
+    "rhs_values": [
+      10.0,
+      -2.0,
+      0.5,
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -578,10 +997,38 @@
   {
     "id": "sum_axis3_no_keepdims_1x2x3x2x2",
     "op": "sum",
-    "lhs_shape": [1, 2, 3, 2, 2],
+    "lhs_shape": [
+      1,
+      2,
+      3,
+      2,
+      2
+    ],
     "lhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
-      18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0,
+      24.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -602,10 +1049,18 @@
   {
     "id": "add_zero_extent_broadcast_2x0x3_plus_1x0x1",
     "op": "add",
-    "lhs_shape": [2, 0, 3],
+    "lhs_shape": [
+      2,
+      0,
+      3
+    ],
     "lhs_values": [],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 0, 1],
+    "rhs_shape": [
+      1,
+      0,
+      1
+    ],
     "rhs_values": [],
     "rhs_dtype": "f64",
     "axis": null,
@@ -623,12 +1078,45 @@
   {
     "id": "add_shape_mismatch_1x2x1x3x1_vs_2x1x4x2",
     "op": "add",
-    "lhs_shape": [1, 2, 1, 3, 1],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      1,
+      2,
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 1, 4, 2],
+    "rhs_shape": [
+      2,
+      1,
+      4,
+      2
+    ],
     "rhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0
     ],
     "rhs_dtype": "f64",
     "axis": null,
@@ -647,10 +1135,38 @@
   {
     "id": "sum_axis_out_of_bounds_5d",
     "op": "sum",
-    "lhs_shape": [1, 2, 3, 2, 2],
+    "lhs_shape": [
+      1,
+      2,
+      3,
+      2,
+      2
+    ],
     "lhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
-      18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0,
+      24.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -672,10 +1188,25 @@
   {
     "id": "mul_missing_rhs_values_2x1x3_by_1x3x1",
     "op": "mul",
-    "lhs_shape": [2, 1, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      1,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 3, 1],
+    "rhs_shape": [
+      1,
+      3,
+      1
+    ],
     "rhs_values": null,
     "rhs_dtype": "f64",
     "axis": null,
@@ -694,11 +1225,28 @@
   {
     "id": "add_mixed_dtype_i32_plus_f32_2x1x2_plus_1x3x1",
     "op": "add",
-    "lhs_shape": [2, 1, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "i32",
-    "rhs_shape": [1, 3, 1],
-    "rhs_values": [0.5, -1.0, 2.0],
+    "rhs_shape": [
+      1,
+      3,
+      1
+    ],
+    "rhs_values": [
+      0.5,
+      -1.0,
+      2.0
+    ],
     "rhs_dtype": "f32",
     "axis": null,
     "keepdims": false,
@@ -715,11 +1263,28 @@
   {
     "id": "mul_mixed_dtype_i64_by_f32_2x1x2_by_1x3x1",
     "op": "mul",
-    "lhs_shape": [2, 1, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "i64",
-    "rhs_shape": [1, 3, 1],
-    "rhs_values": [0.5, -1.0, 2.0],
+    "rhs_shape": [
+      1,
+      3,
+      1
+    ],
+    "rhs_values": [
+      0.5,
+      -1.0,
+      2.0
+    ],
     "rhs_dtype": "f32",
     "axis": null,
     "keepdims": false,
@@ -736,8 +1301,21 @@
   {
     "id": "sum_axis1_keepdims_f64_2x2x2",
     "op": "sum",
-    "lhs_shape": [2, 2, 2],
-    "lhs_values": [-3.0, 1.0, 5.0, -7.0, 9.0, 11.0, -13.0, 15.0],
+    "lhs_shape": [
+      2,
+      2,
+      2
+    ],
+    "lhs_values": [
+      -3.0,
+      1.0,
+      5.0,
+      -7.0,
+      9.0,
+      11.0,
+      -13.0,
+      15.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -757,11 +1335,28 @@
   {
     "id": "mul_mixed_dtype_bool_by_i64_2x1x2_by_1x3x1",
     "op": "mul",
-    "lhs_shape": [2, 1, 2],
-    "lhs_values": [1.0, 0.0, 0.0, 1.0],
+    "lhs_shape": [
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      0.0,
+      1.0
+    ],
     "lhs_dtype": "bool",
-    "rhs_shape": [1, 3, 1],
-    "rhs_values": [10.0, -2.0, 7.0],
+    "rhs_shape": [
+      1,
+      3,
+      1
+    ],
+    "rhs_values": [
+      10.0,
+      -2.0,
+      7.0
+    ],
     "rhs_dtype": "i64",
     "axis": null,
     "keepdims": false,
@@ -778,8 +1373,21 @@
   {
     "id": "sum_axis1_keepdims_i32_2x2x2",
     "op": "sum",
-    "lhs_shape": [2, 2, 2],
-    "lhs_values": [-3.0, 1.0, 5.0, -7.0, 9.0, 11.0, -13.0, 15.0],
+    "lhs_shape": [
+      2,
+      2,
+      2
+    ],
+    "lhs_values": [
+      -3.0,
+      1.0,
+      5.0,
+      -7.0,
+      9.0,
+      11.0,
+      -13.0,
+      15.0
+    ],
     "lhs_dtype": "i32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -799,10 +1407,20 @@
   {
     "id": "add_zero_extent_mixed_dtype_2x0x3x1_plus_1x0x1x1",
     "op": "add",
-    "lhs_shape": [2, 0, 3, 1],
+    "lhs_shape": [
+      2,
+      0,
+      3,
+      1
+    ],
     "lhs_values": [],
     "lhs_dtype": "i32",
-    "rhs_shape": [1, 0, 1, 1],
+    "rhs_shape": [
+      1,
+      0,
+      1,
+      1
+    ],
     "rhs_values": [],
     "rhs_dtype": "f64",
     "axis": null,
@@ -820,11 +1438,45 @@
   {
     "id": "add_broadcast_3x1x2x1x2_plus_1x4x1x2x1",
     "op": "add",
-    "lhs_shape": [3, 1, 2, 1, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "lhs_shape": [
+      3,
+      1,
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 4, 1, 2, 1],
-    "rhs_values": [0.5, -1.0, 2.0, 3.5, -0.25, 1.25, 4.0, -2.0],
+    "rhs_shape": [
+      1,
+      4,
+      1,
+      2,
+      1
+    ],
+    "rhs_values": [
+      0.5,
+      -1.0,
+      2.0,
+      3.5,
+      -0.25,
+      1.25,
+      4.0,
+      -2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -841,11 +1493,33 @@
   {
     "id": "div_mixed_dtype_i32_by_f64_2x1x3x1_by_1x4x1x1",
     "op": "div",
-    "lhs_shape": [2, 1, 3, 1],
-    "lhs_values": [12.0, -6.0, 3.0, 9.0, -3.0, 15.0],
+    "lhs_shape": [
+      2,
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      12.0,
+      -6.0,
+      3.0,
+      9.0,
+      -3.0,
+      15.0
+    ],
     "lhs_dtype": "i32",
-    "rhs_shape": [1, 4, 1, 1],
-    "rhs_values": [2.0, -3.0, 0.5, 4.0],
+    "rhs_shape": [
+      1,
+      4,
+      1,
+      1
+    ],
+    "rhs_values": [
+      2.0,
+      -3.0,
+      0.5,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -862,8 +1536,27 @@
   {
     "id": "sum_axis4_keepdims_f32_2x1x3x1x2",
     "op": "sum",
-    "lhs_shape": [2, 1, 3, 1, 2],
-    "lhs_values": [-1.5, 2.5, 3.0, -4.0, 5.5, 6.5, -7.5, 8.5, 9.0, -10.0, 11.5, 12.5],
+    "lhs_shape": [
+      2,
+      1,
+      3,
+      1,
+      2
+    ],
+    "lhs_values": [
+      -1.5,
+      2.5,
+      3.0,
+      -4.0,
+      5.5,
+      6.5,
+      -7.5,
+      8.5,
+      9.0,
+      -10.0,
+      11.5,
+      12.5
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -883,8 +1576,27 @@
   {
     "id": "sum_axis2_no_keepdims_i64_2x1x3x1x2",
     "op": "sum",
-    "lhs_shape": [2, 1, 3, 1, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0],
+    "lhs_shape": [
+      2,
+      1,
+      3,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      -1.0,
+      -2.0,
+      -3.0,
+      -4.0,
+      -5.0,
+      -6.0
+    ],
     "lhs_dtype": "i64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -904,12 +1616,52 @@
   {
     "id": "add_shape_mismatch_3x1x2x1x2_vs_2x4x1x2x1",
     "op": "add",
-    "lhs_shape": [3, 1, 2, 1, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "lhs_shape": [
+      3,
+      1,
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 4, 1, 2, 1],
+    "rhs_shape": [
+      2,
+      4,
+      1,
+      2,
+      1
+    ],
     "rhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0
     ],
     "rhs_dtype": "f64",
     "axis": null,
@@ -928,8 +1680,24 @@
   {
     "id": "sum_axis_out_of_bounds_6d",
     "op": "sum",
-    "lhs_shape": [1, 2, 1, 2, 1, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_shape": [
+      1,
+      2,
+      1,
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -950,11 +1718,28 @@
   {
     "id": "sub_mixed_dtype_f32_minus_i32_2x1x2_by_1x3x1",
     "op": "sub",
-    "lhs_shape": [2, 1, 2],
-    "lhs_values": [1.5, -2.5, 3.5, -4.5],
+    "lhs_shape": [
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.5,
+      -2.5,
+      3.5,
+      -4.5
+    ],
     "lhs_dtype": "f32",
-    "rhs_shape": [1, 3, 1],
-    "rhs_values": [1.0, -1.0, 2.0],
+    "rhs_shape": [
+      1,
+      3,
+      1
+    ],
+    "rhs_values": [
+      1.0,
+      -1.0,
+      2.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -971,11 +1756,37 @@
   {
     "id": "div_broadcast_f64_by_f32_1x2x1x3x1_by_2x1x3x1x1",
     "op": "div",
-    "lhs_shape": [1, 2, 1, 3, 1],
-    "lhs_values": [12.0, 6.0, -3.0, 9.0, -4.5, 15.0],
+    "lhs_shape": [
+      1,
+      2,
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      12.0,
+      6.0,
+      -3.0,
+      9.0,
+      -4.5,
+      15.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 1, 3, 1, 1],
-    "rhs_values": [2.0, 3.0, 0.5, 4.0, -1.5, 5.0],
+    "rhs_shape": [
+      2,
+      1,
+      3,
+      1,
+      1
+    ],
+    "rhs_values": [
+      2.0,
+      3.0,
+      0.5,
+      4.0,
+      -1.5,
+      5.0
+    ],
     "rhs_dtype": "f32",
     "axis": null,
     "keepdims": false,
@@ -992,8 +1803,20 @@
   {
     "id": "sum_all_keepdims_bool_2x1x3x1",
     "op": "sum",
-    "lhs_shape": [2, 1, 3, 1],
-    "lhs_values": [1.0, 0.0, 1.0, 1.0, 1.0, 0.0],
+    "lhs_shape": [
+      2,
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      1.0,
+      1.0,
+      0.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1013,8 +1836,23 @@
   {
     "id": "sum_axis0_keepdims_f32_2x1x2x1x2",
     "op": "sum",
-    "lhs_shape": [2, 1, 2, 1, 2],
-    "lhs_values": [1.5, -2.5, 3.0, 4.5, -1.0, 2.0, 5.5, -6.5],
+    "lhs_shape": [
+      2,
+      1,
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.5,
+      -2.5,
+      3.0,
+      4.5,
+      -1.0,
+      2.0,
+      5.5,
+      -6.5
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1034,11 +1872,32 @@
   {
     "id": "sub_shape_mismatch_2x1x2x1_vs_1x3x2",
     "op": "sub",
-    "lhs_shape": [2, 1, 2, 1],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      1,
+      2,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 3, 2],
-    "rhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "rhs_shape": [
+      1,
+      3,
+      2
+    ],
+    "rhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -1056,8 +1915,18 @@
   {
     "id": "sum_axis_out_of_bounds_bool_4d",
     "op": "sum",
-    "lhs_shape": [1, 2, 1, 2],
-    "lhs_values": [1.0, 0.0, 1.0, 0.0],
+    "lhs_shape": [
+      1,
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      0.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1078,10 +1947,23 @@
   {
     "id": "div_missing_rhs_values_2x1x2_by_1x2x1",
     "op": "div",
-    "lhs_shape": [2, 1, 2],
-    "lhs_values": [4.0, 8.0, 12.0, 16.0],
+    "lhs_shape": [
+      2,
+      1,
+      2
+    ],
+    "lhs_values": [
+      4.0,
+      8.0,
+      12.0,
+      16.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 2, 1],
+    "rhs_shape": [
+      1,
+      2,
+      1
+    ],
     "rhs_values": null,
     "rhs_dtype": "f64",
     "axis": null,
@@ -1100,8 +1982,21 @@
   {
     "id": "sum_axis_neg1_no_keepdims_2x2x2",
     "op": "sum",
-    "lhs_shape": [2, 2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_shape": [
+      2,
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1121,8 +2016,21 @@
   {
     "id": "sum_axis_neg2_keepdims_2x2x2",
     "op": "sum",
-    "lhs_shape": [2, 2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_shape": [
+      2,
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1142,8 +2050,21 @@
   {
     "id": "sum_axis_negative_out_of_bounds_2x2x2",
     "op": "sum",
-    "lhs_shape": [2, 2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    "lhs_shape": [
+      2,
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1164,11 +2085,37 @@
   {
     "id": "add_rank4_broadcast_2x1x3x1_plus_1x4x1x2",
     "op": "add",
-    "lhs_shape": [2, 1, 3, 1],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 4, 1, 2],
-    "rhs_values": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0],
+    "rhs_shape": [
+      1,
+      4,
+      1,
+      2
+    ],
+    "rhs_values": [
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      50.0,
+      60.0,
+      70.0,
+      80.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -1185,11 +2132,31 @@
   {
     "id": "mul_i32_2x3",
     "op": "mul",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1, 2, 3, 4, 5, 6],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
     "lhs_dtype": "i32",
-    "rhs_shape": [2, 3],
-    "rhs_values": [7, 8, 9, 10, 11, 12],
+    "rhs_shape": [
+      2,
+      3
+    ],
+    "rhs_values": [
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -1206,10 +2173,36 @@
   {
     "id": "sum_rank3_axis1_keepdims",
     "op": "sum",
-    "lhs_shape": [2, 3, 4],
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
     "lhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
-      18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0,
+      24.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -1230,11 +2223,24 @@
   {
     "id": "div_f32_broadcast_3_by_1x3",
     "op": "div",
-    "lhs_shape": [3],
-    "lhs_values": [10.0, 20.0, 30.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      10.0,
+      20.0,
+      30.0
+    ],
     "lhs_dtype": "f32",
-    "rhs_shape": [1, 3],
-    "rhs_values": [2.0, 4.0, 5.0],
+    "rhs_shape": [
+      1,
+      3
+    ],
+    "rhs_values": [
+      2.0,
+      4.0,
+      5.0
+    ],
     "rhs_dtype": "f32",
     "axis": null,
     "keepdims": false,
@@ -1251,11 +2257,27 @@
   {
     "id": "sub_mixed_dtype_i32_f64_2x2",
     "op": "sub",
-    "lhs_shape": [2, 2],
-    "lhs_values": [10, 20, 30, 40],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      10,
+      20,
+      30,
+      40
+    ],
     "lhs_dtype": "i32",
-    "rhs_shape": [2, 2],
-    "rhs_values": [1.5, 2.5, 3.5, 4.5],
+    "rhs_shape": [
+      2,
+      2
+    ],
+    "rhs_values": [
+      1.5,
+      2.5,
+      3.5,
+      4.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -1272,10 +2294,37 @@
   {
     "id": "sum_rank4_axis_minus1",
     "op": "sum",
-    "lhs_shape": [2, 2, 2, 3],
+    "lhs_shape": [
+      2,
+      2,
+      2,
+      3
+    ],
     "lhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
-      18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0,
+      24.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -1296,13 +2345,52 @@
   {
     "id": "add_rank5_broadcast_1x2x1x2x1_plus_2x1x3x1x4",
     "op": "add",
-    "lhs_shape": [1, 2, 1, 2, 1],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      1,
+      2,
+      1,
+      2,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 1, 3, 1, 4],
+    "rhs_shape": [
+      2,
+      1,
+      3,
+      1,
+      4
+    ],
     "rhs_values": [
-      10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0, 140.0,
-      150.0, 160.0, 170.0, 180.0, 190.0, 200.0, 210.0, 220.0, 230.0, 240.0
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      50.0,
+      60.0,
+      70.0,
+      80.0,
+      90.0,
+      100.0,
+      110.0,
+      120.0,
+      130.0,
+      140.0,
+      150.0,
+      160.0,
+      170.0,
+      180.0,
+      190.0,
+      200.0,
+      210.0,
+      220.0,
+      230.0,
+      240.0
     ],
     "rhs_dtype": "f64",
     "axis": null,
@@ -1320,8 +2408,24 @@
   {
     "id": "sum_f32_rank2_axis0_keepdims",
     "op": "sum",
-    "lhs_shape": [3, 4],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "lhs_shape": [
+      3,
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1341,8 +2445,18 @@
   {
     "id": "prod_all_no_keepdims",
     "op": "prod",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1362,8 +2476,18 @@
   {
     "id": "prod_axis1_keepdims",
     "op": "prod",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1383,8 +2507,16 @@
   {
     "id": "prod_i32_promotes_to_i64",
     "op": "prod",
-    "lhs_shape": [2, 2],
-    "lhs_values": [2.0, 3.0, 4.0, 5.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
     "lhs_dtype": "i32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1404,8 +2536,18 @@
   {
     "id": "min_all_no_keepdims",
     "op": "min",
-    "lhs_shape": [2, 3],
-    "lhs_values": [3.0, 1.0, 4.0, 1.5, 5.0, 2.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      1.0,
+      4.0,
+      1.5,
+      5.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1425,8 +2567,18 @@
   {
     "id": "min_axis0_no_keepdims",
     "op": "min",
-    "lhs_shape": [2, 3],
-    "lhs_values": [3.0, 1.0, 4.0, 1.5, 5.0, 2.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      1.0,
+      4.0,
+      1.5,
+      5.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1446,8 +2598,15 @@
   {
     "id": "min_i32_preserves_dtype",
     "op": "min",
-    "lhs_shape": [4],
-    "lhs_values": [5.0, 2.0, 8.0, 1.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      5.0,
+      2.0,
+      8.0,
+      1.0
+    ],
     "lhs_dtype": "i32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1467,8 +2626,18 @@
   {
     "id": "max_all_no_keepdims",
     "op": "max",
-    "lhs_shape": [2, 3],
-    "lhs_values": [3.0, 1.0, 4.0, 1.5, 5.0, 2.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      1.0,
+      4.0,
+      1.5,
+      5.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1488,8 +2657,18 @@
   {
     "id": "max_axis1_keepdims",
     "op": "max",
-    "lhs_shape": [2, 3],
-    "lhs_values": [3.0, 1.0, 4.0, 1.5, 5.0, 2.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      1.0,
+      4.0,
+      1.5,
+      5.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1509,8 +2688,15 @@
   {
     "id": "max_bool_preserves_dtype",
     "op": "max",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 1.0, 0.0, 1.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      0.0,
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1530,8 +2716,18 @@
   {
     "id": "mean_all_no_keepdims",
     "op": "mean",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1551,8 +2747,18 @@
   {
     "id": "mean_axis1_no_keepdims",
     "op": "mean",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1572,8 +2778,16 @@
   {
     "id": "mean_i32_promotes_to_f64",
     "op": "mean",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "i32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1593,8 +2807,25 @@
   {
     "id": "mean_axis0_keepdims_3d",
     "op": "mean",
-    "lhs_shape": [2, 3, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "lhs_shape": [
+      2,
+      3,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1614,8 +2845,18 @@
   {
     "id": "abs_mixed_signs",
     "op": "abs",
-    "lhs_shape": [2, 3],
-    "lhs_values": [-3.0, 1.0, -4.0, 1.5, -5.0, 0.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      -3.0,
+      1.0,
+      -4.0,
+      1.5,
+      -5.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1635,8 +2876,15 @@
   {
     "id": "abs_i32_preserves_dtype",
     "op": "abs",
-    "lhs_shape": [4],
-    "lhs_values": [-2.0, 0.0, 3.0, -7.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      -2.0,
+      0.0,
+      3.0,
+      -7.0
+    ],
     "lhs_dtype": "i32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1656,8 +2904,18 @@
   {
     "id": "negative_mixed_values",
     "op": "negative",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, -2.0, 0.0, 3.5, -4.5, 100.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      -2.0,
+      0.0,
+      3.5,
+      -4.5,
+      100.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1677,8 +2935,18 @@
   {
     "id": "sign_mixed_values",
     "op": "sign",
-    "lhs_shape": [2, 3],
-    "lhs_values": [-3.0, 0.0, 4.0, -1.5, 0.0, 2.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      -3.0,
+      0.0,
+      4.0,
+      -1.5,
+      0.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1698,8 +2966,18 @@
   {
     "id": "sqrt_positive_values",
     "op": "sqrt",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.0, 1.0, 4.0, 9.0, 16.0, 25.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      4.0,
+      9.0,
+      16.0,
+      25.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1719,8 +2997,18 @@
   {
     "id": "square_mixed_values",
     "op": "square",
-    "lhs_shape": [2, 3],
-    "lhs_values": [-2.0, 0.0, 3.0, -1.5, 4.0, -5.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      -2.0,
+      0.0,
+      3.0,
+      -1.5,
+      4.0,
+      -5.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1740,8 +3028,15 @@
   {
     "id": "square_f32_preserves_dtype",
     "op": "square",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1761,8 +3056,18 @@
   {
     "id": "exp_positive_values",
     "op": "exp",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.0, 1.0, 2.0, -1.0, 0.5, -0.5],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      -1.0,
+      0.5,
+      -0.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1782,8 +3087,18 @@
   {
     "id": "log_positive_values",
     "op": "log",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.718281828459045, 1.0, 10.0, 100.0, 0.5],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.718281828459045,
+      1.0,
+      10.0,
+      100.0,
+      0.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1803,8 +3118,15 @@
   {
     "id": "log2_powers_of_two",
     "op": "log2",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 2.0, 4.0, 8.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      4.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1824,8 +3146,15 @@
   {
     "id": "log10_powers_of_ten",
     "op": "log10",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 10.0, 100.0, 1000.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      10.0,
+      100.0,
+      1000.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1845,8 +3174,15 @@
   {
     "id": "sin_key_angles",
     "op": "sin",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 1.5707963267948966, 3.141592653589793, 6.283185307179586],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.5707963267948966,
+      3.141592653589793,
+      6.283185307179586
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1866,8 +3202,15 @@
   {
     "id": "cos_key_angles",
     "op": "cos",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 1.5707963267948966, 3.141592653589793, 6.283185307179586],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.5707963267948966,
+      3.141592653589793,
+      6.283185307179586
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1887,8 +3230,15 @@
   {
     "id": "tan_small_angles",
     "op": "tan",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 0.25, 0.5, 0.75],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      0.25,
+      0.5,
+      0.75
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -1908,11 +3258,31 @@
   {
     "id": "power_float_exponents",
     "op": "power",
-    "lhs_shape": [2, 3],
-    "lhs_values": [2.0, 3.0, 4.0, 5.0, 10.0, 0.5],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      10.0,
+      0.5
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 3],
-    "rhs_values": [3.0, 2.0, 0.5, 0.0, 1.0, 2.0],
+    "rhs_shape": [
+      2,
+      3
+    ],
+    "rhs_values": [
+      3.0,
+      2.0,
+      0.5,
+      0.0,
+      1.0,
+      2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -1929,11 +3299,25 @@
   {
     "id": "power_broadcast_2x3_by_1",
     "op": "power",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [2.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -1950,11 +3334,25 @@
   {
     "id": "remainder_sign_follows_divisor",
     "op": "remainder",
-    "lhs_shape": [4],
-    "lhs_values": [7.0, -7.0, 7.0, -7.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      7.0,
+      -7.0,
+      7.0,
+      -7.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [3.0, 3.0, -3.0, -3.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      3.0,
+      3.0,
+      -3.0,
+      -3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -1971,11 +3369,27 @@
   {
     "id": "remainder_broadcast_2x3_by_3",
     "op": "remainder",
-    "lhs_shape": [2, 3],
-    "lhs_values": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [3.0, 4.0, 5.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      3.0,
+      4.0,
+      5.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -1992,11 +3406,31 @@
   {
     "id": "minimum_elementwise",
     "op": "minimum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 5.0, 3.0, 7.0, 2.0, 8.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      5.0,
+      3.0,
+      7.0,
+      2.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 3],
-    "rhs_values": [4.0, 2.0, 6.0, 1.0, 9.0, 3.0],
+    "rhs_shape": [
+      2,
+      3
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      6.0,
+      1.0,
+      9.0,
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2013,11 +3447,23 @@
   {
     "id": "minimum_broadcast_2x3_by_scalar",
     "op": "minimum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 5.0, 3.0, 7.0, 2.0, 8.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      5.0,
+      3.0,
+      7.0,
+      2.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [4.0],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2034,11 +3480,31 @@
   {
     "id": "maximum_elementwise",
     "op": "maximum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 5.0, 3.0, 7.0, 2.0, 8.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      5.0,
+      3.0,
+      7.0,
+      2.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 3],
-    "rhs_values": [4.0, 2.0, 6.0, 1.0, 9.0, 3.0],
+    "rhs_shape": [
+      2,
+      3
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      6.0,
+      1.0,
+      9.0,
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2055,11 +3521,23 @@
   {
     "id": "maximum_broadcast_2x3_by_scalar",
     "op": "maximum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 5.0, 3.0, 7.0, 2.0, 8.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      5.0,
+      3.0,
+      7.0,
+      2.0,
+      8.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [4.0],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2076,8 +3554,18 @@
   {
     "id": "floor_mixed_values",
     "op": "floor",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.7, -1.7, 2.5, -2.5, 0.0, 3.9],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.7,
+      -1.7,
+      2.5,
+      -2.5,
+      0.0,
+      3.9
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2097,8 +3585,18 @@
   {
     "id": "ceil_mixed_values",
     "op": "ceil",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.7, -1.7, 2.5, -2.5, 0.0, 3.1],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.7,
+      -1.7,
+      2.5,
+      -2.5,
+      0.0,
+      3.1
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2118,8 +3616,18 @@
   {
     "id": "round_bankers_rounding",
     "op": "round",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.5, 1.5, 2.5, 3.5, 4.5, -0.5],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.5,
+      1.5,
+      2.5,
+      3.5,
+      4.5,
+      -0.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2139,8 +3647,18 @@
   {
     "id": "round_general_values",
     "op": "round",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.7, -1.7, 2.3, -2.3, 0.0, 99.9],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.7,
+      -1.7,
+      2.3,
+      -2.3,
+      0.0,
+      99.9
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2160,8 +3678,18 @@
   {
     "id": "reciprocal_positive_values",
     "op": "reciprocal",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 4.0, 0.5, 0.25, 10.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      4.0,
+      0.5,
+      0.25,
+      10.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2181,8 +3709,15 @@
   {
     "id": "reciprocal_mixed_signs",
     "op": "reciprocal",
-    "lhs_shape": [4],
-    "lhs_values": [-2.0, 0.5, -0.25, 8.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      -2.0,
+      0.5,
+      -0.25,
+      8.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2202,8 +3737,18 @@
   {
     "id": "sinh_mixed_values",
     "op": "sinh",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.0, 1.0, -1.0, 2.0, -2.0, 0.5],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      2.0,
+      -2.0,
+      0.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2223,8 +3768,18 @@
   {
     "id": "cosh_mixed_values",
     "op": "cosh",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.0, 1.0, -1.0, 2.0, -2.0, 0.5],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      2.0,
+      -2.0,
+      0.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2244,8 +3799,18 @@
   {
     "id": "tanh_mixed_values",
     "op": "tanh",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.0, 1.0, -1.0, 2.0, -2.0, 0.5],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      2.0,
+      -2.0,
+      0.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2265,8 +3830,18 @@
   {
     "id": "arcsin_valid_range",
     "op": "arcsin",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.0, 0.5, 1.0, -0.5, -1.0, 0.25],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      0.5,
+      1.0,
+      -0.5,
+      -1.0,
+      0.25
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2286,8 +3861,18 @@
   {
     "id": "arccos_valid_range",
     "op": "arccos",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.0, 0.5, 1.0, -0.5, -1.0, 0.25],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      0.5,
+      1.0,
+      -0.5,
+      -1.0,
+      0.25
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2307,8 +3892,18 @@
   {
     "id": "arctan_mixed_values",
     "op": "arctan",
-    "lhs_shape": [2, 3],
-    "lhs_values": [0.0, 1.0, -1.0, 10.0, -10.0, 0.5],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      10.0,
+      -10.0,
+      0.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2328,11 +3923,25 @@
   {
     "id": "arctan2_quadrants",
     "op": "arctan2",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, -1.0, -1.0, 1.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      -1.0,
+      -1.0,
+      1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [1.0, 1.0, -1.0, -1.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      1.0,
+      1.0,
+      -1.0,
+      -1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2349,11 +3958,25 @@
   {
     "id": "arctan2_broadcast_2x3_by_1",
     "op": "arctan2",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 0.0, -1.0, 0.0, 1.0, -1.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      -1.0,
+      0.0,
+      1.0,
+      -1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [1.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2370,8 +3993,15 @@
   {
     "id": "cbrt_mixed_values",
     "op": "cbrt",
-    "lhs_shape": [4],
-    "lhs_values": [8.0, -27.0, 0.0, 1.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      8.0,
+      -27.0,
+      0.0,
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2391,8 +4021,14 @@
   {
     "id": "cbrt_large_values",
     "op": "cbrt",
-    "lhs_shape": [3],
-    "lhs_values": [1000.0, -125.0, 0.001],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1000.0,
+      -125.0,
+      0.001
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2412,8 +4048,15 @@
   {
     "id": "expm1_near_zero",
     "op": "expm1",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 1.0, -1.0, 1e-15],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      1e-15
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2433,8 +4076,15 @@
   {
     "id": "log1p_near_zero",
     "op": "log1p",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 1.0, -0.5, 1e-15],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -0.5,
+      1e-15
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2454,8 +4104,15 @@
   {
     "id": "degrees_standard_angles",
     "op": "degrees",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 3.141592653589793, 1.5707963267948966, 0.7853981633974483],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      3.141592653589793,
+      1.5707963267948966,
+      0.7853981633974483
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2475,8 +4132,15 @@
   {
     "id": "radians_standard_angles",
     "op": "radians",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 180.0, 90.0, 45.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      180.0,
+      90.0,
+      45.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2496,8 +4160,19 @@
   {
     "id": "rint_bankers_rounding",
     "op": "rint",
-    "lhs_shape": [8],
-    "lhs_values": [0.5, 1.5, 2.5, 3.5, 4.5, -0.5, 1.7, -1.7],
+    "lhs_shape": [
+      8
+    ],
+    "lhs_values": [
+      0.5,
+      1.5,
+      2.5,
+      3.5,
+      4.5,
+      -0.5,
+      1.7,
+      -1.7
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2517,8 +4192,16 @@
   {
     "id": "trunc_mixed_values",
     "op": "trunc",
-    "lhs_shape": [5],
-    "lhs_values": [1.7, -1.7, 2.5, -2.5, 0.0],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      1.7,
+      -1.7,
+      2.5,
+      -2.5,
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2538,11 +4221,25 @@
   {
     "id": "fmod_sign_follows_dividend",
     "op": "fmod",
-    "lhs_shape": [4],
-    "lhs_values": [7.0, -7.0, 7.0, -7.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      7.0,
+      -7.0,
+      7.0,
+      -7.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [3.0, 3.0, -3.0, -3.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      3.0,
+      3.0,
+      -3.0,
+      -3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2559,11 +4256,25 @@
   {
     "id": "fmod_broadcast_2x3_by_1",
     "op": "fmod",
-    "lhs_shape": [2, 3],
-    "lhs_values": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [4.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2580,11 +4291,25 @@
   {
     "id": "copysign_mixed",
     "op": "copysign",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, -1.0, 3.0, -3.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      -1.0,
+      3.0,
+      -3.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [-1.0, 1.0, -1.0, 1.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      -1.0,
+      1.0,
+      -1.0,
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2601,11 +4326,23 @@
   {
     "id": "fmax_elementwise",
     "op": "fmax",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, 5.0, 3.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      5.0,
+      3.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [4.0, 2.0, 6.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      6.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2622,11 +4359,23 @@
   {
     "id": "fmin_elementwise",
     "op": "fmin",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, 5.0, 3.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      5.0,
+      3.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [4.0, 2.0, 6.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      6.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2643,8 +4392,15 @@
   {
     "id": "positive_identity",
     "op": "positive",
-    "lhs_shape": [4],
-    "lhs_values": [-3.0, 0.0, 5.0, -1.5],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      -3.0,
+      0.0,
+      5.0,
+      -1.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2664,8 +4420,15 @@
   {
     "id": "spacing_standard_values",
     "op": "spacing",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 10000000000.0, 1e-10, 0.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      10000000000.0,
+      1e-10,
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2685,11 +4448,23 @@
   {
     "id": "heaviside_step_function",
     "op": "heaviside",
-    "lhs_shape": [3],
-    "lhs_values": [-1.5, 0.0, 2.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      -1.5,
+      0.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [0.5, 0.5, 0.5],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      0.5,
+      0.5,
+      0.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2706,11 +4481,23 @@
   {
     "id": "heaviside_broadcast_scalar",
     "op": "heaviside",
-    "lhs_shape": [5],
-    "lhs_values": [-2.0, -0.5, 0.0, 0.5, 2.0],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      -2.0,
+      -0.5,
+      0.0,
+      0.5,
+      2.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [0.5],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      0.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2727,11 +4514,23 @@
   {
     "id": "nextafter_toward_positive",
     "op": "nextafter",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, 0.0, -1.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      -1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [2.0, -1.0, 0.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      2.0,
+      -1.0,
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2748,11 +4547,23 @@
   {
     "id": "nextafter_broadcast",
     "op": "nextafter",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, -1.0, 0.0, 2.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      -1.0,
+      0.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [0.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2769,8 +4580,16 @@
   {
     "id": "logical_not_truthiness",
     "op": "logical_not",
-    "lhs_shape": [5],
-    "lhs_values": [0.0, 1.0, -1.0, 0.5, -0.5],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      0.5,
+      -0.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -2790,11 +4609,25 @@
   {
     "id": "logical_and_basic",
     "op": "logical_and",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 1.0, 0.0, 0.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      1.0,
+      0.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [1.0, 0.0, 1.0, 0.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2811,11 +4644,25 @@
   {
     "id": "logical_or_basic",
     "op": "logical_or",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 1.0, 0.0, 0.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      1.0,
+      0.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [1.0, 0.0, 1.0, 0.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2832,11 +4679,25 @@
   {
     "id": "logical_xor_basic",
     "op": "logical_xor",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 1.0, 0.0, 0.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      1.0,
+      0.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [1.0, 0.0, 1.0, 0.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2853,11 +4714,25 @@
   {
     "id": "equal_basic",
     "op": "equal",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [4.0, 2.0, 1.0, 4.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      1.0,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2874,11 +4749,25 @@
   {
     "id": "not_equal_basic",
     "op": "not_equal",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [4.0, 2.0, 1.0, 4.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      1.0,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2895,11 +4784,25 @@
   {
     "id": "less_basic",
     "op": "less",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [4.0, 2.0, 1.0, 4.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      1.0,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2916,11 +4819,25 @@
   {
     "id": "less_equal_basic",
     "op": "less_equal",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [4.0, 2.0, 1.0, 4.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      1.0,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2937,11 +4854,25 @@
   {
     "id": "greater_basic",
     "op": "greater",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [4.0, 2.0, 1.0, 4.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      1.0,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2958,11 +4889,25 @@
   {
     "id": "greater_equal_basic",
     "op": "greater_equal",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [4.0, 2.0, 1.0, 4.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      4.0,
+      2.0,
+      1.0,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -2979,11 +4924,25 @@
   {
     "id": "equal_broadcast_2x3_by_scalar",
     "op": "equal",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      3.0,
+      2.0,
+      1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [2.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -3001,186 +4960,385 @@
     "id": "hypot_pythagorean",
     "seed": 5985,
     "op": "hypot",
-    "lhs_shape": [3],
-    "lhs_values": [3.0, 5.0, 1.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      5.0,
+      1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [4.0, 12.0, 0.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      4.0,
+      12.0,
+      0.0
+    ],
     "rhs_dtype": "f64"
   },
   {
     "id": "hypot_broadcast_scalar",
     "seed": 5986,
     "op": "hypot",
-    "lhs_shape": [2, 3],
-    "lhs_values": [3.0, 5.0, 8.0, 7.0, 0.0, 1.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      5.0,
+      8.0,
+      7.0,
+      0.0,
+      1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [4.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "f64"
   },
   {
     "id": "logaddexp_basic",
     "seed": 5987,
     "op": "logaddexp",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, 0.0, -1.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      -1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [2.0, 0.0, -2.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      2.0,
+      0.0,
+      -2.0
+    ],
     "rhs_dtype": "f64"
   },
   {
     "id": "logaddexp2_basic",
     "seed": 5988,
     "op": "logaddexp2",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, 0.0, 3.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      3.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [2.0, 0.0, 1.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      2.0,
+      0.0,
+      1.0
+    ],
     "rhs_dtype": "f64"
   },
   {
     "id": "ldexp_basic",
     "seed": 5989,
     "op": "ldexp",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 1.5, 2.0, 0.5],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      1.5,
+      2.0,
+      0.5
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [2.0, 3.0, 0.0, 4.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      2.0,
+      3.0,
+      0.0,
+      4.0
+    ],
     "rhs_dtype": "f64"
   },
   {
     "id": "ldexp_broadcast",
     "seed": 5990,
     "op": "ldexp",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [3.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "f64"
   },
   {
     "id": "isnan_finite_values",
     "seed": 5991,
     "op": "isnan",
-    "lhs_shape": [5],
-    "lhs_values": [0.0, 1.0, -1.0, 3.14, -0.5],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      3.14,
+      -0.5
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "isinf_finite_values",
     "seed": 5992,
     "op": "isinf",
-    "lhs_shape": [5],
-    "lhs_values": [0.0, 1.0, -1.0, 1e300, -1e300],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      1e+300,
+      -1e+300
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "isfinite_standard",
     "seed": 5993,
     "op": "isfinite",
-    "lhs_shape": [5],
-    "lhs_values": [0.0, 1.0, -1.0, 1e308, -1e308],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      1e+308,
+      -1e+308
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "signbit_mixed_signs",
     "seed": 5994,
     "op": "signbit",
-    "lhs_shape": [6],
-    "lhs_values": [1.0, -1.0, 0.0, 3.14, -2.71, 100.0],
+    "lhs_shape": [
+      6
+    ],
+    "lhs_values": [
+      1.0,
+      -1.0,
+      0.0,
+      3.14,
+      -2.71,
+      100.0
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "exp2_basic",
     "seed": 6001,
     "op": "exp2",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 1.0, 2.0, 3.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "exp2_negative",
     "seed": 6002,
     "op": "exp2",
-    "lhs_shape": [3],
-    "lhs_values": [-1.0, -2.0, 0.5],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      -1.0,
+      -2.0,
+      0.5
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "fabs_mixed",
     "seed": 6003,
     "op": "fabs",
-    "lhs_shape": [5],
-    "lhs_values": [-3.0, 0.0, 5.0, -1.5, 2.7],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      -3.0,
+      0.0,
+      5.0,
+      -1.5,
+      2.7
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "floor_divide_basic",
     "seed": 6004,
     "op": "floor_divide",
-    "lhs_shape": [4],
-    "lhs_values": [7.0, -7.0, 7.0, -7.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      7.0,
+      -7.0,
+      7.0,
+      -7.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4],
-    "rhs_values": [3.0, 3.0, -3.0, -3.0],
+    "rhs_shape": [
+      4
+    ],
+    "rhs_values": [
+      3.0,
+      3.0,
+      -3.0,
+      -3.0
+    ],
     "rhs_dtype": "f64"
   },
   {
     "id": "floor_divide_broadcast",
     "seed": 6005,
     "op": "floor_divide",
-    "lhs_shape": [2, 3],
-    "lhs_values": [10.0, 7.0, 5.0, 3.0, 9.0, 1.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      10.0,
+      7.0,
+      5.0,
+      3.0,
+      9.0,
+      1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [3.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "f64"
   },
   {
     "id": "float_power_basic",
     "seed": 6006,
     "op": "float_power",
-    "lhs_shape": [3],
-    "lhs_values": [2.0, 3.0, 4.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [3.0, 2.0, 0.5],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      3.0,
+      2.0,
+      0.5
+    ],
     "rhs_dtype": "f64"
   },
   {
     "id": "arccosh_basic",
     "seed": 6007,
     "op": "arccosh",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, 2.0, 10.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      10.0
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "arcsinh_basic",
     "seed": 6008,
     "op": "arcsinh",
-    "lhs_shape": [4],
-    "lhs_values": [0.0, 1.0, -1.0, 2.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      -1.0,
+      2.0
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "arctanh_basic",
     "seed": 6009,
     "op": "arctanh",
-    "lhs_shape": [3],
-    "lhs_values": [0.0, 0.5, -0.5],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      0.5,
+      -0.5
+    ],
     "lhs_dtype": "f64"
   },
   {
     "id": "cumsum_axis_none_flat",
     "op": "cumsum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3200,8 +5358,18 @@
   {
     "id": "cumsum_axis_0_2x3",
     "op": "cumsum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3221,8 +5389,18 @@
   {
     "id": "cumsum_axis_1_2x3",
     "op": "cumsum",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3242,8 +5420,18 @@
   {
     "id": "cumprod_axis_none_flat",
     "op": "cumprod",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3263,8 +5451,18 @@
   {
     "id": "cumprod_axis_1_2x3",
     "op": "cumprod",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3284,8 +5482,18 @@
   {
     "id": "cummin_axis_none_flat",
     "op": "cummin",
-    "lhs_shape": [2, 3],
-    "lhs_values": [3.0, 1.0, 4.0, 1.0, 5.0, 2.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      1.0,
+      4.0,
+      1.0,
+      5.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3305,8 +5513,18 @@
   {
     "id": "cummin_axis_0_2x3",
     "op": "cummin",
-    "lhs_shape": [2, 3],
-    "lhs_values": [3.0, 1.0, 4.0, 1.0, 5.0, 2.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      1.0,
+      4.0,
+      1.0,
+      5.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3326,8 +5544,18 @@
   {
     "id": "cummax_axis_none_flat",
     "op": "cummax",
-    "lhs_shape": [2, 3],
-    "lhs_values": [3.0, 1.0, 4.0, 1.0, 5.0, 2.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      1.0,
+      4.0,
+      1.0,
+      5.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3347,8 +5575,18 @@
   {
     "id": "cummax_axis_1_2x3",
     "op": "cummax",
-    "lhs_shape": [2, 3],
-    "lhs_values": [3.0, 1.0, 4.0, 1.0, 5.0, 2.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      1.0,
+      4.0,
+      1.0,
+      5.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3368,8 +5606,15 @@
   {
     "id": "cummin_with_nan",
     "op": "cummin",
-    "lhs_shape": [4],
-    "lhs_values": [3.0, "NaN", 1.0, 2.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      3.0,
+      "NaN",
+      1.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3389,8 +5634,15 @@
   {
     "id": "cummax_with_nan",
     "op": "cummax",
-    "lhs_shape": [4],
-    "lhs_values": [3.0, "NaN", 5.0, 2.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      3.0,
+      "NaN",
+      5.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3410,8 +5662,18 @@
   {
     "id": "clip_basic_bounds",
     "op": "clip",
-    "lhs_shape": [2, 3],
-    "lhs_values": [1.0, 5.0, 3.0, 8.0, 2.0, 7.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      5.0,
+      3.0,
+      8.0,
+      2.0,
+      7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3433,8 +5695,17 @@
   {
     "id": "clip_min_only",
     "op": "clip",
-    "lhs_shape": [6],
-    "lhs_values": [-3.0, -1.0, 0.0, 1.0, 3.0, 5.0],
+    "lhs_shape": [
+      6
+    ],
+    "lhs_values": [
+      -3.0,
+      -1.0,
+      0.0,
+      1.0,
+      3.0,
+      5.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3455,8 +5726,25 @@
   {
     "id": "cumsum_3d_axis_2",
     "op": "cumsum",
-    "lhs_shape": [2, 2, 3],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    "lhs_shape": [
+      2,
+      2,
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3476,8 +5764,15 @@
   {
     "id": "var_axis_none_flat",
     "op": "var",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3498,8 +5793,16 @@
   {
     "id": "std_axis_1_keepdims_ddof_1",
     "op": "std",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3520,8 +5823,14 @@
   {
     "id": "argmin_axis_none",
     "op": "argmin",
-    "lhs_shape": [3],
-    "lhs_values": [3.0, 1.0, 2.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      3.0,
+      1.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3541,8 +5850,18 @@
   {
     "id": "argmax_axis_one_2x3",
     "op": "argmax",
-    "lhs_shape": [2, 3],
-    "lhs_values": [5.0, 1.0, 3.0, 2.0, 4.0, 0.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      5.0,
+      1.0,
+      3.0,
+      2.0,
+      4.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3562,11 +5881,27 @@
   {
     "id": "bitwise_and_i64_2x2",
     "op": "bitwise_and",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 3.0, 7.0, 8.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      3.0,
+      7.0,
+      8.0
+    ],
     "lhs_dtype": "i64",
-    "rhs_shape": [2, 2],
-    "rhs_values": [2.0, 1.0, 3.0, 4.0],
+    "rhs_shape": [
+      2,
+      2
+    ],
+    "rhs_values": [
+      2.0,
+      1.0,
+      3.0,
+      4.0
+    ],
     "rhs_dtype": "i64",
     "axis": null,
     "keepdims": false,
@@ -3583,11 +5918,27 @@
   {
     "id": "bitwise_or_i64_2x2",
     "op": "bitwise_or",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 3.0, 7.0, 8.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      3.0,
+      7.0,
+      8.0
+    ],
     "lhs_dtype": "i64",
-    "rhs_shape": [2, 2],
-    "rhs_values": [2.0, 1.0, 3.0, 4.0],
+    "rhs_shape": [
+      2,
+      2
+    ],
+    "rhs_values": [
+      2.0,
+      1.0,
+      3.0,
+      4.0
+    ],
     "rhs_dtype": "i64",
     "axis": null,
     "keepdims": false,
@@ -3604,11 +5955,27 @@
   {
     "id": "bitwise_xor_i64_2x2",
     "op": "bitwise_xor",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 3.0, 7.0, 8.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      3.0,
+      7.0,
+      8.0
+    ],
     "lhs_dtype": "i64",
-    "rhs_shape": [2, 2],
-    "rhs_values": [2.0, 1.0, 3.0, 4.0],
+    "rhs_shape": [
+      2,
+      2
+    ],
+    "rhs_values": [
+      2.0,
+      1.0,
+      3.0,
+      4.0
+    ],
     "rhs_dtype": "i64",
     "axis": null,
     "keepdims": false,
@@ -3625,14 +5992,23 @@
   {
     "id": "where_select_broadcast_scalar",
     "op": "where",
-    "lhs_shape": [2],
-    "lhs_values": [1.0, 0.0],
+    "lhs_shape": [
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      0.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [10.0],
+    "rhs_values": [
+      10.0
+    ],
     "rhs_dtype": "f64",
     "third_shape": [],
-    "third_values": [20.0],
+    "third_values": [
+      20.0
+    ],
     "third_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -3649,8 +6025,18 @@
   {
     "id": "sort_axis_none_2x3",
     "op": "sort",
-    "lhs_shape": [2, 3],
-    "lhs_values": [5.0, 1.0, 3.0, 2.0, 4.0, 0.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      5.0,
+      1.0,
+      3.0,
+      2.0,
+      4.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3670,8 +6056,18 @@
   {
     "id": "argsort_axis_one_2x3",
     "op": "argsort",
-    "lhs_shape": [2, 3],
-    "lhs_values": [5.0, 1.0, 3.0, 2.0, 4.0, 0.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      5.0,
+      1.0,
+      3.0,
+      2.0,
+      4.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3691,11 +6087,25 @@
   {
     "id": "concatenate_axis_zero_2x2_plus_1x2",
     "op": "concatenate",
-    "lhs_shape": [2, 2],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 2],
-    "rhs_values": [5.0, 6.0],
+    "rhs_shape": [
+      1,
+      2
+    ],
+    "rhs_values": [
+      5.0,
+      6.0
+    ],
     "rhs_dtype": "f64",
     "axis": 0,
     "keepdims": false,
@@ -3712,11 +6122,21 @@
   {
     "id": "stack_axis_one_pair",
     "op": "stack",
-    "lhs_shape": [2],
-    "lhs_values": [1.0, 2.0],
+    "lhs_shape": [
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      2.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2],
-    "rhs_values": [3.0, 4.0],
+    "rhs_shape": [
+      2
+    ],
+    "rhs_values": [
+      3.0,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": 1,
     "keepdims": false,
@@ -3733,11 +6153,26 @@
   {
     "id": "searchsorted_basic_insertions",
     "op": "searchsorted",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 3.0, 5.0, 7.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      3.0,
+      5.0,
+      7.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [5],
-    "rhs_values": [-1.0, 1.0, 2.0, 7.0, 9.0],
+    "rhs_shape": [
+      5
+    ],
+    "rhs_values": [
+      -1.0,
+      1.0,
+      2.0,
+      7.0,
+      9.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -3754,7 +6189,9 @@
   {
     "id": "sum_empty_f64_scalar",
     "op": "sum",
-    "lhs_shape": [0],
+    "lhs_shape": [
+      0
+    ],
     "lhs_values": [],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -3775,7 +6212,9 @@
   {
     "id": "prod_empty_f64_scalar",
     "op": "prod",
-    "lhs_shape": [0],
+    "lhs_shape": [
+      0
+    ],
     "lhs_values": [],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -3796,7 +6235,9 @@
   {
     "id": "mean_empty_f64_scalar",
     "op": "mean",
-    "lhs_shape": [0],
+    "lhs_shape": [
+      0
+    ],
     "lhs_values": [],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -3817,8 +6258,12 @@
   {
     "id": "min_singleton_f64_scalar",
     "op": "min",
-    "lhs_shape": [1],
-    "lhs_values": [42.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      42.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3838,8 +6283,12 @@
   {
     "id": "max_singleton_f64_scalar",
     "op": "max",
-    "lhs_shape": [1],
-    "lhs_values": [42.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      42.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3859,8 +6308,14 @@
   {
     "id": "mean_all_nan_f64_scalar",
     "op": "mean",
-    "lhs_shape": [3],
-    "lhs_values": ["NaN", "NaN", "NaN"],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      "NaN",
+      "NaN",
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3880,8 +6335,14 @@
   {
     "id": "var_all_nan_f64_scalar",
     "op": "var",
-    "lhs_shape": [3],
-    "lhs_values": ["NaN", "NaN", "NaN"],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      "NaN",
+      "NaN",
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3902,8 +6363,14 @@
   {
     "id": "std_all_nan_f64_ddof1",
     "op": "std",
-    "lhs_shape": [3],
-    "lhs_values": ["NaN", "NaN", "NaN"],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      "NaN",
+      "NaN",
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3924,17 +6391,46 @@
   {
     "id": "sum_axes_0_2_rank3",
     "op": "sum",
-    "lhs_shape": [2, 3, 4],
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
     "lhs_values": [
-      0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
     "rhs_dtype": null,
     "axis": null,
-    "axes": [0, 2],
+    "axes": [
+      0,
+      2
+    ],
     "keepdims": false,
     "seed": 6309,
     "mode": "strict",
@@ -3949,17 +6445,46 @@
   {
     "id": "prod_axes_0_2_rank3_ones",
     "op": "prod",
-    "lhs_shape": [2, 3, 4],
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
     "lhs_values": [
-      1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-      1.0, 1.0, 1.0, 1.0, 1.0
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
     "rhs_dtype": null,
     "axis": null,
-    "axes": [0, 2],
+    "axes": [
+      0,
+      2
+    ],
     "keepdims": false,
     "seed": 6310,
     "mode": "strict",
@@ -3974,8 +6499,13 @@
   {
     "id": "sum_overflow_to_inf",
     "op": "sum",
-    "lhs_shape": [2],
-    "lhs_values": [1e308, 1e308],
+    "lhs_shape": [
+      2
+    ],
+    "lhs_values": [
+      1e+308,
+      1e+308
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -3995,8 +6525,13 @@
   {
     "id": "sum_cancellation_to_zero",
     "op": "sum",
-    "lhs_shape": [2],
-    "lhs_values": [1e-308, -1e-308],
+    "lhs_shape": [
+      2
+    ],
+    "lhs_values": [
+      1e-308,
+      -1e-308
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -4016,17 +6551,46 @@
   {
     "id": "mean_axes_0_2_keepdims_rank3",
     "op": "mean",
-    "lhs_shape": [2, 3, 4],
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
     "lhs_values": [
-      0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
     "rhs_dtype": null,
     "axis": null,
-    "axes": [0, 2],
+    "axes": [
+      0,
+      2
+    ],
     "keepdims": true,
     "seed": 6313,
     "mode": "strict",
@@ -4042,10 +6606,22 @@
     "id": "add_scalar_lhs_0d_plus_2x3",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [5.0],
+    "lhs_values": [
+      5.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 3],
-    "rhs_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+    "rhs_shape": [
+      2,
+      3
+    ],
+    "rhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4062,11 +6638,23 @@
   {
     "id": "mul_vector3_by_2x1",
     "op": "mul",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, 2.0, 3.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 1],
-    "rhs_values": [10.0, 20.0],
+    "rhs_shape": [
+      2,
+      1
+    ],
+    "rhs_values": [
+      10.0,
+      20.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4083,11 +6671,32 @@
   {
     "id": "add_zero_broadcast_1x3x1_plus_2x1x4",
     "op": "add",
-    "lhs_shape": [1, 3, 1],
-    "lhs_values": [0.0, 0.0, 0.0],
+    "lhs_shape": [
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      0.0,
+      0.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 1, 4],
-    "rhs_values": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "rhs_shape": [
+      2,
+      1,
+      4
+    ],
+    "rhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4104,11 +6713,20 @@
   {
     "id": "sub_zero_extent_0x3_minus_3",
     "op": "sub",
-    "lhs_shape": [0, 3],
+    "lhs_shape": [
+      0,
+      3
+    ],
     "lhs_values": [],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [10.0, 20.0, 30.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      10.0,
+      20.0,
+      30.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4125,11 +6743,21 @@
   {
     "id": "add_len1_to_len3",
     "op": "add",
-    "lhs_shape": [1],
-    "lhs_values": [1.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3],
-    "rhs_values": [2.0, 3.0, 4.0],
+    "rhs_shape": [
+      3
+    ],
+    "rhs_values": [
+      2.0,
+      3.0,
+      4.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4146,11 +6774,25 @@
   {
     "id": "mul_1x1x1_by_5",
     "op": "mul",
-    "lhs_shape": [1, 1, 1],
-    "lhs_values": [1.0],
+    "lhs_shape": [
+      1,
+      1,
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [5],
-    "rhs_values": [1.0, 1.0, 1.0, 1.0, 1.0],
+    "rhs_shape": [
+      5
+    ],
+    "rhs_values": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4168,10 +6810,14 @@
     "id": "add_scalar_0d_plus_scalar_0d",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4188,11 +6834,23 @@
   {
     "id": "power_broadcast_2x2_by_len1",
     "op": "power",
-    "lhs_shape": [2, 2],
-    "lhs_values": [0.0, 1.0, 2.0, 3.0],
+    "lhs_shape": [
+      2,
+      2
+    ],
+    "lhs_values": [
+      0.0,
+      1.0,
+      2.0,
+      3.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1],
-    "rhs_values": [2.0],
+    "rhs_shape": [
+      1
+    ],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4209,11 +6867,26 @@
   {
     "id": "div_outer_broadcast_3x1_by_1x4",
     "op": "div",
-    "lhs_shape": [3, 1],
-    "lhs_values": [1.0, 1.0, 1.0],
+    "lhs_shape": [
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      1.0,
+      1.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [1, 4],
-    "rhs_values": [1.0, 1.0, 1.0, 1.0],
+    "rhs_shape": [
+      1,
+      4
+    ],
+    "rhs_values": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4230,11 +6903,34 @@
   {
     "id": "add_shape_mismatch_2x1x3_vs_4x2",
     "op": "add",
-    "lhs_shape": [2, 1, 3],
-    "lhs_values": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "lhs_shape": [
+      2,
+      1,
+      3
+    ],
+    "lhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [4, 2],
-    "rhs_values": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "rhs_shape": [
+      4,
+      2
+    ],
+    "rhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4252,11 +6948,32 @@
   {
     "id": "add_value_broadcast_1x3x1_plus_2x1x4",
     "op": "add",
-    "lhs_shape": [1, 3, 1],
-    "lhs_values": [1.0, 2.0, 3.0],
+    "lhs_shape": [
+      1,
+      3,
+      1
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 1, 4],
-    "rhs_values": [10.0, 20.0, 30.0, 40.0, 100.0, 200.0, 300.0, 400.0],
+    "rhs_shape": [
+      2,
+      1,
+      4
+    ],
+    "rhs_values": [
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      100.0,
+      200.0,
+      300.0,
+      400.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4274,10 +6991,14 @@
     "id": "add_scalar_i32_plus_f16",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [100.0],
+    "lhs_values": [
+      100.0
+    ],
     "lhs_dtype": "i32",
     "rhs_shape": [],
-    "rhs_values": [1.5],
+    "rhs_values": [
+      1.5
+    ],
     "rhs_dtype": "f16",
     "axis": null,
     "keepdims": false,
@@ -4295,10 +7016,14 @@
     "id": "mul_scalar_u64_by_i8",
     "op": "mul",
     "lhs_shape": [],
-    "lhs_values": [1.152921504606847e18],
+    "lhs_values": [
+      1.152921504606847e+18
+    ],
     "lhs_dtype": "u64",
     "rhs_shape": [],
-    "rhs_values": [-1.0],
+    "rhs_values": [
+      -1.0
+    ],
     "rhs_dtype": "i8",
     "axis": null,
     "keepdims": false,
@@ -4316,10 +7041,14 @@
     "id": "sub_scalar_f32_minus_i64",
     "op": "sub",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "i64",
     "axis": null,
     "keepdims": false,
@@ -4337,10 +7066,14 @@
     "id": "mul_scalar_u16_by_i16",
     "op": "mul",
     "lhs_shape": [],
-    "lhs_values": [60000.0],
+    "lhs_values": [
+      60000.0
+    ],
     "lhs_dtype": "u16",
     "rhs_shape": [],
-    "rhs_values": [-1.0],
+    "rhs_values": [
+      -1.0
+    ],
     "rhs_dtype": "i16",
     "axis": null,
     "keepdims": false,
@@ -4358,10 +7091,14 @@
     "id": "add_scalar_f16_plus_i16",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f16",
     "rhs_shape": [],
-    "rhs_values": [1000.0],
+    "rhs_values": [
+      1000.0
+    ],
     "rhs_dtype": "i16",
     "axis": null,
     "keepdims": false,
@@ -4379,10 +7116,14 @@
     "id": "div_scalar_i32_by_i32",
     "op": "div",
     "lhs_shape": [],
-    "lhs_values": [7.0],
+    "lhs_values": [
+      7.0
+    ],
     "lhs_dtype": "i32",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -4400,10 +7141,14 @@
     "id": "floor_divide_scalar_i32_by_i32",
     "op": "floor_divide",
     "lhs_shape": [],
-    "lhs_values": [7.0],
+    "lhs_values": [
+      7.0
+    ],
     "lhs_dtype": "i32",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -4421,10 +7166,14 @@
     "id": "mul_scalar_f64_by_bool",
     "op": "mul",
     "lhs_shape": [],
-    "lhs_values": [1.5],
+    "lhs_values": [
+      1.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "bool",
     "axis": null,
     "keepdims": false,
@@ -4442,10 +7191,14 @@
     "id": "add_scalar_f64_plus_f32",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "f32",
     "axis": null,
     "keepdims": false,
@@ -4463,10 +7216,14 @@
     "id": "add_scalar_u16_plus_i32",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [65000.0],
+    "lhs_values": [
+      65000.0
+    ],
     "lhs_dtype": "u16",
     "rhs_shape": [],
-    "rhs_values": [-10.0],
+    "rhs_values": [
+      -10.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -4484,10 +7241,14 @@
     "id": "minimum_scalar_f32_with_u16",
     "op": "minimum",
     "lhs_shape": [],
-    "lhs_values": [3.5],
+    "lhs_values": [
+      3.5
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "u16",
     "axis": null,
     "keepdims": false,
@@ -4505,10 +7266,14 @@
     "id": "add_scalar_i32_plus_f64",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [5.0],
+    "lhs_values": [
+      5.0
+    ],
     "lhs_dtype": "i32",
     "rhs_shape": [],
-    "rhs_values": [0.25],
+    "rhs_values": [
+      0.25
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -4526,10 +7291,14 @@
     "id": "sub_scalar_u64_minus_i32",
     "op": "sub",
     "lhs_shape": [],
-    "lhs_values": [100.0],
+    "lhs_values": [
+      100.0
+    ],
     "lhs_dtype": "u64",
     "rhs_shape": [],
-    "rhs_values": [7.0],
+    "rhs_values": [
+      7.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -4547,10 +7316,14 @@
     "id": "div_scalar_bool_by_i64",
     "op": "div",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "i64",
     "axis": null,
     "keepdims": false,
@@ -4568,10 +7341,14 @@
     "id": "floor_divide_scalar_f64_by_i32",
     "op": "floor_divide",
     "lhs_shape": [],
-    "lhs_values": [7.5],
+    "lhs_values": [
+      7.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -4589,10 +7366,14 @@
     "id": "power_scalar_f64_to_i32",
     "op": "power",
     "lhs_shape": [],
-    "lhs_values": [2.0],
+    "lhs_values": [
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [3.0],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -4610,10 +7391,14 @@
     "id": "mul_scalar_f32_by_u64",
     "op": "mul",
     "lhs_shape": [],
-    "lhs_values": [1.5],
+    "lhs_values": [
+      1.5
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": [],
-    "rhs_values": [4.0],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "u64",
     "axis": null,
     "keepdims": false,
@@ -4631,10 +7416,17 @@
     "id": "add_scalar_bool_plus_complex128",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "bool",
-    "rhs_shape": [2],
-    "rhs_values": [1.0, 2.0],
+    "rhs_shape": [
+      2
+    ],
+    "rhs_values": [
+      1.0,
+      2.0
+    ],
     "rhs_dtype": "complex128",
     "axis": null,
     "keepdims": false,
@@ -4652,10 +7444,14 @@
     "id": "add_scalar_u8_plus_i8",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [200.0],
+    "lhs_values": [
+      200.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [-50.0],
+    "rhs_values": [
+      -50.0
+    ],
     "rhs_dtype": "int8",
     "axis": null,
     "keepdims": false,
@@ -4672,11 +7468,18 @@
   {
     "id": "add_scalar_complex64_plus_i32",
     "op": "add",
-    "lhs_shape": [2],
-    "lhs_values": [1.0, 0.0],
+    "lhs_shape": [
+      2
+    ],
+    "lhs_values": [
+      1.0,
+      0.0
+    ],
     "lhs_dtype": "complex64",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -4694,10 +7497,14 @@
     "id": "add_scalar_u8_overflow_wrap",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [255.0],
+    "lhs_values": [
+      255.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
@@ -4715,10 +7522,14 @@
     "id": "add_scalar_i8_overflow_wrap",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [127.0],
+    "lhs_values": [
+      127.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "int8",
     "axis": null,
     "keepdims": false,
@@ -4736,10 +7547,14 @@
     "id": "power_scalar_i64_overflow_wrap",
     "op": "power",
     "lhs_shape": [],
-    "lhs_values": [2.0],
+    "lhs_values": [
+      2.0
+    ],
     "lhs_dtype": "i64",
     "rhs_shape": [],
-    "rhs_values": [63.0],
+    "rhs_values": [
+      63.0
+    ],
     "rhs_dtype": "i64",
     "axis": null,
     "keepdims": false,
@@ -4757,10 +7572,14 @@
     "id": "add_scalar_u32_plus_i8",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [3000000000.0],
+    "lhs_values": [
+      3000000000.0
+    ],
     "lhs_dtype": "u32",
     "rhs_shape": [],
-    "rhs_values": [-1.0],
+    "rhs_values": [
+      -1.0
+    ],
     "rhs_dtype": "int8",
     "axis": null,
     "keepdims": false,
@@ -4778,10 +7597,14 @@
     "id": "add_scalar_u8_plus_i16",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [200.0],
+    "lhs_values": [
+      200.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [1000.0],
+    "rhs_values": [
+      1000.0
+    ],
     "rhs_dtype": "i16",
     "axis": null,
     "keepdims": false,
@@ -4799,10 +7622,14 @@
     "id": "add_scalar_f16_plus_u8",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [1.5],
+    "lhs_values": [
+      1.5
+    ],
     "lhs_dtype": "f16",
     "rhs_shape": [],
-    "rhs_values": [100.0],
+    "rhs_values": [
+      100.0
+    ],
     "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
@@ -4820,10 +7647,14 @@
     "id": "mul_scalar_f32_by_i16",
     "op": "mul",
     "lhs_shape": [],
-    "lhs_values": [2.5],
+    "lhs_values": [
+      2.5
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": [],
-    "rhs_values": [100.0],
+    "rhs_values": [
+      100.0
+    ],
     "rhs_dtype": "i16",
     "axis": null,
     "keepdims": false,
@@ -4841,10 +7672,14 @@
     "id": "add_scalar_u64_plus_i64",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [1000000.0],
+    "lhs_values": [
+      1000000.0
+    ],
     "lhs_dtype": "u64",
     "rhs_shape": [],
-    "rhs_values": [-500000.0],
+    "rhs_values": [
+      -500000.0
+    ],
     "rhs_dtype": "i64",
     "axis": null,
     "keepdims": false,
@@ -4862,10 +7697,14 @@
     "id": "add_scalar_f16_plus_i32",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [0.5],
+    "lhs_values": [
+      0.5
+    ],
     "lhs_dtype": "f16",
     "rhs_shape": [],
-    "rhs_values": [100000.0],
+    "rhs_values": [
+      100000.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -4883,10 +7722,14 @@
     "id": "sub_scalar_i16_minus_u16",
     "op": "sub",
     "lhs_shape": [],
-    "lhs_values": [100.0],
+    "lhs_values": [
+      100.0
+    ],
     "lhs_dtype": "i16",
     "rhs_shape": [],
-    "rhs_values": [60000.0],
+    "rhs_values": [
+      60000.0
+    ],
     "rhs_dtype": "u16",
     "axis": null,
     "keepdims": false,
@@ -4904,10 +7747,14 @@
     "id": "add_scalar_f32_plus_u32",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [1.5],
+    "lhs_values": [
+      1.5
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": [],
-    "rhs_values": [3000000000.0],
+    "rhs_values": [
+      3000000000.0
+    ],
     "rhs_dtype": "u32",
     "axis": null,
     "keepdims": false,
@@ -4925,10 +7772,14 @@
     "id": "add_scalar_bool_plus_i64",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [42.0],
+    "rhs_values": [
+      42.0
+    ],
     "rhs_dtype": "i64",
     "axis": null,
     "keepdims": false,
@@ -4946,10 +7797,14 @@
     "id": "add_scalar_u32_plus_i32",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [2000000000.0],
+    "lhs_values": [
+      2000000000.0
+    ],
     "lhs_dtype": "u32",
     "rhs_shape": [],
-    "rhs_values": [-1000000000.0],
+    "rhs_values": [
+      -1000000000.0
+    ],
     "rhs_dtype": "i32",
     "axis": null,
     "keepdims": false,
@@ -4967,10 +7822,14 @@
     "id": "add_scalar_f16_plus_f32",
     "op": "add",
     "lhs_shape": [],
-    "lhs_values": [1.5],
+    "lhs_values": [
+      1.5
+    ],
     "lhs_dtype": "f16",
     "rhs_shape": [],
-    "rhs_values": [2.5],
+    "rhs_values": [
+      2.5
+    ],
     "rhs_dtype": "f32",
     "axis": null,
     "keepdims": false,
@@ -4988,10 +7847,14 @@
     "id": "left_shift_i32_by_4",
     "op": "left_shift",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [4.0],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -5006,10 +7869,14 @@
     "id": "left_shift_i64_by_62",
     "op": "left_shift",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "int64",
     "rhs_shape": [],
-    "rhs_values": [62.0],
+    "rhs_values": [
+      62.0
+    ],
     "rhs_dtype": "int64",
     "axis": null,
     "keepdims": false,
@@ -5024,10 +7891,14 @@
     "id": "left_shift_uint8_by_7",
     "op": "left_shift",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [7.0],
+    "rhs_values": [
+      7.0
+    ],
     "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
@@ -5042,10 +7913,14 @@
     "id": "left_shift_uint16_by_4",
     "op": "left_shift",
     "lhs_shape": [],
-    "lhs_values": [255.0],
+    "lhs_values": [
+      255.0
+    ],
     "lhs_dtype": "uint16",
     "rhs_shape": [],
-    "rhs_values": [4.0],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "uint16",
     "axis": null,
     "keepdims": false,
@@ -5060,10 +7935,14 @@
     "id": "left_shift_int8_by_6",
     "op": "left_shift",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": [],
-    "rhs_values": [6.0],
+    "rhs_values": [
+      6.0
+    ],
     "rhs_dtype": "int8",
     "axis": null,
     "keepdims": false,
@@ -5078,10 +7957,14 @@
     "id": "left_shift_uint32_by_31",
     "op": "left_shift",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "uint32",
     "rhs_shape": [],
-    "rhs_values": [31.0],
+    "rhs_values": [
+      31.0
+    ],
     "rhs_dtype": "uint32",
     "axis": null,
     "keepdims": false,
@@ -5096,10 +7979,14 @@
     "id": "left_shift_uint8_by_i32",
     "op": "left_shift",
     "lhs_shape": [],
-    "lhs_values": [3.0],
+    "lhs_values": [
+      3.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [4.0],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -5114,10 +8001,14 @@
     "id": "left_shift_zero_i32",
     "op": "left_shift",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [10.0],
+    "rhs_values": [
+      10.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -5132,10 +8023,14 @@
     "id": "left_shift_uint64_by_63",
     "op": "left_shift",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "uint64",
     "rhs_shape": [],
-    "rhs_values": [63.0],
+    "rhs_values": [
+      63.0
+    ],
     "rhs_dtype": "uint64",
     "axis": null,
     "keepdims": false,
@@ -5150,10 +8045,14 @@
     "id": "right_shift_i32_by_4",
     "op": "right_shift",
     "lhs_shape": [],
-    "lhs_values": [256.0],
+    "lhs_values": [
+      256.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [4.0],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -5168,10 +8067,14 @@
     "id": "right_shift_i64_neg_by_2",
     "op": "right_shift",
     "lhs_shape": [],
-    "lhs_values": [-128.0],
+    "lhs_values": [
+      -128.0
+    ],
     "lhs_dtype": "int64",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "int64",
     "axis": null,
     "keepdims": false,
@@ -5186,10 +8089,14 @@
     "id": "right_shift_uint8_by_4",
     "op": "right_shift",
     "lhs_shape": [],
-    "lhs_values": [255.0],
+    "lhs_values": [
+      255.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [4.0],
+    "rhs_values": [
+      4.0
+    ],
     "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
@@ -5204,10 +8111,14 @@
     "id": "right_shift_uint32_by_16",
     "op": "right_shift",
     "lhs_shape": [],
-    "lhs_values": [4294901760.0],
+    "lhs_values": [
+      4294901760.0
+    ],
     "lhs_dtype": "uint32",
     "rhs_shape": [],
-    "rhs_values": [16.0],
+    "rhs_values": [
+      16.0
+    ],
     "rhs_dtype": "uint32",
     "axis": null,
     "keepdims": false,
@@ -5222,10 +8133,14 @@
     "id": "right_shift_int8_neg1_by_1",
     "op": "right_shift",
     "lhs_shape": [],
-    "lhs_values": [-1.0],
+    "lhs_values": [
+      -1.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "int8",
     "axis": null,
     "keepdims": false,
@@ -5240,10 +8155,14 @@
     "id": "right_shift_zero_i32",
     "op": "right_shift",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [10.0],
+    "rhs_values": [
+      10.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -5258,10 +8177,14 @@
     "id": "equal_i32_true",
     "op": "equal",
     "lhs_shape": [],
-    "lhs_values": [42.0],
+    "lhs_values": [
+      42.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [42.0],
+    "rhs_values": [
+      42.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -5276,10 +8199,14 @@
     "id": "equal_i32_false",
     "op": "equal",
     "lhs_shape": [],
-    "lhs_values": [42.0],
+    "lhs_values": [
+      42.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [43.0],
+    "rhs_values": [
+      43.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -5294,10 +8221,14 @@
     "id": "less_i64_true",
     "op": "less",
     "lhs_shape": [],
-    "lhs_values": [-10.0],
+    "lhs_values": [
+      -10.0
+    ],
     "lhs_dtype": "int64",
     "rhs_shape": [],
-    "rhs_values": [5.0],
+    "rhs_values": [
+      5.0
+    ],
     "rhs_dtype": "int64",
     "axis": null,
     "keepdims": false,
@@ -5312,10 +8243,14 @@
     "id": "less_i64_false",
     "op": "less",
     "lhs_shape": [],
-    "lhs_values": [5.0],
+    "lhs_values": [
+      5.0
+    ],
     "lhs_dtype": "int64",
     "rhs_shape": [],
-    "rhs_values": [-10.0],
+    "rhs_values": [
+      -10.0
+    ],
     "rhs_dtype": "int64",
     "axis": null,
     "keepdims": false,
@@ -5330,10 +8265,14 @@
     "id": "greater_equal_u8",
     "op": "greater_equal",
     "lhs_shape": [],
-    "lhs_values": [200.0],
+    "lhs_values": [
+      200.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [200.0],
+    "rhs_values": [
+      200.0
+    ],
     "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
@@ -5348,10 +8287,14 @@
     "id": "equal_i32_f64",
     "op": "equal",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5366,10 +8309,14 @@
     "id": "less_u8_i16",
     "op": "less",
     "lhs_shape": [],
-    "lhs_values": [200.0],
+    "lhs_values": [
+      200.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [300.0],
+    "rhs_values": [
+      300.0
+    ],
     "rhs_dtype": "int16",
     "axis": null,
     "keepdims": false,
@@ -5384,10 +8331,14 @@
     "id": "not_equal_f32_i64",
     "op": "not_equal",
     "lhs_shape": [],
-    "lhs_values": [1.5],
+    "lhs_values": [
+      1.5
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "int64",
     "axis": null,
     "keepdims": false,
@@ -5402,10 +8353,14 @@
     "id": "equal_nan_nan",
     "op": "equal",
     "lhs_shape": [],
-    "lhs_values": ["NaN"],
+    "lhs_values": [
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": ["NaN"],
+    "rhs_values": [
+      "NaN"
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5420,10 +8375,14 @@
     "id": "not_equal_nan_nan",
     "op": "not_equal",
     "lhs_shape": [],
-    "lhs_values": ["NaN"],
+    "lhs_values": [
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": ["NaN"],
+    "rhs_values": [
+      "NaN"
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5438,10 +8397,14 @@
     "id": "less_inf_neg_inf",
     "op": "less",
     "lhs_shape": [],
-    "lhs_values": ["-Infinity"],
+    "lhs_values": [
+      "-Infinity"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": ["Infinity"],
+    "rhs_values": [
+      "Infinity"
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5456,10 +8419,14 @@
     "id": "less_equal_neg_zero",
     "op": "less_equal",
     "lhs_shape": [],
-    "lhs_values": [-0.0],
+    "lhs_values": [
+      -0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5474,10 +8441,14 @@
     "id": "equal_bool_true",
     "op": "equal",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "bool",
     "axis": null,
     "keepdims": false,
@@ -5492,10 +8463,14 @@
     "id": "greater_bool",
     "op": "greater",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "bool",
     "axis": null,
     "keepdims": false,
@@ -5510,10 +8485,14 @@
     "id": "less_equal_bool_f64",
     "op": "less_equal",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [1.5],
+    "rhs_values": [
+      1.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5527,10 +8506,36 @@
   {
     "id": "sum_axes_02_keepdims_rank3",
     "op": "sum",
-    "lhs_shape": [2, 3, 4],
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
     "lhs_values": [
-      0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -5544,15 +8549,44 @@
     "artifact_refs": [],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed",
-    "axes": [0, 2]
+    "axes": [
+      0,
+      2
+    ]
   },
   {
     "id": "prod_axes_12_rank3",
     "op": "prod",
-    "lhs_shape": [2, 3, 4],
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
     "lhs_values": [
-      0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -5566,15 +8600,44 @@
     "artifact_refs": [],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed",
-    "axes": [1, 2]
+    "axes": [
+      1,
+      2
+    ]
   },
   {
     "id": "min_axes_01_rank3",
     "op": "min",
-    "lhs_shape": [2, 3, 4],
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
     "lhs_values": [
-      0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -5588,15 +8651,44 @@
     "artifact_refs": [],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed",
-    "axes": [0, 1]
+    "axes": [
+      0,
+      1
+    ]
   },
   {
     "id": "max_axes_02_rank3",
     "op": "max",
-    "lhs_shape": [2, 3, 4],
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
     "lhs_values": [
-      0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -5610,15 +8702,44 @@
     "artifact_refs": [],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed",
-    "axes": [0, 2]
+    "axes": [
+      0,
+      2
+    ]
   },
   {
     "id": "mean_axes_02_rank3",
     "op": "mean",
-    "lhs_shape": [2, 3, 4],
+    "lhs_shape": [
+      2,
+      3,
+      4
+    ],
     "lhs_values": [
-      0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0
+      0.0,
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0,
+      6.0,
+      7.0,
+      8.0,
+      9.0,
+      10.0,
+      11.0,
+      12.0,
+      13.0,
+      14.0,
+      15.0,
+      16.0,
+      17.0,
+      18.0,
+      19.0,
+      20.0,
+      21.0,
+      22.0,
+      23.0
     ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
@@ -5632,13 +8753,22 @@
     "artifact_refs": [],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed",
-    "axes": [0, 2]
+    "axes": [
+      0,
+      2
+    ]
   },
   {
     "id": "sum_int8_promotes_to_i64",
     "op": "sum",
-    "lhs_shape": [3],
-    "lhs_values": [100.0, 120.0, -50.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      100.0,
+      120.0,
+      -50.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5655,8 +8785,14 @@
   {
     "id": "sum_uint8_promotes_to_u64",
     "op": "sum",
-    "lhs_shape": [3],
-    "lhs_values": [200.0, 100.0, 50.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      200.0,
+      100.0,
+      50.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5673,8 +8809,15 @@
   {
     "id": "sum_bool_promotes_to_i64",
     "op": "sum",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 0.0, 1.0, 1.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5691,8 +8834,15 @@
   {
     "id": "prod_bool_promotes_to_i64",
     "op": "prod",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 0.0, 1.0, 1.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5709,8 +8859,14 @@
   {
     "id": "sum_int32_promotes_to_i64",
     "op": "sum",
-    "lhs_shape": [3],
-    "lhs_values": [1000000.0, 2000000.0, 3000000.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1000000.0,
+      2000000.0,
+      3000000.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5727,8 +8883,14 @@
   {
     "id": "mean_int32_returns_f64",
     "op": "mean",
-    "lhs_shape": [3],
-    "lhs_values": [1000000.0, 2000000.0, 3000000.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1000000.0,
+      2000000.0,
+      3000000.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5745,8 +8907,15 @@
   {
     "id": "min_bool_array",
     "op": "min",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 0.0, 1.0, 1.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5763,8 +8932,15 @@
   {
     "id": "max_bool_array",
     "op": "max",
-    "lhs_shape": [4],
-    "lhs_values": [1.0, 0.0, 1.0, 1.0],
+    "lhs_shape": [
+      4
+    ],
+    "lhs_values": [
+      1.0,
+      0.0,
+      1.0,
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5781,8 +8957,14 @@
   {
     "id": "sum_with_nan_propagates",
     "op": "sum",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, "NaN", 3.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      "NaN",
+      3.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5799,8 +8981,14 @@
   {
     "id": "min_with_nan_propagates",
     "op": "min",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, "NaN", 3.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      "NaN",
+      3.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5817,8 +9005,14 @@
   {
     "id": "mean_with_nan_propagates",
     "op": "mean",
-    "lhs_shape": [3],
-    "lhs_values": [1.0, "NaN", 3.0],
+    "lhs_shape": [
+      3
+    ],
+    "lhs_values": [
+      1.0,
+      "NaN",
+      3.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5835,8 +9029,16 @@
   {
     "id": "var_int32_returns_f64",
     "op": "var",
-    "lhs_shape": [5],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5853,8 +9055,16 @@
   {
     "id": "std_int32_returns_f64",
     "op": "std",
-    "lhs_shape": [5],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5871,8 +9081,16 @@
   {
     "id": "var_int32_ddof1",
     "op": "var",
-    "lhs_shape": [5],
-    "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "lhs_shape": [
+      5
+    ],
+    "lhs_values": [
+      1.0,
+      2.0,
+      3.0,
+      4.0,
+      5.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -5891,10 +9109,14 @@
     "id": "logaddexp_same",
     "op": "logaddexp",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5909,10 +9131,14 @@
     "id": "logaddexp_large_diff",
     "op": "logaddexp",
     "lhs_shape": [],
-    "lhs_values": [100.0],
+    "lhs_values": [
+      100.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5927,10 +9153,14 @@
     "id": "logaddexp_neg_inf",
     "op": "logaddexp",
     "lhs_shape": [],
-    "lhs_values": ["-Infinity"],
+    "lhs_values": [
+      "-Infinity"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5945,10 +9175,14 @@
     "id": "logaddexp_both_neg_inf",
     "op": "logaddexp",
     "lhs_shape": [],
-    "lhs_values": ["-Infinity"],
+    "lhs_values": [
+      "-Infinity"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": ["-Infinity"],
+    "rhs_values": [
+      "-Infinity"
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5963,10 +9197,14 @@
     "id": "logaddexp_nan",
     "op": "logaddexp",
     "lhs_shape": [],
-    "lhs_values": ["NaN"],
+    "lhs_values": [
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5981,10 +9219,14 @@
     "id": "logaddexp2_same",
     "op": "logaddexp2",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -5999,10 +9241,14 @@
     "id": "logaddexp2_large_diff",
     "op": "logaddexp2",
     "lhs_shape": [],
-    "lhs_values": [50.0],
+    "lhs_values": [
+      50.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6017,10 +9263,14 @@
     "id": "logaddexp2_neg_inf",
     "op": "logaddexp2",
     "lhs_shape": [],
-    "lhs_values": ["-Infinity"],
+    "lhs_values": [
+      "-Infinity"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6035,10 +9285,14 @@
     "id": "nextafter_zero_up",
     "op": "nextafter",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6053,10 +9307,14 @@
     "id": "nextafter_zero_down",
     "op": "nextafter",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-1.0],
+    "rhs_values": [
+      -1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6071,10 +9329,14 @@
     "id": "nextafter_one_up",
     "op": "nextafter",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6089,10 +9351,14 @@
     "id": "nextafter_inf",
     "op": "nextafter",
     "lhs_shape": [],
-    "lhs_values": ["Infinity"],
+    "lhs_values": [
+      "Infinity"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6107,10 +9373,14 @@
     "id": "fmod_positive",
     "op": "fmod",
     "lhs_shape": [],
-    "lhs_values": [7.0],
+    "lhs_values": [
+      7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [3.0],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6125,10 +9395,14 @@
     "id": "fmod_negative_dividend",
     "op": "fmod",
     "lhs_shape": [],
-    "lhs_values": [-7.0],
+    "lhs_values": [
+      -7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [3.0],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6143,10 +9417,14 @@
     "id": "fmod_negative_divisor",
     "op": "fmod",
     "lhs_shape": [],
-    "lhs_values": [7.0],
+    "lhs_values": [
+      7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-3.0],
+    "rhs_values": [
+      -3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6161,10 +9439,14 @@
     "id": "fmod_zero_dividend",
     "op": "fmod",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [3.0],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6179,10 +9461,14 @@
     "id": "fmod_nan_input",
     "op": "fmod",
     "lhs_shape": [],
-    "lhs_values": ["NaN"],
+    "lhs_values": [
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [3.0],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6197,10 +9483,14 @@
     "id": "heaviside_positive",
     "op": "heaviside",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.5],
+    "rhs_values": [
+      0.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6215,10 +9505,14 @@
     "id": "heaviside_negative",
     "op": "heaviside",
     "lhs_shape": [],
-    "lhs_values": [-1.0],
+    "lhs_values": [
+      -1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.5],
+    "rhs_values": [
+      0.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6233,10 +9527,14 @@
     "id": "heaviside_zero",
     "op": "heaviside",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.5],
+    "rhs_values": [
+      0.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6251,10 +9549,14 @@
     "id": "heaviside_nan",
     "op": "heaviside",
     "lhs_shape": [],
-    "lhs_values": ["NaN"],
+    "lhs_values": [
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.5],
+    "rhs_values": [
+      0.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6269,10 +9571,14 @@
     "id": "copysign_pos_neg",
     "op": "copysign",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-1.0],
+    "rhs_values": [
+      -1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6287,10 +9593,14 @@
     "id": "copysign_neg_pos",
     "op": "copysign",
     "lhs_shape": [],
-    "lhs_values": [-1.0],
+    "lhs_values": [
+      -1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6305,10 +9615,14 @@
     "id": "copysign_zero_neg",
     "op": "copysign",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-1.0],
+    "rhs_values": [
+      -1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6322,8 +9636,12 @@
   {
     "id": "abs_int8_negative",
     "op": "abs",
-    "lhs_shape": [1],
-    "lhs_values": [-50.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -50.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6340,8 +9658,12 @@
   {
     "id": "abs_int32_negative",
     "op": "abs",
-    "lhs_shape": [1],
-    "lhs_values": [-100000.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -100000.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6358,8 +9680,12 @@
   {
     "id": "abs_int64_negative",
     "op": "abs",
-    "lhs_shape": [1],
-    "lhs_values": [-999999999.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -999999999.0
+    ],
     "lhs_dtype": "int64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6376,8 +9702,12 @@
   {
     "id": "abs_uint8_noop",
     "op": "abs",
-    "lhs_shape": [1],
-    "lhs_values": [200.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      200.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6394,8 +9724,12 @@
   {
     "id": "abs_f32_negative",
     "op": "abs",
-    "lhs_shape": [1],
-    "lhs_values": [-3.14],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -3.14
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6412,8 +9746,12 @@
   {
     "id": "sign_int8_negative",
     "op": "sign",
-    "lhs_shape": [1],
-    "lhs_values": [-50.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -50.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6430,8 +9768,12 @@
   {
     "id": "sign_int8_positive",
     "op": "sign",
-    "lhs_shape": [1],
-    "lhs_values": [50.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      50.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6448,8 +9790,12 @@
   {
     "id": "sign_int8_zero",
     "op": "sign",
-    "lhs_shape": [1],
-    "lhs_values": [0.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6466,8 +9812,12 @@
   {
     "id": "sign_int32_negative",
     "op": "sign",
-    "lhs_shape": [1],
-    "lhs_values": [-100.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      -100.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6484,8 +9834,12 @@
   {
     "id": "sign_f64_nan",
     "op": "sign",
-    "lhs_shape": [1],
-    "lhs_values": ["NaN"],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6502,8 +9856,12 @@
   {
     "id": "square_int8",
     "op": "square",
-    "lhs_shape": [1],
-    "lhs_values": [10.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      10.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6520,8 +9878,12 @@
   {
     "id": "square_int32",
     "op": "square",
-    "lhs_shape": [1],
-    "lhs_values": [1000.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1000.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6538,8 +9900,12 @@
   {
     "id": "square_uint8",
     "op": "square",
-    "lhs_shape": [1],
-    "lhs_values": [15.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      15.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6556,8 +9922,12 @@
   {
     "id": "square_f32",
     "op": "square",
-    "lhs_shape": [1],
-    "lhs_values": [2.5],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      2.5
+    ],
     "lhs_dtype": "f32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6574,8 +9944,12 @@
   {
     "id": "negative_int8",
     "op": "negative",
-    "lhs_shape": [1],
-    "lhs_values": [50.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      50.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6592,8 +9966,12 @@
   {
     "id": "negative_int32",
     "op": "negative",
-    "lhs_shape": [1],
-    "lhs_values": [100000.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      100000.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6610,8 +9988,12 @@
   {
     "id": "negative_uint8",
     "op": "negative",
-    "lhs_shape": [1],
-    "lhs_values": [200.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      200.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6628,8 +10010,12 @@
   {
     "id": "isnan_f64_nan",
     "op": "isnan",
-    "lhs_shape": [1],
-    "lhs_values": ["NaN"],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6646,8 +10032,12 @@
   {
     "id": "isnan_f64_normal",
     "op": "isnan",
-    "lhs_shape": [1],
-    "lhs_values": [1.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6664,8 +10054,12 @@
   {
     "id": "isinf_f64_inf",
     "op": "isinf",
-    "lhs_shape": [1],
-    "lhs_values": ["Infinity"],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "Infinity"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6682,8 +10076,12 @@
   {
     "id": "isinf_f64_normal",
     "op": "isinf",
-    "lhs_shape": [1],
-    "lhs_values": [1.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6700,8 +10098,12 @@
   {
     "id": "isfinite_f64_nan",
     "op": "isfinite",
-    "lhs_shape": [1],
-    "lhs_values": ["NaN"],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "NaN"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6718,8 +10120,12 @@
   {
     "id": "isfinite_f64_inf",
     "op": "isfinite",
-    "lhs_shape": [1],
-    "lhs_values": ["Infinity"],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      "Infinity"
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6736,8 +10142,12 @@
   {
     "id": "isfinite_f64_normal",
     "op": "isfinite",
-    "lhs_shape": [1],
-    "lhs_values": [1.0],
+    "lhs_shape": [
+      1
+    ],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": null,
     "rhs_values": null,
@@ -6755,10 +10165,14 @@
     "id": "ldexp_normal",
     "op": "ldexp",
     "lhs_shape": [],
-    "lhs_values": [1.5],
+    "lhs_values": [
+      1.5
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [3.0],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -6773,10 +10187,14 @@
     "id": "ldexp_negative_exp",
     "op": "ldexp",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-1.0],
+    "rhs_values": [
+      -1.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -6791,10 +10209,14 @@
     "id": "ldexp_overflow",
     "op": "ldexp",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [1024.0],
+    "rhs_values": [
+      1024.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -6809,10 +10231,14 @@
     "id": "floor_divide_pos_neg",
     "op": "floor_divide",
     "lhs_shape": [],
-    "lhs_values": [7.0],
+    "lhs_values": [
+      7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-2.0],
+    "rhs_values": [
+      -2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6827,10 +10253,14 @@
     "id": "floor_divide_neg_pos",
     "op": "floor_divide",
     "lhs_shape": [],
-    "lhs_values": [-7.0],
+    "lhs_values": [
+      -7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6845,10 +10275,14 @@
     "id": "floor_divide_neg_neg",
     "op": "floor_divide",
     "lhs_shape": [],
-    "lhs_values": [-7.0],
+    "lhs_values": [
+      -7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-2.0],
+    "rhs_values": [
+      -2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6863,10 +10297,14 @@
     "id": "floor_divide_exact",
     "op": "floor_divide",
     "lhs_shape": [],
-    "lhs_values": [6.0],
+    "lhs_values": [
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [3.0],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6881,10 +10319,14 @@
     "id": "remainder_pos_neg",
     "op": "remainder",
     "lhs_shape": [],
-    "lhs_values": [7.0],
+    "lhs_values": [
+      7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-2.0],
+    "rhs_values": [
+      -2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6899,10 +10341,14 @@
     "id": "remainder_neg_pos",
     "op": "remainder",
     "lhs_shape": [],
-    "lhs_values": [-7.0],
+    "lhs_values": [
+      -7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [2.0],
+    "rhs_values": [
+      2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6917,10 +10363,14 @@
     "id": "remainder_neg_neg",
     "op": "remainder",
     "lhs_shape": [],
-    "lhs_values": [-7.0],
+    "lhs_values": [
+      -7.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-2.0],
+    "rhs_values": [
+      -2.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6935,10 +10385,14 @@
     "id": "remainder_exact",
     "op": "remainder",
     "lhs_shape": [],
-    "lhs_values": [6.0],
+    "lhs_values": [
+      6.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [3.0],
+    "rhs_values": [
+      3.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6953,10 +10407,14 @@
     "id": "power_zero_zero",
     "op": "power",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6971,10 +10429,14 @@
     "id": "power_neg_fractional",
     "op": "power",
     "lhs_shape": [],
-    "lhs_values": [-1.0],
+    "lhs_values": [
+      -1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.5],
+    "rhs_values": [
+      0.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -6989,10 +10451,14 @@
     "id": "power_zero_negative",
     "op": "power",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [-1.0],
+    "rhs_values": [
+      -1.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -7007,10 +10473,14 @@
     "id": "float_power_neg_fractional",
     "op": "float_power",
     "lhs_shape": [],
-    "lhs_values": [-1.0],
+    "lhs_values": [
+      -1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.5],
+    "rhs_values": [
+      0.5
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -7025,10 +10495,14 @@
     "id": "float_power_int_base",
     "op": "float_power",
     "lhs_shape": [],
-    "lhs_values": [2.0],
+    "lhs_values": [
+      2.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [10.0],
+    "rhs_values": [
+      10.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -7043,10 +10517,14 @@
     "id": "div_pos_by_zero",
     "op": "div",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -7061,10 +10539,14 @@
     "id": "div_neg_by_zero",
     "op": "div",
     "lhs_shape": [],
-    "lhs_values": [-1.0],
+    "lhs_values": [
+      -1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -7079,10 +10561,14 @@
     "id": "div_zero_by_zero",
     "op": "div",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -7097,10 +10583,14 @@
     "id": "floor_divide_by_zero",
     "op": "floor_divide",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -7115,10 +10605,14 @@
     "id": "remainder_by_zero",
     "op": "remainder",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "f64",
     "axis": null,
     "keepdims": false,
@@ -7133,10 +10627,14 @@
     "id": "bitwise_and_u8_mask",
     "op": "bitwise_and",
     "lhs_shape": [],
-    "lhs_values": [255.0],
+    "lhs_values": [
+      255.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [15.0],
+    "rhs_values": [
+      15.0
+    ],
     "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
@@ -7151,10 +10649,14 @@
     "id": "bitwise_and_i32",
     "op": "bitwise_and",
     "lhs_shape": [],
-    "lhs_values": [4660.0],
+    "lhs_values": [
+      4660.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [65280.0],
+    "rhs_values": [
+      65280.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -7169,10 +10671,14 @@
     "id": "bitwise_and_bool",
     "op": "bitwise_and",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "bool",
     "axis": null,
     "keepdims": false,
@@ -7187,10 +10693,14 @@
     "id": "bitwise_and_bool_false",
     "op": "bitwise_and",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "bool",
     "axis": null,
     "keepdims": false,
@@ -7205,10 +10715,14 @@
     "id": "bitwise_and_cross_u8_i32",
     "op": "bitwise_and",
     "lhs_shape": [],
-    "lhs_values": [255.0],
+    "lhs_values": [
+      255.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [3855.0],
+    "rhs_values": [
+      3855.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -7223,10 +10737,14 @@
     "id": "bitwise_or_u8",
     "op": "bitwise_or",
     "lhs_shape": [],
-    "lhs_values": [240.0],
+    "lhs_values": [
+      240.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [15.0],
+    "rhs_values": [
+      15.0
+    ],
     "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
@@ -7241,10 +10759,14 @@
     "id": "bitwise_or_i32",
     "op": "bitwise_or",
     "lhs_shape": [],
-    "lhs_values": [255.0],
+    "lhs_values": [
+      255.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [65280.0],
+    "rhs_values": [
+      65280.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -7259,10 +10781,14 @@
     "id": "bitwise_or_bool",
     "op": "bitwise_or",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "bool",
     "axis": null,
     "keepdims": false,
@@ -7277,10 +10803,14 @@
     "id": "bitwise_or_bool_false",
     "op": "bitwise_or",
     "lhs_shape": [],
-    "lhs_values": [0.0],
+    "lhs_values": [
+      0.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "bool",
     "axis": null,
     "keepdims": false,
@@ -7295,10 +10825,14 @@
     "id": "bitwise_xor_u8",
     "op": "bitwise_xor",
     "lhs_shape": [],
-    "lhs_values": [255.0],
+    "lhs_values": [
+      255.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [15.0],
+    "rhs_values": [
+      15.0
+    ],
     "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
@@ -7313,10 +10847,14 @@
     "id": "bitwise_xor_i32_self",
     "op": "bitwise_xor",
     "lhs_shape": [],
-    "lhs_values": [12345.0],
+    "lhs_values": [
+      12345.0
+    ],
     "lhs_dtype": "int32",
     "rhs_shape": [],
-    "rhs_values": [12345.0],
+    "rhs_values": [
+      12345.0
+    ],
     "rhs_dtype": "int32",
     "axis": null,
     "keepdims": false,
@@ -7331,10 +10869,14 @@
     "id": "bitwise_xor_bool",
     "op": "bitwise_xor",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [0.0],
+    "rhs_values": [
+      0.0
+    ],
     "rhs_dtype": "bool",
     "axis": null,
     "keepdims": false,
@@ -7349,10 +10891,14 @@
     "id": "bitwise_xor_bool_same",
     "op": "bitwise_xor",
     "lhs_shape": [],
-    "lhs_values": [1.0],
+    "lhs_values": [
+      1.0
+    ],
     "lhs_dtype": "bool",
     "rhs_shape": [],
-    "rhs_values": [1.0],
+    "rhs_values": [
+      1.0
+    ],
     "rhs_dtype": "bool",
     "axis": null,
     "keepdims": false,
@@ -7367,10 +10913,14 @@
     "id": "bitwise_xor_all_ones_u8",
     "op": "bitwise_xor",
     "lhs_shape": [],
-    "lhs_values": [255.0],
+    "lhs_values": [
+      255.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [255.0],
+    "rhs_values": [
+      255.0
+    ],
     "rhs_dtype": "uint8",
     "axis": null,
     "keepdims": false,
@@ -7385,10 +10935,14 @@
     "id": "bitwise_or_u8_u16",
     "op": "bitwise_or",
     "lhs_shape": [],
-    "lhs_values": [255.0],
+    "lhs_values": [
+      255.0
+    ],
     "lhs_dtype": "uint8",
     "rhs_shape": [],
-    "rhs_values": [65280.0],
+    "rhs_values": [
+      65280.0
+    ],
     "rhs_dtype": "uint16",
     "axis": null,
     "keepdims": false,
@@ -7403,10 +10957,14 @@
     "id": "bitwise_and_i8_neg1",
     "op": "bitwise_and",
     "lhs_shape": [],
-    "lhs_values": [-1.0],
+    "lhs_values": [
+      -1.0
+    ],
     "lhs_dtype": "int8",
     "rhs_shape": [],
-    "rhs_values": [127.0],
+    "rhs_values": [
+      127.0
+    ],
     "rhs_dtype": "int8",
     "axis": null,
     "keepdims": false,
@@ -7420,55 +10978,144 @@
   {
     "id": "take_along_axis_axis1_basic",
     "op": "take_along_axis",
-    "lhs_shape": [2, 3],
-    "lhs_values": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      50.0,
+      60.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 1],
-    "rhs_values": [2.0, 0.0],
+    "rhs_shape": [
+      2,
+      1
+    ],
+    "rhs_values": [
+      2.0,
+      0.0
+    ],
     "rhs_dtype": "i64",
     "axis": 1,
     "keepdims": false,
     "seed": 6510,
     "mode": "strict",
     "env_fingerprint": "fnp-conformance-along-axis",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_input_cases.json"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed"
   },
   {
     "id": "put_along_axis_axis1_basic",
     "op": "put_along_axis",
-    "lhs_shape": [2, 3],
-    "lhs_values": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+    "lhs_shape": [
+      2,
+      3
+    ],
+    "lhs_values": [
+      10.0,
+      20.0,
+      30.0,
+      40.0,
+      50.0,
+      60.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [2, 1],
-    "rhs_values": [1.0, 2.0],
+    "rhs_shape": [
+      2,
+      1
+    ],
+    "rhs_values": [
+      1.0,
+      2.0
+    ],
     "rhs_dtype": "i64",
     "axis": 1,
     "keepdims": false,
-    "third_shape": [2, 1],
-    "third_values": [99.0, 88.0],
+    "third_shape": [
+      2,
+      1
+    ],
+    "third_values": [
+      99.0,
+      88.0
+    ],
     "third_dtype": "f64",
     "seed": 6511,
     "mode": "strict",
     "env_fingerprint": "fnp-conformance-along-axis",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_input_cases.json"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/ufunc_input_cases.json"
+    ],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "expected_reason_code": "ufunc_dispatch_resolution_failed"
   },
   {
     "id": "put_along_axis_axis0_broadcast_values",
     "op": "put_along_axis",
-    "lhs_shape": [3, 5],
-    "lhs_values": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "lhs_shape": [
+      3,
+      5
+    ],
+    "lhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
     "lhs_dtype": "f64",
-    "rhs_shape": [3, 5],
-    "rhs_values": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "rhs_shape": [
+      3,
+      5
+    ],
+    "rhs_values": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
     "rhs_dtype": "i64",
     "axis": 0,
     "keepdims": false,
-    "third_shape": [1, 5],
-    "third_values": [1.0, 1.0, 1.0, 1.0, 1.0],
+    "third_shape": [
+      1,
+      5
+    ],
+    "third_values": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
     "third_dtype": "f64",
     "seed": 6512,
     "mode": "strict",

@@ -27,9 +27,7 @@
     ],
     "reason_code": "fft_metamorphic_inverse_contract",
     "input_shape": [8, 2],
-    "input_values": [
-      1.0, 0.5, 2.0, -0.5, 3.0, 1.0, 4.0, -1.0, 5.0, 0.25, 6.0, -0.25, 7.0, 0.75, 8.0, -0.75
-    ],
+    "input_values": [1.0, 0.5, 2.0, -0.5, 3.0, 1.0, 4.0, -1.0, 5.0, 0.25, 6.0, -0.25, 7.0, 0.75, 8.0, -0.75],
     "input_dtype": "c128",
     "abs_tol": 1e-12
   },
@@ -101,9 +99,7 @@
     ],
     "reason_code": "fft_metamorphic_parseval_contract",
     "input_shape": [16],
-    "input_values": [
-      1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0, 6.0, -6.0, 7.0, -7.0, 8.0, -8.0
-    ],
+    "input_values": [1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0, 6.0, -6.0, 7.0, -7.0, 8.0, -8.0],
     "input_dtype": "f64",
     "rel_tol": 1e-12
   },
@@ -134,9 +130,7 @@
     ],
     "reason_code": "fft_metamorphic_shift_inverse_contract",
     "input_shape": [4, 4],
-    "input_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
-    ],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
     "input_dtype": "f64"
   },
   {
@@ -231,9 +225,7 @@
     ],
     "reason_code": "fft_metamorphic_rfft_inverse_contract",
     "input_shape": [16],
-    "input_values": [
-      0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6
-    ],
+    "input_values": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6],
     "input_dtype": "f64",
     "abs_tol": 1e-12
   },
@@ -314,9 +306,7 @@
     ],
     "reason_code": "fft_metamorphic_2d_inverse_contract",
     "input_shape": [4, 4],
-    "input_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0
-    ],
+    "input_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0],
     "input_dtype": "f64",
     "abs_tol": 1e-10
   },
@@ -332,9 +322,7 @@
     ],
     "reason_code": "fft_metamorphic_2d_inverse_contract",
     "input_shape": [2, 8],
-    "input_values": [
-      -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 2.5, 2.0, 1.5, 1.0, 0.5, 0.0, -0.5
-    ],
+    "input_values": [-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 2.5, 2.0, 1.5, 1.0, 0.5, 0.0, -0.5],
     "input_dtype": "f64",
     "abs_tol": 1e-11
   },
@@ -366,9 +354,7 @@
     ],
     "reason_code": "fft_metamorphic_nd_inverse_contract",
     "input_shape": [2, 2, 4],
-    "input_values": [
-      1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0, 6.0, -6.0, 7.0, -7.0, 8.0, -8.0
-    ],
+    "input_values": [1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0, 6.0, -6.0, 7.0, -7.0, 8.0, -8.0],
     "input_dtype": "f64",
     "abs_tol": 1e-11
   },
@@ -400,9 +386,7 @@
     ],
     "reason_code": "fft_metamorphic_rfft_hermitian_contract",
     "input_shape": [16],
-    "input_values": [
-      1.0, 2.0, 1.0, -1.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -1.0
-    ],
+    "input_values": [1.0, 2.0, 1.0, -1.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -1.0],
     "input_dtype": "f64",
     "abs_tol": 1e-12
   },
@@ -468,9 +452,7 @@
     ],
     "reason_code": "fft_metamorphic_dc_real_contract",
     "input_shape": [16],
-    "input_values": [
-      0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6
-    ],
+    "input_values": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6],
     "input_dtype": "f64",
     "abs_tol": 1e-13
   },
@@ -486,9 +468,7 @@
     ],
     "reason_code": "fft_metamorphic_conjugate_symmetry_contract",
     "input_shape": [16],
-    "input_values": [
-      1.0, 2.0, 1.0, -1.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -1.0
-    ],
+    "input_values": [1.0, 2.0, 1.0, -1.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 2.0, 1.0, 0.0, -1.0, -2.0, -1.0],
     "input_dtype": "f64",
     "abs_tol": 1e-13
   },
