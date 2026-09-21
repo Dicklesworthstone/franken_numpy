@@ -11515,7 +11515,7 @@ for child in rng.spawn(n_children):
             seed_sequence: Some(SeedSequenceSnapshot {
                 entropy: Vec::new(),
                 spawn_key: vec![1],
-                pool_size: 4,
+                pool_size: 0,
                 spawn_counter: 0,
             }),
         };
@@ -11654,7 +11654,8 @@ for child in rng.spawn(n_children):
 
     #[test]
     fn seed_sequence_errors_map_to_contract_reason_codes() {
-        let generate_err = SeedSequence::new(&[]).expect_err("empty entropy must fail");
+        let generate_err =
+            SeedSequence::with_spawn_key(&[], &[], 0).expect_err("invalid pool size must fail");
         assert_eq!(
             generate_err,
             SeedSequenceError::GenerateStateContractViolation
@@ -11663,6 +11664,13 @@ for child in rng.spawn(n_children):
             generate_err.reason_code(),
             "rng_seedsequence_generate_state_failed"
         );
+    }
+
+    #[test]
+    fn seed_sequence_empty_entropy_is_valid() {
+        let sequence = SeedSequence::new(&[]).expect("empty entropy is allowed for NumPy parity");
+        assert_eq!(sequence.entropy(), &[]);
+        assert_eq!(sequence.pool_size(), super::DEFAULT_SEED_SEQUENCE_POOL_SIZE);
     }
 
     #[test]

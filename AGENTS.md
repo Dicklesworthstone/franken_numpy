@@ -67,12 +67,12 @@ success** — one line, revert, next lever, no retraction narrative.
 
 ---
 
-## Current state (2026-09-03)
+## Current state (2026-09-20)
 
 - `fnp_python` covers **100% of `numpy.__all__`** (499/499 names on the `numpy<2.5` CI oracle, i.e. numpy 2.4.x; the lock test iterates whichever live numpy the build host has) — see [`docs/planning/audit_numpy_reality.md`](docs/planning/audit_numpy_reality.md) for architecture + coverage progression.
 - Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
-- Workspace runs 8,691 tests across 10 crates (see [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,626 `pub fn` declarations across `crates/*/src/**/*.rs`.
-- Bead tracker stands at 2,786 closed beads as of 2026-09-03; live count via `br list --status=closed --limit 10000 --json | jq '.issues | length'`.
+- Workspace runs 8,716 tests across 11 crates (see [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,643 `pub fn` declarations across `crates/*/src/**/*.rs`.
+- Bead tracker stands at 2,834 closed beads as of 2026-09-20; live count via `br list --status=closed --limit 10000 --json | jq '.issues | length'`.
 - No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (13 #[test] functions fail CI on stub/integrity markers); per-site analysis in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
 - Active tracked divergences: 0 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
 
@@ -83,7 +83,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-08-31` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
-- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes, plus narrow layout-checked views of native result buffers) for zero-copy fast paths. Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 9 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.
+- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 10 of 11 crates — the numeric core stays entirely on the safe-Rust path, enforced by `no_unsafe_code_blocks_or_items` in `crates/fnp-conformance/tests/codebase_hygiene.rs`. `fnp-python` is the lone opt-out: as the PyO3 boundary it uses hand-written `unsafe` (chiefly `std::slice::from_raw_parts` on borrowed `PyBuffer` bytes, plus narrow layout-checked views of native result buffers) for zero-copy fast paths. Those blocks are confined to `fnp-python` and excluded from the hygiene scan; every other crate must stay unsafe-free. If narrow unsafe usage ever becomes unavoidable in one of the 10 core crates, isolate it behind audited interfaces and tests rather than relaxing the invariant.
 
 ### Key Dependencies
 
@@ -310,13 +310,14 @@ Layering principles:
 
 ```
 franken_numpy/
-├── Cargo.toml                         # Workspace root (10 crates)
+├── Cargo.toml                         # Workspace root (11 crates)
 ├── crates/
 │   ├── fnp-dtype/                     # Dtype taxonomy, promotion table, cast policy primitives
 │   ├── fnp-ndarray/                   # Shape legality, stride calculus, reshape/broadcast contracts
 │   ├── fnp-iter/                      # Transfer semantics, overlap-safe iteration, Nditer state machine
 │   ├── fnp-ufunc/                     # 850+ array operations, reductions, einsum, masked arrays
 │   ├── fnp-linalg/                    # solve, eig, svd, qr, cholesky, lstsq, batched, complex
+│   ├── fnp-random-core/               # Dependency-free NumPy-compatible SeedSequence and PCG64DXSM
 │   ├── fnp-random/                    # 5 bit generators, distributions, PCG64DXSM bit-exact parity
 │   ├── fnp-io/                        # NPY/NPZ read/write, text I/O, DEFLATE, memmap
 │   ├── fnp-python/                    # PyO3 bindings, 100% numpy.__all__ surface

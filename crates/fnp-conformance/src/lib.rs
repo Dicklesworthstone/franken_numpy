@@ -20614,7 +20614,7 @@ fn execute_rng_adversarial_operation(case: &RngAdversarialCase) -> Result<(), Rn
         "policy_metadata_unknown" => validate_rng_policy_metadata(&case.mode_raw, &case.class_raw)
             .map(|_| ())
             .map_err(map_random_policy_error_to_rng_suite),
-        "seedsequence_empty_entropy" => SeedSequence::new(&[])
+        "seedsequence_empty_entropy" => SeedSequence::with_spawn_key(&[], &[], 0)
             .map(|_| ())
             .map_err(map_seedsequence_error_to_rng_suite),
         "seedsequence_pool_size_invalid" => SeedSequence::with_spawn_key(&[1], &[], case.pool_size)
