@@ -689,3 +689,161 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+#[test]
+fn clip_f64_onesided_scalar_zerocopy_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import time
+rng = np.random.default_rng(42)
+verdicts = []
+# Large array (triggering parallel zero-copy)
+n = 1 << 21
+a = rng.standard_normal(n)
+# Inject specials
+idx = rng.integers(0, n, 4000)
+a[idx[:1000]] = np.nan
+a[idx[1000:2000]] = np.inf
+a[idx[2000:3000]] = -np.inf
+a[idx[3000:]] = -0.0
+
+# Min only
+r_min, e_min = fnp.clip(a, -0.5, None), np.clip(a, -0.5, None)
+if r_min.dtype != e_min.dtype or r_min.tobytes() != e_min.tobytes():
+    verdicts.append("FAIL f64 large min-only")
+
+# Max only
+r_max, e_max = fnp.clip(a, None, 0.5), np.clip(a, None, 0.5)
+if r_max.dtype != e_max.dtype or r_max.tobytes() != e_max.tobytes():
+    verdicts.append("FAIL f64 large max-only")
+
+# Signed zero ties: 0.0 vs -0.0
+z = np.array([-0.0, 0.0, -0.0, 0.0])
+if fnp.clip(z, 0.0, None).tobytes() != np.clip(z, 0.0, None).tobytes():
+    verdicts.append("FAIL f64 signed-zero min-only 0.0")
+if fnp.clip(z, -0.0, None).tobytes() != np.clip(z, -0.0, None).tobytes():
+    verdicts.append("FAIL f64 signed-zero min-only -0.0")
+if fnp.clip(z, None, 0.0).tobytes() != np.clip(z, None, 0.0).tobytes():
+    verdicts.append("FAIL f64 signed-zero max-only 0.0")
+if fnp.clip(z, None, -0.0).tobytes() != np.clip(z, None, -0.0).tobytes():
+    verdicts.append("FAIL f64 signed-zero max-only -0.0")
+
+# NaN bound check (must match numpy, poison to NaN)
+r_nan_min, e_nan_min = fnp.clip(a[:100], float('nan'), None), np.clip(a[:100], float('nan'), None)
+if not np.allclose(r_nan_min, e_nan_min, equal_nan=True):
+    verdicts.append("FAIL f64 nan min bound")
+r_nan_max, e_nan_max = fnp.clip(a[:100], None, float('nan')), np.clip(a[:100], None, float('nan'))
+if not np.allclose(r_nan_max, e_nan_max, equal_nan=True):
+    verdicts.append("FAIL f64 nan max bound")
+
+# Small array (< threshold)
+a_small = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])
+if fnp.clip(a_small, -0.5, None).tobytes() != np.clip(a_small, -0.5, None).tobytes():
+    verdicts.append("FAIL f64 small min-only")
+if fnp.clip(a_small, None, 0.5).tobytes() != np.clip(a_small, None, 0.5).tobytes():
+    verdicts.append("FAIL f64 small max-only")
+
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "f64 one-sided scalar clip must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn clip_f32_onesided_scalar_zerocopy_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(43)
+verdicts = []
+n = 1 << 21
+a = rng.standard_normal(n).astype(np.float32)
+idx = rng.integers(0, n, 4000)
+a[idx[:1000]] = np.nan
+a[idx[1000:2000]] = np.inf
+a[idx[2000:3000]] = -np.inf
+a[idx[3000:]] = np.float32(-0.0)
+
+# With float scalar bounds
+r_min, e_min = fnp.clip(a, -0.5, None), np.clip(a, -0.5, None)
+if r_min.dtype != e_min.dtype or r_min.tobytes() != e_min.tobytes():
+    verdicts.append("FAIL f32 large min-only")
+
+r_max, e_max = fnp.clip(a, None, 0.5), np.clip(a, None, 0.5)
+if r_max.dtype != e_max.dtype or r_max.tobytes() != e_max.tobytes():
+    verdicts.append("FAIL f32 large max-only")
+
+# Signed-zero ties
+z = np.array([-0.0, 0.0, -0.0, 0.0], dtype=np.float32)
+if fnp.clip(z, 0.0, None).tobytes() != np.clip(z, 0.0, None).tobytes():
+    verdicts.append("FAIL f32 signed-zero min-only")
+if fnp.clip(z, None, 0.0).tobytes() != np.clip(z, None, 0.0).tobytes():
+    verdicts.append("FAIL f32 signed-zero max-only")
+
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "f32 one-sided scalar clip must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn clip_int_onesided_scalar_zerocopy_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(44)
+verdicts = []
+dtypes = [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64]
+for dt in dtypes:
+    info = np.iinfo(dt)
+    n = 1 << 20
+    low = max(info.min, -1000000)
+    high = min(info.max, 1000000)
+    a = rng.integers(low, high, n).astype(dt)
+    mid_low = int((low + high) * 0.25)
+    mid_high = int((low + high) * 0.75)
+
+    r_min, e_min = fnp.clip(a, mid_low, None), np.clip(a, mid_low, None)
+    if r_min.dtype != e_min.dtype or r_min.tobytes() != e_min.tobytes():
+        verdicts.append(f"FAIL {dt.__name__} min-only")
+
+    r_max, e_max = fnp.clip(a, None, mid_high), np.clip(a, None, mid_high)
+    if r_max.dtype != e_max.dtype or r_max.tobytes() != e_max.tobytes():
+        verdicts.append(f"FAIL {dt.__name__} max-only")
+
+    # Small array
+    s = a[:10]
+    if fnp.clip(s, mid_low, None).tobytes() != np.clip(s, mid_low, None).tobytes():
+        verdicts.append(f"FAIL {dt.__name__} small min-only")
+    if fnp.clip(s, None, mid_high).tobytes() != np.clip(s, None, mid_high).tobytes():
+        verdicts.append(f"FAIL {dt.__name__} small max-only")
+
+    # Float bound causing promotion
+    r_prom, e_prom = fnp.clip(s, 2.5, None), np.clip(s, 2.5, None)
+    if r_prom.dtype != e_prom.dtype or not np.allclose(r_prom, e_prom):
+        verdicts.append(f"FAIL {dt.__name__} float-bound promotion")
+
+print(verdicts if verdicts else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "integer one-sided scalar clip must be bit-identical to numpy: {result}"
+    );
+    Ok(())
+}
