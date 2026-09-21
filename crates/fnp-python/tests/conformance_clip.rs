@@ -774,6 +774,7 @@ print(verdicts if verdicts else True)
 fn clip_f32_onesided_scalar_zerocopy_bit_exact_matches_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"
+import time
 rng = np.random.default_rng(43)
 verdicts = []
 n = 1 << 21
@@ -800,11 +801,22 @@ if fnp.clip(z, 0.0, None).tobytes() != np.clip(z, 0.0, None).tobytes():
 if fnp.clip(z, None, 0.0).tobytes() != np.clip(z, None, 0.0).tobytes():
     verdicts.append("FAIL f32 signed-zero max-only")
 
+def best(fn, reps=5):
+    fn(); best_s = float("inf")
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); best_s = min(best_s, time.perf_counter() - t0)
+    return best_s * 1000
+a4 = rng.standard_normal(4_000_000).astype(np.float32)
+tn_f32 = best(lambda: np.clip(a4, -0.5, None))
+tf_f32 = best(lambda: fnp.clip(a4, -0.5, None))
+print(f"CLIP_F32_ONESIDED_MIN_AB numpy_ms={tn_f32:.3f} fnp_ms={tf_f32:.3f} ratio={tn_f32 / tf_f32:.3f}")
+
 print(verdicts if verdicts else True)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
+    println!("{result}");
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
         last, "True",
@@ -817,6 +829,7 @@ print(verdicts if verdicts else True)
 fn clip_int_onesided_scalar_zerocopy_bit_exact_matches_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"
+import time
 rng = np.random.default_rng(44)
 verdicts = []
 dtypes = [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64]
