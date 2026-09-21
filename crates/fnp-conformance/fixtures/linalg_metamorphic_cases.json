@@ -9,10 +9,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [4.0, 1.0],
-      [2.0, 3.0]
-    ],
+    "matrix": [[4.0, 1.0], [2.0, 3.0]],
     "rhs": [5.0, 7.0],
     "scalar": 3.0
   },
@@ -52,10 +49,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [5.0, 2.0],
-      [1.0, 3.0]
-    ],
+    "matrix": [[5.0, 2.0], [1.0, 3.0]],
     "rhs": [7.0, 8.0],
     "scalar": -2.0
   },
@@ -95,10 +89,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [7.0, 1.0],
-      [3.0, 5.0]
-    ],
+    "matrix": [[7.0, 1.0], [3.0, 5.0]],
     "rhs": [10.0, 16.0],
     "scalar": 0.5
   },
@@ -138,10 +129,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [10.0, 3.0],
-      [1.0, 6.0]
-    ],
+    "matrix": [[10.0, 3.0], [1.0, 6.0]],
     "rhs": [13.0, 7.0],
     "scalar": 1000.0
   },
@@ -155,10 +143,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [2.0, 5.0],
-      [3.0, 1.0]
-    ],
+    "matrix": [[2.0, 5.0], [3.0, 1.0]],
     "rhs": [12.0, 5.0],
     "scalar": 0.001
   },
@@ -172,10 +157,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [6.0, 2.0],
-      [4.0, 8.0]
-    ],
+    "matrix": [[6.0, 2.0], [4.0, 8.0]],
     "rhs": [10.0, 20.0],
     "scalar": 1.0
   },
@@ -280,10 +262,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [3.0, 7.0],
-      [2.0, 9.0]
-    ],
+    "matrix": [[3.0, 7.0], [2.0, 9.0]],
     "rhs": [10.0, 11.0],
     "scalar": -1.0
   },
@@ -323,10 +302,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [1000.0, 500.0],
-      [250.0, 750.0]
-    ],
+    "matrix": [[1000.0, 500.0], [250.0, 750.0]],
     "rhs": [1500.0, 1000.0],
     "scalar": 0.01
   },
@@ -366,10 +342,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [1.0, 0.0],
-      [0.0, 1.0]
-    ],
+    "matrix": [[1.0, 0.0], [0.0, 1.0]],
     "rhs": [5.0, 7.0],
     "scalar": 2.0
   },
@@ -396,10 +369,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [2.0, 1.0],
-      [1.0, 3.0]
-    ],
+    "matrix": [[2.0, 1.0], [1.0, 3.0]],
     "rhs": [4.0, 5.0],
     "scalar": -1.0
   },
@@ -426,10 +396,7 @@
       "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
     ],
     "reason_code": "linalg_metamorphic_expected_relation",
-    "matrix": [
-      [3.0, 1.0],
-      [1.0, 4.0]
-    ],
+    "matrix": [[3.0, 1.0], [1.0, 4.0]],
     "rhs": [6.0, 9.0],
     "scalar": 0.5
   },
@@ -438,43 +405,27 @@
     "relation": "det_transpose_invariance",
     "seed": 8331,
     "env_fingerprint": "fnp-linalg-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"],
     "reason_code": "linalg_metamorphic_det_transpose",
-    "matrix": [
-      [4.0, 7.0],
-      [2.0, 6.0]
-    ]
+    "matrix": [[4.0, 7.0], [2.0, 6.0]]
   },
   {
     "id": "linalg_det_transpose_invariance_3x3",
     "relation": "det_transpose_invariance",
     "seed": 8332,
     "env_fingerprint": "fnp-linalg-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"],
     "reason_code": "linalg_metamorphic_det_transpose",
-    "matrix": [
-      [1.0, 2.0, 3.0],
-      [4.0, 5.0, 6.0],
-      [7.0, 8.0, 10.0]
-    ]
+    "matrix": [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0]]
   },
   {
     "id": "linalg_det_scalar_multiply_2x2",
     "relation": "det_scalar_multiply",
     "seed": 8333,
     "env_fingerprint": "fnp-linalg-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"],
     "reason_code": "linalg_metamorphic_det_scalar",
-    "matrix": [
-      [3.0, 1.0],
-      [2.0, 4.0]
-    ],
+    "matrix": [[3.0, 1.0], [2.0, 4.0]],
     "scalar": 2.0
   },
   {
@@ -482,15 +433,9 @@
     "relation": "det_scalar_multiply",
     "seed": 8334,
     "env_fingerprint": "fnp-linalg-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"],
     "reason_code": "linalg_metamorphic_det_scalar",
-    "matrix": [
-      [2.0, 0.0, 1.0],
-      [1.0, 3.0, 2.0],
-      [0.0, 1.0, 2.0]
-    ],
+    "matrix": [[2.0, 0.0, 1.0], [1.0, 3.0, 2.0], [0.0, 1.0, 2.0]],
     "scalar": 3.0
   },
   {
@@ -498,29 +443,18 @@
     "relation": "inv_involutive",
     "seed": 8335,
     "env_fingerprint": "fnp-linalg-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"],
     "reason_code": "linalg_metamorphic_inv_involutive",
-    "matrix": [
-      [4.0, 7.0],
-      [2.0, 6.0]
-    ]
+    "matrix": [[4.0, 7.0], [2.0, 6.0]]
   },
   {
     "id": "linalg_inv_involutive_3x3",
     "relation": "inv_involutive",
     "seed": 8336,
     "env_fingerprint": "fnp-linalg-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json"],
     "reason_code": "linalg_metamorphic_inv_involutive",
-    "matrix": [
-      [1.0, 2.0, 1.0],
-      [0.0, 1.0, 2.0],
-      [1.0, 0.0, 1.0]
-    ]
+    "matrix": [[1.0, 2.0, 1.0], [0.0, 1.0, 2.0], [1.0, 0.0, 1.0]]
   },
   {
     "id": "linalg_inv_right_identity_2x2",
@@ -532,10 +466,7 @@
       "crates/fnp-linalg/src/lib.rs"
     ],
     "reason_code": "linalg_metamorphic_inv_right_identity",
-    "matrix": [
-      [4.0, 7.0],
-      [2.0, 6.0]
-    ]
+    "matrix": [[4.0, 7.0], [2.0, 6.0]]
   },
   {
     "id": "linalg_inv_right_identity_2x2_ill_conditioned",
@@ -547,10 +478,7 @@
       "crates/fnp-linalg/src/lib.rs"
     ],
     "reason_code": "linalg_metamorphic_inv_right_identity",
-    "matrix": [
-      [1.0, 1.0],
-      [1.0, 1.0001]
-    ]
+    "matrix": [[1.0, 1.0], [1.0, 1.0001]]
   },
   {
     "id": "linalg_inv_right_identity_3x3",
@@ -562,11 +490,7 @@
       "crates/fnp-linalg/src/lib.rs"
     ],
     "reason_code": "linalg_metamorphic_inv_right_identity",
-    "matrix": [
-      [1.0, 2.0, 1.0],
-      [0.0, 1.0, 2.0],
-      [1.0, 0.0, 1.0]
-    ]
+    "matrix": [[1.0, 2.0, 1.0], [0.0, 1.0, 2.0], [1.0, 0.0, 1.0]]
   },
   {
     "id": "linalg_inv_right_identity_4x4_diagonal_heavy",
@@ -595,10 +519,7 @@
       "crates/fnp-linalg/src/lib.rs"
     ],
     "reason_code": "linalg_metamorphic_cholesky_reconstructs",
-    "matrix": [
-      [2.0, 1.0],
-      [1.0, 2.0]
-    ]
+    "matrix": [[2.0, 1.0], [1.0, 2.0]]
   },
   {
     "id": "linalg_cholesky_reconstructs_spd_positive_definite",
@@ -610,10 +531,7 @@
       "crates/fnp-linalg/src/lib.rs"
     ],
     "reason_code": "linalg_metamorphic_cholesky_reconstructs",
-    "matrix": [
-      [4.0, 12.0],
-      [12.0, 37.0]
-    ]
+    "matrix": [[4.0, 12.0], [12.0, 37.0]]
   },
   {
     "id": "linalg_cholesky_reconstructs_spd_near_identity",
@@ -625,9 +543,6 @@
       "crates/fnp-linalg/src/lib.rs"
     ],
     "reason_code": "linalg_metamorphic_cholesky_reconstructs",
-    "matrix": [
-      [1.01, 0.5],
-      [0.5, 1.01]
-    ]
+    "matrix": [[1.01, 0.5], [0.5, 1.01]]
   }
 ]

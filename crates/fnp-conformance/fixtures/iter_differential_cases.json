@@ -656,8 +656,8 @@
     "expected_reason_code": "nditer_broadcast_plan_contract",
     "broadcast": {
       "operands": [
-        {"shape": [2, 3], "no_broadcast": false},
-        {"shape": [1, 3], "no_broadcast": false}
+        { "shape": [2, 3], "no_broadcast": false },
+        { "shape": [1, 3], "no_broadcast": false }
       ],
       "item_size": 8,
       "order": "C"
@@ -678,8 +678,8 @@
     "expected_reason_code": "nditer_broadcast_plan_contract",
     "broadcast": {
       "operands": [
-        {"shape": [4, 1, 3], "no_broadcast": false},
-        {"shape": [5, 1], "no_broadcast": false}
+        { "shape": [4, 1, 3], "no_broadcast": false },
+        { "shape": [5, 1], "no_broadcast": false }
       ],
       "item_size": 8,
       "order": "C"
@@ -762,10 +762,7 @@
     "reason_code": "nditer_broadcast_plan_contract",
     "expected_reason_code": "nditer_broadcast_plan_contract",
     "broadcast": {
-      "operands": [
-        {"shape": [], "no_broadcast": false},
-        {"shape": [], "no_broadcast": false}
-      ],
+      "operands": [{ "shape": [], "no_broadcast": false }, { "shape": [], "no_broadcast": false }],
       "item_size": 8,
       "order": "C"
     },

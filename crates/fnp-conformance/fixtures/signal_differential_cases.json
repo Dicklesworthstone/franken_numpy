@@ -13,7 +13,10 @@
     "expected_reason_code": "signal_differential_expected_success",
     "n": 8,
     "expected_shape": [8],
-    "expected_values": [0.0, 0.2857142857142857, 0.5714285714285714, 0.8571428571428572, 0.8571428571428572, 0.5714285714285714, 0.2857142857142857, 0.0],
+    "expected_values": [
+      0.0, 0.2857142857142857, 0.5714285714285714, 0.8571428571428572, 0.8571428571428572,
+      0.5714285714285714, 0.2857142857142857, 0.0
+    ],
     "abs_tol": 1e-7,
     "rel_tol": 1e-7
   },
@@ -31,7 +34,10 @@
     "expected_reason_code": "signal_differential_expected_success",
     "n": 8,
     "expected_shape": [8],
-    "expected_values": [0.0, 0.09045342435412808, 0.45918295754596367, 0.9203636180999082, 0.9203636180999082, 0.45918295754596367, 0.09045342435412808, 0.0],
+    "expected_values": [
+      0.0, 0.09045342435412808, 0.45918295754596367, 0.9203636180999082, 0.9203636180999082,
+      0.45918295754596367, 0.09045342435412808, 0.0
+    ],
     "abs_tol": 1e-7,
     "rel_tol": 1e-7
   },
@@ -49,7 +55,10 @@
     "expected_reason_code": "signal_differential_expected_success",
     "n": 8,
     "expected_shape": [8],
-    "expected_values": [0.08, 0.2531946911449826, 0.6423596296199047, 0.9544456792351128, 0.9544456792351128, 0.6423596296199047, 0.2531946911449826, 0.08],
+    "expected_values": [
+      0.08, 0.2531946911449826, 0.6423596296199047, 0.9544456792351128, 0.9544456792351128,
+      0.6423596296199047, 0.2531946911449826, 0.08
+    ],
     "abs_tol": 1e-7,
     "rel_tol": 1e-7
   },
@@ -67,7 +76,10 @@
     "expected_reason_code": "signal_differential_expected_success",
     "n": 8,
     "expected_shape": [8],
-    "expected_values": [0.0, 0.18825509907063326, 0.6112604669781572, 0.9504844339512095, 0.9504844339512095, 0.6112604669781572, 0.18825509907063326, 0.0],
+    "expected_values": [
+      0.0, 0.18825509907063326, 0.6112604669781572, 0.9504844339512095, 0.9504844339512095,
+      0.6112604669781572, 0.18825509907063326, 0.0
+    ],
     "abs_tol": 1e-7,
     "rel_tol": 1e-7
   },
@@ -86,7 +98,10 @@
     "n": 8,
     "beta": 14.0,
     "expected_shape": [8],
-    "expected_values": [7.726866835270368e-06, 0.017964073497790785, 0.2727720681863426, 0.8708037315729595, 0.8708037315729595, 0.2727720681863426, 0.017964073497790785, 7.726866835270368e-06],
+    "expected_values": [
+      7.726866835270368e-6, 0.017964073497790785, 0.2727720681863426, 0.8708037315729595,
+      0.8708037315729595, 0.2727720681863426, 0.017964073497790785, 7.726866835270368e-6
+    ],
     "abs_tol": 1e-7,
     "rel_tol": 1e-7
   },
@@ -673,7 +688,9 @@
     "rhs_shape": [2, 2],
     "rhs_values": [1.0, 0.0, 0.0, 1.0],
     "expected_shape": [4, 4],
-    "expected_values": [1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, 2.0, 3.0, 0.0, 4.0, 0.0, 0.0, 3.0, 0.0, 4.0],
+    "expected_values": [
+      1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, 2.0, 3.0, 0.0, 4.0, 0.0, 0.0, 3.0, 0.0, 4.0
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -901,10 +918,16 @@
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 3, 4],
-    "input_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0],
+    "input_values": [
+      0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0
+    ],
     "axes": [2, 0, 1],
     "expected_shape": [4, 2, 3],
-    "expected_values": [0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 1.0, 5.0, 9.0, 13.0, 17.0, 21.0, 2.0, 6.0, 10.0, 14.0, 18.0, 22.0, 3.0, 7.0, 11.0, 15.0, 19.0, 23.0],
+    "expected_values": [
+      0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 1.0, 5.0, 9.0, 13.0, 17.0, 21.0, 2.0, 6.0, 10.0, 14.0, 18.0,
+      22.0, 3.0, 7.0, 11.0, 15.0, 19.0, 23.0
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -1128,7 +1151,9 @@
     "pad_width": [[1, 1], [1, 1]],
     "constant": 0.0,
     "expected_shape": [4, 4],
-    "expected_values": [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "expected_values": [
+      0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -2730,7 +2755,9 @@
     "input_shape": [2, 4],
     "input_values": [1.0, 2.0, 3.0, 4.0, 4.0, 3.0, 2.0, 1.0],
     "expected_shape": [2, 2],
-    "expected_values": [1.6666666666666667, -1.6666666666666667, -1.6666666666666667, 1.6666666666666667],
+    "expected_values": [
+      1.6666666666666667, -1.6666666666666667, -1.6666666666666667, 1.6666666666666667
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -3756,7 +3783,10 @@
     "expected_reason_code": "signal_differential_expected_success",
     "n": 10,
     "expected_shape": [10],
-    "expected_values": [0.0, 0.2222222222222222, 0.4444444444444444, 0.6666666666666666, 0.8888888888888888, 0.8888888888888888, 0.6666666666666666, 0.4444444444444444, 0.2222222222222222, 0.0],
+    "expected_values": [
+      0.0, 0.2222222222222222, 0.4444444444444444, 0.6666666666666666, 0.8888888888888888,
+      0.8888888888888888, 0.6666666666666666, 0.4444444444444444, 0.2222222222222222, 0.0
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -3774,7 +3804,11 @@
     "expected_reason_code": "signal_differential_expected_success",
     "n": 10,
     "expected_shape": [10],
-    "expected_values": [-1.3877787807814457e-17, 0.05086963265386541, 0.2580005015036621, 0.6299999999999999, 0.9511298658424724, 0.9511298658424724, 0.6300000000000002, 0.25800050150366227, 0.05086963265386547, -1.3877787807814457e-17],
+    "expected_values": [
+      -1.3877787807814457e-17, 0.05086963265386541, 0.2580005015036621, 0.6299999999999999,
+      0.9511298658424724, 0.9511298658424724, 0.6300000000000002, 0.25800050150366227,
+      0.05086963265386547, -1.3877787807814457e-17
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -3792,7 +3826,10 @@
     "expected_reason_code": "signal_differential_expected_success",
     "n": 10,
     "expected_shape": [10],
-    "expected_values": [0.08, 0.18761955616527015, 0.46012183827321207, 0.7699999999999999, 0.9722586055615179, 0.9722586055615179, 0.7699999999999999, 0.4601218382732122, 0.18761955616527018, 0.08],
+    "expected_values": [
+      0.08, 0.18761955616527015, 0.46012183827321207, 0.7699999999999999, 0.9722586055615179,
+      0.9722586055615179, 0.7699999999999999, 0.4601218382732122, 0.18761955616527018, 0.08
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -3810,7 +3847,10 @@
     "expected_reason_code": "signal_differential_expected_success",
     "n": 10,
     "expected_shape": [10],
-    "expected_values": [0.0, 0.11697777844051098, 0.41317591116653485, 0.75, 0.9698463103929543, 0.9698463103929543, 0.75, 0.41317591116653485, 0.11697777844051098, 0.0],
+    "expected_values": [
+      0.0, 0.11697777844051098, 0.41317591116653485, 0.75, 0.9698463103929543, 0.9698463103929543,
+      0.75, 0.41317591116653485, 0.11697777844051098, 0.0
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -3829,7 +3869,11 @@
     "n": 10,
     "beta": 5.0,
     "expected_shape": [10],
-    "expected_values": [0.036710892271286676, 0.20127872573601377, 0.4755274621295788, 0.7753221044454067, 0.9727306872054711, 0.9727306872054711, 0.7753221044454067, 0.4755274621295788, 0.20127872573601377, 0.036710892271286676],
+    "expected_values": [
+      0.036710892271286676, 0.20127872573601377, 0.4755274621295788, 0.7753221044454067,
+      0.9727306872054711, 0.9727306872054711, 0.7753221044454067, 0.4755274621295788,
+      0.20127872573601377, 0.036710892271286676
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -4229,9 +4273,15 @@
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 3, 4],
-    "input_values": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0],
+    "input_values": [
+      0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0
+    ],
     "expected_shape": [4, 3, 2],
-    "expected_values": [0.0, 12.0, 4.0, 16.0, 8.0, 20.0, 1.0, 13.0, 5.0, 17.0, 9.0, 21.0, 2.0, 14.0, 6.0, 18.0, 10.0, 22.0, 3.0, 15.0, 7.0, 19.0, 11.0, 23.0],
+    "expected_values": [
+      0.0, 12.0, 4.0, 16.0, 8.0, 20.0, 1.0, 13.0, 5.0, 17.0, 9.0, 21.0, 2.0, 14.0, 6.0, 18.0, 10.0,
+      22.0, 3.0, 15.0, 7.0, 19.0, 11.0, 23.0
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -4488,7 +4538,10 @@
     "seed": 10088,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -4506,7 +4559,10 @@
     "seed": 10089,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -4524,7 +4580,10 @@
     "seed": 10090,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "start": 1.0,
@@ -4541,7 +4600,10 @@
     "seed": 10091,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "start": 0.0,
@@ -4559,7 +4621,10 @@
     "seed": 10092,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "n": 3,
@@ -4574,7 +4639,10 @@
     "seed": 10093,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "n": 2,
@@ -4589,7 +4657,10 @@
     "seed": 10094,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "constant": 7.0,
@@ -4604,7 +4675,10 @@
     "seed": 10095,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 2],
@@ -4620,7 +4694,10 @@
     "seed": 10096,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -4636,7 +4713,10 @@
     "seed": 10097,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "start": 0.0,
@@ -4653,7 +4733,10 @@
     "seed": 10098,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "start": 0.0,
@@ -4670,7 +4753,10 @@
     "seed": 10099,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -4686,7 +4772,10 @@
     "seed": 10100,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -4702,7 +4791,10 @@
     "seed": 10101,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -4718,7 +4810,10 @@
     "seed": 10102,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -4734,7 +4829,10 @@
     "seed": 10103,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -4750,7 +4848,10 @@
     "seed": 10104,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -4766,7 +4867,10 @@
     "seed": 10105,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -4782,7 +4886,10 @@
     "seed": 10106,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -4798,7 +4905,10 @@
     "seed": 10107,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -4814,7 +4924,10 @@
     "seed": 10108,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -4830,7 +4943,10 @@
     "seed": 10109,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -4846,7 +4962,10 @@
     "seed": 10110,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -4862,7 +4981,10 @@
     "seed": 10111,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -4878,7 +5000,10 @@
     "seed": 10112,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -4894,7 +5019,10 @@
     "seed": 10113,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -4910,13 +5038,18 @@
     "seed": 10114,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
     "input_values": [-2.0, -1.0, 0.0, 1.0, 2.0],
     "expected_shape": [5],
-    "expected_values": [-1.4436354751788103, -0.881373587019543, 0.0, 0.881373587019543, 1.4436354751788103],
+    "expected_values": [
+      -1.4436354751788103, -0.881373587019543, 0.0, 0.881373587019543, 1.4436354751788103
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -4926,7 +5059,10 @@
     "seed": 10115,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -4942,7 +5078,10 @@
     "seed": 10116,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -4958,7 +5097,10 @@
     "seed": 10117,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -4976,7 +5118,10 @@
     "seed": 10118,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -4994,7 +5139,10 @@
     "seed": 10119,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5012,7 +5160,10 @@
     "seed": 10120,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5030,7 +5181,10 @@
     "seed": 10121,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5048,7 +5202,10 @@
     "seed": 10122,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5066,7 +5223,10 @@
     "seed": 10123,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5084,7 +5244,10 @@
     "seed": 10124,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5102,7 +5265,10 @@
     "seed": 10125,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5120,7 +5286,10 @@
     "seed": 10126,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5138,7 +5307,10 @@
     "seed": 10127,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5156,7 +5328,10 @@
     "seed": 10128,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5174,7 +5349,10 @@
     "seed": 10129,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5192,7 +5370,10 @@
     "seed": 10130,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5208,7 +5389,10 @@
     "seed": 10131,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -5225,7 +5409,10 @@
     "seed": 10132,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -5242,7 +5429,10 @@
     "seed": 10133,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5260,7 +5450,10 @@
     "seed": 10134,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5278,7 +5471,10 @@
     "seed": 10135,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5296,7 +5492,10 @@
     "seed": 10136,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5314,7 +5513,10 @@
     "seed": 10137,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5332,7 +5534,10 @@
     "seed": 10138,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5350,7 +5555,10 @@
     "seed": 10139,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5368,7 +5576,10 @@
     "seed": 10140,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5386,7 +5597,10 @@
     "seed": 10141,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5404,7 +5618,10 @@
     "seed": 10142,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -5422,7 +5639,10 @@
     "seed": 10143,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 2],
@@ -5438,7 +5658,10 @@
     "seed": 10144,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 2],
@@ -5454,7 +5677,10 @@
     "seed": 10145,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 2],
@@ -5472,7 +5698,10 @@
     "seed": 10146,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5488,7 +5717,10 @@
     "seed": 10147,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5506,7 +5738,10 @@
     "seed": 10148,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5522,7 +5757,10 @@
     "seed": 10149,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5538,7 +5776,10 @@
     "seed": 10150,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 3],
@@ -5555,7 +5796,10 @@
     "seed": 10151,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [6],
@@ -5572,7 +5816,10 @@
     "seed": 10152,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [12],
@@ -5589,7 +5836,10 @@
     "seed": 10153,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5605,7 +5855,10 @@
     "seed": 10154,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5621,7 +5874,10 @@
     "seed": 10155,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5637,7 +5893,10 @@
     "seed": 10156,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5653,7 +5912,10 @@
     "seed": 10157,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5669,7 +5931,10 @@
     "seed": 10158,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5685,7 +5950,10 @@
     "seed": 10159,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5703,14 +5971,19 @@
     "seed": 10160,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 2],
     "input_values": [1.0, 2.0, 3.0, 4.0],
     "rhs_shape": [2, 2],
     "expected_shape": [4, 4],
-    "expected_values": [1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0],
+    "expected_values": [
+      1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0
+    ],
     "abs_tol": 1e-10,
     "rel_tol": 1e-10
   },
@@ -5720,7 +5993,10 @@
     "seed": 10161,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [1, 3, 1, 2, 1],
@@ -5736,7 +6012,10 @@
     "seed": 10162,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 3],
@@ -5753,7 +6032,10 @@
     "seed": 10163,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -5769,7 +6051,10 @@
     "seed": 10164,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -5785,7 +6070,10 @@
     "seed": 10165,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 3],
@@ -5801,7 +6089,10 @@
     "seed": 10166,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5817,7 +6108,10 @@
     "seed": 10167,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5833,7 +6127,10 @@
     "seed": 10168,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [2, 3],
@@ -5849,7 +6146,10 @@
     "seed": 10169,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [],
@@ -5866,7 +6166,10 @@
     "seed": 10170,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [4],
@@ -5882,7 +6185,10 @@
     "seed": 10171,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [5],
@@ -5898,7 +6204,10 @@
     "seed": 10172,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5914,7 +6223,10 @@
     "seed": 10173,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5930,14 +6242,21 @@
     "seed": 10174,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3, 2],
-    "input_values": [0.0, 0.0, 9.42477796076938, -9.42477796076938, 12.566370614359172, -12.566370614359172],
+    "input_values": [
+      0.0, 0.0, 9.42477796076938, -9.42477796076938, 12.566370614359172, -12.566370614359172
+    ],
     "axis": 0,
     "expected_shape": [3, 2],
-    "expected_values": [0.0, 0.0, 3.141592653589793, -3.141592653589793, 6.283185307179586, -6.283185307179586],
+    "expected_values": [
+      0.0, 0.0, 3.141592653589793, -3.141592653589793, 6.283185307179586, -6.283185307179586
+    ],
     "abs_tol": 1e-12,
     "rel_tol": 1e-12
   },
@@ -5947,7 +6266,10 @@
     "seed": 10175,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "input_shape": [3],
@@ -5964,7 +6286,10 @@
     "seed": 10200,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ij->ji",
@@ -5981,7 +6306,10 @@
     "seed": 10201,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ij->",
@@ -5998,7 +6326,10 @@
     "seed": 10202,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ij->i",
@@ -6015,7 +6346,10 @@
     "seed": 10203,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ij->j",
@@ -6032,7 +6366,10 @@
     "seed": 10204,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "i,i->",
@@ -6051,7 +6388,10 @@
     "seed": 10205,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "i,j->ij",
@@ -6070,7 +6410,10 @@
     "seed": 10206,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "bij,bjk->bik",
@@ -6089,7 +6432,10 @@
     "seed": 10207,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ij,ij->",
@@ -6108,7 +6454,10 @@
     "seed": 10208,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ij,j->i",
@@ -6127,7 +6476,10 @@
     "seed": 10209,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ijk,jkl->il",
@@ -6146,7 +6498,10 @@
     "seed": 10210,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ij,ij->i",
@@ -6165,7 +6520,10 @@
     "seed": 10211,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ji,jk->ik",
@@ -6184,7 +6542,10 @@
     "seed": 10212,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_success",
     "expected_reason_code": "signal_differential_expected_success",
     "subscripts": "ijk,kl->ijl",
@@ -6203,7 +6564,10 @@
     "seed": 10213,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_error",
     "expected_reason_code": "ufunc_operation_error",
     "subscripts": "ij",
@@ -6217,7 +6581,10 @@
     "seed": 10214,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_error",
     "expected_reason_code": "ufunc_operation_error",
     "subscripts": "ij,jk->ik",
@@ -6233,7 +6600,10 @@
     "seed": 10215,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-signal-packet",
-    "artifact_refs": ["crates/fnp-conformance/fixtures/signal_differential_cases.json", "crates/fnp-ufunc/src/lib.rs"],
+    "artifact_refs": [
+      "crates/fnp-conformance/fixtures/signal_differential_cases.json",
+      "crates/fnp-ufunc/src/lib.rs"
+    ],
     "reason_code": "signal_differential_expected_error",
     "expected_reason_code": "ufunc_operation_error",
     "subscripts": "ij->->i",

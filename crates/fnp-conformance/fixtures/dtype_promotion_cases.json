@@ -6,9 +6,7 @@
     "expected": "bool",
     "seed": 201,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_identity"
   },
   {
@@ -18,9 +16,7 @@
     "expected": "i32",
     "seed": 202,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_bool_identity"
   },
   {
@@ -30,9 +26,7 @@
     "expected": "f64",
     "seed": 203,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_bool_identity"
   },
   {
@@ -42,9 +36,7 @@
     "expected": "int8",
     "seed": 204,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_signed_same"
   },
   {
@@ -54,9 +46,7 @@
     "expected": "int16",
     "seed": 205,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_signed_widen"
   },
   {
@@ -66,9 +56,7 @@
     "expected": "int32",
     "seed": 206,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_signed_widen"
   },
   {
@@ -78,9 +66,7 @@
     "expected": "int64",
     "seed": 207,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_signed_widen"
   },
   {
@@ -90,9 +76,7 @@
     "expected": "uint8",
     "seed": 208,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_unsigned_same"
   },
   {
@@ -102,9 +86,7 @@
     "expected": "uint16",
     "seed": 209,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_unsigned_widen"
   },
   {
@@ -114,9 +96,7 @@
     "expected": "uint32",
     "seed": 210,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_unsigned_widen"
   },
   {
@@ -126,9 +106,7 @@
     "expected": "uint64",
     "seed": 211,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_unsigned_widen"
   },
   {
@@ -138,9 +116,7 @@
     "expected": "int16",
     "seed": 212,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_cross_signed_unsigned_widen"
   },
   {
@@ -150,9 +126,7 @@
     "expected": "int32",
     "seed": 213,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_cross_signed_unsigned_widen"
   },
   {
@@ -162,9 +136,7 @@
     "expected": "int64",
     "seed": 214,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_cross_signed_unsigned_widen"
   },
   {
@@ -174,9 +146,7 @@
     "expected": "float64",
     "seed": 215,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u64_signed_to_f64_counterintuitive"
   },
   {
@@ -186,9 +156,7 @@
     "expected": "float64",
     "seed": 216,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u64_signed_to_f64_counterintuitive"
   },
   {
@@ -198,9 +166,7 @@
     "expected": "float16",
     "seed": 217,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_float_same"
   },
   {
@@ -210,9 +176,7 @@
     "expected": "float32",
     "seed": 218,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_float_widen"
   },
   {
@@ -222,9 +186,7 @@
     "expected": "float64",
     "seed": 219,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_float_widen"
   },
   {
@@ -234,9 +196,7 @@
     "expected": "float16",
     "seed": 220,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f16_preserves_8bit"
   },
   {
@@ -246,9 +206,7 @@
     "expected": "float16",
     "seed": 221,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f16_preserves_8bit"
   },
   {
@@ -258,9 +216,7 @@
     "expected": "float32",
     "seed": 222,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f16_16bit_to_f32_mantissa"
   },
   {
@@ -270,9 +226,7 @@
     "expected": "float64",
     "seed": 223,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f16_32bit_to_f64"
   },
   {
@@ -282,9 +236,7 @@
     "expected": "float32",
     "seed": 224,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f32_small_int_preserved"
   },
   {
@@ -294,9 +246,7 @@
     "expected": "float32",
     "seed": 225,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f32_small_int_preserved"
   },
   {
@@ -306,9 +256,7 @@
     "expected": "float64",
     "seed": 226,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f32_large_int_to_f64"
   },
   {
@@ -318,9 +266,7 @@
     "expected": "float64",
     "seed": 227,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f64_absorbs_int"
   },
   {
@@ -330,9 +276,7 @@
     "expected": "complex64",
     "seed": 228,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_complex_same"
   },
   {
@@ -342,9 +286,7 @@
     "expected": "complex128",
     "seed": 229,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_complex_widen"
   },
   {
@@ -354,9 +296,7 @@
     "expected": "complex64",
     "seed": 230,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_float_to_complex"
   },
   {
@@ -366,9 +306,7 @@
     "expected": "complex128",
     "seed": 231,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f64_complex64_to_complex128"
   },
   {
@@ -378,9 +316,7 @@
     "expected": "complex128",
     "seed": 232,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_large_int_complex64_to_complex128"
   },
   {
@@ -390,9 +326,7 @@
     "expected": "complex64",
     "seed": 233,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_small_int_complex64_preserved"
   },
   {
@@ -402,9 +336,7 @@
     "expected": "int64",
     "seed": 234,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_small_unsigned_large_signed"
   },
   {
@@ -414,9 +346,7 @@
     "expected": "int64",
     "seed": 235,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_small_unsigned_large_signed"
   },
   {
@@ -426,9 +356,7 @@
     "expected": "int64",
     "seed": 236,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u32_i64_fits_i64"
   },
   {
@@ -438,9 +366,7 @@
     "expected": "complex128",
     "seed": 237,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_bool_identity"
   },
   {
@@ -450,9 +376,7 @@
     "expected": "complex128",
     "seed": 238,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u64_complex64_to_complex128"
   },
   {
@@ -462,9 +386,7 @@
     "expected": "complex64",
     "seed": 239,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f16_complex64_preserved"
   },
   {
@@ -474,9 +396,7 @@
     "expected": "int64",
     "seed": 240,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_signed_same"
   },
   {
@@ -486,9 +406,7 @@
     "expected": "float64",
     "seed": 241,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_float_same"
   },
   {
@@ -498,9 +416,7 @@
     "expected": "float64",
     "seed": 242,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u64_f32_to_f64"
   },
   {
@@ -510,9 +426,7 @@
     "expected": "float64",
     "seed": 243,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u64_f64_absorbs"
   },
   {
@@ -522,9 +436,7 @@
     "expected": "float64",
     "seed": 244,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_i64_f32_to_f64"
   },
   {
@@ -534,9 +446,7 @@
     "expected": "float32",
     "seed": 245,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u16_f16_to_f32_mantissa"
   },
   {
@@ -546,9 +456,7 @@
     "expected": "float64",
     "seed": 246,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u32_f32_to_f64"
   },
   {
@@ -558,9 +466,7 @@
     "expected": "complex128",
     "seed": 247,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_i64_complex64_to_complex128"
   },
   {
@@ -570,9 +476,7 @@
     "expected": "int32",
     "seed": 248,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u16_i8_cross_to_i32"
   },
   {
@@ -582,9 +486,7 @@
     "expected": "int64",
     "seed": 249,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u32_i8_cross_to_i64"
   },
   {
@@ -594,9 +496,7 @@
     "expected": "float64",
     "seed": 250,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u64_any_signed_to_f64"
   },
   {
@@ -606,9 +506,7 @@
     "expected": "float64",
     "seed": 251,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u64_any_signed_to_f64"
   },
   {
@@ -618,9 +516,7 @@
     "expected": "uint64",
     "seed": 252,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_bool_identity"
   },
   {
@@ -630,9 +526,7 @@
     "expected": "float16",
     "seed": 253,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_bool_identity"
   },
   {
@@ -642,9 +536,7 @@
     "expected": "complex128",
     "seed": 254,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_f16_complex128_absorbs"
   },
   {
@@ -654,9 +546,7 @@
     "expected": "float32",
     "seed": 255,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u8_f32_preserved"
   },
   {
@@ -666,9 +556,7 @@
     "expected": "float32",
     "seed": 256,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_i16_f16_to_f32_mantissa"
   },
   {
@@ -678,9 +566,7 @@
     "expected": "float64",
     "seed": 257,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_i32_f32_to_f64"
   },
   {
@@ -690,9 +576,7 @@
     "expected": "complex128",
     "seed": 258,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_u8_complex128_absorbs"
   },
   {
@@ -702,9 +586,7 @@
     "expected": "complex128",
     "seed": 259,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_i16_complex128_absorbs"
   },
   {
@@ -714,9 +596,7 @@
     "expected": "int8",
     "seed": 260,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -726,9 +606,7 @@
     "expected": "int16",
     "seed": 261,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -738,9 +616,7 @@
     "expected": "int32",
     "seed": 262,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -750,9 +626,7 @@
     "expected": "int64",
     "seed": 263,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -762,9 +636,7 @@
     "expected": "uint8",
     "seed": 264,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -774,9 +646,7 @@
     "expected": "uint16",
     "seed": 265,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -786,9 +656,7 @@
     "expected": "uint32",
     "seed": 266,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -798,9 +666,7 @@
     "expected": "float32",
     "seed": 267,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -810,9 +676,7 @@
     "expected": "float64",
     "seed": 268,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -822,9 +686,7 @@
     "expected": "complex64",
     "seed": 269,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -834,9 +696,7 @@
     "expected": "int8",
     "seed": 270,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -846,9 +706,7 @@
     "expected": "int32",
     "seed": 271,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -858,9 +716,7 @@
     "expected": "int64",
     "seed": 272,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -870,9 +726,7 @@
     "expected": "int16",
     "seed": 273,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -882,9 +736,7 @@
     "expected": "int32",
     "seed": 274,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -894,9 +746,7 @@
     "expected": "int64",
     "seed": 275,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -906,9 +756,7 @@
     "expected": "float64",
     "seed": 276,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -918,9 +766,7 @@
     "expected": "float16",
     "seed": 277,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -930,9 +776,7 @@
     "expected": "float32",
     "seed": 278,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -942,9 +786,7 @@
     "expected": "float64",
     "seed": 279,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -954,9 +796,7 @@
     "expected": "complex128",
     "seed": 280,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -966,9 +806,7 @@
     "expected": "int16",
     "seed": 281,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -978,9 +816,7 @@
     "expected": "int16",
     "seed": 282,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -990,9 +826,7 @@
     "expected": "int16",
     "seed": 283,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1002,9 +836,7 @@
     "expected": "int64",
     "seed": 284,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1014,9 +846,7 @@
     "expected": "int16",
     "seed": 285,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1026,9 +856,7 @@
     "expected": "int32",
     "seed": 286,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1038,9 +866,7 @@
     "expected": "int64",
     "seed": 287,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1050,9 +876,7 @@
     "expected": "float64",
     "seed": 288,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1062,9 +886,7 @@
     "expected": "float32",
     "seed": 289,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1074,9 +896,7 @@
     "expected": "float64",
     "seed": 290,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1086,9 +906,7 @@
     "expected": "complex64",
     "seed": 291,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1098,9 +916,7 @@
     "expected": "int32",
     "seed": 292,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1110,9 +926,7 @@
     "expected": "int32",
     "seed": 293,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1122,9 +936,7 @@
     "expected": "int32",
     "seed": 294,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1134,9 +946,7 @@
     "expected": "int32",
     "seed": 295,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1146,9 +956,7 @@
     "expected": "int32",
     "seed": 296,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1158,9 +966,7 @@
     "expected": "int32",
     "seed": 297,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1170,9 +976,7 @@
     "expected": "int64",
     "seed": 298,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1182,9 +986,7 @@
     "expected": "float64",
     "seed": 299,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1194,9 +996,7 @@
     "expected": "float64",
     "seed": 300,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1206,9 +1006,7 @@
     "expected": "float64",
     "seed": 301,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1218,9 +1016,7 @@
     "expected": "complex128",
     "seed": 302,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1230,9 +1026,7 @@
     "expected": "int64",
     "seed": 303,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1242,9 +1036,7 @@
     "expected": "int64",
     "seed": 304,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1254,9 +1046,7 @@
     "expected": "int64",
     "seed": 305,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1266,9 +1056,7 @@
     "expected": "int64",
     "seed": 306,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1278,9 +1066,7 @@
     "expected": "int64",
     "seed": 307,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1290,9 +1076,7 @@
     "expected": "int64",
     "seed": 308,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1302,9 +1086,7 @@
     "expected": "int64",
     "seed": 309,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1314,9 +1096,7 @@
     "expected": "float64",
     "seed": 310,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1326,9 +1106,7 @@
     "expected": "float64",
     "seed": 311,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1338,9 +1116,7 @@
     "expected": "float64",
     "seed": 312,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1350,9 +1126,7 @@
     "expected": "complex128",
     "seed": 313,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1362,9 +1136,7 @@
     "expected": "uint8",
     "seed": 314,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1374,9 +1146,7 @@
     "expected": "int16",
     "seed": 315,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1386,9 +1156,7 @@
     "expected": "int32",
     "seed": 316,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1398,9 +1166,7 @@
     "expected": "uint32",
     "seed": 317,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1410,9 +1176,7 @@
     "expected": "uint64",
     "seed": 318,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1422,9 +1186,7 @@
     "expected": "float16",
     "seed": 319,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1434,9 +1196,7 @@
     "expected": "float64",
     "seed": 320,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1446,9 +1206,7 @@
     "expected": "complex64",
     "seed": 321,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1458,9 +1216,7 @@
     "expected": "uint16",
     "seed": 322,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1470,9 +1226,7 @@
     "expected": "int32",
     "seed": 323,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1482,9 +1236,7 @@
     "expected": "uint16",
     "seed": 324,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1494,9 +1246,7 @@
     "expected": "uint16",
     "seed": 325,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1506,9 +1256,7 @@
     "expected": "uint64",
     "seed": 326,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1518,9 +1266,7 @@
     "expected": "float32",
     "seed": 327,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1530,9 +1276,7 @@
     "expected": "float64",
     "seed": 328,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1542,9 +1286,7 @@
     "expected": "complex64",
     "seed": 329,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1554,9 +1296,7 @@
     "expected": "complex128",
     "seed": 330,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1566,9 +1306,7 @@
     "expected": "uint32",
     "seed": 331,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1578,9 +1316,7 @@
     "expected": "int64",
     "seed": 332,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1590,9 +1326,7 @@
     "expected": "uint32",
     "seed": 333,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1602,9 +1336,7 @@
     "expected": "uint32",
     "seed": 334,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1614,9 +1346,7 @@
     "expected": "uint32",
     "seed": 335,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1626,9 +1356,7 @@
     "expected": "float64",
     "seed": 336,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1638,9 +1366,7 @@
     "expected": "float64",
     "seed": 337,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1650,9 +1376,7 @@
     "expected": "complex128",
     "seed": 338,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1662,9 +1386,7 @@
     "expected": "complex128",
     "seed": 339,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1674,9 +1396,7 @@
     "expected": "uint64",
     "seed": 340,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1686,9 +1406,7 @@
     "expected": "uint64",
     "seed": 341,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1698,9 +1416,7 @@
     "expected": "uint64",
     "seed": 342,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1710,9 +1426,7 @@
     "expected": "uint64",
     "seed": 343,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1722,9 +1436,7 @@
     "expected": "uint64",
     "seed": 344,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1734,9 +1446,7 @@
     "expected": "float64",
     "seed": 345,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1746,9 +1456,7 @@
     "expected": "complex128",
     "seed": 346,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1758,9 +1466,7 @@
     "expected": "float16",
     "seed": 347,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1770,9 +1476,7 @@
     "expected": "float64",
     "seed": 348,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1782,9 +1486,7 @@
     "expected": "float32",
     "seed": 349,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1794,9 +1496,7 @@
     "expected": "float64",
     "seed": 350,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1806,9 +1506,7 @@
     "expected": "float64",
     "seed": 351,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1818,9 +1516,7 @@
     "expected": "float64",
     "seed": 352,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1830,9 +1526,7 @@
     "expected": "float32",
     "seed": 353,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1842,9 +1536,7 @@
     "expected": "float64",
     "seed": 354,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1854,9 +1546,7 @@
     "expected": "float32",
     "seed": 355,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1866,9 +1556,7 @@
     "expected": "float32",
     "seed": 356,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1878,9 +1566,7 @@
     "expected": "float64",
     "seed": 357,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1890,9 +1576,7 @@
     "expected": "float64",
     "seed": 358,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1902,9 +1586,7 @@
     "expected": "float32",
     "seed": 359,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1914,9 +1596,7 @@
     "expected": "float32",
     "seed": 360,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1926,9 +1606,7 @@
     "expected": "complex128",
     "seed": 361,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1938,9 +1616,7 @@
     "expected": "float64",
     "seed": 362,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1950,9 +1626,7 @@
     "expected": "float64",
     "seed": 363,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1962,9 +1636,7 @@
     "expected": "float64",
     "seed": 364,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1974,9 +1646,7 @@
     "expected": "float64",
     "seed": 365,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1986,9 +1656,7 @@
     "expected": "float64",
     "seed": 366,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -1998,9 +1666,7 @@
     "expected": "float64",
     "seed": 367,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2010,9 +1676,7 @@
     "expected": "float64",
     "seed": 368,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2022,9 +1686,7 @@
     "expected": "float64",
     "seed": 369,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2034,9 +1696,7 @@
     "expected": "float64",
     "seed": 370,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2046,9 +1706,7 @@
     "expected": "float64",
     "seed": 371,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2058,9 +1716,7 @@
     "expected": "complex128",
     "seed": 372,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2070,9 +1726,7 @@
     "expected": "complex64",
     "seed": 373,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2082,9 +1736,7 @@
     "expected": "complex64",
     "seed": 374,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2094,9 +1746,7 @@
     "expected": "complex64",
     "seed": 375,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2106,9 +1756,7 @@
     "expected": "complex128",
     "seed": 376,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2118,9 +1766,7 @@
     "expected": "complex128",
     "seed": 377,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2130,9 +1776,7 @@
     "expected": "complex64",
     "seed": 378,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2142,9 +1786,7 @@
     "expected": "complex64",
     "seed": 379,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2154,9 +1796,7 @@
     "expected": "complex128",
     "seed": 380,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2166,9 +1806,7 @@
     "expected": "complex128",
     "seed": 381,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2178,9 +1816,7 @@
     "expected": "complex64",
     "seed": 382,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2190,9 +1826,7 @@
     "expected": "complex64",
     "seed": 383,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2202,9 +1836,7 @@
     "expected": "complex128",
     "seed": 384,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2214,9 +1846,7 @@
     "expected": "complex128",
     "seed": 385,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2226,9 +1856,7 @@
     "expected": "complex128",
     "seed": 386,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2238,9 +1866,7 @@
     "expected": "complex128",
     "seed": 387,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2250,9 +1876,7 @@
     "expected": "complex128",
     "seed": 388,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2262,9 +1886,7 @@
     "expected": "complex128",
     "seed": 389,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2274,9 +1896,7 @@
     "expected": "complex128",
     "seed": 390,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2286,9 +1906,7 @@
     "expected": "complex128",
     "seed": 391,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2298,9 +1916,7 @@
     "expected": "complex128",
     "seed": 392,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2310,9 +1926,7 @@
     "expected": "complex128",
     "seed": 393,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2322,9 +1936,7 @@
     "expected": "complex128",
     "seed": 394,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2334,9 +1946,7 @@
     "expected": "complex128",
     "seed": 395,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2346,9 +1956,7 @@
     "expected": "complex128",
     "seed": 396,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2358,9 +1966,7 @@
     "expected": "complex128",
     "seed": 397,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   },
   {
@@ -2370,9 +1976,7 @@
     "expected": "complex128",
     "seed": 398,
     "env_fingerprint": "fnp-conformance-default-paths",
-    "artifact_refs": [
-      "artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"
-    ],
+    "artifact_refs": ["artifacts/phase2c/FNP-P2C-002/fixture_manifest.json"],
     "reason_code": "promotion_matrix_systematic"
   }
 ]

@@ -12,9 +12,7 @@
     "expected_action": "full_validate",
     "seed": 301,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_allowlisted"
   },
   {
@@ -30,9 +28,7 @@
     "expected_action": "fail_closed",
     "seed": 302,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_not_allowlisted"
   },
   {
@@ -48,9 +44,7 @@
     "expected_action": "fail_closed",
     "seed": 303,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_strict_mode_rejected"
   },
   {
@@ -66,9 +60,7 @@
     "expected_action": "fail_closed",
     "seed": 304,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_incompatible_rejected"
   },
   {
@@ -84,9 +76,7 @@
     "expected_action": "fail_closed",
     "seed": 305,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_unknown_rejected"
   },
   {
@@ -102,9 +92,7 @@
     "expected_action": "fail_closed",
     "seed": 306,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_empty_class_rejected"
   },
   {
@@ -120,9 +108,7 @@
     "expected_action": "fail_closed",
     "seed": 307,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_empty_allowlist_rejected"
   },
   {
@@ -138,9 +124,7 @@
     "expected_action": "full_validate",
     "seed": 308,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_whitespace_normalization"
   },
   {
@@ -156,9 +140,7 @@
     "expected_action": "full_validate",
     "seed": 309,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_whitespace_normalization"
   },
   {
@@ -174,9 +156,7 @@
     "expected_action": "fail_closed",
     "seed": 310,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_strict_unknown_rejected"
   },
   {
@@ -192,9 +172,7 @@
     "expected_action": "full_validate",
     "seed": 311,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_multiple_allowlist"
   },
   {
@@ -210,9 +188,7 @@
     "expected_action": "full_validate",
     "seed": 312,
     "env_fingerprint": "linux-x86_64-rust2024",
-    "artifact_refs": [
-      "artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"
-    ],
+    "artifact_refs": ["artifacts/contracts/SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md"],
     "reason_code": "override_audit_whitespace_trimmed"
   }
 ]

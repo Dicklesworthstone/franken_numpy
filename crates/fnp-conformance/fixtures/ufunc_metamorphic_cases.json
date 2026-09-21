@@ -100,10 +100,7 @@
     "reason_code": "ufunc_reduction_contract_violation",
     "lhs_shape": [2, 2, 2, 2],
     "lhs_values": [
-      1.0, -2.0, 3.0, -4.0,
-      5.0, -6.0, 7.0, -8.0,
-      9.0, -10.0, 11.0, -12.0,
-      13.0, -14.0, 15.0, -16.0
+      1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 9.0, -10.0, 11.0, -12.0, 13.0, -14.0, 15.0, -16.0
     ],
     "lhs_dtype": "f64",
     "scalar": 1.75
@@ -139,12 +136,8 @@
     "reason_code": "ufunc_reduction_contract_violation",
     "lhs_shape": [1, 2, 3, 2, 2],
     "lhs_values": [
-      1.0, -2.0, 3.0, -4.0,
-      5.0, -6.0, 7.0, -8.0,
-      9.0, -10.0, 11.0, -12.0,
-      13.0, -14.0, 15.0, -16.0,
-      17.0, -18.0, 19.0, -20.0,
-      21.0, -22.0, 23.0, -24.0
+      1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 9.0, -10.0, 11.0, -12.0, 13.0, -14.0, 15.0, -16.0,
+      17.0, -18.0, 19.0, -20.0, 21.0, -22.0, 23.0, -24.0
     ],
     "lhs_dtype": "f64",
     "scalar": -0.75
@@ -215,10 +208,7 @@
     ],
     "reason_code": "ufunc_reduction_contract_violation",
     "lhs_shape": [1, 2, 1, 2, 1, 3],
-    "lhs_values": [
-      1.0, -2.0, 3.0, 4.0, -5.0, 6.0,
-      7.0, -8.0, 9.0, 10.0, -11.0, 12.0
-    ],
+    "lhs_values": [1.0, -2.0, 3.0, 4.0, -5.0, 6.0, 7.0, -8.0, 9.0, 10.0, -11.0, 12.0],
     "lhs_dtype": "f64",
     "scalar": 3.14
   },
@@ -238,9 +228,8 @@
     "lhs_dtype": "f64",
     "rhs_shape": [2, 3, 4],
     "rhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
-      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
+      18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
     ],
     "rhs_dtype": "f64"
   },
@@ -346,9 +335,8 @@
     "lhs_dtype": "f64",
     "rhs_shape": [2, 3, 1, 4],
     "rhs_values": [
-      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
-      9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-      17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
+      1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
+      18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0
     ],
     "rhs_dtype": "f64"
   },
@@ -364,10 +352,14 @@
     ],
     "reason_code": "ufunc_dispatch_resolution_failed",
     "lhs_shape": [2, 1, 2, 1, 2, 1, 2, 1],
-    "lhs_values": [1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 9.0, -10.0, 11.0, -12.0, 13.0, -14.0, 15.0, -16.0],
+    "lhs_values": [
+      1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0, 9.0, -10.0, 11.0, -12.0, 13.0, -14.0, 15.0, -16.0
+    ],
     "lhs_dtype": "f64",
     "rhs_shape": [1, 2, 1, 2, 1, 2, 1, 2],
-    "rhs_values": [0.5, -1.0, 2.0, -0.5, 1.5, -3.0, 0.25, -2.5, 3.5, -4.5, 5.5, -6.5, 7.5, -8.5, 9.5, -10.5],
+    "rhs_values": [
+      0.5, -1.0, 2.0, -0.5, 1.5, -3.0, 0.25, -2.5, 3.5, -4.5, 5.5, -6.5, 7.5, -8.5, 9.5, -10.5
+    ],
     "rhs_dtype": "f64"
   },
   {
@@ -600,9 +592,7 @@
     "seed": 334,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_neg_involution",
     "lhs_shape": [3, 2],
     "lhs_values": [1.0, -2.0, 3.5, -4.0, 0.0, 5.5],
@@ -614,9 +604,7 @@
     "seed": 335,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_neg_involution",
     "lhs_shape": [2, 2, 2],
     "lhs_values": [-1.0, 2.0, -3.0, 4.0, 5.0, -6.0, 7.0, -8.0],
@@ -628,9 +616,7 @@
     "seed": 336,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_abs_idempotent",
     "lhs_shape": [3, 3],
     "lhs_values": [-1.0, 2.0, -3.0, 4.0, -5.0, 6.0, -7.0, 8.0, -9.0],
@@ -642,9 +628,7 @@
     "seed": 337,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_abs_idempotent",
     "lhs_shape": [5],
     "lhs_values": [1.5, -2.5, 0.0, -4.5, 5.5],
@@ -656,9 +640,7 @@
     "seed": 338,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_max_commutative",
     "lhs_shape": [2, 3],
     "lhs_values": [1.0, 5.0, 3.0, 7.0, 2.0, 8.0],
@@ -673,9 +655,7 @@
     "seed": 339,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_max_commutative",
     "lhs_shape": [3, 2],
     "lhs_values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -690,9 +670,7 @@
     "seed": 3400,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_neg_involution",
     "lhs_shape": [5],
     "lhs_values": [0.0, -0.0, 5e-324, -5e-324, 1.0],
@@ -704,9 +682,7 @@
     "seed": 3401,
     "mode": "hardened",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_neg_involution",
     "lhs_shape": [4],
     "lhs_values": [1e300, -1e300, 1e-300, -1e-300],
@@ -718,9 +694,7 @@
     "seed": 3402,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_neg_involution",
     "lhs_shape": [0],
     "lhs_values": [],
@@ -732,9 +706,7 @@
     "seed": 3403,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_abs_idempotent",
     "lhs_shape": [2, 2, 2],
     "lhs_values": [-0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8],
@@ -746,9 +718,7 @@
     "seed": 3404,
     "mode": "hardened",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_abs_idempotent",
     "lhs_shape": [6],
     "lhs_values": [0.0, -0.0, 1.0, -1.0, 1e-10, -1e-10],
@@ -760,9 +730,7 @@
     "seed": 3405,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_abs_idempotent",
     "lhs_shape": [0, 3],
     "lhs_values": [],
@@ -774,9 +742,7 @@
     "seed": 3406,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_max_commutative",
     "lhs_shape": [4],
     "lhs_values": [3.0, 3.0, 3.0, 3.0],
@@ -791,9 +757,7 @@
     "seed": 3407,
     "mode": "hardened",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_max_commutative",
     "lhs_shape": [3],
     "lhs_values": [-10.0, -20.0, -30.0],
@@ -808,9 +772,7 @@
     "seed": 3408,
     "mode": "strict",
     "env_fingerprint": "fnp-ufunc-metamorphic-f",
-    "artifact_refs": [
-      "crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"
-    ],
+    "artifact_refs": ["crates/fnp-conformance/fixtures/ufunc_metamorphic_cases.json"],
     "reason_code": "ufunc_metamorphic_max_commutative",
     "lhs_shape": [2, 3],
     "lhs_values": [1.0, 5.0, 2.0, 7.0, 3.0, 6.0],

@@ -162,7 +162,24 @@
     "reason_code": "flatiter_indexing_contract",
     "flat_index": {
       "kind": "bool_mask",
-      "mask": [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true]
+      "mask": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ]
     }
   },
   {
