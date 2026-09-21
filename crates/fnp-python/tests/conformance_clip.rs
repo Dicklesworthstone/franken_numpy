@@ -743,11 +743,25 @@ if fnp.clip(a_small, -0.5, None).tobytes() != np.clip(a_small, -0.5, None).tobyt
 if fnp.clip(a_small, None, 0.5).tobytes() != np.clip(a_small, None, 0.5).tobytes():
     verdicts.append("FAIL f64 small max-only")
 
+def best(fn, reps=5):
+    fn(); best_s = float("inf")
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); best_s = min(best_s, time.perf_counter() - t0)
+    return best_s * 1000
+a8 = rng.standard_normal(4_000_000)
+tn_min = best(lambda: np.clip(a8, -0.5, None))
+tf_min = best(lambda: fnp.clip(a8, -0.5, None))
+tn_max = best(lambda: np.clip(a8, None, 0.5))
+tf_max = best(lambda: fnp.clip(a8, None, 0.5))
+print(f"CLIP_F64_ONESIDED_MIN_AB numpy_ms={tn_min:.3f} fnp_ms={tf_min:.3f} ratio={tn_min / tf_min:.3f}")
+print(f"CLIP_F64_ONESIDED_MAX_AB numpy_ms={tn_max:.3f} fnp_ms={tf_max:.3f} ratio={tn_max / tf_max:.3f}")
+
 print(verdicts if verdicts else True)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
+    println!("{result}");
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
         last, "True",
@@ -835,11 +849,22 @@ for dt in dtypes:
     if r_prom.dtype != e_prom.dtype or not np.allclose(r_prom, e_prom):
         verdicts.append(f"FAIL {dt.__name__} float-bound promotion")
 
+def best(fn, reps=5):
+    fn(); best_s = float("inf")
+    for _ in range(reps):
+        t0 = time.perf_counter(); fn(); best_s = min(best_s, time.perf_counter() - t0)
+    return best_s * 1000
+a_i64 = rng.integers(-1_000_000, 1_000_000, 4_000_000).astype(np.int64)
+tn_int = best(lambda: np.clip(a_i64, -500_000, None))
+tf_int = best(lambda: fnp.clip(a_i64, -500_000, None))
+print(f"CLIP_INT64_ONESIDED_MIN_AB numpy_ms={tn_int:.3f} fnp_ms={tf_int:.3f} ratio={tn_int / tf_int:.3f}")
+
 print(verdicts if verdicts else True)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
+    println!("{result}");
     let last = result.lines().last().unwrap_or("").trim();
     assert_eq!(
         last, "True",
