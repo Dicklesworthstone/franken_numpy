@@ -11654,8 +11654,8 @@ for child in rng.spawn(n_children):
 
     #[test]
     fn seed_sequence_errors_map_to_contract_reason_codes() {
-        let generate_err = SeedSequence::with_spawn_key(&[], &[], 0)
-            .expect_err("invalid pool size must fail");
+        let generate_err =
+            SeedSequence::with_spawn_key(&[], &[], 0).expect_err("invalid pool size must fail");
         assert_eq!(
             generate_err,
             SeedSequenceError::GenerateStateContractViolation
