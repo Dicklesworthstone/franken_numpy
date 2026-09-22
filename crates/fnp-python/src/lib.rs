@@ -117,19 +117,19 @@ pub fn clear_runtime_decisions() {
 #[pyfunction]
 pub fn get_runtime_decisions(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let list = PyList::empty(py);
-    if let Ok(guard) = RUNTIME_LEDGER.lock() {
-        if let Some(ledger) = guard.as_ref() {
-            for event in ledger.events() {
-                let dict = PyDict::new(py);
-                dict.set_item("action", event.action.as_str())?;
-                dict.set_item("mode", event.mode.as_str())?;
-                dict.set_item("class", event.class.as_str())?;
-                dict.set_item("reason_code", &event.reason_code)?;
-                dict.set_item("fixture_id", &event.fixture_id)?;
-                dict.set_item("note", &event.note)?;
-                dict.set_item("risk_score", event.risk_score)?;
-                list.append(dict)?;
-            }
+    if let Ok(guard) = RUNTIME_LEDGER.lock()
+        && let Some(ledger) = guard.as_ref()
+    {
+        for event in ledger.events() {
+            let dict = PyDict::new(py);
+            dict.set_item("action", event.action.as_str())?;
+            dict.set_item("mode", event.mode.as_str())?;
+            dict.set_item("class", event.class.as_str())?;
+            dict.set_item("reason_code", &event.reason_code)?;
+            dict.set_item("fixture_id", &event.fixture_id)?;
+            dict.set_item("note", &event.note)?;
+            dict.set_item("risk_score", event.risk_score)?;
+            list.append(dict)?;
         }
     }
     Ok(list.into_any().unbind())
