@@ -113,6 +113,28 @@ pub fn clear_runtime_decisions() {
     }
 }
 
+/// Returns the recorded runtime decisions as a list of dictionaries.
+#[pyfunction]
+pub fn get_runtime_decisions(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let list = PyList::empty(py);
+    if let Ok(guard) = RUNTIME_LEDGER.lock() {
+        if let Some(ledger) = guard.as_ref() {
+            for event in ledger.events() {
+                let dict = PyDict::new(py);
+                dict.set_item("action", event.action.as_str())?;
+                dict.set_item("mode", event.mode.as_str())?;
+                dict.set_item("class", event.class.as_str())?;
+                dict.set_item("reason_code", &event.reason_code)?;
+                dict.set_item("fixture_id", &event.fixture_id)?;
+                dict.set_item("note", &event.note)?;
+                dict.set_item("risk_score", event.risk_score)?;
+                list.append(dict)?;
+            }
+        }
+    }
+    Ok(list.into_any().unbind())
+}
+
 /// Records a compatibility decision in the runtime ledger.
 pub fn record_runtime_decision(
     class: CompatibilityClass,
@@ -27599,6 +27621,15 @@ fn clip(
     // (numpy clip with neither bound raises; one-sided bounds defer too).
     let a_min: Py<PyAny> = a_min.or(min).unwrap_or_else(|| py.None());
     let a_max: Py<PyAny> = a_max.or(max).unwrap_or_else(|| py.None());
+
+    if current_runtime_mode() == RuntimeMode::Hardened {
+        record_runtime_decision(
+            CompatibilityClass::KnownCompatible,
+            0.10,
+            "clip_operation",
+            "clip bounds applied in hardened mode",
+        );
+    }
 
     let fallback = || -> PyResult<Py<PyAny>> {
         let has_kwargs = kwargs.as_ref().is_some_and(|k| !k.is_empty());
@@ -61550,9 +61581,18 @@ fn emit_native_float_warnings(py: Python<'_>) -> PyResult<()> {
     if events.is_empty() {
         return Ok(());
     }
+    let is_hardened = current_runtime_mode() == RuntimeMode::Hardened;
     let warnings = cached_warnings(py)?;
     let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
     for event in events {
+        if is_hardened {
+            record_runtime_decision(
+                CompatibilityClass::KnownCompatible,
+                0.25,
+                event.op,
+                &event.message,
+            );
+        }
         if matches!(event.mode, FloatErrorMode::Warn) {
             warnings.call_method1(intern!(py, "warn"), (event.message, &category))?;
         }
@@ -122118,6 +122158,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_runtime_mode, m)?)?;
     m.add_function(wrap_pyfunction!(get_runtime_mode, m)?)?;
     m.add_function(wrap_pyfunction!(get_runtime_decision_count, m)?)?;
+    m.add_function(wrap_pyfunction!(get_runtime_decisions, m)?)?;
     m.add_function(wrap_pyfunction!(clear_runtime_decisions, m)?)?;
 
     // `__all__` is bound LAST, deliberately. PyO3's `PyModule::add` appends the
@@ -181224,6 +181265,50 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
                 .extract()
                 .expect("extract count");
             assert!(count > 0, "decision count should be > 0 in hardened mode");
+
+            let decisions_obj = module
+                .getattr("get_runtime_decisions")
+                .expect("get get_runtime_decisions")
+                .call0()
+                .expect("call get_runtime_decisions");
+            let decisions_list = decisions_obj.cast::<PyList>().expect("cast to PyList");
+            assert_eq!(decisions_list.len(), count);
+            let first_item = decisions_list.get_item(0).expect("get item 0");
+            let first = first_item.cast::<PyDict>().expect("cast to PyDict");
+            let action: String = first
+                .get_item("action")
+                .expect("get action")
+                .expect("action exists")
+                .extract()
+                .expect("extract action");
+            assert!(!action.is_empty());
+            let mode: String = first
+                .get_item("mode")
+                .expect("get mode")
+                .expect("mode exists")
+                .extract()
+                .expect("extract mode");
+            assert_eq!(mode, "hardened");
+
+            // clip in hardened mode also logs a decision
+            let clip_arr = module
+                .getattr("array")
+                .expect("getattr array")
+                .call1((vec![1.0_f64, 5.0, 10.0],))
+                .expect("call array");
+            let _ = module
+                .getattr("clip")
+                .expect("getattr clip")
+                .call1((clip_arr, 2.0, 8.0))
+                .expect("call clip");
+            let count_after_clip: usize = module
+                .getattr("get_runtime_decision_count")
+                .expect("get count")
+                .call0()
+                .expect("call count")
+                .extract()
+                .expect("extract count");
+            assert!(count_after_clip > count);
 
             // Clear decisions via module
             module
