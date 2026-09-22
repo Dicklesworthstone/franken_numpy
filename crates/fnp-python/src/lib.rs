@@ -73189,6 +73189,102 @@ fn int64_sort_flat_small(
     Ok(Some(out.unbind()))
 }
 
+fn int32_sort_flat_small(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.get_type().is(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
+        return Ok(None);
+    };
+    let Ok(out_buffer) = PyBuffer::<i32>::get(&out) else {
+        return Ok(None);
+    };
+    if out_buffer.dimensions() != 1 {
+        return Ok(None);
+    }
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: `ReadOnlyCell<i32>` is repr(transparent) over `i32`; this buffer
+    // belongs to the fresh array `copy` just returned, so nothing else aliases
+    // it, and it is held under the GIL.
+    let dst: &mut [i32] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i32, n) };
+    fnp_ufunc::sort_small::sort_i32(dst);
+    Ok(Some(out.unbind()))
+}
+
+fn uint64_sort_flat_small(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.get_type().is(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
+        return Ok(None);
+    };
+    let Ok(out_buffer) = PyBuffer::<u64>::get(&out) else {
+        return Ok(None);
+    };
+    if out_buffer.dimensions() != 1 {
+        return Ok(None);
+    }
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: `ReadOnlyCell<u64>` is repr(transparent) over `u64`; this buffer
+    // belongs to the fresh array `copy` just returned, so nothing else aliases
+    // it, and it is held under the GIL.
+    let dst: &mut [u64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u64, n) };
+    fnp_ufunc::sort_small::sort_u64(dst);
+    Ok(Some(out.unbind()))
+}
+
+fn uint32_sort_flat_small(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.get_type().is(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
+        return Ok(None);
+    };
+    let Ok(out_buffer) = PyBuffer::<u32>::get(&out) else {
+        return Ok(None);
+    };
+    if out_buffer.dimensions() != 1 {
+        return Ok(None);
+    }
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: `ReadOnlyCell<u32>` is repr(transparent) over `u32`; this buffer
+    // belongs to the fresh array `copy` just returned, so nothing else aliases
+    // it, and it is held under the GIL.
+    let dst: &mut [u32] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u32, n) };
+    fnp_ufunc::sort_small::sort_u32(dst);
+    Ok(Some(out.unbind()))
+}
+
 // NumPy's AVX2-class int32 qsort was already within 1.7% of the native Rayon
 // path on the sampled many-core worker. On small pools, avoid paying the copy +
 // comparison-sort fan-out when NumPy has that SIMD basis. Pre-AVX2/non-x86
@@ -73382,7 +73478,7 @@ fn try_native_int_sort_flat(
     a: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     const SORT_PARALLEL_MIN: usize = 1 << 20;
-    const I64_SMALL_SORT_MAX: usize = 256;
+    const INT_SMALL_SORT_MAX: usize = 256;
     if !a.is_exact_instance(cached_ndarray_type(py)?) {
         return Ok(None);
     }
@@ -73416,15 +73512,20 @@ fn try_native_int_sort_flat(
     let Ok(n) = a.len() else {
         return Ok(None);
     };
-    // THE SMALL int64 CELL SKIPS THE PYTHON SHAPE PROBE ENTIRELY
-    // (`franken_numpy-ixs5y.409`). `int64_sort_flat_small` acquires a `PyBuffer` on the
-    // way in regardless, and that buffer already carries dimension count, C-contiguity
-    // and element count - the three facts `ndim`, `flags.c_contiguous` and `len` were
-    // being fetched for. It now checks them there, off the Python attribute path and
-    // without constructing a numpy flagsobj. Profiled, this cell's time is its Python
-    // entry: 3566 ns route against a 1092 ns comparison sort, so entries are the lever.
-    if kind == 'i' && itemsize == std::mem::size_of::<i64>() && n <= I64_SMALL_SORT_MAX {
-        return int64_sort_flat_small(py, a, n);
+    // THE SMALL INT CELL SKIPS THE PYTHON SHAPE PROBE ENTIRELY
+    // (`franken_numpy-ixs5y.409`, `deadlock-audit-9g7u0`). The small flat sort helper
+    // acquires a `PyBuffer` on the way in regardless, and that buffer already carries
+    // dimension count, C-contiguity and element count - the three facts `ndim`,
+    // `flags.c_contiguous` and `len` were being fetched for. It now checks them there,
+    // off the Python attribute path and without constructing a numpy flagsobj.
+    if n <= INT_SMALL_SORT_MAX {
+        match (kind, itemsize) {
+            ('i', 8) => return int64_sort_flat_small(py, a, n),
+            ('i', 4) => return int32_sort_flat_small(py, a, n),
+            ('u', 8) => return uint64_sort_flat_small(py, a, n),
+            ('u', 4) => return uint32_sort_flat_small(py, a, n),
+            _ => {}
+        }
     }
     // Every remaining branch below reads the operand as a flat 1-D buffer, so the shape
     // probe stays for them, unchanged.

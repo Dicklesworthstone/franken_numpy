@@ -2290,3 +2290,81 @@ print(all(checks))
     );
     Ok(())
 }
+
+#[test]
+fn small_int_sort_admitted_set_matches_numpy_across_types() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+checks = []
+dtypes = [np.int32, np.uint32, np.uint64, np.int64]
+
+class SubArray(np.ndarray):
+    pass
+
+for dt in dtypes:
+    info = np.iinfo(dt)
+    for n in (0, 1, 2, 5, 17, 64, 255, 256, 257):
+        vals = [info.min, info.max, 0, 1] if n >= 4 else [info.min, info.max][:n]
+        arr = np.array((vals * ((n // len(vals) + 1) if vals else 1))[:n], dtype=dt)
+        exp = np.sort(arr)
+        act = fnp.sort(arr)
+        checks.append(type(act) is type(exp))
+        checks.append(act.dtype.str == exp.dtype.str)
+        checks.append(act.shape == exp.shape)
+        checks.append(act.tobytes() == exp.tobytes())
+
+        rng = np.random.default_rng(n + 42)
+        if np.issubdtype(dt, np.signedinteger):
+            rand_arr = rng.integers(-500, 500, size=n, dtype=dt) if n > 0 else np.array([], dtype=dt)
+        else:
+            rand_arr = rng.integers(0, 1000, size=n, dtype=dt) if n > 0 else np.array([], dtype=dt)
+        exp = np.sort(rand_arr)
+        act = fnp.sort(rand_arr)
+        checks.append(act.shape == exp.shape)
+        checks.append(act.tobytes() == exp.tobytes())
+
+    # Strided 1-D slices
+    base = np.arange(0, 128, dtype=dt)
+    for s in (base[::-1], base[::2], base[::-2]):
+        exp = np.sort(s)
+        act = fnp.sort(s)
+        checks.append(type(act) is type(exp))
+        checks.append(act.shape == exp.shape)
+        checks.append(act.tobytes() == exp.tobytes())
+
+    # Non-flat shapes: (4, 1), (2, 2), (1, 4), (2, 3, 2)
+    for shp in ((4, 1), (2, 2), (1, 4), (2, 3, 2)):
+        mat = np.arange(np.prod(shp), dtype=dt).reshape(shp)[::-1]
+        exp = np.sort(mat)
+        act = fnp.sort(mat)
+        checks.append(type(act) is type(exp))
+        checks.append(act.shape == exp.shape)
+        checks.append(act.tobytes() == exp.tobytes())
+
+    # Subclasses: must defer to numpy, preserving subclass type
+    sub = np.array([4, 2, 3, 1], dtype=dt).view(SubArray)
+    exp = np.sort(sub)
+    act = fnp.sort(sub)
+    checks.append(type(act) is SubArray)
+    checks.append(act.tobytes() == exp.tobytes())
+
+    # Masked array: must defer to numpy
+    masked = np.ma.array([5, 1, 4, 2], mask=[0, 1, 0, 0], dtype=dt)
+    exp = np.sort(masked)
+    act = fnp.sort(masked)
+    checks.append(type(act) is type(exp))
+    checks.append(np.array_equal(act.filled(0), exp.filled(0)))
+    checks.append(np.array_equal(np.ma.getmaskarray(act), np.ma.getmaskarray(exp)))
+
+print(all(checks))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "small int sorting must match numpy across int32, uint32, uint64, int64: {result}"
+    );
+    Ok(())
+}

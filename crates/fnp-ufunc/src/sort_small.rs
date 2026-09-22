@@ -152,6 +152,21 @@ pub fn sort_i64(values: &mut [i64]) {
     values.sort_unstable();
 }
 
+#[inline]
+pub fn sort_i32(values: &mut [i32]) {
+    values.sort_unstable();
+}
+
+#[inline]
+pub fn sort_u64(values: &mut [u64]) {
+    values.sort_unstable();
+}
+
+#[inline]
+pub fn sort_u32(values: &mut [u32]) {
+    values.sort_unstable();
+}
+
 /// The comparison-sort arm, named so the standalone A/B harness can hold both
 /// kernels as values of the same function type and interleave them.
 pub fn sort_i64_unstable_forced(values: &mut [i64]) {
@@ -171,7 +186,9 @@ pub fn sort_i64_network_forced(values: &mut [i64]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BITONIC_MAX, BITONIC_MIN, sort_i64, sort_i64_network_forced};
+    use super::{
+        BITONIC_MAX, BITONIC_MIN, sort_i32, sort_i64, sort_i64_network_forced, sort_u32, sort_u64,
+    };
 
     #[test]
     fn i64_small_sort_orders_extrema_and_duplicates() {
@@ -186,6 +203,27 @@ mod tests {
         sort_i64(&mut values);
         assert_ne!(values, [2, -1, 1], "the route must perform the sort");
         assert_eq!(values, [-1, 1, 2]);
+    }
+
+    #[test]
+    fn i32_small_sort_orders_extrema_and_duplicates() {
+        let mut values = [i32::MAX, 0, -7, i32::MIN, -7, 1, 0, -1];
+        sort_i32(&mut values);
+        assert_eq!(values, [i32::MIN, -7, -7, -1, 0, 0, 1, i32::MAX]);
+    }
+
+    #[test]
+    fn u64_small_sort_orders_extrema_and_duplicates() {
+        let mut values = [u64::MAX, 0, 7, 100, 7, 1, 0, 42];
+        sort_u64(&mut values);
+        assert_eq!(values, [0, 0, 1, 7, 7, 42, 100, u64::MAX]);
+    }
+
+    #[test]
+    fn u32_small_sort_orders_extrema_and_duplicates() {
+        let mut values = [u32::MAX, 0, 7, 100, 7, 1, 0, 42];
+        sort_u32(&mut values);
+        assert_eq!(values, [0, 0, 1, 7, 7, 42, 100, u32::MAX]);
     }
 
     /// A bitonic network is a FIXED comparator sequence, so a length that is
