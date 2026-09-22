@@ -711,6 +711,18 @@ fn function_exclusion(name: &str) -> Option<FnpPythonApiExclusion> {
             "flat_namespace_alias",
             "flat numpy.linalg alias; canonical nested linalg surface carries conformance evidence",
         ))
+    } else if matches!(
+        name,
+        "set_runtime_mode"
+            | "get_runtime_mode"
+            | "get_runtime_decision_count"
+            | "get_runtime_decisions"
+            | "clear_runtime_decisions"
+    ) {
+        Some((
+            "runtime_management_control",
+            "FrankenNumPy runtime control and audit ledger export; verified via integration and unit tests",
+        ))
     } else {
         None
     }?;
