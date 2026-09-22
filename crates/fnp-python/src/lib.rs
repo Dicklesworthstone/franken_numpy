@@ -24469,7 +24469,7 @@ fn trapezoid(
 ) -> PyResult<Py<PyAny>> {
     let Some((y, x, dx, axis)) = parse_trapezoid_args(py, args, kwargs)? else {
         let numpy = cached_numpy(py)?;
-        let delegate = numpy_trapezoid_delegate(numpy, "trapz")?;
+        let delegate = numpy_trapezoid_delegate(numpy, "trapezoid")?;
         return Ok(delegate.call(args, kwargs)?.unbind());
     };
     trapezoid_impl(py, "trapezoid", y.unbind(), x.map(|v| v.unbind()), dx, axis)
