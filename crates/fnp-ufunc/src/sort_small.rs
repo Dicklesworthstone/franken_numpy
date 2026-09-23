@@ -167,6 +167,26 @@ pub fn sort_u32(values: &mut [u32]) {
     values.sort_unstable();
 }
 
+#[inline]
+pub fn sort_i16(values: &mut [i16]) {
+    values.sort_unstable();
+}
+
+#[inline]
+pub fn sort_u16(values: &mut [u16]) {
+    values.sort_unstable();
+}
+
+#[inline]
+pub fn sort_i8(values: &mut [i8]) {
+    values.sort_unstable();
+}
+
+#[inline]
+pub fn sort_u8(values: &mut [u8]) {
+    values.sort_unstable();
+}
+
 /// The comparison-sort arm, named so the standalone A/B harness can hold both
 /// kernels as values of the same function type and interleave them.
 pub fn sort_i64_unstable_forced(values: &mut [i64]) {
@@ -187,7 +207,8 @@ pub fn sort_i64_network_forced(values: &mut [i64]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BITONIC_MAX, BITONIC_MIN, sort_i32, sort_i64, sort_i64_network_forced, sort_u32, sort_u64,
+        BITONIC_MAX, BITONIC_MIN, sort_i8, sort_i16, sort_i32, sort_i64, sort_i64_network_forced,
+        sort_u8, sort_u16, sort_u32, sort_u64,
     };
 
     #[test]
@@ -224,6 +245,34 @@ mod tests {
         let mut values = [u32::MAX, 0, 7, 100, 7, 1, 0, 42];
         sort_u32(&mut values);
         assert_eq!(values, [0, 0, 1, 7, 7, 42, 100, u32::MAX]);
+    }
+
+    #[test]
+    fn i16_small_sort_orders_extrema_and_duplicates() {
+        let mut values = [i16::MAX, 0, -7, i16::MIN, -7, 1, 0, -1];
+        sort_i16(&mut values);
+        assert_eq!(values, [i16::MIN, -7, -7, -1, 0, 0, 1, i16::MAX]);
+    }
+
+    #[test]
+    fn u16_small_sort_orders_extrema_and_duplicates() {
+        let mut values = [u16::MAX, 0, 7, 100, 7, 1, 0, 42];
+        sort_u16(&mut values);
+        assert_eq!(values, [0, 0, 1, 7, 7, 42, 100, u16::MAX]);
+    }
+
+    #[test]
+    fn i8_small_sort_orders_extrema_and_duplicates() {
+        let mut values = [i8::MAX, 0, -7, i8::MIN, -7, 1, 0, -1];
+        sort_i8(&mut values);
+        assert_eq!(values, [i8::MIN, -7, -7, -1, 0, 0, 1, i8::MAX]);
+    }
+
+    #[test]
+    fn u8_small_sort_orders_extrema_and_duplicates() {
+        let mut values = [u8::MAX, 0, 7, 100, 7, 1, 0, 42];
+        sort_u8(&mut values);
+        assert_eq!(values, [0, 0, 1, 7, 7, 42, 100, u8::MAX]);
     }
 
     /// A bitonic network is a FIXED comparator sequence, so a length that is

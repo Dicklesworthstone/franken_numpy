@@ -73285,6 +73285,169 @@ fn uint32_sort_flat_small(
     Ok(Some(out.unbind()))
 }
 
+fn int16_sort_flat_small(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.get_type().is(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
+        return Ok(None);
+    };
+    let Ok(out_buffer) = PyBuffer::<i16>::get(&out) else {
+        return Ok(None);
+    };
+    if out_buffer.dimensions() != 1 {
+        return Ok(None);
+    }
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: `ReadOnlyCell<i16>` is repr(transparent) over `i16`; this buffer
+    // belongs to the fresh array `copy` just returned, so nothing else aliases
+    // it, and it is held under the GIL.
+    let dst: &mut [i16] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i16, n) };
+    fnp_ufunc::sort_small::sort_i16(dst);
+    Ok(Some(out.unbind()))
+}
+
+fn uint16_sort_flat_small(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.get_type().is(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
+        return Ok(None);
+    };
+    let Ok(out_buffer) = PyBuffer::<u16>::get(&out) else {
+        return Ok(None);
+    };
+    if out_buffer.dimensions() != 1 {
+        return Ok(None);
+    }
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: `ReadOnlyCell<u16>` is repr(transparent) over `u16`; this buffer
+    // belongs to the fresh array `copy` just returned, so nothing else aliases
+    // it, and it is held under the GIL.
+    let dst: &mut [u16] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u16, n) };
+    fnp_ufunc::sort_small::sort_u16(dst);
+    Ok(Some(out.unbind()))
+}
+
+fn int8_sort_flat_small(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.get_type().is(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
+        return Ok(None);
+    };
+    let Ok(out_buffer) = PyBuffer::<i8>::get(&out) else {
+        return Ok(None);
+    };
+    if out_buffer.dimensions() != 1 {
+        return Ok(None);
+    }
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: `ReadOnlyCell<i8>` is repr(transparent) over `i8`; this buffer
+    // belongs to the fresh array `copy` just returned, so nothing else aliases
+    // it, and it is held under the GIL.
+    let dst: &mut [i8] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i8, n) };
+    fnp_ufunc::sort_small::sort_i8(dst);
+    Ok(Some(out.unbind()))
+}
+
+fn uint8_sort_flat_small(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.get_type().is(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
+        return Ok(None);
+    };
+    let Ok(out_buffer) = PyBuffer::<u8>::get(&out) else {
+        return Ok(None);
+    };
+    if out_buffer.dimensions() != 1 {
+        return Ok(None);
+    }
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: `ReadOnlyCell<u8>` is repr(transparent) over `u8`; this buffer
+    // belongs to the fresh array `copy` just returned, so nothing else aliases
+    // it, and it is held under the GIL.
+    let dst: &mut [u8] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
+    fnp_ufunc::sort_small::sort_u8(dst);
+    Ok(Some(out.unbind()))
+}
+
+fn bool_sort_flat_small(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.get_type().is(cached_ndarray_type(py)?) {
+        return Ok(None);
+    }
+    let Ok(out) = a.call_method0(intern!(py, "copy")) else {
+        return Ok(None);
+    };
+    let Ok(out_view) = out.call_method1(intern!(py, "view"), ("uint8",)) else {
+        return Ok(None);
+    };
+    let Ok(out_buffer) = PyBuffer::<u8>::get(&out_view) else {
+        return Ok(None);
+    };
+    if out_buffer.dimensions() != 1 {
+        return Ok(None);
+    }
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: `ReadOnlyCell<u8>` is repr(transparent) over `u8`; this buffer
+    // belongs to the fresh array `copy` just returned (viewed as uint8), so
+    // nothing else aliases it, and it is held under the GIL.
+    let dst: &mut [u8] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
+    fnp_ufunc::sort_small::sort_u8(dst);
+    Ok(Some(out.unbind()))
+}
+
 // NumPy's AVX2-class int32 qsort was already within 1.7% of the native Rayon
 // path on the sampled many-core worker. On small pools, avoid paying the copy +
 // comparison-sort fan-out when NumPy has that SIMD basis. Pre-AVX2/non-x86
@@ -73524,6 +73687,11 @@ fn try_native_int_sort_flat(
             ('i', 4) => return int32_sort_flat_small(py, a, n),
             ('u', 8) => return uint64_sort_flat_small(py, a, n),
             ('u', 4) => return uint32_sort_flat_small(py, a, n),
+            ('i', 2) => return int16_sort_flat_small(py, a, n),
+            ('u', 2) => return uint16_sort_flat_small(py, a, n),
+            ('i', 1) => return int8_sort_flat_small(py, a, n),
+            ('u', 1) => return uint8_sort_flat_small(py, a, n),
+            ('b', 1) => return bool_sort_flat_small(py, a, n),
             _ => {}
         }
     }
@@ -77609,7 +77777,7 @@ fn sort(
             let complex_of =
                 |size: usize| facts.is_none_or(|f| f.kind == 'c' && f.itemsize == size);
             let integral_sortable =
-                facts.is_none_or(|f| matches!(f.kind, 'i' | 'u') && matches!(f.itemsize, 4 | 8));
+                facts.is_none_or(|f| matches!(f.kind, 'i' | 'u' | 'b'));
             let temporal = facts.is_none_or(|f| matches!(f.kind, 'M' | 'm'));
 
             // 1-D: axis missing/None/-1/0 all collapse to the single axis.
@@ -77622,9 +77790,10 @@ fn sort(
                 {
                     return Ok(out);
                 }
-                // 4-/8-byte integer flat sort (numpy simd-sort single-threaded; par 1.44-2.35x).
-                // (f32 flat sort gives only ~1.07x — numpy's AVX simd-sort already saturates — so
-                // it is NOT routed here; it stays on the numpy passthrough.)
+                // Integer and boolean flat sort: small slices (<=256) route to zero-copy
+                // unstable sort without Python attribute probes; large slices (>=1M) route
+                // to parallel Rayon sort (simd-competitive comparison sort for 4-/8-byte,
+                // parallel counting sort for 1-/2-byte and bool).
                 if integral_sortable && let Some(out) = try_native_int_sort_flat(py, numpy, &a)? {
                     return Ok(out);
                 }
@@ -77692,10 +77861,10 @@ fn sort(
             {
                 return Ok(out);
             }
-            // The thirteen axis gates below partition on dtype exactly as the flat ones do,
-            // so the same classification serves them. `integral_any` rather than
-            // `integral_sortable`: these are byte-exact for any integer width, unlike the
-            // flat int gate which only routes 4- and 8-byte.
+            // The thirteen axis gates below partition on dtype similarly to the flat ones,
+            // so the same classification serves them. `integral_any` selects integer kinds
+            // ('i' | 'u') for the per-lane multi-dimensional integer sort gates (which run
+            // byte-exact for any integer width), whereas flat int sort also admits bool.
             let integral_any = facts.is_none_or(|f| matches!(f.kind, 'i' | 'u'));
 
             // float16 >=2-D LAST-AXIS sort via the same widening composition (per-lane value

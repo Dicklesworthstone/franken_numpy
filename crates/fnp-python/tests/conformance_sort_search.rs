@@ -2296,7 +2296,10 @@ fn small_int_sort_admitted_set_matches_numpy_across_types() -> Result<(), String
     let script = fnp_script(
         r#"
 checks = []
-dtypes = [np.int32, np.uint32, np.uint64, np.int64]
+dtypes = [
+    np.int8, np.uint8, np.int16, np.uint16,
+    np.int32, np.uint32, np.int64, np.uint64,
+]
 
 class SubArray(np.ndarray):
     pass
@@ -2315,9 +2318,12 @@ for dt in dtypes:
 
         rng = np.random.default_rng(n + 42)
         if np.issubdtype(dt, np.signedinteger):
-            rand_arr = rng.integers(-500, 500, size=n, dtype=dt) if n > 0 else np.array([], dtype=dt)
+            low = max(int(info.min), -500)
+            high = min(int(info.max), 500)
+            rand_arr = rng.integers(low, high, size=n, dtype=dt, endpoint=True) if n > 0 else np.array([], dtype=dt)
         else:
-            rand_arr = rng.integers(0, 1000, size=n, dtype=dt) if n > 0 else np.array([], dtype=dt)
+            high = min(int(info.max), 1000)
+            rand_arr = rng.integers(0, high, size=n, dtype=dt, endpoint=True) if n > 0 else np.array([], dtype=dt)
         exp = np.sort(rand_arr)
         act = fnp.sort(rand_arr)
         checks.append(act.shape == exp.shape)
@@ -2356,6 +2362,52 @@ for dt in dtypes:
     checks.append(np.array_equal(act.filled(0), exp.filled(0)))
     checks.append(np.array_equal(np.ma.getmaskarray(act), np.ma.getmaskarray(exp)))
 
+for n in (0, 1, 2, 5, 17, 64, 255, 256, 257):
+    vals = [True, False, False, True] if n >= 4 else [True, False][:n]
+    arr = np.array((vals * ((n // len(vals) + 1) if vals else 1))[:n], dtype=np.bool_)
+    exp = np.sort(arr)
+    act = fnp.sort(arr)
+    checks.append(type(act) is type(exp))
+    checks.append(act.dtype.str == exp.dtype.str)
+    checks.append(act.shape == exp.shape)
+    checks.append(act.tobytes() == exp.tobytes())
+
+    rng = np.random.default_rng(n + 123)
+    rand_arr = (rng.integers(0, 2, size=n) == 1) if n > 0 else np.array([], dtype=np.bool_)
+    exp = np.sort(rand_arr)
+    act = fnp.sort(rand_arr)
+    checks.append(act.shape == exp.shape)
+    checks.append(act.tobytes() == exp.tobytes())
+
+base_b = (np.arange(0, 128) % 3 == 0)
+for s in (base_b[::-1], base_b[::2], base_b[::-2]):
+    exp = np.sort(s)
+    act = fnp.sort(s)
+    checks.append(type(act) is type(exp))
+    checks.append(act.shape == exp.shape)
+    checks.append(act.tobytes() == exp.tobytes())
+
+for shp in ((4, 1), (2, 2), (1, 4), (2, 3, 2)):
+    mat = (np.arange(np.prod(shp)) % 2 == 0).reshape(shp)[::-1]
+    exp = np.sort(mat)
+    act = fnp.sort(mat)
+    checks.append(type(act) is type(exp))
+    checks.append(act.shape == exp.shape)
+    checks.append(act.tobytes() == exp.tobytes())
+
+sub_b = np.array([True, False, True, False], dtype=np.bool_).view(SubArray)
+exp = np.sort(sub_b)
+act = fnp.sort(sub_b)
+checks.append(type(act) is SubArray)
+checks.append(act.tobytes() == exp.tobytes())
+
+masked_b = np.ma.array([True, False, True, False], mask=[0, 1, 0, 0], dtype=np.bool_)
+exp = np.sort(masked_b)
+act = fnp.sort(masked_b)
+checks.append(type(act) is type(exp))
+checks.append(np.array_equal(act.filled(False), exp.filled(False)))
+checks.append(np.array_equal(np.ma.getmaskarray(act), np.ma.getmaskarray(exp)))
+
 print(all(checks))
 "#
         .into(),
@@ -2364,7 +2416,7 @@ print(all(checks))
     assert_eq!(
         result.trim(),
         "True",
-        "small int sorting must match numpy across int32, uint32, uint64, int64: {result}"
+        "small int and bool sorting must match numpy across all integer and bool types: {result}"
     );
     Ok(())
 }
