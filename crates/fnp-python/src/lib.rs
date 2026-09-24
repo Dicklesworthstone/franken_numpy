@@ -774,15 +774,67 @@ fn native_or_numpy_on_non_finite(
     }
 }
 
-/// A branch-free `&` fold, which vectorises. SERIAL on purpose: a rayon version (2^16+ elements,
-/// per-thread chunks) put a pool dispatch on routes whose kernels are serial - 1-D diff below
-/// 2^21, degrees at 2^16 - and on a loaded host the call then waits for the slowest-scheduled
-/// worker: fnp/numpy went 0.95x -> 6.8x (diff 2^20) and 0.13x -> 3.3-4.8x (degrees 2^16) on
-/// thinkstation1 at load 30-40 (triage, two builds, 2026-09-24). One read of an output the kernel
-/// just wrote is bounded and predictable; fusing the check into the kernel removes even that
-/// (bead deadlock-audit-vo85m).
-fn slice_all_finite<T: Copy>(data: &[T], is_finite: impl Fn(T) -> bool) -> bool {
-    data.iter().fold(true, |finite, &v| finite & is_finite(v))
+// Finiteness scans as an integer OR-reduction, which LLVM vectorises; a `bool` `&` fold over
+// `is_finite()` did not, and cost about half a numpy diff at 2^20 (triage, 2026-09-24). A value is
+// NaN or infinite exactly when its exponent field is all ones, and adding one exponent unit to
+// the masked exponent then carries into the sign bit - so the OR of those sums has its top bit
+// set iff some value is non-finite. SERIAL on purpose: a rayon version put a pool dispatch on
+// routes whose kernels are serial (1-D diff below 2^21, degrees at 2^16), and on a loaded host the
+// call waited for the slowest-scheduled worker (0.95x -> 6.8x, bead deadlock-audit-vo85m).
+fn all_finite_f64(values: &[f64]) -> bool {
+    const EXPONENT: u64 = 0x7ff0_0000_0000_0000;
+    let carry = values
+        .iter()
+        .fold(0u64, |acc, v| acc | (v.to_bits() & EXPONENT).wrapping_add(1 << 52));
+    carry >> 63 == 0
+}
+
+fn all_finite_f32(values: &[f32]) -> bool {
+    const EXPONENT: u32 = 0x7f80_0000;
+    let carry = values
+        .iter()
+        .fold(0u32, |acc, v| acc | (v.to_bits() & EXPONENT).wrapping_add(1 << 23));
+    carry >> 31 == 0
+}
+
+/// float16 values held as their bits (numpy's float16 viewed as uint16).
+fn all_finite_f16_bits(bits: &[u16]) -> bool {
+    const EXPONENT: u16 = 0x7c00;
+    let carry = bits
+        .iter()
+        .fold(0u16, |acc, b| acc | (b & EXPONENT).wrapping_add(1 << 10));
+    carry >> 15 == 0
+}
+
+/// `native_or_numpy_on_non_finite` for a cumulative sum / product along `axis` (None: the
+/// flattened result). NaN and infinity are ABSORBING in a running sum or product - inf + x,
+/// inf - inf, inf * 0, nan * x never become finite again, for real and complex values alike, and a
+/// nan-skipping scan (nancumsum / nancumprod) only repeats the running value at a skipped NaN - so a
+/// lane that holds a non-finite value also ENDS in one. Checking each lane's last element is exact
+/// and reads n / axis_len values instead of the whole output (bead deadlock-audit-vo85m).
+fn accumulation_or_numpy_on_non_finite(
+    py: Python<'_>,
+    result: Py<PyAny>,
+    axis: Option<isize>,
+    numpy_call: impl FnOnce() -> PyResult<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let bound = result.bind(py);
+    if bound.getattr(intern!(py, "size"))?.extract::<usize>()? == 0 {
+        return Ok(result);
+    }
+    let last_elements = match axis {
+        None => bound.call_method1(intern!(py, "take"), (-1,))?,
+        Some(axis) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "axis"), axis)?;
+            bound.call_method(intern!(py, "take"), (-1,), Some(&kwargs))?
+        }
+    };
+    if result_has_non_finite(py, &last_elements)? {
+        numpy_call()
+    } else {
+        Ok(result)
+    }
 }
 
 /// The largest |x| of a native-order C-contiguous float64 / float32 ndarray, or None when it holds
@@ -872,7 +924,7 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
             // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
             let data: &[f64] =
                 unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
-            return Ok(!slice_all_finite(data, |v| v.is_finite()));
+            return Ok(!all_finite_f64(data));
         }
         if let Ok(buffer) = PyBuffer::<f32>::get(value)
             && buffer.is_c_contiguous()
@@ -881,7 +933,7 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
             // SAFETY: as above, for f32.
             let data: &[f32] =
                 unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
-            return Ok(!slice_all_finite(data, |v| v.is_finite()));
+            return Ok(!all_finite_f32(data));
         }
         // complex128/complex64 as their (re, im) float view, float16 as its bits (non-finite
         // exactly when the exponent is all ones): numpy's `isfinite(...).all()` below would
@@ -908,7 +960,7 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
                     let bits: &[u16] = unsafe {
                         std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), cells.len())
                     };
-                    return Ok(!slice_all_finite(bits, |b| (b & 0x7c00) != 0x7c00));
+                    return Ok(!all_finite_f16_bits(bits));
                 }
             } else {
                 return result_has_non_finite(py, &view);
@@ -10544,7 +10596,22 @@ fn zerocopy_f64_unary_flat<'py>(
                         raise_fp_categories_through_numpy(py, name, categories, false)?;
                     }
                 }
-                UnaryOp::Degrees => unary_map_f64(input, output, |x| UnaryOp::Degrees.apply(x)),
+                // Overflow (a finite x past f64::MAX / 57.3) is the one IEEE event degrees can
+                // raise - a NaN or infinity is only propagated - so the map flags it in the same
+                // pass and a flagged buffer declines: the caller's numpy route then warns or
+                // raises under its own name (degrees vs rad2deg). A separate output scan cost
+                // 0.52x -> 0.85x of numpy at 2^23 (bead .26, deadlock-audit-vo85m). radians
+                // (x * pi / 180) cannot overflow.
+                UnaryOp::Degrees => {
+                    if unary_map_flagged(
+                        input,
+                        output,
+                        |x| UnaryOp::Degrees.apply(x),
+                        |v: f64, r: f64| (v.abs() <= f64::MAX) & (r.abs() > f64::MAX),
+                    ) {
+                        return Ok(None);
+                    }
+                }
                 UnaryOp::Radians => unary_map_f64(input, output, |x| UnaryOp::Radians.apply(x)),
                 // Transcendental scalar-libm maps: compute straight off the
                 // borrowed numpy buffer (the same UnaryOp::apply the UFuncArray
@@ -22826,24 +22893,33 @@ fn try_zerocopy_f64_diff1d(
         // numpy's diff is a single-threaded consecutive subtract; each output is independent so a
         // parallel map aggregates memory bandwidth across cores (mirrors ediff1d, which won 3.4x
         // vs this serial path). Same expression (in[i+1]-in[i]) => bit-identical regardless of chunk.
+        //
+        // `subtract_into` also reports a `SubtractionHazard` (inf - inf, overflow); one declines
+        // the call, so numpy owns the warning or FloatingPointError (bead .26).
         const DIFF1D_PARALLEL_MIN: usize = 1 << 21;
-        if n_out >= DIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let sub = |x: f64, y: f64| x - y;
+        let hazard = if n_out >= DIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n_out.div_ceil(rayon::current_num_threads());
             out_raw
                 .par_chunks_mut(chunk)
                 .enumerate()
-                .for_each(|(ci, o)| {
+                .map(|(ci, o)| {
                     let base = ci * chunk;
-                    for (j, slot) in o.iter_mut().enumerate() {
-                        let i = base + j;
-                        *slot = in_raw[i + 1] - in_raw[i];
-                    }
-                });
+                    let len = o.len();
+                    subtract_into(
+                        &in_raw[base + 1..base + 1 + len],
+                        &in_raw[base..base + len],
+                        o,
+                        &sub,
+                    )
+                })
+                .reduce(|| false, |x, y| x | y)
         } else {
-            for (i, slot) in out_raw.iter_mut().enumerate() {
-                *slot = in_raw[i + 1] - in_raw[i];
-            }
+            subtract_into(&in_raw[1..], &in_raw[..n_out], out_raw, &sub)
+        };
+        if hazard {
+            return Ok(None);
         }
     }
     Ok(Some(flat.unbind()))
@@ -22912,8 +22988,6 @@ fn try_zerocopy_f64_diff_axis(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        let in_lane = axis_len * inner;
-        let out_lane = out_axis_len * inner;
         // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input read-only under
         // the GIL, output is a fresh numpy.empty. Same subtraction as the serial form => bit-exact
         // regardless of chunking. numpy's per-axis diff is single-threaded; a parallel one wins ~2x.
@@ -22921,76 +22995,211 @@ fn try_zerocopy_f64_diff_axis(
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
         let out_raw: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total_out) };
-        use rayon::prelude::*;
         const DIFF_AXIS_PARALLEL_MIN: usize = 1 << 21;
         let par = total_out >= DIFF_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-        if inner == 1 {
-            if par && outer >= 2 {
-                out_raw
-                    .par_chunks_mut(out_axis_len)
-                    .enumerate()
-                    .for_each(|(o, outl)| {
-                        let base = o * in_lane;
-                        for (a, slot) in outl.iter_mut().enumerate() {
-                            *slot = in_raw[base + a + 1] - in_raw[base + a];
-                        }
-                    });
-            } else if par {
-                let chunk = out_axis_len.div_ceil(rayon::current_num_threads());
-                out_raw
-                    .par_chunks_mut(chunk)
-                    .enumerate()
-                    .for_each(|(ci, outl)| {
-                        let base = ci * chunk;
-                        for (j, slot) in outl.iter_mut().enumerate() {
-                            let i = base + j;
-                            *slot = in_raw[i + 1] - in_raw[i];
-                        }
-                    });
-            } else {
-                for o in 0..outer {
-                    let base = o * in_lane;
-                    let ob = o * out_lane;
-                    for a in 0..out_axis_len {
-                        out_raw[ob + a] = in_raw[base + a + 1] - in_raw[base + a];
-                    }
-                }
-            }
-        } else if par {
-            out_raw
-                .par_chunks_mut(inner)
-                .enumerate()
-                .for_each(|(c, row)| {
-                    let o = c / out_axis_len;
-                    let a_out = c % out_axis_len;
-                    let cur = o * in_lane + a_out * inner;
-                    let nxt = cur + inner;
-                    for i in 0..inner {
-                        row[i] = in_raw[nxt + i] - in_raw[cur + i];
-                    }
-                });
-        } else {
-            for o in 0..outer {
-                let ibase = o * in_lane;
-                let obase = o * out_lane;
-                for a_out in 0..out_axis_len {
-                    let dst = obase + a_out * inner;
-                    let cur = ibase + a_out * inner;
-                    let nxt = ibase + (a_out + 1) * inner;
-                    for i in 0..inner {
-                        out_raw[dst + i] = in_raw[nxt + i] - in_raw[cur + i];
-                    }
-                }
-            }
+        // As in `try_zerocopy_f64_diff1d`: `subtract_into` reports a hazard, which declines the
+        // call (bead .26).
+        if diff_lanes_hazard(
+            in_raw,
+            out_raw,
+            (outer, axis_len, inner),
+            par,
+            &|x: f64, y: f64| x - y,
+        ) {
+            return Ok(None);
         }
     }
     Ok(Some(finish_preshaped_output(flat, &out_shape)?))
 }
 
+/// Whether numpy's `minuend - subtrahend == difference` raises an IEEE event: an INVALID NaN from
+/// two non-NaN operands (inf - inf) or an OVERFLOW to infinity from two finite ones. A NaN that is
+/// only propagated (nan - 1) raises nothing, so NaN-holding data stays native and silent, as in
+/// numpy. The diff kernels fold this into their subtract loop and decline on a hazard - numpy then
+/// owns the warning or FloatingPointError (bead .26) - instead of scanning their output afterwards,
+/// which cost 0.9x -> 1.5x at 2^20 (deadlock-audit-vo85m). Integer subtraction wraps silently.
+trait SubtractionHazard: Copy {
+    /// The lane-width integer the exponent-carry test accumulates in (u64 for f64, u32 for f32):
+    /// an accumulator of the operand's own width keeps the subtract loop in one vector lane size.
+    type Carry: Copy + Default + std::ops::BitOr<Output = Self::Carry> + PartialOrd;
+    /// Its value is at or above `CARRY_TOP` exactly when some OR-ed value was NaN or infinite
+    /// (see `all_finite_f64`).
+    const CARRY_TOP: Self::Carry;
+    fn subtraction_hazard(minuend: Self, subtrahend: Self, difference: Self) -> bool;
+    fn nonfinite_carry(self) -> Self::Carry;
+}
+
+impl SubtractionHazard for f64 {
+    type Carry = u64;
+    const CARRY_TOP: u64 = 1 << 63;
+    #[inline(always)]
+    fn subtraction_hazard(minuend: Self, subtrahend: Self, difference: Self) -> bool {
+        (difference.is_nan() & !minuend.is_nan() & !subtrahend.is_nan())
+            | (difference.is_infinite() & minuend.is_finite() & subtrahend.is_finite())
+    }
+    #[inline(always)]
+    fn nonfinite_carry(self) -> u64 {
+        (self.to_bits() & 0x7ff0_0000_0000_0000).wrapping_add(1 << 52)
+    }
+}
+
+impl SubtractionHazard for f32 {
+    type Carry = u32;
+    const CARRY_TOP: u32 = 1 << 31;
+    #[inline(always)]
+    fn subtraction_hazard(minuend: Self, subtrahend: Self, difference: Self) -> bool {
+        (difference.is_nan() & !minuend.is_nan() & !subtrahend.is_nan())
+            | (difference.is_infinite() & minuend.is_finite() & subtrahend.is_finite())
+    }
+    #[inline(always)]
+    fn nonfinite_carry(self) -> u32 {
+        (self.to_bits() & 0x7f80_0000).wrapping_add(1 << 23)
+    }
+}
+
+macro_rules! integer_subtraction_hazard {
+    ($($t:ty),*) => {$(
+        impl SubtractionHazard for $t {
+            type Carry = u8;
+            const CARRY_TOP: u8 = 1;
+            #[inline(always)]
+            fn subtraction_hazard(_: Self, _: Self, _: Self) -> bool {
+                false
+            }
+            #[inline(always)]
+            fn nonfinite_carry(self) -> u8 {
+                0
+            }
+        }
+    )*};
+}
+integer_subtraction_hazard!(i8, i16, i32, i64, u8, u16, u32, u64);
+
+/// `out[j] = sub(next[j], cur[j])` over three equal-length slices, returning whether any
+/// subtraction was a `SubtractionHazard`. The subtract loop ORs each difference's
+/// `nonfinite_carry` into a block accumulator - one pass, vectorised - and only a 1024-element
+/// block that produced a NaN or infinity pays the exact per-element test (a NaN that is merely
+/// propagated is not a hazard). Measured in isolation (+avx2, 2026-09-24): parity with a plain
+/// subtract loop at 2^16 / 2^20 / 2^23, where the exact test inside the loop blocked
+/// vectorisation (1-D diff 0.95x -> 1.8x of numpy) and a second finiteness pass over each block
+/// cost ~30%.
+#[inline(always)]
+fn subtract_into<T: SubtractionHazard>(
+    next: &[T],
+    cur: &[T],
+    out: &mut [T],
+    sub: &impl Fn(T, T) -> T,
+) -> bool {
+    const BLOCK: usize = 1024;
+    let mut hazard = false;
+    for ((block, next), cur) in out
+        .chunks_mut(BLOCK)
+        .zip(next.chunks(BLOCK))
+        .zip(cur.chunks(BLOCK))
+    {
+        let mut carry = T::Carry::default();
+        for ((slot, &x), &y) in block.iter_mut().zip(next).zip(cur) {
+            let difference = sub(x, y);
+            *slot = difference;
+            carry = carry | difference.nonfinite_carry();
+        }
+        if carry >= T::CARRY_TOP {
+            hazard |= block
+                .iter()
+                .zip(next)
+                .zip(cur)
+                .any(|((&difference, &x), &y)| T::subtraction_hazard(x, y, difference));
+        }
+    }
+    hazard
+}
+
+/// The first difference along one axis of a C-contiguous (outer, axis_len, inner) buffer into its
+/// (outer, axis_len - 1, inner) output, across rayon's pool when `par`; returns whether any
+/// subtraction was a `SubtractionHazard`. Contiguous lanes (inner == 1) and strided rows
+/// (inner > 1) both reduce to `subtract_into` on slices, so the subtract loops vectorise. Callers
+/// guarantee a non-empty output (axis_len >= 2).
+fn diff_lanes_hazard<T: SubtractionHazard + Send + Sync>(
+    in_raw: &[T],
+    out_raw: &mut [T],
+    (outer, axis_len, inner): (usize, usize, usize),
+    par: bool,
+    sub: &(impl Fn(T, T) -> T + Sync),
+) -> bool {
+    use rayon::prelude::*;
+    let out_axis_len = axis_len - 1;
+    let in_lane = axis_len * inner;
+    let out_lane = out_axis_len * inner;
+    let lane = |base: usize, len: usize| {
+        (
+            &in_raw[base + 1..base + 1 + len],
+            &in_raw[base..base + len],
+        )
+    };
+    if inner == 1 {
+        if par && outer >= 2 {
+            // One lane per chunk (out_lane == out_axis_len when inner == 1).
+            out_raw
+                .par_chunks_mut(out_axis_len)
+                .enumerate()
+                .map(|(o, outl)| {
+                    let (next, cur) = lane(o * in_lane, out_axis_len);
+                    subtract_into(next, cur, outl, sub)
+                })
+                .reduce(|| false, |x, y| x | y)
+        } else if par {
+            // Single lane (outer == 1): chunk it across threads (mirrors ediff1d).
+            let chunk = out_axis_len.div_ceil(rayon::current_num_threads());
+            out_raw
+                .par_chunks_mut(chunk)
+                .enumerate()
+                .map(|(ci, outl)| {
+                    let (next, cur) = lane(ci * chunk, outl.len());
+                    subtract_into(next, cur, outl, sub)
+                })
+                .reduce(|| false, |x, y| x | y)
+        } else {
+            let mut hazard = false;
+            for (o, outl) in out_raw.chunks_mut(out_lane).enumerate() {
+                let (next, cur) = lane(o * in_lane, out_axis_len);
+                hazard |= subtract_into(next, cur, outl, sub);
+            }
+            hazard
+        }
+    } else {
+        // Strided: one output row (inner contiguous elements) per chunk; chunk index c maps to
+        // (outer o, axis position a_out) = (c / out_axis_len, c % out_axis_len), and its row reads
+        // input rows a_out + 1 and a_out of the same outer block.
+        let row = |c: usize| {
+            let (o, a_out) = (c / out_axis_len, c % out_axis_len);
+            let cur = o * in_lane + a_out * inner;
+            (&in_raw[cur + inner..cur + 2 * inner], &in_raw[cur..cur + inner])
+        };
+        if par {
+            out_raw
+                .par_chunks_mut(inner)
+                .enumerate()
+                .map(|(c, out_row)| {
+                    let (next, cur) = row(c);
+                    subtract_into(next, cur, out_row, sub)
+                })
+                .reduce(|| false, |x, y| x | y)
+        } else {
+            let mut hazard = false;
+            for (c, out_row) in out_raw.chunks_mut(inner).enumerate() {
+                let (next, cur) = row(c);
+                hazard |= subtract_into(next, cur, out_row, sub);
+            }
+            hazard
+        }
+    }
+}
+
 // Generic typed core for np.diff(n=1) along an axis, via the same
 // outer * axis_len * inner decomposition as the f64 path (the 1-D case is
 // outer=inner=1). Reads the `T` buffer and writes sub(in[a+1], in[a]) per lane
-// into a fresh `T` buffer; returns it plus the (axis-shrunk) shape.
+// into a fresh `T` buffer; returns it plus the (axis-shrunk) shape. None on a
+// floating-point hazard (see `SubtractionHazard`), as for every other decline.
 fn diff_typed<'py, T, F>(
     py: Python<'py>,
     a: &Bound<'py, PyAny>,
@@ -22999,7 +23208,7 @@ fn diff_typed<'py, T, F>(
     sub: F,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
 where
-    T: pyo3::buffer::Element + Copy + Send + Sync,
+    T: pyo3::buffer::Element + Copy + Send + Sync + SubtractionHazard,
     F: Fn(T, T) -> T + Sync,
 {
     let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
@@ -23042,8 +23251,6 @@ where
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        let in_lane = axis_len * inner;
-        let out_lane = out_axis_len * inner;
         // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is read-only under
         // the GIL, output is a fresh numpy.empty that cannot alias it. Same subtraction expression
         // as the serial form => bit-identical regardless of chunking. Mirrors the f64 diff1d/ediff1d
@@ -23053,72 +23260,10 @@ where
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
         let out_raw: &mut [T] =
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total_out) };
-        use rayon::prelude::*;
         const DIFF_PARALLEL_MIN: usize = 1 << 21;
         let par = total_out >= DIFF_PARALLEL_MIN && rayon::current_num_threads() >= 2;
-        if inner == 1 {
-            // Last-axis (or 1-D) lanes are contiguous.
-            if par && outer >= 2 {
-                // One lane per chunk (out_lane == out_axis_len when inner == 1).
-                out_raw
-                    .par_chunks_mut(out_axis_len)
-                    .enumerate()
-                    .for_each(|(o, outl)| {
-                        let base = o * in_lane;
-                        for (a, slot) in outl.iter_mut().enumerate() {
-                            *slot = sub(in_raw[base + a + 1], in_raw[base + a]);
-                        }
-                    });
-            } else if par {
-                // Single lane (outer == 1): chunk it across threads (mirrors ediff1d).
-                let chunk = out_axis_len.div_ceil(rayon::current_num_threads());
-                out_raw
-                    .par_chunks_mut(chunk)
-                    .enumerate()
-                    .for_each(|(ci, outl)| {
-                        let base = ci * chunk;
-                        for (j, slot) in outl.iter_mut().enumerate() {
-                            let i = base + j;
-                            *slot = sub(in_raw[i + 1], in_raw[i]);
-                        }
-                    });
-            } else {
-                for o in 0..outer {
-                    let base = o * in_lane;
-                    let ob = o * out_lane;
-                    for a in 0..out_axis_len {
-                        out_raw[ob + a] = sub(in_raw[base + a + 1], in_raw[base + a]);
-                    }
-                }
-            }
-        } else if par {
-            // Strided: one output row (inner contiguous elems) per chunk; chunk index c maps to
-            // (outer o, axis position a_out) = (c / out_axis_len, c % out_axis_len).
-            out_raw
-                .par_chunks_mut(inner)
-                .enumerate()
-                .for_each(|(c, row)| {
-                    let o = c / out_axis_len;
-                    let a_out = c % out_axis_len;
-                    let cur = o * in_lane + a_out * inner;
-                    let nxt = cur + inner;
-                    for i in 0..inner {
-                        row[i] = sub(in_raw[nxt + i], in_raw[cur + i]);
-                    }
-                });
-        } else {
-            for o in 0..outer {
-                let ibase = o * in_lane;
-                let obase = o * out_lane;
-                for a_out in 0..out_axis_len {
-                    let dst = obase + a_out * inner;
-                    let cur = ibase + a_out * inner;
-                    let nxt = ibase + (a_out + 1) * inner;
-                    for i in 0..inner {
-                        out_raw[dst + i] = sub(in_raw[nxt + i], in_raw[cur + i]);
-                    }
-                }
-            }
+        if diff_lanes_hazard(in_raw, out_raw, (outer, axis_len, inner), par, &sub) {
+            return Ok(None);
         }
     }
     Ok(Some((flat, out_shape)))
@@ -23407,21 +23552,31 @@ fn try_zerocopy_f64_ediff1d(
         // numpy.ediff1d is a single-threaded subtract of consecutive elements; each diff is
         // independent so a parallel map aggregates memory bandwidth across cores and wins.
         // Same expression (in[i+1]-in[i]) => bit-identical regardless of chunking.
+        // Each subtraction ORs its `SubtractionHazard` bit and a hazard declines the call, so
+        // numpy owns the warning (bead .26); to_begin / to_end are copied, not computed.
         const EDIFF1D_PARALLEL_MIN: usize = 1 << 21;
-        if n_diff >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let sub = |x: f64, y: f64| x - y;
+        let hazard = if n_diff >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n_diff.div_ceil(rayon::current_num_threads());
-            diff.par_chunks_mut(chunk).enumerate().for_each(|(ci, o)| {
-                let base = ci * chunk;
-                for (j, slot) in o.iter_mut().enumerate() {
-                    let i = base + j;
-                    *slot = in_raw[i + 1] - in_raw[i];
-                }
-            });
+            diff.par_chunks_mut(chunk)
+                .enumerate()
+                .map(|(ci, o)| {
+                    let base = ci * chunk;
+                    let len = o.len();
+                    subtract_into(
+                        &in_raw[base + 1..base + 1 + len],
+                        &in_raw[base..base + len],
+                        o,
+                        &sub,
+                    )
+                })
+                .reduce(|| false, |x, y| x | y)
         } else {
-            for (i, slot) in diff.iter_mut().enumerate() {
-                *slot = in_raw[i + 1] - in_raw[i];
-            }
+            subtract_into(&in_raw[1..], &in_raw[..n_diff], diff, &sub)
+        };
+        if hazard {
+            return Ok(None);
         }
     }
     Ok(Some(flat.unbind()))
@@ -23431,7 +23586,11 @@ fn try_zerocopy_f64_ediff1d(
 // to_begin/to_end). Reads the C-order `T` buffer (== numpy's ravel order) and
 // writes wrapping out[i] = in[i+1] - in[i] into a fresh same-dtype buffer via a
 // slice-iterator triple-zip so bounds checks elide and it autovectorizes.
-fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) -> T + Sync>(
+fn ediff1d_typed<
+    'py,
+    T: pyo3::buffer::Element + Copy + Send + Sync + SubtractionHazard,
+    F: Fn(T, T) -> T + Sync,
+>(
     py: Python<'py>,
     ary: &Bound<'py, PyAny>,
     dtype_name: &str,
@@ -23460,24 +23619,30 @@ fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T)
             unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n_out) };
         // numpy ediff1d is single-threaded; each consecutive diff is independent so a parallel
         // map aggregates memory bandwidth across cores. Same sub(in[i+1],in[i]) => bit-identical.
+        // A float `SubtractionHazard` declines the call (bead .26); integers wrap silently.
         const EDIFF1D_PARALLEL_MIN: usize = 1 << 21;
-        if n_out >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let hazard = if n_out >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n_out.div_ceil(rayon::current_num_threads());
             out_raw
                 .par_chunks_mut(chunk)
                 .enumerate()
-                .for_each(|(ci, o)| {
+                .map(|(ci, o)| {
                     let base = ci * chunk;
-                    for (j, slot) in o.iter_mut().enumerate() {
-                        let i = base + j;
-                        *slot = sub(in_raw[i + 1], in_raw[i]);
-                    }
-                });
+                    let len = o.len();
+                    subtract_into(
+                        &in_raw[base + 1..base + 1 + len],
+                        &in_raw[base..base + len],
+                        o,
+                        &sub,
+                    )
+                })
+                .reduce(|| false, |x, y| x | y)
         } else {
-            for (i, slot) in out_raw.iter_mut().enumerate() {
-                *slot = sub(in_raw[i + 1], in_raw[i]);
-            }
+            subtract_into(&in_raw[1..], &in_raw[..n_out], out_raw, &sub)
+        };
+        if hazard {
+            return Ok(None);
         }
     }
     Ok(Some(flat.unbind()))
@@ -34592,14 +34757,16 @@ fn native_angle_conversion(
     numpy_name: &Bound<'_, PyString>,
     extract_label: &str,
 ) -> PyResult<Py<PyAny>> {
-    // Both native f64 returns below report no FP event, yet `degrees(1e307)` overflows: a
-    // non-finite result is numpy's to recompute, warn about or raise on (bead .26). The numpy
-    // delegations are not wrapped - numpy has already reported there.
+    // `degrees(1e307)` overflows, and numpy warns or raises. The zero-copy kernel flags that
+    // overflow in its own pass and DECLINES (radians cannot overflow; a NaN or infinity is only
+    // propagated, which numpy reports nothing for), so its result is returned as is. The extract
+    // path computes silently: a non-finite result there is numpy's to recompute (bead .26). The
+    // numpy delegations are not wrapped - numpy has already reported there.
     let numpy_call = || -> PyResult<Py<PyAny>> {
         Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind())
     };
     if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
-        return native_or_numpy_on_non_finite(py, out, numpy_call);
+        return Ok(out);
     }
     // NumPy promotes by exact width: int8/uint8 -> float16, int16/uint16 -> float32,
     // wider ints -> float64, bool -> float16, and float16/float32 are preserved. The
@@ -43142,12 +43309,10 @@ fn diff(
             }
         }
         if all_ok {
-            // diff keeps its dtype, so every step ran the same route family: an f16 chain ran
-            // only the self-reporting f16 route above; f64/f32 steps subtract silently.
-            if dtype_is_f16(&a)? {
-                return Ok(current);
-            }
-            return native(current);
+            // No output scan: every route in this chain reports for itself. The f64 and f32
+            // kernels decline on a `SubtractionHazard` (inf - inf, overflow), integers cannot go
+            // non-finite, and the f16 route hands a hazard to np.diff.
+            return Ok(current);
         }
     }
     // Non-contiguous (transposed/strided) ndarrays make every zero-copy diff path bail
@@ -96239,7 +96404,7 @@ fn cumsum(
         // This scan and the two complex ones below report no FP event, and
         // `finish_native_accumulation` reads only f64/f32: an overflow past 65504 or `inf + -inf`
         // is numpy's to compute, warn about or raise on (bead .26).
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return accumulation_or_numpy_on_non_finite(py, result, axis_val, fallback);
     }
     // complex128/complex64 per-lane last-axis cumsum: numpy's complex cumsum is a single-threaded
     // sequential dependency chain (~177ms@16M c128); re/im accumulate independently, so per contiguous
@@ -96247,7 +96412,7 @@ fn cumsum(
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_complex_cumsum_lastaxis(py, a.bind(py), Some(ax))?
     {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return accumulation_or_numpy_on_non_finite(py, result, axis_val, fallback);
     }
     // complex128/complex64 MIDDLE-axis cumsum: numpy runs a non-last complex cumulative strided +
     // single-threaded; each independent outer block is a slab-by-slab scan, fanned across the pool.
@@ -96255,7 +96420,7 @@ fn cumsum(
         && let Some(result) =
             try_zerocopy_complex_cumulative_nonlast(py, a.bind(py), Some(ax), false)?
     {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return accumulation_or_numpy_on_non_finite(py, result, axis_val, fallback);
     }
     // float16 accumulates STEPWISE in float16 in numpy (each partial sum rounded to
     // f16); our extract path accumulates in f64 then casts once, diverging by ~1 ULP.
@@ -96413,7 +96578,7 @@ fn cumprod(
         // This scan and the two complex ones below report no FP event, and
         // `finish_native_accumulation` reads only f64/f32: a NaN or infinity in the product
         // (inf * 0, overflow past 65504) is numpy's to compute, warn about or raise on (bead .26).
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return accumulation_or_numpy_on_non_finite(py, result, axis_val, fallback);
     }
     // complex128/complex64 per-lane last-axis cumprod: numpy's complex cumprod is a single-threaded
     // sequential dependency chain (multiply.accumulate, no SIMD escape); per contiguous lane it is one
@@ -96421,7 +96586,7 @@ fn cumprod(
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_complex_cumprod_lastaxis(py, a.bind(py), Some(ax))?
     {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return accumulation_or_numpy_on_non_finite(py, result, axis_val, fallback);
     }
     // complex128/complex64 MIDDLE-axis cumprod: numpy runs a non-last complex multiply.accumulate
     // strided + single-threaded; each independent outer block is a slab-by-slab scan via naive cmul,
@@ -96430,7 +96595,7 @@ fn cumprod(
         && let Some(result) =
             try_zerocopy_complex_cumulative_nonlast(py, a.bind(py), Some(ax), true)?
     {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return accumulation_or_numpy_on_non_finite(py, result, axis_val, fallback);
     }
     // float16 accumulates STEPWISE in float16 in numpy (each partial product rounded
     // to f16); our extract path accumulates in f64 then casts once, diverging by
@@ -118689,7 +118854,9 @@ fn nancumprod(
                 passthrough()
             }
         };
-        let recomputed = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, passthrough);
+        let recomputed = |out: Py<PyAny>| {
+            accumulation_or_numpy_on_non_finite(py, out, axis_val, passthrough)
+        };
         if let Some(out) = try_zerocopy_f64_nancumprod(py, &a, axis_val)? {
             return reported(out);
         }
@@ -118754,7 +118921,9 @@ fn nancumsum(
                 passthrough()
             }
         };
-        let recomputed = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, passthrough);
+        let recomputed = |out: Py<PyAny>| {
+            accumulation_or_numpy_on_non_finite(py, out, axis_val, passthrough)
+        };
         if let Some(out) = try_zerocopy_f64_nancumsum(py, &a, axis_val)? {
             return reported(out);
         }
@@ -121618,9 +121787,10 @@ fn ediff1d(
             }
         }
     };
-    // The f64/f32/int routes and the extract path subtract silently (numpy's `inf - inf` warns
-    // "invalid value encountered in subtract"): a non-finite result is numpy's (bead .26). The
-    // f16 route is not wrapped - on a hazard it returns np.diff's own, already-reported result.
+    // The extract path subtracts silently (numpy's `inf - inf` warns "invalid value encountered
+    // in subtract"): a non-finite result is numpy's (bead .26). The zero-copy routes report for
+    // themselves: f64/f32 decline on a `SubtractionHazard`, integers cannot go non-finite, and the
+    // f16 route returns np.diff's own result on a hazard.
     let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
 
     // A byte-swapped operand belongs to numpy, decided here for the same reason as in `diff`:
@@ -121659,7 +121829,7 @@ fn ediff1d(
     if let Some(out) =
         try_zerocopy_f64_ediff1d(py, ary.bind(py), to_begin.as_ref(), to_end.as_ref())?
     {
-        return native(out);
+        return Ok(out);
     }
 
     // Zero-copy integer consecutive differences (no to_begin/to_end); wrapping
@@ -121678,7 +121848,7 @@ fn ediff1d(
         && to_end.is_none()
         && let Some(out) = try_zerocopy_f32_ediff1d(py, ary.bind(py))?
     {
-        return native(out);
+        return Ok(out);
     }
 
     // Zero-copy float16 consecutive differences (no to_begin/to_end)
@@ -149560,6 +149730,46 @@ mod tests {
 
     fn supplied_k(py: Python<'_>, k: i64) -> PyResult<SuppliedArg> {
         Ok(SuppliedArg::Supplied(k.into_pyobject(py)?.into_any().unbind()))
+    }
+
+    /// The exponent-carry finiteness scans agree with `is_finite` on every float16 bit pattern
+    /// and on the float32/float64 edges (subnormals, max, signed zeros, infinities, NaNs of both
+    /// signs), one bad value at a time among good ones; `SubtractionHazard` flags inf - inf and a
+    /// finite overflow but not a propagated NaN.
+    #[test]
+    fn finiteness_carry_scans_and_subtraction_hazards_are_exact() {
+        for bits in 0..=u16::MAX {
+            let finite = (bits & 0x7c00) != 0x7c00;
+            assert_eq!(all_finite_f16_bits(&[0, bits, 0x3c00]), finite, "f16 bits {bits:#06x}");
+        }
+        let f64_edges = [
+            0.0, -0.0, 1.0, f64::MIN_POSITIVE, 5e-324, f64::MAX, f64::MIN, f64::INFINITY,
+            f64::NEG_INFINITY, f64::NAN, -f64::NAN,
+        ];
+        for v in f64_edges {
+            assert_eq!(all_finite_f64(&[1.0, v, 2.0]), v.is_finite(), "f64 {v:?}");
+        }
+        let f32_edges = [
+            0.0, -0.0, 1.0, f32::MIN_POSITIVE, 1e-45, f32::MAX, f32::MIN, f32::INFINITY,
+            f32::NEG_INFINITY, f32::NAN, -f32::NAN,
+        ];
+        for v in f32_edges {
+            assert_eq!(all_finite_f32(&[1.0, v, 2.0]), v.is_finite(), "f32 {v:?}");
+        }
+        assert!(all_finite_f64(&[]));
+        let (inf, nan) = (f64::INFINITY, f64::NAN);
+        assert!(f64::subtraction_hazard(inf, inf, inf - inf));
+        assert!(f64::subtraction_hazard(f64::MAX, f64::MIN, f64::MAX - f64::MIN));
+        assert!(!f64::subtraction_hazard(nan, 1.0, nan - 1.0));
+        assert!(!f64::subtraction_hazard(inf, 1.0, inf - 1.0));
+        assert!(!f64::subtraction_hazard(-inf, inf, -inf - inf));
+        assert!(!f64::subtraction_hazard(3.0, 1.0, 2.0));
+        let (next, cur) = ([1.0, inf, 5.0], [0.0, inf, 4.0]);
+        let mut out = [0.0; 3];
+        assert!(subtract_into(&next, &cur, &mut out, &|x: f64, y: f64| x - y));
+        assert!(!subtract_into(&[nan, 2.0], &[1.0, 1.0], &mut out[..2], &|x: f64, y: f64| {
+            x - y
+        }));
     }
 
     #[test]

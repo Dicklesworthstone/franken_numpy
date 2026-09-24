@@ -318,7 +318,10 @@ print(cells, zero_d, bad)
     let cells: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
     let zero_d: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
     assert!(cells >= 300, "cell table drifted: {result}");
-    assert!(zero_d >= 150, "too few 0-d cells to test anything: {result}");
+    assert!(
+        zero_d >= 150,
+        "too few 0-d cells to test anything: {result}"
+    );
     assert_eq!(
         fields.next().unwrap_or(""),
         "[]",
