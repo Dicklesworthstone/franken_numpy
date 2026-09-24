@@ -1885,24 +1885,6 @@ fn try_parallel_int_scatter_at(
     }
 }
 
-enum VectorizeArgSlot {
-    Fixed(Py<PyAny>),
-    PendingArray(Py<PyAny>),
-    Broadcast(Vec<Py<PyAny>>),
-}
-
-#[pyclass(name = "Vectorize", unsendable)]
-pub struct PyVectorize {
-    callable: Py<PyAny>,
-    excluded: Vec<usize>,
-    /// Forced output dtype(s) from the `otypes=` kwarg (a typecode string or a
-    /// sequence of dtype-likes), or None to infer from the first result.
-    otypes: Option<Py<PyAny>>,
-    /// gufunc `signature=`; when set we delegate to numpy.vectorize since the
-    /// native per-element path only models elementwise broadcasting.
-    signature: Option<Py<PyAny>>,
-}
-
 #[pyclass(name = "MGridClass")]
 pub struct PyMGridClass;
 
@@ -23359,238 +23341,6 @@ impl PyFromPyFunc {
     }
 }
 
-impl PyVectorize {
-    fn new_checked(
-        callable: Py<PyAny>,
-        otypes: Option<Py<PyAny>>,
-        signature: Option<Py<PyAny>>,
-        excluded: Option<Vec<usize>>,
-        py: Python<'_>,
-    ) -> PyResult<Self> {
-        if !callable.bind(py).is_callable() {
-            return Err(PyTypeError::new_err(
-                "vectorize: callable_obj must be callable",
-            ));
-        }
-
-        let mut excluded = excluded.unwrap_or_default();
-        excluded.sort_unstable();
-        excluded.dedup();
-
-        let otypes = otypes.filter(|value| !value.bind(py).is_none());
-        let signature = signature.filter(|value| !value.bind(py).is_none());
-
-        Ok(Self {
-            callable,
-            excluded,
-            otypes,
-            signature,
-        })
-    }
-
-    fn infer_output_dtype(
-        py: Python<'_>,
-        numpy: &Bound<'_, PyModule>,
-        value: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<PyAny>> {
-        let probe = PyList::new(py, [value])?;
-        Ok(numpy
-            .call_method1(intern!(py, "array"), (probe,))?
-            .getattr(intern!(py, "dtype"))?
-            .unbind())
-    }
-
-    fn call_bound(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
-        let numpy = cached_numpy(py)?;
-
-        // A gufunc `signature=` changes broadcasting in ways the native
-        // per-element path does not model, so delegate the whole call to
-        // numpy.vectorize (carrying otypes/excluded for parity).
-        if let Some(sig) = self.signature.as_ref() {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item(intern!(py, "signature"), sig.bind(py))?;
-            if let Some(ot) = self.otypes.as_ref() {
-                kwargs.set_item(intern!(py, "otypes"), ot.bind(py))?;
-            }
-            if !self.excluded.is_empty() {
-                kwargs.set_item(
-                    intern!(py, "excluded"),
-                    PyList::new(py, self.excluded.iter().copied())?,
-                )?;
-            }
-            let np_vec = numpy
-                .getattr(intern!(py, "vectorize"))?
-                .call((self.callable.bind(py),), Some(&kwargs))?;
-            return Ok(np_vec.call1(args)?.unbind());
-        }
-
-        if args.is_empty() {
-            return Err(PyValueError::new_err(
-                "vectorize: need at least one input array",
-            ));
-        }
-
-        // Resolve forced output dtype(s) from `otypes=` (typecode string or a
-        // sequence of dtype-likes); None means infer from the first result.
-        let forced_dtypes: Option<Vec<Py<PyAny>>> = match self.otypes.as_ref() {
-            Some(otypes) => {
-                let otypes = otypes.bind(py);
-                let dtype_fn = numpy.getattr(intern!(py, "dtype"))?;
-                let mut resolved = Vec::new();
-                if let Ok(codes) = otypes.extract::<&str>() {
-                    for code in codes.chars() {
-                        resolved.push(dtype_fn.call1((code.to_string(),))?.unbind());
-                    }
-                } else {
-                    for item in otypes.try_iter()? {
-                        resolved.push(dtype_fn.call1((item?,))?.unbind());
-                    }
-                }
-                Some(resolved)
-            }
-            None => None,
-        };
-
-        let mut vectorized_shapes = Vec::new();
-        let mut slots = Vec::with_capacity(args.len());
-
-        for (idx, arg) in args.iter().enumerate() {
-            if self.excluded.binary_search(&idx).is_ok() {
-                slots.push(VectorizeArgSlot::Fixed(arg.unbind()));
-                continue;
-            }
-
-            let array = numpy.call_method1(intern!(py, "asarray"), (arg,))?;
-            let shape = array
-                .getattr(intern!(py, "shape"))?
-                .extract::<Vec<usize>>()?;
-            vectorized_shapes.push(shape);
-            slots.push(VectorizeArgSlot::PendingArray(array.unbind()));
-        }
-
-        let out_shape = if vectorized_shapes.is_empty() {
-            Vec::new()
-        } else {
-            let shape_refs: Vec<&[usize]> = vectorized_shapes.iter().map(Vec::as_slice).collect();
-            broadcast_shapes(&shape_refs).map_err(|err| PyValueError::new_err(err.to_string()))?
-        };
-        let flat_len = if out_shape.is_empty() {
-            1
-        } else {
-            element_count(&out_shape).map_err(|err| PyValueError::new_err(err.to_string()))?
-        };
-        let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
-        let is_1d = out_shape.len() == 1;
-
-        let mut prepared_slots = Vec::with_capacity(slots.len());
-        for slot in slots {
-            match slot {
-                VectorizeArgSlot::Fixed(value) => {
-                    prepared_slots.push(VectorizeArgSlot::Fixed(value))
-                }
-                VectorizeArgSlot::PendingArray(array) => {
-                    let broadcasted = numpy.call_method1(
-                        intern!(py, "broadcast_to"),
-                        (array.bind(py), output_shape.clone()),
-                    )?;
-                    let flattened = if is_1d {
-                        broadcasted
-                    } else {
-                        broadcasted.call_method1(intern!(py, "reshape"), (-1,))?
-                    };
-                    let values = flattened
-                        .call_method0(intern!(py, "tolist"))?
-                        .extract::<Vec<Py<PyAny>>>()?;
-                    prepared_slots.push(VectorizeArgSlot::Broadcast(values));
-                }
-                VectorizeArgSlot::Broadcast(_) => unreachable!("pending slots are prepared once"),
-            }
-        }
-
-        let mut outputs: Vec<Vec<Py<PyAny>>> = Vec::new();
-        let mut output_dtypes: Vec<Py<PyAny>> = Vec::new();
-
-        for element_idx in 0..flat_len {
-            let call_args = PyTuple::new(
-                py,
-                prepared_slots.iter().map(|slot| match slot {
-                    VectorizeArgSlot::Fixed(value) => value.bind(py),
-                    VectorizeArgSlot::Broadcast(values) => values[element_idx].bind(py),
-                    VectorizeArgSlot::PendingArray(_) => unreachable!("pending slots are prepared"),
-                }),
-            )?;
-            let result = self.callable.bind(py).call1(call_args)?;
-            let values = if let Ok(tuple) = result.cast::<PyTuple>() {
-                tuple.iter().map(|value| value.unbind()).collect::<Vec<_>>()
-            } else {
-                vec![result.unbind()]
-            };
-
-            if outputs.is_empty() {
-                outputs = (0..values.len())
-                    .map(|_| Vec::with_capacity(flat_len))
-                    .collect();
-            } else if values.len() != outputs.len() {
-                return Err(PyValueError::new_err(format!(
-                    "vectorize: output arity changed from {} to {}",
-                    outputs.len(),
-                    values.len()
-                )));
-            }
-
-            for (output_idx, value) in values.into_iter().enumerate() {
-                if output_dtypes.len() == output_idx {
-                    let dtype = match forced_dtypes.as_ref() {
-                        Some(dtypes) => dtypes
-                            .get(output_idx)
-                            .map(|d| d.clone_ref(py))
-                            .ok_or_else(|| {
-                                PyValueError::new_err(format!(
-                                    "vectorize: otypes specifies {} dtype(s) but the function \
-                                     produced output {}",
-                                    dtypes.len(),
-                                    output_idx + 1
-                                ))
-                            })?,
-                        None => Self::infer_output_dtype(py, numpy, value.bind(py))?,
-                    };
-                    output_dtypes.push(dtype);
-                }
-                outputs[output_idx].push(value);
-            }
-        }
-
-        // Empty inputs never enter the per-element loop; with `otypes` set we
-        // still return correctly-typed empty outputs (NumPy parity).
-        if outputs.is_empty()
-            && let Some(dtypes) = forced_dtypes.as_ref()
-        {
-            outputs = dtypes.iter().map(|_| Vec::new()).collect();
-            output_dtypes = dtypes.iter().map(|d| d.clone_ref(py)).collect();
-        }
-
-        let mut arrays = Vec::with_capacity(outputs.len());
-        for (values, dtype) in outputs.into_iter().zip(output_dtypes) {
-            let list = PyList::new(py, values.iter().map(|value| value.bind(py)))?;
-            let array = cached_numpy_array(py)?.call1((list, dtype.bind(py)))?;
-            let reshaped = if out_shape.len() == 1 {
-                array
-            } else {
-                array.call_method1(intern!(py, "reshape"), (&output_shape,))?
-            };
-            arrays.push(reshaped.unbind());
-        }
-
-        if arrays.len() == 1 {
-            Ok(arrays.remove(0))
-        } else {
-            Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
-                .into_any()
-                .unbind())
-        }
-    }
-}
-
 #[pymethods]
 impl PyMGridClass {
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -23798,41 +23548,6 @@ impl PyFromPyFunc {
     }
 }
 
-#[pymethods]
-impl PyVectorize {
-    #[new]
-    #[pyo3(signature = (pyfunc, otypes=None, doc=None, excluded=None, cache=false, signature=None))]
-    fn new(
-        pyfunc: Py<PyAny>,
-        otypes: Option<Py<PyAny>>,
-        doc: Option<Py<PyAny>>,
-        excluded: Option<Vec<usize>>,
-        cache: bool,
-        signature: Option<Py<PyAny>>,
-        py: Python<'_>,
-    ) -> PyResult<Self> {
-        // `doc` (sets __doc__) and `cache` (memoizes the dtype-probe call) do
-        // not affect output values, so they are accepted and ignored. `otypes`
-        // and `signature` are honored in call_bound.
-        let _ = (doc, cache);
-        Self::new_checked(pyfunc, otypes, signature, excluded, py)
-    }
-
-    #[getter]
-    fn excluded(&self) -> Vec<usize> {
-        self.excluded.clone()
-    }
-
-    #[pyo3(signature = (*args))]
-    fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
-        self.call_bound(py, args)
-    }
-
-    fn __repr__(&self) -> String {
-        format!("Vectorize(excluded={:?})", self.excluded)
-    }
-}
-
 #[pyfunction]
 #[pyo3(signature = (callable_obj, nin, nout, **kwargs))]
 fn frompyfunc(
@@ -23843,22 +23558,6 @@ fn frompyfunc(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyFromPyFunc> {
     PyFromPyFunc::new_checked(callable_obj, nin, nout, kwargs, py)
-}
-
-#[pyfunction]
-#[pyo3(signature = (pyfunc, otypes=None, doc=None, excluded=None, cache=false, signature=None))]
-fn vectorize(
-    py: Python<'_>,
-    pyfunc: Py<PyAny>,
-    otypes: Option<Py<PyAny>>,
-    doc: Option<Py<PyAny>>,
-    excluded: Option<Vec<usize>>,
-    cache: bool,
-    signature: Option<Py<PyAny>>,
-) -> PyResult<PyVectorize> {
-    // `doc`/`cache` do not affect output values; accepted for signature parity.
-    let _ = (doc, cache);
-    PyVectorize::new_checked(pyfunc, otypes, signature, excluded, py)
 }
 
 #[pyfunction]
@@ -120970,7 +120669,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyNditerStep>()?;
     m.add_class::<PyNditer>()?;
     m.add_class::<PyFromPyFunc>()?;
-    m.add_class::<PyVectorize>()?;
     m.add("mgrid", Py::new(py, PyMGridClass)?)?;
     m.add("ogrid", Py::new(py, PyOGridClass)?)?;
     m.add("r_", Py::new(py, PyRClass)?)?;
@@ -121232,7 +120930,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("polynomial", polynomial)?;
     }
     m.add_function(wrap_pyfunction!(frompyfunc, m)?)?;
-    m.add_function(wrap_pyfunction!(vectorize, m)?)?;
     m.add_function(wrap_pyfunction!(digitize, m)?)?;
     m.add_function(wrap_pyfunction!(bincount, m)?)?;
     m.add_function(wrap_pyfunction!(interp, m)?)?;
@@ -122123,13 +121820,20 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             }
         }
 
-        // numpy class passthroughs (numpy.__all__ reality-check). The 19
+        // numpy class passthroughs (numpy.__all__ reality-check). The 20
         // names here are disjoint from NUMPY_DTYPE_SCALARS — `uint` and
         // `ulong` are already re-exported there. These are type objects
         // that users construct (errstate, finfo, iinfo, matrix, poly1d, …)
         // or introspect (dtype, ndarray, ufunc, nditer, recarray, record).
         // For the parity-oracle mode we re-export numpy's class object so
         // that `fnp_python.errstate() == numpy.errstate()` behaviourally.
+        //
+        // `vectorize` joined this list when the native `Vectorize` class was removed: it
+        // dropped keyword arguments, rejected a set/str `excluded`, had no decorator form
+        // (`@vectorize(otypes=...)`) and no `otypes`/`cache`/`__name__`/`__doc__` (17 of
+        // numpy's own test_function_base tests), and it was SLOWER than numpy's from n=1000
+        // up (triage, same host: 1.24-1.34x flat, 2.04x on a broadcast two-argument call).
+        // Each element is a Python call either way, so there was no native lever to keep.
         const NUMPY_CLASS_NAMES: &[&str] = &[
             "broadcast",
             "busdaycalendar",
@@ -122150,6 +121854,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "recarray",
             "record",
             "ufunc",
+            "vectorize",
         ];
         for name in NUMPY_CLASS_NAMES {
             if let Ok(value) = numpy.getattr(*name) {
@@ -123410,7 +123115,7 @@ mod tests {
     use super::{
         BinaryOp, F64_ACCUMULATE_NATIVE_MIN_LEN, F64_DIV_NATIVE_MIN_LEN,
         F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN, F64_DIV_OUT_DECLINE_MIN_LEN, MaskedStream,
-        NarrowSetOp, PyFromPyFunc, PyVectorize, PythonNativeGemmOp, ScimathFix, UFuncKind,
+        NarrowSetOp, PyFromPyFunc, PythonNativeGemmOp, ScimathFix, UFuncKind,
         accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, busdays_in_span, cached_float64_dtype, cached_numpy,
         cached_numpy_recfunctions, ceil_native, choose, compress, copysign, count_nonzero,
@@ -132887,7 +132592,8 @@ mod tests {
             assert!(module.getattr("frompyfunc").is_ok());
             assert!(module.getattr("FromPyFunc").is_ok());
             assert!(module.getattr("vectorize").is_ok());
-            assert!(module.getattr("Vectorize").is_ok());
+            // `vectorize` is numpy's class; the native `Vectorize` was removed.
+            assert!(module.getattr("Vectorize").is_err());
             assert!(module.getattr("digitize").is_ok());
             assert!(module.getattr("interp").is_ok());
             assert!(module.getattr("trapezoid").is_ok());
@@ -134955,46 +134661,7 @@ mod tests {
     }
 
     #[test]
-    fn vectorize_live_callable_matches_numpy_single_output() {
-        with_python(|py| {
-            if !numpy_available(py) {
-                return Ok(());
-            }
-
-            let functools = py.import("functools")?;
-            let operator = py.import("operator")?;
-            let callable = functools
-                .getattr("partial")?
-                .call1((operator.getattr("add")?, 10))?
-                .unbind();
-            let vectorized =
-                PyVectorize::new_checked(callable.clone_ref(py), None, None, None, py)?;
-
-            let values = object_array(py, vec![1, 2, 3]);
-            let args = PyTuple::new(py, [values.clone()])?;
-
-            let actual = vectorized.call_bound(py, &args)?;
-            let numpy = py.import("numpy")?;
-            let expected_args = PyTuple::new(py, [values])?;
-            let expected = numpy
-                .getattr("vectorize")?
-                .call1((callable.bind(py),))?
-                .call1(expected_args)?;
-
-            assert_eq!(
-                actual.bind(py).getattr("shape")?.extract::<Vec<usize>>()?,
-                vec![3]
-            );
-            assert_eq!(
-                repr_string(&actual.bind(py).call_method0("tolist")?),
-                repr_string(&expected.call_method0("tolist")?)
-            );
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn vectorize_and_frompyfunc_accept_positional_call_args() {
+    fn frompyfunc_accepts_positional_call_args() {
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
@@ -135004,24 +134671,10 @@ mod tests {
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
             let operator = py.import("operator")?;
-            let neg = operator.getattr("neg")?;
             let add = operator.getattr("add")?;
 
-            // vectorize: calling g(array) with a positional arg used to raise
-            // TypeError because __call__ lacked a (*args) signature and so
-            // demanded a single literal tuple.
-            let arr = numpy.call_method1("array", (vec![1, 2, 3],))?;
-            let fnp_vec = module.getattr("vectorize")?.call1((neg.clone(),))?;
-            let np_vec = numpy.getattr("vectorize")?.call1((neg.clone(),))?;
-            let got = fnp_vec.call1((&arr,))?;
-            let want = np_vec.call1((&arr,))?;
-            assert_eq!(
-                repr_string(&got.call_method0("tolist")?),
-                repr_string(&want.call_method0("tolist")?)
-            );
-
-            // frompyfunc: calling the ufunc with two positional arrays likewise
-            // used to raise "takes 1 positional argument but 2 were given".
+            // frompyfunc: calling the ufunc with two positional arrays used to raise
+            // "takes 1 positional argument but 2 were given".
             let a = numpy.call_method1("array", (vec![1, 2, 3],))?;
             let b = numpy.call_method1("array", (vec![10, 20, 30],))?;
             let fnp_uf = module.getattr("frompyfunc")?.call1((add.clone(), 2, 1))?;
@@ -135036,139 +134689,26 @@ mod tests {
         });
     }
 
+    /// `vectorize` IS numpy's class: the native `Vectorize` it replaced diverged on keyword
+    /// arguments, `excluded` sets, the decorator form and its attributes, and was slower than
+    /// numpy's from n=1000. Identity, not value equality, is the contract - re-adding a
+    /// divergent native class must fail here.
     #[test]
-    fn vectorize_honors_otypes_and_signature() {
+    fn vectorize_is_numpys_vectorize_class() {
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
             }
-
-            let module = PyModule::new(py, "fnp_python_test_vec_otypes")?;
+            let module = PyModule::new(py, "fnp_python_test_vectorize_identity")?;
             fnp_python(&module)?;
             let numpy = py.import("numpy")?;
-            let operator = py.import("operator")?;
-            let neg = operator.getattr("neg")?;
-
-            // otypes=[float64] forces the output dtype even though neg(int)
-            // is an int — previously raised "unexpected keyword 'otypes'".
-            let arr = numpy.call_method1("array", (vec![1, 2, 3],))?;
-            let kw = PyDict::new(py);
-            kw.set_item("otypes", PyList::new(py, [numpy.getattr("float64")?])?)?;
-            let fnp_v = module
-                .getattr("vectorize")?
-                .call((neg.clone(),), Some(&kw))?;
-            let np_v = numpy
-                .getattr("vectorize")?
-                .call((neg.clone(),), Some(&kw))?;
-            let got = fnp_v.call1((&arr,))?;
-            let want = np_v.call1((&arr,))?;
-            assert_eq!(got.getattr("dtype")?.str()?.extract::<String>()?, "float64");
-            assert_eq!(
-                got.getattr("dtype")?.str()?.extract::<String>()?,
-                want.getattr("dtype")?.str()?.extract::<String>()?
+            assert!(
+                module
+                    .getattr("vectorize")?
+                    .is(&numpy.getattr("vectorize")?),
+                "fnp_python.vectorize must be numpy.vectorize"
             );
-            assert_eq!(
-                repr_string(&got.call_method0("tolist")?),
-                repr_string(&want.call_method0("tolist")?)
-            );
-
-            // A gufunc signature delegates to numpy.vectorize.
-            let mat = numpy.call_method1("array", (vec![vec![1, 2, 3], vec![4, 5, 6]],))?;
-            let kw2 = PyDict::new(py);
-            kw2.set_item("signature", "(n)->()")?;
-            let sum_fn = numpy.getattr("sum")?;
-            let fnp_g = module
-                .getattr("vectorize")?
-                .call((sum_fn.clone(),), Some(&kw2))?;
-            let np_g = numpy
-                .getattr("vectorize")?
-                .call((sum_fn.clone(),), Some(&kw2))?;
-            let got2 = fnp_g.call1((&mat,))?;
-            let want2 = np_g.call1((&mat,))?;
-            assert_eq!(
-                repr_string(&got2.call_method0("tolist")?),
-                repr_string(&want2.call_method0("tolist")?)
-            );
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn vectorize_live_callable_matches_numpy_multi_output() {
-        with_python(|py| {
-            if !numpy_available(py) {
-                return Ok(());
-            }
-
-            let builtins = py.import("builtins")?;
-            let callable = builtins.getattr("divmod")?.unbind();
-            let vectorized =
-                PyVectorize::new_checked(callable.clone_ref(py), None, None, None, py)?;
-
-            let lhs = object_array(py, vec![10, 11, 12]);
-            let rhs = object_array(py, vec![3]);
-            let args = PyTuple::new(py, [lhs.clone(), rhs.clone()])?;
-
-            let actual = vectorized.call_bound(py, &args)?;
-            let numpy = py.import("numpy")?;
-            let expected_args = PyTuple::new(py, [lhs, rhs])?;
-            let expected = numpy
-                .getattr("vectorize")?
-                .call1((callable.bind(py),))?
-                .call1(expected_args)?;
-
-            let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
-            let expected_tuple = expected.cast::<PyTuple>()?;
-            assert_eq!(actual_tuple.len()?, 2);
-            assert_eq!(expected_tuple.len()?, 2);
-
-            for (actual_item, expected_item) in
-                actual_tuple.try_iter()?.zip(expected_tuple.try_iter()?)
-            {
-                let actual_item = actual_item?;
-                let expected_item = expected_item?;
-                assert_eq!(
-                    actual_item.getattr("shape")?.extract::<Vec<usize>>()?,
-                    vec![3]
-                );
-                assert_eq!(
-                    repr_string(&actual_item.call_method0("tolist")?),
-                    repr_string(&expected_item.call_method0("tolist")?)
-                );
-            }
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn vectorize_excluded_argument_matches_numpy() {
-        with_python(|py| {
-            if !numpy_available(py) {
-                return Ok(());
-            }
-
-            let operator = py.import("operator")?;
-            let callable = operator.getattr("add")?.unbind();
-            let vectorized =
-                PyVectorize::new_checked(callable.clone_ref(py), None, None, Some(vec![1]), py)?;
-
-            let lhs = object_array(py, vec![1, 2, 3]);
-            let scalar = 10i32.into_pyobject(py)?.unbind();
-            let args = PyTuple::new(py, vec![lhs.clone().unbind(), scalar.clone_ref(py).into()])?;
-
-            let actual = vectorized.call_bound(py, &args)?;
-            let numpy = py.import("numpy")?;
-            let expected_args = PyTuple::new(py, vec![lhs.unbind(), scalar.clone_ref(py).into()])?;
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("excluded", vec![1])?;
-            let expected = numpy
-                .call_method("vectorize", (callable.bind(py),), Some(&kwargs))?
-                .call1(expected_args)?;
-
-            assert_eq!(
-                repr_string(&actual.bind(py).call_method0("tolist")?),
-                repr_string(&expected.call_method0("tolist")?)
-            );
+            assert!(module.getattr("Vectorize").is_err());
             Ok(())
         });
     }

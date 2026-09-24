@@ -261,18 +261,39 @@ print(np.allclose(result, expected))
 // vectorize
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `fnp.vectorize` is numpy's `vectorize` class. The native `Vectorize` it replaced had "a
+/// different API than np.vectorize" (this test's old comment, which then only checked
+/// `callable`): keyword arguments, `excluded` sets, the decorator form and the
+/// `otypes`/`__name__`/`__doc__` attributes all diverged. The usage forms below are the ones
+/// numpy's own test_function_base caught.
 #[test]
-fn vectorize_exists() -> Result<(), String> {
+fn vectorize_is_numpys_class_and_takes_its_usage_forms() -> Result<(), String> {
     let script = fnp_script(
         r#"
-# fnp.vectorize has a different API than np.vectorize
-# Just verify it exists and is callable
-print(callable(fnp.vectorize))
+checks = [fnp.vectorize is np.vectorize]
+def f(x, y=1, *, z=0):
+    "Docstring"
+    return x * y + z
+v = fnp.vectorize(f)
+checks.append(v(np.arange(3), y=2, z=1).tolist() == [1, 3, 5])
+checks.append((v.__name__, v.__doc__) == ("f", "Docstring"))
+def poly(x, coeffs):
+    return sum(c * x**i for i, c in enumerate(coeffs))
+checks.append(fnp.vectorize(poly, excluded={"coeffs"})(np.arange(3), coeffs=[1, 2]).tolist() == [1, 3, 5])
+@fnp.vectorize(otypes=[np.float64])
+def g(x):
+    return x // 2
+checks.append(g(np.arange(4)).dtype == np.float64)
+print(checks)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "vectorize should be callable");
+    assert_eq!(
+        result.trim(),
+        "[True, True, True, True, True]",
+        "fnp.vectorize must be numpy's class and accept its usage forms: {result}"
+    );
     Ok(())
 }
 
