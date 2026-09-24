@@ -4190,10 +4190,12 @@ print(len(names), cells, bad)
 /// with the same set of (category, message) warnings. Under 'ignore' that set is empty, which is
 /// the negative case. Each arm gets fresh copies (numpy's rot90 reduces an array `k` in place).
 /// The sweep found 35 default-errstate cells (and the same 35 under `raise`) in 21 functions whose
-/// native kernels return numpy's values silently. FIXED, per route: var/std axis routes and the
-/// float16 cumprod/cumulative_prod scan now hand a non-finite result to numpy. STILL OPEN (bead
-/// .26), as the RATCHET below: cov, degrees, diff, ediff1d, gradient, i0, kron, nancumprod,
-/// nancumsum, nanprod, nansum, nanstd, nanvar, outer, rad2deg, sinc, unwrap. A name-level
+/// native kernels return numpy's values silently. FIXED, per route: var/std axis routes, the
+/// float16 cumprod/cumulative_prod scan, degrees/rad2deg, sinc, unwrap, diff, ediff1d, gradient,
+/// i0 (a native result only - `native_unary_promoting_route`), kron and outer now hand a
+/// non-finite result to numpy; the diff/ediff1d float16 route is left alone because on a hazard
+/// it already returns np.diff's own result. STILL OPEN (bead .26), as the RATCHET below: cov,
+/// nancumprod, nancumsum, nanprod, nansum, nanstd, nanvar. A name-level
 /// recompute for those (6a050102) was reverted: it warned twice wherever the native function had
 /// already returned numpy's own result (fallbacks, nanvar's all-NaN deferral). The test fails on
 /// any divergence outside the residual set AND on a residual name that now matches, so the list
@@ -4257,8 +4259,7 @@ for mode, settings in MODES.items():
 # Bead .26's open residual: native kernels not yet converted to the per-ROUTE non-finite recompute.
 # A divergence outside this set fails, and so does a name in it that no longer diverges - the list
 # can only shrink.
-RESIDUAL = {"cov", "degrees", "diff", "ediff1d", "gradient", "i0", "kron", "nancumprod",
-            "nancumsum", "nanprod", "nansum", "nanstd", "nanvar", "outer", "rad2deg", "sinc", "unwrap"}
+RESIDUAL = {"cov", "nancumprod", "nancumsum", "nanprod", "nansum", "nanstd", "nanvar"}
 unexpected = [text for name, text in bad if name not in RESIDUAL]
 stale = sorted(RESIDUAL - {name for name, _ in bad})
 print(len(names), cells, "|", unexpected, "|", stale)

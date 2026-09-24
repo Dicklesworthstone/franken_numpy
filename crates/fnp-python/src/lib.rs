@@ -774,6 +774,20 @@ fn native_or_numpy_on_non_finite(
     }
 }
 
+/// The branch-free `&` fold vectorises; an elementwise route's output is as large as its input,
+/// so a serial pass would cost about as much as the parallel kernel that produced it. Above 2^16
+/// elements the scan runs on rayon's pool in per-thread chunks.
+fn slice_all_finite<T: Copy + Sync>(data: &[T], is_finite: impl Fn(T) -> bool + Sync) -> bool {
+    const PARALLEL_SCAN_MIN: usize = 1 << 16;
+    let fold = |chunk: &[T]| chunk.iter().fold(true, |finite, &v| finite & is_finite(v));
+    if data.len() < PARALLEL_SCAN_MIN || rayon::current_num_threads() < 2 {
+        return fold(data);
+    }
+    use rayon::prelude::*;
+    let chunk = data.len().div_ceil(rayon::current_num_threads());
+    data.par_chunks(chunk).all(fold)
+}
+
 /// True when `value` - a float or complex scalar, an ndarray, or a tuple/list of them - holds a
 /// NaN or an infinity. Native-order contiguous float64/float32 arrays are scanned directly;
 /// anything else asks numpy (`isfinite(value).all()`).
@@ -804,7 +818,7 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
             // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
             let data: &[f64] =
                 unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
-            return Ok(!data.iter().fold(true, |finite, v| finite & v.is_finite()));
+            return Ok(!slice_all_finite(data, |v| v.is_finite()));
         }
         if let Ok(buffer) = PyBuffer::<f32>::get(value)
             && buffer.is_c_contiguous()
@@ -813,7 +827,7 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
             // SAFETY: as above, for f32.
             let data: &[f32] =
                 unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
-            return Ok(!data.iter().fold(true, |finite, v| finite & v.is_finite()));
+            return Ok(!slice_all_finite(data, |v| v.is_finite()));
         }
     }
     let finite = cached_numpy(py)?
@@ -34481,8 +34495,14 @@ fn native_angle_conversion(
     numpy_name: &Bound<'_, PyString>,
     extract_label: &str,
 ) -> PyResult<Py<PyAny>> {
+    // Both native f64 returns below report no FP event, yet `degrees(1e307)` overflows: a
+    // non-finite result is numpy's to recompute, warn about or raise on (bead .26). The numpy
+    // delegations are not wrapped - numpy has already reported there.
+    let numpy_call = || -> PyResult<Py<PyAny>> {
+        Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind())
+    };
     if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
-        return Ok(out);
+        return native_or_numpy_on_non_finite(py, out, numpy_call);
     }
     // NumPy promotes by exact width: int8/uint8 -> float16, int16/uint16 -> float32,
     // wider ints -> float64, bool -> float16, and float16/float32 are preserved. The
@@ -34512,8 +34532,9 @@ fn native_angle_conversion(
     if noncontiguous_ndarray(cached_numpy(py)?, x)? {
         return Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind());
     }
-    let x = extract_precise_numeric_array(py, x, extract_label)?;
-    build_numpy_scalar_or_array(py, &x.elementwise_unary(op))
+    let native = extract_precise_numeric_array(py, x, extract_label)?;
+    let out = build_numpy_scalar_or_array(py, &native.elementwise_unary(op))?;
+    native_or_numpy_on_non_finite(py, out, numpy_call)
 }
 
 fn degrees_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -36359,8 +36380,16 @@ fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .call1((x.bind(py),))?
             .unbind());
     }
+    // The native sinc kernels report no FP event (numpy's `sinc(inf)` warns "invalid value
+    // encountered in sin"): a non-finite result is numpy's to recompute (bead .26).
+    let numpy_sinc = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr(intern!(py, "sinc"))?
+            .call1((x.bind(py),))?
+            .unbind())
+    };
     if let Some(out) = try_zerocopy_f64_sinc(py, numpy, x.bind(py))? {
-        return Ok(out);
+        return native_or_numpy_on_non_finite(py, out, numpy_sinc);
     }
     // A NON-CONTIGUOUS OPERAND MUST DELEGATE, NOT EXTRACT (`deadlock-audit-0iwez`).
     //
@@ -36373,8 +36402,9 @@ fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .call1((x.bind(py),))?
             .unbind());
     }
-    let x = extract_numeric_array(py, x.bind(py), "sinc(x)")?;
-    build_numpy_scalar_or_array(py, &x.sinc())
+    let native = extract_numeric_array(py, x.bind(py), "sinc(x)")?;
+    let out = build_numpy_scalar_or_array(py, &native.sinc())?;
+    native_or_numpy_on_non_finite(py, out, numpy_sinc)
 }
 
 #[pyfunction]
@@ -42408,6 +42438,27 @@ fn gradient(
         Some(converted) => converted,
         None => f,
     };
+    let numpy_gradient = || -> PyResult<Py<PyAny>> {
+        let mut positional: Vec<Bound<'_, PyAny>> = Vec::with_capacity(varargs.len() + 1);
+        positional.push(f.bind(py).clone());
+        positional.extend(varargs.iter());
+        let args = PyTuple::new(py, positional)?;
+        let kwargs = PyDict::new(py);
+        if let Some(axis_val) = axis.as_ref() {
+            kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
+        }
+        if edge_order != 1 {
+            kwargs.set_item(intern!(py, "edge_order"), edge_order)?;
+        }
+        Ok(numpy
+            .getattr(intern!(py, "gradient"))?
+            .call(args, Some(&kwargs))?
+            .unbind())
+    };
+    // Every native gradient route below differences silently (numpy's `inf - inf` warns "invalid
+    // value encountered in subtract"): a non-finite result - an array, or the per-axis tuple -
+    // is numpy's to recompute (bead .26).
+    let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, numpy_gradient);
     // Native zero-copy parallel fast path for f64 with UNIFORM spacing (no spacing arg => dx=1, or a single
     // scalar spacing arg => that dx) along the LAST axis, edge_order 1 OR 2 (byte-identical boundary stencils).
     // A coordinate-array spacing arg, a non-last axis, N-D-with-no-axis, or non-f64 defer to numpy.
@@ -42441,7 +42492,7 @@ fn gradient(
         && let Some(dx) = uniform_dx
         && let Some(out) = try_zerocopy_f64_gradient_1d(py, numpy, f.bind(py), dx, edge_order)?
     {
-        return Ok(out);
+        return native(out);
     }
     // float32 last-axis / 1-D twin (edge_order=1): numpy keeps f32 gradient in f32, so this is
     // bit-identical and wins ~8x over numpy's slow pure-Python slice gradient.
@@ -42449,7 +42500,7 @@ fn gradient(
         && let Some(dx) = uniform_dx
         && let Some(out) = try_zerocopy_f32_gradient_1d(py, numpy, f.bind(py), dx, edge_order)?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native strided (non-last) single-axis gradient: numpy's pure-Python slice
     // implementation is ~30+ ms for a 4096x1024 axis=0 call; the row-combine kernel
@@ -42463,7 +42514,7 @@ fn gradient(
         && let Some(out) =
             try_zerocopy_f64_gradient_strided_axis(py, numpy, f.bind(py), ax_raw, dx, edge_order)?
     {
-        return Ok(out);
+        return native(out);
     }
     // float32 strided (non-last) single-axis twin (edge_order=1): bit-identical, wins like f64.
     if !axis_is_last
@@ -42473,7 +42524,7 @@ fn gradient(
         && let Some(out) =
             try_zerocopy_f32_gradient_strided_axis(py, numpy, f.bind(py), ax_raw, dx, edge_order)?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native FULL gradient (axis=None on an N-D array, uniform spacing): numpy returns a
     // TUPLE of per-axis gradients, each via its slow pure-Python slice path (~27 ms for a
@@ -42528,7 +42579,7 @@ fn gradient(
         }
         if all_ok {
             let tuple = PyTuple::new(py, grads.iter().map(|g| g.bind(py)))?;
-            return Ok(tuple.into_any().unbind());
+            return native(tuple.into_any().unbind());
         }
     }
     // Non-uniform 2-D gradient: gradient(field, cy, cx) with COORDINATE ARRAYS, edge_order=1, axis=None
@@ -42547,7 +42598,7 @@ fn gradient(
         if let Some(out) =
             try_zerocopy_f64_gradient_2d_coords(py, numpy, f.bind(py), &cy, &cx, edge_order)?
         {
-            return Ok(out);
+            return native(out);
         }
     }
     // Non-uniform 1-D gradient: gradient(f, x) with a COORDINATE ARRAY x, edge_order=1. The uniform
@@ -42573,7 +42624,7 @@ fn gradient(
         if let Some(out) =
             try_zerocopy_f64_gradient_1d_coords(py, numpy, f.bind(py), &x, edge_order)?
         {
-            return Ok(out);
+            return native(out);
         }
     }
     // Non-uniform single-axis gradient on an N-D (>=2) array: gradient(f_ND, coord, axis=k) with a
@@ -42606,28 +42657,14 @@ fn gradient(
                 &coord,
                 edge_order,
             )? {
-                return Ok(out);
+                return native(out);
             }
         }
     }
     // Passthrough to np.gradient so spacing-argument handling, axis
     // selection, return-shape conventions, and boundary schemes match
     // NumPy exactly.
-    let gradient_fn = numpy.getattr(intern!(py, "gradient"))?;
-    let mut positional: Vec<Py<PyAny>> = Vec::with_capacity(varargs.len() + 1);
-    positional.push(f);
-    for arg in varargs.iter() {
-        positional.push(arg.unbind());
-    }
-    let args = PyTuple::new(py, positional.iter().map(|item| item.bind(py)))?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis_val) = axis {
-        kwargs.set_item(intern!(py, "axis"), axis_val.bind(py))?;
-    }
-    if edge_order != 1 {
-        kwargs.set_item(intern!(py, "edge_order"), edge_order)?;
-    }
-    Ok(gradient_fn.call(args, Some(&kwargs))?.unbind())
+    numpy_gradient()
 }
 
 // Fused np.diff(a, n=1, prepend=/append=SCALAR) for 1-D arrays: numpy composes
@@ -42859,6 +42896,11 @@ fn diff(
     let fallback = || -> PyResult<Py<PyAny>> {
         core_numpy_passthrough_interned(py, intern!(py, "diff"), args, kwargs)
     };
+    // Every native diff route below subtracts silently, where numpy's `inf - inf` warns
+    // "invalid value encountered in subtract" and `1e308 - -1e308` "overflow" (or raises under
+    // errstate): a non-finite float result is numpy's to recompute (bead .26). The datetime and
+    // integer routes cannot produce one, so the check returns at the dtype kind for them.
+    let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
 
     let Some((a, n, axis, prepend, append)) = parse_diff_args(py, args, kwargs)? else {
         return fallback();
@@ -42886,11 +42928,13 @@ fn diff(
             && let Some(out) =
                 try_zerocopy_diff1_pend(py, numpy, &a, prepend.as_ref(), append.as_ref())?
         {
-            return Ok(out);
+            return native(out);
         }
         return fallback();
     }
 
+    // Not `native(..)`: on a hazard this route returns np.diff's own result, which has already
+    // warned, so a recompute would warn twice.
     if n == 1
         && let Some(output) = try_zerocopy_f16_diff_1d(py, numpy, &a, axis)?
     {
@@ -43001,7 +43045,12 @@ fn diff(
             }
         }
         if all_ok {
-            return Ok(current);
+            // diff keeps its dtype, so every step ran the same route family: an f16 chain ran
+            // only the self-reporting f16 route above; f64/f32 steps subtract silently.
+            if dtype_is_f16(&a)? {
+                return Ok(current);
+            }
+            return native(current);
         }
     }
     // Non-contiguous (transposed/strided) ndarrays make every zero-copy diff path bail
@@ -43036,7 +43085,7 @@ fn diff(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    build_numpy_array_from_ufunc(py, &result)
+    native(build_numpy_array_from_ufunc(py, &result)?)
 }
 
 #[pyfunction]
@@ -62922,27 +62971,38 @@ fn native_unary_promoting(
     numpy_name: &Bound<'_, PyString>,
     context: &str,
 ) -> PyResult<Py<PyAny>> {
+    match native_unary_promoting_route(py, x, op, context)? {
+        Some(out) => Ok(out),
+        None => Ok(cached_numpy(py)?.getattr(numpy_name)?.call1((x,))?.unbind()),
+    }
+}
+
+/// `native_unary_promoting`'s native routes; None where the operand is numpy's. A caller that
+/// must tell a native result from numpy's own (i0's non-finite recompute, bead .26) uses this.
+fn native_unary_promoting_route(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    op: UnaryOp,
+    context: &str,
+) -> PyResult<Option<Py<PyAny>>> {
     let numpy = cached_numpy(py)?;
-    let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
-        Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind())
-    };
     // float16: numpy's f16 ufuncs (via an f16<->f32 path) are the reference and far
     // faster than fnp's native f16 round-trip (no f16 PyBuffer Element). Defer f16 —
     // EXCEPT f16 sqrt, which is compute-bound + bit-exact via the native parallel widen
     // path (it defers internally on any negative input so numpy's "invalid" surface is exact).
     // Transcendentals (exp/log/sin/...) return None from the helper -> still defer (libm divergence).
     if let Some(out) = try_zerocopy_f16_unary_widen(py, x, op)? {
-        return Ok(out);
+        return Ok(Some(out));
     }
     if numpy_dtype_is_f16(x) {
-        return fallback(py);
+        return Ok(None);
     }
     // complex128 sin/cos/sinh/cosh: numpy computes these per-element single-threaded; the
     // parallel real-libm composition is bit-exact (verified) and wins ~7x.
     if let Some(cop) = complex_unary_op_for(op)
         && let Some(out) = try_zerocopy_complex_unary(py, x, cop)?
     {
-        return Ok(out);
+        return Ok(Some(out));
     }
     // SCALAR-LIBM TRANSCENDENTALS: delegate wherever NumPy's f64 kernel is not
     // the system libm. Every native route below computes the same scalar
@@ -62975,14 +63035,14 @@ fn native_unary_promoting(
     // pre-commit hook holds historical rows to the current evidence standard,
     // which a 2026-07-10 row cannot retroactively meet).
     if !numpy_f64_native_unary_is_byte_exact(py, numpy, op) {
-        return fallback(py);
+        return Ok(None);
     }
     // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Integer inputs
     // (which this promoting path widens to float) are not float64 ndarrays, so
     // they correctly fall through unchanged.
     if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, numpy, x, op)? {
-        return finish_preshaped_output(flat, &shape);
+        return finish_preshaped_output(flat, &shape).map(Some);
     }
     // float32 SIMD-transcendentals: numpy's vectorized f32 libm beats our scalar
     // per-element f32 libm 2-12x (sin/cos/tanh ~10x) — and the scalar path even
@@ -63011,19 +63071,19 @@ fn native_unary_promoting(
                 | UnaryOp::Sqrt
         )
     {
-        return fallback(py);
+        return Ok(None);
     }
     // float32 input is float-preserving here (only integers promote to f64), so
     // the zero-copy float32 path applies to the ops it supports (e.g. sqrt).
     if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, numpy, x, op)? {
-        return finish_preshaped_output(flat, &shape);
+        return finish_preshaped_output(flat, &shape).map(Some);
     }
     // An ndarray SUBCLASS keeps its type through a numpy ufunc, and every fast path
     // above gates on `is_exact_instance` (`deadlock-audit-1zl3e`). Same guard as
     // `native_unary_elementwise`; `sqrt` reaches the family through THIS function, which
     // is why fixing only the other one left `sqrt(np.matrix(a))` returning an ndarray.
     if ndarray_subclass_needs_numpy(py, x)? {
-        return fallback(py);
+        return Ok(None);
     }
     // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
     // zero-copy fast paths into the cold extract → rebuild (transpose-copy, ~4-5x
@@ -63034,7 +63094,7 @@ fn native_unary_promoting(
             .getattr(intern!(py, "c_contiguous"))?
             .extract::<bool>()?
     {
-        return fallback(py);
+        return Ok(None);
     }
     // DECIDE BEFORE THE EXTRACT, NOT AFTER IT. The block immediately below delegates bool,
     // integer and complex operands unconditionally - but it only learns which it is AFTER
@@ -63055,30 +63115,30 @@ fn native_unary_promoting(
     //
     // This is the whole small-n cost of the promoting libm unary family on integer input.
     if numeric_operand_facts(py, x)?.is_some_and(|f| matches!(f.kind, 'b' | 'i' | 'u' | 'c')) {
-        return fallback(py);
+        return Ok(None);
     }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
-        return fallback(py);
+        return Ok(None);
     };
     if native.dtype() == DType::Bool
         || native.has_integer_sidecar()
         || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
         || native.dtype().is_integer()
     {
-        return fallback(py);
+        return Ok(None);
     }
     if let Some(out) = numpy_array_from_direct_f64_unary(py, numpy, &native, op)? {
-        return finish_preshaped_output(out, native.shape());
+        return finish_preshaped_output(out, native.shape()).map(Some);
     }
     let result = native.elementwise_unary(op);
     if !dtype_supported_by_numpy_export_bridge(result.dtype()) {
-        return fallback(py);
+        return Ok(None);
     }
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if native.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
     }
-    Ok(output)
+    Ok(Some(output))
 }
 
 /// The IEEE floating-point categories a native kernel's operands raised.
@@ -64958,7 +65018,17 @@ fn unwrap(
         && period.is_none()
         && let Some(out) = try_native_unwrap_default(py, p.bind(py), axis)?
     {
-        return Ok(out);
+        // The native kernel reports no FP event (numpy's `unwrap([inf, 1])` warns "invalid value
+        // encountered in remainder"): a non-finite result is numpy's to recompute (bead .26).
+        return native_or_numpy_on_non_finite(py, out, || {
+            let unwrap_fn = cached_numpy(py)?.getattr(intern!(py, "unwrap"))?;
+            if axis == -1 {
+                return Ok(unwrap_fn.call1((p.bind(py),))?.unbind());
+            }
+            let kwargs = PyDict::new(py);
+            kwargs.set_item(intern!(py, "axis"), axis)?;
+            Ok(unwrap_fn.call((p.bind(py),), Some(&kwargs))?.unbind())
+        });
     }
     // Passthrough to np.unwrap (phase unwrapping). `discont` defaults to
     // period/2 in numpy; we forward None explicitly only when provided so
@@ -71705,12 +71775,22 @@ fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // hazard CI found in `kaiser`, which is i0 over i0); those hosts delegate. float16/float32
     // do too: numpy evaluates the Chebyshev series in that precision, and the float64 kernel
     // rounded once at the end differed in the last place on 15 of 24 float32 values (bead .8).
-    if !numpy_explog_matches_libm() || numpy_dtype_is_narrow_float(py, x.bind(py)) {
-        return Ok(cached_numpy(py)?
+    let numpy_i0 = || -> PyResult<Py<PyAny>> {
+        Ok(cached_numpy(py)?
             .call_method1(intern!(py, "i0"), (x.bind(py),))?
-            .unbind());
+            .unbind())
+    };
+    if !numpy_explog_matches_libm() || numpy_dtype_is_narrow_float(py, x.bind(py)) {
+        return numpy_i0();
     }
-    let result = native_unary_promoting(py, x.bind(py), UnaryOp::I0, intern!(py, "i0"), "i0(x)")?;
+    // The native I0 kernel reports no FP event, where numpy's `i0(1e308)` warns "overflow
+    // encountered in exp" and `i0(inf)` "invalid value encountered in divide": a non-finite
+    // NATIVE result is numpy's to recompute (bead .26). Only a native result - an operand the
+    // route declined has not been computed yet, and numpy reports for itself.
+    let result = match native_unary_promoting_route(py, x.bind(py), UnaryOp::I0, "i0(x)")? {
+        Some(native) => native_or_numpy_on_non_finite(py, native, numpy_i0)?,
+        None => return numpy_i0(),
+    };
     // numpy's i0 is `piecewise` over `asanyarray(x)`, so a scalar in gives a 0-d ndarray out,
     // not a numpy scalar (numpy's own Test_I0::test_non_array).
     if result.bind(py).is_instance(cached_ndarray_type(py)?)? {
@@ -86850,21 +86930,24 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Zero-copy 1-D Kronecker product (= flattened outer) for C-contiguous f64
     // ndarrays; skips the cold extract + full n*m build Vecs. Bit-identical;
     // multi-dim inputs and other dtypes fall through to the general path.
+    //
+    // Every route here multiplies silently (numpy's `inf * 0` warns "invalid value encountered
+    // in multiply"): a non-finite result is numpy's to recompute (bead .26).
     if let Some(result) = try_zerocopy_f64_kron1d(py, b_a, b_b)? {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     if let Some(result) = try_zerocopy_int_kron1d(py, b_a, b_b)? {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     // SIMD block-fill 2-D f64 Kronecker product (~7x faster than the cold extract
     // + native build); other ndims/dtypes fall through.
     if let Some(result) = try_zerocopy_f64_kron2d(py, b_a, b_b)? {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     // f32 / integer 2-D Kronecker product (the f64 path above is f64-only; f32/int otherwise hit the
     // cold extract ~6-36x). Element-wise block products, bit-identical to numpy.
     if let Some(result) = try_zerocopy_typed_kron2d(py, b_a, b_b)? {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
 
     // Everything the typed routes decline (float16, lists, N-D, mixed dtypes) is numpy's. The
@@ -87207,11 +87290,13 @@ fn outer(
     // Zero-copy rank-1 product for C-contiguous f64 ndarrays (the common case);
     // skips the cold extract + full n*m build Vecs. Bit-identical; other dtypes
     // and non-contiguous inputs fall through to the general path.
+    // The native outer kernels multiply silently (numpy's `inf * 0` warns "invalid value
+    // encountered in multiply"): a non-finite result is numpy's to recompute (bead .26).
     if let Some(result) = try_zerocopy_f64_outer(py, b_a, b_b)? {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     if let Some(result) = try_zerocopy_int_outer(py, b_a, b_b)? {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
 
     // Everything the zero-copy routes decline (float16, lists, mixed dtypes) is numpy's: the
@@ -121263,6 +121348,10 @@ fn ediff1d(
             }
         }
     };
+    // The f64/f32/int routes and the extract path subtract silently (numpy's `inf - inf` warns
+    // "invalid value encountered in subtract"): a non-finite result is numpy's (bead .26). The
+    // f16 route is not wrapped - on a hazard it returns np.diff's own, already-reported result.
+    let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
 
     // A byte-swapped operand belongs to numpy, decided here for the same reason as in `diff`:
     // declining only the zero-copy route drops `>u8` into the f64 storage bridge, which raises
@@ -121300,7 +121389,7 @@ fn ediff1d(
     if let Some(out) =
         try_zerocopy_f64_ediff1d(py, ary.bind(py), to_begin.as_ref(), to_end.as_ref())?
     {
-        return Ok(out);
+        return native(out);
     }
 
     // Zero-copy integer consecutive differences (no to_begin/to_end); wrapping
@@ -121319,7 +121408,7 @@ fn ediff1d(
         && to_end.is_none()
         && let Some(out) = try_zerocopy_f32_ediff1d(py, ary.bind(py))?
     {
-        return Ok(out);
+        return native(out);
     }
 
     // Zero-copy float16 consecutive differences (no to_begin/to_end)
@@ -121379,7 +121468,7 @@ fn ediff1d(
     };
 
     if to_begin.is_none() && to_end.is_none() {
-        return build_numpy_array_from_ufunc(py, &diff_result);
+        return native(build_numpy_array_from_ufunc(py, &diff_result)?);
     }
 
     let mut parts: Vec<UFuncArray> = Vec::with_capacity(3);
@@ -121409,7 +121498,7 @@ fn ediff1d(
         Ok(r) => r,
         Err(_) => return fallback(),
     };
-    build_numpy_array_from_ufunc(py, &result)
+    native(build_numpy_array_from_ufunc(py, &result)?)
 }
 
 // Print-options (3). printoptions is a context manager; passthrough
