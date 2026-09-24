@@ -69829,12 +69829,12 @@ fn loadtxt(
 }
 
 #[pyfunction]
-#[pyo3(signature = (fname, dtype=None, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, skip_header=0_i64, skip_footer=0_i64, converters=None, missing_values=None, filling_values=None, usecols=None, names=None, excludelist=None, deletechars=None, replace_space="_", autostrip=false, case_sensitive=None, defaultfmt="f%i", unpack=None, usemask=false, loose=true, invalid_raise=true, max_rows=None, encoding=None, *, ndmin=0_i64, like=None))]
+#[pyo3(signature = (fname, dtype=SuppliedArg::Omitted, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, skip_header=0_i64, skip_footer=0_i64, converters=None, missing_values=None, filling_values=None, usecols=None, names=None, excludelist=None, deletechars=None, replace_space="_", autostrip=false, case_sensitive=None, defaultfmt="f%i", unpack=None, usemask=false, loose=true, invalid_raise=true, max_rows=None, encoding=None, *, ndmin=0_i64, like=None))]
 #[allow(clippy::too_many_arguments)]
 fn genfromtxt(
     py: Python<'_>,
     fname: Py<PyAny>,
-    dtype: Option<Py<PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] dtype: SuppliedArg,
     // `comments=None`, an int delimiter (fixed width) and a tuple of field widths are all
     // numpy's to parse (see `TextArg`).
     #[pyo3(from_py_with = text_arg)] comments: TextArg,
@@ -69862,13 +69862,24 @@ fn genfromtxt(
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = cached_numpy(py)?;
+    // numpy's default is `dtype=float`; an EXPLICIT `dtype=None` asks it to detect each column's
+    // type. A defaulted `Option` merged the two, and the fallback then forwarded nothing for
+    // None, so `genfromtxt(f, dtype=None)` came back float64 with NaN in every text column where
+    // numpy returns a structured array of str/int/float/complex/bool fields (numpy's own
+    // TestFromTxt, 20 tests, through the drop-in harness - bead rc0923 .8). The explicit value is
+    // forwarded verbatim; the native path below only ever takes a concrete numeric dtype.
+    let dtype_arg = dtype;
+    let dtype: Option<Py<PyAny>> = match &dtype_arg {
+        SuppliedArg::Supplied(value) if !value.is_none(py) => Some(value.clone_ref(py)),
+        _ => None,
+    };
     let initial_pos = fname.bind(py).call_method0(intern!(py, "tell")).ok();
     let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
         if let Some(ref pos) = initial_pos {
             let _ = fname.bind(py).call_method1(intern!(py, "seek"), (pos,));
         }
         let kwargs = PyDict::new(py);
-        if let Some(dtype_val) = dtype.as_ref() {
+        if let SuppliedArg::Supplied(dtype_val) = &dtype_arg {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
         kwargs.set_item(intern!(py, "comments"), comments.to_object(py)?)?;

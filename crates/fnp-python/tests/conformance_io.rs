@@ -961,3 +961,47 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// numpy's genfromtxt defaults to `dtype=float`, and an EXPLICIT `dtype=None` detects each
+/// column's type. fnp's defaulted `Option` merged the two and forwarded nothing for None, so
+/// `genfromtxt(f, dtype=None)` returned float64 with NaN in every text column (numpy's own
+/// TestFromTxt: 20 tests, found through the drop-in harness, bead rc0923 .8). Controls: an omitted
+/// dtype (float) and an explicit float keep matching.
+#[test]
+fn genfromtxt_explicit_dtype_none_detects_column_types_like_numpy() -> Result<(), String> {
+    // `r##` because the script itself contains `"#` (a commented header line).
+    let script = fnp_script(
+        r##"
+import warnings
+warnings.simplefilter("ignore")
+def o(f):
+    try:
+        r = f()
+        return ("ok", str(r.dtype), r.shape, r.tobytes() if r.dtype.kind != "O" else repr(r))
+    except Exception as e:
+        return (type(e).__name__,)
+header = "gender age weight\nM 64.0 75.0\nF 25.0 60.0"
+cases = {
+    "names header": lambda m: m.genfromtxt(StringIO(header), dtype=None, names=True, encoding=None),
+    "auto dtype": lambda m: m.genfromtxt(StringIO("A 64 75.0 3+4j True\nBCD 25 60.0 5+6j False"), dtype=None, encoding=None),
+    "commented header": lambda m: m.genfromtxt(StringIO("# gender age weight\nM 21 72.1\nF 35 58.33"), dtype=None, names=True, encoding=None),
+    "usecols names": lambda m: m.genfromtxt(StringIO("1 2 3\n4 5 6"), usecols=(0, 2), names="a, b", dtype=None),
+    "autostrip": lambda m: m.genfromtxt(StringIO("01/01/2003  , 1.3,   abcde"), delimiter=",", dtype=None, autostrip=True, encoding=None),
+    "numeric ints": lambda m: m.genfromtxt(StringIO("1 2 3\n4 5 6"), dtype=None),
+    "mixed": lambda m: m.genfromtxt(StringIO("1 a 3.5\n4 b 6.5"), dtype=None, encoding=None),
+    "omitted dtype (control)": lambda m: m.genfromtxt(StringIO("1 2 3\n4 5 6")),
+    "explicit float (control)": lambda m: m.genfromtxt(StringIO("1 2 3\n4 5 6"), dtype=float),
+}
+bad = [k for k, f in cases.items() if o(lambda: f(np)) != o(lambda: f(fnp))]
+print(len(cases), bad)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "9 []",
+        "genfromtxt dtype=None must match numpy: {result}"
+    );
+    Ok(())
+}
