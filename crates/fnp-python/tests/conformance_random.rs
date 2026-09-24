@@ -861,3 +861,60 @@ result = bad
         Ok(())
     });
 }
+
+/// numpy's Generator.dirichlet requires a 1-D `alpha` with no negative entry and switches to
+/// a beta-variate stick-breaking sampler when `alpha.max() < 0.1`; negative_binomial rejects
+/// `n <= 0`, `p` outside (0, 1] and a Poisson-overflowing `(1-p)/p * (n + 10 sqrt(n))`.
+/// fnp flattened a 2-D `alpha` into a wrongly shaped result, drew different small-alpha and
+/// NaN-alpha values, and returned a value for `negative_binomial(2**62, 0.1)` (numpy's own
+/// test_dirichlet_bad_alpha / test_dirichlet_small_alpha /
+/// test_negative_binomial_invalid_p_n_combination). Values bit-for-bit, errors by type and
+/// message, stream continuity after each call.
+#[test]
+fn dirichlet_and_negative_binomial_validation_and_small_alpha_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+cases = [
+    ("dirichlet 2-D", lambda r: r.dirichlet([[5, 1]])),
+    ("dirichlet 2-D array", lambda r: r.dirichlet(np.array([[5, 1], [1, 5]]))),
+    ("dirichlet negative", lambda r: r.dirichlet(np.array([5.4e-01, -1.0e-16]))),
+    ("dirichlet NaN", lambda r: r.dirichlet([1.0, np.nan])),
+    ("dirichlet small alpha", lambda r: r.dirichlet([0.05, 0.02, 0.01], size=3)),
+    ("dirichlet mixed alpha", lambda r: r.dirichlet([0.05, 0.5], size=2)),
+    ("dirichlet plain", lambda r: r.dirichlet([1.0, 2.0, 3.0], size=2)),
+    ("negative_binomial overflow", lambda r: r.negative_binomial(2**62, 0.1)),
+    ("negative_binomial n <= 0", lambda r: r.negative_binomial(0, 0.5)),
+    ("negative_binomial p NaN", lambda r: r.negative_binomial(5, np.nan)),
+    ("negative_binomial plain", lambda r: r.negative_binomial(5, 0.3, size=4)),
+]
+for label, fn in cases:
+    f, n = fnp.random.default_rng(5), np.random.default_rng(5)
+    try: w = fn(n); we = None
+    except Exception as e: w, we = None, (type(e).__name__, str(e))
+    try: g = fn(f); ge = None
+    except Exception as e: g, ge = None, (type(e).__name__, str(e))
+    if we != ge or (we is None and (np.shape(g) != np.shape(w) or np.asarray(g).tobytes() != np.asarray(w).tobytes())):
+        bad.append(f"{label}: numpy={we or np.shape(w)} fnp={ge or np.shape(g)}")
+    elif not np.array_equal(f.random(3), n.random(3)):
+        bad.append(f"{label}: stream diverged after the call")
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "dirichlet/negative_binomial diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}

@@ -34,8 +34,9 @@ use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolera
 use fnp_ndarray::{broadcast_shapes, element_count};
 use fnp_random::{
     BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
-    BitGeneratorState, Generator as RandomGenerator, RandomError, RandomState as CoreRandomState,
-    SeedMaterial, SeedSequence, SeedSequenceSnapshot, ShapedRandomOutput,
+    BitGeneratorState, Generator as RandomGenerator, POISSON_LAM_MAX, RandomError,
+    RandomState as CoreRandomState, SeedMaterial, SeedSequence, SeedSequenceSnapshot,
+    ShapedRandomOutput,
 };
 use fnp_ufunc::{
     BinaryOp, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
@@ -2992,7 +2993,24 @@ impl PyRandomGenerator {
         #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let (Some(n), Some(p)) = (n.native(), p.native()) else {
+        // numpy validates scalars before drawing: `n > 0`, `0 < p <= 1`, and a Poisson
+        // overflow bound on `(1 - p) / p * (n + 10 sqrt(n))`. The native kernel accepted
+        // `negative_binomial(2**62, 0.1)` (numpy's own
+        // TestRandomDist::test_negative_binomial_invalid_p_n_combination), so anything numpy
+        // rejects goes to numpy, which raises its own message without touching the stream.
+        let numpy_rejects = |n: f64, p: f64| {
+            n.is_nan()
+                || n <= 0.0
+                || p.is_nan()
+                || p <= 0.0
+                || p > 1.0
+                || (1.0 - p) / p * (n + 10.0 * n.sqrt()) > POISSON_LAM_MAX
+        };
+        let native = match (n.native(), p.native()) {
+            (Some(n), Some(p)) if !numpy_rejects(n, p) => Some((n, p)),
+            _ => None,
+        };
+        let Some((n, p)) = native else {
             let params = [("n", n.to_object(py)?), ("p", p.to_object(py)?)];
             return self.numpy_distribution(py, "negative_binomial", &params, size);
         };
@@ -3367,6 +3385,12 @@ impl PyRandomGenerator {
         build_random_u64_matrix_as_i64_parts(py, shape, values, width)
     }
 
+    // numpy requires a 1-D `alpha` with no negative or NaN entry, and switches to a
+    // beta-variate stick-breaking sampler when `alpha.max() < 0.1`. The flattening extract
+    // below accepted a 2-D `alpha` silently (numpy's own
+    // TestRandomDist::test_dirichlet_bad_alpha) and the native kernel has no small-alpha
+    // branch (test_dirichlet_small_alpha drew different values), so all three run numpy's
+    // sampler on this generator's exact state; numpy raises its own errors.
     #[pyo3(signature = (alpha, size=None))]
     fn dirichlet(
         &mut self,
@@ -3374,8 +3398,28 @@ impl PyRandomGenerator {
         alpha: Py<PyAny>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let alpha_ndim = match alpha
+            .bind(py)
+            .getattr(intern!(py, "ndim"))
+            .and_then(|ndim| ndim.extract::<usize>())
+        {
+            Ok(ndim) => ndim,
+            Err(_) => cached_numpy(py)?
+                .call_method1(intern!(py, "ndim"), (alpha.bind(py),))?
+                .extract::<usize>()?,
+        };
+        let alpha_values = if alpha_ndim == 1 {
+            extract_random_f64_vector(py, alpha.bind(py)).ok()
+        } else {
+            None
+        };
+        let Some(alpha) = alpha_values.filter(|values| {
+            values.iter().all(|a| !a.is_nan() && *a >= 0.0)
+                && (values.is_empty() || values.iter().copied().fold(f64::MIN, f64::max) >= 0.1)
+        }) else {
+            return self.numpy_distribution(py, "dirichlet", &[("alpha", alpha)], size);
+        };
         self.before_draw(py)?;
-        let alpha = extract_random_f64_vector(py, alpha.bind(py))?;
         let size = random_size_from_py(py, size, "Generator.dirichlet(size)")?;
         let (shape, len, _) = random_len_and_shape(size)?;
         let width = alpha.len();

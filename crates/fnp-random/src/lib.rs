@@ -279,7 +279,7 @@ pub const BIT_GENERATOR_STATE_SCHEMA_VERSION: u32 = 1;
 const MAX_BINOMIAL_DIRECT_TRIALS: u64 = i64::MAX as u64;
 /// Maximum Poisson lambda accepted by NumPy's Generator before int64 overflow risk.
 /// NumPy computes this as `float(np.iinfo(int64).max) - 10 * sqrt(float(np.iinfo(int64).max))`.
-const POISSON_LAM_MAX: f64 = 9.223_372_006_484_771e18;
+pub const POISSON_LAM_MAX: f64 = 9.223_372_006_484_771e18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RandomRuntimeMode {
