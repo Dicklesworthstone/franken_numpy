@@ -67639,3 +67639,50 @@ is the only actionable non-win and is too small to be worth a slot. The next rea
 project needs a WIDER board (f32, complex, 2-D axis reductions, strided inputs, small-n entry
 costs), not another pass over these 24 cells.
 AGENT_NAME=BlackThrush.
+
+## 2026-09-24 - LOSS MAP (measured, no code change): default-kind argsort at n=2^20 vs live numpy on a 10-core worker - f64 normal 1.49x SLOWER and f32 normal 1.15x SLOWER decided, i64 [0,2^40) 1.75x FASTER decided, four cells lean slower
+
+Bead `deadlock-audit-rc0923-epic-71qy3.23`. The triage on thinkstation1 (64 logical, load 21-26)
+read f64 normal 2.010x, i64 [0, 2^40) 3.868x and f64 sorted 1.186x SLOWER. This is the
+contract-grade re-measure of those cells and four neighbours.
+
+HOST_BASELINE host=vmi1227854 cpu_model=AMD_EPYC_Processor__with_IBPB_ physical_cores=10 logical_threads=10 online_cpus=0:1:2:3:4:5:6:7:8:9 allowed_logical_threads=10 allowed_cpus=0:1:2:3:4:5:6:7:8:9 governor=unavailable
+bench_elf_sha256=24c4c96f1872a6fa21553f79b923f81fb7b4cef5e5a3f2bfc680ffe46dc167a7 (commit f966237d,
+`cargo test --release -p fnp-python --bench criterion_python_argsort`, profile=release, NOT
+release-perf - both arms in one binary, so ratios are fair but absolute ms are not ship-grade).
+harness=common::run_dual_null_median_ci_contract_with_sampling (dual A/A nulls, 41 rounds, min_of=1)
+Incumbent: numpy 2.4.3 `numpy.argsort` in the same process; the group asserts at runtime that
+fnp.argsort is not numpy's callable. Both arms are the public call end to end, and each allocates
+its own int64 output. PARITY: every cell's index output was byte-identical to numpy's before timing.
+
+| cell (n=2^20, seed 23) | numpy ms | fnp ms | numpy/fnp | 95% CI | A/A null numpy / fnp | verdict |
+|---|---|---|---|---|---|---|
+| f64 standard_normal | 76.69 | 116.54 | 0.6711 | [0.6258, 0.7641] | 0.9716 / 1.0367 | DECIDABLE_REGRESSION |
+| f32 standard_normal | 48.31 | 57.63 | 0.8700 | [0.8220, 0.9129] | 1.0124 / 1.0026 | DECIDABLE_REGRESSION |
+| i64 uniform [0, 2^40) | 51.39 | 30.08 | 1.7492 | [1.5609, 1.9131] | 0.9765 / 0.9402 | DECIDABLE_WIN |
+| f64 sorted | 3.35 | 3.95 | 0.8643 | [0.8534, 0.8824] | 0.9937 / 1.0148 | UNDECIDED |
+| i64 uniform [0, 2^32) | 52.71 | 60.36 | 0.8368 | [0.8253, 0.8775] | 0.9717 / 1.0461 | UNDECIDED |
+| i64 full width | 59.54 | 71.47 | 0.9160 | [0.7227, 0.9918] | 1.0264 / 1.0600 | UNDECIDED |
+| i32 full width | 46.85 | 61.95 | 0.7805 | [0.6938, 0.8869] | 1.0147 / 0.9847 | UNDECIDED |
+
+A/A NULL CONTROLS (same invocation): numpy null 0.9716-1.0264, fnp null 0.9402-1.0600 across the
+seven cells, as tabled.
+READING THE i64 [0, 2^40) CELL: the triage LOSS and this WIN are both consistent with the 2026-08-27
+row ("every native integer argsort SORTS IN FULL AND THEN DISCARDS IT on a single duplicate"). At
+n=2^20 a [0, 2^40) draw expects 0.5 duplicate pairs, so the gate (`int_argsort_tie_is_probable`,
+range < n^2/2 = 2^39) lets the radix run, and whether it wins or pays twice is a coin flip on one
+duplicate. Seed 23 had none. This is not an incumbent-win claim; the regime is the finding.
+MECHANISM, not yet counted: f64/f32 normal data is distinct, so the gather-free LSD radix engages
+and runs a pass per key byte (8 for f64) over key+index. On 10 cores that loses to numpy's
+single-threaded x86-simd-sort AVX2 argsort. The 2026-06-21 "parallel flat f64 argsort 2.2-4.3x" row
+was measured on a different, larger host; per the standing rule, the two are not comparable.
+A triage run of the same grid at 11 rounds on vmi1152480 (bench_elf_sha256=98855d5d..., also 10
+cores) leaned slower in all seven cells and decided none. It is a different worker, so it is
+recorded, not compared.
+RETRY PREDICATE: a lever for the f64/f32 default radix (fewer passes via wider digits, an MSD split,
+a thread-count-aware engage gate, or declining below a core count) must re-run
+`bench_argsort_default_grid_vs_numpy` on a named 10-core worker AND a >=32-core worker in the same
+commit, because this route's sign flips with core count. A thread-count gate needs both rows before
+it ships. Do not retry the i64 [0, 2^40) cell without seeding at least 11 draws: a single seed
+measures whether a duplicate happened, not the route.
+AGENT_NAME=TealKnoll.
