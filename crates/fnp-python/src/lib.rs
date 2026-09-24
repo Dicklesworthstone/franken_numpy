@@ -62668,8 +62668,16 @@ fn rad2deg(
         if let Some(out) = try_zerocopy_f16_unary_widen(py, &x_arg, UnaryOp::Degrees)? {
             return Ok(out);
         }
-        degrees_native(py, &x_arg)
-            .or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "rad2deg"), args, kwargs))
+        // Its OWN numpy name, not `degrees_native`'s: every delegation and non-finite recompute
+        // in there calls that name, and numpy's warning says "overflow encountered in rad2deg".
+        native_angle_conversion(
+            py,
+            &x_arg,
+            UnaryOp::Degrees,
+            intern!(py, "rad2deg"),
+            "rad2deg(x)",
+        )
+        .or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "rad2deg"), args, kwargs))
     } else {
         core_numpy_passthrough_interned(py, intern!(py, "rad2deg"), args, kwargs)
     }
@@ -64681,8 +64689,15 @@ fn deg2rad(
         if let Some(out) = try_zerocopy_f16_unary_widen(py, &x_arg, UnaryOp::Radians)? {
             return Ok(out);
         }
-        radians_native(py, &x_arg)
-            .or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "deg2rad"), args, kwargs))
+        // Its own numpy name, as in `rad2deg`.
+        native_angle_conversion(
+            py,
+            &x_arg,
+            UnaryOp::Radians,
+            intern!(py, "deg2rad"),
+            "deg2rad(x)",
+        )
+        .or_else(|_| core_numpy_passthrough_interned(py, intern!(py, "deg2rad"), args, kwargs))
     } else {
         core_numpy_passthrough_interned(py, intern!(py, "deg2rad"), args, kwargs)
     }
