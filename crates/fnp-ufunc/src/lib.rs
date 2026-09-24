@@ -51387,7 +51387,7 @@ print(json.dumps(payload))
 
     // Run with: cargo test -p fnp-ufunc --release --lib bench_radix_value_sort -- --ignored --nocapture
     #[test]
-    #[ignore]
+    #[ignore = "perf A/B: radix value sort vs comparison sort; run --release -- --ignored --nocapture"]
     fn bench_radix_value_sort_vs_comparison() {
         use std::time::Instant;
         let n = 4_000_000usize;

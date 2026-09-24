@@ -1120,3 +1120,71 @@ result = (count, bad)
         Ok(())
     });
 }
+
+/// Former DISCREPANCIES.md DISC-004 (multivariate_normal "Cholesky, not SVD") and DISC-005
+/// (multivariate_hypergeometric "sequential draws") claimed seeded streams that differ from
+/// numpy. At the Python surface both are seed-exact: every draw and the stream position after
+/// it must match numpy. docs/DIVERGENCES.md cites this test as the evidence for retiring them.
+#[test]
+fn multivariate_distributions_are_seed_exact_with_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+cov = [[2.0, 0.3, 0.1], [0.3, 1.0, 0.2], [0.1, 0.2, 0.5]]
+singular = [[1.0, 1.0], [1.0, 1.0]]
+cells = []
+for seed in (0, 11, 2024):
+    for method in ("marginals", "count"):
+        for colors, nsample, size in (([5, 10, 15], 12, 6), ([0, 3, 40, 2], 20, (2, 3)), ([7], 7, None)):
+            kw = dict(size=size, method=method)
+            cells.append((seed, "multivariate_hypergeometric", (colors, nsample), kw))
+    cells.append((seed, "multivariate_normal", ([0.0, 1.0, -2.0], cov), dict(size=4)))
+    cells.append((seed, "multivariate_normal", ([0.5, -0.5], singular), dict(size=(2, 2), method="svd")))
+    cells.append((seed, "multivariate_normal", ([0.0, 1.0, -2.0], cov), dict(size=3, method="cholesky")))
+def run(rng, name, args, kw):
+    try:
+        value, err = getattr(rng, name)(*args, **kw), None
+    except Exception as exc:
+        value, err = None, type(exc).__name__
+    return value, err, rng.random(2)
+bad = []
+distinct = set()
+for seed, name, args, kw in cells:
+    gv, ge, gnext = run(fnp.random.default_rng(seed), name, args, kw)
+    wv, we, wnext = run(np.random.default_rng(seed), name, args, kw)
+    if we is None:
+        distinct.add(np.asarray(wv).tobytes())
+    same = (ge == we and np.asarray(gnext).tobytes() == wnext.tobytes()
+            and (we is not None or (np.asarray(gv).dtype == wv.dtype
+                                    and np.shape(gv) == wv.shape
+                                    and np.asarray(gv).tobytes() == wv.tobytes())))
+    if not same:
+        bad.append(f"{name}{args} {kw} seed={seed}: numpy_err={we} fnp_err={ge}")
+result = (len(cells), len(distinct), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (count, distinct, bad): (usize, usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(count, 3 * (2 * 3 + 3), "cell table drifted");
+        // Negative control: the seeds and parameters must actually move the draws, or
+        // byte equality above would be satisfied by a constant stream. The six
+        // single-colour cells (colors=[7], nsample=7) are deterministic by construction and
+        // collapse to one value; every other cell must be distinct.
+        assert!(
+            distinct >= count - 5,
+            "only {distinct} distinct numpy draws across {count} cells"
+        );
+        assert!(
+            bad.is_empty(),
+            "multivariate draws diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}

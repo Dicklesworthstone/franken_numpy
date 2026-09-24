@@ -265,8 +265,9 @@ print(np.array_equal(fnp_result, np_result))
     Ok(())
 }
 
+// Re-enabled 2026-09-24 (bead rc0923 .16): DISC-011 no longer reproduces at the Python surface;
+// the body passed against the f11c7752 build and numpy 2.4.3.
 #[test]
-#[ignore = "PARITY GAP: fnp accumulator returns -0.0, NumPy returns 0.0. See DISC-011."]
 fn matmul_signed_zero_parity() -> Result<(), String> {
     let script = fnp_script(
         r#"

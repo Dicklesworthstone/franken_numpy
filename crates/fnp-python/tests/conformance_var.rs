@@ -845,7 +845,7 @@ print(verdicts if verdicts else True)
 }
 
 #[test]
-#[ignore = "PARITY GAP (ISA-dependent): flat f64 nansum/var/std byte parity vs numpy depends on the WORKER's numpy SIMD build - one gate worker read all-True at every size, another read False from n=131072 (nansum) / ~2M + all N-D flats (var/std). numpy's pairwise-sum leaf structure varies with vector width (AVX-512 vs AVX2 partial accumulators), so base_sum_simd matches one ISA and sub-ULP-diverges on others - the transcendental ISA-divergence class, sum edition. Fix requires the ISA-gate treatment (worker_isa_probe grid); see dtype-gap-audit memory 2026-07-13."]
+#[ignore = "PARITY GAP PD-F64-FLAT-SUM-ISA (ISA-dependent): flat f64 nansum/var/std byte parity vs numpy depends on the WORKER's numpy SIMD build - one gate worker read all-True at every size, another read False from n=131072 (nansum) / ~2M + all N-D flats (var/std). numpy's pairwise-sum leaf structure varies with vector width (AVX-512 vs AVX2 partial accumulators), so base_sum_simd matches one ISA and sub-ULP-diverges on others - the transcendental ISA-divergence class, sum edition. Fix requires the ISA-gate treatment (worker_isa_probe grid); see dtype-gap-audit memory 2026-07-13."]
 fn f64_var_flat_byte_parity_probe_vs_numpy() -> Result<(), String> {
     // PROBE preserved for the ISA-gate investigation: nansum rows isolate the
     // shared pairwise sum core; var/std rows add the sqr-dev pass; 2-D/3-D
