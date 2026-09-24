@@ -1133,7 +1133,7 @@ impl BinaryOp {
                         0.0
                     }
                 } else {
-                    (lhs / rhs).floor()
+                    npy_floor_divide_f64(lhs, rhs)
                 }
             }
             Self::FloatPower => lhs.powf(rhs),
@@ -41600,6 +41600,39 @@ pub fn lcm_arrays(a: &UFuncArray, b: &UFuncArray) -> Result<UFuncArray, UFuncErr
     })
 }
 
+/// NumPy's float64 `npy_floor_divide`, step for step: fmod, subtract, divide, sign fix, floor,
+/// snap to the nearest integer, copysign. Every step is an IEEE-exact operation, so the
+/// quotient is byte-identical to `numpy.floor_divide` and to the quotient of `numpy.divmod`.
+/// `(a / b).floor()` is NOT: near an exact multiple, `a / b` rounds up to the next integer
+/// (`78 * 6e-8 // 6e-8` is 77 in NumPy, 78 by `floor(a / b)`), which also breaks
+/// `q * b + r == a`. A zero divisor returns `a / b`, as NumPy does. The formula was pinned
+/// against numpy 2.4.3 on 300k adversarial cases (sign grids, exact multiples, subnormals,
+/// 1e300 / 5e-324 extremes; 0 fails) in the 2026-07-12 floor_divide reconstruction.
+/// `#[inline]` so fnp-python's parallel floor_divide/divmod loops still inline it across
+/// crates (the release profile has no LTO).
+#[inline]
+#[must_use]
+pub fn npy_floor_divide_f64(a: f64, b: f64) -> f64 {
+    if b == 0.0 {
+        return a / b;
+    }
+    let md = a % b;
+    let mut div = (a - md) / b;
+    if md != 0.0 && ((b < 0.0) != (md < 0.0)) {
+        div -= 1.0;
+    }
+    if div != 0.0 {
+        let floordiv = div.floor();
+        if div - floordiv > 0.5 {
+            floordiv + 1.0
+        } else {
+            floordiv
+        }
+    } else {
+        0.0f64.copysign(a / b)
+    }
+}
+
 /// Element-wise divmod: returns `(floor_quotient, remainder)`.
 ///
 /// Uses floor division semantics (like Python, not C truncation).
@@ -41663,7 +41696,7 @@ pub fn divmod_arrays(
             quotients.push(f64::NAN);
             remainders.push(f64::NAN);
         } else {
-            let q = (av / bv).floor();
+            let q = npy_floor_divide_f64(av, bv);
             // Use fmod for the remainder to preserve precision with large numbers
             let r = av % bv;
             // Adjust remainder sign to match floor division semantics
@@ -43769,17 +43802,17 @@ mod tests {
         chebroots, chebval, checked_window_total, copysign, datetime_as_string, divmod_arrays,
         errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis, financial_fv, financial_ipmt,
         financial_irr, financial_mirr, financial_nper, financial_npv, financial_pmt,
-        financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc, frompyfunc_object,
-        frompyfunc_python, frompyfunc_python_import, frompyfunc_python_import_with_interpreter,
-        frompyfunc_python_with_interpreter, gcd_arrays, geterr, herm2poly, hermder, hermdiv,
-        herme2poly, hermeder, hermediv, hermefit, hermefromroots, hermeint, hermeroots, hermeval,
-        hermfit, hermfromroots, hermint, hermroots, hermval, hypot, interpolate_percentile,
-        is_busday, isnat, isneginf, isposinf, lag2poly, lagder, lagdiv, lagfit, lagfromroots,
-        lagint, lagroots, lagval, lcm_arrays, ldexp, leg2poly, legder, legdiv, legfit,
-        legfromroots, legint, legroots, legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked,
-        ma_make_mask, ma_mask_or, ma_maximum_fill_value, ma_maximum_fill_value_for_dtype,
-        ma_minimum_fill_value, ma_minimum_fill_value_for_dtype, matmul_accumulate,
-        matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
+        financial_ppmt, financial_pv, financial_rate, floor_divide, frexp, frompyfunc,
+        frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
+        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
+        geterr, herm2poly, hermder, hermdiv, herme2poly, hermeder, hermediv, hermefit,
+        hermefromroots, hermeint, hermeroots, hermeval, hermfit, hermfromroots, hermint, hermroots,
+        hermval, hypot, interpolate_percentile, is_busday, isnat, isneginf, isposinf, lag2poly,
+        lagder, lagdiv, lagfit, lagfromroots, lagint, lagroots, lagval, lcm_arrays, ldexp,
+        leg2poly, legder, legdiv, legfit, legfromroots, legint, legroots, legval, logaddexp,
+        logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or, ma_maximum_fill_value,
+        ma_maximum_fill_value_for_dtype, ma_minimum_fill_value, ma_minimum_fill_value_for_dtype,
+        matmul_accumulate, matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
         normalize_fixed_signature_keywords, normalize_signature_keywords, note_unary_float_errors,
         pad_empty, pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
         plan_binary_dispatch, plan_binary_dispatch_with_registry,
@@ -77759,6 +77792,48 @@ print("\n".join(out))
                 vals_b[i]
             );
         }
+    }
+
+    /// numpy gh-6127 regime: near an exact multiple, `a / b` rounds up to the next integer, so
+    /// `floor(a / b)` overshoots. Expected values are numpy 2.4.3's own outputs
+    /// (`np.divmod(78 * 6e-8, 6e-8)` is `(77.0, 5.999999999999965e-08)`), and
+    /// `q * b + r == a` holds exactly, as numpy's test_float_remainder_roundoff asserts.
+    #[test]
+    fn divmod_and_floor_divide_match_numpy_near_exact_multiples() {
+        let b_abs = 6e-8_f64;
+        let a_abs = 78.0 * 6e-8_f64;
+        // Negative control: the naive quotient is wrong on this input.
+        assert_eq!((a_abs / b_abs).floor(), 78.0);
+        for (sa, sb) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+            let (av, bv) = (sa * a_abs, sb * b_abs);
+            let a = UFuncArray::new(vec![1], vec![av], DType::F64).unwrap();
+            let b = UFuncArray::new(vec![1], vec![bv], DType::F64).unwrap();
+            let (q, r) = divmod_arrays(&a, &b).unwrap();
+            let (qv, rv) = (q.values()[0], r.values()[0]);
+            assert_eq!(qv * bv + rv, av, "q*b + r == a for ({av}, {bv})");
+            if bv < 0.0 {
+                assert!(
+                    bv < rv && rv <= 0.0,
+                    "remainder sign for ({av}, {bv}): {rv}"
+                );
+            } else {
+                assert!(
+                    bv > rv && rv >= 0.0,
+                    "remainder sign for ({av}, {bv}): {rv}"
+                );
+            }
+            let fd = floor_divide(&a, &b).unwrap();
+            assert_eq!(
+                fd.values()[0].to_bits(),
+                qv.to_bits(),
+                "floor_divide == divmod quotient"
+            );
+        }
+        let a = UFuncArray::new(vec![1], vec![a_abs], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![1], vec![b_abs], DType::F64).unwrap();
+        let (q, r) = divmod_arrays(&a, &b).unwrap();
+        assert_eq!(q.values(), &[77.0]);
+        assert_eq!(r.values()[0].to_bits(), 5.999999999999965e-08_f64.to_bits());
     }
 
     #[test]

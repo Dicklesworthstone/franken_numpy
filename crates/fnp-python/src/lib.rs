@@ -47,7 +47,7 @@ use fnp_ufunc::{
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
     left_shift as ufunc_left_shift, logaddexp2 as ufunc_logaddexp2,
     logical_not as ufunc_logical_not, ma_is_masked, ma_make_mask, ma_mask_or,
-    matmul_accumulate_serial, modf as ufunc_modf, reduce_frompyfunc_values,
+    matmul_accumulate_serial, modf as ufunc_modf, npy_floor_divide_f64, reduce_frompyfunc_values,
     right_shift as ufunc_right_shift, signbit as ufunc_signbit, spacing as ufunc_spacing,
     take_float_error_events,
 };
@@ -64586,30 +64586,6 @@ fn imag(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
-// numpy's npy_floor_divide(a, b) replicated exactly: every step (fmod, subtract,
-// divide, floor, copysign) is an IEEE-exact deterministic operation, so the Rust
-// translation is byte-identical with no libm-variance risk (formula pinned against
-// numpy 2.4.3 on 300k adversarial cases incl sign grids, exact multiples,
-// subnormals, 1e300/5e-324 extremes: 0 fails; floor_divide recon 2026-07-12).
-#[inline]
-fn npy_floor_divide_f64(a: f64, b: f64) -> f64 {
-    let md = a % b;
-    let mut div = (a - md) / b;
-    if md != 0.0 && ((b < 0.0) != (md < 0.0)) {
-        div -= 1.0;
-    }
-    if div != 0.0 {
-        let floordiv = div.floor();
-        if div - floordiv > 0.5 {
-            floordiv + 1.0
-        } else {
-            floordiv
-        }
-    } else {
-        (0.0f64).copysign(a / b)
-    }
-}
-
 // Zero-copy parallel f64 array-array floor_divide. numpy's DOUBLE_floor_divide
 // loop is single-threaded and compute-heavy (fmod + floor + correction per
 // element, ~300ms at 8M on hz1); the same exact per-element function fans out
@@ -114553,9 +114529,15 @@ fn try_zerocopy_f64_divmod(
         // SAFETY: fresh numpy.empty buffers we own; disjoint chunks under par_chunks_mut.
         let q: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(qc.as_ptr() as *mut f64, n) };
         let r: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(rc.as_ptr() as *mut f64, n) };
-        let kernel = |q: &mut [f64], r: &mut [f64], a: &[f64], b: &[f64]| {
+        // Quotient by numpy's npy_divmod algorithm, not `floor(a / b)`, which overshoots near
+        // exact multiples (39% of cells in a near-multiple sweep). Returns whether every
+        // quotient is finite: finite operands can still overflow the quotient (`4 / tiny`),
+        // and numpy reports that as an "overflow" FP event, so such a call declines.
+        let kernel = |q: &mut [f64], r: &mut [f64], a: &[f64], b: &[f64]| -> bool {
+            let mut finite = true;
             for (((qs, rs), &av), &bv) in q.iter_mut().zip(r.iter_mut()).zip(a).zip(b) {
-                *qs = (av / bv).floor();
+                *qs = npy_floor_divide_f64(av, bv);
+                finite &= qs.is_finite();
                 let rem = av % bv;
                 *rs = if rem != 0.0 && (rem > 0.0) != (bv > 0.0) {
                     rem + bv
@@ -114565,18 +114547,23 @@ fn try_zerocopy_f64_divmod(
                     rem
                 };
             }
+            finite
         };
         const DIVMOD_PARALLEL_MIN: usize = 1 << 18;
-        if n >= DIVMOD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let all_finite = if n >= DIVMOD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             let chunk = n.div_ceil(rayon::current_num_threads());
             q.par_chunks_mut(chunk)
                 .zip(r.par_chunks_mut(chunk))
                 .zip(a.par_chunks(chunk))
                 .zip(b.par_chunks(chunk))
-                .for_each(|(((qq, rr), aa), bb)| kernel(qq, rr, aa, bb));
+                .map(|(((qq, rr), aa), bb)| kernel(qq, rr, aa, bb))
+                .reduce(|| true, |x, y| x && y)
         } else {
-            kernel(q, r, a, b);
+            kernel(q, r, a, b)
+        };
+        if !all_finite {
+            return Ok(None);
         }
     }
     if shape.is_empty() {
@@ -114646,15 +114633,26 @@ fn divmod(
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
-    // Defer zero-divisor cases so numpy emits the RuntimeWarning (matches the
-    // floor_divide fast path).
-    if x2a.values().contains(&0.0) {
+    // Defer zero divisors and non-finite operands so numpy raises or warns per the caller's
+    // errstate ("divide by zero" / "invalid value" in divmod; `divmod(inf, inf)` is invalid)
+    // and keeps its NaN payloads. What is left can only raise "overflow" (`4 / tiny`), which a
+    // non-finite quotient reveals, so that defers too.
+    if x2a.values().contains(&0.0)
+        || x1a
+            .values()
+            .iter()
+            .chain(x2a.values())
+            .any(|value| !value.is_finite())
+    {
         return fallback();
     }
     let (quotient, remainder) = match ufunc_divmod(&x1a, &x2a) {
         Ok(pair) => pair,
         Err(_) => return fallback(),
     };
+    if quotient.values().iter().any(|value| !value.is_finite()) {
+        return fallback();
+    }
     let outputs = [quotient, remainder];
     build_numpy_scalar_or_array_tuple(py, &outputs)
 }
