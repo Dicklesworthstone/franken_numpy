@@ -96472,10 +96472,11 @@ fn trace(
 
     // Zero-copy fast path: a contiguous 2-D float64 matrix in the canonical
     // (axis1, axis2) == (0, 1) orientation. Read its row-major buffer directly and
-    // sum the diagonal a[i, i+offset] by striding (i*ncols + i + offset) — no numpy
+    // gather the diagonal a[i, i+offset] by striding (i*ncols + i + offset) — no numpy
     // import, no `diagonal` view object, no per-element extract across the bridge.
-    // Bit-identical to the diagonal-view path below: identical i-ascending order and
-    // the same left-to-right f64 fold from 0.0 (matching UFuncArray::scalar(_,F64)).
+    // numpy's trace is add.reduce over the diagonal view, i.e. its pairwise tree from
+    // 0.0; the left-to-right fold used here before differed in the last bit from 8
+    // diagonal elements up (bead .8), so sum the gathered diagonal with that tree.
     {
         let n1 = if axis1 < 0 { axis1 + 2 } else { axis1 };
         let n2 = if axis2 < 0 { axis2 + 2 } else { axis2 };
@@ -96486,27 +96487,26 @@ fn trace(
             && buffer.is_c_contiguous()
             && let Some(data) = buffer.as_slice(py)
         {
+            if !numpy_sums_runs_as_one_tree(py)? {
+                return fallback();
+            }
             let shape = buffer.shape();
             let (nrows, ncols) = (shape[0], shape[1]);
-            let mut sum = 0.0f64;
+            let mut diagonal: Vec<f64> = Vec::new();
             if offset >= 0 {
                 let off = offset as usize;
                 if off < ncols {
                     let count = nrows.min(ncols - off);
-                    for i in 0..count {
-                        sum += data[i * ncols + i + off].get();
-                    }
+                    diagonal.extend((0..count).map(|i| data[i * ncols + i + off].get()));
                 }
             } else {
                 let off = offset.unsigned_abs() as usize;
                 if off < nrows {
                     let count = (nrows - off).min(ncols);
-                    for i in 0..count {
-                        sum += data[(i + off) * ncols + i].get();
-                    }
+                    diagonal.extend((0..count).map(|i| data[(i + off) * ncols + i].get()));
                 }
             }
-            return build_f64_scalar(py, sum);
+            return build_f64_scalar(py, 0.0 + pairwise_sum_f64_slice(&diagonal));
         }
     }
 
@@ -96531,6 +96531,10 @@ fn trace(
             && let Ok(diag_view) = a_bound.call_method1(intern!(py, "diagonal"), (offset,))
             && let Ok(diag_array) = extract_precise_numeric_array(py, &diag_view, "trace(diagonal)")
         {
+            // A float diagonal folds left to right here; numpy's is its pairwise tree.
+            if !diag_array.has_integer_sidecar() {
+                return fallback();
+            }
             // diag_array is the 1-D diagonal view. Sum it via the shared helper,
             // which accumulates the exact-integer sidecar with wraparound for
             // int64/uint64 and folds f64 otherwise — matching NumPy's native
@@ -96546,6 +96550,11 @@ fn trace(
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
+    // Integer traces wrap and are order-free; a float trace folded left to right is not
+    // numpy's pairwise tree, so float inputs (lists of floats among them) are numpy's.
+    if !array.has_integer_sidecar() {
+        return fallback();
+    }
 
     // Call native Rust trace_axis
     let result = match array.trace_axis(offset, axis1, axis2) {
@@ -105646,14 +105655,14 @@ fn einsum_native(
     }
     if let Some(kw) = kwargs {
         // Our native kernel does a single simultaneous multi-operand contraction
-        // and does NOT optimize the pairwise contraction PATH. For >=3 operands
-        // with `optimize` explicitly requested (True/'greedy'/'optimal'/a path
-        // list), numpy's path optimizer + BLAS is orders of magnitude faster
-        // (measured ~680x on 'ij,jk,kl->il'), so defer those to numpy. The default
-        // optimize=False keeps our native kernel (which beats numpy's naive
-        // default). The result is identical (same contraction, associativity
-        // within float tolerance).
-        if args.len() >= 4
+        // and does NOT optimize the pairwise contraction PATH. With `optimize`
+        // requested (True/'greedy'/'optimal'/a path list) numpy contracts through
+        // tensordot and BLAS: for >=3 operands orders of magnitude faster (measured
+        // ~680x on 'ij,jk,kl->il'), and for 2 operands FMA-contracted bits no native
+        // kernel reproduces, plus a 0-d ndarray (not a scalar) for a full contraction
+        // ('i,i->' / 'ij,ij->', bead .8). Defer every multi-operand optimize call.
+        // The default optimize=False keeps our native kernel.
+        if args.len() >= 3
             && let Some(opt) = kw.get_item("optimize")?
             && !opt.is_none()
             && opt.is_truthy()?
