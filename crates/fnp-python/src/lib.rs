@@ -46442,6 +46442,9 @@ fn cov_gram_two_rowvar_f64(
         return Ok(None); // shape mismatch (numpy errors) / empty / DoF<=0: defer.
     }
     let n_vars = m_rows + y_rows;
+    if cov_output_too_large_for_native(n_vars) {
+        return Ok(None);
+    }
     let (Some(m_slice), Some(y_slice)) = (m_buf.as_slice(py), y_buf.as_slice(py)) else {
         return Ok(None);
     };
@@ -46480,6 +46483,20 @@ fn try_zerocopy_cov_two_rowvar_f64(
     build_square_f64_matrix(py, numpy, result, n_vars)
 }
 
+/// The native Gram path holds its `n_vars x n_vars` result in a Rust `Vec` and then COPIES it
+/// into a fresh numpy output - two full squares alive at once, on top of the centred copy -
+/// where numpy's `dot(X, X.T)` holds one. At (32768, 8) that is 2 x 8.6 GB: `fnp.cov` raised
+/// MemoryError under an address-space cap numpy's cov fits in (bead rc0923 .7). A large output
+/// goes to numpy until the Gram is written straight into the numpy buffer (the measured
+/// alternative, which needs a same-invocation A/B before it can replace this cap).
+fn cov_output_too_large_for_native(n_vars: usize) -> bool {
+    const COV_NATIVE_MAX_OUTPUT_BYTES: usize = 256 << 20;
+    n_vars
+        .saturating_mul(n_vars)
+        .saturating_mul(std::mem::size_of::<f64>())
+        >= COV_NATIVE_MAX_OUTPUT_BYTES
+}
+
 fn cov_gram_rowvar_f64(
     py: Python<'_>,
     m: &Bound<'_, PyAny>,
@@ -46506,6 +46523,9 @@ fn cov_gram_rowvar_f64(
     };
     if n_vars == 0 || n_obs == 0 || n_obs <= ddof {
         return Ok(None); // empty / DoF<=0 (numpy warns + returns NaN): defer.
+    }
+    if cov_output_too_large_for_native(n_vars) {
+        return Ok(None);
     }
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None); // non-contiguous

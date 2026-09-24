@@ -1132,3 +1132,48 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// Bead rc0923 .7 acceptance: `cov`/`corrcoef` must not need more memory than numpy. The native
+/// Gram path held its n_vars^2 result twice (a Rust Vec plus the numpy output it was copied
+/// into) where numpy holds it once, so `fnp.cov` of a (32768, 8) array raised MemoryError under
+/// an address-space cap numpy fits in. Each arm runs in its OWN fresh process and reports its
+/// peak-RSS growth (`ru_maxrss`, KiB) across the call; fnp may use at most 1.1x numpy's plus
+/// 16 MiB. (8192, 64) is the CI-sized large-output case (a 512 MiB result); (4, 2^20) keeps a
+/// tiny output with a large centring copy.
+#[test]
+fn cov_and_corrcoef_peak_memory_stays_within_numpys() -> Result<(), String> {
+    let cases = [
+        ("cov", "(8192, 64)"),
+        ("corrcoef", "(8192, 64)"),
+        ("cov", "(4, 1 << 20)"),
+    ];
+    for (name, shape) in cases {
+        let peak_growth = |module: &str| -> Result<f64, String> {
+            let script = fnp_script(format!(
+                r#"
+import gc, resource
+m = np.random.default_rng(0).standard_normal({shape})
+gc.collect()
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+result = {module}.{name}(m)
+after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print(after - before)
+"#
+            ));
+            let out = numpy_oracle(&script)?;
+            out.lines()
+                .last()
+                .unwrap_or("")
+                .trim()
+                .parse::<f64>()
+                .map_err(|e| format!("{name}{shape} {module}: unparsable peak growth {out:?}: {e}"))
+        };
+        let ours = peak_growth("fnp")?;
+        let theirs = peak_growth("np")?;
+        assert!(
+            ours <= theirs * 1.1 + 16384.0,
+            "{name}{shape}: fnp peak RSS growth {ours} KiB exceeds 1.1x numpy's {theirs} KiB"
+        );
+    }
+    Ok(())
+}
