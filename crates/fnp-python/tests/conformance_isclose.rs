@@ -400,3 +400,38 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// Two float32 arrays with Python-float tolerances: numpy evaluates `|x - y|` and
+/// `float32(atol) + float32(rtol) * |y|` in float32 (the tolerances are weak under NEP 50),
+/// rounding at each ufunc. fnp's float32 isclose/allclose kernels widened to float64 and
+/// disagreed at the tolerance boundary (2 of 200,000 near-boundary pairs at rtol=1e-3, seed 0).
+/// The sweep places x within +-0.1% of the tolerance boundary of y.
+#[test]
+fn f32_array_pairs_use_numpys_float32_tolerance_arithmetic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(0)
+bad = []
+for rtol, atol in ((1e-5, 1e-8), (1e-3, 0.0), (0.0, 1e-3), (1e-6, 1e-7)):
+    y = rng.uniform(-10, 10, 200000).astype(np.float32)
+    tol = atol + rtol * np.abs(y.astype(np.float64))
+    x = (y.astype(np.float64) + tol * rng.choice([-1, 1], y.size) * rng.uniform(0.999, 1.001, y.size)).astype(np.float32)
+    got, want = fnp.isclose(x, y, rtol=rtol, atol=atol), np.isclose(x, y, rtol=rtol, atol=atol)
+    if got.dtype != want.dtype or not np.array_equal(got, want):
+        bad.append(f"isclose rtol={rtol} atol={atol}: {int((got != want).sum())} mismatches")
+    # allclose over slices that are all-close in numpy, so a disagreement cannot hide behind False
+    close_idx = np.flatnonzero(want)[:5000]
+    if bool(fnp.allclose(x[close_idx], y[close_idx], rtol=rtol, atol=atol)) != bool(np.allclose(x[close_idx], y[close_idx], rtol=rtol, atol=atol)):
+        bad.append(f"allclose rtol={rtol} atol={atol}")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "float32 isclose/allclose tolerance arithmetic must match numpy: {result}"
+    );
+    Ok(())
+}

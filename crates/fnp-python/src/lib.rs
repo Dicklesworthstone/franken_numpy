@@ -11224,11 +11224,15 @@ fn zerocopy_f32_isclose_flat<'py>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // Parallel chunks, byte-identical per-element predicate (widened to
-        // f64 exactly as before; 2026-07-12 - was serial).
-        let predicate = |x: f64, y: f64| -> u8 {
+        // Parallel chunks (2026-07-12 - was serial). IN FLOAT32, as numpy computes it: both
+        // operands are float32 and the Python-float tolerances are WEAK (NEP 50), so numpy
+        // evaluates `|x - y|` and `float32(atol) + float32(rtol) * |y|` in float32, rounding at
+        // each ufunc. The predicate used to widen to float64 and disagreed with numpy at the
+        // tolerance boundary (2 of 200,000 near-boundary pairs at rtol=1e-3).
+        let (rtol32, atol32) = (rtol as f32, atol as f32);
+        let predicate = |x: f32, y: f32| -> u8 {
             let close = if x.is_finite() && y.is_finite() {
-                (x - y).abs() <= atol + rtol * y.abs()
+                (x - y).abs() <= atol32 + rtol32 * y.abs()
             } else if equal_nan && x.is_nan() && y.is_nan() {
                 true
             } else {
@@ -11255,12 +11259,12 @@ fn zerocopy_f32_isclose_flat<'py>(
                 .zip(a_raw.par_chunks(chunk).zip(b_raw.par_chunks(chunk)))
                 .for_each(|(o, (ar, br))| {
                     for ((slot, &x), &y) in o.iter_mut().zip(ar).zip(br) {
-                        *slot = predicate(f64::from(x), f64::from(y));
+                        *slot = predicate(x, y);
                     }
                 });
         } else {
             for ((slot, &x), &y) in out_raw.iter_mut().zip(a_raw).zip(b_raw) {
-                *slot = predicate(f64::from(x), f64::from(y));
+                *slot = predicate(x, y);
             }
         }
     }
@@ -65742,6 +65746,16 @@ fn allclose_pair(x: f64, y: f64, rtol: f64, atol: f64, equal_nan: bool) -> bool 
     }
 }
 
+/// `allclose_pair` for two float32 operands, in float32 as numpy evaluates it: the Python-float
+/// tolerances are weak (NEP 50) and are cast to float32 by the caller.
+fn allclose_pair_f32(x: f32, y: f32, rtol: f32, atol: f32, equal_nan: bool) -> bool {
+    if x.is_finite() && y.is_finite() {
+        (x - y).abs() <= atol + rtol * y.abs()
+    } else {
+        x == y || (equal_nan && x.is_nan() && y.is_nan())
+    }
+}
+
 // Zero-copy early-exit np.allclose for f64: same-shape f64 ndarrays, or an f64
 // ndarray vs an f64 scalar (broadcast against the scalar). numpy builds the whole
 // isclose array then reduces; bailing on the first not-close pair skips that and
@@ -65880,7 +65894,7 @@ fn try_zerocopy_f32_allclose(
             a_raw
                 .iter()
                 .zip(b_raw)
-                .all(|(&x, &y)| allclose_pair(x as f64, y as f64, rtol, atol, equal_nan))
+                .all(|(&x, &y)| allclose_pair_f32(x, y, rtol as f32, atol as f32, equal_nan))
         }
         (Some(ab), None) => {
             let Some(scalar) = b_sc else { return Ok(None) };
