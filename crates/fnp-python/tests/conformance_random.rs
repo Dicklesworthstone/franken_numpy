@@ -1026,3 +1026,97 @@ result = bad
         Ok(())
     });
 }
+
+/// Bead rc0923 .6 acceptance: every Generator distribution in the method table, at 3 seeds, with
+/// (a) scalar parameters, (b) a 1-D array parameter, (c) a 2-D (2, 1) parameter broadcast against
+/// `size=(2, 3)`, and (d) an incompatible shape - a (3,) parameter with `size=(2,)` - must give
+/// numpy's value byte-for-byte (type, dtype, shape, bytes) or numpy's exception type, and leave
+/// the stream where numpy leaves it (checked by one more draw). The (2, 1)-against-size case is
+/// the negative control for a sampler that draws per parameter column instead of in C order.
+/// Every divergence is reported as `method form seed`.
+#[test]
+fn distribution_method_table_matches_numpy_across_param_shapes_and_seeds() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+# (method, first parameter, scalar value, 1-D values, other scalar kwargs)
+table = [
+ ("normal", "loc", 0.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("uniform", "low", 0.5, [0.0, 0.5, 1.0], {"high": 3.0}),
+ ("exponential", "scale", 1.5, [0.5, 1.0, 2.5], {}),
+ ("gamma", "shape", 1.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("beta", "a", 1.5, [0.5, 1.0, 2.5], {"b": 2.0}),
+ ("chisquare", "df", 2.5, [1.5, 2.0, 3.5], {}),
+ ("f", "dfnum", 2.5, [1.5, 2.0, 3.5], {"dfden": 4.0}),
+ ("noncentral_chisquare", "df", 2.5, [1.5, 2.0, 3.5], {"nonc": 1.0}),
+ ("noncentral_f", "dfnum", 2.5, [1.5, 2.0, 3.5], {"dfden": 4.0, "nonc": 1.0}),
+ ("standard_gamma", "shape", 1.5, [0.5, 1.0, 2.5], {}),
+ ("standard_t", "df", 2.5, [1.5, 2.0, 3.5], {}),
+ ("vonmises", "mu", 0.5, [0.0, 0.5, 1.0], {"kappa": 1.5}),
+ ("pareto", "a", 1.5, [0.5, 1.0, 2.5], {}),
+ ("weibull", "a", 1.5, [0.5, 1.0, 2.5], {}),
+ ("power", "a", 1.5, [0.5, 1.0, 2.5], {}),
+ ("laplace", "loc", 0.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("gumbel", "loc", 0.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("logistic", "loc", 0.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("lognormal", "mean", 0.5, [0.5, 1.0, 2.5], {"sigma": 0.5}),
+ ("rayleigh", "scale", 1.5, [0.5, 1.0, 2.5], {}),
+ ("wald", "mean", 1.5, [0.5, 1.0, 2.5], {"scale": 2.0}),
+ ("triangular", "left", -0.5, [-1.0, -0.5, 0.0], {"mode": 0.5, "right": 2.0}),
+ ("binomial", "n", 10, [5, 10, 20], {"p": 0.4}),
+ ("negative_binomial", "n", 10, [5, 10, 20], {"p": 0.4}),
+ ("poisson", "lam", 3.5, [0.5, 3.0, 25.0], {}),
+ ("zipf", "a", 2.5, [2.0, 2.5, 3.5], {}),
+ ("geometric", "p", 0.4, [0.2, 0.5, 0.7], {}),
+ ("hypergeometric", "ngood", 10, [5, 10, 20], {"nbad": 8, "nsample": 4}),
+ ("logseries", "p", 0.4, [0.2, 0.5, 0.7], {}),
+ ("integers", "low", 2, [0, 3, 7], {"high": 40}),
+]
+def same(a, b):
+    return (type(a) is type(b) and np.shape(a) == np.shape(b)
+            and np.asarray(a).dtype == np.asarray(b).dtype
+            and np.asarray(a).tobytes() == np.asarray(b).tobytes())
+def outcome(rng, name, kw):
+    try:
+        value = getattr(rng, name)(**kw)
+        err = None
+    except Exception as exc:
+        value, err = None, type(exc).__name__
+    return value, err, rng.random(2)
+bad = []
+count = 0
+for name, first, scalar, one_d, others in table:
+    column = np.array(one_d[:2]).reshape(2, 1)
+    forms = {
+        "scalar": dict(others, **{first: scalar}),
+        "1-D": dict(others, **{first: np.array(one_d)}),
+        "2-D(2,1) x size(2,3)": dict(others, size=(2, 3), **{first: column}),
+        "incompatible (3,) x size(2,)": dict(others, size=(2,), **{first: np.array(one_d)}),
+    }
+    for form, kw in forms.items():
+        for seed in (0, 7, 123):
+            count += 1
+            gv, ge, gnext = outcome(fnp.random.default_rng(seed), name, kw)
+            wv, we, wnext = outcome(np.random.default_rng(seed), name, kw)
+            if ge != we or (we is None and not same(gv, wv)) or not same(gnext, wnext):
+                bad.append(f"{name} {form} seed={seed}: numpy_err={we} fnp_err={ge}")
+result = (count, bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (count, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(count, 30 * 4 * 3, "method table or form set drifted");
+        assert!(
+            bad.is_empty(),
+            "distribution cells diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
