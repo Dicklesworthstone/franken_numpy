@@ -1983,6 +1983,13 @@ macro_rules! define_py_bit_generator {
 
             #[pyo3(signature = (jumps=1))]
             fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
+                // numpy.random.SFC64 defines no `jumped`, so NumPy code reaching for it gets
+                // AttributeError; raise that rather than a contract ValueError.
+                if matches!($kind, BitGeneratorKind::Sfc64) {
+                    return Err(pyo3::exceptions::PyAttributeError::new_err(
+                        "'SFC64' object has no attribute 'jumped'",
+                    ));
+                }
                 Ok(Self {
                     inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
                     seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
@@ -6498,6 +6505,20 @@ fn bit_generator_random_raw(
 ) -> PyResult<Py<PyAny>> {
     let size = random_size_from_py(py, size, "BitGenerator.random_raw(size)")?;
     let (shape, len, scalar) = random_len_and_shape(size)?;
+    // NumPy's MT19937 raw output is ONE native 32-bit draw widened to uint64
+    // (`next_raw = mt19937_raw`), not two words spliced into a u64 as `next_u64` does.
+    if matches!(bit_generator.kind(), BitGeneratorKind::Mt19937) {
+        if scalar {
+            return Ok(u64::from(bit_generator.next_u32())
+                .into_pyobject(py)?
+                .into_any()
+                .unbind());
+        }
+        let words: Vec<u64> = (0..len)
+            .map(|_| u64::from(bit_generator.next_u32()))
+            .collect();
+        return build_numpy_array_from_storage(py, &shape, ArrayStorage::U64(words));
+    }
     if scalar {
         return Ok(bit_generator
             .next_u64()

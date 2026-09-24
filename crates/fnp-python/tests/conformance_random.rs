@@ -696,3 +696,59 @@ result = (len(cases), bad)
         Ok(())
     });
 }
+
+/// `jumped` is NumPy's parallel-streams recipe, so it must land exactly where NumPy lands.
+/// fnp used a small per-kind stride: MT19937 did not move at all (a jumped generator REPLAYED
+/// its parent's stream), and PCG64/PCG64DXSM/Philox jumped to states NumPy never produces.
+/// `random_raw` on MT19937 spliced two 32-bit draws into each u64 where NumPy returns one
+/// draw per element. Compares full state dicts and the raw stream after jumping, from fresh
+/// and mid-stream states; SFC64 has no `jumped` in NumPy and must raise AttributeError.
+#[test]
+fn jumped_and_random_raw_match_numpy_for_every_bit_generator() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+def same_state(a, b):
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(same_state(a[k], b[k]) for k in a)
+    return np.array_equal(np.asarray(a), np.asarray(b))
+bad = []
+for kind in ("MT19937", "PCG64", "PCG64DXSM", "Philox"):
+    for seed, warmup, jumps in ((1, 0, 1), (7, 3, 1), (12345, 5, 2), (99, 1, 3)):
+        f, n = getattr(fnp.random, kind)(seed), getattr(np.random, kind)(seed)
+        if not np.array_equal(f.random_raw(warmup + 1), n.random_raw(warmup + 1)):
+            bad.append(f"{kind}({seed}).random_raw({warmup + 1})")
+        fj, nj = f.jumped(jumps), n.jumped(jumps)
+        if not same_state(fj.state, nj.state):
+            bad.append(f"{kind}({seed}) after {warmup + 1} draws .jumped({jumps}).state")
+        if not np.array_equal(fj.random_raw(5), nj.random_raw(5)):
+            bad.append(f"{kind}({seed}).jumped({jumps}).random_raw(5)")
+        if same_state(fj.state, f.state):
+            bad.append(f"{kind}({seed}).jumped({jumps}) did not move")
+    g, h = fnp.random.Generator(getattr(fnp.random, kind)(3).jumped()), np.random.Generator(getattr(np.random, kind)(3).jumped())
+    if not np.array_equal(g.random(4), h.random(4)):
+        bad.append(f"Generator({kind}(3).jumped()).random")
+try:
+    fnp.random.SFC64(1).jumped()
+    bad.append("SFC64.jumped did not raise")
+except AttributeError:
+    pass
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "jumped/random_raw diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
