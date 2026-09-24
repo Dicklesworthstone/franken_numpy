@@ -72574,18 +72574,20 @@ fn eye(
         return fallback();
     }
 
+    // `int_not_bool` throughout: numpy 2 refuses a bool N/M/k ("an integer is required"), and
+    // `extract::<i64>()` took `True` as 1.
     let n = if args.is_empty() {
         match call_kwargs.get_item("N")? {
-            Some(value) => match value.extract::<i64>() {
-                Ok(value) => value,
-                Err(_) => return fallback(),
+            Some(value) => match int_not_bool(&value) {
+                Some(value) => value,
+                None => return fallback(),
             },
             None => return fallback(),
         }
     } else {
-        match args.get_item(0)?.extract::<i64>() {
-            Ok(value) => value,
-            Err(_) => return fallback(),
+        match int_not_bool(&args.get_item(0)?) {
+            Some(value) => value,
+            None => return fallback(),
         }
     };
     let m = if args.len() >= 2 {
@@ -72593,31 +72595,31 @@ fn eye(
         if value.is_none() {
             None
         } else {
-            match value.extract::<i64>() {
-                Ok(value) => Some(value),
-                Err(_) => return fallback(),
+            match int_not_bool(&value) {
+                Some(value) => Some(value),
+                None => return fallback(),
             }
         }
     } else {
         match call_kwargs.get_item("M")? {
             Some(value) if value.is_none() => None,
-            Some(value) => match value.extract::<i64>() {
-                Ok(value) => Some(value),
-                Err(_) => return fallback(),
+            Some(value) => match int_not_bool(&value) {
+                Some(value) => Some(value),
+                None => return fallback(),
             },
             None => None,
         }
     };
     let k = if args.len() >= 3 {
-        match args.get_item(2)?.extract::<i64>() {
-            Ok(value) => value,
-            Err(_) => return fallback(),
+        match int_not_bool(&args.get_item(2)?) {
+            Some(value) => value,
+            None => return fallback(),
         }
     } else {
         match call_kwargs.get_item("k")? {
-            Some(value) => match value.extract::<i64>() {
-                Ok(value) => value,
-                Err(_) => return fallback(),
+            Some(value) => match int_not_bool(&value) {
+                Some(value) => value,
+                None => return fallback(),
             },
             None => 0,
         }
