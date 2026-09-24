@@ -439,7 +439,11 @@ struct SniffDtypes {
     float16: Py<PyAny>,
 }
 
-#[pyclass(name = "ufunc", skip_from_py_object)]
+// `module = "fnp_python"`: fnp's ufunc objects pickle BY REFERENCE, exactly as NumPy's do
+// (`copyreg` reduces a numpy ufunc to its `__name__`), so `pickle.loads(pickle.dumps(fnp.add))
+// is fnp.add`. Module init re-points `__module__` when the extension is loaded under another
+// name. See `__reduce__` on both classes.
+#[pyclass(name = "ufunc", module = "fnp_python", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyUFunc {
     kind: UFuncKind,
@@ -461,7 +465,8 @@ pub struct PyUFunc {
 ///   ufunc via `__getattr__`.
 /// - `__class__` reports `numpy.ufunc`, so `isinstance(x, numpy.ufunc)` holds (the
 ///   `unittest.mock` technique); `type(x)` still names this class.
-#[pyclass(name = "ufunc", skip_from_py_object)]
+/// - it pickles by reference to its `fnp_python` attribute, as `PyUFunc` does.
+#[pyclass(name = "ufunc", module = "fnp_python", skip_from_py_object)]
 pub struct PyUFuncProxy {
     name: String,
     native: Py<PyAny>,
@@ -527,13 +532,12 @@ impl PyUFuncProxy {
         format!("<ufunc '{}'>", self.name)
     }
 
-    /// Pickles as NumPy's ufunc of the same name (NumPy pickles ufuncs by name).
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(self
-            .numpy_ufunc
-            .bind(py)
-            .call_method0(intern!(py, "__reduce__"))?
-            .unbind())
+    /// Pickles BY NAME, as NumPy's `copyreg` reducer does for its own ufuncs: the returned
+    /// string is a global in this class's `__module__` (`fnp_python`), which holds this very
+    /// object. Delegating to `numpy_ufunc.__reduce__()` raised, because NumPy never pickles
+    /// ufuncs through `__reduce__`.
+    fn __reduce__(&self) -> &str {
+        &self.name
     }
 }
 
@@ -541,6 +545,15 @@ impl PyUFuncProxy {
 /// with a `PyUFuncProxy` (see there). Names already bound to a `PyUFunc` or to NumPy's own
 /// ufunc object are left alone.
 fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Both ufunc classes declare `module = "fnp_python"` so their objects pickle by reference;
+    // loaded under another name (the in-process test harness) that global lives elsewhere.
+    let module_name: String = m.getattr(intern!(py, "__name__"))?.extract()?;
+    if module_name != "fnp_python" {
+        py.get_type::<PyUFunc>()
+            .setattr(intern!(py, "__module__"), &module_name)?;
+        py.get_type::<PyUFuncProxy>()
+            .setattr(intern!(py, "__module__"), &module_name)?;
+    }
     let numpy = cached_numpy(py)?;
     let ufunc_type = numpy.getattr(intern!(py, "ufunc"))?;
     let signature_of = py.import("inspect")?.getattr("signature")?;
@@ -595,6 +608,26 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
         };
         m.setattr(name.as_str(), Py::new(py, proxy)?)?;
     }
+    // NumPy's alias names ARE its canonical ufuncs: `np.acos is np.arccos`, and
+    // `np.abs.__name__ == "absolute"`. fnp bound a separate object under each alias that
+    // reported the alias as its name. Point every alias at fnp's object for the canonical
+    // name, so identity, `__name__` and repr all match NumPy's.
+    for name in numpy.dir()?.iter() {
+        let name: String = name.extract()?;
+        if name.starts_with('_') {
+            continue;
+        }
+        let np_obj = numpy.getattr(name.as_str())?;
+        if !np_obj.is_instance(&ufunc_type)? {
+            continue;
+        }
+        let canonical: String = np_obj.getattr(intern!(py, "__name__"))?.extract()?;
+        if canonical != name
+            && let Ok(ours) = m.getattr(canonical.as_str())
+        {
+            m.setattr(name.as_str(), ours)?;
+        }
+    }
     Ok(())
 }
 
@@ -625,11 +658,6 @@ impl PyUFunc {
         })
     }
 
-    #[getter]
-    fn ntypes(&self) -> usize {
-        22
-    }
-
     // CACHED MODULE HANDLE THROUGHOUT THIS IMPL (`deadlock-audit-v46rn`).
     //
     // Every method below used to open with `py.import("numpy")`, which `__call__`'s own
@@ -656,6 +684,12 @@ impl PyUFunc {
 
     fn __repr__(&self) -> String {
         format!("<ufunc '{}'>", self.kind.name())
+    }
+
+    /// Pickles by name, exactly as `PyUFuncProxy` does. Without it `object.__reduce_ex__`
+    /// refused: "cannot pickle 'ufunc' object".
+    fn __reduce__(&self) -> &'static str {
+        self.kind.name()
     }
 
     /// Reports `numpy.ufunc` so `isinstance(fnp.add, numpy.ufunc)` holds (see

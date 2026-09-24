@@ -19,7 +19,7 @@ fn numpy_oracle(script: &str) -> Result<String, String> {
 }
 
 mod support;
-use support::fnp_script;
+use support::{fnp_script, fnp_script_with};
 
 #[test]
 fn add_reduce_empty_returns_zero() {
@@ -2816,7 +2816,11 @@ print(verdicts if verdicts else True)
 /// two routes apart.
 #[test]
 fn every_numpy_ufunc_name_is_a_ufunc_object_with_numpy_protocol() {
-    let script = fnp_script(
+    // Registered in sys.modules: fnp's ufuncs pickle by reference to `fnp_python.<name>`, as
+    // numpy's pickle to `numpy.<name>`, so the module must be importable as it is when installed.
+    let script = fnp_script_with(
+        "import sys\n",
+        true,
         r#"
 import pickle, warnings
 warnings.simplefilter("ignore")
@@ -2842,8 +2846,9 @@ def check(n, f, g):
             bad.append(f"{n}.resolve_dtypes(reduction=True): {outcomes[0]} vs {outcomes[1]}")
     if repr(f) != repr(g):
         bad.append(f"{n}: repr {repr(f)!r}")
-    if pickle.loads(pickle.dumps(f)) is not g:
-        bad.append(f"{n}: pickle does not round-trip to numpy's ufunc")
+    # By reference, like numpy's own: the round trip returns the SAME object.
+    if pickle.loads(pickle.dumps(f)) is not f:
+        bad.append(f"{n}: pickle does not round-trip to the same object")
     if g.nin == 2 and g.nout == 1 and g.signature is None and "d" in "".join(g.types):
         for meth, call in (("reduce", lambda u: u.reduce(x)), ("accumulate", lambda u: u.accumulate(x)),
                            ("outer", lambda u: u.outer(x[:3], x[:3]))):
