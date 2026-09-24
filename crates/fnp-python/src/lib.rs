@@ -60114,28 +60114,19 @@ fn vander(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, dtype=None, device=None, like=None))]
+#[pyo3(signature = (*args, **kwargs))]
 fn arange(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
-    dtype: Option<Py<PyAny>>,
-    device: Option<Py<PyAny>>,
-    like: Option<Py<PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Always passthrough to NumPy - our Rust→NumPy export is slower.
     // See zeros() comment and perf bead franken_numpy-yx2wt.
-    let arange_fn = cached_numpy_arange(py)?;
-    let kwargs = PyDict::new(py);
-    if let Some(dtype_val) = dtype.as_ref() {
-        kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
-    }
-    if let Some(device_val) = device.as_ref() {
-        kwargs.set_item(intern!(py, "device"), device_val.bind(py))?;
-    }
-    if let Some(like_val) = like.as_ref() {
-        kwargs.set_item(intern!(py, "like"), like_val.bind(py))?;
-    }
-    Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
+    //
+    // VERBATIM, keywords included: the old signature named only dtype/device/like, so the
+    // everyday `np.arange(0, 1, step=0.1)` (and `start=`/`stop=`) was a TypeError (numpy's own
+    // TestDateTime::test_datetime_arange under the drop-in harness).
+    Ok(cached_numpy_arange(py)?.call(args, kwargs)?.unbind())
 }
 
 /// Whether an argument is an array that CANNOT convert to a scalar
@@ -70262,14 +70253,26 @@ fn try_zerocopy_pad_bytes_1d_reflect(
 }
 
 #[pyfunction]
-#[pyo3(signature = (array, pad_width, mode="constant", **kwargs))]
+#[pyo3(signature = (array, pad_width, mode=TextArg::Str(String::from("constant")), **kwargs))]
 fn pad(
     py: Python<'_>,
     array: Py<PyAny>,
     pad_width: Py<PyAny>,
-    mode: &str,
+    #[pyo3(from_py_with = text_arg)] mode: TextArg,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // numpy's `mode` may be a CALLABLE (the documented vector-function form) and answers an
+    // unsupported value with `ValueError: mode '...' is not supported`; `mode: &str` made both a
+    // PyO3 TypeError (numpy's own test_arraypad). Only a str mode is native.
+    let TextArg::Str(mode_text) = &mode else {
+        return Ok(cached_numpy_pad(py)?
+            .call(
+                (array.bind(py), pad_width.bind(py), mode.to_object(py)?),
+                kwargs,
+            )?
+            .unbind());
+    };
+    let mode = mode_text.as_str();
     // Passthrough to np.pad. Supports scalar/tuple/ndarray pad_width,
     // the full mode set (constant, edge, linear_ramp, maximum, mean,
     // median, minimum, reflect, symmetric, wrap, empty), and all
