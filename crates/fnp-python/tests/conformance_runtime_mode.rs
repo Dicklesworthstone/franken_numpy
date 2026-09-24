@@ -160,13 +160,18 @@ for name, op in ops.items():
         bad.append(f"{name}: guard fired on a finite operand")
 fnp.set_runtime_mode("strict")
 fnp.clear_runtime_decisions()
-print(bad if bad else True)
+print("HARDENED_LINALG_VERDICT", bad if bad else True, flush=True)
 "#
         .into(),
     )?;
+    // Tagged, not "the last line": numpy's LAPACK writes " ** On entry to DLASCL parameter ..."
+    // diagnostics to stdout for NaN operands on some hosts (worker vmi1227854), after the verdict.
+    let verdict = result
+        .lines()
+        .find_map(|line| line.strip_prefix("HARDENED_LINALG_VERDICT "))
+        .unwrap_or("");
     assert_eq!(
-        result.lines().last().unwrap_or(""),
-        "True",
+        verdict, "True",
         "hardened linalg guard / strict parity: {result}"
     );
     Ok(())
