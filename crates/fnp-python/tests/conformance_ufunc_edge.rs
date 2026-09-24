@@ -3002,3 +3002,26 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// fnp's ufunc objects report NumPy's docstring. The proxy class for natively implemented ufunc
+/// names carried a Rust `///` class docstring, which CPython writes into the type dict after
+/// PyO3's `__doc__` getter and so replaces it: `fnp.sin.__doc__` was fnp's implementation note.
+#[test]
+fn ufunc_objects_report_numpys_docstring() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+bad = [name for name in ("sin", "cos", "exp", "log", "sqrt", "isnan", "modf", "ldexp", "frexp",
+                         "add", "multiply", "power", "reciprocal", "square", "absolute")
+       if getattr(fnp, name).__doc__ != getattr(np, name).__doc__]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "ufunc docstrings must be numpy's: {result}"
+    );
+    Ok(())
+}

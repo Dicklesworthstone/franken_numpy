@@ -428,23 +428,27 @@ pub struct PyUFunc {
     kind: UFuncKind,
 }
 
-/// The ufunc face of a NumPy ufunc name that fnp implements as a plain native function.
-///
-/// NumPy ufuncs are objects: `np.exp.reduce`, `np.ldexp(x, n, out=o)`, `np.isnan.types`,
-/// `isinstance(np.sqrt, np.ufunc)`. fnp used to expose ~83 of NumPy's 106 ufunc names as bare
-/// `builtin_function_or_method`s, so all of that raised (AttributeError on `.reduce`/`.at`,
-/// TypeError on `out=`/`dtype=`/`subok=`), and 105 of 106 failed `isinstance(x, np.ufunc)`
-/// (deadlock-audit-rc0923-epic-71qy3.5). This proxy keeps fnp's native kernel on the call
-/// path it supports and hands everything else to NumPy's own ufunc object:
-/// - `__call__` runs the native function when the call uses no more positionals than the
-///   ufunc's `nin` and only keywords the native function accepts; otherwise (an `out`
-///   positional, `dtype=`, `subok=`, `signature=`, `axes=`, ...) NumPy's ufunc runs it.
-/// - every other attribute (`reduce`, `accumulate`, `outer`, `at`, `reduceat`, `nin`,
-///   `nout`, `types`, `identity`, `signature`, `resolve_dtypes`, ...) resolves on NumPy's
-///   ufunc via `__getattr__`.
-/// - `__class__` reports `numpy.ufunc`, so `isinstance(x, numpy.ufunc)` holds (the
-///   `unittest.mock` technique); `type(x)` still names this class.
-/// - it pickles by reference to its `fnp_python` attribute, as `PyUFunc` does.
+// The ufunc face of a NumPy ufunc name that fnp implements as a plain native function.
+//
+// NumPy ufuncs are objects: `np.exp.reduce`, `np.ldexp(x, n, out=o)`, `np.isnan.types`,
+// `isinstance(np.sqrt, np.ufunc)`. fnp used to expose ~83 of NumPy's 106 ufunc names as bare
+// `builtin_function_or_method`s, so all of that raised (AttributeError on `.reduce`/`.at`,
+// TypeError on `out=`/`dtype=`/`subok=`), and 105 of 106 failed `isinstance(x, np.ufunc)`
+// (deadlock-audit-rc0923-epic-71qy3.5). This proxy keeps fnp's native kernel on the call
+// path it supports and hands everything else to NumPy's own ufunc object:
+// - `__call__` runs the native function when the call uses no more positionals than the
+//   ufunc's `nin` and only keywords the native function accepts; otherwise (an `out`
+//   positional, `dtype=`, `subok=`, `signature=`, `axes=`, ...) NumPy's ufunc runs it.
+// - every other attribute (`reduce`, `accumulate`, `outer`, `at`, `reduceat`, `nin`,
+//   `nout`, `types`, `identity`, `signature`, `resolve_dtypes`, ...) resolves on NumPy's
+//   ufunc via `__getattr__`.
+// - `__class__` reports `numpy.ufunc`, so `isinstance(x, numpy.ufunc)` holds (the
+//   `unittest.mock` technique); `type(x)` still names this class.
+// - it pickles by reference to its `fnp_python` attribute, as `PyUFunc` does.
+//
+// A PLAIN COMMENT, NOT A `///` DOC COMMENT, and that is load-bearing: a class docstring is
+// written into the type dict AFTER PyO3 installs the `__doc__` getter below and replaces it
+// (see `PyArrayFunctionDispatcher`), so `fnp.sin.__doc__` was this text, not NumPy's.
 #[pyclass(name = "ufunc", module = "fnp_python", skip_from_py_object)]
 pub struct PyUFuncProxy {
     name: String,
