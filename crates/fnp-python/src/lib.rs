@@ -118461,6 +118461,13 @@ fn try_native_int_convolve(
     }
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
     let itemsize = dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+    // Decline every non-integer pair BEFORE `rayon::current_num_threads()`, which starts the
+    // global pool: a float16 correlate that numpy answers anyway spawned 4 threads first, and in
+    // CI's address-space-capped OOM probe their stacks made fnp raise MemoryError where numpy fit
+    // the cap (conformance_memory_utils, `correlate float16`, runner with numpy 2.4.6).
+    if !matches!(kind, 'i' | 'u') {
+        return Ok(None);
+    }
     if a_shape[0].saturating_mul(v_shape[0]) < INT_CONV_MIN_WORK || rayon::current_num_threads() < 2
     {
         return Ok(None);
