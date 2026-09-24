@@ -33476,8 +33476,14 @@ fn ndarray_subclass_needs_numpy(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResul
 /// (`deadlock-audit-1zl3e`): 11 divergences over 299 cases, every one of them a non-f64 FLOAT.
 fn float_dtype_needs_numpy_precision(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
     let Some(facts) = numeric_operand_facts(py, x)? else {
-        // Not an exact ndarray: a list/scalar operand promotes to f64 in numpy AND here.
-        return Ok(false);
+        // Not an exact ndarray. A list or a Python float promotes to f64 in numpy as it does
+        // here, but a NumPy float16/float32 SCALAR keeps its dtype in numpy:
+        // `np.nanpercentile(np.float16(0.5), 50)` is float16, and this read it as float64.
+        return Ok(dtype_kind_of(x) == Some('f')
+            && x.getattr(intern!(py, "dtype"))
+                .and_then(|dtype| dtype.getattr(intern!(py, "itemsize")))
+                .and_then(|size| size.extract::<usize>())
+                .is_ok_and(|size| size != 8));
     };
     Ok(facts.kind == 'f' && facts.itemsize != 8)
 }
@@ -43432,16 +43438,21 @@ fn moveaxis(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, axis, start=0))]
-fn rollaxis(py: Python<'_>, a: Py<PyAny>, axis: i64, start: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn rollaxis(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // numpy.rollaxis returns a strided VIEW (shares memory, writeable). The native
     // path materialized a C-order copy — ~40000x slower on a 200x200x100 (numpy ~1us
     // view vs ~51ms copy) AND a semantics divergence (result no longer aliased the
     // input). An axis roll is never faster materialized than as numpy's view, so
     // delegate unconditionally (cf. matrix_transpose; moveaxis/swapaxes already
-    // delegate and correctly return views).
-    let rollaxis_fn = cached_numpy_rollaxis(py)?;
-    Ok(rollaxis_fn.call1((a.bind(py), axis, start))?.unbind())
+    // delegate and correctly return views) - VERBATIM: typed `axis: i64, start: i64`
+    // made PyO3 raise TypeError on a float axis where numpy raises AttributeError on the
+    // non-array `a` first.
+    Ok(cached_numpy_rollaxis(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -60762,6 +60773,18 @@ fn arange(
 /// currently-native input kinds. Only an EXACT ndarray with `ndim >= 1` actually fails, so
 /// that is what this asks. An ndarray SUBCLASS is not "exact" and still reaches the
 /// conversion, keeping today's behaviour; a deliberate scope limit.
+/// A linspace/geomspace/logspace endpoint as a REAL float64, or None. `extract::<f64>()` alone is
+/// not that test: a NumPy complex scalar implements `__float__` (a ComplexWarning, then the real
+/// part), and `np.complex128` even subclasses Python `complex` - so `linspace(np.complex128(1-1j),
+/// ...)` built a float64 array from the real parts where numpy returns complex. Anything whose
+/// type is complex (Python or NumPy scalar, 0-d array) is declined here for numpy to answer.
+fn real_endpoint_f64(value: &Bound<'_, PyAny>) -> Option<f64> {
+    if value.is_instance_of::<PyComplex>() || dtype_kind_of(value) == Some('c') {
+        return None;
+    }
+    value.extract::<f64>().ok()
+}
+
 fn arg_cannot_be_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     if !is_exact_numpy_ndarray(py, value).unwrap_or(false) {
         return false;
@@ -60877,10 +60900,10 @@ fn linspace(
     if arg_cannot_be_scalar(py, start.bind(py)) || arg_cannot_be_scalar(py, stop.bind(py)) {
         return fallback(py);
     }
-    let Ok(start_f) = start.bind(py).extract::<f64>() else {
+    let Some(start_f) = real_endpoint_f64(start.bind(py)) else {
         return fallback(py);
     };
-    let Ok(stop_f) = stop.bind(py).extract::<f64>() else {
+    let Some(stop_f) = real_endpoint_f64(stop.bind(py)) else {
         return fallback(py);
     };
     let resolved_dtype = match dtype.as_ref() {
@@ -61007,10 +61030,10 @@ fn geomspace(
     if arg_cannot_be_scalar(py, start.bind(py)) || arg_cannot_be_scalar(py, stop.bind(py)) {
         return fallback(py);
     }
-    let Ok(start_f) = start.bind(py).extract::<f64>() else {
+    let Some(start_f) = real_endpoint_f64(start.bind(py)) else {
         return fallback(py);
     };
-    let Ok(stop_f) = stop.bind(py).extract::<f64>() else {
+    let Some(stop_f) = real_endpoint_f64(stop.bind(py)) else {
         return fallback(py);
     };
     if !start_f.is_finite() || !stop_f.is_finite() || start_f <= 0.0 || stop_f <= 0.0 {
@@ -72504,16 +72527,18 @@ fn eye(
 ) -> PyResult<Py<PyAny>> {
     let has_kwargs = kwargs.is_some_and(|k| !k.is_empty());
     if !has_kwargs {
+        // `int_not_bool`, not `extract::<i64>()`: the latter takes `True` as 1, and numpy 2
+        // refuses a bool N ("an integer is required").
         if args.len() == 1 {
-            if let Ok(n) = args.get_item(0)?.extract::<i64>()
+            if let Some(n) = int_not_bool(&args.get_item(0)?)
                 && n >= 0
             {
                 return build_f64_eye(py, n as usize, n as usize, 0);
             }
         } else if args.len() == 2
-            && let (Ok(n), Ok(m)) = (
-                args.get_item(0)?.extract::<i64>(),
-                args.get_item(1)?.extract::<i64>(),
+            && let (Some(n), Some(m)) = (
+                int_not_bool(&args.get_item(0)?),
+                int_not_bool(&args.get_item(1)?),
             )
             && n >= 0
             && m >= 0
@@ -72684,17 +72709,10 @@ fn eye(
 #[pyo3(signature = (n, dtype=None, *, like=None))]
 fn identity(
     py: Python<'_>,
-    n: i64,
+    n: &Bound<'_, PyAny>,
     dtype: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let like_is_set = like.as_ref().is_some_and(|value| !value.bind(py).is_none());
-    if !like_is_set
-        && n >= 0
-        && (dtype.is_none() || dtype.as_ref().is_some_and(|d| d.bind(py).is_none()))
-    {
-        return build_f64_eye(py, n as usize, n as usize, 0);
-    }
     let fallback = || -> PyResult<Py<PyAny>> {
         let id_fn = cached_numpy_identity(py)?;
         let kwargs = PyDict::new(py);
@@ -72706,6 +72724,17 @@ fn identity(
         }
         Ok(id_fn.call((n,), Some(&kwargs))?.unbind())
     };
+    // A typed `n: i64` took `True` as 1; numpy 2 refuses a bool ("an integer is required").
+    let Some(n) = int_not_bool(n) else {
+        return fallback();
+    };
+    let like_is_set = like.as_ref().is_some_and(|value| !value.bind(py).is_none());
+    if !like_is_set
+        && n >= 0
+        && (dtype.is_none() || dtype.as_ref().is_some_and(|d| d.bind(py).is_none()))
+    {
+        return build_f64_eye(py, n as usize, n as usize, 0);
+    }
 
     if like_is_set || n < 0 {
         return fallback();
@@ -72792,10 +72821,10 @@ fn logspace(
     if arg_cannot_be_scalar(py, start.bind(py)) || arg_cannot_be_scalar(py, stop.bind(py)) {
         return fallback(py);
     }
-    let Ok(start_f) = start.bind(py).extract::<f64>() else {
+    let Some(start_f) = real_endpoint_f64(start.bind(py)) else {
         return fallback(py);
     };
-    let Ok(stop_f) = stop.bind(py).extract::<f64>() else {
+    let Some(stop_f) = real_endpoint_f64(stop.bind(py)) else {
         return fallback(py);
     };
     if !start_f.is_finite() || !stop_f.is_finite() {
@@ -88878,6 +88907,12 @@ fn build_diag_indices_tuple(py: Python<'_>, n: usize, ndim: usize) -> PyResult<P
 
 #[pyfunction]
 fn diag_indices_from(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // numpy reads `arr.ndim` first: a non-array is its AttributeError, not our ValueError.
+    if !arr.bind(py).is_instance(cached_ndarray_type(py)?)? {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "diag_indices_from"), (arr.bind(py),))?
+            .unbind());
+    }
     let shape = extract_array_shape(py, arr.bind(py), "diag_indices_from(arr)")?;
     if shape.len() < 2 {
         return Err(PyValueError::new_err("input array must be at least 2-d"));
@@ -89047,6 +89082,10 @@ fn tril_indices_from(
     let Some((arr, k)) = parse_indices_from_args(py, args, kwargs)? else {
         return core_numpy_passthrough_interned(py, intern!(py, "tril_indices_from"), args, kwargs);
     };
+    // numpy reads `arr.ndim` first: a non-array is its AttributeError, not our ValueError.
+    if !arr.is_instance(cached_ndarray_type(py)?)? {
+        return core_numpy_passthrough_interned(py, intern!(py, "tril_indices_from"), args, kwargs);
+    }
     tril_indices_from_impl(py, &arr, k)
 }
 
@@ -89106,6 +89145,10 @@ fn triu_indices_from(
     let Some((arr, k)) = parse_indices_from_args(py, args, kwargs)? else {
         return core_numpy_passthrough_interned(py, intern!(py, "triu_indices_from"), args, kwargs);
     };
+    // numpy reads `arr.ndim` first: a non-array is its AttributeError, not our ValueError.
+    if !arr.is_instance(cached_ndarray_type(py)?)? {
+        return core_numpy_passthrough_interned(py, intern!(py, "triu_indices_from"), args, kwargs);
+    }
     triu_indices_from_impl(py, &arr, k)
 }
 
@@ -90342,6 +90385,16 @@ fn ndarray_carries_objects(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult
 /// the output. So the conversion stays strict and its failure becomes a decline, exactly as
 /// `try_extract_numeric_array` does for operands.
 fn integer_argument(value: &Bound<'_, PyAny>) -> Option<i64> {
+    value.extract::<i64>().ok()
+}
+
+/// An integer argument that numpy reads through `operator.index` WITHOUT accepting a bool:
+/// PyO3's `extract::<i64>()` takes `True` as 1 (bool subclasses int), while numpy 2 refuses a
+/// bool size with "an integer is required" (`np.eye(True)`, `np.identity(True)`).
+fn int_not_bool(value: &Bound<'_, PyAny>) -> Option<i64> {
+    if value.is_instance_of::<PyBool>() {
+        return None;
+    }
     value.extract::<i64>().ok()
 }
 
@@ -121223,6 +121276,14 @@ fn ediff1d(
     // layouts the guard happened to touch would leave the behaviour depending on LAYOUT, which
     // is worse than a consistent bug - so all layouts delegate and NumPy raises for all three.
     if dtype_kind_of(ary.bind(py)) == Some('b') {
+        return fallback();
+    }
+    // A Python bool or a list of them has no `dtype` to read, and numpy turns it into a bool
+    // array and refuses it just the same (`np.ediff1d(True)`); ask numpy what it would make of
+    // any operand that is not already an ndarray.
+    if !ary.bind(py).is_instance(cached_ndarray_type(py)?)?
+        && dtype_kind_of(&cached_numpy_asarray(py)?.call1((ary.bind(py),))?) == Some('b')
+    {
         return fallback();
     }
 

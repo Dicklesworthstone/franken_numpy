@@ -3976,6 +3976,101 @@ print(len(names), cells, panics, bad)
     Ok(())
 }
 
+/// SCALAR operands: every numpy.__all__ callable on Python scalars (int, float, bool, complex),
+/// NumPy scalars (float64/32/16, int64/8, uint8, bool_, complex128) and 0-d arrays, called as
+/// f(x), f(x, x) and f(x, axis=0). fnp must return numpy's result TYPE (a NumPy scalar is not a
+/// 0-d array is not a Python float), dtype and bytes, or raise the same exception type (~6,000
+/// cells). Before the fix, 32 cells differed. The worst were silent wrong answers: linspace/
+/// geomspace/logspace with `np.complex128` or `np.complex64` endpoints returned float64 arrays of
+/// the REAL parts (a NumPy complex scalar implements `__float__`), and
+/// nanpercentile/nanquantile of a `np.float16` scalar returned float64. ediff1d(True),
+/// eye(True) and identity(True) answered where numpy refuses a bool, and
+/// tril/triu/diag_indices_from and rollaxis raised a different exception type than numpy for a
+/// non-array argument.
+#[test]
+fn array_functions_match_numpy_on_python_and_numpy_scalars() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import copy, inspect, warnings
+warnings.simplefilter("ignore")
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "empty", "empty_like", "ndarray", "broadcast", "iinfo", "finfo", "dtype", "getbufsize",
+        "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray", "record",
+        "put", "place", "putmask", "copyto", "fill_diagonal", "busday_offset", "busday_count",
+        "is_busday", "shares_memory", "may_share_memory"}
+VALUES = {"py_int": 3, "py_float": 2.5, "py_neg": -1.5, "py_bool": True, "py_complex": 1.5 - 2j,
+          "np_f8": np.float64(2.5), "np_f4": np.float32(-1.25), "np_f2": np.float16(0.5),
+          "np_i8": np.int64(-7), "np_u1": np.uint8(200), "np_i1": np.int8(-3), "np_b": np.bool_(True),
+          "np_c16": np.complex128(1 - 1j), "zd_f8": np.array(2.5), "zd_i4": np.array(4, dtype=np.int32)}
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def run(fn, args, kw):
+    try:
+        return fn(*copy.deepcopy(args), **kw)
+    except BaseException as ex:
+        return Raised(ex)
+def same(r, s):
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        return isinstance(s, Raised) and isinstance(r, Raised) and r.name == s.name
+    if isinstance(s, (tuple, list)):
+        return type(r) is type(s) and len(r) == len(s) and all(same(a, b) for a, b in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    if s is None or isinstance(s, (str, bool, int, float, complex)):
+        return r == s or (s != s and r != r)
+    try:
+        r2, s2 = np.asarray(r), np.asarray(s)
+    except Exception:
+        return repr(r) == repr(s)
+    if r2.dtype.kind == "O":
+        return repr(r) == repr(s)
+    return r2.dtype == s2.dtype and r2.shape == s2.shape and r2.tobytes() == s2.tobytes()
+bad, cells = [], 0
+for name in names:
+    npf, fnf = getattr(np, name), getattr(fnp, name, None)
+    if fnf is None:
+        continue
+    for label, x in VALUES.items():
+        for form, args, kw in (("1", (x,), {}), ("2", (x, x), {}), ("ax0", (x,), {"axis": 0})):
+            s = run(npf, args, kw)
+            r = run(fnf, args, kw)
+            if isinstance(s, Raised) and s.name == "TypeError" and isinstance(r, Raised):
+                continue
+            cells += 1
+            if not same(r, s):
+                bad.append(f"{name}{form} {label}: fnp={getattr(r, 'name', type(r).__name__)} "
+                           f"numpy={getattr(s, 'name', type(s).__name__)}")
+print(len(names), cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (functions, cells, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 5000,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        bad, "[]",
+        "scalar operands must behave as in numpy: {result}"
+    );
+    Ok(())
+}
+
 /// ndarray SUBCLASSES: every numpy.__all__ callable on a user subclass (with
 /// `__array_finalize__`), an `np.matrix` and an `np.ma.MaskedArray` of f8/i8/bool, called as
 /// f(a), f(a, a) and f(a, axis=0). fnp must return numpy's exact result CLASS, dtype, shape,
