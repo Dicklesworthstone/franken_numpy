@@ -1289,6 +1289,15 @@ impl PhiloxRng {
         self.buffer_pos = 4;
     }
 
+    /// NumPy's `Philox.advance(delta)`: `philox_advance` adds the 256-bit `delta` (four
+    /// little-endian words, already wrapped to 256 bits) to the counter, then
+    /// `_reset_state_variables` discards the output buffer.
+    pub fn advance_like_numpy(&mut self, delta: [u64; 4]) {
+        self.advance_counter(delta);
+        self.buffer = [0; 4];
+        self.buffer_pos = 4;
+    }
+
     /// Port of NumPy's `philox_advance`: add a 256-bit step to the 4-word counter, with
     /// NumPy's carry order (the pending carry is applied before the word's own step).
     fn advance_counter(&mut self, step: [u64; 4]) {
@@ -2225,6 +2234,21 @@ impl RngBackend {
             }
             Self::Sfc64(_) => {}
         }
+    }
+
+    /// NumPy's `advance(delta)` on the core, `delta` as four little-endian u64 words already
+    /// wrapped to the core's width: the PCG cores step their LCG `delta` times (128 bits, each
+    /// with its own multiplier), Philox adds `delta` to its 256-bit counter. False for the
+    /// cores NumPy gives no `advance` (MT19937, SFC64).
+    fn advance_like_numpy(&mut self, delta: [u64; 4]) -> bool {
+        let low_128 = u128::from(delta[0]) | (u128::from(delta[1]) << 64);
+        match self {
+            Self::Pcg64(rng) => rng.advance(low_128),
+            Self::Pcg64Dxsm(rng) => rng.advance(low_128),
+            Self::Philox(rng) => rng.advance_like_numpy(delta),
+            Self::Deterministic(_) | Self::Mt19937(_) | Self::Sfc64(_) => return false,
+        }
+        true
     }
 
     fn to_state_entries(&self) -> Vec<(String, u64)> {
@@ -3390,6 +3414,22 @@ impl BitGenerator {
         let mut jumped = self.clone();
         jumped.jump_in_place(jumps)?;
         Ok(jumped)
+    }
+
+    /// NumPy's `advance(delta)` for PCG64, PCG64DXSM and Philox: advance the core as if
+    /// `delta` raw draws had happened (Philox: `delta` counter blocks), `delta` given as four
+    /// little-endian u64 words already wrapped to the core's width (`wrap_int(delta, 128)`,
+    /// or 256 for Philox). Like NumPy's `_reset_state_variables`, it also drops a buffered
+    /// 32-bit half, so a `uint32` drawn before the advance cannot leak after it.
+    pub fn advance(&mut self, delta: [u64; 4]) -> Result<(), BitGeneratorError> {
+        if !self.rng.advance_like_numpy(delta) {
+            return Err(BitGeneratorError::JumpContractViolation(
+                "numpy defines advance only for PCG64, PCG64DXSM and Philox",
+            ));
+        }
+        self.has_uint32 = false;
+        self.uinteger = 0;
+        Ok(())
     }
 
     pub fn spawn(&mut self, n_children: usize) -> Result<Vec<Self>, BitGeneratorError> {
@@ -9717,6 +9757,82 @@ for child in rng.spawn(n_children):
         assert_ne!(pcg_val, dxsm_val, "PCG64 and PCG64DXSM should differ");
         assert_ne!(dxsm_val, philox_val, "PCG64DXSM and Philox should differ");
         assert_ne!(philox_val, sfc64_val, "Philox and SFC64 should differ");
+    }
+
+    /// `advance(delta)` against NumPy 2.4.3: `cls(12345).advance(d).random_raw(2)` for
+    /// d = 0 and 2**64 + 3 (and 2**200 + 5 on Philox's 256-bit counter), plus a uint32 drawn
+    /// through `Generator.integers(0, 2**32, dtype=uint32)` before and after `advance(5)`.
+    /// The after-value is the LOW half of a fresh word; a leaked buffer would return the high
+    /// half of the first word instead (0x3a32b18d for PCG64).
+    #[test]
+    fn advance_matches_numpy_streams_and_drops_the_buffered_u32() {
+        let cases: [(BitGeneratorKind, [u64; 2], [u64; 2], u32, u32); 3] = [
+            (
+                BitGeneratorKind::Pcg64,
+                [0x3a32_b18d_b2ff_c19d, 0x5117_1315_c9e4_c4de],
+                [0xe561_5b97_af1b_c781, 0x6538_8b33_72c0_8506],
+                0xb2ff_c19d,
+                0x9147_e59d,
+            ),
+            (
+                BitGeneratorKind::Pcg64Dxsm,
+                [0xee9c_e7d9_1fd0_146f, 0x5666_c45f_046a_0883],
+                [0xb83a_a5f5_8b6e_15dd, 0x8efe_d49a_db39_0d06],
+                0x1fd0_146f,
+                0x4455_f0f6,
+            ),
+            (
+                BitGeneratorKind::Philox,
+                [0x6bb6_8ec5_e088_7940, 0xa736_3669_9d49_8901],
+                [0x7b00_8fbc_bfb1_19a5, 0x2efe_ee31_aa77_bee5],
+                0xe088_7940,
+                0x905c_2547,
+            ),
+        ];
+        for (kind, at_zero, at_2_64_plus_3, u32_before, u32_after) in cases {
+            let mut bg = BitGenerator::new(kind, SeedMaterial::U64(12345)).unwrap();
+            bg.advance([0; 4]).unwrap();
+            assert_eq!(
+                [bg.next_u64(), bg.next_u64()],
+                at_zero,
+                "{kind:?} advance(0)"
+            );
+
+            let mut bg = BitGenerator::new(kind, SeedMaterial::U64(12345)).unwrap();
+            bg.advance([3, 1, 0, 0]).unwrap();
+            assert_eq!(
+                [bg.next_u64(), bg.next_u64()],
+                at_2_64_plus_3,
+                "{kind:?} advance(2**64 + 3)"
+            );
+
+            let mut bg = BitGenerator::new(kind, SeedMaterial::U64(12345)).unwrap();
+            assert_eq!(bg.next_u32(), u32_before, "{kind:?} first uint32");
+            bg.advance([5, 0, 0, 0]).unwrap();
+            assert_eq!(
+                bg.next_u32(),
+                u32_after,
+                "{kind:?}: the buffered uint32 half leaked past advance"
+            );
+        }
+
+        let mut philox =
+            BitGenerator::new(BitGeneratorKind::Philox, SeedMaterial::U64(12345)).unwrap();
+        philox.advance([5, 0, 0, 1 << 8]).unwrap();
+        assert_eq!(
+            [philox.next_u64(), philox.next_u64()],
+            [0x22c0_f170_9830_dc27, 0x8eaa_6596_0feb_1fc2],
+            "Philox advance(2**200 + 5)"
+        );
+
+        // NumPy defines no advance on MT19937 or SFC64.
+        for kind in [BitGeneratorKind::Mt19937, BitGeneratorKind::Sfc64] {
+            let mut bg = BitGenerator::new(kind, SeedMaterial::U64(12345)).unwrap();
+            assert!(
+                bg.advance([1, 0, 0, 0]).is_err(),
+                "{kind:?} must refuse advance"
+            );
+        }
     }
 
     #[test]

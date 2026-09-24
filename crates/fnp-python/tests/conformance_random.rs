@@ -1303,3 +1303,71 @@ result = (cells, len(distinct), bad)
         Ok(())
     });
 }
+
+/// numpy's `advance(delta)` on PCG64, PCG64DXSM and Philox (bead .30): for seeds {0, 12345,
+/// 2**40 + 7} and deltas {0, 1, 12345, 2**64 + 3, 2**127, -1} (and 2**200 on Philox's 256-bit
+/// counter), `advance(d).random_raw(8)` must equal numpy's word for word, `advance` must return
+/// the SAME object, and a uint32 buffered by `Generator.integers(..., dtype=uint32)` before an
+/// advance must not leak after it. `delta` goes through numpy's own `delta & mask`, so a NumPy
+/// integer is numpy's OverflowError and a float its TypeError. And the method SURFACE must be
+/// numpy's: `hasattr(SFC64(0), "jumped")` and `hasattr(MT19937(0), "advance")` are False there
+/// (fnp's shared pyclass used to give every generator `jumped`, and none of them `advance`).
+#[test]
+fn bit_generator_advance_matches_numpy_streams_and_surface() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+cells = 0
+for name in ("PCG64", "PCG64DXSM", "Philox"):
+    deltas = [0, 1, 12345, 2**64 + 3, 2**127, -1] + ([2**200] if name == "Philox" else [])
+    for seed in (0, 12345, 2**40 + 7):
+        for d in deltas:
+            ours, theirs = getattr(fnp.random, name)(seed), getattr(np.random, name)(seed)
+            if ours.advance(d) is not ours:
+                bad.append(f"{name}({seed}).advance({d}) did not return self")
+            cells += 1
+            if ours.random_raw(8).tolist() != theirs.advance(d).random_raw(8).tolist():
+                bad.append(f"{name}({seed}).advance({d})")
+        ours, theirs = getattr(fnp.random, name)(seed), getattr(np.random, name)(seed)
+        og, tg = fnp.random.Generator(ours), np.random.Generator(theirs)
+        first = (og.integers(0, 2**32, dtype=np.uint32), tg.integers(0, 2**32, dtype=np.uint32))
+        ours.advance(5)
+        theirs.advance(5)
+        after = (og.integers(0, 2**32, dtype=np.uint32), tg.integers(0, 2**32, dtype=np.uint32))
+        cells += 1
+        if int(first[0]) != int(first[1]) or int(after[0]) != int(after[1]):
+            bad.append(f"{name}({seed}) buffered uint32 across advance: {first} {after}")
+    for d in (np.int64(5), 1.5, "5"):
+        def outcome(module):
+            try:
+                getattr(module.random, name)(1).advance(d)
+                return "ok"
+            except Exception as ex:
+                return type(ex).__name__
+        cells += 1
+        if outcome(fnp) != outcome(np):
+            bad.append(f"{name}.advance({d!r}): fnp={outcome(fnp)} numpy={outcome(np)}")
+for name in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    for attr in ("jumped", "advance"):
+        cells += 1
+        mine = hasattr(getattr(fnp.random, name)(0), attr)
+        if mine != hasattr(getattr(np.random, name)(0), attr):
+            bad.append(f"hasattr({name}(0), {attr!r}) = {mine}")
+result = (cells, bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (cells, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(cells, 85, "cell table drifted");
+        assert!(bad.is_empty(), "advance diverges from numpy: {bad:#?}");
+        Ok(())
+    });
+}

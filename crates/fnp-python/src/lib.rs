@@ -2399,8 +2399,41 @@ pub struct PySeedSequence {
     entropy: Py<PyAny>,
 }
 
+/// NumPy's `advance(delta)` for PCG64/PCG64DXSM (`bits` = 128) and Philox (256): numpy
+/// computes `wrap_int(delta, bits)` as `delta & mask` IN PYTHON, so that is what runs here too -
+/// a Python int (or bool) wraps modulo 2**bits, a NumPy integer or 0-d array raises the same
+/// OverflowError numpy raises, a float or str the same TypeError. The wrapped value is split into
+/// four little-endian u64 words for the core, which then drops its buffered uint32 half.
+fn bit_generator_advance(
+    inner: &mut BitGenerator,
+    delta: &Bound<'_, PyAny>,
+    bits: u32,
+) -> PyResult<()> {
+    let py = delta.py();
+    let mask = 1_u8
+        .into_pyobject(py)?
+        .call_method1(intern!(py, "__lshift__"), (bits,))?
+        .call_method1(intern!(py, "__sub__"), (1_u8,))?;
+    let wrapped = py
+        .import("operator")?
+        .getattr(intern!(py, "and_"))?
+        .call1((delta, mask))?;
+    let bytes: Vec<u8> = wrapped
+        .call_method1(intern!(py, "to_bytes"), (32_u8, intern!(py, "little")))?
+        .extract()?;
+    let mut words = [0_u64; 4];
+    for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *word = u64::from_le_bytes(*chunk);
+    }
+    inner.advance(words).map_err(map_bit_generator_error)
+}
+
+/// One `#[pymethods]` block per bit generator; `$extra` carries the methods only some of them
+/// have (numpy: `jumped` on MT19937/PCG64/PCG64DXSM/Philox, `advance` on PCG64/PCG64DXSM/Philox,
+/// neither on SFC64). They are spliced in as tokens because a nested macro inside a
+/// `#[pymethods]` impl would not be registered as a Python method.
 macro_rules! define_py_bit_generator {
-    ($type_name:ident, $py_name:literal, $kind:expr) => {
+    ($type_name:ident, $py_name:literal, $kind:expr, { $($extra:tt)* }) => {
         #[pyclass(
             name = $py_name,
             module = "fnp_python.random",
@@ -2453,20 +2486,7 @@ macro_rules! define_py_bit_generator {
                 bit_generator_random_raw(py, &mut self.inner, size)
             }
 
-            #[pyo3(signature = (jumps=1))]
-            fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
-                // numpy.random.SFC64 defines no `jumped`, so NumPy code reaching for it gets
-                // AttributeError; raise that rather than a contract ValueError.
-                if matches!($kind, BitGeneratorKind::Sfc64) {
-                    return Err(pyo3::exceptions::PyAttributeError::new_err(
-                        "'SFC64' object has no attribute 'jumped'",
-                    ));
-                }
-                Ok(Self {
-                    inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
-                    seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
-                })
-            }
+            $($extra)*
 
             fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
                 let list = PyList::empty(py);
@@ -2560,11 +2580,71 @@ macro_rules! define_py_bit_generator {
     };
 }
 
-define_py_bit_generator!(PyMt19937, "MT19937", BitGeneratorKind::Mt19937);
-define_py_bit_generator!(PyPcg64, "PCG64", BitGeneratorKind::Pcg64);
-define_py_bit_generator!(PyPcg64Dxsm, "PCG64DXSM", BitGeneratorKind::Pcg64Dxsm);
-define_py_bit_generator!(PyPhilox, "Philox", BitGeneratorKind::Philox);
-define_py_bit_generator!(PySfc64, "SFC64", BitGeneratorKind::Sfc64);
+define_py_bit_generator!(PyMt19937, "MT19937", BitGeneratorKind::Mt19937, {
+    #[pyo3(signature = (jumps=1))]
+    fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
+            seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
+        })
+    }
+});
+define_py_bit_generator!(PyPcg64, "PCG64", BitGeneratorKind::Pcg64, {
+    #[pyo3(signature = (jumps=1))]
+    fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
+            seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
+        })
+    }
+
+    /// Returns self, as numpy's does.
+    fn advance<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        delta: &Bound<'py, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        bit_generator_advance(&mut slf.inner, delta, 128)?;
+        Ok(slf)
+    }
+});
+define_py_bit_generator!(PyPcg64Dxsm, "PCG64DXSM", BitGeneratorKind::Pcg64Dxsm, {
+    #[pyo3(signature = (jumps=1))]
+    fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
+            seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
+        })
+    }
+
+    /// Returns self, as numpy's does.
+    fn advance<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        delta: &Bound<'py, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        bit_generator_advance(&mut slf.inner, delta, 128)?;
+        Ok(slf)
+    }
+});
+define_py_bit_generator!(PyPhilox, "Philox", BitGeneratorKind::Philox, {
+    #[pyo3(signature = (jumps=1))]
+    fn jumped(&self, py: Python<'_>, jumps: u64) -> PyResult<Self> {
+        Ok(Self {
+            inner: self.inner.jumped(jumps).map_err(map_bit_generator_error)?,
+            seed_sequence: self.seed_sequence.as_ref().map(|s| s.clone_ref(py)),
+        })
+    }
+
+    /// Returns self, as numpy's does; Philox's counter is 256 bits wide.
+    fn advance<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        delta: &Bound<'py, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        bit_generator_advance(&mut slf.inner, delta, 256)?;
+        Ok(slf)
+    }
+});
+// numpy.random.SFC64 has neither `jumped` nor `advance`, so `hasattr` must say False on both.
+define_py_bit_generator!(PySfc64, "SFC64", BitGeneratorKind::Sfc64, {});
 
 #[pymethods]
 impl PySeedSequence {
