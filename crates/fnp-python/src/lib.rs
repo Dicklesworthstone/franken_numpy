@@ -46,7 +46,7 @@ use fnp_ufunc::{
     hermeder as ufunc_hermeder,
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
     logaddexp2 as ufunc_logaddexp2,
-    logical_not as ufunc_logical_not, ma_is_masked, ma_make_mask, ma_mask_or,
+    logical_not as ufunc_logical_not, ma_is_masked,
     matmul_accumulate_serial, modf as ufunc_modf, npy_floor_divide_f64, reduce_frompyfunc_values,
     signbit as ufunc_signbit, spacing as ufunc_spacing,
     take_float_error_events, tiny_product_is_inexact,
@@ -8073,119 +8073,11 @@ fn extract_mask_metadata(
     Ok((true, mask, shape))
 }
 
-fn extract_numeric_masked_array(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<Option<MaskedArray>> {
-    let asanyarray = cached_numpy_asanyarray(py)?.call1((value,))?;
-    let is_masked_array = asanyarray.is_instance(cached_numpy_ma_masked_array(py)?)?;
-
-    let mask = if is_masked_array {
-        let mask_object = cached_numpy_ma_getmaskarray(py)?.call1((&asanyarray,))?;
-        let mask =
-            match extract_precise_numeric_array(py, &mask_object, &format!("{context}: mask")) {
-                Ok(mask) => mask,
-                Err(_) => return Ok(None),
-            };
-        mask.values()
-            .iter()
-            .any(|&value| value != 0.0)
-            .then_some(mask)
-    } else {
-        None
-    };
-
-    let data_source = if is_masked_array {
-        asanyarray.getattr(intern!(py, "data"))?
-    } else {
-        cached_numpy_asarray(py)?.call1((value,))?
-    };
-    let data = match extract_precise_numeric_array(py, &data_source, context) {
-        Ok(data) => data,
-        Err(_) => return Ok(None),
-    };
-    let fill_value = if is_masked_array {
-        asanyarray
-            .getattr(intern!(py, "fill_value"))
-            .ok()
-            .and_then(|value| value.extract::<f64>().ok())
-    } else {
-        None
-    };
-
-    MaskedArray::new(data, mask, fill_value)
-        .map(Some)
-        .map_err(|err| map_ma_error(context, err))
-}
-
-enum FilledScalarStorage {
-    Storage(ArrayStorage),
-    PythonInt(ArrayStorage),
-    PythonFloat(f64),
-}
-
-impl FilledScalarStorage {
-    fn into_storage(self) -> ArrayStorage {
-        match self {
-            Self::Storage(storage) | Self::PythonInt(storage) => storage,
-            Self::PythonFloat(value) => ArrayStorage::F64(vec![value]),
-        }
-    }
-}
-
-fn dtype_is_unsigned_integer(dtype: DType) -> bool {
-    matches!(dtype, DType::U8 | DType::U16 | DType::U32 | DType::U64)
-}
-
-fn extract_filled_scalar_storage(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<Option<FilledScalarStorage>> {
-    let py_type = value.get_type();
-    let type_name_bound = py_type.name()?;
-    let type_name = type_name_bound.extract::<&str>()?;
-    match type_name {
-        "bool" => Ok(Some(FilledScalarStorage::Storage(ArrayStorage::Bool(
-            vec![value.extract::<bool>()?],
-        )))),
-        "int" => {
-            if let Ok(value) = value.extract::<i64>() {
-                return Ok(Some(FilledScalarStorage::PythonInt(ArrayStorage::I64(
-                    vec![value],
-                ))));
-            }
-            if let Ok(value) = value.extract::<u64>() {
-                return Ok(Some(FilledScalarStorage::PythonInt(ArrayStorage::U64(
-                    vec![value],
-                ))));
-            }
-            Ok(None)
-        }
-        "float" => Ok(Some(FilledScalarStorage::PythonFloat(
-            value.extract::<f64>()?,
-        ))),
-        _ => {
-            let scalar = match extract_precise_numeric_array(py, value, context) {
-                Ok(scalar) => scalar,
-                Err(_) => return Ok(None),
-            };
-            if !scalar.shape().is_empty() {
-                return Ok(None);
-            }
-            let storage = scalar.to_storage().map_err(map_ufunc_error)?;
-            Ok(Some(FilledScalarStorage::Storage(storage)))
-        }
-    }
-}
-
 fn masked_scalar_compare(
     py: Python<'_>,
     x: Py<PyAny>,
     value: Py<PyAny>,
     copy: bool,
-    context: &str,
     numpy_name: &Bound<'_, PyString>,
     op: BinaryOp,
 ) -> PyResult<Py<PyAny>> {
@@ -8252,47 +8144,10 @@ fn masked_scalar_compare(
         }
     }
 
-    let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), context)? else {
-        return fallback();
-    };
-    let scalar =
-        match extract_precise_numeric_array(py, value.bind(py), &format!("{context}: value")) {
-            Ok(value) if value.shape().is_empty() => value,
-            _ => return fallback(),
-        };
-
-    let condition = match masked_x.data().elementwise_binary(&scalar, op) {
-        Ok(condition) => condition,
-        Err(_) => return fallback(),
-    };
-    let mut mask = ma_mask_or(masked_x.mask(), Some(&condition));
-    if mask
-        .as_ref()
-        .is_some_and(|mask| mask.values().iter().all(|&value| value == 0.0))
-    {
-        mask = None;
-    }
-
-    let fill_value = if numpy_name == "masked_equal" {
-        scalar.values()[0]
-    } else {
-        masked_x.fill_value()
-    };
-    let result = MaskedArray::new(masked_x.data().clone(), mask, Some(fill_value))
-        .map_err(|err| map_ma_error(context, err))?;
-    let py_result = build_numpy_masked_array(py, &result)?;
-    // numpy.ma.masked_equal(data, sentinel) sets fill_value=sentinel in
-    // the result, regardless of data dtype. build_numpy_masked_array
-    // does not propagate our Rust struct's fill_value (that would
-    // regress 10 other masked tests that rely on numpy's dtype-default),
-    // so we apply the override here for the masked_equal convention
-    // only. bead franken_numpy-ijry.
-    if numpy_name == "masked_equal" {
-        py_result
-            .bind(py)
-            .call_method1(intern!(py, "set_fill_value"), (scalar.values()[0],))?;
-    }
-    Ok(py_result)
+    // Everything else - MaskedArray x, list x, array value - is numpy's. The extract -> combine
+    // -> rebuild path this replaced gave the result the dtype-default fill_value, dropping the
+    // input's (bead .8), and made ~3 full-size copies where numpy makes one.
+    fallback()
 }
 
 fn matrix_rank_default_rcond(dtype: DType, max_dim: usize) -> Option<f64> {
@@ -8354,7 +8209,6 @@ fn masked_interval_compare(
     v1: Py<PyAny>,
     v2: Py<PyAny>,
     copy: bool,
-    context: &str,
     numpy_name: &Bound<'_, PyString>,
     outside: bool,
 ) -> PyResult<Py<PyAny>> {
@@ -8403,70 +8257,10 @@ fn masked_interval_compare(
         }
     }
 
-    let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), context)? else {
-        return fallback();
-    };
-    let left = match extract_precise_numeric_array(py, v1.bind(py), &format!("{context}: v1")) {
-        Ok(value) if value.shape().is_empty() => value,
-        _ => return fallback(),
-    };
-    let right = match extract_precise_numeric_array(py, v2.bind(py), &format!("{context}: v2")) {
-        Ok(value) if value.shape().is_empty() => value,
-        _ => return fallback(),
-    };
-
-    let left_first = match left.elementwise_binary(&right, BinaryOp::LessEqual) {
-        Ok(ordering) => ordering.values()[0] != 0.0,
-        Err(_) => return fallback(),
-    };
-    let (lo, hi) = if left_first {
-        (left, right)
-    } else {
-        (right, left)
-    };
-
-    let interval_mask = if outside {
-        let below = match masked_x.data().elementwise_binary(&lo, BinaryOp::Less) {
-            Ok(value) => value,
-            Err(_) => return fallback(),
-        };
-        let above = match masked_x.data().elementwise_binary(&hi, BinaryOp::Greater) {
-            Ok(value) => value,
-            Err(_) => return fallback(),
-        };
-        match below.elementwise_binary(&above, BinaryOp::LogicalOr) {
-            Ok(mask) => mask,
-            Err(_) => return fallback(),
-        }
-    } else {
-        let ge_lo = match masked_x
-            .data()
-            .elementwise_binary(&lo, BinaryOp::GreaterEqual)
-        {
-            Ok(value) => value,
-            Err(_) => return fallback(),
-        };
-        let le_hi = match masked_x.data().elementwise_binary(&hi, BinaryOp::LessEqual) {
-            Ok(value) => value,
-            Err(_) => return fallback(),
-        };
-        match ge_lo.elementwise_binary(&le_hi, BinaryOp::LogicalAnd) {
-            Ok(mask) => mask,
-            Err(_) => return fallback(),
-        }
-    };
-
-    let mut mask = ma_mask_or(masked_x.mask(), Some(&interval_mask));
-    if mask
-        .as_ref()
-        .is_some_and(|mask| mask.values().iter().all(|&value| value == 0.0))
-    {
-        mask = None;
-    }
-
-    let result = MaskedArray::new(masked_x.data().clone(), mask, Some(masked_x.fill_value()))
-        .map_err(|err| map_ma_error(context, err))?;
-    build_numpy_masked_array(py, &result)
+    // Everything else (MaskedArray / non-f64 / list x, array bounds) is numpy's: the
+    // extract -> combine -> rebuild path this replaced dropped the input's fill_value (bead .8)
+    // and was ~13x slower than numpy.
+    fallback()
 }
 
 fn extract_python_dtype_bound(
@@ -31297,48 +31091,23 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
             && numpy_dtype_is_f64(py, a.bind(py))
             && let Some(mask) = try_zerocopy_f64_predicate(py, a.bind(py), |v| !v.is_finite())?
         {
-            return Ok(cached_numpy_ma_masked_where(py)?
-                .call1((mask.bind(py), a.bind(py)))?
-                .unbind());
+            let result = cached_numpy_ma_masked_where(py)?.call1((mask.bind(py), a.bind(py)))?;
+            // numpy's masked_invalid never returns nomask (gh-22842, for matplotlib): an input
+            // with nothing invalid keeps an explicit all-False mask, which masked_where shrinks.
+            if result
+                .getattr(intern!(py, "_mask"))?
+                .is(cached_numpy_ma_nomask(py)?)
+            {
+                result.setattr(intern!(py, "_mask"), mask.bind(py))?;
+            }
+            return Ok(result.unbind());
         }
     }
 
-    let asanyarray = cached_numpy_asanyarray(py)?.call1((a.bind(py),))?;
-    let input_is_masked = asanyarray.is_instance(cached_numpy_ma_masked_array(py)?)?;
-
-    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "masked_invalid(a)")? else {
-        return fallback();
-    };
-    if matches!(
-        masked.data().dtype(),
-        DType::Complex64
-            | DType::Complex128
-            | DType::DateTime64
-            | DType::TimeDelta64
-            | DType::Str
-            | DType::Structured
-    ) {
-        return fallback();
-    }
-
-    let invalid = masked
-        .data()
-        .elementwise_unary(UnaryOp::Isfinite)
-        .elementwise_unary(UnaryOp::LogicalNot);
-    let result = MaskedArray::new(
-        masked.data().clone(),
-        ma_mask_or(masked.mask(), Some(&invalid)),
-        None,
-    )
-    .map_err(|err| map_ma_error("masked_invalid", err))?;
-    let py_result = build_numpy_masked_array(py, &result)?;
-    if input_is_masked {
-        py_result.bind(py).call_method1(
-            intern!(py, "set_fill_value"),
-            (asanyarray.getattr(intern!(py, "fill_value"))?,),
-        )?;
-    }
-    Ok(py_result)
+    // Everything else (MaskedArray / non-f64 / list inputs) is numpy's: the extract -> combine
+    // -> rebuild path this replaced disagreed with numpy on those inputs (bead .8) and was
+    // ~16x slower.
+    fallback()
 }
 
 #[pyfunction]
@@ -45082,65 +44851,21 @@ fn masked_where(
     a: Py<PyAny>,
     copy: bool,
 ) -> PyResult<Py<PyAny>> {
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let masked_where_fn = cached_numpy_ma_masked_where(py)?;
-        if copy {
-            Ok(masked_where_fn
-                .call1((condition.bind(py), a.bind(py)))?
-                .unbind())
-        } else {
-            Ok(masked_where_fn
-                .call1((condition.bind(py), a.bind(py), copy))?
-                .unbind())
-        }
-    };
-
-    if !copy {
-        return fallback();
-    }
-
-    // Fast path: a PLAIN ndarray a (never already-masked — get_type().is(ndarray)
-    // excludes MaskedArray subclasses). numpy's own masked_where is the parity
-    // reference and ~12x faster than the extract -> combine -> rebuild path below
-    // (159ms vs 13.5ms @4M f64), which copies both the condition and the data into
-    // owned Vecs. numpy handles scalar-broadcast conditions, shape-mismatch
-    // IndexErrors, and all-False mask shrinking natively, so the result is identical.
-    {
-        if is_exact_numpy_ndarray(py, a.bind(py))? {
-            return fallback();
-        }
-    }
-
-    let condition = match extract_numeric_array(py, condition.bind(py), "masked_where(condition)") {
-        Ok(condition) => condition,
-        Err(_) => return fallback(),
-    };
-    let Some(masked_a) = extract_numeric_masked_array(py, a.bind(py), "masked_where(a)")? else {
-        return fallback();
-    };
-    let condition = if condition.shape().is_empty() {
-        match condition.broadcast_to(masked_a.data().shape()) {
-            Ok(condition) => condition,
-            Err(_) => return fallback(),
-        }
+    // numpy.ma.masked_where is the parity reference for every input. It was already taken for
+    // plain ndarrays (~12x faster than the extract -> combine -> rebuild path, 159ms vs 13.5ms
+    // @4M f64). That path remained for MaskedArray and list inputs and rebuilt the result with
+    // the dtype-default fill_value, dropping the input's (a float32 array with fill_value=-5
+    // came back with 1e20), bead .8.
+    let masked_where_fn = cached_numpy_ma_masked_where(py)?;
+    if copy {
+        Ok(masked_where_fn
+            .call1((condition.bind(py), a.bind(py)))?
+            .unbind())
     } else {
-        if condition.shape() != masked_a.data().shape() {
-            return fallback();
-        }
-        condition
-    };
-
-    let mut mask = ma_mask_or(masked_a.mask(), Some(&ma_make_mask(&condition)));
-    if mask
-        .as_ref()
-        .is_some_and(|mask| mask.values().iter().all(|&value| value == 0.0))
-    {
-        mask = None;
+        Ok(masked_where_fn
+            .call1((condition.bind(py), a.bind(py), copy))?
+            .unbind())
     }
-
-    let result = MaskedArray::new(masked_a.data().clone(), mask, Some(masked_a.fill_value()))
-        .map_err(|err| map_ma_error("masked_where", err))?;
-    build_numpy_masked_array(py, &result)
 }
 
 #[pyfunction]
@@ -45397,7 +45122,6 @@ fn masked_equal(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> P
         x,
         value,
         copy,
-        "masked_equal",
         intern!(py, "masked_equal"),
         BinaryOp::Equal,
     )
@@ -45416,7 +45140,6 @@ fn masked_not_equal(
         x,
         value,
         copy,
-        "masked_not_equal",
         intern!(py, "masked_not_equal"),
         BinaryOp::NotEqual,
     )
@@ -45457,7 +45180,6 @@ fn masked_inside(
         v1,
         v2,
         copy,
-        "masked_inside",
         intern!(py, "masked_inside"),
         false,
     )
@@ -45476,7 +45198,6 @@ fn masked_greater_equal(
         x,
         value,
         copy,
-        "masked_greater_equal",
         intern!(py, "masked_greater_equal"),
         BinaryOp::GreaterEqual,
     )
@@ -45751,33 +45472,10 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
         }
     }
 
-    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "filled")? else {
-        return fallback();
-    };
-    let fill_value = match fill_value.as_ref() {
-        Some(value) => {
-            match extract_filled_scalar_storage(py, value.bind(py), "filled(fill_value)")? {
-                Some(fill_value) => fill_value,
-                None => return fallback(),
-            }
-        }
-        None => FilledScalarStorage::Storage(ArrayStorage::F64(vec![masked.fill_value()])),
-    };
-
-    if dtype_is_unsigned_integer(masked.dtype()) {
-        match &fill_value {
-            FilledScalarStorage::PythonFloat(value) if *value < 0.0 => return fallback(),
-            FilledScalarStorage::PythonInt(ArrayStorage::I64(values)) if values[0] < 0 => {
-                return fallback();
-            }
-            _ => {}
-        }
-    }
-
-    let result = masked
-        .filled_with_storage(fill_value.into_storage())
-        .map_err(|err| map_ufunc_error(format!("filled: {err}")))?;
-    build_numpy_scalar_or_array(py, &result)
+    // Everything else is numpy's. The extract -> fill -> rebuild path this replaced returned a
+    // numpy scalar for a 0-d MaskedArray (numpy returns a 0-d ndarray) and a fresh copy for a
+    // plain ndarray (numpy returns the input object itself), bead .8.
+    fallback()
 }
 
 #[pyfunction]
@@ -47613,6 +47311,12 @@ fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyR
         }
     };
 
+    // fill_value=False is numpy's: it answers the Python `False` whenever a mask array exists,
+    // whatever the data, and `d.all()` (a numpy bool) only under nomask.
+    if !fill_value {
+        return fallback();
+    }
+
     // Zero-copy early-exit fast path: a,b both f64 (MaskedArray or plain ndarray) of
     // the same shape. The generic path below extracts BOTH operands' data+mask into
     // owned f64 UFuncArrays before folding (~85ms @4M, 7.9x slower than numpy) — and
@@ -47732,46 +47436,18 @@ fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyR
                             }
                             equal
                         };
-                        return Ok(PyBool::new(py, equal).to_owned().into_any().unbind());
+                        // numpy.ma.allequal returns `d.all()`, a numpy bool, not a Python bool.
+                        return Ok(cached_bool_type(py)?.call1((equal,))?.unbind());
                     }
                 }
             }
         }
     }
 
-    let Some(a_masked) = extract_numeric_masked_array(py, a.bind(py), "allequal(a)")? else {
-        return fallback();
-    };
-    let Some(b_masked) = extract_numeric_masked_array(py, b.bind(py), "allequal(b)")? else {
-        return fallback();
-    };
-
-    if a_masked.data().shape() != b_masked.data().shape() {
-        return Ok(PyBool::new(py, false).to_owned().into_any().unbind());
-    }
-
-    let a_mask = a_masked.mask().map(|mask| mask.values());
-    let b_mask = b_masked.mask().map(|mask| mask.values());
-    let equal = a_masked
-        .data()
-        .values()
-        .iter()
-        .zip(b_masked.data().values().iter())
-        .enumerate()
-        .all(|(idx, (&lhs, &rhs))| {
-            let lhs_masked = a_mask.as_ref().is_some_and(|mask| mask[idx] != 0.0);
-            let rhs_masked = b_mask.as_ref().is_some_and(|mask| mask[idx] != 0.0);
-            match (lhs_masked, rhs_masked) {
-                // numpy.ma.allequal treats any masked entry as fill_value
-                // (controls whether masked positions count as equal). When
-                // fill_value=False, both-masked should return False too,
-                // not True as a naive "both masked ⇒ trivially equal".
-                (true, true) | (true, false) | (false, true) => fill_value,
-                (false, false) => !lhs.is_nan() && !rhs.is_nan() && lhs == rhs,
-            }
-        });
-
-    Ok(PyBool::new(py, equal).to_owned().into_any().unbind())
+    // Everything else is numpy's. The extract path this replaced returned a Python bool and
+    // answered False for differently shaped operands, where numpy broadcasts them
+    // (allequal([1, 2], [[1, 2], [1, 2]]) is True), bead .8.
+    fallback()
 }
 
 // True for an exact integer (signed or unsigned) ndarray. Integer data cannot hold
@@ -83839,310 +83515,12 @@ fn ma_average(
             .unbind())
     };
 
-    // Fast path: with no weights, ma.average reduces to the masked mean. The manual
-    // extract + per-element accumulation below runs ~7x slower than numpy.ma.average
-    // (106ms vs 14ms @4M f64). numpy is the parity reference and handles the
-    // returned-tuple and all-masked -> masked-scalar cases natively, so defer the
-    // (common) no-weights case to it.
-    if weights.is_none() {
-        return fallback();
-    }
-
-    let input_is_masked_array = extract_mask_metadata(py, a.bind(py), "ma_average(a)")
-        .map(|(is_masked, _, _)| is_masked)
-        .unwrap_or(false);
-    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "ma_average(a)")? else {
-        return fallback();
-    };
-    let axis = match extract_axis_spec_bound(
-        py,
-        axis.as_ref().map(|value| value.bind(py)),
-        "ma_average",
-    ) {
-        Ok(None) => None,
-        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
-        Ok(Some(_)) => return fallback(),
-        Err(_) => return fallback(),
-    };
-    if let Some(weights) = weights.as_ref() {
-        let Some(masked_weights) =
-            extract_numeric_masked_array(py, weights.bind(py), "ma_average(weights)")?
-        else {
-            return fallback();
-        };
-        let masked_scalar = cached_numpy_ma_masked(py)?.clone().unbind();
-        match axis {
-            None => {
-                if masked.shape() != masked_weights.shape() {
-                    return fallback();
-                }
-
-                let combined_mask = ma_mask_or(masked.mask(), masked_weights.mask());
-                let mut numerator = 0.0;
-                let mut denominator = 0.0;
-                let mut any_valid = false;
-                for index in 0..masked.data().values().len() {
-                    let is_masked = combined_mask
-                        .as_ref()
-                        .is_some_and(|mask| mask.values()[index] != 0.0);
-                    if is_masked {
-                        continue;
-                    }
-                    any_valid = true;
-                    let weight = masked_weights.data().values()[index];
-                    denominator += weight;
-                    numerator += masked.data().values()[index] * weight;
-                }
-
-                if !any_valid {
-                    if returned {
-                        return Ok(PyTuple::new(
-                            py,
-                            [masked_scalar.bind(py), masked_scalar.bind(py)],
-                        )?
-                        .into_any()
-                        .unbind());
-                    }
-                    return Ok(masked_scalar);
-                }
-
-                let average_output = build_numpy_scalar_or_array(
-                    py,
-                    &UFuncArray::scalar(numerator / denominator, DType::F64),
-                )?;
-                if returned {
-                    let sum_output = build_numpy_scalar_or_array(
-                        py,
-                        &UFuncArray::scalar(denominator, DType::F64),
-                    )?;
-                    return Ok(
-                        PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
-                            .into_any()
-                            .unbind(),
-                    );
-                }
-                return Ok(average_output);
-            }
-            Some(axis) => {
-                let Some(normalized_axis) = try_normalize_axis(axis, masked.shape().len()) else {
-                    return fallback();
-                };
-                let axis_len = masked.shape()[normalized_axis];
-                if masked_weights.shape() != [axis_len] {
-                    return fallback();
-                }
-
-                let outer = element_count(&masked.shape()[..normalized_axis])
-                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                let inner = element_count(&masked.shape()[normalized_axis + 1..])
-                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
-                let out_shape = masked
-                    .count(Some(axis))
-                    .map_err(|err| map_ma_error("ma_average", err))?
-                    .shape()
-                    .to_vec();
-                let out_len = outer * inner;
-                let mut avg_values = vec![0.0; out_len];
-                let mut avg_mask_values = vec![0.0; out_len];
-                let mut sum_values = vec![0.0; out_len];
-                let mut sum_mask_values = vec![0.0; out_len];
-                let mut any_valid_values = vec![false; out_len];
-
-                for outer_idx in 0..outer {
-                    let base = outer_idx * axis_len * inner;
-                    for inner_idx in 0..inner {
-                        let dst = outer_idx * inner + inner_idx;
-                        let mut numerator = 0.0;
-                        let mut denominator = 0.0;
-                        let mut any_valid = false;
-                        for lane_idx in 0..axis_len {
-                            let src = base + lane_idx * inner + inner_idx;
-                            let data_masked =
-                                masked.mask().is_some_and(|mask| mask.values()[src] != 0.0);
-                            let weight_masked = masked_weights
-                                .mask()
-                                .is_some_and(|mask| mask.values()[lane_idx] != 0.0);
-                            if data_masked || weight_masked {
-                                continue;
-                            }
-                            any_valid = true;
-                            let weight = masked_weights.data().values()[lane_idx];
-                            denominator += weight;
-                            numerator += masked.data().values()[src] * weight;
-                        }
-                        any_valid_values[dst] = any_valid;
-
-                        if !any_valid {
-                            avg_mask_values[dst] = 1.0;
-                            if input_is_masked_array {
-                                sum_mask_values[dst] = 1.0;
-                            } else {
-                                sum_values[dst] = 0.0;
-                            }
-                            continue;
-                        }
-
-                        sum_values[dst] = denominator;
-                        if denominator == 0.0 {
-                            if out_shape.is_empty() {
-                                avg_values[dst] = numerator / denominator;
-                            } else {
-                                avg_mask_values[dst] = 1.0;
-                                avg_values[dst] = f64::NAN;
-                            }
-                        } else {
-                            avg_values[dst] = numerator / denominator;
-                        }
-                    }
-                }
-
-                if out_shape.is_empty() {
-                    if !any_valid_values[0] {
-                        if returned {
-                            return Ok(PyTuple::new(
-                                py,
-                                [masked_scalar.bind(py), masked_scalar.bind(py)],
-                            )?
-                            .into_any()
-                            .unbind());
-                        }
-                        return Ok(masked_scalar);
-                    }
-
-                    let average_output = build_numpy_scalar_or_array(
-                        py,
-                        &UFuncArray::scalar(avg_values[0], DType::F64),
-                    )?;
-                    if returned {
-                        let sum_output = build_numpy_scalar_or_array(
-                            py,
-                            &UFuncArray::scalar(sum_values[0], DType::F64),
-                        )?;
-                        return Ok(PyTuple::new(
-                            py,
-                            [average_output.bind(py), sum_output.bind(py)],
-                        )?
-                        .into_any()
-                        .unbind());
-                    }
-                    return Ok(average_output);
-                }
-
-                let average = MaskedArray::new(
-                    UFuncArray::new(out_shape.clone(), avg_values, DType::F64)
-                        .map_err(map_ufunc_error)?,
-                    Some(
-                        UFuncArray::new(out_shape.clone(), avg_mask_values, DType::Bool)
-                            .map_err(map_ufunc_error)?,
-                    ),
-                    Some(masked.fill_value()),
-                )
-                .map_err(|err| map_ma_error("ma_average", err))?;
-                let average_output = build_numpy_masked_array(py, &average)?;
-                average_output
-                    .bind(py)
-                    .call_method1(intern!(py, "set_fill_value"), (masked.fill_value(),))?;
-                if returned {
-                    let sum_output = if input_is_masked_array {
-                        let sum_weights = MaskedArray::new(
-                            UFuncArray::new(out_shape, sum_values, DType::F64)
-                                .map_err(map_ufunc_error)?,
-                            Some(
-                                UFuncArray::new(
-                                    average.data().shape().to_vec(),
-                                    sum_mask_values,
-                                    DType::Bool,
-                                )
-                                .map_err(map_ufunc_error)?,
-                            ),
-                            Some(masked.fill_value()),
-                        )
-                        .map_err(|err| map_ma_error("ma_average", err))?;
-                        let sum_output = build_numpy_masked_array(py, &sum_weights)?;
-                        sum_output
-                            .bind(py)
-                            .call_method1(intern!(py, "set_fill_value"), (masked.fill_value(),))?;
-                        sum_output
-                    } else {
-                        build_numpy_scalar_or_array(
-                            py,
-                            &UFuncArray::new(out_shape, sum_values, DType::F64)
-                                .map_err(map_ufunc_error)?,
-                        )?
-                    };
-                    return Ok(
-                        PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
-                            .into_any()
-                            .unbind(),
-                    );
-                }
-                return Ok(average_output);
-            }
-        }
-    }
-
-    let counts = match masked.count(axis) {
-        Ok(counts) => counts,
-        Err(_) => return fallback(),
-    };
-    let counts_output = build_numpy_scalar_or_array(py, &counts)?;
-
-    if axis.is_none() && counts.values().first().copied().unwrap_or(0.0) == 0.0 {
-        let masked_output = cached_numpy_ma_masked(py)?.clone().unbind();
-        if returned {
-            return Ok(
-                PyTuple::new(py, [masked_output.bind(py), counts_output.bind(py)])?
-                    .into_any()
-                    .unbind(),
-            );
-        }
-        return Ok(masked_output);
-    }
-
-    let mean = match masked.mean(axis, false) {
-        Ok(mean) => mean,
-        Err(_) => return fallback(),
-    };
-
-    if axis.is_none() {
-        let mean_output = build_numpy_scalar_or_array(py, mean.data())?;
-        if returned {
-            return Ok(
-                PyTuple::new(py, [mean_output.bind(py), counts_output.bind(py)])?
-                    .into_any()
-                    .unbind(),
-            );
-        }
-        return Ok(mean_output);
-    }
-
-    let mask = if counts.values().contains(&0.0) {
-        let mask_values: Vec<f64> = counts
-            .values()
-            .iter()
-            .map(|&value| if value == 0.0 { 1.0 } else { 0.0 })
-            .collect();
-        Some(
-            UFuncArray::new(counts.shape().to_vec(), mask_values, DType::Bool)
-                .map_err(map_ufunc_error)?,
-        )
-    } else {
-        None
-    };
-    let result = MaskedArray::new(mean.data().clone(), mask, Some(masked.fill_value()))
-        .map_err(|err| map_ma_error("ma_average", err))?;
-    let py_result = build_numpy_masked_array(py, &result)?;
-    py_result
-        .bind(py)
-        .call_method1(intern!(py, "set_fill_value"), (masked.fill_value(),))?;
-    if returned {
-        return Ok(
-            PyTuple::new(py, [py_result.bind(py), counts_output.bind(py)])?
-                .into_any()
-                .unbind(),
-        );
-    }
-    Ok(py_result)
+    // numpy.ma.average for every input. The unweighted case already deferred (the native
+    // extract + per-element accumulation was ~7x slower, 106ms vs 14ms @4M f64). The weighted
+    // native path summed w*x sequentially where numpy sums multiply(a, wgt) with its pairwise
+    // tree, and rebuilt results with the input's fill_value (999999.0 on a float result from
+    // an int input, where numpy gives 1e20) and its own mask rules (bead .8).
+    fallback()
 }
 
 #[pyfunction]
@@ -86484,67 +85862,10 @@ fn masked_values(
             .unbind())
     };
 
-    // Fast path: a PLAIN ndarray x (never already-masked — get_type().is(ndarray)
-    // excludes MaskedArray subclasses). numpy's own masked_values is the parity
-    // reference and ~15x faster than the extract -> isclose -> rebuild path below
-    // (194ms vs 12.7ms @4M f64). numpy computes the isclose mask, fills/shrinks, and
-    // sets fill_value=value natively, so the result is identical.
-    {
-        let ndarray_type = cached_ndarray_type(py)?;
-        if x.bind(py).get_type().is(ndarray_type) {
-            return fallback();
-        }
-    }
-
-    let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), "masked_values(x)")? else {
-        return fallback();
-    };
-    let scalar = match extract_precise_numeric_array(py, value.bind(py), "masked_values(value)") {
-        Ok(value) if value.shape().is_empty() => value,
-        _ => return fallback(),
-    };
-
-    let condition = if matches!(
-        masked_x.data().dtype(),
-        DType::F16 | DType::F32 | DType::F64
-    ) || matches!(scalar.dtype(), DType::F16 | DType::F32 | DType::F64)
-    {
-        match masked_x.data().isclose(&scalar, rtol, atol) {
-            Ok(condition) => condition,
-            Err(_) => return fallback(),
-        }
-    } else {
-        match masked_x.data().elementwise_binary(&scalar, BinaryOp::Equal) {
-            Ok(condition) => condition,
-            Err(_) => return fallback(),
-        }
-    };
-
-    let filled_data = if masked_x.mask().is_some() {
-        match masked_x.filled(scalar.values()[0]) {
-            Ok(data) => data,
-            Err(_) => return fallback(),
-        }
-    } else {
-        masked_x.data().clone()
-    };
-
-    let mut mask = ma_mask_or(masked_x.mask(), Some(&condition));
-    if shrink
-        && mask
-            .as_ref()
-            .is_some_and(|mask| mask.values().iter().all(|&value| value == 0.0))
-    {
-        mask = None;
-    }
-
-    let result = MaskedArray::new(filled_data, mask, Some(scalar.values()[0]))
-        .map_err(|err| map_ma_error("masked_values", err))?;
-    let py_result = build_numpy_masked_array(py, &result)?;
-    py_result
-        .bind(py)
-        .call_method1(intern!(py, "set_fill_value"), (value.bind(py),))?;
-    Ok(py_result)
+    // numpy's own masked_values is the parity reference for every input: ~15x faster than the
+    // extract -> isclose -> rebuild path this replaced (194ms vs 12.7ms @4M f64), which was
+    // kept only for MaskedArray / list inputs and disagreed with numpy there (bead .8).
+    fallback()
 }
 
 #[pyfunction]
@@ -86572,96 +85893,12 @@ fn ma_ediff1d(
             .unbind())
     };
 
-    let Some(flat) = extract_numeric_masked_array(py, arr.bind(py), "ma_ediff1d(arr)")?
-        .map(|array| array.ravel())
-    else {
-        return fallback();
-    };
-
-    let diff = if flat.data().values().len() < 2 {
-        MaskedArray::new(
-            flat.data().ediff1d().map_err(map_ufunc_error)?,
-            None,
-            Some(flat.fill_value()),
-        )
-        .map_err(|err| map_ma_error("ma_ediff1d", err))?
-    } else {
-        let right_indices = (1..flat.data().values().len())
-            .map(|index| index as i64)
-            .collect::<Vec<_>>();
-        let left_indices = (0..flat.data().values().len() - 1)
-            .map(|index| index as i64)
-            .collect::<Vec<_>>();
-        let right = flat
-            .take(&right_indices)
-            .map_err(|err| map_ma_error("ma_ediff1d", err))?;
-        let left = flat
-            .take(&left_indices)
-            .map_err(|err| map_ma_error("ma_ediff1d", err))?;
-        right
-            .elementwise_binary(&left, BinaryOp::Sub)
-            .map_err(|err| map_ma_error("ma_ediff1d", err))?
-    };
-
-    let begin = match to_begin.as_ref() {
-        Some(value) => {
-            match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_begin)")? {
-                Some(value) => Some(value.ravel()),
-                None => return fallback(),
-            }
-        }
-        None => None,
-    };
-    let end = match to_end.as_ref() {
-        Some(value) => {
-            match extract_numeric_masked_array(py, value.bind(py), "ma_ediff1d(to_end)")? {
-                Some(value) => Some(value.ravel()),
-                None => return fallback(),
-            }
-        }
-        None => None,
-    };
-
-    let result = match (begin.as_ref(), end.as_ref()) {
-        (None, None) => diff,
-        (Some(begin), None) => MaskedArray::concatenate(&[begin, &diff], 0)
-            .map_err(|err| map_ma_error("ma_ediff1d", err))?,
-        (None, Some(end)) => MaskedArray::concatenate(&[&diff, end], 0)
-            .map_err(|err| map_ma_error("ma_ediff1d", err))?,
-        (Some(begin), Some(end)) => MaskedArray::concatenate(&[begin, &diff, end], 0)
-            .map_err(|err| map_ma_error("ma_ediff1d", err))?,
-    };
-
-    let arr_any = cached_numpy_asanyarray(py)?.call1((arr.bind(py),))?;
-    let input_is_masked_array = arr_any.is_instance(cached_numpy_ma_masked_array(py)?)?;
-    let fill_value = if input_is_masked_array {
-        arr_any.getattr(intern!(py, "fill_value"))?
-    } else {
-        cached_numpy_ma_default_fill_value(py)?.call1((&arr_any,))?
-    };
-
-    let py_result = build_numpy_masked_array(py, &result)?;
-    py_result
-        .bind(py)
-        .call_method1(intern!(py, "set_fill_value"), (&fill_value,))?;
-    // numpy.ma.ediff1d uses an explicit all-False bool mask (not the
-    // nomask scalar) ONLY when to_begin or to_end is provided — in that
-    // case numpy's concat path synthesises an explicit mask for the
-    // boundary entries. Without boundaries it reuses the input's
-    // nomask. Match that asymmetry so repr parity holds (tuf2).
-    let had_boundary = begin.is_some() || end.is_some();
-    if had_boundary {
-        let mask_attr = py_result.bind(py).getattr(intern!(py, "mask"))?;
-        let is_nomask: bool = mask_attr.is(cached_numpy_ma_nomask(py)?);
-        if is_nomask {
-            let shape = py_result.bind(py).getattr(intern!(py, "shape"))?;
-            let zeros_kwargs = PyDict::new(py);
-            zeros_kwargs.set_item(intern!(py, "dtype"), cached_bool_type(py)?)?;
-            let explicit_mask = cached_numpy_zeros(py)?.call((shape,), Some(&zeros_kwargs))?;
-            py_result.bind(py).setattr("mask", explicit_mask)?;
-        }
-    }
-    Ok(py_result)
+    // numpy.ma.ediff1d is `arr.flat[1:] - arr.flat[:-1]` on a MaskedArray plus an hstack, and
+    // numpy's masked subtraction copies the first operand's data into masked slots and picks
+    // the result's fill_value by its own rules. The native rebuild computed different data
+    // under the mask and reported the input's integer fill (999999) on float results (bead
+    // .8), so every input is numpy's.
+    fallback()
 }
 
 #[pyfunction]
@@ -86677,7 +85914,6 @@ fn masked_less_equal(
         x,
         value,
         copy,
-        "masked_less_equal",
         intern!(py, "masked_less_equal"),
         BinaryOp::LessEqual,
     )
@@ -86698,7 +85934,6 @@ fn masked_outside(
         v1,
         v2,
         copy,
-        "masked_outside",
         intern!(py, "masked_outside"),
         true,
     )
@@ -87539,7 +86774,6 @@ fn masked_less(py: Python<'_>, x: Py<PyAny>, value: Py<PyAny>, copy: bool) -> Py
         x,
         value,
         copy,
-        "masked_less",
         intern!(py, "masked_less"),
         BinaryOp::Less,
     )
@@ -87558,7 +86792,6 @@ fn masked_greater(
         x,
         value,
         copy,
-        "masked_greater",
         intern!(py, "masked_greater"),
         BinaryOp::Greater,
     )
@@ -90904,8 +90137,6 @@ cached_numpy_ma_attr!(cached_numpy_ma_mask_cols, "mask_cols");
 cached_numpy_ma_attr!(cached_numpy_ma_argmax, "argmax");
 cached_numpy_ma_attr!(cached_numpy_ma_argmin, "argmin");
 cached_numpy_ma_attr!(cached_numpy_ma_average, "average");
-cached_numpy_ma_attr!(cached_numpy_ma_masked, "masked");
-cached_numpy_ma_attr!(cached_numpy_ma_default_fill_value, "default_fill_value");
 cached_numpy_ma_attr!(cached_numpy_ma_ediff1d, "ediff1d");
 cached_numpy_ma_attr!(cached_numpy_ma_filled, "filled");
 cached_numpy_ma_attr!(cached_numpy_ma_allequal, "allequal");
