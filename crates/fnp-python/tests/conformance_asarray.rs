@@ -320,3 +320,85 @@ print(np.array_equal(fnp_result, np_result) and fnp_result.dtype == np_result.dt
     assert_eq!(result.trim(), "True", "asarray complex should match numpy");
     Ok(())
 }
+
+/// numpy's own TestArrayConstruction::test_array_signature, over fnp's constructors: every one
+/// reports a signature with its array argument first (`object` for `array`, `a` otherwise) as a
+/// required positional-or-keyword parameter, a `dtype` parameter, and at least 3 parameters.
+/// `fnp.array` is a `*args, **kwargs` passthrough and reported just those two.
+#[test]
+fn constructor_signatures_satisfy_numpys_array_signature_test() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import inspect
+bad = []
+for name in ("array", "asarray", "asanyarray", "ascontiguousarray", "asfortranarray"):
+    try:
+        sig = inspect.signature(getattr(fnp, name))
+    except (TypeError, ValueError) as exc:
+        bad.append((name, type(exc).__name__))
+        continue
+    arg0 = "object" if name == "array" else "a"
+    params = sig.parameters
+    if not (len(params) >= 3 and arg0 in params and "dtype" in params
+            and params[arg0].default is inspect.Parameter.empty
+            and params[arg0].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD):
+        bad.append((name, str(sig)))
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "constructor signatures must satisfy numpy's test: {result}"
+    );
+    Ok(())
+}
+
+/// `asarray`/`asanyarray` VIEW an operand that exports the buffer protocol or an array
+/// interface, as numpy does. fnp extracted every non-ndarray operand into a fresh array, so
+/// `asarray(memoryview(a))` / `bytearray` / `array.array` / ctypes / `__array_interface__`
+/// objects came back as COPIES: writes through the result never reached the source (numpy's
+/// own TestNewBufferProtocol::_check_roundtrip). Lists and tuples are the copy controls.
+#[test]
+fn asarray_views_buffer_exporters_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import array, ctypes
+class ArrayInterface:
+    def __init__(self):
+        self.base = np.arange(3.0)
+        self.__array_interface__ = self.base.__array_interface__
+class ReadOnlyStruct:
+    # numpy's own TestFlags::test_readonly_flag_protocols: a view keeps the read-only flag.
+    def __init__(self):
+        self.base = np.arange(10)
+        self.base.flags.writeable = False
+        self.__array_struct__ = self.base.__array_struct__
+def sources():
+    return [("memoryview", memoryview(np.arange(4.0))), ("bytearray", bytearray(b"abcd")),
+            ("array.array", array.array("d", [1.0, 2.0])), ("ctypes", (ctypes.c_double * 3)(1, 2, 3)),
+            ("array_interface", ArrayInterface()), ("readonly_array_struct", ReadOnlyStruct()),
+            ("list", [1.0, 2.0]), ("tuple", (1, 2, 3))]
+def outcome(m, name, src):
+    y = getattr(m, name)(src)
+    shares = False if isinstance(src, (list, tuple)) else np.shares_memory(y, np.asarray(src))
+    return y.flags.owndata, y.flags.writeable, y.dtype.str, y.shape, shares
+bad = []
+for name in ("asarray", "asanyarray"):
+    for (label, src), (_, src2) in zip(sources(), sources()):
+        if outcome(fnp, name, src) != outcome(np, name, src2):
+            bad.append((name, label))
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "asarray must view buffer exporters like numpy: {result}"
+    );
+    Ok(())
+}

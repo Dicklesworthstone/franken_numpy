@@ -61320,6 +61320,20 @@ fn native_asarray_like(
     {
         return Ok(None);
     }
+    // ONLY OPERANDS NUMPY WOULD COPY are built here: lists, tuples and Python scalars. Anything
+    // else that is not an ndarray may be one numpy VIEWS - a memoryview, bytearray,
+    // array.array, ctypes array, or an object exporting `__array_interface__` /
+    // `__array_struct__` / `__dlpack__` - and extracting it made a COPY where
+    // `numpy.asarray` shares memory, so writes through the result never reached the source
+    // (numpy's own TestNewBufferProtocol::_check_roundtrip: `asarray(memoryview(a))` must not
+    // own its data).
+    if !input_is_ndarray_family
+        && !(a.is_exact_instance_of::<PyList>()
+            || a.is_exact_instance_of::<PyTuple>()
+            || is_plain_python_scalar(a))
+    {
+        return Ok(None);
+    }
 
     let native = match extract_precise_numeric_array(py, a, "asarray(a)") {
         Ok(value) => value,
@@ -91022,8 +91036,14 @@ fn empty(
     Ok(cached_numpy_empty(py)?.call(args, kwargs)?.unbind())
 }
 
+// The text signature is numpy 2.4's own (`inspect.signature(np.array)`): a bare `*args,
+// **kwargs` made `inspect.signature(fnp.array)` report two parameters, and numpy's own
+// TestArrayConstruction::test_array_signature requires `object` first with >= 3 parameters.
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(object, dtype=None, *, copy=True, order='K', subok=False, ndmin=0, ndmax=0, like=None)"
+)]
 fn array(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
