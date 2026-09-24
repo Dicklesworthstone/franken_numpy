@@ -655,6 +655,278 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
     Ok(())
 }
 
+// fnp's counterpart of NumPy's `_ArrayFunctionDispatcher`: the NEP 18 `__array_function__`
+// protocol, for every native function whose NumPy counterpart dispatches through it.
+//
+// NumPy wraps each public array function so that an argument whose type overrides
+// `__array_function__` - dask, xarray, pint, cupy, sparse, astropy's `Quantity` - receives
+// the call instead of NumPy's implementation. fnp's functions were plain native functions,
+// so they coerced such an argument through `__array__` and returned an ndarray: a SILENT
+// wrong answer, measured on 87 of the 306 dispatcher names fnp implements natively by a
+// duck-array sweep over every NumPy dispatcher.
+//
+// - `__call__` scans the arguments - and up to two levels into list/tuple arguments, where
+//   `concatenate`/`stack`/`block` operands live - for a type whose `__array_function__` is
+//   not `ndarray`'s. None found, the common case, calls the native function. One found:
+//   NumPy's own function runs the call, so the override receives NumPy's function object and
+//   NumPy's relevant-argument rules. The scan may look at MORE arguments than NumPy's
+//   dispatcher does; that can only over-delegate, and a delegated call is NumPy's answer.
+// - every other attribute (`__wrapped__`, `__signature__`, `_implementation`, ...) resolves
+//   on NumPy's dispatcher, so `inspect.signature` reports NumPy's signature.
+// - it pickles by its dotted path from the top module (`"linalg.norm"`), which also covers
+//   submodule functions: the plain native `fft.fft` could not be pickled at all.
+//
+// A PLAIN COMMENT, NOT A `///` DOC COMMENT, and that is load-bearing: a class docstring is
+// written into the type dict AFTER PyO3 installs the `__doc__` getter below and replaces it,
+// so every dispatcher reported this text as its `__doc__` instead of NumPy's docstring.
+#[pyclass(
+    name = "_ArrayFunctionDispatcher",
+    module = "fnp_python",
+    skip_from_py_object
+)]
+pub struct PyArrayFunctionDispatcher {
+    name: String,
+    qualified_path: String,
+    native: Py<PyAny>,
+    numpy_function: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyArrayFunctionDispatcher {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __call__(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let target = if call_has_array_function_override(py, args, kwargs)? {
+            &self.numpy_function
+        } else {
+            &self.native
+        };
+        Ok(target.bind(py).call(args, kwargs)?.unbind())
+    }
+
+    fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
+        Ok(self.numpy_function.bind(py).getattr(attr)?.unbind())
+    }
+
+    #[getter]
+    fn __name__(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn __qualname__(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn __doc__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .numpy_function
+            .bind(py)
+            .getattr(intern!(py, "__doc__"))?
+            .unbind())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<function {}>", self.qualified_path)
+    }
+
+    /// Pickles BY REFERENCE: pickle resolves the dotted path against this class's
+    /// `__module__` (the top fnp module), which holds this very object.
+    fn __reduce__(&self) -> &str {
+        &self.qualified_path
+    }
+}
+
+/// Whether any argument of a call - positional or keyword - carries a NEP 18
+/// `__array_function__` override (see `PyArrayFunctionDispatcher`).
+fn call_has_array_function_override(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<bool> {
+    let ndarray_type = cached_ndarray_type(py)?;
+    let ndarray_hook = cached_ndarray_array_function(py)?;
+    for arg in args.iter() {
+        if has_array_function_override(py, &arg, 2, ndarray_type, ndarray_hook)? {
+            return Ok(true);
+        }
+    }
+    if let Some(kwargs) = kwargs {
+        for (_, value) in kwargs.iter() {
+            if has_array_function_override(py, &value, 2, ndarray_type, ndarray_hook)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Python scalars, strings and `None` never carry `__array_function__`.
+fn is_plain_python_scalar(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_none()
+        || obj.is_exact_instance_of::<pyo3::types::PyFloat>()
+        || obj.is_exact_instance_of::<PyInt>()
+        || obj.is_exact_instance_of::<PyBool>()
+        || obj.is_exact_instance_of::<PyString>()
+        || obj.is_exact_instance_of::<PyComplex>()
+        || obj.is_exact_instance_of::<PyBytes>()
+}
+
+/// Whether `obj` - or, up to `depth` list/tuple levels down, one of its elements - has a
+/// type overriding `__array_function__`. `ndarray` and every subclass that keeps
+/// `ndarray.__array_function__` (MaskedArray, matrix, recarray, memmap, chararray) do not;
+/// numpy scalars, dtypes, Python scalars and strings have no hook at all.
+fn has_array_function_override(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    depth: u8,
+    ndarray_type: &Bound<'_, PyAny>,
+    ndarray_hook: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    if obj.is_exact_instance(ndarray_type) || is_plain_python_scalar(obj) {
+        return Ok(false);
+    }
+    if let Ok(list) = obj.cast_exact::<PyList>() {
+        return sequence_has_array_function_override(
+            py,
+            list.iter(),
+            depth,
+            ndarray_type,
+            ndarray_hook,
+        );
+    }
+    if let Ok(tuple) = obj.cast_exact::<PyTuple>() {
+        return sequence_has_array_function_override(
+            py,
+            tuple.iter(),
+            depth,
+            ndarray_type,
+            ndarray_hook,
+        );
+    }
+    Ok(obj
+        .get_type()
+        .getattr_opt(intern!(py, "__array_function__"))?
+        .is_some_and(|hook| !hook.is(ndarray_hook)))
+}
+
+fn sequence_has_array_function_override<'py>(
+    py: Python<'py>,
+    items: impl Iterator<Item = Bound<'py, PyAny>>,
+    depth: u8,
+    ndarray_type: &Bound<'py, PyAny>,
+    ndarray_hook: &Bound<'py, PyAny>,
+) -> PyResult<bool> {
+    if depth == 0 {
+        return Ok(false);
+    }
+    // A run of plain scalars is DATA (`sum([1.0, 2.0, ...])`), not a list of operands: stop
+    // there rather than walk a million-element list on every call.
+    let mut plain_run = 0_u8;
+    for item in items {
+        if is_plain_python_scalar(&item) {
+            plain_run += 1;
+            if plain_run == 8 {
+                return Ok(false);
+            }
+            continue;
+        }
+        plain_run = 0;
+        if has_array_function_override(py, &item, depth - 1, ndarray_type, ndarray_hook)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Bind a `PyArrayFunctionDispatcher` (see there) in place of every native fnp function
+/// whose NumPy counterpart is a NEP 18 dispatcher, in the top module and in each fnp
+/// submodule (`linalg`, `fft`, `lib.stride_tricks`, ...), each paired with the NumPy module of
+/// the same dotted path. NumPy modules fnp re-exports as-is (`char`, `rec`, ...) and names
+/// fnp already binds to NumPy's own object keep NumPy's dispatch and are left alone. A
+/// native function bound under several paths gets ONE dispatcher, so aliases stay identical.
+fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let module_name: String = m.getattr(intern!(py, "__name__"))?.extract()?;
+    if module_name != "fnp_python" {
+        py.get_type::<PyArrayFunctionDispatcher>()
+            .setattr(intern!(py, "__module__"), &module_name)?;
+    }
+    let import_module = py.import("importlib")?.getattr("import_module")?;
+    let mut dispatchers: std::collections::HashMap<usize, (Py<PyAny>, usize)> =
+        std::collections::HashMap::new();
+    let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut pending: Vec<(Bound<'_, PyAny>, String)> = vec![(m.clone().into_any(), String::new())];
+    while let Some((ours_module, prefix)) = pending.pop() {
+        if !visited.insert(ours_module.as_ptr() as usize) {
+            continue;
+        }
+        let numpy_module_name = if prefix.is_empty() {
+            "numpy".to_string()
+        } else {
+            format!("numpy.{prefix}")
+        };
+        let Ok(numpy_module) = import_module.call1((&numpy_module_name,)) else {
+            continue;
+        };
+        for name in ours_module.dir()?.iter() {
+            let name: String = name.extract()?;
+            if name.starts_with('_') {
+                continue;
+            }
+            let Ok(ours) = ours_module.getattr(name.as_str()) else {
+                continue;
+            };
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            if ours.is_instance_of::<PyModule>() {
+                let submodule_name: String = ours.getattr(intern!(py, "__name__"))?.extract()?;
+                if submodule_name.starts_with(&module_name) {
+                    pending.push((ours, path));
+                }
+                continue;
+            }
+            if !ours.is_instance_of::<pyo3::types::PyCFunction>() {
+                continue;
+            }
+            let Ok(theirs) = numpy_module.getattr(name.as_str()) else {
+                continue;
+            };
+            if !theirs.hasattr(intern!(py, "_implementation"))? {
+                continue;
+            }
+            let theirs_id = theirs.as_ptr() as usize;
+            let dispatcher = match dispatchers.get(&(ours.as_ptr() as usize)) {
+                Some((existing, numpy_id)) if *numpy_id == theirs_id => existing.clone_ref(py),
+                _ => {
+                    let key = ours.as_ptr() as usize;
+                    let created: Py<PyAny> = Py::new(
+                        py,
+                        PyArrayFunctionDispatcher {
+                            name: name.clone(),
+                            qualified_path: path,
+                            native: ours.unbind(),
+                            numpy_function: theirs.unbind(),
+                        },
+                    )?
+                    .into_any();
+                    dispatchers.insert(key, (created.clone_ref(py), theirs_id));
+                    created
+                }
+            };
+            ours_module.setattr(name.as_str(), dispatcher)?;
+        }
+    }
+    Ok(())
+}
+
 #[pymethods]
 impl PyUFunc {
     #[getter]
@@ -89647,6 +89919,19 @@ pub(crate) fn cached_ndarray_type(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>>
         .bind(py))
 }
 
+/// `numpy.ndarray.__array_function__`: the hook every ndarray subclass that does NOT override
+/// NEP 18 dispatch still resolves to (see `has_array_function_override`).
+fn cached_ndarray_array_function(py: Python<'_>) -> PyResult<&Bound<'_, PyAny>> {
+    static NDARRAY_ARRAY_FUNCTION: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Ok(NDARRAY_ARRAY_FUNCTION
+        .get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+            Ok(cached_ndarray_type(py)?
+                .getattr(intern!(py, "__array_function__"))?
+                .unbind())
+        })?
+        .bind(py))
+}
+
 /// The `numpy.dtype` TYPE OBJECT, on the same terms as `cached_ndarray_type`.
 ///
 /// MUST BE `is_instance`, NEVER `is_exact_instance`: in numpy 2 every dtype is an instance of
@@ -123493,6 +123778,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // After every function is registered: give each NumPy ufunc name that is still a plain
     // native function the ufunc protocol (deadlock-audit-rc0923-epic-71qy3.5).
     wrap_plain_ufunc_names(py, m)?;
+    // ... and each NEP 18 dispatcher name the `__array_function__` protocol (see
+    // `PyArrayFunctionDispatcher`), which fnp's native functions silently ignored.
+    wrap_array_function_dispatchers(py, m)?;
 
     // `__all__` is bound LAST, deliberately. PyO3's `PyModule::add` appends the
     // added name to `__all__`, so binding it early meant every subsequent `add`
