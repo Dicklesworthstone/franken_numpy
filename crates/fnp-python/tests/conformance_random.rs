@@ -979,3 +979,50 @@ result = bad
         Ok(())
     });
 }
+
+/// numpy's legacy `RandomState.randint` for every integer dtype and range, including a
+/// near-full-width int64 range and the 8/16-bit dtypes: fnp raised "integer sample exceeds
+/// int64" for `randint(iinfo(int64).min, iinfo(int64).max - 1, dtype=int64)` and drew DIFFERENT
+/// values than numpy for int8/int16/uint8/uint16 (numpy buffers 32-bit draws there), found under
+/// numpy's own test_multiarray::test_sort_int. Values bit-for-bit, then the stream.
+#[test]
+fn random_state_randint_matches_numpy_across_dtypes_and_full_ranges() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+for dt in ("b", "B", "h", "H", "i", "I", "l", "L", "q", "Q"):
+    ii = np.iinfo(dt)
+    for label, lo, hi in (("full-1", ii.min, ii.max - 1), ("full", ii.min, ii.max), ("small", 0, 10)):
+        f, n = fnp.random.RandomState(5), np.random.RandomState(5)
+        try: w = n.randint(lo, hi, size=7, dtype=dt); we = None
+        except Exception as e: w, we = None, type(e).__name__
+        try: g = f.randint(lo, hi, size=7, dtype=dt); ge = None
+        except Exception as e: g, ge = None, type(e).__name__
+        if we != ge or (we is None and (g.dtype != w.dtype or not np.array_equal(g, w))):
+            bad.append(f"{dt} {label}: numpy={we or w.tolist()} fnp={ge or (g.tolist() if g is not None else None)}")
+        elif not np.array_equal(f.randint(0, 1000, 3), n.randint(0, 1000, 3)):
+            bad.append(f"{dt} {label}: stream diverged after the call")
+np.random.seed(11); w = np.random.randint(np.iinfo("l").min, np.iinfo("l").max - 1, size=5, dtype="l")
+fnp.random.seed(11); g = fnp.random.randint(np.iinfo("l").min, np.iinfo("l").max - 1, size=5, dtype="l")
+if not np.array_equal(g, w):
+    bad.append("module-level randint full int64")
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "RandomState.randint diverges from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}

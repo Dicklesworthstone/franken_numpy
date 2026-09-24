@@ -4547,6 +4547,10 @@ impl PyRandomState {
             Some(h) if !h.is_none() => Some(rng_i64_arg(h)?),
             _ => None,
         };
+        // 8/16-bit dtypes also go to NumPy: its legacy bounded generator BUFFERS 32-bit draws
+        // (two 16-bit or four 8-bit values per draw), while the native loop draws once per
+        // value, so `RandomState(5).randint(0, 10, 6, dtype=np.int16)` returned different values
+        // than numpy for the same seed (found under numpy's own test_multiarray::test_sort_int).
         let native_dtype = extract_python_dtype_bound(
             py,
             dtype.as_ref().map(|d| d.bind(py)),
@@ -4554,7 +4558,12 @@ impl PyRandomState {
             "RandomState.randint(dtype)",
         )
         .ok()
-        .filter(|dtype| !matches!(dtype, DType::Bool));
+        .filter(|dtype| {
+            !matches!(
+                dtype,
+                DType::Bool | DType::I8 | DType::U8 | DType::I16 | DType::U16
+            )
+        });
         let native_high = match &high_arg {
             Some(h) => h.native().map(Some),
             None => Some(None),
@@ -4586,10 +4595,8 @@ impl PyRandomState {
         let mut values = Vec::with_capacity(len);
         for _ in 0..len {
             let offset = random_state_integer_offset(&mut self.inner, span)?;
-            values.push(
-                low.checked_add(offset)
-                    .ok_or_else(|| PyValueError::new_err("integer sample exceeds int64"))?,
-            );
+            // low + offset < high <= i64::MAX, so the unsigned add cannot overflow.
+            values.push(low.wrapping_add_unsigned(offset));
         }
         build_random_integer_parts(py, shape, values, scalar, dtype)
     }
@@ -6752,12 +6759,15 @@ fn random_state_uniform_parts(
     Ok((shape, values, scalar))
 }
 
-fn random_state_integer_offset(random_state: &mut CoreRandomState, span: u64) -> PyResult<i64> {
+/// Offset in [0, span) from numpy's masked-rejection `random_interval`. Returned as u64: for a
+/// near-full-width int64 range (`randint(iinfo.min, iinfo.max - 1)`) the offset exceeds
+/// `i64::MAX`, and converting it to i64 here made numpy-valid calls fail with "integer sample
+/// exceeds int64" (numpy's own test_multiarray::test_sort_int).
+fn random_state_integer_offset(random_state: &mut CoreRandomState, span: u64) -> PyResult<u64> {
     if span == 0 {
         return Err(PyValueError::new_err("high <= low"));
     }
-    let offset = random_state.random_interval(span - 1);
-    i64::try_from(offset).map_err(|_| PyValueError::new_err("integer sample exceeds int64"))
+    Ok(random_state.random_interval(span - 1))
 }
 
 fn random_state_integer_inclusive_sample(
