@@ -541,6 +541,21 @@ fn note_binary_float_errors(
     }
 }
 
+/// This path computes a float32 / float16 array's op in f64 and narrows the result when it is
+/// stored, so an overflow numpy's native narrow loop reports - `square(float32(1e32))` - left no
+/// trace: the f64 result is finite and only the narrowed one is infinite (numpy's own test_umath
+/// through the drop-in harness, bead rc0923 .8). float16 rounds to infinity from 65520 up.
+fn note_narrowing_overflow(flags: &mut FloatErrorFlags, dtype: DType, value: f64, result: f64) {
+    let overflows = match dtype {
+        DType::F32 => (result as f32).is_infinite(),
+        DType::F16 => result.abs() >= 65520.0,
+        _ => false,
+    };
+    if overflows && value.is_finite() && result.is_finite() {
+        flags.note(FloatErrorKind::Over);
+    }
+}
+
 fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64, result: f64) {
     match op {
         UnaryOp::Reciprocal => {
@@ -561,34 +576,40 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
         UnaryOp::Sin | UnaryOp::Cos | UnaryOp::Tan if value.is_infinite() => {
             flags.note(FloatErrorKind::Invalid);
         }
+        // The out-of-domain sets below are NumPy's own, INFINITIES INCLUDED: `log(-inf)`,
+        // `log1p(-inf)`, `sqrt(-inf)`, `arcsin(+-inf)`, `arctanh(+-inf)` and `arccosh(-inf)` are
+        // all `invalid` there. An `is_finite()` guard dropped exactly those, so `fnp.sqrt(-inf)`
+        // stayed silent under `errstate(invalid='raise')` (numpy's own test_umath, run through
+        // the drop-in harness, bead rc0923 .8). NaN compares false and stays silent; -0.0 is not
+        // below zero (and `log(-0.0)` is the `== 0.0` divide branch).
         UnaryOp::Log | UnaryOp::Log2 | UnaryOp::Log10 => {
             if value == 0.0 {
                 flags.note(FloatErrorKind::Divide);
-            } else if value.is_finite() && value < 0.0 {
+            } else if value < 0.0 {
                 flags.note(FloatErrorKind::Invalid);
             }
         }
         UnaryOp::Log1p => {
             if value == -1.0 {
                 flags.note(FloatErrorKind::Divide);
-            } else if value.is_finite() && value < -1.0 {
+            } else if value < -1.0 {
                 flags.note(FloatErrorKind::Invalid);
             }
         }
-        UnaryOp::Sqrt if value.is_finite() && value < 0.0 => {
+        UnaryOp::Sqrt if value < 0.0 => {
             flags.note(FloatErrorKind::Invalid);
         }
-        UnaryOp::Arcsin | UnaryOp::Arccos if value.is_finite() && value.abs() > 1.0 => {
+        UnaryOp::Arcsin | UnaryOp::Arccos if value.abs() > 1.0 => {
             flags.note(FloatErrorKind::Invalid);
         }
         UnaryOp::Arctanh => {
             if value.abs() == 1.0 {
                 flags.note(FloatErrorKind::Divide);
-            } else if value.is_finite() && value.abs() > 1.0 {
+            } else if value.abs() > 1.0 {
                 flags.note(FloatErrorKind::Invalid);
             }
         }
-        UnaryOp::Arccosh if value.is_finite() && value < 1.0 => {
+        UnaryOp::Arccosh if value < 1.0 => {
             flags.note(FloatErrorKind::Invalid);
         }
         // Underflow is a ZERO OR SUBNORMAL result from a finite nonzero operand: NumPy reports it
@@ -8118,13 +8139,21 @@ impl UFuncArray {
                 .par_chunks_mut(UNARY_PARALLEL_CHUNK)
                 .zip(self.values.par_chunks(UNARY_PARALLEL_CHUNK))
                 .map(|(out_chunk, in_chunk)| {
-                    if let Some(flags) = apply_simd_residual_unary_chunk(op, out_chunk, in_chunk) {
+                    if let Some(mut flags) =
+                        apply_simd_residual_unary_chunk(op, out_chunk, in_chunk)
+                    {
+                        if matches!(dtype, DType::F32 | DType::F16) {
+                            for (&value, &result) in in_chunk.iter().zip(out_chunk.iter()) {
+                                note_narrowing_overflow(&mut flags, dtype, value, result);
+                            }
+                        }
                         return flags;
                     }
                     let mut chunk_flags = FloatErrorFlags::default();
                     for (out_slot, &value) in out_chunk.iter_mut().zip(in_chunk.iter()) {
                         let result = op.apply(value);
                         note_unary_float_errors(&mut chunk_flags, op, value, result);
+                        note_narrowing_overflow(&mut chunk_flags, dtype, value, result);
                         *out_slot = result;
                     }
                     chunk_flags
@@ -8141,6 +8170,7 @@ impl UFuncArray {
             .map(|&value| {
                 let result = op.apply(value);
                 note_unary_float_errors(&mut float_error_flags, op, value, result);
+                note_narrowing_overflow(&mut float_error_flags, dtype, value, result);
                 result
             })
             .collect();
@@ -45392,6 +45422,61 @@ print(json.dumps(payload))
                 "{op:?}: residual parallel path diverged from serial"
             );
         }
+    }
+
+    /// NumPy's out-of-domain sets include the infinities (`sqrt(-inf)`, `log(-inf)`,
+    /// `arcsin(inf)`, `arctanh(-inf)`, `arccosh(-inf)` are all `invalid`), while NaN, -0.0 and
+    /// the in-domain infinities stay silent; a float32 / float16 result that only overflows when
+    /// narrowed is `over`.
+    #[test]
+    fn unary_classifier_includes_infinities_and_narrowing_overflow() {
+        let classify = |op: UnaryOp, value: f64| {
+            let mut flags = FloatErrorFlags::default();
+            note_unary_float_errors(&mut flags, op, value, op.apply(value));
+            flags.kinds()
+        };
+        let invalid = vec![FloatErrorKind::Invalid];
+        let inf = f64::INFINITY;
+        for (op, value) in [
+            (UnaryOp::Sqrt, -inf),
+            (UnaryOp::Log, -inf),
+            (UnaryOp::Log2, -inf),
+            (UnaryOp::Log10, -inf),
+            (UnaryOp::Log1p, -inf),
+            (UnaryOp::Arcsin, inf),
+            (UnaryOp::Arccos, -inf),
+            (UnaryOp::Arctanh, inf),
+            (UnaryOp::Arctanh, -inf),
+            (UnaryOp::Arccosh, -inf),
+        ] {
+            assert_eq!(classify(op, value), invalid, "{op:?}({value})");
+        }
+        for (op, value) in [
+            (UnaryOp::Sqrt, inf),
+            (UnaryOp::Sqrt, -0.0),
+            (UnaryOp::Sqrt, f64::NAN),
+            (UnaryOp::Log, inf),
+            (UnaryOp::Log1p, inf),
+            (UnaryOp::Arccosh, inf),
+            (UnaryOp::Arcsin, f64::NAN),
+        ] {
+            assert!(
+                classify(op, value).is_empty(),
+                "{op:?}({value}) must stay silent"
+            );
+        }
+        let narrowed = |dtype: DType, value: f64, result: f64| {
+            let mut flags = FloatErrorFlags::default();
+            note_narrowing_overflow(&mut flags, dtype, value, result);
+            flags.kinds()
+        };
+        let over = vec![FloatErrorKind::Over];
+        assert_eq!(narrowed(DType::F32, 1e32, 1e64), over);
+        assert_eq!(narrowed(DType::F16, 300.0, 90_000.0), over);
+        assert!(narrowed(DType::F64, 1e32, 1e64).is_empty());
+        assert!(narrowed(DType::F32, 2.0, 4.0).is_empty());
+        assert!(narrowed(DType::F32, inf, inf).is_empty());
+        assert!(narrowed(DType::F16, 200.0, 40_000.0).is_empty());
     }
 
     #[test]

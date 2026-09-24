@@ -4589,6 +4589,94 @@ print(len(cases), bad)
     Ok(())
 }
 
+/// numpy's own test_umath (TestSpecialFloats, through the drop-in harness, bead rc0923 .8) found
+/// unary domain errors that did not raise under `errstate(<category>='raise')` when the operand
+/// was 0-d, a list, a Python float or a numpy scalar - the operands that take the extract path:
+/// `sqrt(-inf)`, `log1p(-inf)`, `arcsin`/`arccos(+-inf)` (an `is_finite()` guard in fnp-ufunc's
+/// event classifier and in the direct f64 bridge dropped infinities from numpy's invalid set) and
+/// `square(float32(1e32))` (computed in f64, the overflow only appeared when narrowing). Every
+/// cell compares the outcome with numpy for each operand form. The negative half is numpy's
+/// test_unary_spurious_fpexception data: on those, fnp must stay as silent as numpy.
+#[test]
+fn unary_domain_errors_raise_like_numpy_for_every_operand_form() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+inf, nan = np.inf, np.nan
+raise_cells = []
+for dt in "efd":
+    for f in ("log", "log2", "log10"):
+        raise_cells += [(f, 0.0, dt, "divide"), (f, -inf, dt, "invalid"), (f, -1.0, dt, "invalid")]
+    raise_cells += [("log1p", -1.0, dt, "divide"), ("log1p", -inf, dt, "invalid")]
+    for f in ("arcsin", "arccos"):
+        raise_cells += [(f, v, dt, "invalid") for v in (inf, -inf, 2.0, -2.0)]
+    raise_cells.append(("square", {"e": 1e3, "f": 1e32, "d": 1e200}[dt], dt, "over"))
+    for f in ("sin", "cos", "tan"):
+        raise_cells += [(f, inf, dt, "invalid"), (f, -inf, dt, "invalid")]
+    raise_cells += [("sqrt", -1.0, dt, "invalid"), ("sqrt", -inf, dt, "invalid"),
+                    ("arctanh", 2.0, dt, "invalid"), ("arctanh", inf, dt, "invalid"),
+                    ("arctanh", 1.0, dt, "divide"), ("arccosh", 0.5, dt, "invalid"),
+                    ("arccosh", -inf, dt, "invalid"), ("reciprocal", 0.0, dt, "divide"),
+                    ("exp", 1e4, dt, "over"), ("sinh", 1e4, dt, "over")]
+def forms(value, dt):
+    scalar = np.dtype(dt).type(value)
+    yield "0-d", np.array(value, dtype=dt)
+    yield "(1,)", np.full((1,), value, dtype=dt)
+    yield "(3,)", np.full((3,), value, dtype=dt)
+    yield "numpy scalar", scalar
+    if dt == "d":
+        yield "list", [value]
+        yield "float", float(value)
+def raised(m, f, a, category):
+    with np.errstate(**{category: "raise"}):
+        try:
+            getattr(m, f)(a)
+            return "ok"
+        except BaseException as ex:
+            return type(ex).__name__
+bad, cells = [], 0
+for f, value, dt, category in raise_cells:
+    for form, a in forms(value, dt):
+        cells += 1
+        s, r = raised(np, f, a, category), raised(fnp, f, a, category)
+        if s != r:
+            bad.append(f"{f}({value}) {dt} {form} [{category}=raise]: fnp={r} numpy={s}")
+datas = [[0.03], [-1.0], [1.0], [0.0], [-0.0], [0.5, 0.5, 0.5, nan], [nan, 1.0, 1.0, 1.0], [nan],
+         [0.5, 0.5, 0.5, inf], [inf], [0.5, 0.5, 0.5, -inf], [-inf]]
+names = ["arctanh", "arccosh", "tan", "sin", "log2", "log10", "log", "cos", "arcsin", "arccos",
+         "sqrt", "log1p", "spacing", "reciprocal", "exp", "expm1", "tanh", "arctan", "square"]
+def warned(fn, a):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fn(a)
+    return sorted({str(w.message) for w in caught})
+for name in names:
+    for dt in "efd":
+        for data in datas:
+            for reps in (1, 32):
+                cells += 1
+                a = np.array(data * reps, dtype=dt)
+                s, r = warned(getattr(np, name), a), warned(getattr(fnp, name), a)
+                if s != r:
+                    bad.append(f"{name} {dt} {data} x{reps}: fnp warned {r} numpy {s}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(2, ' ');
+    assert!(
+        fields.next().unwrap_or("0").parse::<usize>().unwrap_or(0) >= 1800,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "unary domain errors must raise and stay silent exactly as numpy: {result}"
+    );
+    Ok(())
+}
+
 /// The NaN-screened sort / argsort / sort_complex fast paths scan the caller's buffer for NaN and
 /// read it again afterwards; a NaN that lands in between (another thread's `np.copyto`, which
 /// drops the GIL - 25 sites reproduced that way - or here, deterministically, a patched

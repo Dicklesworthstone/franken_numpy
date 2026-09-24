@@ -9520,13 +9520,11 @@ fn direct_f64_unary_output_supported(array: &UFuncArray, op: UnaryOp) -> bool {
         UnaryOp::Abs | UnaryOp::Fabs | UnaryOp::Negative | UnaryOp::Positive | UnaryOp::Rint => {
             true
         }
-        // `sqrt` records NumPy-style invalid events for finite negative inputs.
-        // Keep those cases on the existing UFuncArray path; non-negative inputs
-        // are copy-equivalent because no error state is produced.
-        UnaryOp::Sqrt => !array
-            .values()
-            .iter()
-            .any(|value| value.is_finite() && *value < 0.0),
+        // `sqrt` records NumPy's invalid event for every NEGATIVE input, -inf included (`v < 0.0`
+        // is exactly that set: NaN and -0.0 compare false). Keep those on the UFuncArray path,
+        // which records it; the rest are copy-equivalent. An `is_finite()` guard here let
+        // `sqrt([-inf])` through silently under `errstate(invalid='raise')` (bead rc0923 .8).
+        UnaryOp::Sqrt => !array.values().iter().any(|value| *value < 0.0),
         _ => false,
     }
 }
