@@ -1102,8 +1102,9 @@ fn is_plain_python_scalar(obj: &Bound<'_, PyAny>) -> bool {
 }
 
 /// Whether `obj` - or, up to `depth` list/tuple levels down, one of its elements - is numpy's
-/// to handle: a type overriding `__array_function__`, or an ndarray SUBCLASS. numpy scalars,
-/// dtypes, Python scalars and strings have no hook at all.
+/// to handle: a type overriding `__array_function__`, defining `__array_ufunc__` or (unless it
+/// is a NumPy scalar) `__array_wrap__`, or an ndarray SUBCLASS. numpy scalars, dtypes, Python
+/// scalars and strings are plain data.
 ///
 /// A subclass keeps `ndarray.__array_function__` (MaskedArray, matrix, recarray, memmap,
 /// chararray, user subclasses), but its semantics live in numpy: the mask, matrix's 2-D rules,
@@ -1142,10 +1143,23 @@ fn has_array_function_override(
             ndarray_hook,
         );
     }
-    Ok(obj
-        .get_type()
+    let ty = obj.get_type();
+    if ty
         .getattr_opt(intern!(py, "__array_function__"))?
-        .is_some_and(|hook| !hook.is(ndarray_hook)))
+        .is_some_and(|hook| !hook.is(ndarray_hook))
+    {
+        return Ok(true);
+    }
+    // numpy also runs an operand's ufunc hooks: `__array_ufunc__` (NEP 13; ndarray instances
+    // have already returned above) and `__array_wrap__`, through which `np.abs(obj)` hands obj
+    // its result. The native paths returned a bare ndarray (numpy's Test_I0::test_non_array;
+    // pandas-style objects survive ufuncs this way; bead rc0923 .8). NumPy scalars define
+    // `__array_wrap__` but are plain data here.
+    if ty.getattr_opt(intern!(py, "__array_ufunc__"))?.is_some() {
+        return Ok(true);
+    }
+    Ok(ty.getattr_opt(intern!(py, "__array_wrap__"))?.is_some()
+        && !obj.is_instance(&cached_numpy(py)?.getattr(intern!(py, "generic"))?)?)
 }
 
 fn sequence_has_array_function_override<'py>(
@@ -25338,6 +25352,16 @@ fn digitize(
             .call_method1(intern!(py, "digitize"), (x, bins, right))?
             .unbind());
     };
+    // The kernel compares in float64, and integers past 2**53 collapse there:
+    // `digitize(2**54, [2**54 - 1, 2**54 + 1])` was 2, numpy says 1 (gh-11022, numpy's
+    // test_large_integers_increasing through the drop-in harness, bead rc0923 .8). Integer
+    // operands on this cold path (Python ints, lists; matched-dtype arrays took the exact
+    // typed zero-copy path above) are numpy's.
+    if x_values.has_integer_sidecar() || bin_values.has_integer_sidecar() {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "digitize"), (x, bins, right))?
+            .unbind());
+    }
     let result = x_values
         .digitize_right(&bin_values, right)
         .map_err(map_ufunc_error)?;
@@ -35213,11 +35237,10 @@ fn spacing(
     // numpy from the extra full-size copies + cold page faults). The per-element formula
     // is byte-identical to ufunc_spacing (UFuncArray::spacing).
     if let Some((flat, shape)) = zerocopy_f64_unary_flat_with(py, x.bind(py), |v| {
-        // numpy's npy_spacing: `x - x` for a NaN (its own sign and payload, quieted).
         if v.is_infinite() {
             f64::NAN
         } else if v.is_nan() {
-            v - v
+            fnp_ufunc::spacing_of_nan(v)
         } else if v == 0.0 {
             f64::from_bits(1)
         } else {
@@ -41651,6 +41674,10 @@ fn histogram(
         Ok(value) => value,
         Err(_) => return fallback(py),
     };
+    // Edges that do not strictly increase are numpy's "Too many bins for data range".
+    if edges.values().windows(2).any(|pair| pair[0] >= pair[1]) {
+        return fallback(py);
+    }
     // UFuncArray::histogram returns counts with DType::I64 but stored as
     // f64 values — build_numpy_array_from_ufunc emits an int64 ndarray.
     // Bridge each component through the C-order export helpers.
@@ -41674,6 +41701,21 @@ fn i64_is_f64_exact(value: i64) -> bool {
 fn u64_is_f64_exact(value: u64) -> bool {
     const F64_EXACT_INT_LIMIT: u64 = 9_007_199_254_740_992;
     value <= F64_EXACT_INT_LIMIT
+}
+
+/// numpy's histogram refuses bins its float edges cannot separate. When some edge fails to
+/// exceed the one before it (a data range only a few ulps wide), it raises "Too many bins for
+/// data range. Cannot create {n} finite-sized bins." The native paths counted everything into
+/// degenerate bins instead (numpy's test_small_value_range, bead rc0923 .8). A false result
+/// declines, and numpy raises.
+fn histogram_edges_strictly_increasing(py: Python<'_>, edges: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let Ok(buffer) = PyBuffer::<f64>::get(edges) else {
+        return Ok(false);
+    };
+    let Some(slice) = buffer.as_slice(py) else {
+        return Ok(false);
+    };
+    Ok(slice.windows(2).all(|pair| pair[0].get() < pair[1].get()))
 }
 
 fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
@@ -41756,6 +41798,9 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
             last += 0.5;
         }
         let edges = numpy.call_method1(intern!(py, "linspace"), (first, last, nbins + 1))?;
+        if !histogram_edges_strictly_increasing(py, &edges)? {
+            return Ok(None);
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "dtype"), "int64")?;
         let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
@@ -41867,6 +41912,9 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
     }
     // Delegate the (nbins+1) edge floats to numpy.linspace for bit-identical edges.
     let edges = numpy.call_method1(intern!(py, "linspace"), (first, last, nbins + 1))?;
+    if !histogram_edges_strictly_increasing(py, &edges)? {
+        return Ok(None);
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "dtype"), "int64")?;
     let counts = numpy.call_method(intern!(py, "zeros"), (nbins,), Some(&kwargs))?;
@@ -44330,6 +44378,10 @@ fn histogram_bin_edges(
                 Ok(value) => value,
                 Err(_) => return fallback(py),
             };
+        // Edges that do not strictly increase are numpy's "Too many bins for data range".
+        if edges.values().windows(2).any(|pair| pair[0] >= pair[1]) {
+            return fallback(py);
+        }
         return build_numpy_array_from_ufunc(py, &edges);
     }
 

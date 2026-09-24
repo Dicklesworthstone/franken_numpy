@@ -1525,11 +1525,10 @@ impl UnaryOp {
             Self::Trunc => x.trunc(),
             Self::Positive => x,
             Self::Spacing => {
-                // numpy's npy_spacing: `x - x` for a NaN (its own sign and payload, quieted).
                 if x.is_infinite() {
                     f64::NAN
                 } else if x.is_nan() {
-                    x - x
+                    spacing_of_nan(x)
                 } else if x == 0.0 {
                     f64::from_bits(1)
                 } else {
@@ -5796,8 +5795,20 @@ impl UFuncArray {
         } else {
             num as f64
         };
-        let step = (stop - start) / divisor;
-        let mut values = try_collect_f64((0..num).map(|i| start + step * i as f64), "linspace")?;
+        let delta = stop - start;
+        let step = delta / divisor;
+        // numpy (gh-5437): a step that underflows to zero - a range of subnormals - is applied
+        // as `y /= div; y *= delta` instead of `y *= step`, so `linspace(0, 5 * tiny, 10,
+        // endpoint=False)` keeps its subnormal values; `i * 0.0` returned all zeros (numpy's
+        // test_denormal_numbers, bead rc0923 .8). Same values as the step form when delta == 0.
+        let mut values = if step == 0.0 {
+            try_collect_f64(
+                (0..num).map(|i| (i as f64 / divisor) * delta + start),
+                "linspace",
+            )?
+        } else {
+            try_collect_f64((0..num).map(|i| start + step * i as f64), "linspace")?
+        };
         // Guarantee exact endpoint when included
         if endpoint && let Some(last) = values.last_mut() {
             *last = stop;
@@ -41543,6 +41554,17 @@ pub fn nextafter(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncEr
     })
 }
 
+/// NumPy's `npy_spacing` result for a NaN: `_next(x) - x`, and `_next` returns a NaN
+/// unchanged, so this is `x - x`. That is the input's own sign and payload, quieted; a
+/// signaling NaN raises "invalid" in hardware. A canonical NaN in its place changed the bits
+/// of `spacing(-nan)` (bead rc0923 .8).
+#[inline]
+#[must_use]
+#[allow(clippy::eq_op)] // The self-subtraction IS numpy's result for a NaN operand.
+pub fn spacing_of_nan(x: f64) -> f64 {
+    x - x
+}
+
 /// Return the distance between x and the next representable floating-point value.
 ///
 /// This is equivalent to `nextafter(x, +inf) - x` for non-negative `x`.
@@ -41556,10 +41578,7 @@ pub fn spacing(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
             if v.is_infinite() {
                 f64::NAN
             } else if v.is_nan() {
-                // numpy's npy_spacing returns `_next(x) - x` = `x - x` for a NaN: the input's
-                // own sign and payload, quieted. A canonical NaN here changed the bits of
-                // spacing(-nan) and of any payload NaN.
-                v - v
+                spacing_of_nan(v)
             } else if v == 0.0 {
                 // Smallest positive subnormal
                 f64::from_bits(1)

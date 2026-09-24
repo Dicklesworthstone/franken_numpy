@@ -4685,6 +4685,7 @@ print(cells, bad)
 /// - A 0-d or scalar float32 signaling NaN went through a float64 extract. That warned
 ///   "invalid value encountered in cast" from `isnan`/`isinf`/`isfinite`/`signbit`, and
 ///   returned quieted bits from `negative`/`fabs`/`absolute`.
+///
 /// 40 of these cells failed on 25feaae5. Known residual, not asserted here: numpy's hardware
 /// raises "invalid" when ARITHMETIC ops (sin, log, sqrt, ...) read a signaling NaN, and fnp's
 /// event classifier does not flag a NaN input as invalid.
@@ -4883,6 +4884,100 @@ print(len(cases), [c for c in cases if c[1] != "ok"])
         result.trim(),
         "10 []",
         "a NaN written after the screen must not panic: {result}"
+    );
+    Ok(())
+}
+
+/// Singletons from numpy's own suites under the drop-in harness (bead rc0923 .8), each a
+/// silently different answer before the fix:
+/// - `digitize(2**54, [2**54 - 1, 2**54 + 1])` compared in float64 and answered 2 (numpy: 1).
+/// - `histogram` / `histogram_bin_edges` over a range only ulps wide built bins that did not
+///   increase and counted into them, where numpy raises "Too many bins for data range".
+/// - `linspace` to a subnormal stop returned zeros (numpy divides first when the step
+///   underflows, gh-5437).
+/// - An operand carrying `__array_wrap__` (numpy hands it the result) or `__array_ufunc__`
+///   (numpy dispatches it) got a bare ndarray from the native unary ufuncs.
+///
+/// 14 of these 46 cells failed on 0ba35c5c.
+#[test]
+fn digitize_histogram_linspace_and_ufunc_hook_singletons_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = call()
+            if isinstance(r, Wrap):
+                got = ("Wrap", r.ctx_name, r.arr.dtype.str, r.arr.tobytes())
+            elif isinstance(r, tuple):
+                got = ("tuple",) + tuple((np.asarray(x).dtype.str, np.asarray(x).tobytes()) for x in r)
+            elif isinstance(r, (np.ndarray, np.generic)):
+                a = np.asarray(r)
+                got = ("ok", type(r).__name__, a.dtype.str, a.shape, a.tobytes())
+            else:
+                got = ("ok", type(r).__name__, repr(r))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted((w.category.__name__, str(w.message)) for w in caught),)
+
+base = np.arange(4.0)
+class Wrap:
+    __array_interface__ = base.__array_interface__
+    def __array_wrap__(self, arr, context=None, return_scalar=False):
+        r = Wrap()
+        r.arr = arr
+        r.ctx_name = context[0].__name__ if context else None
+        return r
+class UF:
+    def __array_ufunc__(self, ufunc, method, *inputs, **kw):
+        return ("UF", ufunc.__name__, method)
+
+big = 2**54
+tiny_range = np.array([1, 1 + 2e-16] * 10)
+cases = {
+    # Integers past 2**53 must not collapse in float64.
+    "digitize 2**54": lambda m: m.digitize(big, [big - 1, big + 1]),
+    "digitize 2**54 right": lambda m: m.digitize(big, [big - 1, big + 1], right=True),
+    "digitize 2**54 list": lambda m: m.digitize([big, big + 2], [big - 1, big + 1]),
+    # Bins the float edges cannot separate are numpy's ValueError.
+    "histogram tiny range": lambda m: m.histogram(tiny_range, bins=10),
+    "histogram tiny range f32": lambda m: m.histogram(tiny_range.astype(np.float32), bins=10),
+    "histogram_bin_edges tiny range": lambda m: m.histogram_bin_edges(tiny_range, bins=10),
+    "histogram ordinary": lambda m: m.histogram(np.arange(20.0), bins=4),
+    # A step that underflows to zero keeps the subnormal values (gh-5437).
+    "linspace subnormal f64": lambda m: m.linspace(0, np.nextafter(0.0, 1.0) * 5, 10, endpoint=False),
+    "linspace subnormal f32": lambda m: m.linspace(0, np.nextafter(np.float32(0), np.float32(1)) * 5, 10, endpoint=False, dtype=np.float32),
+    "linspace subnormal endpoint": lambda m: m.linspace(0, np.nextafter(0.0, 1.0) * 5, 11),
+    "linspace ordinary": lambda m: m.linspace(0.0, 1.0, 7),
+}
+# Operands carrying numpy's ufunc hooks: `__array_wrap__` receives the result, and
+# `__array_ufunc__` is dispatched.
+for name in ("abs", "absolute", "negative", "sqrt", "sin", "exp", "isnan", "i0", "fabs"):
+    cases[f"{name}(Wrap)"] = lambda m, name=name: getattr(m, name)(Wrap())
+    cases[f"{name}(UF)"] = lambda m, name=name: getattr(m, name)(UF())
+for name in ("add", "multiply", "maximum", "power", "divide", "subtract", "arctan2"):
+    cases[f"{name}(Wrap, 1)"] = lambda m, name=name: getattr(m, name)(Wrap(), 1.0)
+    cases[f"{name}(1, UF)"] = lambda m, name=name: getattr(m, name)(1.0, UF())
+cases["add.reduce(UF)"] = lambda m: m.add.reduce(UF())
+cases["numpy scalar add"] = lambda m: m.add(np.float64(1.5), 2.0)
+cases["numpy scalar sqrt"] = lambda m: m.sqrt(np.float32(2.0))
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "46 []",
+        "singletons must match numpy: {result}"
     );
     Ok(())
 }
