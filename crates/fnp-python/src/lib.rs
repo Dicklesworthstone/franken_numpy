@@ -33965,7 +33965,12 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     {
         return fallback();
     }
-    if let Ok(array) = extract_numeric_array(py, bound, "inv(a)") {
+    // The extract canonicalises float32 to F64: the operand's own dtype decides, or a stacked
+    // float32 is inverted in float64 and returned as float64 (numpy: float32 LAPACK, float32
+    // result; bead rc0923 .8, found with numpy's TestCond via the drop-in harness).
+    if !float_dtype_needs_numpy_precision(py, bound)?
+        && let Ok(array) = extract_numeric_array(py, bound, "inv(a)")
+    {
         let shape = array.shape();
         let real = !matches!(array.dtype(), DType::Complex64 | DType::Complex128);
         if shape.len() == 2 && shape[0] == shape[1] && real {
@@ -72795,7 +72800,9 @@ fn linalg_matrix_norm(
             None
         }
     });
+    // The operand's own dtype gates the float64 batch SVD (the extract canonicalises float32).
     if let Some(mode) = svd_mode
+        && !float_dtype_needs_numpy_precision(py, b_x)?
         && let Ok(array) = extract_numeric_array(py, b_x, "matrix_norm(x)")
     {
         let shape = array.shape();
@@ -73484,6 +73491,10 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return fallback();
     }
 
+    // The operand's own dtype gates the float64 batch SVD (the extract canonicalises float32).
+    if float_dtype_needs_numpy_precision(py, x.bind(py))? {
+        return fallback();
+    }
     let x = match extract_numeric_array(py, x.bind(py), "svdvals(x)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -88450,7 +88461,12 @@ fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny
             }
         }
     };
+    // The dtype gate below reads the EXTRACTED array, which canonicalises float32 to F64, so
+    // a stacked float32 operand took the float64 SVD and returned float64 where numpy returns
+    // float32 from float32 LAPACK (numpy's TestCond::test_generalized_sq_cases, drop-in
+    // harness, bead rc0923 .8). The operand's own dtype decides.
     if let Some(mode) = p_mode
+        && !float_dtype_needs_numpy_precision(py, x.bind(py))?
         && let Ok(array) = extract_numeric_array(py, x.bind(py), "cond(x)")
     {
         let shape = array.shape();
@@ -88592,9 +88608,13 @@ fn norm(
     // are transpose-invariant, so axis order within the pair is irrelevant.
     // Everything else (vector norms, other orders, non-trailing axes, complex,
     // non-finite, 2-D) stays on the numpy passthrough.
+    // As in `cond`: the extract canonicalises float32 to F64, so the operand's own dtype
+    // gates the float64 batch SVD (a stacked float32 got a float64 norm; numpy's
+    // TestNormSingle::test_axis).
     if let (Some(ord_val), Some(axis_val)) = (ord.as_ref(), axis.as_ref())
         && let Some(mode) = svd_matrix_norm_mode(py, ord_val)
         && let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>()
+        && !float_dtype_needs_numpy_precision(py, x.bind(py))?
         && let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)")
     {
         let nd = array.shape().len() as i64;

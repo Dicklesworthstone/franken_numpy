@@ -588,13 +588,17 @@ result = [k for k, fn in cases.items() if outcome(fn, fnp.linalg) != outcome(fn,
     });
 }
 
-/// fnp.linalg against numpy.linalg over 15 operand classes (float64/float32/complex/int/bool,
-/// batched, singular, 1x1, 0x0, rectangular, SPD, symmetric batch, Fortran-ordered, NaN) and every
-/// decomposition / solver / norm / cond / rank / power option (595 cases). README's linalg
-/// contract is tolerance-based for values, so values must agree within 1e-9 of the largest
-/// magnitude (signs ignored where a factor is only unique up to sign); the result type, dtype,
-/// shape and exception type must match exactly. Before the fix (bead .8): pinv of a float32
-/// matrix returned float64, because the native SVD works in float64 where numpy works in float32.
+/// fnp.linalg against numpy.linalg over 16 operand classes (float64/float32/complex/int/bool,
+/// batched, batched float32, singular, 1x1, 0x0, rectangular, SPD, symmetric batch,
+/// Fortran-ordered, NaN) and every decomposition / solver / norm / cond / rank / power option
+/// (638 cases). README's linalg contract is tolerance-based for values, so values must agree
+/// within 1e-9 of the largest magnitude (signs ignored where a factor is only unique up to sign);
+/// the result type, dtype, shape and exception type must match exactly. Before the fix (bead .8):
+/// pinv of a float32 matrix returned float64, because the native SVD works in float64 where
+/// numpy works in float32. Stacked float32 input had the same defect in inv, svdvals, cond and
+/// norm/matrix_norm (ord 2 / nuc): their batch gates read the float64-canonicalised extract (the
+/// "f4 batch" class plus its four trailing-axes norm cases; 7 of those 638 cases failed on
+/// 517884bb).
 #[test]
 fn linalg_results_match_numpy_types_exactly_and_values_within_tolerance() {
     with_fnp_and_numpy(|py, module, numpy| {
@@ -614,6 +618,7 @@ M = {
     "sym batch": (lambda a: a + np.swapaxes(a, -1, -2))(rng.standard_normal((5, 4, 4))),
     "F-order": np.asfortranarray(rng.standard_normal((4, 4))),
     "nan": np.array([[1.0, np.nan, 0], [0, 1, 0], [0, 0, 1]]), "bool": np.array([[True, False], [False, True]]),
+    "f4 batch": rng.standard_normal((6, 3, 3)).astype(np.float32),
 }
 cases = []
 def add(name, fn, signs=False):
@@ -639,6 +644,9 @@ for tag, a in M.items():
     add(f"svd reduced {tag}", lambda m, a=a: m.linalg.svd(a, full_matrices=False), True)
     add(f"eigh U {tag}", lambda m, a=a: m.linalg.eigh(a, UPLO="U"), True)
     add(f"cholesky upper {tag}", lambda m, a=a: m.linalg.cholesky(a, upper=True))
+for o in (2, "nuc"):
+    add(f"norm ord={o} axes f4 batch", lambda m, o=o: m.linalg.norm(M["f4 batch"], o, (-2, -1)))
+    add(f"matrix_norm ord={o} f4 batch", lambda m, o=o: m.linalg.matrix_norm(M["f4 batch"], ord=o))
 add("solve", lambda m: m.linalg.solve(M["f8"], np.arange(4.0)))
 add("solve batch", lambda m: m.linalg.solve(M["batch"], np.ones((6, 3, 1))))
 add("solve singular", lambda m: m.linalg.solve(M["singular"], [1.0, 2.0]))
@@ -691,7 +699,7 @@ result = (len(cases), bad)
             .get_item("result")?
             .expect("script sets result")
             .extract()?;
-        assert_eq!(count, 595, "case table drifted");
+        assert_eq!(count, 638, "case table drifted");
         assert!(bad.is_empty(), "linalg must match numpy: {bad:#?}");
         Ok(())
     });
