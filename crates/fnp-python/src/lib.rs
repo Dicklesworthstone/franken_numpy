@@ -46726,6 +46726,28 @@ fn try_zerocopy_cov_two_rowvar_f64(
 /// MemoryError under an address-space cap numpy's cov fits in (bead rc0923 .7). A large output
 /// goes to numpy until the Gram is written straight into the numpy buffer (the measured
 /// alternative, which needs a same-invocation A/B before it can replace this cap).
+/// The side length of the square matrix `cov`/`corrcoef` returns: `m`'s variables plus `y`'s,
+/// read from columns when `rowvar` is false. `None` when a shape cannot be read cheaply.
+fn cov_output_n_vars(
+    m: &Bound<'_, PyAny>,
+    y: Option<&Bound<'_, PyAny>>,
+    rowvar: bool,
+) -> Option<usize> {
+    let vars = |a: &Bound<'_, PyAny>| -> Option<usize> {
+        let shape: Vec<usize> = a.getattr("shape").ok()?.extract().ok()?;
+        match shape.as_slice() {
+            [_] => Some(1),
+            [rows, cols] => Some(if rowvar { *rows } else { *cols }),
+            _ => None,
+        }
+    };
+    let m_vars = vars(m)?;
+    match y {
+        Some(y) if !y.is_none() => m_vars.checked_add(vars(y)?),
+        _ => Some(m_vars),
+    }
+}
+
 fn cov_output_too_large_for_native(n_vars: usize) -> bool {
     const COV_NATIVE_MAX_OUTPUT_BYTES: usize = 256 << 20;
     n_vars
@@ -47282,6 +47304,15 @@ fn cov(
     {
         return fallback(py);
     }
+    // A large output goes to numpy on EVERY native route. Guarding only the zero-copy Gram made
+    // it worse: when that declined, the cold extract path below took over and held the n_vars^2
+    // result several times (cov of a (8192, 64) float64 array peaked at 1.52 GiB against numpy's
+    // 521 MiB; bead rc0923 .7).
+    if cov_output_n_vars(m_bound, y_binding, rowvar_bool)
+        .is_some_and(cov_output_too_large_for_native)
+    {
+        return fallback(py);
+    }
     // Fast path: rowvar=True with no y is the common shape and maps to a single
     // zero-copy parallel Gram (no transpose / extract / full-matrix allocations).
     if rowvar_bool
@@ -47484,6 +47515,12 @@ fn corrcoef(
             .and_then(|s| s.extract::<Vec<usize>>())
         && shape.len() == 2
         && cov_gram_should_delegate(shape[0], shape[1], 400_000, 0)
+    {
+        return fallback(py);
+    }
+    // A large output goes to numpy on every native route - see `cov`.
+    if cov_output_n_vars(x_bound, y_binding, rowvar_bool)
+        .is_some_and(cov_output_too_large_for_native)
     {
         return fallback(py);
     }
