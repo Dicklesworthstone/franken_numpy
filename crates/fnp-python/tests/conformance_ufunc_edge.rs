@@ -3259,6 +3259,88 @@ print(cells, bad)
     Ok(())
 }
 
+/// Binary ops over every pairing of 11 array dtypes, a broadcasting column, Python scalars (int,
+/// out-of-range int, negative int, float, complex, bool) and NumPy scalars: numpy's result type,
+/// dtype, bytes, and exception type. Before the fix only the shifts failed, 302 cells for
+/// left_shift and 289 for right_shift: wrong promotion (bool << bool gave bool, numpy int8),
+/// ValueError on mixed widths numpy shifts, and ValueError where numpy raises TypeError or
+/// OverflowError.
+#[test]
+fn binary_ops_match_numpy_promotion_scalars_and_exceptions() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(5)
+dts = ["?", "i1", "u1", "i4", "u4", "i8", "u8", "f2", "f4", "f8", "c16"]
+def arr(dt, n=5):
+    d = np.dtype(dt)
+    if d.kind == "b": return rng.integers(0, 2, n).astype(d)
+    if d.kind == "u": return rng.integers(1, 100, n).astype(d)
+    if d.kind == "i": return rng.integers(-60, 60, n).astype(d)
+    if d.kind == "f": return (rng.standard_normal(n) * 9).astype(d)
+    return (rng.standard_normal(n) * 9 + 3j).astype(d)
+operands = {f"arr_{d}": arr(d) for d in dts}
+operands.update({f"col_{d}": arr(d).reshape(5, 1)[:3] for d in ("i4", "f8")})
+operands.update({"py_int": 3, "py_big": 300, "py_neg": -2, "py_float": 2.5, "py_complex": 1 + 2j,
+                 "py_bool": True, "np_i8": np.int8(3), "np_u8": np.uint8(200),
+                 "np_f32": np.float32(2.5), "np_f64": np.float64(2.5)})
+ops = ["add", "subtract", "multiply", "true_divide", "floor_divide", "remainder", "power", "maximum",
+       "minimum", "fmax", "fmin", "arctan2", "hypot", "copysign", "logaddexp", "bitwise_and",
+       "bitwise_or", "bitwise_xor", "left_shift", "right_shift", "equal", "less", "greater_equal",
+       "logical_xor", "heaviside", "fmod", "divmod"]
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, tuple):
+        return isinstance(r, tuple) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad, cells, shifts = [], 0, 0
+names = list(operands)
+for op in ops:
+    for ln in names:
+        for rn in names:
+            if not (ln.startswith(("arr", "col")) or rn.startswith(("arr", "col"))):
+                continue
+            a, b = operands[ln], operands[rn]
+            try:
+                s = getattr(np, op)(a, b)
+            except Exception as ex:
+                s = Raised(ex)
+            try:
+                r = getattr(fnp, op)(a, b)
+            except Exception as ex:
+                r = Raised(ex)
+            cells += 1
+            shifts += op.endswith("_shift")
+            if isinstance(s, Raised) or isinstance(r, Raised):
+                if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+                    bad.append(f"{op}({ln}, {rn}): fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+            elif not same(r, s):
+                bad.append(f"{op}({ln}, {rn})")
+print(cells, shifts, bad[:40], len(bad))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let cells: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let shifts: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert!(cells >= 11_000, "cell table drifted: {result}");
+    assert!(
+        shifts >= 800,
+        "shift cells must stay in the table: {result}"
+    );
+    assert!(
+        fields.next().unwrap_or("").ends_with("[] 0"),
+        "binary ops differ from numpy: {result}"
+    );
+    Ok(())
+}
+
 /// fnp's ufunc objects report NumPy's docstring. The proxy class for natively implemented ufunc
 /// names carried a Rust `///` class docstring, which CPython writes into the type dict after
 /// PyO3's `__doc__` getter and so replaces it: `fnp.sin.__doc__` was fnp's implementation note.

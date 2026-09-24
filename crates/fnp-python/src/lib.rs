@@ -45,10 +45,10 @@ use fnp_ufunc::{
     divmod_arrays as ufunc_divmod, errstate as ufunc_errstate, frexp as ufunc_frexp,
     hermeder as ufunc_hermeder,
     hermeint as ufunc_hermeint, isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
-    left_shift as ufunc_left_shift, logaddexp2 as ufunc_logaddexp2,
+    logaddexp2 as ufunc_logaddexp2,
     logical_not as ufunc_logical_not, ma_is_masked, ma_make_mask, ma_mask_or,
     matmul_accumulate_serial, modf as ufunc_modf, npy_floor_divide_f64, reduce_frompyfunc_values,
-    right_shift as ufunc_right_shift, signbit as ufunc_signbit, spacing as ufunc_spacing,
+    signbit as ufunc_signbit, spacing as ufunc_spacing,
     take_float_error_events, tiny_product_is_inexact,
 };
 use fnp_runtime::{
@@ -64237,20 +64237,15 @@ fn native_binary_left_shift_or_passthrough(
         if let Some(out) = try_zerocopy_narrow_shift(py, &a, &b, true)? {
             return Ok(out);
         }
-        // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
-        // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). NumPy shifts an
-        // object array element by element - `np.left_shift(np.array([1,2,3], dtype=object),
-        // [1,2,3])` is `array([2, 8, 24], dtype=object)` - and we used to answer that call
-        // with `TypeError: left_shift(x1): expected a bool/int/uint/float array`. The
-        // declining classifier costs the succeeding path nothing; it is the same read.
-        let Some(x1) = try_extract_numeric_array(py, &a)? else {
-            return core_numpy_passthrough_interned(py, intern!(py, "left_shift"), args, kwargs);
-        };
-        let Some(x2) = try_extract_numeric_array(py, &b)? else {
-            return core_numpy_passthrough_interned(py, intern!(py, "left_shift"), args, kwargs);
-        };
-        let result = ufunc_left_shift(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
+        // Every operand pair the zero-copy shifts decline is numpy's. The extract path that used
+        // to take them promoted by its own rules and raised ValueError for everything, so of
+        // 11 operand dtypes x Python/NumPy scalars x broadcasting it gave bool << bool as bool
+        // (numpy: int8), bool << int32 as int64 (numpy: int32), raised on mixed widths numpy
+        // shifts (int8 << uint8), and raised ValueError where numpy raises TypeError (float
+        // operands) or OverflowError (an out-of-range Python int): 302 cells for left_shift, 289
+        // for right_shift. Object arrays already went to numpy
+        // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`).
+        core_numpy_passthrough_interned(py, intern!(py, "left_shift"), args, kwargs)
     } else {
         core_numpy_passthrough_interned(py, intern!(py, "left_shift"), args, kwargs)
     }
@@ -64274,15 +64269,8 @@ fn native_binary_right_shift_or_passthrough(
         if let Some(out) = try_zerocopy_narrow_shift(py, &a, &b, false)? {
             return Ok(out);
         }
-        // Declines an operand we cannot own to the delegate, exactly as `left_shift` above.
-        let Some(x1) = try_extract_numeric_array(py, &a)? else {
-            return core_numpy_passthrough_interned(py, intern!(py, "right_shift"), args, kwargs);
-        };
-        let Some(x2) = try_extract_numeric_array(py, &b)? else {
-            return core_numpy_passthrough_interned(py, intern!(py, "right_shift"), args, kwargs);
-        };
-        let result = ufunc_right_shift(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
+        // Every pair the zero-copy shifts decline is numpy's - see `left_shift`.
+        core_numpy_passthrough_interned(py, intern!(py, "right_shift"), args, kwargs)
     } else {
         core_numpy_passthrough_interned(py, intern!(py, "right_shift"), args, kwargs)
     }
