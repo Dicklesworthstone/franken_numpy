@@ -133,6 +133,108 @@ print(cells, fortran_files, bad)
     Ok(())
 }
 
+/// Bead rc0923 .22, the half the dtype grid above cannot reach: every NPY header VERSION numpy
+/// writes (1.0; 2.0 for a header past 65535 bytes - a 3000-field record; 3.0 for UTF-8 field
+/// names), structured and nested dtypes, savez_compressed members (names, order, decompressed
+/// bytes; the deflate container itself may differ), the save -> load -> save fixed point, numpy's
+/// max_header_size refusal, files forced to each version by np.lib.format.write_array, and the
+/// object-array pickle policy in both directions. The byte comparison is the whole contract: a
+/// scratch fnp.save with ONE header-padding byte changed failed all 192 cells of the grid above.
+#[test]
+fn npy_header_versions_structured_dtypes_and_compressed_npz_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import zipfile, warnings
+warnings.simplefilter("ignore", UserWarning)  # "Stored array in format 3.0", from both writers
+def members(payload):
+    with zipfile.ZipFile(BytesIO(payload)) as z:
+        return [(name, z.read(name)) for name in z.namelist()]
+def outcome(fn):
+    try:
+        return "ok", fn()
+    except Exception as ex:
+        return type(ex).__name__, None
+def loaded(arr):
+    return str(arr.dtype), arr.shape, arr.tobytes()
+def first_diff(a, b):
+    return next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+long_names = [(f"field_{i:05d}", "<f8") for i in range(3000)]
+utf8_names = [("温度", "<f4"), ("ß", "<i2")]
+cases = {
+    "f8 3-d C": np.arange(24.0).reshape(2, 3, 4),
+    "i2 2-d F": np.asfortranarray(np.arange(12, dtype="<i2").reshape(3, 4)),
+    "U4 1-d": np.array(["ab", "éxyz", ""], dtype="<U4"),
+    "struct C": np.array([(1, 2.5), (3, -1.0)], dtype=[("a", "<i4"), ("b", "<f8")]),
+    "struct nested": np.zeros(3, dtype=[("p", [("x", "<f4"), ("y", "<f4")]), ("id", "<u2", (2,))]),
+    "struct long header (v2.0)": np.zeros(2, dtype=long_names),
+    "struct utf8 names (v3.0)": np.zeros(2, dtype=utf8_names),
+    "f8 0-d": np.array(3.5),
+    "c16 empty 2-d": np.empty((0, 3), dtype="<c16"),
+}
+bad, cells, versions = [], 0, set()
+for label, arr in cases.items():
+    cells += 1
+    theirs = BytesIO(); np.save(theirs, arr); theirs = theirs.getvalue()
+    versions.add(theirs[6:8])
+    ours = BytesIO(); fnp.save(ours, arr); ours = ours.getvalue()
+    if ours != theirs:
+        bad.append(f"save {label}: first differing byte {first_diff(ours, theirs)} (v{theirs[6]}.{theirs[7]})")
+    # numpy refuses a header over max_header_size (10000) unless told otherwise: the same
+    # refusal, then the same values once allowed.
+    for kw in ({}, {"max_header_size": 200000}):
+        s = outcome(lambda: loaded(np.load(BytesIO(theirs), **kw)))
+        r = outcome(lambda: loaded(fnp.load(BytesIO(theirs), **kw)))
+        if s != r:
+            bad.append(f"load {label} {kw}: fnp={r[0]} numpy={s[0]}")
+    again = BytesIO(); fnp.save(again, fnp.load(BytesIO(ours), max_header_size=200000)); again = again.getvalue()
+    if again != ours:
+        bad.append(f"save-load-save {label}: first differing byte {first_diff(again, ours)}")
+    zc_ours, zc_theirs = BytesIO(), BytesIO()
+    fnp.savez_compressed(zc_ours, first=arr, second=arr); np.savez_compressed(zc_theirs, first=arr, second=arr)
+    if members(zc_ours.getvalue()) != members(zc_theirs.getvalue()):
+        bad.append(f"savez_compressed {label}: member names/order/bytes differ")
+for version in [(1, 0), (2, 0), (3, 0)]:
+    for label in ["f8 3-d C", "i2 2-d F", "U4 1-d", "struct C"]:
+        cells += 1
+        buf = BytesIO(); np.lib.format.write_array(buf, cases[label], version=version)
+        s = outcome(lambda: loaded(np.load(BytesIO(buf.getvalue()))))
+        r = outcome(lambda: loaded(fnp.load(BytesIO(buf.getvalue()))))
+        if s != r:
+            bad.append(f"load v{version} {label}: fnp={r[0]} numpy={s[0]}")
+obj = np.array([{"k": 1}, [2, 3], "s"], dtype=object)
+for allow in (False, True):
+    cells += 1
+    theirs = BytesIO(); np.save(theirs, obj, allow_pickle=True); theirs = theirs.getvalue()
+    s = outcome(lambda: np.load(BytesIO(theirs), allow_pickle=allow).tolist())
+    r = outcome(lambda: fnp.load(BytesIO(theirs), allow_pickle=allow).tolist())
+    if s != r:
+        bad.append(f"load object allow_pickle={allow}: fnp={r[0]} numpy={s[0]}")
+    s = outcome(lambda: (np.save(BytesIO(), obj, allow_pickle=allow), "saved")[1])
+    r = outcome(lambda: (fnp.save(BytesIO(), obj, allow_pickle=allow), "saved")[1])
+    if s != r:
+        bad.append(f"save object allow_pickle={allow}: fnp={r[0]} numpy={s[0]}")
+print(cells, "|".join(sorted(v.hex() for v in versions)), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    assert_eq!(fields.next(), Some("23"), "cell table drifted: {result}");
+    // Negative control on the grid itself: numpy must really have written all three versions,
+    // or the version cells compare nothing.
+    assert_eq!(
+        fields.next(),
+        Some("0100|0200|0300"),
+        "numpy no longer writes versions 1.0, 2.0 and 3.0 here: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "npy/npz IO differs from numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn load_numpy_saved_bytesio_float32_preserves_shape_dtype_and_values() -> Result<(), String> {
     let script = fnp_script(
