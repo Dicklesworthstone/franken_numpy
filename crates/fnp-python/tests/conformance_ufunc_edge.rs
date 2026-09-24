@@ -3617,10 +3617,11 @@ print(len(cases), bad)
     Ok(())
 }
 
-/// Every numpy.__all__ callable (346 after excluding IO, state and class entry points) that numpy
+/// Every numpy.__all__ callable (344 after excluding IO, state and class entry points) that numpy
 /// accepts with one or two same-dtype arrays, with no keyword and with axis=0 / axis=-1, over ten
-/// dtypes in BOTH byte orders (f8, i4, c16, f4, u2, i8, f2, c8, i2, m8[s]): fnp must match
-/// numpy's result type, dtype, shape and bytes, or raise the same exception type (7,552 cells).
+/// dtypes in BOTH byte orders (f8, i4, c16, f4, u2, i8, f2, c8, i2, m8[s]) at (4, 6) and at
+/// (160, 128), which clears the 2**14-element floors of most native routes: fnp must match
+/// numpy's result type, dtype, shape and bytes, or raise the same exception type (14,865 cells).
 /// Big-endian operands used to reach native kernels that `.view()` the data as a native integer
 /// and compute on the reinterpreted bits (bead .8): argmax/argmin/min/max/ptp of '>m8' gave
 /// wrong answers, angle('>c16') was off by up to 5.6, outer/kron/lexsort/frexp and the
@@ -3661,7 +3662,12 @@ def make(dt, shape=(4, 6)):
         base = rng.integers(0, 50, shape)
     return base.astype(np.dtype(dt).newbyteorder("<")).astype(dt)
 KINDS = ["f8", "i4", "c16", "f4", "u2", "i8", "f2", "c8", "i2", "m8[s]"]
-OPS = {order + k: make(order + k) for order in (">", "<") for k in KINDS}
+# 4x6 and 160x128: the larger one clears the 2**14-element floors most native routes use,
+# which is where several of the byte-order defects lived; the four functions with quadratic
+# outputs are left out of it.
+OPS = {(order + k, shape): make(order + k, shape) for shape in ((4, 6), (160, 128))
+       for order in (">", "<") for k in KINDS}
+QUADRATIC = {"outer", "kron", "meshgrid", "diagflat"}
 names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
          and not inspect.isclass(getattr(np, n))]
 class Raised:
@@ -3695,14 +3701,16 @@ for name in names:
     npf, fnf = getattr(np, name), getattr(fnp, name, None)
     if fnf is None:
         continue
-    for dt, a in OPS.items():
+    for (dt, shape), a in OPS.items():
+        if shape != (4, 6) and name in QUADRATIC:
+            continue
         for args, kw in (((a,), {}), ((a, a[::-1].copy()), {}), ((a,), {"axis": 0}), ((a,), {"axis": -1})):
             s = run(lambda: npf(*args, **kw))
             if isinstance(s, Raised):
                 continue
             cells += 1
             if not same(run(lambda: fnf(*args, **kw)), s):
-                bad.append(f"{name}{len(args)}{kw} {dt}")
+                bad.append(f"{name}{len(args)}{kw} {dt} {shape}")
 print(len(names), cells, bad)
 "#
         .into(),
@@ -3719,7 +3727,7 @@ print(len(names), cells, bad)
         "numpy callables drifted: {result}"
     );
     assert!(
-        cells.parse::<usize>().unwrap_or(0) >= 7000,
+        cells.parse::<usize>().unwrap_or(0) >= 14000,
         "cell table drifted: {result}"
     );
     assert_eq!(bad, "[]", "array functions must match numpy: {result}");

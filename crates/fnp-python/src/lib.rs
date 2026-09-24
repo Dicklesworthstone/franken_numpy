@@ -25392,23 +25392,6 @@ fn trapezoid_impl(
     // non-contiguous inputs keep the original (helper returns None).
     // half_range: trapezoid ADDS y pairs (and diffs x pairs) in the original
     // dtype before promoting, so narrow widths must not be able to wrap.
-    let y = match try_int_input_to_f64_exact(py, numpy, y.bind(py), true)? {
-        Some(converted) => converted,
-        None => y,
-    };
-    let x = match x {
-        Some(xv) => Some(
-            match try_int_input_to_f64_exact(py, numpy, xv.bind(py), true)? {
-                Some(converted) => converted,
-                None => xv,
-            },
-        ),
-        None => None,
-    };
-    // Any int operand STILL unconverted (out-of-range values, non-contiguous)
-    // must DELEGATE: the extract-based native path below converts lossily and
-    // diverges from numpy's in-dtype wrapping chain (pre-existing gap, exposed
-    // by the huge-i64 conformance row).
     let int_kind = |v: &Bound<'_, PyAny>| -> bool {
         v.getattr(intern!(py, "dtype"))
             .and_then(|d| d.getattr(intern!(py, "kind")))
@@ -25416,7 +25399,26 @@ fn trapezoid_impl(
             .map(|k| k == 'i' || k == 'u')
             .unwrap_or(false)
     };
-    if int_kind(y.bind(py)) || x.as_ref().is_some_and(|xv| int_kind(xv.bind(py))) {
+    // An integer `x` sends the whole call, with the ORIGINAL y, to numpy: it takes diff(x) in x's
+    // dtype (an unsigned x that decreases wraps) and multiplies d * (y[1:] + y[:-1]) in the
+    // promoted integer dtype (a narrow product overflows). The half-range conversion below only
+    // proves the y pair sums cannot wrap, which is all numpy does in integers when x is absent or
+    // a float. trapezoid(uint16 y, uint16 x) of a (256, 300) array differed in all 256 outputs,
+    // first natively and then through the delegate when y had already been converted (bead .8).
+    let x_is_int = x.as_ref().is_some_and(|xv| int_kind(xv.bind(py)));
+    let y = if x_is_int {
+        y
+    } else {
+        match try_int_input_to_f64_exact(py, numpy, y.bind(py), true)? {
+            Some(converted) => converted,
+            None => y,
+        }
+    };
+    // Any int operand STILL unconverted (an integer x, out-of-range values, non-contiguous)
+    // must DELEGATE: the extract-based native path below converts lossily and
+    // diverges from numpy's in-dtype wrapping chain (pre-existing gap, exposed
+    // by the huge-i64 conformance row).
+    if int_kind(y.bind(py)) || x_is_int {
         let kwargs = PyDict::new(py);
         if let Some(xv) = x.as_ref() {
             kwargs.set_item(intern!(py, "x"), xv.bind(py))?;
@@ -86454,26 +86456,11 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return Ok(result);
     }
 
-    let a = match extract_precise_numeric_array(py, b_a, "kron(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let b = match extract_precise_numeric_array(py, b_b, "kron(b)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    if a.has_integer_sidecar()
-        || b.has_integer_sidecar()
-        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
-        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
-    {
-        return fallback();
-    }
-    let result = match a.kron(&b) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_scalar_or_array(py, &result)
+    // Everything the typed routes decline (float16, lists, N-D, mixed dtypes) is numpy's. The
+    // extract -> UFuncArray::kron path this replaced held every element as f64: kron of two
+    // (256, 300) float16 arrays asked Rust for 47 GB where numpy allocates 11.8 GB, and a
+    // failed Rust allocation ABORTS the interpreter instead of raising MemoryError (bead .8).
+    fallback()
 }
 
 #[pyfunction]
@@ -86816,26 +86803,11 @@ fn outer(
         return Ok(result);
     }
 
-    let a = match extract_precise_numeric_array(py, b_a, "outer(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let b = match extract_precise_numeric_array(py, b_b, "outer(b)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    if a.has_integer_sidecar()
-        || b.has_integer_sidecar()
-        || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
-        || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
-    {
-        return fallback();
-    }
-    let result = match a.outer(&b) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // Everything the zero-copy routes decline (float16, lists, mixed dtypes) is numpy's: the
+    // extract -> UFuncArray::outer path held every element as f64 - outer of two 76,800-element
+    // float16 vectors asked Rust for 47 GB where numpy allocates 11.8 GB, and the failed Rust
+    // allocation aborted the interpreter instead of raising MemoryError (bead .8).
+    fallback()
 }
 
 #[pyfunction]

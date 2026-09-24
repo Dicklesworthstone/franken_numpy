@@ -481,3 +481,42 @@ print(verdicts if verdicts else True)
     );
     Ok(())
 }
+
+/// trapezoid over ten dtypes (narrow signed/unsigned ints included) at (40,) and (256, 300), with
+/// y alone, an integer x (random and reversed), dx, a float x, a float y over an integer x, and
+/// axis=0 - byte-compared with numpy (140 cells). numpy takes diff(x) in x's integer dtype (a
+/// decreasing unsigned x wraps) and multiplies d * (y[1:] + y[:-1]) in the promoted integer
+/// dtype (a narrow product overflows). Before the fix (bead .8) an integer x was converted to
+/// float64 alongside y and the route skipped both wraps: uint16 / uint8 / uint64 y with an
+/// integer x at (256, 300) differed in every output (by up to 7.6e22 for uint64). The test
+/// above never reached it: its only integer x is an increasing int64 arange.
+#[test]
+fn trapezoid_with_integer_x_keeps_numpys_integer_wraparound() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(12)
+bad = []
+cells = 0
+for dt in (np.uint16, np.int16, np.uint8, np.int8, np.int32, np.uint32, np.uint64, np.int64, np.float32, np.float64):
+    for shape in ((40,), (256, 300)):
+        y = rng.integers(0, 50, shape).astype(dt)
+        x = rng.integers(0, 50, shape).astype(dt)
+        variants = (("y", (y,), {}), ("y,x", (y,), {"x": x}), ("y,xrev", (y,), {"x": x[::-1].copy()}),
+                    ("y,dx", (y,), {"dx": 0.5}), ("yf,x", (y.astype(float),), {"x": x}),
+                    ("y,xf", (y,), {"x": x.astype(float)}),
+                    ("y,x,axis0", (y,), {"x": x, "axis": 0} if len(shape) > 1 else {"x": x}))
+        for label, args, kw in variants:
+            cells += 1
+            r, s = np.asarray(fnp.trapezoid(*args, **kw)), np.asarray(np.trapezoid(*args, **kw))
+            if r.dtype != s.dtype or r.shape != s.shape or r.tobytes() != s.tobytes():
+                bad.append(f"{dt.__name__} {shape} {label}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "140", "cell table drifted: {result}");
+    assert_eq!(bad, "[]", "trapezoid must match numpy bytes: {result}");
+    Ok(())
+}
