@@ -92,3 +92,82 @@ fnp.set_runtime_mode("strict")
     );
     Ok(())
 }
+
+/// Bead rc0923 .10 acceptance (first guard): Hardened mode ACTS on the decision engine. A linalg
+/// decomposition or solve on an operand carrying inf or NaN is known-compatible input at high
+/// risk, which the runtime mode matrix sends to `full_validate`; the validation fails, so the
+/// call raises LinAlgError and the ledger holds a `linalg_nonfinite_operand` / `full_validate`
+/// event. Strict mode must stay NumPy's outcome exactly (value or exception type) on the same
+/// hostile operand, and a finite operand must behave identically in both modes with no guard
+/// event. Negative case: with recording only (the pre-fix state), the Hardened raise is absent
+/// and this fails.
+#[test]
+fn hardened_mode_rejects_nonfinite_linalg_operands_strict_matches_numpy() -> Result<(), String> {
+    let result = run_python(
+        r#"
+import numpy.linalg as npl
+def outcome(fn):
+    try:
+        r = fn()
+    except Exception as exc:
+        return ("raised", type(exc).__name__)
+    parts = list(r) if isinstance(r, tuple) else [r]
+    return ("ok", [(np.asarray(p).shape, np.asarray(p).dtype.str) for p in parts],
+            [np.asarray(p) for p in parts])
+def same(a, b):
+    if a[0] != b[0] or a[1] != b[1]:
+        return False
+    return a[0] == "raised" or all(np.array_equal(x, y, equal_nan=True) for x, y in zip(a[2], b[2]))
+hostile = np.array([[1.0, np.nan], [np.inf, 2.0]])
+finite = np.array([[4.0, 1.0], [1.0, 3.0]])
+rhs = np.array([1.0, 2.0])
+ops = {
+    "svd": lambda m, a: m.linalg.svd(a), "qr": lambda m, a: m.linalg.qr(a),
+    "cholesky": lambda m, a: m.linalg.cholesky(a),
+    "lstsq": lambda m, a: m.linalg.lstsq(a, rhs, rcond=None),
+    "solve": lambda m, a: m.linalg.solve(a, rhs), "inv": lambda m, a: m.linalg.inv(a),
+    "det": lambda m, a: m.linalg.det(a), "slogdet": lambda m, a: m.linalg.slogdet(a),
+    "eigh": lambda m, a: m.linalg.eigh(a), "eigvals": lambda m, a: m.linalg.eigvals(a),
+    "eigvalsh": lambda m, a: m.linalg.eigvalsh(a), "eig": lambda m, a: m.linalg.eig(a),
+    "pinv": lambda m, a: m.linalg.pinv(a),
+    "matrix_rank": lambda m, a: m.linalg.matrix_rank(a),
+}
+bad = []
+for name, op in ops.items():
+    fnp.set_runtime_mode("strict")
+    if not same(outcome(lambda: op(fnp, hostile)), outcome(lambda: op(np, hostile))):
+        bad.append(f"{name}: strict differs from numpy on a non-finite operand")
+    # Finite-operand parity with numpy belongs to each op's own shard (native pinv/lstsq are
+    # tolerance-checked there); here the guard's contract is only that Hardened leaves a
+    # finite operand's result exactly as Strict computes it.
+    strict_finite = outcome(lambda: op(fnp, finite))
+    fnp.set_runtime_mode("hardened")
+    fnp.clear_runtime_decisions()
+    try:
+        op(fnp, hostile)
+        bad.append(f"{name}: hardened did not raise")
+    except Exception as exc:
+        if not isinstance(exc, npl.LinAlgError) or "hardened" not in str(exc):
+            bad.append(f"{name}: hardened raised {type(exc).__name__}, not the guard: {exc}")
+    events = [e for e in fnp.get_runtime_decisions()
+              if e["reason_code"] == "linalg_nonfinite_operand"]
+    if not events or events[-1]["action"] != "full_validate" or events[-1]["mode"] != "hardened":
+        bad.append(f"{name}: no full_validate ledger event")
+    fnp.clear_runtime_decisions()
+    if not same(outcome(lambda: op(fnp, finite)), strict_finite):
+        bad.append(f"{name}: hardened changed a finite operand's result")
+    if any(e["reason_code"] == "linalg_nonfinite_operand" for e in fnp.get_runtime_decisions()):
+        bad.append(f"{name}: guard fired on a finite operand")
+fnp.set_runtime_mode("strict")
+fnp.clear_runtime_decisions()
+print(bad if bad else True)
+"#
+        .into(),
+    )?;
+    assert_eq!(
+        result.lines().last().unwrap_or(""),
+        "True",
+        "hardened linalg guard / strict parity: {result}"
+    );
+    Ok(())
+}

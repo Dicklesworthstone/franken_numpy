@@ -186,6 +186,60 @@ pub fn record_runtime_decision(
     action
 }
 
+/// Hardened-mode guard for linalg decompositions and solves (runtime mode matrix: a
+/// known-compatible call on HIGH-RISK input gets `full_validate`; bead rc0923 .10).
+///
+/// An operand carrying inf or NaN makes NumPy's LAPACK routines answer inconsistently - `svd`
+/// raises "SVD did not converge", `inv`/`solve`/`det` return NaN-filled results without a
+/// word, `eigh` may return garbage. In Hardened mode such an operand is RECORDED as a
+/// `linalg_nonfinite_operand` decision and the call raises `LinAlgError` before any work; the
+/// decision engine's action is what is enforced (FullValidate: the validation failed, so
+/// raise; FailClosed: raise). Strict mode reads the mode and returns - it stays NumPy's
+/// behaviour byte for byte, which is why the divergence is registered as intentional and
+/// hardened-only in docs/DIVERGENCES.md.
+fn hardened_linalg_nonfinite_guard(
+    py: Python<'_>,
+    op: &str,
+    operands: &[&Bound<'_, PyAny>],
+) -> PyResult<()> {
+    if current_runtime_mode() != RuntimeMode::Hardened {
+        return Ok(());
+    }
+    let numpy = cached_numpy(py)?;
+    for operand in operands {
+        // Only float/complex data can carry inf or NaN; anything numpy cannot read as an array
+        // is left for the operation itself to reject.
+        let Ok(array) = numpy.call_method1(intern!(py, "asarray"), (*operand,)) else {
+            continue;
+        };
+        if !matches!(dtype_kind_of(&array), Some('f' | 'c')) {
+            continue;
+        }
+        let all_finite: bool = numpy
+            .call_method1(intern!(py, "isfinite"), (&array,))?
+            .call_method0(intern!(py, "all"))?
+            .extract()?;
+        if all_finite {
+            continue;
+        }
+        let action = record_runtime_decision(
+            CompatibilityClass::KnownCompatible,
+            1.0,
+            "linalg_nonfinite_operand",
+            &format!("linalg.{op}: operand contains inf or NaN"),
+        );
+        if matches!(
+            action,
+            DecisionAction::FullValidate | DecisionAction::FailClosed
+        ) {
+            return Err(PyErr::from_value(cached_numpy_linalg_error(py)?.call1((
+                format!("{op}: array must not contain infs or NaNs (hardened mode)"),
+            ))?));
+        }
+    }
+    Ok(())
+}
+
 /// Crate-local shadow of `pyo3::buffer::PyBuffer` whose `get` REFUSES a buffer whose
 /// element byte order is not the host's.
 ///
@@ -31468,6 +31522,7 @@ fn pinv(
     hermitian: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    hardened_linalg_nonfinite_guard(py, "pinv", &[a.bind(py)])?;
     let arr = cached_numpy_asarray(py)?.call1((a.bind(py),))?;
     let dtype_kind = arr
         .getattr(intern!(py, "dtype"))?
@@ -31502,9 +31557,14 @@ fn pinv(
     // hermitian and non-hermitian) and let larger 2-D fall through to the numpy
     // delegation below. Batched (>=3-D) pinv stays native (it wins decisively).
     const PINV_NATIVE_MAX_2D_DIM: usize = 32;
+    // Finite entries only, like the batched path below: the native SVD rejects inf/NaN with
+    // ValueError("entries must be finite"), where numpy raises LinAlgError("SVD did not
+    // converge") for NaN and RETURNS a result for an inf-only matrix (found by bead .10's
+    // strict-parity check).
     if shape.len() == 2
         && (!hermitian || shape[0] == shape[1])
         && shape[0].max(shape[1]) <= PINV_NATIVE_MAX_2D_DIM
+        && array.values().iter().all(|value| value.is_finite())
     {
         let values = if hermitian {
             pinv_hermitian_nxn_with_tolerance_aliases(
@@ -31567,6 +31627,7 @@ fn pinv(
 
 #[pyfunction]
 fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    hardened_linalg_nonfinite_guard(py, "eigvals", &[a.bind(py)])?;
     // Real general (non-symmetric) eigenvalues need a robust unsymmetric
     // eigensolver. The native Francis double-shift QR (`eig_nxn`) does NOT
     // reliably converge: across random real matrices it returns wrong
@@ -31597,6 +31658,7 @@ fn matrix_rank(
     hermitian: bool,
     rtol: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    hardened_linalg_nonfinite_guard(py, "matrix_rank", &[A.bind(py)])?;
     let matrix_rank_fn = cached_numpy_linalg_matrix_rank(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         if rtol.is_none() {
@@ -32057,6 +32119,7 @@ fn matrix_power_one_exact_ndarray_can_return_input(
 #[pyfunction]
 #[pyo3(signature = (a,))]
 fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    hardened_linalg_nonfinite_guard(py, "slogdet", &[a.bind(py)])?;
     let slogdet_fn = cached_numpy_linalg_slogdet(py)?;
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(slogdet_fn.call1((a.bind(py),))?.unbind()) };
@@ -32136,6 +32199,7 @@ fn svd(
     compute_uv: bool,
     hermitian: bool,
 ) -> PyResult<Py<PyAny>> {
+    hardened_linalg_nonfinite_guard(py, "svd", &[a.bind(py)])?;
     // Passthrough to np.linalg.svd — fnp_linalg::svd_mxn produces
     // singular values that differ from numpy's LAPACK path by ~2 ULPs,
     // which the strict tolist-repr parity test
@@ -32156,6 +32220,7 @@ fn svd(
 #[pyfunction]
 #[pyo3(signature = (a, mode="reduced"))]
 fn qr(py: Python<'_>, a: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+    hardened_linalg_nonfinite_guard(py, "qr", &[a.bind(py)])?;
     // Passthrough to np.linalg.qr so QRResult / ndarray / tuple return types,
     // deprecated compatibility modes, and stacked (..., M, N) semantics stay
     // byte-for-byte aligned with numpy.
@@ -32206,6 +32271,7 @@ fn cholesky(
     }
 
     let a = args.get_item(0)?.unbind();
+    hardened_linalg_nonfinite_guard(py, "cholesky", &[a.bind(py)])?;
     let mut call_kwargs: Option<Bound<'_, PyDict>> = None;
     let mut saw_upper = false;
     if let Some(kwargs) = kwargs {
@@ -32453,6 +32519,7 @@ fn solve_repeated_f64_square_stack(
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    hardened_linalg_nonfinite_guard(py, "solve", &[a.bind(py), b.bind(py)])?;
     let solve_fn = cached_numpy_linalg_solve(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         Ok(solve_fn
@@ -32661,6 +32728,7 @@ fn try_zerocopy_f64_eigvalsh_diagonal(
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
 fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
+    hardened_linalg_nonfinite_guard(py, "eigvalsh", &[a.bind(py)])?;
     let eigvalsh_fn = cached_numpy_linalg_eigvalsh(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         if UPLO == "L" {
@@ -32777,6 +32845,7 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // passed through to np.linalg.det so numpy's broadcasting / complex
     // semantics are preserved exactly.
     let bound = a.bind(py);
+    hardened_linalg_nonfinite_guard(py, "det", &[bound])?;
     let det_fn = cached_numpy_linalg_det(py)?;
     // STALE-CLIFF UPDATE (2026-06-20): the old size-gate routed n>=832 single-matrix
     // det to the native blocked LU because OpenBLAS getrf used to hit a sharp cliff
@@ -32845,6 +32914,7 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Real 2-D square inputs route to fnp_linalg::inv_nxn; complex /
     // batched / non-2-D passthrough to np.linalg.inv.
     let bound = a.bind(py);
+    hardened_linalg_nonfinite_guard(py, "inv", &[bound])?;
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(cached_numpy_linalg_inv(py)?.call1((bound,))?.unbind()) };
     // STALE-CLIFF UPDATE (2026-06-20): the old gate routed n>=100 single-matrix inv
@@ -33030,6 +33100,7 @@ fn lstsq(
 ) -> PyResult<Py<PyAny>> {
     let bound_a = a.bind(py);
     let bound_b = b.bind(py);
+    hardened_linalg_nonfinite_guard(py, "lstsq", &[bound_a, bound_b])?;
     let bound_rcond = rcond.as_ref().map(|value| value.bind(py));
     // Full-rank tall-skinny real 2-D systems go through TSQR; see
     // try_native_lstsq_tsqr for the gate and why everything else must not.
@@ -71431,6 +71502,7 @@ fn linalg_eig(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // for a general square matrix. Matches numpy on real matrices with
     // real eigenvalues, real matrices with complex-conjugate pairs,
     // complex input, and 3-D batched input (last two axes).
+    hardened_linalg_nonfinite_guard(py, "eig", &[a.bind(py)])?;
     Ok(cached_numpy_linalg_eig(py)?.call1((a.bind(py),))?.unbind())
 }
 
@@ -85950,6 +86022,7 @@ fn ifftn(
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
 fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
+    hardened_linalg_nonfinite_guard(py, "eigh", &[a.bind(py)])?;
     let eigh_fn = cached_numpy_linalg_eigh(py)?;
     let fallback = || -> PyResult<Py<PyAny>> {
         if UPLO == "L" {

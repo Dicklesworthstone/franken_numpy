@@ -74,7 +74,7 @@ success** — one line, revert, next lever, no retraction narrative.
 - Workspace runs 8,716 tests across 11 crates (see [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,643 `pub fn` declarations across `crates/*/src/**/*.rs`.
 - Bead tracker stands at 2,834 closed beads as of 2026-09-20; live count via `br list --status=closed --limit 10000 --json | jq '.issues | length'`.
 - No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (13 #[test] functions fail CI on stub/integrity markers); per-site analysis in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
-- Active tracked divergences: 0 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
+- Active tracked divergences: 1 row in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md), and it is Hardened-mode only (`DIV-HARDENED-LINALG-NONFINITE`: hardened linalg rejects inf/NaN operands; Strict is NumPy-identical); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
 
 ## Toolchain: Rust & Cargo
 
