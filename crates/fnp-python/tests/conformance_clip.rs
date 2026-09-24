@@ -110,6 +110,46 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     Ok(())
 }
 
+/// `np.clip` accepts any array_like. The zero-copy clip helpers read `a.dtype` with `?`
+/// BEFORE checking that `a` is an ndarray, so every list, tuple, and Python scalar input
+/// raised AttributeError instead of declining (found by running numpy's own test_numeric
+/// against fnp). Each case must match NumPy's result type, dtype, shape, and values.
+#[test]
+fn clip_python_containers_and_scalars_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(fn, *args):
+    try:
+        r = fn(*args)
+        arr = np.asarray(r)
+        return ("ok", type(r).__name__, str(arr.dtype), arr.shape, arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ([1, 5, 9], 2, 6),
+    ((1.5, 7.0, -3.25), 2.0, 6.0),
+    (3, 4, 5),
+    (2.5, 0.0, 1.0),
+    ([1, 5, 9], np.array([0, 6, 0]), 8),
+    ([[1.5, -2.0]], -1.0, np.array([1.0, 0.0])),
+    ([True, False], 0, 1),
+]
+bad = [(c, outcome(fnp.clip, *c), outcome(np.clip, *c)) for c in cases]
+bad = [b for b in bad if b[1] != b[2]]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "clip on Python containers/scalars must match numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn clip_complex() -> Result<(), String> {
     let script = fnp_script(

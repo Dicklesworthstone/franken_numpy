@@ -2520,13 +2520,34 @@ impl PyRandomGenerator {
         }
     }
 
-    #[pyo3(signature = (size=None, out=None))]
+    // NumPy's signature is (size=None, dtype=np.float64, out=None); without `dtype`, the
+    // ordinary call `rng.standard_normal(n, np.float32)` bound the dtype to `out` and raised
+    // (found by running numpy's own test_umath against fnp). float64 stays native; any other
+    // dtype runs NumPy's sampler on this generator's exact state.
+    #[pyo3(signature = (size=None, dtype=None, out=None))]
     fn standard_normal(
         &mut self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
+        dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        if let Some(dtype_obj) = dtype.as_ref()
+            && !dtype_obj.bind(py).is_none()
+            && extract_random_float_dtype(
+                py,
+                Some(dtype_obj.clone_ref(py)),
+                "Generator.standard_normal(dtype)",
+            )
+            .ok()
+                != Some(DType::F64)
+        {
+            let mut params = vec![("dtype", dtype_obj.clone_ref(py))];
+            if let Some(out) = out {
+                params.push(("out", out));
+            }
+            return self.numpy_distribution(py, "standard_normal", &params, size);
+        }
         self.before_draw(py)?;
         let requested_size = random_size_from_py(py, size, "Generator.standard_normal(size)")?;
         let (size, out) = resolve_random_out(
@@ -2594,14 +2615,41 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (size=None, *, method="zig", out=None))]
+    // NumPy's signature is (size=None, dtype=np.float64, method='zig', out=None): `dtype` and
+    // `method` are positional there. Non-float64 dtypes and unknown methods run NumPy's own
+    // sampler on this generator's exact state (NumPy validates `method` itself).
+    #[pyo3(signature = (size=None, dtype=None, method="zig", out=None))]
     fn standard_exponential(
         &mut self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
+        dtype: Option<Py<PyAny>>,
         method: &str,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let non_f64_dtype = dtype.as_ref().is_some_and(|d| {
+            !d.bind(py).is_none()
+                && extract_random_float_dtype(
+                    py,
+                    Some(d.clone_ref(py)),
+                    "Generator.standard_exponential(dtype)",
+                )
+                .ok()
+                    != Some(DType::F64)
+        });
+        if non_f64_dtype || !matches!(method, "zig" | "inv") {
+            let mut params = vec![(
+                "method",
+                pyo3::IntoPyObjectExt::into_py_any(method, py)?,
+            )];
+            if let Some(dtype) = dtype {
+                params.push(("dtype", dtype));
+            }
+            if let Some(out) = out {
+                params.push(("out", out));
+            }
+            return self.numpy_distribution(py, "standard_exponential", &params, size);
+        }
         self.before_draw(py)?;
         let requested_size = random_size_from_py(py, size, "Generator.standard_exponential(size)")?;
         let (size, out) = resolve_random_out(
@@ -27990,6 +28038,10 @@ fn try_zerocopy_int_clip_arrays(
     const CLIP_ARRAYS_PARALLEL_MIN: usize = 1 << 20;
     let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(py)?;
+    // Type check BEFORE reading `.dtype` (see `try_zerocopy_float_clip_arrays`).
+    if !a.is_exact_instance(ndarray_type) {
+        return Ok(None);
+    }
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
     for operand in [a, lo, hi] {
         if !operand.is_exact_instance(ndarray_type) {
@@ -28165,6 +28217,12 @@ fn try_zerocopy_float_clip_arrays(
     const CLIP_ARRAYS_PARALLEL_MIN: usize = 1 << 20;
     let numpy = cached_numpy(py)?;
     let ndarray_type = cached_ndarray_type(py)?;
+    // Type check BEFORE reading `.dtype`: a list/tuple/scalar `a` has no `.dtype`, and the
+    // `?` used to turn `np.clip([1, 5, 9], 2, 6)` into an AttributeError instead of a
+    // decline (found by running numpy's own test_numeric against fnp).
+    if !a.is_exact_instance(ndarray_type) {
+        return Ok(None);
+    }
     let a_dtype = a.getattr(intern!(py, "dtype"))?;
     for operand in [a, lo, hi] {
         if !operand.is_exact_instance(ndarray_type) {
@@ -30367,6 +30425,17 @@ fn concatenate(
 
     // Fall back for empty args or extra positional args.
     if args.is_empty() || args.len() > 2 {
+        return fallback();
+    }
+    // NumPy rejects more than INT_MAX arrays up front with a ValueError. The native path
+    // would first materialize every element and, at that size, the allocation failure
+    // ABORTS the interpreter (numpy's test_shape_base::test_huge_list_error killed the
+    // process). `len()` is O(1) on a tuple/list, so check it before any extraction.
+    if args
+        .get_item(0)?
+        .len()
+        .is_ok_and(|len| len > i32::MAX as usize)
+    {
         return fallback();
     }
     // Allow an `axis` kwarg to still hit the native path (the common np.concatenate([...], axis=k) form);
@@ -45628,6 +45697,44 @@ fn try_native_int_median(
     }
 }
 
+/// Whether `q` has an integer or bool dtype. NumPy's linear `quantile`/`nanquantile` then
+/// computes integral virtual indices `(n - 1) * q` and takes the order statistic with `take`,
+/// which PRESERVES the input dtype: `np.quantile(int8_arr, [0, 1])` is int8, while
+/// `np.quantile(int8_arr, 1.0)` interpolates to float64. fnp's kernels always interpolate in
+/// f64, so such calls must delegate (found by numpy's own test_nanfunctions run against fnp).
+/// Integer `q` can only be 0 or 1, so this route is rare; the common float `q` answers on the
+/// first `PyFloat` check. Anything unclassifiable delegates, and numpy raises its own error.
+fn quantile_q_has_integer_dtype(py: Python<'_>, q: &Bound<'_, PyAny>) -> PyResult<bool> {
+    use pyo3::types::PyFloat;
+    if q.is_instance_of::<PyFloat>() {
+        return Ok(false);
+    }
+    // bool is an int subclass, and numpy treats a bool `q` as integral too.
+    if q.is_instance_of::<PyInt>() {
+        return Ok(true);
+    }
+    // A float item makes the whole list/tuple float, without paying for `asarray`.
+    if let Ok(list) = q.cast::<PyList>()
+        && list.iter().any(|item| item.is_instance_of::<PyFloat>())
+    {
+        return Ok(false);
+    }
+    if let Ok(tuple) = q.cast::<PyTuple>()
+        && tuple.iter().any(|item| item.is_instance_of::<PyFloat>())
+    {
+        return Ok(false);
+    }
+    let kind = cached_numpy(py)?
+        .call_method1(intern!(py, "asarray"), (q,))
+        .and_then(|array| array.getattr(intern!(py, "dtype")))
+        .and_then(|dtype| dtype.getattr(intern!(py, "kind")))
+        .and_then(|kind| kind.extract::<char>());
+    Ok(match kind {
+        Ok(kind) => matches!(kind, 'b' | 'i' | 'u'),
+        Err(_) => true,
+    })
+}
+
 fn try_native_int_linear_quantile(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -47991,6 +48098,11 @@ fn try_zerocopy_f64_nanmean_flat(
         return Ok(None); // all-NaN / empty — defer for numpy's warning + NaN
     }
     let mean = total / count as f64;
+    if mean.is_nan() {
+        // An inf/-inf pair: numpy's sum warns "invalid value encountered in reduce"
+        // (and raises under errstate(invalid='raise')); this kernel does neither.
+        return Ok(None);
+    }
     Ok(Some(
         numpy
             .getattr(intern!(py, "float64"))?
@@ -49299,7 +49411,10 @@ fn compute_f64_nanvar_flat(
     }
     let avg = total / count as f64;
     let sqr_sum = pairwise_sqr_dev_f64(cells, 0, n, avg, &mut buf);
-    Ok(Some(sqr_sum / (count - ddof) as f64))
+    let var = sqr_sum / (count - ddof) as f64;
+    // NaN from an inf in the data carries numpy's invalid-value warning, which this kernel
+    // does not raise -> defer (see `try_zerocopy_f64_nanmean_flat`).
+    Ok((!var.is_nan()).then_some(var))
 }
 
 // Bit-exact flat var value (axis=None) for the PLAIN (NaN-propagating) np.var via
@@ -52887,6 +53002,12 @@ fn nanmax(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
+    // A NaN in a nanmax result means an all-NaN slice, for which numpy warns "All-NaN slice
+    // encountered". This generic path (reached by 0-d input, whose buffer the zero-copy paths
+    // cannot take) returned the NaN silently; recompute through numpy so it owns the warning.
+    if contains_nan_value(&result) {
+        return fallback();
+    }
     // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
     // 0-d ndarray; collapse the 0-d case to a scalar to match.
     build_numpy_scalar_or_array(py, &result)
@@ -53070,6 +53191,10 @@ fn nanmin(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
+    // All-NaN slice -> numpy owns the warning; see the same guard in `nanmax`.
+    if contains_nan_value(&result) {
+        return fallback();
+    }
     // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
     // 0-d ndarray; collapse the 0-d case to a scalar to match.
     build_numpy_scalar_or_array(py, &result)
@@ -53672,6 +53797,12 @@ fn nanvar(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
+    // The zero-copy paths above defer DoF <= 0 / all-NaN slices so numpy owns its "Degrees of
+    // freedom <= 0 for slice." warning; this generic tail (small, 0-d, and strided inputs)
+    // returned the NaN silently. Same rule here: a NaN result recomputes through numpy.
+    if contains_nan_value(&result) {
+        return fallback();
+    }
     build_numpy_scalar_or_array(py, &result)
 }
 
@@ -54967,7 +55098,11 @@ fn nanpercentile(
                         }
                     }
                 };
-                if let Ok(result) = native {
+                // A NaN result (an inf/-inf interpolation pair) carries a numpy
+                // invalid-value warning the kernel does not raise -> delegate.
+                if let Ok(result) = native
+                    && !contains_nan_value(&result)
+                {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims
                         && let Ok(in_shape) = a
@@ -55018,6 +55153,12 @@ fn nanpercentile(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
+    // A NaN result means an all-NaN slice (numpy warns "All-NaN slice encountered" once per
+    // slice) or an inf/-inf interpolation pair (numpy's invalid-value warning). The kernel
+    // raises neither, and returned the NaN silently; numpy recomputes and owns both warnings.
+    if contains_nan_value(&result) {
+        return fallback();
+    }
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if keepdims && let Some(ax) = axis {
         let Some(ndim) = orig_ndim else {
@@ -55099,8 +55240,12 @@ fn nanquantile(
     // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
     // (`deadlock-audit-qdp30`). The multi-q branch below already gates on
     // `numpy_dtype_is_f64`; the SCALAR-q branch after it did not, which is the whole
-    // defect - one function, two branches, one guard.
-    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
+    // defect - one function, two branches, one guard. An integer-dtype `q` keeps the INPUT
+    // dtype in numpy (see `quantile_q_has_integer_dtype`); this function's native branches
+    // returned float64 for `nanquantile(int8_arr, 1)`.
+    if float_dtype_needs_numpy_precision(py, a.bind(py))?
+        || quantile_q_has_integer_dtype(py, q.bind(py))?
+    {
         return fallback();
     }
 
@@ -55155,7 +55300,10 @@ fn nanquantile(
                         }
                     }
                 };
-                if let Ok(result) = native {
+                // NaN result -> numpy owns the warning (see `nanpercentile`).
+                if let Ok(result) = native
+                    && !contains_nan_value(&result)
+                {
                     let out = build_numpy_array_from_ufunc(py, &result)?;
                     if keepdims
                         && let Ok(in_shape) = a
@@ -55206,6 +55354,10 @@ fn nanquantile(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
+    // NaN result -> numpy owns the all-NaN / invalid-value warnings (see `nanpercentile`).
+    if contains_nan_value(&result) {
+        return fallback();
+    }
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if keepdims && let Some(ax) = axis {
         let Some(ndim) = orig_ndim else {
@@ -82984,6 +83136,13 @@ fn nanmedian(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
+    // A NaN result means an all-NaN slice (numpy warns "All-NaN slice encountered" once PER
+    // slice) or an inf/-inf midpoint pair (numpy's own invalid-value warning). The native kernel
+    // warns about neither, so recompute through numpy, which owns both. Rare by construction:
+    // only lanes that are already NaN pay the second pass.
+    if contains_nan_value(&result) {
+        return fallback();
+    }
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if keepdims_effective && let Some(ax) = axis {
         let Some(ndim) = orig_ndim else {
@@ -83559,8 +83718,12 @@ fn quantile(
     };
 
     // A non-f64 FLOAT keeps its own dtype in numpy and would be silently widened here
-    // (`deadlock-audit-qdp30`).
-    if float_dtype_needs_numpy_precision(py, a.bind(py))? {
+    // (`deadlock-audit-qdp30`). An integer-dtype `q` keeps the INPUT dtype in numpy's linear
+    // method (see `quantile_q_has_integer_dtype`); the discontinuous methods already match.
+    if float_dtype_needs_numpy_precision(py, a.bind(py))?
+        || (matches!(method.as_deref(), None | Some("linear"))
+            && quantile_q_has_integer_dtype(py, q.bind(py))?)
+    {
         return fallback();
     }
 

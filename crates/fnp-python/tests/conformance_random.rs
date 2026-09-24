@@ -636,3 +636,63 @@ result = (len(gen_cases), bad)
         Ok(())
     });
 }
+
+/// NumPy's signatures are `standard_normal(size=None, dtype=np.float64, out=None)` and
+/// `standard_exponential(size=None, dtype=np.float64, method='zig', out=None)`. fnp declared
+/// neither `dtype`, so the ordinary `rng.standard_normal(n, np.float32)` bound the dtype to
+/// `out` and raised TypeError (found by running numpy's own test suite against fnp). Every
+/// case must match NumPy's value bit-for-bit (or its exception type) and leave the stream
+/// where NumPy leaves it. NumPy treats ANY method other than 'zig' as 'inv' for float64, so
+/// "bogus" is a value case, not an error case.
+#[test]
+fn standard_normal_and_exponential_take_numpy_dtype_and_method_arguments() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+def same(a, b):
+    return (type(a) is type(b) and np.shape(a) == np.shape(b)
+            and np.asarray(a).dtype == np.asarray(b).dtype
+            and np.asarray(a).tobytes() == np.asarray(b).tobytes())
+cases = [
+ ("normal f32 positional", lambda r: r.standard_normal(5, np.float32)),
+ ("normal f32 keyword str", lambda r: r.standard_normal(size=4, dtype="float32")),
+ ("normal f64 positional", lambda r: r.standard_normal(3, np.float64)),
+ ("normal f32 out", lambda r: r.standard_normal(dtype=np.float32, out=np.empty(3, np.float32))),
+ ("normal f32 scalar", lambda r: r.standard_normal(None, np.float32)),
+ ("normal int dtype", lambda r: r.standard_normal(3, np.int32)),
+ ("exp f32 positional", lambda r: r.standard_exponential(4, np.float32)),
+ ("exp f32 inv", lambda r: r.standard_exponential(4, np.float32, "inv")),
+ ("exp f64 inv positional", lambda r: r.standard_exponential(3, np.float64, "inv")),
+ ("exp inv keyword", lambda r: r.standard_exponential(3, method="inv")),
+ ("exp unknown method", lambda r: r.standard_exponential(3, np.float64, "bogus")),
+ ("exp f32 out", lambda r: r.standard_exponential(dtype=np.float32, out=np.empty((2, 2), np.float32))),
+]
+bad = []
+for label, fn in cases:
+    f = fnp.random.default_rng(11); n = np.random.default_rng(11)
+    try: w = fn(n); we = None
+    except Exception as e: w, we = None, type(e).__name__
+    try: g = fn(f); ge = None
+    except Exception as e: g, ge = None, type(e).__name__
+    if we != ge or (we is None and not same(g, w)) or not same(f.random(3), n.random(3)):
+        bad.append(f"{label}: numpy={we} fnp={ge}")
+result = (len(cases), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (count, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(count, 12, "case table drifted");
+        assert!(
+            bad.is_empty(),
+            "standard_normal/standard_exponential dtype/method diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}

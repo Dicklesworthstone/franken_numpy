@@ -119,6 +119,40 @@ print(ok)
     Ok(())
 }
 
+/// NumPy rejects a sequence whose length exceeds INT_MAX with a ValueError before touching
+/// any element. fnp's native path materialized every element first; with a real 2^31-tuple
+/// (numpy's test_huge_list_error) that allocation aborted the interpreter. A list subclass
+/// that REPORTS 2^31 elements exercises the same length check without 16 GiB of tuple: NumPy
+/// raises, and before the guard fnp silently concatenated the two real items.
+#[test]
+fn concatenate_rejects_more_than_int_max_arrays_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+class Huge(list):
+    def __len__(self):
+        return 2**31
+
+def outcome(fn):
+    a = np.array([1.0, 2.0])
+    try:
+        return ("ok", fn(Huge([a, a])).tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+actual, expected = outcome(fnp.concatenate), outcome(np.concatenate)
+print(True if actual == expected and expected[0] == "err" else (actual, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "concatenate must raise numpy's INT_MAX ValueError: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn concatenate_1d() -> Result<(), String> {
     let script = fnp_script(

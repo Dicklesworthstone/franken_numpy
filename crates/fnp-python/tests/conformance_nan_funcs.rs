@@ -1401,3 +1401,96 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
+
+/// NumPy warns once per all-NaN slice ("All-NaN slice encountered") in nanmin/nanmax/
+/// nanmedian/nanpercentile/nanquantile, and "Degrees of freedom <= 0 for slice." in nanvar.
+/// fnp's generic native tails returned the NaN SILENTLY (30 cells, found by running numpy's
+/// own test_nanfunctions against fnp), so `-W error` code and `pytest.warns` checks behaved
+/// differently. A NaN native result now recomputes through numpy. The warning LIST (category,
+/// message, count) must equal numpy's, as must the value outcome.
+#[test]
+fn all_nan_slices_emit_numpy_warnings_with_numpy_counts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+nan = np.nan
+inputs = {
+    "0d": np.array(nan), "1d-all": np.full(5, nan),
+    "2d-row": np.array([[nan, nan, nan], [1.0, 2.0, 3.0]]), "2d-all": np.full((2, 3), nan),
+    "big-1d": np.full(4096, nan), "inf-pair": np.array([-np.inf, np.inf, nan]),
+}
+funcs = {
+    "nanmin": lambda m, x, ax: m.nanmin(x, axis=ax), "nanmax": lambda m, x, ax: m.nanmax(x, axis=ax),
+    "nanmean": lambda m, x, ax: m.nanmean(x, axis=ax), "nanvar": lambda m, x, ax: m.nanvar(x, axis=ax),
+    "nanstd": lambda m, x, ax: m.nanstd(x, axis=ax), "nanmedian": lambda m, x, ax: m.nanmedian(x, axis=ax),
+    "nanpercentile": lambda m, x, ax: m.nanpercentile(x, 30, axis=ax),
+    "nanquantile": lambda m, x, ax: m.nanquantile(x, 0.3, axis=ax),
+    "nanquantile-multi": lambda m, x, ax: m.nanquantile(x, [0.3, 0.6], axis=ax),
+}
+def run(m, f, x, ax):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = np.asarray(f(m, x, ax)); value = ("ok", str(r.dtype), r.shape, r.tobytes())
+        except Exception as exc:
+            value = ("err", type(exc).__name__)
+    return value, sorted((c.category.__name__, str(c.message)) for c in caught)
+bad = []
+for fname, f in funcs.items():
+    for iname, x in inputs.items():
+        for ax in ([None] if x.ndim < 2 else [None, 0, 1]):
+            got, want = run(fnp, f, x, ax), run(np, f, x, ax)
+            if got != want:
+                bad.append(f"{fname}[{iname}, axis={ax}]: fnp={got[1]} numpy={want[1]}")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "all-NaN warnings must match numpy: {result}"
+    );
+    Ok(())
+}
+
+/// With the default linear method, an integer or bool `q` gives integral virtual indices and
+/// numpy takes the order statistic with `take`, PRESERVING the input dtype:
+/// `np.nanquantile(int8_arr, 1)` is `np.int8`, `np.quantile(int8_arr, [0, 1])` is int8. fnp's
+/// kernels interpolated in f64 and returned float64 (60 cells). Float `q` and the
+/// discontinuous methods must keep matching as well; they are the control rows.
+#[test]
+fn integer_q_quantile_preserves_input_dtype_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(0)
+bad = []
+for dt in (np.int8, np.int64, np.uint16, np.float64):
+    for shape, ax in (((50,), None), ((6, 40), 1), ((6, 40), 0)):
+        a = rng.integers(0, 100, shape).astype(dt)
+        for name in ("quantile", "nanquantile"):
+            for q in (0, 1, [0, 1], (1, 0), np.int64(1), np.array([0, 1]), True, 0.3, [0.3, 1]):
+                for method in (None, "lower", "nearest"):
+                    kw = {} if method is None else {"method": method}
+                    outcomes = []
+                    for m in (fnp, np):
+                        try:
+                            r = getattr(m, name)(a, q, axis=ax, **kw)
+                            outcomes.append(("ok", type(r).__name__, str(np.asarray(r).dtype), np.asarray(r).tobytes()))
+                        except Exception as exc:
+                            outcomes.append(("err", type(exc).__name__))
+                    if outcomes[0] != outcomes[1]:
+                        bad.append(f"{name}({dt.__name__}{shape}, q={q!r}, axis={ax}, method={method}): fnp={outcomes[0][:3]} numpy={outcomes[1][:3]}")
+print(bad[:10] if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "integer-q quantile dtype must match numpy: {result}"
+    );
+    Ok(())
+}
