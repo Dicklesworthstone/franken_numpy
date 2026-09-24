@@ -881,3 +881,44 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// numpy's bincount converts a SEQUENCE with an intp target, so an EMPTY sequence is an empty
+/// int64 count (length `minlength`), not the float64 safe-cast TypeError fnp raised - `asarray`
+/// makes `[]` float64 (numpy's own TestBincount::test_empty_list). A float LIST is
+/// deprecated-but-accepted on numpy 2.1+ (DeprecationWarning, then truncation) while a float
+/// ARRAY raises; the outcome, warnings included, must be whatever the live numpy does.
+#[test]
+fn bincount_empty_sequence_is_an_empty_int_count() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+def outcome(fn):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            r = fn()
+            value = ("ok", type(r).__name__, str(r.dtype), r.tolist())
+        except Exception as exc:
+            value = ("err", type(exc).__name__)
+    return value, sorted(c.category.__name__ for c in caught)
+cases = [
+    lambda m: m.bincount([]),
+    lambda m: m.bincount([], minlength=3),
+    lambda m: m.bincount((), weights=[]),
+    lambda m: m.bincount([1.0, 2.0]),
+    lambda m: m.bincount(np.array([1.0, 2.0])),
+    lambda m: m.bincount([0, 2, 2]),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "bincount on empty sequences must match numpy: {result}"
+    );
+    Ok(())
+}

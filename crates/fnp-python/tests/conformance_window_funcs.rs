@@ -377,3 +377,43 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
+
+/// numpy's kaiser computes in the promoted dtype of `[0.0, M, beta]` with `arange(0, M)`, so a
+/// float `M` is legal (and a non-integral one changes the window); `M: i64` rejected every float
+/// `M` (numpy's own TestFilterwindows::test_kaiser). numpy's i0 returns a 0-d ndarray for a
+/// scalar, not a numpy scalar (Test_I0::test_non_array).
+#[test]
+fn kaiser_float_m_and_i0_scalar_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Type, dtype and shape exactly; values to 1e-14 relative, because numpy's i0 runs its own exp,
+# which is not libm on every host (the native kernel is bit-identical where it is).
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", type(r).__name__, str(np.asarray(r).dtype), np.asarray(r).shape), np.asarray(r)
+    except Exception as exc:
+        return ("err", type(exc).__name__), None
+def same(c):
+    (a, av), (b, bv) = outcome(lambda: c(fnp)), outcome(lambda: c(np))
+    # equal_nan: a non-integral M makes numpy take sqrt of a negative, so NaN is the answer.
+    return a == b and (av is None or np.allclose(av, bv, rtol=1e-14, atol=0, equal_nan=True))
+cases = [
+    lambda m: m.kaiser(4.0, 0.5), lambda m: m.kaiser(4.5, 0.5), lambda m: m.kaiser(np.float32(6), 2),
+    lambda m: m.kaiser(np.longdouble(5), 1.0), lambda m: m.kaiser(7, 14), lambda m: m.kaiser(1, 3.0),
+    lambda m: m.kaiser(0, 3.0), lambda m: m.kaiser(-2, 3.0),
+    lambda m: m.i0(0.5), lambda m: m.i0(3), lambda m: m.i0(np.array(2.0)), lambda m: m.i0([0.5, 9.0]),
+]
+bad = [i for i, c in enumerate(cases) if not same(c)]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "kaiser(float M) / i0(scalar) must match numpy: {result}"
+    );
+    Ok(())
+}

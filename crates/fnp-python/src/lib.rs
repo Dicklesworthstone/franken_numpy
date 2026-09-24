@@ -3273,14 +3273,35 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
+    // numpy broadcasts an ARRAY `n` against `pvals`, accepts N-D `pvals`, and answers a
+    // negative `n` with `ValueError("n < 0")`. `n: u64` turned those into TypeError and
+    // OverflowError, and the flattening pvals extract below would mangle N-D `pvals`, so
+    // anything but a non-negative scalar `n` with 1-D `pvals` runs numpy's sampler on this
+    // generator's exact state (numpy's own TestBroadcast::test_multinomial,
+    // TestMultinomial::test_invalid_n).
     #[pyo3(signature = (n, pvals, size=None))]
     fn multinomial(
         &mut self,
         py: Python<'_>,
-        n: u64,
+        #[pyo3(from_py_with = rng_i64_arg)] n: RngArg<i64>,
         pvals: Py<PyAny>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let pvals_ndim = match pvals
+            .bind(py)
+            .getattr(intern!(py, "ndim"))
+            .and_then(|ndim| ndim.extract::<usize>())
+        {
+            Ok(ndim) => ndim,
+            Err(_) => cached_numpy(py)?
+                .call_method1(intern!(py, "ndim"), (pvals.bind(py),))?
+                .extract::<usize>()?,
+        };
+        let Some(n) = n.native().filter(|&n| n >= 0 && pvals_ndim == 1) else {
+            let params = [("n", n.to_object(py)?), ("pvals", pvals)];
+            return self.numpy_distribution(py, "multinomial", &params, size);
+        };
+        let n = n as u64;
         self.before_draw(py)?;
         let pvals = extract_random_f64_vector(py, pvals.bind(py))?;
         if pvals.is_empty() {
@@ -24124,10 +24145,28 @@ fn bincount(
         dtype
     } else {
         let numpy = cached_numpy(py)?;
-        numpy
+        let array = numpy
             .getattr(intern!(py, "asarray"))?
-            .call1((x.bind(py),))?
+            .call1((x.bind(py),))?;
+        // A SEQUENCE that `asarray` makes empty, float or complex is numpy's call, not the
+        // safe-cast TypeError below: numpy converts sequences with an intp target, so
+        // `np.bincount([])` is an empty int64 count (numpy's own TestBincount::test_empty_list),
+        // and a float LIST is deprecated-but-accepted on numpy 2.1+ (DeprecationWarning, then
+        // truncation) where a float ARRAY raises. Which of those a given numpy does is its own
+        // version's business, so the delegate decides.
+        let sequence_kind = array
             .getattr(intern!(py, "dtype"))?
+            .getattr(intern!(py, "kind"))?
+            .extract::<char>()?;
+        if array.getattr(intern!(py, "size"))?.extract::<usize>()? == 0
+            || matches!(sequence_kind, 'f' | 'c')
+        {
+            let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
+            return Ok(numpy
+                .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+                .unbind());
+        }
+        array.getattr(intern!(py, "dtype"))?
     };
     let kind = input_dtype
         .getattr(intern!(py, "kind"))?
@@ -41979,7 +42018,11 @@ fn diff(
     // A byte-swapped operand belongs to numpy, and it has to be decided HERE. Declining only the
     // zero-copy route drops `>u8` into the f64 storage bridge, which RAISES on a wrapping
     // difference rather than answering; every native route below reads bytes in host order.
-    if ndarray_is_byteswapped(py, &a) {
+    //
+    // So does an ndarray SUBCLASS: numpy's diff slices and subtracts the subclass itself, so a
+    // MaskedArray keeps its mask and a matrix stays a matrix; the native routes returned a
+    // plain ndarray and silently dropped the mask (numpy's own TestDiff::test_subclass).
+    if ndarray_is_byteswapped(py, &a) || ndarray_subclass_needs_numpy(py, &a)? {
         return fallback();
     }
 
@@ -43735,6 +43778,13 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
         cached_numpy_place(py)?.call1((arr, mask, vals))?;
         return Ok(py.None());
     };
+    // EMPTY `vals` is numpy's call: with no True in the mask it is a no-op, otherwise numpy
+    // raises "Cannot insert from an empty array!". The native kernel rejected every empty
+    // `vals` (numpy's own TestExtins::test_place).
+    if values.values().is_empty() {
+        cached_numpy_place(py)?.call1((arr, mask, vals))?;
+        return Ok(py.None());
+    }
 
     array
         .place(&mask_values, &values)
@@ -66138,12 +66188,29 @@ fn triangular_impl(
 #[pyfunction]
 #[pyo3(signature = (M, beta))]
 #[allow(non_snake_case)]
-fn kaiser(py: Python<'_>, M: i64, beta: f64) -> PyResult<Py<PyAny>> {
+fn kaiser(py: Python<'_>, M: Py<PyAny>, beta: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Rust-owned port of np.kaiser. NumPy maps negative lengths to an
     // empty float64 array, keeps M <= 1 special-cased, and otherwise
     // emits the Kaiser window parameterized by beta. `M` carries numpy's
     // capital spelling so np.kaiser(M=..., beta=...) ports verbatim.
-    let result = UFuncArray::kaiser(M.max(0) as usize, beta);
+    //
+    // Only an integer `M` and a real scalar `beta` are native. NumPy computes in the promoted
+    // dtype of `[0.0, M, beta]` with `arange(0, M)`, so a non-integral `M` changes the window
+    // and a longdouble `M` returns a longdouble window; `M: i64` used to reject every float
+    // `M` with TypeError (numpy's own TestFilterwindows::test_kaiser).
+    let native_m = M.bind(py).extract::<i64>().ok().filter(|_| {
+        M.bind(py).is_instance_of::<PyInt>() && !M.bind(py).is_instance_of::<PyBool>()
+    });
+    let native_beta = beta.bind(py).extract::<f64>().ok().filter(|_| {
+        beta.bind(py).is_instance_of::<pyo3::types::PyFloat>()
+            || beta.bind(py).is_instance_of::<PyInt>()
+    });
+    let (Some(m), Some(beta_value)) = (native_m, native_beta) else {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "kaiser"), (M.bind(py), beta.bind(py)))?
+            .unbind());
+    };
+    let result = UFuncArray::kaiser(m.max(0) as usize, beta_value);
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -70132,7 +70199,15 @@ fn einsum_path(
 fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Native implementation of modified Bessel function of the first kind, order 0.
     // Uses the Abramowitz and Stegun polynomial approximation via UnaryOp::I0.
-    native_unary_promoting(py, x.bind(py), UnaryOp::I0, intern!(py, "i0"), "i0(x)")
+    let result = native_unary_promoting(py, x.bind(py), UnaryOp::I0, intern!(py, "i0"), "i0(x)")?;
+    // numpy's i0 is `piecewise` over `asanyarray(x)`, so a scalar in gives a 0-d ndarray out,
+    // not a numpy scalar (numpy's own Test_I0::test_non_array).
+    if result.bind(py).is_instance(cached_ndarray_type(py)?)? {
+        return Ok(result);
+    }
+    Ok(cached_numpy(py)?
+        .call_method1(intern!(py, "asarray"), (result.bind(py),))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -71746,7 +71821,10 @@ fn identity(
 }
 
 #[pyfunction]
-#[pyo3(signature = (start, stop, num=50, endpoint=true, base=10.0, dtype=None, axis=0))]
+// `base` goes through the scalar-or-object extractor: numpy broadcasts an ARRAY base against
+// the samples (`logspace(0, 2, 3, base=[2, 10])` is 3x2), and `base: f64` rejected it with
+// TypeError before the delegate could see it (numpy's own TestLogspace::test_base_array).
+#[pyo3(signature = (start, stop, num=50, endpoint=true, base=RngArg::Native(10.0), dtype=None, axis=0))]
 #[allow(clippy::too_many_arguments)]
 fn logspace(
     py: Python<'_>,
@@ -71754,7 +71832,7 @@ fn logspace(
     stop: Py<PyAny>,
     num: i64,
     endpoint: bool,
-    base: f64,
+    #[pyo3(from_py_with = rng_f64_arg)] base: RngArg<f64>,
     dtype: Option<Py<PyAny>>,
     axis: i64,
 ) -> PyResult<Py<PyAny>> {
@@ -71764,7 +71842,7 @@ fn logspace(
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "num"), num)?;
         kwargs.set_item(intern!(py, "endpoint"), endpoint)?;
-        kwargs.set_item(intern!(py, "base"), base)?;
+        kwargs.set_item(intern!(py, "base"), base.to_object(py)?)?;
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
@@ -71783,7 +71861,11 @@ fn logspace(
     // a numpy array — a double-handling that beats numpy's per-call overhead only for SMALL outputs (1000
     // 1.37x, ~parity to ~1M) but loses for large ones where the extra ~num*8-byte copy dominates (5M 0.85x,
     // 20M 0.84x). Delegate large num to numpy's direct 10**linspace (faster AND byte-identical, it's the ref).
-    if axis != 0 || num < 0 || base.to_bits() != 10.0_f64.to_bits() || num as usize > (1 << 21) {
+    if axis != 0
+        || num < 0
+        || base.native().map(f64::to_bits) != Some(10.0_f64.to_bits())
+        || num as usize > (1 << 21)
+    {
         return fallback(py);
     }
     // Same hazard as geomspace above: numpy's reference here is `10 ** linspace`,

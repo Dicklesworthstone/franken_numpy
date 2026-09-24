@@ -433,3 +433,41 @@ print(np.allclose(logspace_result, geomspace_result))
     );
     Ok(())
 }
+
+/// numpy broadcasts an ARRAY `base` against the samples (`logspace(0, 2, 3, base=[2, 10])` is
+/// 3x2); `base: f64` rejected it with TypeError before the delegate could see it (numpy's own
+/// TestLogspace::test_base_array). Scalar bases, including numpy scalars, and an explicit
+/// `base=None` (numpy's TypeError) must still match.
+#[test]
+fn logspace_array_base_broadcasts_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", type(r).__name__, str(r.dtype), r.shape, np.round(r, 10).tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+cases = [
+    lambda m: m.logspace(0, 2, 3, base=np.array([2.0, 10.0])),
+    lambda m: m.logspace(0, 2, 3, base=[2, 10]),
+    lambda m: m.logspace(0, 2, 3, base=[2, 10], axis=1),
+    lambda m: m.logspace(0, 2, 3, base=np.array([[2.0], [3.0]])),
+    lambda m: m.logspace(0, 2, 3, base=2.0),
+    lambda m: m.logspace(0, 2, 3, base=np.float32(3.0)),
+    lambda m: m.logspace(0, 2, 3),
+    lambda m: m.logspace(0, 2, 3, base=None),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "logspace with array base must match numpy: {result}"
+    );
+    Ok(())
+}

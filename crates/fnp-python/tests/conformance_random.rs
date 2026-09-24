@@ -814,3 +814,50 @@ result = bad
         Ok(())
     });
 }
+
+/// numpy's Generator.multinomial broadcasts an ARRAY `n` against `pvals`, accepts N-D
+/// `pvals`, and answers a negative `n` with `ValueError("n < 0")`. fnp declared `n: u64`
+/// (TypeError / OverflowError) and flattened `pvals`. Values must match numpy bit-for-bit,
+/// errors by type and message, and the stream must continue where numpy's does.
+#[test]
+fn multinomial_array_n_nd_pvals_and_negative_n_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+bad = []
+cases = [
+    ("array n", lambda r: r.multinomial([3, 4], [0.2, 0.8])),
+    ("array n + size", lambda r: r.multinomial(np.array([5, 10]), [0.3, 0.7], size=(3, 2))),
+    ("2-D pvals", lambda r: r.multinomial(5, [[0.2, 0.8], [0.5, 0.5]])),
+    ("negative n", lambda r: r.multinomial(-1, [0.2, 0.8])),
+    ("scalar n", lambda r: r.multinomial(7, [0.1, 0.2, 0.7], size=4)),
+]
+for label, fn in cases:
+    f, n = fnp.random.default_rng(21), np.random.default_rng(21)
+    try: w = fn(n); we = None
+    except Exception as e: w, we = None, (type(e).__name__, str(e))
+    try: g = fn(f); ge = None
+    except Exception as e: g, ge = None, (type(e).__name__, str(e))
+    if we != ge or (we is None and (g.dtype != w.dtype or g.shape != w.shape or not np.array_equal(g, w))):
+        bad.append(f"{label}: numpy={we or w.shape} fnp={ge or g.shape}")
+    elif not np.array_equal(f.random(3), n.random(3)):
+        bad.append(f"{label}: stream diverged after the call")
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "multinomial broadcast/error surface diverges from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}

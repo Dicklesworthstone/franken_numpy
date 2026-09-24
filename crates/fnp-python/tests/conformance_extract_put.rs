@@ -757,3 +757,37 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// EMPTY `vals` is numpy's call in `place`: with no True in the mask it is a no-op, otherwise
+/// numpy raises "Cannot insert from an empty array!". fnp rejected every empty `vals` with its
+/// own ValueError (numpy's own TestExtins::test_place).
+#[test]
+fn place_with_empty_vals_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(m, arr, mask, vals):
+    arr = arr.copy()
+    try:
+        r = m.place(arr, mask, vals)
+        return ("ok", r, arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+cases = [
+    (np.arange(3.0), [False] * 3, []),
+    (np.arange(3.0), np.zeros(3, bool), np.array([])),
+    (np.arange(3), [False, True, False], []),
+    (np.arange(3.0), [True, False, True], [9.0]),
+]
+bad = [i for i, (a, mk, v) in enumerate(cases) if outcome(fnp, a, mk, v) != outcome(np, a, mk, v)]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "place with empty vals must match numpy: {result}"
+    );
+    Ok(())
+}

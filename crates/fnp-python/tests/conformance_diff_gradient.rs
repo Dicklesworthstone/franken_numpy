@@ -781,3 +781,32 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// numpy's diff slices and subtracts the subclass itself, so a MaskedArray keeps its mask and a
+/// matrix stays a matrix. fnp's native routes returned a plain ndarray and silently dropped the
+/// mask (numpy's own TestDiff::test_subclass).
+#[test]
+fn diff_preserves_ndarray_subclasses_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def outcome(r):
+    return (type(r).__name__, np.asarray(r).tolist(), np.ma.getmaskarray(r).tolist() if isinstance(r, np.ma.MaskedArray) else None)
+m1 = np.ma.array([1.0, 2.0, 4.0, 7.0], mask=[0, 1, 0, 0])
+m2 = np.ma.array([[1, 2, 4], [3, 3, 9]], mask=[[0, 0, 1], [1, 0, 0]])
+cases = [
+    lambda m: m.diff(m1), lambda m: m.diff(m1, n=2), lambda m: m.diff(m2, axis=1), lambda m: m.diff(m2, axis=0),
+    lambda m: m.diff(np.matrix([[1.0, 3.0, 6.0]])), lambda m: m.diff(np.array([1.0, 3.0, 6.0])),
+]
+bad = [i for i, c in enumerate(cases) if outcome(c(fnp)) != outcome(c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "diff on ndarray subclasses must match numpy: {result}"
+    );
+    Ok(())
+}
