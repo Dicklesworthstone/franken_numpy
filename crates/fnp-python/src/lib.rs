@@ -93051,7 +93051,7 @@ fn py_std(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_std);
+        return native_or_numpy_on_non_finite(py, o, numpy_std);
     }
     // Native first-axis (axis=0) streaming two-pass — the ML standardization reduction
     // numpy materializes two temps + a sequential reduce for. See try_zerocopy_f64_var_axis0.
@@ -93063,7 +93063,7 @@ fn py_std(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_std);
+        return native_or_numpy_on_non_finite(py, o, numpy_std);
     }
     // Native middle-axis (0 < ax < ndim-1) block-parallel two-pass — take_sqrt = true.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93075,7 +93075,7 @@ fn py_std(
         && let Some(o) =
             try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_std);
+        return native_or_numpy_on_non_finite(py, o, numpy_std);
     }
     // Native FLOAT32 non-last-axis (axis 0 or middle) sequential two-pass — take_sqrt = true.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93087,7 +93087,7 @@ fn py_std(
         && let Some(o) =
             try_zerocopy_f32_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_std);
+        return native_or_numpy_on_non_finite(py, o, numpy_std);
     }
     // Native FLOAT16 LAST-axis std (per-lane f32-pairwise mean + sqr-dev). take_sqrt=true, nan_skip=false.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93100,7 +93100,7 @@ fn py_std(
         && let Some(o) =
             try_zerocopy_f16_nanvar_lastaxis(py, a.bind(py), Some(ax_i), *d, true, kd, false)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_std);
+        return native_or_numpy_on_non_finite(py, o, numpy_std);
     }
     // Native FLOAT16 non-last-axis std (per-lane narrow-each-step two-pass; nan_skip=false so NaN
     // propagates). take_sqrt = true. numpy's strided f16 std is a slow scalar two-pass.
@@ -93114,7 +93114,7 @@ fn py_std(
         && let Some(o) =
             try_zerocopy_f16_nanvar_nonlast_axis(py, a.bind(py), Some(ax_i), *d, true, kd, false)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_std);
+        return native_or_numpy_on_non_finite(py, o, numpy_std);
     }
     numpy_std()
 }
@@ -93198,7 +93198,7 @@ fn var(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_var);
+        return native_or_numpy_on_non_finite(py, o, numpy_var);
     }
     // Native first-axis (axis=0) streaming two-pass — see py_std. take_sqrt = false for var.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93209,7 +93209,7 @@ fn var(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_var);
+        return native_or_numpy_on_non_finite(py, o, numpy_var);
     }
     // Native middle-axis (0 < ax < ndim-1) block-parallel two-pass — take_sqrt = false.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93221,7 +93221,7 @@ fn var(
         && let Some(o) =
             try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_var);
+        return native_or_numpy_on_non_finite(py, o, numpy_var);
     }
     // Native FLOAT32 non-last-axis (axis 0 or middle) sequential two-pass — take_sqrt = false.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93233,7 +93233,7 @@ fn var(
         && let Some(o) =
             try_zerocopy_f32_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_var);
+        return native_or_numpy_on_non_finite(py, o, numpy_var);
     }
     // Native FLOAT16 LAST-axis var (per-lane f32-pairwise mean + sqr-dev). take_sqrt=false, nan_skip=false.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93246,7 +93246,7 @@ fn var(
         && let Some(o) =
             try_zerocopy_f16_nanvar_lastaxis(py, a.bind(py), Some(ax_i), *d, false, kd, false)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_var);
+        return native_or_numpy_on_non_finite(py, o, numpy_var);
     }
     // Native FLOAT16 non-last-axis var (per-lane narrow-each-step two-pass; nan_skip=false, NaN
     // propagates). take_sqrt = false. numpy's strided f16 var is a slow scalar two-pass.
@@ -93260,7 +93260,7 @@ fn var(
         && let Some(o) =
             try_zerocopy_f16_nanvar_nonlast_axis(py, a.bind(py), Some(ax_i), *d, false, kd, false)?
     {
-        return native_or_numpy_on_non_finite(py, o, &numpy_var);
+        return native_or_numpy_on_non_finite(py, o, numpy_var);
     }
     numpy_var()
 }
