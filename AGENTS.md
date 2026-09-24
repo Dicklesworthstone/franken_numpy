@@ -71,7 +71,7 @@ success** — one line, revert, next lever, no retraction narrative.
 
 - `fnp_python` covers **100% of `numpy.__all__`** (499/499 names on the `numpy<2.5` CI oracle, i.e. numpy 2.4.x; the lock test iterates whichever live numpy the build host has) — see [`docs/planning/audit_numpy_reality.md`](docs/planning/audit_numpy_reality.md) for architecture + coverage progression.
 - Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
-- Workspace runs 8,716 tests across 11 crates (see [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,643 `pub fn` declarations across `crates/*/src/**/*.rs`.
+- CI G2 (`--no-fail-fast`) ran 8,665 tests in 308 binaries across 11 crates, 0 failing, in run 35969423866 at `7131b1d2` (2026-09-24); [`docs/planning/FEATURE_PARITY.md`](docs/planning/FEATURE_PARITY.md) has an older per-crate breakdown. Underlying Rust surface: 1,666 `pub fn` declarations across `crates/*/src/**/*.rs` (`rg -c '^\s*pub fn '`, 2026-09-24).
 - Bead tracker stands at 2,834 closed beads as of 2026-09-20; live count via `br list --status=closed --limit 10000 --json | jq '.issues | length'`.
 - No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (13 #[test] functions fail CI on stub/integrity markers); per-site analysis in [`docs/planning/audit_numpy_mocks.md`](docs/planning/audit_numpy_mocks.md).
 - Active tracked divergences: 4 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md), the ONLY divergence ledger (the old `crates/fnp-conformance/DISCREPANCIES.md` was merged into it). An `#[ignore]` or `ExpectedFail` that tolerates a NumPy divergence must cite a row id, or CI G2 fails (`repository_markers_and_ledger_rows_agree`); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
@@ -188,7 +188,7 @@ Every component crate includes inline `#[cfg(test)]` unit tests alongside the im
 - Edge cases (empty input, max values, boundary conditions)
 - Error conditions
 
-Cross-component integration tests live in crate-level `tests/` directories. The `fnp-conformance` crate contains the differential harness, adversarial policy harness, security-contract validator, oracle capture, and benchmark + RaptorQ artifact tooling. It also ships `tests/codebase_hygiene.rs` which uses `rg` (ripgrep) to enforce the no-stubs invariant — install `ripgrep` (`apt-get install ripgrep`, `brew install ripgrep`, or `cargo install ripgrep`) before running `cargo test -p fnp-conformance`, or the 8 hygiene tests will panic with "rg should be available".
+Cross-component integration tests live in crate-level `tests/` directories. The `fnp-conformance` crate contains the differential harness, adversarial policy harness, security-contract validator, oracle capture, and benchmark + RaptorQ artifact tooling. It also ships `tests/codebase_hygiene.rs` which uses `rg` (ripgrep) to enforce the no-stubs invariant — install `ripgrep` (`apt-get install ripgrep`, `brew install ripgrep`, or `cargo install ripgrep`) before running `cargo test -p fnp-conformance`, or the 13 hygiene tests will panic with "rg should be available".
 
 ### Unit Tests
 
@@ -229,7 +229,7 @@ Cost note: `fnp-ufunc` (2,472 tests, ~84k src LOC) and `fnp-python` (3,637 tests
 | `fnp-random` | 5 production bit generators (PCG64, PCG64DXSM, MT19937, Philox, SFC64) + an internal `DeterministicRng` for tests, full `SeedSequence` / `SeedMaterial` hierarchy with spawn lineage, pickle payload round-trip, `RandomState` legacy wrapper, 40+ oracle-verified distributions with bit-exact PCG64DXSM parity vs NumPy |
 | `fnp-io` | npy/npz parser/writer, hardened boundary checks, adversarial input fuzzing |
 | `fnp-conformance` | Fixture-driven differential suites, oracle capture, adversarial/security policy harnesses, benchmark baselines, RaptorQ sidecar/scrub/decode proofs, workflow scenario gates |
-| `fnp-python` | PyO3 bindings exposing 100% of `numpy.__all__` (499/499 names) structurally locked by `fnp_python_covers_full_numpy_all`, plus 192 dedicated `conformance_*.rs` parity shards under `crates/fnp-python/tests/` |
+| `fnp-python` | PyO3 bindings exposing 100% of `numpy.__all__` (499/499 names) structurally locked by `fnp_python_covers_full_numpy_all`, plus 194 dedicated `conformance_*.rs` parity shards under `crates/fnp-python/tests/` |
 | `fnp-runtime` | Strict/hardened mode split, fail-closed wire decoding, override-audit gate, decision/evidence ledger |
 
 ### Conformance and Artifact Commands
