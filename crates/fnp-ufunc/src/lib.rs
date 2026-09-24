@@ -610,7 +610,7 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
             if value.is_finite()
                 && value != 0.0
                 && result.abs() < f64::MIN_POSITIVE
-                && value.mul_add(value, -result) != 0.0
+                && tiny_product_is_inexact(value, value, result)
             {
                 flags.note(FloatErrorKind::Under);
             }
@@ -41600,6 +41600,34 @@ pub fn lcm_arrays(a: &UFuncArray, b: &UFuncArray) -> Result<UFuncArray, UFuncErr
     })
 }
 
+/// Whether the tiny (zero or subnormal) product `a * b == product` is INEXACT, which with
+/// tininess makes it an IEEE underflow that NumPy reports. The fused residual
+/// `a.mul_add(b, -product)` cannot decide this: when the exact product lies below half the
+/// smallest subnormal, the residual rounds to zero as well (`1e-200 * 1e-200` gives 0 with a 0
+/// residual), which hid NumPy's "underflow encountered in square". Scaling each factor by 2**600
+/// moves the check into the normal range, where the residual is exact and a power-of-two
+/// rescale of `product` is lossless. Also exact for float32 operands widened to float64.
+///
+/// Only a product tiny in FLOAT64 terms is scaled. A float32 product is "tiny" below 2**-126
+/// yet normal in float64, and scaling it would overflow (2**-140 * 2**1200); unscaled, its
+/// residual is at least ~2**-1006 and therefore exact already.
+#[must_use]
+pub fn tiny_product_is_inexact(a: f64, b: f64, product: f64) -> bool {
+    const SCALE: f64 = f64::from_bits((1023 + 600) << 52);
+    const SCALE_BELOW: f64 = f64::from_bits((1023 - 900) << 52);
+    if product == 0.0 {
+        return a != 0.0 && b != 0.0;
+    }
+    let scale = if product.abs() < SCALE_BELOW {
+        SCALE
+    } else {
+        1.0
+    };
+    let (scaled_a, scaled_b) = (a * scale, b * scale);
+    let scaled = scaled_a * scaled_b;
+    scaled_a.mul_add(scaled_b, -scaled) != 0.0 || product * scale * scale != scaled
+}
+
 /// NumPy's float64 `npy_floor_divide`, step for step: fmod, subtract, divide, sign fix, floor,
 /// snap to the nearest integer, copysign. Every step is an IEEE-exact operation, so the
 /// quotient is byte-identical to `numpy.floor_divide` and to the quotient of `numpy.divmod`.
@@ -43820,8 +43848,9 @@ mod tests {
         reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
         scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
         scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
-        take_float_error_events, transpose_tiled, unique_all, unique_counts, unique_inverse,
-        unique_values, validate_override_payload_class, where_nonzero,
+        take_float_error_events, tiny_product_is_inexact, transpose_tiled, unique_all,
+        unique_counts, unique_inverse, unique_values, validate_override_payload_class,
+        where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -77834,6 +77863,34 @@ print("\n".join(out))
         let (q, r) = divmod_arrays(&a, &b).unwrap();
         assert_eq!(q.values(), &[77.0]);
         assert_eq!(r.values()[0].to_bits(), 5.999999999999965e-08_f64.to_bits());
+    }
+
+    /// Underflow is a tiny AND inexact product. numpy 2.4.3 reports "underflow encountered in
+    /// square" for 1e-200 (rounds to 0) and 1.1e-160 (inexact subnormal), not for 2**-520 (the
+    /// exact subnormal 2**-1040).
+    #[test]
+    fn tiny_product_is_inexact_decides_underflow_where_the_fused_residual_cannot() {
+        let tiny = 1e-200_f64;
+        // Control: the fused residual rounds to zero too, so it calls this product exact.
+        assert_eq!(tiny.mul_add(tiny, -(tiny * tiny)), 0.0);
+        assert!(tiny_product_is_inexact(tiny, tiny, tiny * tiny));
+        let exact = 2f64.powi(-520);
+        assert!(!tiny_product_is_inexact(exact, exact, exact * exact));
+        let inexact = 1.1e-160_f64;
+        assert!(tiny_product_is_inexact(inexact, inexact, inexact * inexact));
+        assert!(!tiny_product_is_inexact(0.0, tiny, 0.0));
+        assert!(tiny_product_is_inexact(-tiny, tiny, -(tiny * tiny)));
+        assert!(!tiny_product_is_inexact(exact, -exact, -(exact * exact)));
+        // float32 operands widened to f64: exact iff the f32 product equals the f64 product.
+        for x in [1e-20_f32, 2f32.powi(-70), 3.3e-23, 1e-30] {
+            let r = x * x;
+            let expected = f64::from(x) * f64::from(x) != f64::from(r);
+            assert_eq!(
+                tiny_product_is_inexact(f64::from(x), f64::from(x), f64::from(r)),
+                expected,
+                "float32 {x:e}"
+            );
+        }
     }
 
     #[test]

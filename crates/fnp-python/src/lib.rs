@@ -49,7 +49,7 @@ use fnp_ufunc::{
     logical_not as ufunc_logical_not, ma_is_masked, ma_make_mask, ma_mask_or,
     matmul_accumulate_serial, modf as ufunc_modf, npy_floor_divide_f64, reduce_frompyfunc_values,
     right_shift as ufunc_right_shift, signbit as ufunc_signbit, spacing as ufunc_spacing,
-    take_float_error_events,
+    take_float_error_events, tiny_product_is_inexact,
 };
 use fnp_runtime::{
     CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
@@ -63267,7 +63267,7 @@ fn reciprocal_square_categories<T: Copy + Into<f64>>(
             let inexact = if reciprocal {
                 result.mul_add(value, -1.0) != 0.0
             } else {
-                value.mul_add(value, -result) != 0.0
+                tiny_product_is_inexact(value, value, result)
             };
             categories.under |= inexact;
         }
@@ -63295,7 +63295,8 @@ fn note_accumulation_step(
     } else if prev.is_finite() && value.is_finite() {
         if next.is_infinite() {
             categories.over = true;
-        } else if is_prod && next.abs() < min_positive && prev.mul_add(value, -next) != 0.0 {
+        } else if is_prod && next.abs() < min_positive && tiny_product_is_inexact(prev, value, next)
+        {
             categories.under = true;
         }
     }
