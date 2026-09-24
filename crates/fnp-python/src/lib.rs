@@ -1143,6 +1143,12 @@ fn has_array_function_override(
             ndarray_hook,
         );
     }
+    // NumPy scalars are plain data: no `__array_function__` or `__array_ufunc__`, and the
+    // `__array_wrap__` they do define is not a hook to honour here. One isinstance settles them
+    // before any type-attribute lookup.
+    if obj.is_instance(cached_numpy_generic(py)?)? {
+        return Ok(false);
+    }
     let ty = obj.get_type();
     if ty
         .getattr_opt(intern!(py, "__array_function__"))?
@@ -1153,13 +1159,9 @@ fn has_array_function_override(
     // numpy also runs an operand's ufunc hooks: `__array_ufunc__` (NEP 13; ndarray instances
     // have already returned above) and `__array_wrap__`, through which `np.abs(obj)` hands obj
     // its result. The native paths returned a bare ndarray (numpy's Test_I0::test_non_array;
-    // pandas-style objects survive ufuncs this way; bead rc0923 .8). NumPy scalars define
-    // `__array_wrap__` but are plain data here.
-    if ty.getattr_opt(intern!(py, "__array_ufunc__"))?.is_some() {
-        return Ok(true);
-    }
-    Ok(ty.getattr_opt(intern!(py, "__array_wrap__"))?.is_some()
-        && !obj.is_instance(&cached_numpy(py)?.getattr(intern!(py, "generic"))?)?)
+    // pandas-style objects survive ufuncs this way; bead rc0923 .8).
+    Ok(ty.getattr_opt(intern!(py, "__array_ufunc__"))?.is_some()
+        || ty.getattr_opt(intern!(py, "__array_wrap__"))?.is_some())
 }
 
 fn sequence_has_array_function_override<'py>(
