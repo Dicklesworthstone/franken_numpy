@@ -12928,6 +12928,15 @@ impl UFuncArray {
             .iter()
             .map(|key| key.synthesized_integer_sidecar("lexsort"))
             .collect::<Result<Vec<_>, _>>()?;
+        // numpy's float key order: `<` with every NaN last and equal to every other NaN, so -0.0
+        // ties with 0.0 and the next key (then index order) decides. `total_cmp` put -0.0 first
+        // and ordered NaNs by sign bit.
+        let float_key_cmp = |x: f64, y: f64| match (x.is_nan(), y.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            (false, false) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        };
         let mut indices: Vec<usize> = (0..n).collect();
         indices.sort_by(|&a, &b| {
             // Compare from last key to first (last key is primary)
@@ -12935,7 +12944,7 @@ impl UFuncArray {
                 let ord = match sidecar {
                     Some(IntegerSidecar::I64(values)) => values[a].cmp(&values[b]),
                     Some(IntegerSidecar::U64(values)) => values[a].cmp(&values[b]),
-                    None => key.values[a].total_cmp(&key.values[b]),
+                    None => float_key_cmp(key.values[a], key.values[b]),
                 };
                 if ord != std::cmp::Ordering::Equal {
                     return ord;
@@ -63379,6 +63388,28 @@ for module, prefix in families:
         let k = UFuncArray::new(vec![3], vec![3.0, 1.0, 2.0], DType::F64).unwrap();
         let r = UFuncArray::lexsort(&[&k]).unwrap();
         assert_eq!(r.values(), &[1.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn lexsort_ties_signed_zeros_and_nans_like_numpy() {
+        // np.lexsort((secondary, primary)) with primary [0.0, -0.0, nan, -nan, 1.0]: numpy ties
+        // 0.0 with -0.0 and nan with -nan (NaNs last), so the secondary key orders each tie -
+        // [1, 0, 4, 3, 2] for secondary [5, 4, 3, 2, 1] and [0, 1, 4, 2, 3] for [1, 2, 3, 4, 5]
+        // (numpy 2.4.3). `total_cmp` put -0.0 before 0.0 and the sign-bit NaN before every
+        // number, whatever the secondary said.
+        let primary = UFuncArray::new(
+            vec![5],
+            vec![0.0, -0.0, f64::NAN, -f64::NAN, 1.0],
+            DType::F64,
+        )
+        .unwrap();
+        let secondary =
+            UFuncArray::new(vec![5], vec![5.0, 4.0, 3.0, 2.0, 1.0], DType::F64).unwrap();
+        let r = UFuncArray::lexsort(&[&secondary, &primary]).unwrap();
+        assert_eq!(r.values(), &[1.0, 0.0, 4.0, 3.0, 2.0]);
+        let reversed = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
+        let r = UFuncArray::lexsort(&[&reversed, &primary]).unwrap();
+        assert_eq!(r.values(), &[0.0, 1.0, 4.0, 2.0, 3.0]);
     }
 
     #[test]

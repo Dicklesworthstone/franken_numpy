@@ -2420,3 +2420,173 @@ print(all(checks))
     );
     Ok(())
 }
+
+/// Sorting, searching and set operations over 15 dtypes (floats seeded with NaN, -0.0 and +-inf;
+/// ints with their extremes; bool, unicode, bytes, datetime64) at sizes 0..70,000 and every kind/
+/// side/sorter/return_*/equal_nan/invert keyword, compared with numpy by type, dtype, shape, bytes,
+/// C/F contiguity and exception type (3,405 cases). Before the fixes (bead .8): lexsort split -0.0
+/// from 0.0 and ordered NaNs by sign bit (fnp-ufunc's generic comparator used total_cmp);
+/// unique_counts/unique_inverse/unique_all collapsed NaNs (numpy's array-API forms pass
+/// equal_nan=False); float16 unique and union1d kept +0.0 where numpy kept -0.0 from n = 16384
+/// (the widened-f32 routes followed the f32 sort's tie arrangement, not numpy's f16 introsort).
+#[test]
+fn sort_search_and_set_ops_match_numpy_across_dtypes_specials_and_keywords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(77)
+
+def specials(dt, n):
+    kind = np.dtype(dt).kind
+    if n == 0:
+        return np.array([], dtype={"U": "U3", "S": "S3"}.get(dt, dt))
+    if kind == "f":
+        x = (rng.standard_normal(n) * 100).astype(dt)
+        idx = rng.integers(0, n, max(1, n // 7))
+        x[idx[: len(idx) // 3]] = np.nan
+        x[idx[len(idx) // 3: 2 * len(idx) // 3]] = -0.0
+        x[idx[2 * len(idx) // 3:]] = rng.choice([np.inf, -np.inf, 0.0], len(idx) - 2 * len(idx) // 3)
+        return x
+    if kind == "c":
+        x = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+        x[rng.integers(0, n, max(1, n // 9))] = complex(np.nan, 0)
+        x[rng.integers(0, n, max(1, n // 9))] = complex(1, np.nan)
+        return x
+    if kind == "b":
+        return rng.integers(0, 2, n).astype(bool)
+    if kind in "iu":
+        info = np.iinfo(dt)
+        x = rng.integers(max(info.min, -1000), min(info.max, 1000), n).astype(dt)
+        x[rng.integers(0, n, max(1, n // 11))] = info.max
+        x[rng.integers(0, n, max(1, n // 11))] = info.min
+        return x
+    if kind == "U":
+        return np.array([f"k{v}" for v in rng.integers(0, max(2, n // 3), n)])
+    if kind == "S":
+        return np.array([f"k{v}".encode() for v in rng.integers(0, max(2, n // 3), n)])
+    return (np.datetime64("2020-01-01") + rng.integers(-500, 500, n).astype("timedelta64[D]")).astype(dt)
+
+cases = []
+def add(name, fn):
+    cases.append((name, fn))
+
+for dt in ["f8", "f4", "f2", "c16", "i8", "i4", "i2", "i1", "u8", "u4", "u1", "?", "U", "S", "M8[D]"]:
+    for n in [0, 1, 7, 64, 1000, 70_000]:
+        a = specials(dt, n)
+        b = specials(dt, max(n // 2, 1))
+        tag = f"{dt} n={n}"
+        for kind in ("quicksort", "stable", "heapsort"):
+            add(f"sort {kind} {tag}", lambda m, a=a, k=kind: m.sort(a, kind=k))
+            add(f"argsort {kind} {tag}", lambda m, a=a, k=kind: m.argsort(a, kind=k))
+        add(f"sort axis=None {tag}", lambda m, a=a: m.sort(a, axis=None))
+        add(f"sort reversed view {tag}", lambda m, a=a: m.sort(a[::-1]))
+        if n > 3:
+            add(f"partition {tag}", lambda m, a=a, n=n: np.sort(m.partition(a, n // 2)))
+            add(f"partition kth {tag}", lambda m, a=a, n=n: m.partition(a, n // 2)[n // 2])
+            add(f"argpartition kth {tag}", lambda m, a=a, n=n: a[m.argpartition(a, n // 3)[n // 3]])
+            add(f"partition list-kth {tag}", lambda m, a=a, n=n: m.partition(a, [1, n - 2])[[1, n - 2]])
+        s = np.sort(a)
+        for side in ("left", "right"):
+            add(f"searchsorted {side} {tag}", lambda m, s=s, b=b, sd=side: m.searchsorted(s, b, side=sd))
+            add(f"searchsorted sorter {side} {tag}",
+                lambda m, a=a, b=b, sd=side: m.searchsorted(a, b, side=sd, sorter=np.argsort(a, kind="stable")))
+            add(f"searchsorted scalar {side} {tag}", lambda m, s=s, b=b, sd=side: m.searchsorted(s, b[0], side=sd))
+        add(f"unique {tag}", lambda m, a=a: m.unique(a))
+        add(f"unique all {tag}", lambda m, a=a: m.unique(a, return_index=True, return_inverse=True, return_counts=True))
+        if a.dtype.kind in "fc":
+            add(f"unique equal_nan=False {tag}", lambda m, a=a: m.unique(a, equal_nan=False))
+        for fn in ("intersect1d", "union1d", "setdiff1d", "setxor1d"):
+            add(f"{fn} {tag}", lambda m, a=a, b=b, f=fn: getattr(m, f)(a, b))
+        add(f"intersect1d idx {tag}", lambda m, a=a, b=b: m.intersect1d(a, b, return_indices=True))
+        add(f"intersect1d assume_unique {tag}",
+            lambda m, a=a, b=b: m.intersect1d(np.unique(a), np.unique(b), assume_unique=True))
+        add(f"isin {tag}", lambda m, a=a, b=b: m.isin(a, b))
+        add(f"isin invert {tag}", lambda m, a=a, b=b: m.isin(a, b, invert=True))
+        if a.dtype.kind in "iub":
+            add(f"isin table {tag}", lambda m, a=a, b=b: m.isin(a, b, kind="table"))
+        add(f"isin sort {tag}", lambda m, a=a, b=b: m.isin(a, b, kind="sort"))
+        if n:
+            for f in ("argmax", "argmin", "max", "min", "nanargmax", "nanmin"):
+                add(f"{f} {tag}", lambda m, a=a, f=f: getattr(m, f)(a))
+        add(f"lexsort pair {tag}", lambda m, a=a: m.lexsort((a, a[::-1])))
+        add(f"count_nonzero {tag}", lambda m, a=a: m.count_nonzero(a))
+        add(f"nonzero {tag}", lambda m, a=a: m.nonzero(a))
+        if a.dtype.kind in "fciu":
+            add(f"sort_complex {tag}", lambda m, a=a: m.sort_complex(a))
+
+M2 = rng.standard_normal((40, 30))
+M2[rng.integers(0, 40, 9), rng.integers(0, 30, 9)] = np.nan
+for axis in (0, 1, -1, None):
+    add(f"sort 2-D axis={axis}", lambda m, ax=axis: m.sort(M2, axis=ax))
+    add(f"argsort 2-D axis={axis}", lambda m, ax=axis: m.argsort(M2, axis=ax, kind="stable"))
+    add(f"argmax 2-D axis={axis}", lambda m, ax=axis: m.argmax(M2, axis=ax))
+    add(f"unique 2-D axis={axis}", lambda m, ax=axis: m.unique(np.round(M2 / 3), axis=ax))
+    add(f"partition 2-D axis={axis}", lambda m, ax=axis: np.sort(m.partition(M2, 3, axis=ax), axis=ax))
+REC = np.array([(2, 1.0), (1, 3.0), (2, 0.5)], dtype=[("a", "i4"), ("b", "f8")])
+K3 = (rng.integers(0, 3, 50), rng.integers(0, 3, 50), rng.standard_normal(50))
+K2 = rng.integers(0, 4, (3, 60))
+V2 = rng.standard_normal((3, 4)) * 5
+F100 = specials("f8", 100)
+I100 = specials("i8", 100)
+I46 = rng.integers(0, 5, (4, 6))
+add("argsort F-order", lambda m: m.argsort(np.asfortranarray(M2), axis=0, kind="stable"))
+add("sort structured order", lambda m: m.sort(REC, order="b"))
+add("argsort structured order", lambda m: m.argsort(REC, order=["a", "b"]))
+add("lexsort 3 keys", lambda m: m.lexsort(K3))
+add("lexsort 2-D keys", lambda m: m.lexsort(K2))
+add("searchsorted unsorted", lambda m: m.searchsorted(np.array([3, 1, 2]), [2]))
+add("searchsorted 2-D v", lambda m: m.searchsorted(np.arange(10.0), V2))
+add("searchsorted nan", lambda m: m.searchsorted(np.array([1.0, 2.0, np.nan]), [np.nan, 2.0, 5.0]))
+add("unique_values", lambda m: m.unique_values(F100))
+add("unique_counts", lambda m: tuple(m.unique_counts(I100)))
+add("unique_counts nan", lambda m: tuple(m.unique_counts(F100)))
+add("unique_inverse", lambda m: tuple(m.unique_inverse(F100)))
+add("unique_all", lambda m: tuple(m.unique_all(F100)))
+add("unique_all 2-D", lambda m: tuple(m.unique_all(I46)))
+add("unique inverse 2-D", lambda m: m.unique(I46, return_inverse=True))
+
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+
+def same(r, s):
+    if isinstance(s, (tuple, list)):
+        return (isinstance(r, (tuple, list)) and type(r).__name__ == type(s).__name__
+                and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s)))
+    if type(r) is not type(s):
+        return False
+    r2, s2 = np.asarray(r), np.asarray(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape or r2.tobytes() != s2.tobytes():
+        return False
+    if isinstance(s, np.ndarray):
+        return r.flags.c_contiguous == s.flags.c_contiguous and r.flags.f_contiguous == s.flags.f_contiguous
+    return True
+
+bad = []
+for name, fn in cases:
+    try:
+        s = fn(np)
+    except Exception as ex:
+        s = Raised(ex)
+    try:
+        r = fn(fnp)
+    except Exception as ex:
+        r = Raised(ex)
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+            bad.append(f"{name}: fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+    elif not same(r, s):
+        bad.append(name)
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cases, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cases.parse::<usize>().unwrap_or(0) >= 3000,
+        "case table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "sorting/set-op parity with numpy: {result}");
+    Ok(())
+}

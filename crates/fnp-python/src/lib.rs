@@ -77003,13 +77003,57 @@ fn ndarray_element_count(arr: &Bound<'_, PyAny>) -> PyResult<usize> {
     arr.getattr(intern!(arr.py(), "size"))?.extract::<usize>()
 }
 
+/// True when float16 `arrays` hold an equal class under more than one encoding - both +0.0 and
+/// -0.0, or two different NaN bit patterns - or cannot be scanned (not C-contiguous).
+///
+/// Which encoding numpy's sort-based unique keeps for such a class is an artifact of its f16
+/// introsort's partitioning. The widened-f32 routes below follow the f32 sort's arrangement
+/// instead: unique and union1d of float16 kept +0.0 where numpy kept -0.0 from n = 16384
+/// (bead .8). `try_native_f16_unique_flat` already declines these inputs; so do the widening
+/// routes now.
+fn f16_equal_class_is_ambiguous(py: Python<'_>, arrays: &[&Bound<'_, PyAny>]) -> PyResult<bool> {
+    let u16t = cached_uint16_type(py)?;
+    let (mut pos0, mut neg0, mut nan): (bool, bool, Option<u16>) = (false, false, None);
+    for array in arrays {
+        let Ok(view) = array.call_method1(intern!(py, "view"), (u16t,)) else {
+            return Ok(true);
+        };
+        let Ok(buffer) = PyBuffer::<u16>::get(&view) else {
+            return Ok(true);
+        };
+        let Some(cells) = buffer.as_slice(py) else {
+            return Ok(true);
+        };
+        for cell in cells {
+            let bits = cell.get();
+            if bits == 0x0000 {
+                pos0 = true;
+            } else if bits == 0x8000 {
+                neg0 = true;
+            } else if bits & 0x7fff > 0x7c00 {
+                match nan {
+                    Some(seen) if seen != bits => return Ok(true),
+                    _ => nan = Some(bits),
+                }
+            }
+            if pos0 && neg0 {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn try_native_f16_unique(
     py: Python<'_>,
     _numpy: &Bound<'_, PyModule>,
     item: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
     let nd = cached_ndarray_type(py)?;
-    if !f16_dtype_ok(item, nd)? || ndarray_element_count(item)? < (1 << 14) {
+    if !f16_dtype_ok(item, nd)?
+        || ndarray_element_count(item)? < (1 << 14)
+        || f16_equal_class_is_ambiguous(py, &[item])?
+    {
         return Ok(None);
     }
     // Widen exact -> f32 unique (fnp fast path or numpy) -> narrow the sorted-unique result back to f16.
@@ -77332,8 +77376,10 @@ fn try_native_f16_searchsorted_table(
 }
 
 // float16 set-ops via exact f32 widening (numpy f16 set-ops ~172ms @2M+2M, no SIMD). Widen both operands to
-// f32, route to the f32 set-op, narrow the sorted-unique result back to f16. BYTE-EXACT incl NaN/-0.0/inf
-// (verified vs numpy — unlike f16 SORT, the sorted-UNIQUE output has no ±0.0 tie-order ambiguity). Gate n>=1<<14.
+// f32, route to the f32 set-op, narrow the sorted-unique result back to f16. Byte-exact except for WHICH
+// encoding of an equal class survives: with both zeros (or two NaN patterns) present that is numpy's
+// f16-introsort artifact, and union1d kept +0.0 where numpy kept -0.0 - those inputs defer
+// (`f16_equal_class_is_ambiguous`). setdiff1d's values come from unique(ar1) alone. Gate n>=1<<14.
 fn try_native_f16_setop(
     py: Python<'_>,
     _numpy: &Bound<'_, PyModule>,
@@ -77346,6 +77392,13 @@ fn try_native_f16_setop(
         || !f16_dtype_ok(ar2, nd)?
         || ndarray_element_count(ar1)? < (1 << 14)
     {
+        return Ok(None);
+    }
+    let value_sources: &[&Bound<'_, PyAny>] = match op {
+        DtSetOp::Setdiff => &[ar1],
+        DtSetOp::Union | DtSetOp::Intersect | DtSetOp::Setxor => &[ar1, ar2],
+    };
+    if f16_equal_class_is_ambiguous(py, value_sources)? {
         return Ok(None);
     }
     let a32 = ar1
@@ -117650,6 +117703,10 @@ fn array_api_unique_route(
     let x = args.get_item(0)?;
     let one = PyTuple::new(py, [x])?;
     let uk = PyDict::new(py);
+    // numpy's array-API forms call `unique(x, ..., equal_nan=False)`: every NaN is its own
+    // value. Without it the route collapsed NaNs (unique_counts([1, nan, nan]) gave 2 values
+    // where numpy gives 3).
+    uk.set_item(intern!(py, "equal_nan"), false)?;
     if ret_index {
         uk.set_item(intern!(py, "return_index"), true)?;
     }
@@ -117659,7 +117716,7 @@ fn array_api_unique_route(
     if ret_counts {
         uk.set_item(intern!(py, "return_counts"), true)?;
     }
-    let res = unique(py, &one, if uk.is_empty() { None } else { Some(&uk) })?;
+    let res = unique(py, &one, Some(&uk))?;
     match result_type {
         None => Ok(res), // unique_values: bare sorted-unique values array
         Some(tname) => {
@@ -117753,11 +117810,10 @@ fn unique_values(
     // "unspecified", the installed numpy IS the contract, so ask it. Delegating
     // also makes this correct across numpy versions for free.
     //
-    // NOT VERIFIED for the siblings: unique_all, unique_counts and unique_inverse
-    // share the same array-API order guarantee and the same native route. Their
-    // tests pass today, but that may only mean their inputs do not discriminate
-    // sorted order from numpy's — check them with an input like [3, 1, 2, 1, 3]
-    // before assuming they are safe.
+    // The siblings unique_all, unique_counts and unique_inverse keep the native route: numpy
+    // 2.4.3 implements them as SORTED `unique(x, return_*=True, equal_nan=False)` (checked with
+    // [3, 1, 2, 1, 3]), which is what `array_api_unique_route` computes. It lacked
+    // `equal_nan=False` and collapsed NaNs until bead .8.
     let numpy = cached_numpy(py)?;
     Ok(numpy
         .getattr(intern!(py, "unique_values"))?
