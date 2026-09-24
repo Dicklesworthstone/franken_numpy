@@ -16970,10 +16970,13 @@ fn try_zerocopy_int_nan_to_num(
     if kind != 'i' && kind != 'u' {
         return Ok(None);
     }
-    Ok(Some(
-        x.call_method1(intern!(py, "copy"), (intern!(py, "K"),))?
-            .unbind(),
-    ))
+    let copied = x.call_method1(intern!(py, "copy"), (intern!(py, "K"),))?;
+    // numpy ends with `x[()] if isscalar else x`: a 0-d input comes back as a SCALAR
+    // (np.int64(3)), not the 0-d array this path used to return.
+    if copied.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0 {
+        return Ok(Some(copied.get_item(())?.unbind()));
+    }
+    Ok(Some(copied.unbind()))
 }
 
 fn try_zerocopy_f64_nan_to_num(
@@ -24787,13 +24790,21 @@ fn bincount(
     let kind = input_dtype
         .getattr(intern!(py, "kind"))?
         .extract::<char>()?;
-    if kind == 'f' || kind == 'c' {
-        let src_attr = input_dtype.getattr(intern!(py, "name"))?;
-        let src = src_attr.extract::<&str>()?;
-        return Err(PyTypeError::new_err(format!(
-            "Cannot cast array data from dtype('{src}') to dtype('int64') \
-             according to the rule 'safe'"
-        )));
+    // Float/complex input and an EMPTY array are numpy's. numpy checks the rank before the
+    // dtype, so a 2-D or 0-d float `x` is its ValueError ("object too deep/of too small depth
+    // for desired array"), not the safe-cast TypeError this route used to synthesize; and an
+    // empty `x` is an intp count WHATEVER the weights (the weighted route returned float64).
+    if kind == 'f'
+        || kind == 'c'
+        || x.bind(py)
+            .getattr(intern!(py, "size"))
+            .and_then(|size| size.extract::<usize>())
+            .is_ok_and(|size| size == 0)
+    {
+        let weights = weights.as_ref().map_or_else(|| py.None(), |w| w.clone_ref(py));
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "bincount"), (x.bind(py), weights, minlength))?
+            .unbind());
     }
     // Zero-copy int64 tally for the common no-weights case; skips the int->f64
     // round-trip and the cold extract/build Vecs. Bit-identical; weighted,
@@ -28578,14 +28589,37 @@ fn try_zerocopy_float_clip_arrays(
     }
 }
 
+/// An argument numpy defaults to `np._NoValue`, kept THREE-state. PyO3 calls the `from_py_with`
+/// parser only for a SUPPLIED argument, so the signature default (`Omitted`) and an explicit
+/// `None` (`Supplied(None)`) stay distinct - an `Option` parameter folds the two together, and
+/// numpy does not treat them alike (see `clip`).
+enum SuppliedArg {
+    Omitted,
+    Supplied(Py<PyAny>),
+}
+
+fn parse_supplied_arg(value: &Bound<'_, PyAny>) -> PyResult<SuppliedArg> {
+    Ok(SuppliedArg::Supplied(value.clone().unbind()))
+}
+
+impl SuppliedArg {
+    /// The two-state reading: omitted and an explicit `None` both become `None`.
+    fn into_option(self, py: Python<'_>) -> Option<Py<PyAny>> {
+        match self {
+            Self::Supplied(value) if !value.is_none(py) => Some(value),
+            _ => None,
+        }
+    }
+}
+
 #[pyfunction]
-#[pyo3(signature = (a, a_min=None, a_max=None, out=None, min=None, max=None, **kwargs))]
+#[pyo3(signature = (a, a_min=SuppliedArg::Omitted, a_max=SuppliedArg::Omitted, out=None, min=None, max=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
 fn clip(
     py: Python<'_>,
     a: Py<PyAny>,
-    a_min: Option<Py<PyAny>>,
-    a_max: Option<Py<PyAny>>,
+    #[pyo3(from_py_with = parse_supplied_arg)] a_min: SuppliedArg,
+    #[pyo3(from_py_with = parse_supplied_arg)] a_max: SuppliedArg,
     out: Option<Py<PyAny>>,
     min: Option<Py<PyAny>>,
     max: Option<Py<PyAny>>,
@@ -28597,6 +28631,28 @@ fn clip(
     // kwargs (casting, where, dtype, …) fall back to np.clip so numpy's
     // full dispatch surface is preserved exactly.
     let clip_fn = cached_numpy_clip(py)?;
+
+    // numpy takes the legacy bounds as a PAIR: `np.clip(a, 0)` and `np.clip(a, a_min=None)` raise
+    // TypeError ("clip() missing 1 required positional argument: 'a_max'"), while
+    // `np.clip(a, 0, None)` is fine. With `Option` parameters the one-sided call looked like
+    // `clip(a, 0, None)` and was answered. Hand exactly what was supplied to numpy, which raises.
+    let one_sided = match (&a_min, &a_max) {
+        (SuppliedArg::Supplied(value), SuppliedArg::Omitted) => Some(("a_min", value)),
+        (SuppliedArg::Omitted, SuppliedArg::Supplied(value)) => Some(("a_max", value)),
+        _ => None,
+    };
+    if let Some((name, value)) = one_sided {
+        let ckw = clone_py_kwargs(py, kwargs)?;
+        ckw.set_item(name, value.bind(py))?;
+        for (key, supplied) in [("out", &out), ("min", &min), ("max", &max)] {
+            if let Some(v) = supplied.as_ref() {
+                ckw.set_item(key, v.bind(py))?;
+            }
+        }
+        return Ok(clip_fn.call((a.bind(py),), Some(&ckw))?.unbind());
+    }
+    let a_min = a_min.into_option(py);
+    let a_max = a_max.into_option(py);
 
     // numpy 2.0 renamed a_min/a_max -> min/max. The modern min/max spelling makes
     // each bound independently optional; the legacy a_min/a_max spelling is still
@@ -30735,7 +30791,17 @@ fn concatenate(
     // Parse arrays sequence and optional axis (positional wins; else the axis kwarg; else 0).
     let arrays_seq = args.get_item(0)?;
     let axis: isize = if args.len() == 2 {
-        args.get_item(1)?.extract().unwrap_or(0)
+        // A POSITIONAL axis gets the keyword's rules. `.unwrap_or(0)` read every non-integer as
+        // axis 0: `np.concatenate([a, b], None)` - which FLATTENS - came back as an axis-0
+        // stack of the wrong shape, and a float axis numpy refuses was answered.
+        let axv = args.get_item(1)?;
+        if axv.is_none() {
+            return fallback();
+        }
+        match axv.extract() {
+            Ok(a) => a,
+            Err(_) => return fallback(),
+        }
     } else if let Some(axv) = kw_axis.as_ref() {
         // axis=None flattens (a different op) -> delegate to numpy.
         if axv.is_none() {
@@ -31007,13 +31073,31 @@ fn try_zerocopy_trim_zeros(
 }
 
 #[pyfunction]
-#[pyo3(signature = (filt, trim="fb", axis=None))]
+#[pyo3(signature = (filt, trim=SuppliedArg::Omitted, axis=None))]
 fn trim_zeros(
     py: Python<'_>,
     filt: Py<PyAny>,
-    trim: &str,
+    #[pyo3(from_py_with = parse_supplied_arg)] trim: SuppliedArg,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // A `trim` that is not a str is numpy's to refuse (it calls `trim.lower()`, an
+    // AttributeError on an array); a typed `trim: &str` raised TypeError instead.
+    let trim: String = match trim {
+        SuppliedArg::Omitted => "fb".to_owned(),
+        SuppliedArg::Supplied(value) => match value.bind(py).extract::<String>() {
+            Ok(trim) => trim,
+            Err(_) => {
+                let trim_zeros_fn = cached_numpy_trim_zeros(py)?;
+                return Ok(match axis.as_ref() {
+                    Some(axis_val) => trim_zeros_fn
+                        .call1((filt.bind(py), value.bind(py), axis_val.bind(py)))?,
+                    None => trim_zeros_fn.call1((filt.bind(py), value.bind(py)))?,
+                }
+                .unbind());
+            }
+        },
+    };
+    let trim = trim.as_str();
     let fallback = || -> PyResult<Py<PyAny>> {
         let trim_zeros_fn = cached_numpy_trim_zeros(py)?;
         if let Some(axis_val) = axis.as_ref() {
@@ -37432,6 +37516,14 @@ fn compress(
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
         return fallback();
     }
+    // numpy requires a 1-D condition ("condition must be a 1-d array"). The compaction below is
+    // shared with `extract`, which RAVELS its condition, so a (0, 4) or (2, 3) condition was
+    // silently flattened and answered here. numpy raises its own error.
+    if b_cond.is_instance(cached_ndarray_type(py)?)?
+        && b_cond.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
+    {
+        return fallback();
+    }
     // Zero-copy branchless compaction for the flat case (axis=None, bool
     // condition) over every fixed-width numeric dtype — all 8 integer widths,
     // float32/float64, bool. Skips the cold extract_numeric_array path that
@@ -42888,36 +42980,17 @@ fn histogram_bin_edges(
     let range_bound = range.as_ref().map(|v| v.bind(py));
     let weights_bound = weights.as_ref().map(|v| v.bind(py));
 
-    // Case 1: explicit array-like bins → return the edges coerced through
-    // numpy.asarray. This preserves identity when bins is already an
-    // ndarray (matches numpy's behavior).
+    // Case 1: explicit array-like bins are numpy's. Returning `asarray(bins)` skipped every check
+    // numpy makes on this path, and each one answered calls numpy rejects: bins must be EXACTLY
+    // 1-D ("`bins` must be 1d, when an array"; a (0, 4) or (2, 0, 3) array came back verbatim),
+    // increase monotonically, and be orderable, and `a` itself is validated too (a bool `a` is
+    // converted with a RuntimeWarning, and `weights` must match its shape). Re-checking all of
+    // that costs the same numpy calls numpy makes, so there is nothing left to shortcut.
     if let Some(bins_val) = bins_bound
         && !bins_val.is_instance_of::<pyo3::types::PyInt>()
         && !bins_val.is_instance_of::<pyo3::types::PyString>()
         && !bins_val.is_none()
     {
-        // Must be array-like. numpy.asarray to enforce dtype coercion.
-        // Weights are ignored with explicit edges (documented).
-        //
-        // NOT EVERYTHING asarray ACCEPTS IS A VALID `bins`
-        // (`deadlock-audit-inverse-cell-and-exception-type-parity`). numpy requires an
-        // integer, a string, or a 1-D array of edges, and refuses a 0-d operand
-        // ("`bins` must be an integer, a string, or an array") or one whose dtype it cannot
-        // order ("ufunc 'greater' did not contain a loop" for a structured dtype). This
-        // shortcut returned both verbatim, answering four calls numpy rejects. Anything that
-        // is not a >=1-D orderable array goes to numpy so its own message is the one raised.
-        let edges = numpy.call_method1(intern!(py, "asarray"), (bins_val,))?;
-        let edges_dtype = edges.getattr(intern!(py, "dtype"))?;
-        let orderable = !edges_dtype
-            .getattr(intern!(py, "hasobject"))?
-            .extract::<bool>()?
-            && edges_dtype
-                .getattr(intern!(py, "kind"))?
-                .extract::<char>()?
-                != 'V';
-        if orderable && edges.getattr(intern!(py, "ndim"))?.extract::<usize>()? >= 1 {
-            return Ok(edges.unbind());
-        }
         return fallback(py);
     }
 
@@ -43190,14 +43263,19 @@ fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py
 }
 
 #[pyfunction]
-#[pyo3(signature = (m, k=1, axes=(0, 1)))]
-fn rot90(py: Python<'_>, m: Py<PyAny>, k: i64, axes: (i64, i64)) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn rot90(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // np.rot90 is flip + transpose — both stride ops — so it returns a VIEW
     // (O(1)). The old native path materialized a rotated copy (~13x slower +
     // view-semantics divergence). Delegate to numpy.rot90 for the exact view,
-    // dtype, and error surface.
-    let rot90_fn = cached_numpy_rot90(py)?;
-    Ok(rot90_fn.call1((m.bind(py), k, axes))?.unbind())
+    // dtype, and error surface - VERBATIM: a typed `k: i64, axes: (i64, i64)` signature made
+    // PyO3 refuse a `k` or `axes` numpy interprets or refuses differently (an array `k` is
+    // numpy's ValueError, it was fnp's TypeError).
+    Ok(cached_numpy_rot90(py)?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
@@ -44608,22 +44686,37 @@ fn try_zerocopy_indices(
 #[pyo3(signature = (dimensions, dtype=None, sparse=false))]
 fn indices(
     py: Python<'_>,
-    dimensions: Vec<usize>,
+    dimensions: &Bound<'_, PyAny>,
     dtype: Option<Py<PyAny>>,
     sparse: bool,
 ) -> PyResult<Py<PyAny>> {
-    // sparse=True changes the RETURN TYPE - numpy hands back a tuple of
-    // broadcastable arrays, one per dimension, not a single stacked grid - so it
-    // cannot be layered onto the native dense build; delegate.
-    if sparse {
-        let indices_fn = cached_numpy_indices(py)?;
+    let delegate = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "sparse"), true)?;
-        return Ok(indices_fn.call((dimensions,), Some(&kwargs))?.unbind());
+        if sparse {
+            kwargs.set_item(intern!(py, "sparse"), true)?;
+        }
+        Ok(cached_numpy_indices(py)?
+            .call((dimensions,), Some(&kwargs))?
+            .unbind())
+    };
+    // sparse=True changes the RETURN TYPE - numpy hands back a tuple of
+    // broadcastable arrays, one per dimension, not a single stacked grid - so it
+    // cannot be layered onto the native dense build; delegate.
+    //
+    // So does a `dimensions` longer than numpy's 64-dimension limit, or one that is not a
+    // sequence of non-negative ints: a typed `Vec<usize>` parameter made PyO3 copy an
+    // arbitrarily long array into a Vec BEFORE this body ran (an 8M-element one aborted, then
+    // raised PanicException, where numpy raises MemoryError), and raised its own TypeError for
+    // the rest.
+    if sparse || dimensions.len().map_or(true, |rank| rank > 64) {
+        return delegate();
     }
+    let Ok(dimensions) = dimensions.extract::<Vec<usize>>() else {
+        return delegate();
+    };
     if let Some(out) = try_zerocopy_indices(py, &dimensions, dtype.as_ref().map(|d| d.bind(py)))? {
         return Ok(out);
     }
@@ -46214,6 +46307,12 @@ fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: u
     // room for the operands; MR=6/8 spill and measured slower.
     const MR: usize = 4;
 
+    // No variables: the result is 0x0, and `chunks_mut(n_vars * MR)` below would panic on a
+    // zero chunk size - cov/corrcoef of a (0, n) operand raised PanicException ("chunk size
+    // must be non-zero") where numpy returns array([], shape=(0, 0)).
+    if n_vars == 0 {
+        return Vec::new();
+    }
     let inv_fact = 1.0_f64 / (n_obs - ddof) as f64;
     let n_chunks = n_obs / 8;
     let tail = n_chunks * 8;
@@ -54484,6 +54583,12 @@ fn try_zerocopy_float_nanarg_nonlast_axis<T: NanArgFloat>(
     };
     let outer: usize = shape[..k].iter().product();
     let inner: usize = shape[k + 1..].iter().product();
+    // An empty trailing extent - nanargmin(np.empty((4, 0)), axis=0) - has an empty result, and
+    // `chunks_mut(inner)` below panicked on the zero chunk size (PanicException where numpy
+    // returns array([], dtype=int64)). numpy owns the empty case.
+    if inner == 0 {
+        return Ok(None);
+    }
     let lane = axis_len * inner;
     // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
     let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
@@ -54891,6 +54996,35 @@ fn nanargmin(
     Ok(output)
 }
 
+/// `q` as a SCALAR, or None for anything with a shape. `extract::<f64>()` alone is not that
+/// test: it goes through `__float__`, which numpy <= 2.3 still honours for a 1-element ARRAY
+/// (with a DeprecationWarning). So `percentile(a, np.array([50]))` took the scalar-q route and
+/// returned a scalar where numpy returns shape (1,) - only on hosts with the older numpy, which
+/// is how the percentile family's answer came to depend on the installed numpy version.
+fn scalar_q(q: &Bound<'_, PyAny>) -> Option<f64> {
+    if q.getattr(intern!(q.py(), "ndim"))
+        .and_then(|ndim| ndim.extract::<usize>())
+        .is_ok_and(|ndim| ndim > 0)
+    {
+        return None;
+    }
+    q.extract::<f64>().ok()
+}
+
+/// `q` as a 1-D sequence, or None. The [`scalar_q`] hazard one level down: extracting a
+/// `Vec<f64>` from a 2-D `q` iterates its ROWS, and numpy <= 2.3 converts each 1-element row
+/// through `__float__`, so a (1, 1) `q` was read as the 1-D `[q]` and the result lost a
+/// dimension - again only on hosts with the older numpy.
+fn vector_q(q: &Bound<'_, PyAny>) -> Option<Vec<f64>> {
+    if q.getattr(intern!(q.py(), "ndim"))
+        .and_then(|ndim| ndim.extract::<usize>())
+        .is_ok_and(|ndim| ndim != 1)
+    {
+        return None;
+    }
+    q.extract::<Vec<f64>>().ok()
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, q, axis=None, out=None, overwrite_input=false, method=None, keepdims=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
@@ -54956,7 +55090,7 @@ fn percentile(
         && !keepdims
         && weights.is_none()
         && matches!(method.as_deref(), None | Some("linear"))
-        && let Ok(q_scalar) = q.bind(py).extract::<f64>()
+        && let Some(q_scalar) = scalar_q(q.bind(py))
         && q_scalar.is_finite()
         && (0.0..=100.0).contains(&q_scalar)
         && let Some(result) =
@@ -54980,8 +55114,8 @@ fn percentile(
         && !keepdims
         && numpy_dtype_is_f64(py, a.bind(py))
     {
-        let qs_vec: Option<Vec<f64>> = q.bind(py).extract::<Vec<f64>>().ok();
-        let q_scalar: Option<f64> = q.bind(py).extract::<f64>().ok();
+        let qs_vec: Option<Vec<f64>> = vector_q(q.bind(py));
+        let q_scalar: Option<f64> = scalar_q(q.bind(py));
         if let Ok(arr) = extract_numeric_array(py, a.bind(py), "percentile(a)")
             && let Ok(warr) = extract_numeric_array(py, wobj.bind(py), "percentile(weights)")
         {
@@ -55014,7 +55148,7 @@ fn percentile(
         // percentile byte-for-byte (pinned across i64/i32/i16/u8 x flat/ax0/ax1 incl
         // +-1e9 range; extract RAISES on any int that cannot round-trip f64 exactly,
         // so the fallback below stays the safety net). Scalar-q ints still delegate.
-        || (numpy_dtype_is_integer(py, a.bind(py))? && q.bind(py).extract::<Vec<f64>>().is_err())
+        || (numpy_dtype_is_integer(py, a.bind(py))? && vector_q(q.bind(py)).is_none())
     {
         return fallback();
     }
@@ -55046,7 +55180,7 @@ fn percentile(
     // extracts (it wins); a Python-None axis (flatten) is NOT "with an axis" and continues to the native
     // array-q-flat path.
     let axis_is_set = axis.as_ref().is_some_and(|v| !v.bind(py).is_none());
-    if axis_is_set && q.bind(py).extract::<f64>().is_err() {
+    if axis_is_set && scalar_q(q.bind(py)).is_none() {
         // Native multi-q LAST-axis path (linear method, no keepdims): per-lane sort +
         // numpy's two-sided _lerp in fractions_last_axis, byte-exact by construction
         // (order stats are value-exact; the lerp matches numpy's). numpy's delegate
@@ -55054,7 +55188,7 @@ fn percentile(
         // partitions; the lane-parallel kernel wins. Non-last axes, other methods,
         // keepdims, and non-extractable q keep the delegate.
         if matches!(qinterp, fnp_ufunc::QuantileInterp::Linear)
-            && let Ok(pcts) = q.bind(py).extract::<Vec<f64>>()
+            && let Some(pcts) = vector_q(q.bind(py))
             && let Ok(ax_raw) = axis
                 .as_ref()
                 .map(|v| v.bind(py).extract::<isize>())
@@ -55157,7 +55291,7 @@ fn percentile(
     if keepdims
         && axis.is_none()
         && !(qinterp == fnp_ufunc::QuantileInterp::Linear
-            && q.bind(py).extract::<Vec<f64>>().is_ok())
+            && vector_q(q.bind(py)).is_some())
     {
         return fallback();
     }
@@ -55165,7 +55299,7 @@ fn percentile(
     // on the original byte-exact path; the non-interpolating methods use percentile_method (order statistics
     // only -> byte-exact). (Interpolating methods other than the default aren't byte-exact via that path and
     // are gated out above.)
-    if let Ok(q) = q.bind(py).extract::<f64>() {
+    if let Some(q) = scalar_q(q.bind(py)) {
         let native = if qinterp == fnp_ufunc::QuantileInterp::Linear {
             a.percentile(q, axis)
         } else {
@@ -55198,7 +55332,7 @@ fn percentile(
     // (percentiles_axis_none) is Linear-only, so a non-linear method delegates here.
     if axis.is_none()
         && qinterp == fnp_ufunc::QuantileInterp::Linear
-        && let Ok(qs) = q.bind(py).extract::<Vec<f64>>()
+        && let Some(qs) = vector_q(q.bind(py))
     {
         let result = match a.percentiles_axis_none(&qs) {
             Ok(result) => result,
@@ -55316,9 +55450,9 @@ fn nanpercentile(
     // qs on hz1 even NaN-free; the lane-parallel kernel wins. Any all-NaN lane
     // errs inside -> full delegate so numpy owns the "All-NaN slice" warning.
     // Non-last axes / keepdims / non-f64 keep the delegate.
-    if q.bind(py).extract::<f64>().is_err() {
+    if scalar_q(q.bind(py)).is_none() {
         if numpy_dtype_is_f64(py, a.bind(py))
-            && let Ok(pcts) = q.bind(py).extract::<Vec<f64>>()
+            && let Some(pcts) = vector_q(q.bind(py))
         {
             let fractions: Vec<f64> = pcts.iter().map(|&p| p / 100.0).collect();
             let axis_is_none = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
@@ -55390,9 +55524,8 @@ fn nanpercentile(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let q = match q.bind(py).extract::<f64>() {
-        Ok(value) => value,
-        Err(_) => return fallback(),
+    let Some(q) = scalar_q(q.bind(py)) else {
+        return fallback();
     };
     let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanpercentile") {
         Ok(None) => None,
@@ -55518,9 +55651,9 @@ fn nanquantile(
     // qs on hz1 even NaN-free; the lane-parallel kernel wins. Any all-NaN lane
     // errs inside -> full delegate so numpy owns the "All-NaN slice" warning.
     // Non-last axes / keepdims / non-f64 keep the delegate.
-    if q.bind(py).extract::<f64>().is_err() {
+    if scalar_q(q.bind(py)).is_none() {
         if numpy_dtype_is_f64(py, a.bind(py))
-            && let Ok(fracs) = q.bind(py).extract::<Vec<f64>>()
+            && let Some(fracs) = vector_q(q.bind(py))
         {
             let fractions: Vec<f64> = fracs;
             let axis_is_none = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
@@ -55591,9 +55724,8 @@ fn nanquantile(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let q = match q.bind(py).extract::<f64>() {
-        Ok(value) => value,
-        Err(_) => return fallback(),
+    let Some(q) = scalar_q(q.bind(py)) else {
+        return fallback();
     };
     let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanquantile") {
         Ok(None) => None,
@@ -60355,12 +60487,30 @@ fn try_zerocopy_f64_vander(
 fn vander(
     py: Python<'_>,
     x: Py<PyAny>,
-    N: Option<usize>,
+    N: Option<&Bound<'_, PyAny>>,
     increasing: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     // numpy reads `increasing` for TRUTHINESS
     // (`deadlock-audit-strict-scalar-argument-typing-soeis`).
     let increasing = truthy_flag(increasing)?;
+    // `N` defaults to None in numpy too, so None and omitted agree. Anything that is not a
+    // non-negative integer is numpy's to interpret or refuse: a typed `N: usize` made PyO3
+    // raise TypeError on an array N and OverflowError on N=-1, where numpy raises ValueError.
+    let N: Option<usize> = match N {
+        Some(width) if !width.is_none() => match width.extract::<usize>() {
+            Ok(width) => Some(width),
+            Err(_) => {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("N", width)?;
+                kwargs.set_item(intern!(py, "increasing"), increasing)?;
+                return Ok(cached_numpy(py)?
+                    .getattr(intern!(py, "vander"))?
+                    .call((x.bind(py),), Some(&kwargs))?
+                    .unbind());
+            }
+        },
+        _ => None,
+    };
     // Native fused cumulative-product path for f64 1-D x; numpy's broadcast +
     // multiply.accumulate is far slower. Other dtypes/shapes fall through so width
     // selection, increasing-order columns, int64 dtype preservation, and 1-D
@@ -61953,7 +62103,10 @@ fn try_zerocopy_complex_angle(
     }
     let shape: Vec<usize> = z.getattr(intern!(py, "shape"))?.extract()?;
     let n: usize = shape.iter().product();
-    if n == 0 {
+    // 0-d defers, as the header says: `view(float64)` of a 0-d complex128 raises ValueError
+    // (a 0-d view cannot change itemsize), so `angle(np.array(1+2j))` raised where numpy
+    // returns np.float64.
+    if n == 0 || shape.is_empty() {
         return Ok(None);
     }
     let view = z.call_method1(
@@ -71305,32 +71458,19 @@ fn linalg_matrix_norm(
 }
 
 #[pyfunction]
-#[pyo3(signature = (subscripts, *operands, optimize=None))]
+#[pyo3(signature = (*args, **kwargs))]
 fn einsum_path(
     py: Python<'_>,
-    subscripts: &str,
-    operands: &Bound<'_, PyTuple>,
-    optimize: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.einsum_path. Returns a (path_list, path_string)
-    // tuple describing the optimal contraction order for an einsum
-    // expression. The optimize kwarg accepts True/False/str/path-list
-    // inputs exactly as numpy does; numpy's default is True so we
-    // forward the caller value as-is without substituting our own.
-    let numpy = cached_numpy(py)?;
-    let subscripts_obj = subscripts.into_pyobject(py)?.unbind();
-    let mut call_items: Vec<Py<PyAny>> = vec![subscripts_obj.into_any()];
-    for o in operands.iter() {
-        call_items.push(o.clone().unbind());
-    }
-    let call_args = PyTuple::new(py, call_items)?;
-    let kwargs = PyDict::new(py);
-    if let Some(opt_val) = optimize {
-        kwargs.set_item(intern!(py, "optimize"), opt_val.bind(py))?;
-    }
-    Ok(numpy
+    // Passthrough to np.einsum_path, VERBATIM. A typed `subscripts: &str` refused numpy's
+    // INTERLEAVED form - `einsum_path(a, [0, 1], b, [1, 2])`, whose first argument is an
+    // operand - with TypeError, and answered a non-string subscript with TypeError where numpy
+    // raises ValueError. numpy now sees exactly what the caller wrote.
+    Ok(cached_numpy(py)?
         .getattr(intern!(py, "einsum_path"))?
-        .call(&call_args, Some(&kwargs))?
+        .call(args, kwargs)?
         .unbind())
 }
 
@@ -81004,9 +81144,12 @@ fn try_native_float_argsort_default_radix(
     //
     // Equivalent for anything that could pass: the `ndim == 1` test below means `len(a)` IS the
     // element count for every operand this gate can accept, and an operand where they differ is
-    // declined by that test anyway. `len()` raises on a 0-d array and `?` propagates that
-    // exactly as it did when this line sat lower down.
-    let n = a.len()?;
+    // declined by that test anyway. `len()` RAISES on a 0-d array, and that must decline too:
+    // propagating it made `argsort(np.array(3.0))` a TypeError ("len() of unsized object")
+    // where numpy returns array([0]).
+    let Ok(n) = a.len() else {
+        return Ok(FloatArgsortRadixOutcome::NotApplicable);
+    };
     if n < MIN || rayon::current_num_threads() < 2 {
         return Ok(FloatArgsortRadixOutcome::NotApplicable);
     }
@@ -83888,7 +84031,7 @@ fn quantile(
         && !keepdims
         && weights.is_none()
         && matches!(method.as_deref(), None | Some("linear"))
-        && let Ok(q_scalar) = q.bind(py).extract::<f64>()
+        && let Some(q_scalar) = scalar_q(q.bind(py))
         && q_scalar.is_finite()
         && (0.0..=1.0).contains(&q_scalar)
         && let Some(result) = try_native_int_linear_quantile(py, numpy, a.bind(py), q_scalar)?
@@ -83911,8 +84054,8 @@ fn quantile(
         && !keepdims
         && numpy_dtype_is_f64(py, a.bind(py))
     {
-        let qs_vec: Option<Vec<f64>> = q.bind(py).extract::<Vec<f64>>().ok();
-        let q_scalar: Option<f64> = q.bind(py).extract::<f64>().ok();
+        let qs_vec: Option<Vec<f64>> = vector_q(q.bind(py));
+        let q_scalar: Option<f64> = scalar_q(q.bind(py));
         if let Ok(arr) = extract_numeric_array(py, a.bind(py), "quantile(a)")
             && let Ok(warr) = extract_numeric_array(py, wobj.bind(py), "quantile(weights)")
         {
@@ -83945,7 +84088,7 @@ fn quantile(
         // percentile byte-for-byte (pinned across i64/i32/i16/u8 x flat/ax0/ax1 incl
         // +-1e9 range; extract RAISES on any int that cannot round-trip f64 exactly,
         // so the fallback below stays the safety net). Scalar-q ints still delegate.
-        || (numpy_dtype_is_integer(py, a.bind(py))? && q.bind(py).extract::<Vec<f64>>().is_err())
+        || (numpy_dtype_is_integer(py, a.bind(py))? && vector_q(q.bind(py)).is_none())
     {
         return fallback();
     }
@@ -83973,7 +84116,7 @@ fn quantile(
     // Array-q WITH an axis has no native path (only scalar-q + array-q-flat); delegate BEFORE the
     // whole-array extract below so we don't pay a ~32MB copy just to fall back (same fix as percentile).
     let axis_is_set = axis.as_ref().is_some_and(|v| !v.bind(py).is_none());
-    if axis_is_set && q.bind(py).extract::<f64>().is_err() {
+    if axis_is_set && scalar_q(q.bind(py)).is_none() {
         // Native multi-q LAST-axis path (linear method, no keepdims): per-lane sort +
         // numpy's two-sided _lerp in fractions_last_axis, byte-exact by construction
         // (order stats are value-exact; the lerp matches numpy's). numpy's delegate
@@ -83981,7 +84124,7 @@ fn quantile(
         // partitions; the lane-parallel kernel wins. Non-last axes, other methods,
         // keepdims, and non-extractable q keep the delegate.
         if matches!(qinterp, fnp_ufunc::QuantileInterp::Linear)
-            && let Ok(fractions_raw) = q.bind(py).extract::<Vec<f64>>()
+            && let Some(fractions_raw) = vector_q(q.bind(py))
             && let Ok(ax_raw) = axis
                 .as_ref()
                 .map(|v| v.bind(py).extract::<isize>())
@@ -84091,11 +84234,11 @@ fn quantile(
     if keepdims
         && axis.is_none()
         && !(qinterp == fnp_ufunc::QuantileInterp::Linear
-            && q.bind(py).extract::<Vec<f64>>().is_ok())
+            && vector_q(q.bind(py)).is_some())
     {
         return fallback();
     }
-    if let Ok(q) = q.bind(py).extract::<f64>() {
+    if let Some(q) = scalar_q(q.bind(py)) {
         // Linear stays on the original byte-exact path; non-interpolating methods use quantile_method.
         let native = if qinterp == fnp_ufunc::QuantileInterp::Linear {
             a.quantile(q, axis)
@@ -84124,7 +84267,7 @@ fn quantile(
     }
     if axis.is_none()
         && qinterp == fnp_ufunc::QuantileInterp::Linear
-        && let Ok(qs) = q.bind(py).extract::<Vec<f64>>()
+        && let Some(qs) = vector_q(q.bind(py))
     {
         let result = match a.quantiles_axis_none(&qs) {
             Ok(result) => result,
@@ -87584,8 +87727,26 @@ fn irfft2(
 }
 
 #[pyfunction]
-#[pyo3(signature = (v, k=0))]
-fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (v, k=SuppliedArg::Omitted))]
+fn diag(
+    py: Python<'_>,
+    v: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] k: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
+    // A `k` numpy reads as something other than an integer (an array, None, a float) is
+    // numpy's to interpret or refuse: a typed `k: i64` made PyO3 raise TypeError where numpy
+    // raises ValueError, or answers.
+    let k = match k {
+        SuppliedArg::Omitted => 0,
+        SuppliedArg::Supplied(value) => match integer_argument(value.bind(py)) {
+            Some(k) => k,
+            None => {
+                return Ok(cached_numpy_diag(py)?
+                    .call1((v.bind(py), value.bind(py)))?
+                    .unbind());
+            }
+        },
+    };
     let v_bound = v.bind(py);
     let arr = if v_bound.is_exact_instance(cached_ndarray_type(py)?) {
         v_bound.clone()
@@ -87680,8 +87841,24 @@ fn try_zerocopy_f64_diagflat(
 }
 
 #[pyfunction]
-#[pyo3(signature = (v, k=0))]
-fn diagflat(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (v, k=SuppliedArg::Omitted))]
+fn diagflat(
+    py: Python<'_>,
+    v: Py<PyAny>,
+    #[pyo3(from_py_with = parse_supplied_arg)] k: SuppliedArg,
+) -> PyResult<Py<PyAny>> {
+    // As in `diag`: a non-integer `k` is numpy's (a 0-d bool `k` is one numpy ACCEPTS).
+    let k = match k {
+        SuppliedArg::Omitted => 0,
+        SuppliedArg::Supplied(value) => match integer_argument(value.bind(py)) {
+            Some(k) => k,
+            None => {
+                return Ok(cached_numpy_diagflat(py)?
+                    .call1((v.bind(py), value.bind(py)))?
+                    .unbind());
+            }
+        },
+    };
     let v_bound = v.bind(py);
     // Zero-copy diagonal write for C-contiguous f64 ndarrays; skips the cold
     // extract + full s*s build Vecs. Bit-identical; other dtypes fall through.
@@ -88443,6 +88620,16 @@ fn parse_diag_indices_args<'py>(
             }
         }
     }
+    // Only exact Python ints go native: numpy returns `(idx,) * ndim`, and a 0-d array `ndim`
+    // BROADCASTS that multiplication into an ndarray (np.diag_indices(2, np.array(2)) is
+    // array([[0, 2]])), where this builder answered a tuple.
+    if slots
+        .iter()
+        .flatten()
+        .any(|value| !value.is_exact_instance_of::<PyInt>())
+    {
+        return Ok(None);
+    }
     let Some(n) = slots[0].take() else {
         return Ok(None);
     };
@@ -88530,6 +88717,16 @@ fn parse_tril_triu_indices_args<'py>(
                 None => return Ok(None),
             }
         }
+    }
+    // Only exact Python ints (and `m=None`) go native. numpy does ARITHMETIC in the argument's
+    // own type (`k - 1`, `-k`, `M - k`), so a numpy uint8 `n`/`k` overflows there - numpy raises
+    // OverflowError - where the i64 read here answered.
+    if slots
+        .iter()
+        .flatten()
+        .any(|value| !value.is_exact_instance_of::<PyInt>() && !value.is_none())
+    {
+        return Ok(None);
     }
     let Some(n_any) = slots[0].take() else {
         return Ok(None);
@@ -96379,6 +96576,12 @@ fn try_zerocopy_f64_argextreme_axis(
     };
     let outer: usize = shape[..k].iter().product();
     let inner: usize = shape[k + 1..].iter().product();
+    // An empty trailing extent - argmin(np.empty((4, 0)), axis=0) - has an empty result, and
+    // `chunks_mut(inner)` below panicked on the zero chunk size (PanicException where numpy
+    // returns array([], dtype=int64)). numpy owns the empty case.
+    if inner == 0 {
+        return Ok(None);
+    }
     let lane = axis_len * inner;
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
     let data: &[f64] =
@@ -109450,10 +109653,10 @@ fn bitwise_count(
 // bytes across cores writing straight into the output (~5x). BIT-EXACT (deterministic bit extraction).
 // Any axis/count/bitorder kwarg, non-1-D / non-uint8 / non-contiguous, or below the gate defers to numpy.
 #[pyfunction]
-#[pyo3(signature = (a, **kwargs))]
+#[pyo3(signature = (*args, **kwargs))]
 fn unpackbits(
     py: Python<'_>,
-    a: Py<PyAny>,
+    args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // The 8x-larger output is what costs: only once it exceeds L3 (~32MB => ~4M input bytes) is numpy's
@@ -109464,14 +109667,17 @@ fn unpackbits(
     let delegate = || -> PyResult<Py<PyAny>> {
         Ok(numpy
             .getattr(intern!(py, "unpackbits"))?
-            .call((a.bind(py),), kwargs)?
+            .call(args, kwargs)?
             .unbind())
     };
-    // Any kwargs (axis / count / bitorder) -> delegate (default bitorder='big' is the native case).
-    if kwargs.is_some_and(|k| !k.is_empty()) {
+    // Any kwargs (axis / count / bitorder) -> delegate (default bitorder='big' is the native case),
+    // and so does any POSITIONAL one: numpy's signature is (a, axis=None, count=None,
+    // bitorder='big'), and `(a, **kwargs)` refused `np.unpackbits(a, 1)` with TypeError.
+    if kwargs.is_some_and(|k| !k.is_empty()) || args.len() != 1 {
         return delegate();
     }
-    let x = a.bind(py);
+    let x = args.get_item(0)?;
+    let x = &x;
     if !x.is_exact_instance(cached_ndarray_type(py)?) {
         return delegate();
     }
@@ -118162,6 +118368,15 @@ fn histogram2d(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // float16/float32 samples are numpy's: its edges keep the sample dtype, and the native
+    // routes compute them in float64 (histogram2d of a float16 pair returned float64 edges,
+    // the class `histogramdd` already delegates).
+    if (1..=2).any(|i| {
+        args.get_item(i - 1)
+            .is_ok_and(|sample| numpy_dtype_is_narrow_float(py, &sample))
+    }) {
+        return core_numpy_passthrough_interned(py, intern!(py, "histogram2d"), args, kwargs);
+    }
     if let Some(result) = histogram2d_native(py, args, kwargs)? {
         return Ok(result);
     }
@@ -123524,7 +123739,7 @@ mod tests {
     use super::{
         BinaryOp, F64_ACCUMULATE_NATIVE_MIN_LEN, F64_DIV_NATIVE_MIN_LEN,
         F64_DIV_OUT_DECLINE_MAX_EXCLUSIVE_LEN, F64_DIV_OUT_DECLINE_MIN_LEN, MaskedStream,
-        NarrowSetOp, PyFromPyFunc, PythonNativeGemmOp, ScimathFix, UFuncKind,
+        NarrowSetOp, PyFromPyFunc, PythonNativeGemmOp, ScimathFix, SuppliedArg, UFuncKind,
         accumulate_native_route_is_worth_taking_len, argwhere, bincount, blas_is_single_threaded,
         build_numpy_array_from_ufunc, busdays_in_span, cached_float64_dtype, cached_numpy,
         cached_numpy_recfunctions, ceil_native, choose, compress, copysign, count_nonzero,
@@ -148716,17 +148931,22 @@ mod tests {
                 return Ok(());
             }
 
-            let actual_default = indices(py, vec![2, 3], None, false)?;
+            let dimensions = PyTuple::new(py, [2_usize, 3])?.into_any();
+            let actual_default = indices(py, &dimensions, None, false)?;
             let numpy = py.import("numpy")?;
             let expected_default = numpy.call_method1("indices", ((2, 3),))?;
             assert_array_matches_numpy(actual_default.bind(py), &expected_default)?;
 
             let int32 = numpy.getattr("int32")?;
-            let actual_typed = indices(py, vec![2, 3], Some(int32.clone().unbind()), false)?;
+            let actual_typed = indices(py, &dimensions, Some(int32.clone().unbind()), false)?;
             let expected_typed = numpy.call_method1("indices", ((2, 3), int32))?;
             assert_array_matches_numpy(actual_typed.bind(py), &expected_typed)?;
             Ok(())
         });
+    }
+
+    fn supplied_k(py: Python<'_>, k: i64) -> PyResult<SuppliedArg> {
+        Ok(SuppliedArg::Supplied(k.into_pyobject(py)?.into_any().unbind()))
     }
 
     #[test]
@@ -148737,9 +148957,9 @@ mod tests {
             }
 
             let vector = numeric_array(py, vec![10_i64, 20_i64, 30_i64], "int64");
-            let actual_vector = diag(py, vector.clone().unbind(), 1)?;
+            let actual_vector = diag(py, vector.clone().unbind(), supplied_k(py, 1)?)?;
             let numpy = py.import("numpy")?;
-            let expected_vector = numpy.call_method1("diag", (vector, 1))?;
+            let expected_vector = numpy.call_method1("diag", (vector.clone(), 1))?;
             assert_array_matches_numpy(actual_vector.bind(py), &expected_vector)?;
 
             let matrix = numeric_array(
@@ -148747,15 +148967,33 @@ mod tests {
                 vec![vec![1_i64, 2_i64, 3_i64], vec![4_i64, 5_i64, 6_i64]],
                 "int64",
             );
-            let actual_matrix = diag(py, matrix.clone().unbind(), -1)?;
+            let actual_matrix = diag(py, matrix.clone().unbind(), supplied_k(py, -1)?)?;
             let expected_matrix = numpy.call_method1("diag", (matrix, -1))?;
             assert_array_matches_numpy(actual_matrix.bind(py), &expected_matrix)?;
 
             let large = (1_u64 << 63) + 777;
             let uint_vector = numeric_array(py, vec![large, large - 1], "uint64");
-            let actual_uint = diag(py, uint_vector.clone().unbind(), 0)?;
+            let actual_uint = diag(py, uint_vector.clone().unbind(), SuppliedArg::Omitted)?;
             let expected_uint = numpy.call_method1("diag", (uint_vector, 0))?;
             assert_array_matches_numpy(actual_uint.bind(py), &expected_uint)?;
+
+            // A non-integer `k` is numpy's to interpret or refuse. With a 0-d float `v` and `k`,
+            // numpy refuses the 0-d `v` (ValueError) before it reads `k`; a typed `k: i64`
+            // parameter used to fail first, with TypeError.
+            let scalar = numpy.call_method1("array", (2.5_f64,))?;
+            let theirs = numpy
+                .call_method1("diag", (scalar.clone(), scalar.clone()))
+                .expect_err("numpy refuses a 0-d v");
+            let ours = diag(
+                py,
+                scalar.clone().unbind(),
+                SuppliedArg::Supplied(scalar.clone().unbind()),
+            )
+            .expect_err("fnp must refuse it too");
+            assert!(
+                ours.get_type(py).is(theirs.get_type(py)),
+                "fnp raised {ours}, numpy raised {theirs}"
+            );
             Ok(())
         });
     }
@@ -148768,14 +149006,14 @@ mod tests {
             }
 
             let input = numeric_array(py, vec![vec![1_i64, 2_i64], vec![3_i64, 4_i64]], "int64");
-            let actual = diagflat(py, input.clone().unbind(), 1)?;
+            let actual = diagflat(py, input.clone().unbind(), supplied_k(py, 1)?)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("diagflat", (input, 1))?;
             assert_array_matches_numpy(actual.bind(py), &expected)?;
 
             let large = (1_u64 << 63) + 65_539;
             let uint_input = numeric_array(py, vec![large, large - 1], "uint64");
-            let actual_uint = diagflat(py, uint_input.clone().unbind(), 0)?;
+            let actual_uint = diagflat(py, uint_input.clone().unbind(), SuppliedArg::Omitted)?;
             let expected_uint = numpy.call_method1("diagflat", (uint_input, 0))?;
             assert_array_matches_numpy(actual_uint.bind(py), &expected_uint)?;
             Ok(())

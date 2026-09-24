@@ -3005,11 +3005,26 @@ for name, fn, mask in cases:
     compared += 1
     if not same(r, s, mask):
         bad.append(name)
+# One JSON verdict line per ufunc name (the failing cells, empty when it matches), then the
+# summary line the assertions read.
+import json
+for n in names:
+    failing = [b for b in bad if b.split(":")[0].split(" ")[0].split(".")[0] == n]
+    print(json.dumps({"ufunc": n, "ok": not failing, "failing": failing}))
 print(len(names), compared, bad)
 "#
         .into(),
     );
-    let result = numpy_oracle(&script)?;
+    let output = numpy_oracle(&script)?;
+    let (result, verdicts) = output
+        .trim()
+        .lines()
+        .collect::<Vec<_>>()
+        .split_last()
+        .map(|(summary, verdicts)| (summary.to_string(), verdicts.join("\n")))
+        .ok_or_else(|| format!("no output: {output}"))?;
+    // Per-ufunc verdicts, shown by the test harness whenever this test fails.
+    println!("{verdicts}");
     let mut fields = result.trim().splitn(3, ' ');
     let (ufuncs, compared, bad) = (
         fields.next().unwrap_or("0"),
@@ -3855,6 +3870,109 @@ print(len(names), cells, bad)
         "cell table drifted: {result}"
     );
     assert_eq!(bad, "[]", "array functions must match numpy: {result}");
+    Ok(())
+}
+
+/// Every numpy.__all__ callable on DEGENERATE operands: empty ((0,), (0, 4), (4, 0), (0, 0),
+/// (2, 0, 3)), 0-d, and length-1 ((1,), (1, 1)) arrays of six dtypes, called as f(a), f(a, a),
+/// f(a, axis=0) and f(a, axis=-1). Each arm gets fresh copies of its arguments. fnp must match
+/// numpy's result type, dtype, shape and bytes, or raise the same exception type, and must never
+/// panic (~23,700 cells). Before the fixes: argmin/argmax/nanargmin/nanargmax(axis=0) of a (4, 0)
+/// array and cov/corrcoef of a (0, 4) one PANICKED on a zero chunk size; argsort and angle of a
+/// 0-d array raised; nan_to_num of a 0-d int returned an array, not a scalar;
+/// concatenate(arrays, None) stacked on axis 0 instead of flattening; histogram_bin_edges and
+/// compress answered bins/conditions numpy rejects as not 1-D; clip(a, a_min) answered numpy's
+/// "missing a_max" TypeError; bincount of an empty array returned float64 counts; histogram2d of
+/// float16 returned float64 edges; unpackbits refused a positional axis; and rot90, diag,
+/// diagflat, vander, einsum_path, trim_zeros and the index helpers raised PyO3's argument
+/// TypeError where numpy raises or answers differently (336 cells and 10 panics in all).
+#[test]
+fn array_functions_match_numpy_on_empty_zero_dim_and_length_one_operands() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import copy, inspect, warnings
+warnings.simplefilter("ignore")
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "empty", "empty_like", "ndarray", "broadcast", "iinfo", "finfo", "dtype", "getbufsize",
+        "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray", "record",
+        "put", "place", "putmask", "copyto", "fill_diagonal", "busday_offset", "busday_count",
+        "is_busday", "shares_memory", "may_share_memory"}
+SHAPES = [(0,), (0, 4), (4, 0), (0, 0), (), (1,), (1, 1), (2, 0, 3)]
+DTS = ["f8", "i8", "?", "c16", "f2", "u1"]
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def run(fn, args, kw):
+    try:
+        return fn(*copy.deepcopy(args), **kw)
+    except BaseException as ex:  # a Rust panic surfaces as PanicException, a BaseException
+        return Raised(ex)
+def same(r, s):
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        return isinstance(s, Raised) and isinstance(r, Raised) and r.name == s.name
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(a, b) for a, b in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    if s is None or isinstance(s, (str, bool, int, float)):
+        return r == s or (s != s and r != r)
+    try:
+        r2, s2 = np.asarray(r), np.asarray(s)
+    except Exception:
+        return repr(r) == repr(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape:
+        return False
+    if r2.dtype.kind == "O":
+        return repr(r) == repr(s)
+    return r2.tobytes() == s2.tobytes()
+rng = np.random.default_rng(5)
+bad, panics, cells = [], [], 0
+for name in names:
+    npf, fnf = getattr(np, name), getattr(fnp, name, None)
+    if fnf is None:
+        continue
+    for shape in SHAPES:
+        for dt in DTS:
+            a = (rng.random(shape) * 4).astype(dt) if shape else np.array(rng.random() * 4).astype(dt)
+            for label, args, kw in (("1", (a,), {}), ("2", (a, a.copy()), {}), ("ax0", (a,), {"axis": 0}),
+                                    ("ax-1", (a,), {"axis": -1})):
+                s = run(npf, args, kw)
+                r = run(fnf, args, kw)
+                if isinstance(s, Raised) and s.name == "TypeError" and isinstance(r, Raised):
+                    continue
+                cells += 1
+                if isinstance(r, Raised) and r.name == "PanicException":
+                    panics.append(f"{name}{label} {dt}{shape}")
+                elif not same(r, s):
+                    bad.append(f"{name}{label} {dt}{shape}: fnp={getattr(r, 'name', type(r).__name__)} "
+                               f"numpy={getattr(s, 'name', type(s).__name__)}")
+print(len(names), cells, panics, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (functions, cells, rest) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 20000,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(
+        rest, "[] []",
+        "degenerate operands must never panic and must match numpy (panics, mismatches): {result}"
+    );
     Ok(())
 }
 
