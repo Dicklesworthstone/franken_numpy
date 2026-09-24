@@ -521,3 +521,69 @@ fn conformance_linalg_matrix() {
         );
     }
 }
+
+/// Stacks of 0x0 matrices (and other empty operands) must behave like numpy, never PANIC.
+/// Two native batched paths divided or chunked by `n * n` without excluding n == 0:
+/// `solve` on a (k, 0, 0) stack panicked with "chunk size must be non-zero" and
+/// `eigh`/`eigvalsh` with "attempt to divide by zero", surfacing as `PanicException` where
+/// numpy returns empty results (numpy's own TestSolve / TestEigh / TestEigvalsh
+/// `test_generalized_empty_*` cases). A non-positive `tensorinv` `ind` is numpy's
+/// ValueError, not an OverflowError. Outcome = exception type, or dtype and shape per output.
+#[test]
+fn empty_matrix_stacks_never_panic_and_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        // A Rust panic reaches Python as `PanicException` (a BaseException), so the sweep
+        // catches BaseException and records the type like any other outcome.
+        let code = std::ffi::CString::new(
+            r#"
+def outcome(fn, m):
+    try:
+        r = fn(m)
+        rs = r if isinstance(r, tuple) else (r,)
+        return ("ok", [(np.asarray(x).dtype.str, np.shape(x)) for x in rs])
+    except BaseException as exc:
+        return ("err", type(exc).__name__)
+z = np.zeros
+cases = {
+    "solve (2,0,0)x(2,0)": lambda m: m.solve(z((2, 0, 0)), z((2, 0))),
+    "solve (3,0,0)x(3,0,5)": lambda m: m.solve(z((3, 0, 0)), z((3, 0, 5))),
+    "solve (0,0)x(0,)": lambda m: m.solve(z((0, 0)), z((0,))),
+    "solve (0,2,2)x(0,2)": lambda m: m.solve(z((0, 2, 2)), z((0, 2))),
+    "inv (2,0,0)": lambda m: m.inv(z((2, 0, 0))),
+    "eigh (2,0,0)": lambda m: m.eigh(z((2, 0, 0))),
+    "eigh (0,2,2)": lambda m: m.eigh(z((0, 2, 2))),
+    "eigvalsh (2,0,0)": lambda m: m.eigvalsh(z((2, 0, 0))),
+    "eigvalsh (0,3,3)": lambda m: m.eigvalsh(z((0, 3, 3))),
+    "eig (2,0,0)": lambda m: m.eig(z((2, 0, 0))),
+    "eigvals (2,0,0)": lambda m: m.eigvals(z((2, 0, 0))),
+    "det (2,0,0)": lambda m: m.det(z((2, 0, 0))),
+    "slogdet (2,0,0)": lambda m: m.slogdet(z((2, 0, 0))),
+    "cholesky (2,0,0)": lambda m: m.cholesky(z((2, 0, 0))),
+    "qr (2,0,0)": lambda m: m.qr(z((2, 0, 0))),
+    "svd (2,0,0)": lambda m: m.svd(z((2, 0, 0))),
+    "pinv (2,0,0)": lambda m: m.pinv(z((2, 0, 0))),
+    "matrix_power (2,0,0)": lambda m: m.matrix_power(z((2, 0, 0)), 3),
+    "matrix_rank (2,0,0)": lambda m: m.matrix_rank(z((2, 0, 0))),
+    "tensorinv ind=-2": lambda m: m.tensorinv(np.eye(4).reshape(4, 2, 2), ind=-2),
+    "tensorinv ind=0": lambda m: m.tensorinv(np.eye(4).reshape(4, 2, 2), ind=0),
+    "tensorinv ind=1": lambda m: m.tensorinv(np.eye(4).reshape(4, 2, 2), ind=1),
+}
+result = [k for k, fn in cases.items() if outcome(fn, fnp.linalg) != outcome(fn, np.linalg)]
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "empty matrix stacks must match numpy and never panic: {bad:?}"
+        );
+        Ok(())
+    });
+}

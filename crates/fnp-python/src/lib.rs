@@ -31786,7 +31786,10 @@ fn repeated_f64_square_stack(values: &[f64], batch: usize, n: usize) -> bool {
     let Some(expected_len) = batch.checked_mul(mat_size) else {
         return false;
     };
-    if batch <= 1 || values.len() != expected_len {
+    // mat_size == 0 (a stack of 0x0 matrices): `chunks_exact(0)` PANICS ("chunk size must be
+    // non-zero"), which is what `np.linalg.solve` on a (k, 0, 0) stack hit (numpy's own
+    // TestSolve::test_generalized_empty_sq_cases). There is nothing to deduplicate.
+    if batch <= 1 || mat_size == 0 || values.len() != expected_len {
         return false;
     }
     let first = &values[..mat_size];
@@ -32172,7 +32175,13 @@ fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
     // and the result is well-defined per lane. Symmetrize every lane from the
     // selected UPLO triangle (matching the 2-D path), then run the parallel
     // batch_eigvalsh. Output shape = batch dims + [n]. On any Err fall back to numpy.
-    if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real_f64_finite {
+    // A stack of 0x0 matrices (n == 0) is numpy's: `len / (n * n)` PANICKED with "attempt to
+    // divide by zero" (numpy's own TestEigvalshCases::test_generalized_empty_herm_cases).
+    if shape.len() >= 3
+        && shape[shape.len() - 1] == shape[shape.len() - 2]
+        && shape[shape.len() - 1] > 0
+        && real_f64_finite
+    {
         let n = shape[shape.len() - 1];
         let mat_size = n * n;
         let vals = array.values();
@@ -32523,15 +32532,17 @@ fn tensorsolve(
 
 #[pyfunction]
 #[pyo3(signature = (a, ind=2))]
-fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
+fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: i64) -> PyResult<Py<PyAny>> {
     let arr = cached_numpy_asarray(py)?.call1((a.bind(py),))?;
     let dtype_kind = arr
         .getattr(intern!(py, "dtype"))?
         .getattr(intern!(py, "kind"))?
         .extract::<char>()?;
 
-    // Complex arrays must fall back to numpy
-    if dtype_kind == 'c' {
+    // Complex arrays must fall back to numpy, and so must `ind <= 0`: numpy raises
+    // `ValueError("Invalid ind argument.")`, where `ind: usize` made a negative `ind` an
+    // OverflowError (numpy's own TestTensorinv::test_tensorinv_ind_limit).
+    if dtype_kind == 'c' || ind <= 0 {
         let ti_fn = cached_numpy_linalg_tensorinv(py)?;
         if ind == 2 {
             return Ok(ti_fn.call1((a.bind(py),))?.unbind());
@@ -32540,7 +32551,8 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
     }
 
     let array = extract_numeric_array(py, a.bind(py), "tensorinv(a)")?;
-    let result = match array.tensorinv(ind) {
+    // `ind > 0` is guaranteed by the delegate above.
+    let result = match array.tensorinv(ind as usize) {
         Ok(result) => result,
         // numpy raises LinAlgError for the non-square reshape and singular-
         // matrix cases; our ufunc layer would flatten those to a plain
@@ -84762,8 +84774,13 @@ fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
     // |eigenvectors| (a column's sign is non-deterministic across LAPACK builds), so
     // the per-lane sign choice is parity-safe. Symmetrize each lane from the selected
     // UPLO triangle (matching the 2-D path), then run batch_eigh. On any Err
-    // (non-convergence / shape) fall back to numpy. Mirrors the eigvalsh batched path.
-    if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real_f64_finite {
+    // (non-convergence / shape) fall back to numpy. Mirrors the eigvalsh batched path,
+    // including its n == 0 exclusion (the division below panicked on a stack of 0x0 matrices).
+    if shape.len() >= 3
+        && shape[shape.len() - 1] == shape[shape.len() - 2]
+        && shape[shape.len() - 1] > 0
+        && real_f64_finite
+    {
         let n = shape[shape.len() - 1];
         let mat_size = n * n;
         let vals = array.values();
