@@ -677,3 +677,47 @@ print("oracle", platform.node(), np.__version__)
     );
     Ok(())
 }
+
+/// numpy's text readers take `comments` as str, bytes, a sequence of str, or None (no
+/// comment character), and genfromtxt's `delimiter` as an int or a tuple of field widths.
+/// fnp typed them `&str`, so every other form was a PyO3 TypeError before the numpy delegate
+/// could see it, and a non-integral `ndmin` raised TypeError where numpy raises ValueError
+/// (numpy's own TestLoadTxt / TestFromTxt). The plain-str fast path must still match.
+#[test]
+fn text_readers_accept_numpys_comments_delimiter_and_ndmin_forms() -> Result<(), String> {
+    // `r##` because the Python below contains `"#` (a string opening with a comment char).
+    let script = fnp_script(
+        r##"
+import io
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", str(r.dtype), r.shape, r.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+S = io.StringIO
+cases = [
+    lambda m: m.loadtxt(S("1 2\n3 4\n"), comments=None),
+    lambda m: m.loadtxt(S("# c\n1,2,3,5\n"), dtype=int, delimiter=",", comments=b"#"),
+    lambda m: m.loadtxt(S("# c\n@ d\n// e\n1,2\n"), delimiter=",", comments=["#", "@", "//"]),
+    lambda m: m.loadtxt(S("1 2\n3 4\n"), ndmin=1.5),
+    lambda m: m.loadtxt(S("1 2\n3 4\n"), ndmin=2),
+    lambda m: m.loadtxt(S("# c\n1,2\n3,4\n"), delimiter=","),
+    lambda m: m.genfromtxt(S("  1  2  3\n  4  5 67\n890123  4"), delimiter=3),
+    lambda m: m.genfromtxt(S("  1  2  3\n  4  5 67\n890123  4"), delimiter=(3, 3, 4)),
+    lambda m: m.genfromtxt(S("1 2\n3 4\n"), comments=None),
+    lambda m: m.genfromtxt(S("# c\n1,2\n3,4\n"), delimiter=",", dtype=float),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"##
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "loadtxt/genfromtxt parameter forms must match numpy: {result}"
+    );
+    Ok(())
+}

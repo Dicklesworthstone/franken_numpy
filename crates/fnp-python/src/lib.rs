@@ -6082,6 +6082,38 @@ fn rng_i64_arg(obj: &Bound<'_, PyAny>) -> PyResult<RngArg<i64>> {
     Ok(RngArg::Object(obj.clone().unbind()))
 }
 
+/// A text-I/O parameter NumPy accepts in more forms than the native parsers handle:
+/// `comments` may be bytes, a sequence of str, or None (no comment character at all), and
+/// `delimiter` may be bytes, an int, or a tuple of field widths. Typing them `&str` made
+/// every other form a PyO3 TypeError before the NumPy delegate could see it (numpy's own
+/// TestLoadTxt/TestFromTxt). The native parsers take plain `str` (and `None` where it means
+/// the default); anything else goes to NumPy as the original object.
+enum TextArg {
+    Str(String),
+    NoneValue,
+    Other(Py<PyAny>),
+}
+
+impl TextArg {
+    fn to_object(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self {
+            Self::Str(text) => pyo3::IntoPyObjectExt::into_py_any(text.as_str(), py),
+            Self::NoneValue => Ok(py.None()),
+            Self::Other(obj) => Ok(obj.clone_ref(py)),
+        }
+    }
+}
+
+fn text_arg(obj: &Bound<'_, PyAny>) -> PyResult<TextArg> {
+    if obj.is_none() {
+        return Ok(TextArg::NoneValue);
+    }
+    if let Ok(text) = obj.cast::<PyString>() {
+        return Ok(TextArg::Str(text.to_str()?.to_owned()));
+    }
+    Ok(TextArg::Other(obj.clone().unbind()))
+}
+
 impl PyRandomGenerator {
     /// Run `numpy.random.Generator.<name>(**params, size=size)` on this generator's state.
     fn numpy_distribution(
@@ -67287,19 +67319,20 @@ fn fromfile(
 }
 
 #[pyfunction]
-#[pyo3(signature = (fname, dtype=None, comments="#", delimiter=None, converters=None, skiprows=0_i64, usecols=None, unpack=false, ndmin=0_i64, encoding=None, max_rows=None, quotechar=None, *, like=None))]
+#[pyo3(signature = (fname, dtype=None, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, converters=None, skiprows=0_i64, usecols=None, unpack=false, ndmin=RngArg::Native(0), encoding=None, max_rows=None, quotechar=None, *, like=None))]
 #[allow(clippy::too_many_arguments)]
 fn loadtxt(
     py: Python<'_>,
     fname: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
-    comments: &str,
-    delimiter: Option<&str>,
+    #[pyo3(from_py_with = text_arg)] comments: TextArg,
+    #[pyo3(from_py_with = text_arg)] delimiter: TextArg,
     converters: Option<Py<PyAny>>,
     skiprows: i64,
     usecols: Option<Py<PyAny>>,
     unpack: bool,
-    ndmin: i64,
+    // numpy answers a non-integral `ndmin` with ValueError; `i64` made it a TypeError.
+    #[pyo3(from_py_with = rng_i64_arg)] ndmin: RngArg<i64>,
     encoding: Option<&str>,
     max_rows: Option<i64>,
     quotechar: Option<Py<PyAny>>,
@@ -67315,9 +67348,9 @@ fn loadtxt(
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "comments"), comments)?;
-        if let Some(delim) = delimiter {
-            kwargs.set_item(intern!(py, "delimiter"), delim)?;
+        kwargs.set_item(intern!(py, "comments"), comments.to_object(py)?)?;
+        if !matches!(delimiter, TextArg::NoneValue) {
+            kwargs.set_item(intern!(py, "delimiter"), delimiter.to_object(py)?)?;
         }
         if let Some(cv) = converters.as_ref() {
             kwargs.set_item(intern!(py, "converters"), cv.bind(py))?;
@@ -67327,7 +67360,7 @@ fn loadtxt(
             kwargs.set_item(intern!(py, "usecols"), uc.bind(py))?;
         }
         kwargs.set_item(intern!(py, "unpack"), unpack)?;
-        kwargs.set_item(intern!(py, "ndmin"), ndmin)?;
+        kwargs.set_item(intern!(py, "ndmin"), ndmin.to_object(py)?)?;
         if let Some(enc) = encoding {
             kwargs.set_item(intern!(py, "encoding"), enc)?;
         }
@@ -67354,10 +67387,20 @@ fn loadtxt(
         || max_rows.is_some()
         || like.is_some()
         || quotechar.is_some()
-        || ndmin != 0
+        || ndmin.native() != Some(0)
     {
         return fallback(py);
     }
+    // Only a plain-str `comments` and a str-or-None `delimiter` are native (see `TextArg`).
+    let comments = match &comments {
+        TextArg::Str(text) => text.as_str(),
+        TextArg::NoneValue | TextArg::Other(_) => return fallback(py),
+    };
+    let delimiter = match &delimiter {
+        TextArg::NoneValue => None,
+        TextArg::Str(text) => Some(text.as_str()),
+        TextArg::Other(_) => return fallback(py),
+    };
 
     // Resolve text content from fname. Accept StringIO, file-like with
     // .read() method, or str path (via open).
@@ -67951,14 +67994,16 @@ fn loadtxt(
 }
 
 #[pyfunction]
-#[pyo3(signature = (fname, dtype=None, comments="#", delimiter=None, skip_header=0_i64, skip_footer=0_i64, converters=None, missing_values=None, filling_values=None, usecols=None, names=None, excludelist=None, deletechars=None, replace_space="_", autostrip=false, case_sensitive=None, defaultfmt="f%i", unpack=None, usemask=false, loose=true, invalid_raise=true, max_rows=None, encoding=None, *, ndmin=0_i64, like=None))]
+#[pyo3(signature = (fname, dtype=None, comments=TextArg::Str(String::from("#")), delimiter=TextArg::NoneValue, skip_header=0_i64, skip_footer=0_i64, converters=None, missing_values=None, filling_values=None, usecols=None, names=None, excludelist=None, deletechars=None, replace_space="_", autostrip=false, case_sensitive=None, defaultfmt="f%i", unpack=None, usemask=false, loose=true, invalid_raise=true, max_rows=None, encoding=None, *, ndmin=0_i64, like=None))]
 #[allow(clippy::too_many_arguments)]
 fn genfromtxt(
     py: Python<'_>,
     fname: Py<PyAny>,
     dtype: Option<Py<PyAny>>,
-    comments: &str,
-    delimiter: Option<&str>,
+    // `comments=None`, an int delimiter (fixed width) and a tuple of field widths are all
+    // numpy's to parse (see `TextArg`).
+    #[pyo3(from_py_with = text_arg)] comments: TextArg,
+    #[pyo3(from_py_with = text_arg)] delimiter: TextArg,
     skip_header: i64,
     skip_footer: i64,
     converters: Option<Py<PyAny>>,
@@ -67991,9 +68036,9 @@ fn genfromtxt(
         if let Some(dtype_val) = dtype.as_ref() {
             kwargs.set_item(intern!(py, "dtype"), dtype_val.bind(py))?;
         }
-        kwargs.set_item(intern!(py, "comments"), comments)?;
-        if let Some(d) = delimiter {
-            kwargs.set_item(intern!(py, "delimiter"), d)?;
+        kwargs.set_item(intern!(py, "comments"), comments.to_object(py)?)?;
+        if !matches!(delimiter, TextArg::NoneValue) {
+            kwargs.set_item(intern!(py, "delimiter"), delimiter.to_object(py)?)?;
         }
         kwargs.set_item(intern!(py, "skip_header"), skip_header)?;
         kwargs.set_item(intern!(py, "skip_footer"), skip_footer)?;
@@ -68072,6 +68117,16 @@ fn genfromtxt(
     {
         return fallback(py);
     }
+    // Only a plain-str `comments` and a str-or-None `delimiter` are native (see `TextArg`).
+    let comments = match &comments {
+        TextArg::Str(text) => text.as_str(),
+        TextArg::NoneValue | TextArg::Other(_) => return fallback(py),
+    };
+    let delimiter = match &delimiter {
+        TextArg::NoneValue => None,
+        TextArg::Str(text) => Some(text.as_str()),
+        TextArg::Other(_) => return fallback(py),
+    };
 
     // Extract text (StringIO, file-like, or file path).
     let fname_bound = fname.bind(py);
