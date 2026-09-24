@@ -829,6 +829,37 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
                 unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
             return Ok(!slice_all_finite(data, |v| v.is_finite()));
         }
+        // complex128/complex64 as their (re, im) float view, float16 as its bits (non-finite
+        // exactly when the exponent is all ones): numpy's `isfinite(...).all()` below would
+        // allocate a bool array as large as the output to answer one bit.
+        let itemsize = dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()?;
+        let view_as = match (kind, itemsize) {
+            ('c', 16) => Some(cached_float64_type(py)?),
+            ('c', 8) => Some(cached_float32_type(py)?),
+            ('f', 2) => Some(cached_uint16_type(py)?),
+            _ => None,
+        };
+        if let Some(view_as) = view_as
+            && value
+                .getattr(intern!(py, "flags"))?
+                .getattr(intern!(py, "c_contiguous"))?
+                .extract::<bool>()?
+        {
+            let view = value.call_method1(intern!(py, "view"), (view_as,))?;
+            if kind == 'f' {
+                if let Ok(buffer) = PyBuffer::<u16>::get(&view)
+                    && let Some(cells) = buffer.as_slice(py)
+                {
+                    // SAFETY: ReadOnlyCell<u16> is repr(transparent) over u16; read-only here.
+                    let bits: &[u16] = unsafe {
+                        std::slice::from_raw_parts(cells.as_ptr().cast::<u16>(), cells.len())
+                    };
+                    return Ok(!slice_all_finite(bits, |b| (b & 0x7c00) != 0x7c00));
+                }
+            } else {
+                return result_has_non_finite(py, &view);
+            }
+        }
     }
     let finite = cached_numpy(py)?
         .getattr(intern!(py, "isfinite"))?
@@ -25652,26 +25683,6 @@ fn trapezoid_impl(
             .call((y.bind(py),), Some(&kwargs))?
             .unbind());
     }
-    // Zero-copy fast path: 1-D f64 contiguous y with uniform dx (no x): numpy's own terms and
-    // pairwise tree, the tree's subtrees evaluated in parallel (see the route).
-    if x.is_none()
-        && let Some(out) = try_zerocopy_f64_trapezoid_flat(py, numpy, y.bind(py), dx, axis)?
-    {
-        return Ok(out);
-    }
-    // Zero-copy N-D trapezoid along the LAST (contiguous) axis: per-row sum shortcut,
-    // parallel over rows. Avoids the extract copy + numpy's single-threaded temp-alloc.
-    if x.is_none()
-        && let Some(out) = try_zerocopy_f64_trapezoid_lastaxis(py, numpy, y.bind(py), dx, axis)?
-    {
-        return Ok(out);
-    }
-    // f32 last-axis: numpy computes in float32 (terms and pairwise sum); see the route.
-    if x.is_none()
-        && let Some(out) = try_zerocopy_f32_trapezoid(py, numpy, y.bind(py), dx, axis)?
-    {
-        return Ok(out);
-    }
     // AN OPERAND WE CANNOT OWN DELEGATES, IT DOES NOT RAISE
     // (`deadlock-audit-objdtype-decline-by-raising-family-mhv2b`). `np.trapezoid` of an
     // object array is 4.0 - it sums Python objects - and we answered that call with
@@ -25688,6 +25699,29 @@ fn trapezoid_impl(
             .call((y.bind(py),), Some(&kwargs))?
             .unbind())
     };
+    // The three native routes below sum silently (numpy's `inf + -inf` in its adds warns
+    // "invalid value encountered in add"): a non-finite native result is numpy's (bead .26).
+    //
+    // Zero-copy fast path: 1-D f64 contiguous y with uniform dx (no x): numpy's own terms and
+    // pairwise tree, the tree's subtrees evaluated in parallel (see the route).
+    if x.is_none()
+        && let Some(out) = try_zerocopy_f64_trapezoid_flat(py, numpy, y.bind(py), dx, axis)?
+    {
+        return native_or_numpy_on_non_finite(py, out, delegate);
+    }
+    // Zero-copy N-D trapezoid along the LAST (contiguous) axis: per-row sum shortcut,
+    // parallel over rows. Avoids the extract copy + numpy's single-threaded temp-alloc.
+    if x.is_none()
+        && let Some(out) = try_zerocopy_f64_trapezoid_lastaxis(py, numpy, y.bind(py), dx, axis)?
+    {
+        return native_or_numpy_on_non_finite(py, out, delegate);
+    }
+    // f32 last-axis: numpy computes in float32 (terms and pairwise sum); see the route.
+    if x.is_none()
+        && let Some(out) = try_zerocopy_f32_trapezoid(py, numpy, y.bind(py), dx, axis)?
+    {
+        return native_or_numpy_on_non_finite(py, out, delegate);
+    }
     // Everything the exact routes above do not take - an `x` argument, a non-last axis, a
     // float16/bool/complex/object operand, a host whose pairwise tree differs - is numpy's. The
     // extract path that used to serve it folded in its own order (last-bit differences for f64),
@@ -47317,6 +47351,10 @@ fn cov(
         }
         Ok(cov_fn.call((m.bind(py),), Some(&kwargs))?.unbind())
     };
+    // The native Gram routes and the extract path compute silently (numpy's centring `inf - inf`
+    // warns "invalid value encountered in subtract"): a non-finite native result is numpy's to
+    // recompute (bead .26).
+    let checked = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, || fallback(py));
 
     // dtype= forces the accumulation and result type; the native Gram path is
     // f64-only, so a supplied dtype delegates alongside fweights/aweights.
@@ -47411,13 +47449,13 @@ fn cov(
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_ufunc_rowvar_f64_cov_core(py, m_bound, RowvarCovCore::Cov)?
     {
-        return Ok(out);
+        return checked(out);
     }
     if rowvar_bool
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_zerocopy_cov_rowvar_f64(py, m_bound, resolved_ddof)?
     {
-        return Ok(out);
+        return checked(out);
     }
     // Two-operand form np.cov(m, y): center m's and y's rows directly from their
     // buffers and reuse the shared Gram (no extract/stack copy). Closes the 9-17x
@@ -47445,7 +47483,7 @@ fn cov(
         && (rowvar_bool || (ndim_is_1(m_bound) && ndim_is_1(y_val)))
         && let Some(out) = try_zerocopy_cov_two_rowvar_f64(py, m_bound, y_val, resolved_ddof)?
     {
-        return Ok(out);
+        return checked(out);
     }
     let native = match native_cov_unweighted(py, m_bound, y_binding, rowvar_bool, resolved_ddof) {
         Ok(Some(value)) => value,
@@ -47457,12 +47495,14 @@ fn cov(
     let trivial_scalar = shape.iter().all(|&dim| dim == 1);
     let output = build_numpy_array_from_ufunc(py, &native)?;
     if trivial_scalar {
-        return Ok(output
-            .bind(py)
-            .call_method0(intern!(py, "squeeze"))?
-            .unbind());
+        return checked(
+            output
+                .bind(py)
+                .call_method0(intern!(py, "squeeze"))?
+                .unbind(),
+        );
     }
-    Ok(output)
+    checked(output)
 }
 
 #[pyfunction]
@@ -50128,6 +50168,10 @@ fn nansum(
         r#where.apply(py, &kwargs)?;
         Ok(nansum_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
+    // Every native nansum route below sums silently, where numpy's `inf + -inf` warns "invalid
+    // value encountered in reduce" (and an f16 total past 65504 "overflow"): a non-finite native
+    // result is numpy's to recompute (bead .26).
+    let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
 
     // initial= / where= are part of numpy's signature and no native path here
     // implements them, so a non-None value delegates exactly as dtype= and out=
@@ -50165,7 +50209,7 @@ fn nansum(
         && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(out) = try_zerocopy_f16_nansum_flat(py, a.bind(py))?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native parallel f16 nansum along the LAST axis (per-lane nan-skip pairwise across lanes). Also
     // ABOVE the f64 guard. Single int axis; non-last/small/non-f16 defer inside (keepdims handled there).
@@ -50174,7 +50218,7 @@ fn nansum(
         && let Some(out) =
             try_zerocopy_f16_sum_lastaxis(py, a.bind(py), Some(ax_i), keepdims, true)?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native parallel f16 nansum along a NON-LAST axis (per-lane sequential f16-narrow accumulate across
     // the outer*inner lanes). numpy's strided f16 nansum is slow (mask/where + narrow-each-step).
@@ -50183,7 +50227,7 @@ fn nansum(
         && let Some(out) =
             try_zerocopy_f16_sum_nonlast_axis(py, a.bind(py), Some(ax_i), keepdims, true)?
     {
-        return Ok(out);
+        return native(out);
     }
 
     // Native parallel f32 nansum along a NON-LAST axis (per-block sequential f32, bit-exact, ~12x).
@@ -50198,7 +50242,7 @@ fn nansum(
             false,
         )?
     {
-        return Ok(out);
+        return native(out);
     }
 
     // The native kernel computes in f64; defer float16/float32/complex inputs
@@ -50228,9 +50272,9 @@ fn nansum(
     if flat_reduction && let Some(out) = try_zerocopy_f64_nansum_flat(py, a.bind(py))?
     {
         if keepdims {
-            return keepdims_reshape_scalar(py, numpy, a.bind(py), out);
+            return native(keepdims_reshape_scalar(py, numpy, a.bind(py), out)?);
         }
-        return Ok(out);
+        return native(out);
     }
     if let Some(axis_val) = axis.as_ref()
         && !axis_val.bind(py).is_none()
@@ -50242,9 +50286,9 @@ fn nansum(
                 .getattr(intern!(py, "ndim"))?
                 .extract::<usize>()?;
             let ax_i = axis_val.bind(py).extract::<i64>()?;
-            return keepdims_expand_axis(py, numpy, out, ax_i, ndim);
+            return native(keepdims_expand_axis(py, numpy, out, ax_i, ndim)?);
         }
-        return Ok(out);
+        return native(out);
     }
     // Everything the zero-copy routes above decline (lists and tuples, non-native byte order,
     // strided views, axis tuples, lanes past the axis route's length cap, and every route under
@@ -50296,6 +50340,10 @@ fn nanprod(
         r#where.apply(py, &kwargs)?;
         Ok(nanprod_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
+    // Every native nanprod route below multiplies silently, where numpy's `inf * 0` warns
+    // "invalid value encountered in reduce" and `1e308 * 2` "overflow": a non-finite native
+    // result is numpy's to recompute (bead .26).
+    let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
 
     if dtype
         .as_ref()
@@ -50333,7 +50381,7 @@ fn nanprod(
             && let Some(out) =
                 try_zerocopy_complex_nanprod_lastaxis(py, a.bind(py), k, keepdims)?
         {
-            return Ok(out);
+            return native(out);
         }
     }
 
@@ -50348,7 +50396,7 @@ fn nanprod(
             true,
         )?
     {
-        return Ok(out);
+        return native(out);
     }
 
     // The native kernel computes in f64; defer float16/float32/complex inputs
@@ -50369,9 +50417,9 @@ fn nanprod(
         && let Some(out) = try_zerocopy_f64_nanprod_flat(py, a.bind(py))?
     {
         if keepdims {
-            return keepdims_reshape_scalar(py, numpy, a.bind(py), out);
+            return native(keepdims_reshape_scalar(py, numpy, a.bind(py), out)?);
         }
-        return Ok(out);
+        return native(out);
     }
     // Per-lane sequential-product fast path for the contiguous last axis (bit-exact;
     // lanes are independent so they fan across the rayon pool). keepdims via expand.
@@ -50385,9 +50433,9 @@ fn nanprod(
                 .getattr(intern!(py, "ndim"))?
                 .extract::<usize>()?;
             let ax_i = axis_val.bind(py).extract::<i64>()?;
-            return keepdims_expand_axis(py, numpy, out, ax_i, ndim);
+            return native(keepdims_expand_axis(py, numpy, out, ax_i, ndim)?);
         }
-        return Ok(out);
+        return native(out);
     }
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
     // cold extract → rebuild (transpose-copy). Delegate to numpy.
@@ -50418,7 +50466,7 @@ fn nanprod(
     };
     // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
     // 0-d ndarray; collapse the 0-d case to a scalar to match.
-    build_numpy_scalar_or_array(py, &result)
+    native(build_numpy_scalar_or_array(py, &result)?)
 }
 
 // Zero-copy bit-exact nanprod for the f64 full reduction (axis=None). numpy's
@@ -53915,6 +53963,9 @@ fn nanstd(
         }
         Ok(nanstd_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
+    // As in `nanvar`: every native route below computes silently and declines (never delegates)
+    // an all-NaN / count <= ddof lane, so a non-finite native result is numpy's (bead .26).
+    let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
 
     // INT/BOOL input: numpy's nanstd short-circuits non-float dtypes to std
     // (pinned byte-exact); route to fnp's py_std - see the nanvar twin.
@@ -53980,7 +54031,7 @@ fn nanstd(
             true,
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native FLOAT16 non-last-axis NaN-skip two-pass nanstd (per-lane narrow-each-step). BEFORE the
     // f32/f64 guards. take_sqrt = true.
@@ -54001,7 +54052,7 @@ fn nanstd(
             true,
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native FLOAT32 non-last-axis (axis 0 or middle) NaN-skip two-pass nanstd — placed
     // BEFORE the f64-dtype guard below because it preserves float32 (the f64 kernels would
@@ -54021,7 +54072,7 @@ fn nanstd(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native FLOAT32 contiguous last-axis (or trailing-tuple) NaN-skip pairwise two-pass
     // nanstd — also BEFORE the f64-dtype guard (preserves float32; numpy materializes a
@@ -54041,7 +54092,7 @@ fn nanstd(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // The native kernel computes in f64; defer float16/float32/complex inputs to
     // numpy.nanstd so the narrow float dtype is preserved (NumPy returns float32 for
@@ -54067,9 +54118,9 @@ fn nanstd(
             .call1((var.sqrt(),))?
             .unbind();
         if keepdims.unwrap_or(false) {
-            return keepdims_reshape_scalar(py, numpy, a.bind(py), out);
+            return native(keepdims_reshape_scalar(py, numpy, a.bind(py), out)?);
         }
-        return Ok(out);
+        return native(out);
     }
     // Zero-copy per-lane pairwise nanstd over the contiguous last axis (bit-exact;
     // parallel) — skips the cold extract → native nanstd path.
@@ -54088,7 +54139,7 @@ fn nanstd(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native first-axis (axis=0) streaming nanstd — see try_zerocopy_f64_nanvar_axis0.
     if let Some(axis_val) = axis.as_ref()
@@ -54106,7 +54157,7 @@ fn nanstd(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native middle-axis (0 < ax < ndim-1) block-parallel NaN-skip two-pass nanstd.
     if let Some(axis_val) = axis.as_ref()
@@ -54124,7 +54175,7 @@ fn nanstd(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Everything the zero-copy routes above decline is numpy's: the extract path this replaced
     // summed SEQUENTIALLY, not in numpy's pairwise tree (nanstd of a Python list or a
@@ -54185,6 +54236,11 @@ fn nanvar(
         }
         Ok(nanvar_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
+    // Every native nanvar route below computes silently (numpy's `inf - inf` in the deviations
+    // warns "invalid value encountered in subtract", `1e308**2` "overflow"). Each one DECLINES an
+    // all-NaN / count <= ddof lane rather than calling numpy, so a native result is never numpy's
+    // own and a non-finite one is numpy's to recompute (bead .26).
+    let native = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, fallback);
 
     // INT/BOOL input (dtype-gap audit): numpy's nanvar short-circuits
     // non-float dtypes straight to var (pinned: nanvar(int) == var(int)
@@ -54249,7 +54305,7 @@ fn nanvar(
             true,
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native FLOAT16 non-last-axis NaN-skip two-pass nanvar (per-lane narrow-each-step; numpy's strided
     // f16 nanvar is a slow scalar two-pass). BEFORE the f32/f64 guards. take_sqrt = false.
@@ -54270,7 +54326,7 @@ fn nanvar(
             true,
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native FLOAT32 non-last-axis (axis 0 or middle) NaN-skip two-pass nanvar — placed
     // BEFORE the f64-dtype guard below because it preserves float32 (the f64 kernels would
@@ -54290,7 +54346,7 @@ fn nanvar(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native FLOAT32 contiguous last-axis (or trailing-tuple) NaN-skip pairwise two-pass
     // nanvar — also BEFORE the f64-dtype guard (preserves float32; numpy materializes a
@@ -54310,7 +54366,7 @@ fn nanvar(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // The native kernel computes in f64; defer float16/float32/complex inputs to
     // numpy.nanvar so the narrow float dtype is preserved (NumPy returns float32 for
@@ -54338,9 +54394,9 @@ fn nanvar(
             .call1((var,))?
             .unbind();
         if keepdims.unwrap_or(false) {
-            return keepdims_reshape_scalar(py, numpy, a.bind(py), out);
+            return native(keepdims_reshape_scalar(py, numpy, a.bind(py), out)?);
         }
-        return Ok(out);
+        return native(out);
     }
     // Zero-copy per-lane pairwise nanvar over the contiguous last axis (bit-exact;
     // parallel) — skips the cold extract → native nanvar path.
@@ -54359,7 +54415,7 @@ fn nanvar(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native first-axis (axis=0) streaming nanvar — see try_zerocopy_f64_nanvar_axis0.
     if let Some(axis_val) = axis.as_ref()
@@ -54377,7 +54433,7 @@ fn nanvar(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Native middle-axis (0 < ax < ndim-1) block-parallel NaN-skip two-pass nanvar.
     if let Some(axis_val) = axis.as_ref()
@@ -54395,7 +54451,7 @@ fn nanvar(
             keepdims.unwrap_or(false),
         )?
     {
-        return Ok(out);
+        return native(out);
     }
     // Everything the zero-copy routes above decline is numpy's: the extract path this replaced
     // summed SEQUENTIALLY, not in numpy's pairwise tree (nanvar of a Python list or a
@@ -60774,16 +60830,21 @@ fn vander(
     // selection, increasing-order columns, int64 dtype preservation, and 1-D
     // input validation all match numpy exactly.
     let numpy = cached_numpy(py)?;
+    let numpy_vander = || -> PyResult<Py<PyAny>> {
+        let vander_fn = numpy.getattr(intern!(py, "vander"))?;
+        let kwargs = PyDict::new(py);
+        if let Some(width) = N {
+            kwargs.set_item("N", width)?;
+        }
+        kwargs.set_item(intern!(py, "increasing"), increasing)?;
+        Ok(vander_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+    };
+    // The power columns are built silently (numpy's multiply.accumulate warns "overflow" on
+    // 1e308**2 and "invalid" on inf * 0): a non-finite native result is numpy's (bead .26).
     if let Some(out) = try_zerocopy_f64_vander(py, numpy, x.bind(py), N, increasing)? {
-        return Ok(out);
+        return native_or_numpy_on_non_finite(py, out, numpy_vander);
     }
-    let vander_fn = numpy.getattr(intern!(py, "vander"))?;
-    let kwargs = PyDict::new(py);
-    if let Some(width) = N {
-        kwargs.set_item("N", width)?;
-    }
-    kwargs.set_item(intern!(py, "increasing"), increasing)?;
-    Ok(vander_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
+    numpy_vander()
 }
 
 #[pyfunction]
@@ -84808,19 +84869,24 @@ fn polyval(py: Python<'_>, p: Py<PyAny>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // scalar or array-like; output matches numpy's dtype-promotion rules (including
     // complex coefficients broadcasting up).
     let numpy = cached_numpy(py)?;
+    let numpy_polyval = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr(intern!(py, "polyval"))?
+            .call1((p.bind(py), x.bind(py)))?
+            .unbind())
+    };
+    // Both Horner routes evaluate silently (numpy's `inf * 0` warns "invalid value encountered
+    // in multiply"): a non-finite native result is numpy's to recompute (bead .26).
     // Native fused Horner for real coefficients + an f64 C-contiguous x array.
     if let Some(out) = try_zerocopy_f64_polyval(py, numpy, p.bind(py), x.bind(py))? {
-        return Ok(out);
+        return native_or_numpy_on_non_finite(py, out, numpy_polyval);
     }
     // float32 coeffs + f32 x: numpy Horner is single-threaded (~570ms@16M); native parallel f32
     // Horner is bit-identical and far faster.
     if let Some(out) = try_zerocopy_f32_polyval(py, numpy, p.bind(py), x.bind(py))? {
-        return Ok(out);
+        return native_or_numpy_on_non_finite(py, out, numpy_polyval);
     }
-    Ok(numpy
-        .getattr(intern!(py, "polyval"))?
-        .call1((p.bind(py), x.bind(py)))?
-        .unbind())
+    numpy_polyval()
 }
 
 #[pyfunction]
@@ -91622,6 +91688,54 @@ fn sum(
     // axis test first), so an axis form never pays for it.
     let flat_blocked = axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && flat_native_reduction_impossible(py, a.bind(py))?;
+    // Passthrough to NumPy: everything no native route takes, and a native FLOAT result that is
+    // not finite - every float route below sums silently, where numpy's `inf + -inf` warns
+    // "invalid value encountered in reduce" and `1e308 + 1e308` "overflow" (bead .26).
+    let numpy_sum = || -> PyResult<Py<PyAny>> {
+        let sum_fn = numpy.getattr(intern!(py, "sum"))?;
+        // THE BARE `np.sum(a)` DELEGATES WITHOUT BUILDING A KEYWORD DICT AT ALL.
+        //
+        // Below this point every optional is folded into a fresh `PyDict` and the call is made
+        // WITH keywords - and for the commonest delegating form, `fnp.sum(a)` on an array too
+        // small for any native route, that dict is EMPTY. So the call allocated a dict, filled
+        // it with nothing, and then went through CPython's keyword-call path to pass it. This
+        // is the small-n entry tax measured at +495 ns/call on a route whose whole native
+        // decision above is two attribute reads.
+        //
+        // EXACTLY EQUIVALENT, not merely similar: each `set_item` below is already conditional
+        // on its argument being present, and `KeepdimsArg::NotGiven` already sets nothing. So
+        // when all of them are absent the dict this builds IS empty, and `f(a)` and `f(a, **{})`
+        // call the same function with the same arguments. The guard tests ABSENCE, never an
+        // explicit `None` - `fnp.sum(a, axis=None)` still takes the dict path and forwards
+        // `axis=None` verbatim, exactly as before.
+        if axis.is_none()
+            && dtype.is_none()
+            && out.is_none()
+            && initial.is_none()
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && kwargs.is_none_or(|kw| kw.is_empty())
+        {
+            return Ok(sum_fn.call1((a.bind(py),))?.unbind());
+        }
+        let kw = clone_py_kwargs(py, kwargs)?;
+        if let Some(ax) = axis.as_ref() {
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
+        }
+        if let Some(dt) = dtype.as_ref() {
+            kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
+        }
+        if let Some(o) = out.as_ref() {
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
+        }
+        // ONLY FORWARD `keepdims` IF THE CALLER SUPPLIED IT (`deadlock-audit-30d18`). numpy's
+        // default is the `np._NoValue` sentinel, and forwarding an explicit `False` is not the
+        // same thing - see the note on the parameter.
+        keepdims.set_numpy_kwarg(py, &kw)?;
+        if let Some(init) = initial.as_ref() {
+            kw.set_item(intern!(py, "initial"), init.bind(py))?;
+        }
+        Ok(sum_fn.call((a.bind(py),), Some(&kw))?.unbind())
+    };
     // Large flat float32/float64 sum: evaluate NumPy's exact pairwise tree on
     // Rayon.  The incumbent pays one serial DOUBLE/FLOAT_pairwise_sum; every
     // candidate subtree is independent and preserves the same combine edges.
@@ -91634,7 +91748,7 @@ fn sum(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_float_sum_flat(py, a.bind(py), kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, numpy_sum);
     }
     // Large flat integer sum: NumPy's ufunc reduction is single-threaded. A
     // cache-banded wrapping reduction uses the full Rayon pool while preserving
@@ -91661,7 +91775,7 @@ fn sum(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_sum_lastaxis(py, a.bind(py), ax.bind(py), kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, numpy_sum);
     }
     // Native parallel FLAT f16 sum: numpy sums float16 single-threaded + compute-bound (widen->f32
     // pairwise). Parallel bit-exact widen-pairwise wins ~5-8x. Flat only (axis None), no dtype/out/
@@ -91675,7 +91789,7 @@ fn sum(
         && keepdims_effective == Some(false)
         && let Some(o) = try_zerocopy_f16_sum_flat(py, a.bind(py))?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, numpy_sum);
     }
     // NOTE: f16 sum along the LAST axis is NOT hooked — numpy's contiguous f16 sum(axis=-1) is already
     // SIMD-fast (per-lane f32-pairwise), so a per-lane native path LOSES ~2.5x (measured 4000x4000). The
@@ -91691,52 +91805,9 @@ fn sum(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f16_sum_nonlast_axis(py, a.bind(py), Some(ax_i), kd, false)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, numpy_sum);
     }
-    // Passthrough to NumPy for everything else.
-    let sum_fn = numpy.getattr(intern!(py, "sum"))?;
-    // THE BARE `np.sum(a)` DELEGATES WITHOUT BUILDING A KEYWORD DICT AT ALL.
-    //
-    // Below this point every optional is folded into a fresh `PyDict` and the call is made
-    // WITH keywords - and for the commonest delegating form, `fnp.sum(a)` on an array too
-    // small for any native route, that dict is EMPTY. So the call allocated a dict, filled
-    // it with nothing, and then went through CPython's keyword-call path to pass it. This
-    // is the small-n entry tax measured at +495 ns/call on a route whose whole native
-    // decision above is two attribute reads.
-    //
-    // EXACTLY EQUIVALENT, not merely similar: each `set_item` below is already conditional
-    // on its argument being present, and `KeepdimsArg::NotGiven` already sets nothing. So
-    // when all of them are absent the dict this builds IS empty, and `f(a)` and `f(a, **{})`
-    // call the same function with the same arguments. The guard tests ABSENCE, never an
-    // explicit `None` - `fnp.sum(a, axis=None)` still takes the dict path and forwards
-    // `axis=None` verbatim, exactly as before.
-    if axis.is_none()
-        && dtype.is_none()
-        && out.is_none()
-        && initial.is_none()
-        && matches!(keepdims, KeepdimsArg::NotGiven)
-        && kwargs.is_none_or(|kw| kw.is_empty())
-    {
-        return Ok(sum_fn.call1((a.bind(py),))?.unbind());
-    }
-    let kw = clone_py_kwargs(py, kwargs)?;
-    if let Some(ax) = axis.as_ref() {
-        kw.set_item(intern!(py, "axis"), ax.bind(py))?;
-    }
-    if let Some(dt) = dtype.as_ref() {
-        kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
-    }
-    if let Some(o) = out.as_ref() {
-        kw.set_item(intern!(py, "out"), o.bind(py))?;
-    }
-    // ONLY FORWARD `keepdims` IF THE CALLER SUPPLIED IT (`deadlock-audit-30d18`). numpy's
-    // default is the `np._NoValue` sentinel, and forwarding an explicit `False` is not the
-    // same thing - see the note on the parameter.
-    keepdims.set_numpy_kwarg(py, &kw)?;
-    if let Some(init) = initial.as_ref() {
-        kw.set_item(intern!(py, "initial"), init.bind(py))?;
-    }
-    Ok(sum_fn.call((a.bind(py),), Some(&kw))?.unbind())
+    numpy_sum()
 }
 
 // Zero-copy np.prod reduction for a C-contiguous float64 ndarray (no out/dtype/
@@ -92781,8 +92852,11 @@ fn prod(
     // slower on the contiguous axis than the strided outer axes; fan the independent lanes across the
     // rayon pool (bit-exact, see complex_prod_lastaxis_typed). Other axes/dtypes fall through to the
     // f64/int/extract paths (numpy is already SIMD-fast on the outer axes).
+    //
+    // The lane products report no FP event (numpy's `inf * 0` warns "invalid value encountered
+    // in reduce"): a non-finite result is numpy's to recompute (bead .26).
     if let Some(out) = try_zerocopy_complex_prod_lastaxis(py, a.bind(py), axis_val, keepdims_bool)? {
-        return Ok(out);
+        return native_or_numpy_on_non_finite(py, out, fallback);
     }
 
     // Zero-copy sequential product reduction for C-contiguous f64 ndarrays; skips
@@ -96039,7 +96113,10 @@ fn cumsum(
         && numpy_dtype_is_f16(a.bind(py))
         && let Some(result) = try_zerocopy_f16_cumulative_axis(py, a.bind(py), ax, false, false)?
     {
-        return Ok(result);
+        // This scan and the two complex ones below report no FP event, and
+        // `finish_native_accumulation` reads only f64/f32: an overflow past 65504 or `inf + -inf`
+        // is numpy's to compute, warn about or raise on (bead .26).
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     // complex128/complex64 per-lane last-axis cumsum: numpy's complex cumsum is a single-threaded
     // sequential dependency chain (~177ms@16M c128); re/im accumulate independently, so per contiguous
@@ -96047,7 +96124,7 @@ fn cumsum(
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_complex_cumsum_lastaxis(py, a.bind(py), Some(ax))?
     {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     // complex128/complex64 MIDDLE-axis cumsum: numpy runs a non-last complex cumulative strided +
     // single-threaded; each independent outer block is a slab-by-slab scan, fanned across the pool.
@@ -96055,7 +96132,7 @@ fn cumsum(
         && let Some(result) =
             try_zerocopy_complex_cumulative_nonlast(py, a.bind(py), Some(ax), false)?
     {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     // float16 accumulates STEPWISE in float16 in numpy (each partial sum rounded to
     // f16); our extract path accumulates in f64 then casts once, diverging by ~1 ULP.
@@ -96210,13 +96287,10 @@ fn cumprod(
         && numpy_dtype_is_f16(a.bind(py))
         && let Some(result) = try_zerocopy_f16_cumulative_axis(py, a.bind(py), ax, true, false)?
     {
-        // This scan reports no FP event, and `finish_native_accumulation` reads only f64/f32:
-        // a NaN or infinity in the product (inf * 0, overflow past 65504) is numpy's to
-        // compute, warn about or raise on (bead .26).
-        if result_has_non_finite(py, result.bind(py))? {
-            return fallback();
-        }
-        return Ok(result);
+        // This scan and the two complex ones below report no FP event, and
+        // `finish_native_accumulation` reads only f64/f32: a NaN or infinity in the product
+        // (inf * 0, overflow past 65504) is numpy's to compute, warn about or raise on (bead .26).
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     // complex128/complex64 per-lane last-axis cumprod: numpy's complex cumprod is a single-threaded
     // sequential dependency chain (multiply.accumulate, no SIMD escape); per contiguous lane it is one
@@ -96224,7 +96298,7 @@ fn cumprod(
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_complex_cumprod_lastaxis(py, a.bind(py), Some(ax))?
     {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     // complex128/complex64 MIDDLE-axis cumprod: numpy runs a non-last complex multiply.accumulate
     // strided + single-threaded; each independent outer block is a slab-by-slab scan via naive cmul,
@@ -96233,7 +96307,7 @@ fn cumprod(
         && let Some(result) =
             try_zerocopy_complex_cumulative_nonlast(py, a.bind(py), Some(ax), true)?
     {
-        return Ok(result);
+        return native_or_numpy_on_non_finite(py, result, fallback);
     }
     // float16 accumulates STEPWISE in float16 in numpy (each partial product rounded
     // to f16); our extract path accumulates in f64 then casts once, diverging by
@@ -96390,7 +96464,10 @@ fn trace(
                     diagonal.extend((0..count).map(|i| data[(i + off) * ncols + i].get()));
                 }
             }
-            return build_f64_scalar(py, 0.0 + pairwise_sum_f64_slice(&diagonal));
+            // The tree sums silently (numpy's `inf + -inf` on the diagonal warns "invalid value
+            // encountered in reduce"): a non-finite trace is numpy's to recompute (bead .26).
+            let native = build_f64_scalar(py, 0.0 + pairwise_sum_f64_slice(&diagonal))?;
+            return native_or_numpy_on_non_finite(py, native, fallback);
         }
     }
 
@@ -118433,27 +118510,41 @@ fn nancumprod(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if let Some((a, axis_val)) = parse_nan_cumulative_args(args, kwargs)? {
+        let passthrough =
+            || core_numpy_passthrough_interned(py, intern!(py, "nancumprod"), args, kwargs);
+        // No native route here reports an FP event; numpy's nancumprod is multiply.accumulate over
+        // the NaN->1 copy, so `inf * 0` warns "invalid value encountered in accumulate" (bead .26).
+        // f64/f32 chains report their categories exactly (`skip_nan`: a NaN step is the identity);
+        // f16 and complex chains, which that replay cannot read, go to numpy on a non-finite result.
+        let reported = |out: Py<PyAny>| -> PyResult<Py<PyAny>> {
+            if report_native_accumulation_fp_events(py, &a, out.bind(py), axis_val, true, true)? {
+                Ok(out)
+            } else {
+                passthrough()
+            }
+        };
+        let recomputed = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, passthrough);
         if let Some(out) = try_zerocopy_f64_nancumprod(py, &a, axis_val)? {
-            return Ok(out);
+            return reported(out);
         }
         // n-D explicit axis: shared cumulative-axis kernel with skip_nan (NaN -> 1 identity)
         // wins like plain cumprod-axis (the flatten helper only handles axis=None / 1-D).
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_f64_cumulative_axis(py, &a, ax, true, true)?
         {
-            return Ok(out);
+            return reported(out);
         }
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_f32_nancumulative_axis(py, &a, ax, true)?
         {
-            return Ok(out);
+            return reported(out);
         }
         // f16 per-axis nancumprod: numpy widens f16->f32 + narrows each step, NaN->1 identity, all
         // lanes single-threaded (~171ms@16M). Parallel-across-lanes uint16-view scan is bit-exact.
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_f16_cumulative_axis(py, &a, ax, true, true)?
         {
-            return Ok(out);
+            return recomputed(out);
         }
         // Integers carry no NaN, so nancumprod == cumprod (int64/uint64 accumulator).
         if let Some(out) = try_zerocopy_int_cumprod(py, &a, axis_val)? {
@@ -118464,14 +118555,14 @@ fn nancumprod(
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_lastaxis(py, &a, Some(ax), true)?
         {
-            return Ok(out);
+            return recomputed(out);
         }
         // Complex non-last nancumprod: middle axes use the per-outer-block slab
         // scan; only the measured complex128 axis-0 case uses gather/scan/scatter.
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_nonlast(py, &a, Some(ax), true)?
         {
-            return Ok(out);
+            return recomputed(out);
         }
     }
     core_numpy_passthrough_interned(py, intern!(py, "nancumprod"), args, kwargs)
@@ -118485,8 +118576,21 @@ fn nancumsum(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if let Some((a, axis_val)) = parse_nan_cumulative_args(args, kwargs)? {
+        let passthrough =
+            || core_numpy_passthrough_interned(py, intern!(py, "nancumsum"), args, kwargs);
+        // As in `nancumprod`: numpy's nancumsum is add.accumulate over the NaN->0 copy, so
+        // `inf + -inf` warns "invalid value encountered in accumulate" (bead .26). f64/f32 chains
+        // report exactly (`skip_nan`); f16 and complex chains go to numpy on a non-finite result.
+        let reported = |out: Py<PyAny>| -> PyResult<Py<PyAny>> {
+            if report_native_accumulation_fp_events(py, &a, out.bind(py), axis_val, false, true)? {
+                Ok(out)
+            } else {
+                passthrough()
+            }
+        };
+        let recomputed = |out: Py<PyAny>| native_or_numpy_on_non_finite(py, out, passthrough);
         if let Some(out) = try_zerocopy_f64_nancumsum(py, &a, axis_val)? {
-            return Ok(out);
+            return reported(out);
         }
         // n-D explicit axis: the flatten helper above only handles axis=None / 1-D, so a
         // 2-D+ axis used to delegate (par). The shared cumulative-axis kernel with skip_nan
@@ -118494,19 +118598,19 @@ fn nancumsum(
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_f64_cumulative_axis(py, &a, ax, false, true)?
         {
-            return Ok(out);
+            return reported(out);
         }
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_f32_nancumulative_axis(py, &a, ax, false)?
         {
-            return Ok(out);
+            return reported(out);
         }
         // f16 per-axis nancumsum: numpy widens f16->f32 + narrows each step, NaN->0 identity, all
         // lanes single-threaded (~202ms@16M). Parallel-across-lanes uint16-view scan is bit-exact.
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_f16_cumulative_axis(py, &a, ax, false, true)?
         {
-            return Ok(out);
+            return recomputed(out);
         }
         // Integers carry no NaN, so nancumsum == cumsum (int64/uint64 accumulator).
         if let Some(out) = try_zerocopy_int_cumsum(py, &a, axis_val)? {
@@ -118517,14 +118621,14 @@ fn nancumsum(
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_lastaxis(py, &a, Some(ax), false)?
         {
-            return Ok(out);
+            return recomputed(out);
         }
         // Complex middle-axis nancumsum uses the per-outer-block slab scan.
         // Axis 0 deliberately delegates until separately measured.
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_complex_nancumulative_nonlast(py, &a, Some(ax), false)?
         {
-            return Ok(out);
+            return recomputed(out);
         }
     }
     core_numpy_passthrough_interned(py, intern!(py, "nancumsum"), args, kwargs)

@@ -4184,23 +4184,25 @@ print(len(names), cells, bad)
 
 /// Floating-point EVENTS, not just values (bead .26): every numpy.__all__ callable on operands
 /// that provoke numpy's warnings (0, -1, 1e308, +-inf, NaN, -0.0 in f8/f4/f2/c16, an all-NaN
-/// array, an empty one, and integer/bool arrays), called as f(a), f(a, a) and f(a, axis=0) under
+/// array, an empty one, and integer/bool arrays - each (2, 4), and the floats again 1-D, 4096
+/// long and 64x64), called as f(a), f(a, a) and f(a, axis=0) under
 /// numpy's default errstate, under `errstate(all='raise', under='ignore')` and under
 /// `errstate(all='ignore')`. fnp must end the same way as numpy (ok or the same exception type)
 /// with the same set of (category, message) warnings. Under 'ignore' that set is empty, which is
 /// the negative case. Each arm gets fresh copies (numpy's rot90 reduces an array `k` in place).
 /// The sweep found 35 default-errstate cells (and the same 35 under `raise`) in 21 functions whose
-/// native kernels return numpy's values silently. FIXED, per route: var/std axis routes, the
-/// float16 cumprod/cumulative_prod scan, degrees/rad2deg, sinc, unwrap, diff, ediff1d, gradient,
-/// i0 (a native result only - `native_unary_promoting_route`), kron and outer now hand a
-/// non-finite result to numpy; the diff/ediff1d float16 route is left alone because on a hazard
-/// it already returns np.diff's own result. STILL OPEN (bead .26), as the RATCHET below: cov,
-/// nancumprod, nancumsum, nanprod, nansum, nanstd, nanvar. A name-level
-/// recompute for those (6a050102) was reverted: it warned twice wherever the native function had
-/// already returned numpy's own result (fallbacks, nanvar's all-NaN deferral). The test fails on
-/// any divergence outside the residual set AND on a residual name that now matches, so the list
-/// can only shrink. Underflow is out of scope: it leaves no NaN/inf in the result to detect
-/// (arctan2/nextafter under a non-default `under=`).
+/// native kernels return numpy's values silently; the 1-D / 4096 / 64x64 operands then found the
+/// same class in sum, trace, trapezoid, polyval, vander and the float16 cumsum scan. FIXED, per
+/// ROUTE, never per name: each native route that computes silently hands a non-finite result to
+/// numpy (`native_or_numpy_on_non_finite`), and the f64/f32 nancumsum/nancumprod chains replay
+/// their categories exactly (`report_native_accumulation_fp_events`, skip_nan). A route that
+/// already returns numpy's own result on a hazard (the float16 diff) is left alone, and i0 wraps
+/// only a native result (`native_unary_promoting_route`). A name-level recompute (6a050102) was
+/// reverted: it warned twice wherever the native function had already returned numpy's own
+/// result (fallbacks, nanvar's all-NaN deferral). RESIDUAL below is the ratchet for anything
+/// still open: the test fails on any divergence outside it AND on a name in it that now matches.
+/// Underflow is out of scope: it leaves no NaN/inf in the result to detect (arctan2/nextafter
+/// under a non-default `under=`).
 #[test]
 fn array_functions_match_numpy_fp_warnings_and_errors() -> Result<(), String> {
     let script = fnp_script(
@@ -4225,6 +4227,15 @@ with np.errstate(all="ignore"):
         "c16": (np.array(SPECIAL) + 1j * np.array(SPECIAL[::-1])).reshape(2, 4),
         "nan": np.full((2, 4), np.nan),
         "empty": np.empty((0, 4)),
+        # 1-D and 4096-element operands reach the routes a (2, 4) one never does: the 1-D diff,
+        # gradient and trapezoid kernels, size-gated sum/nansum trees, a 64x64 trace.
+        "f8_1d": np.array(SPECIAL, dtype="f8"),
+        "f4_1d": np.array(SPECIAL, dtype="f8").astype("f4"),
+        "f2_1d": np.array(SPECIAL, dtype="f8").astype("f2"),
+        "c16_1d": np.array(SPECIAL) + 1j * np.array(SPECIAL[::-1]),
+        "f8_4k": np.tile(np.array(SPECIAL, dtype="f8"), 512),
+        "f4_4k": np.tile(np.array(SPECIAL, dtype="f8").astype("f4"), 512),
+        "f8_64x64": np.tile(np.array(SPECIAL, dtype="f8"), 512).reshape(64, 64),
     }
 names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
          and not inspect.isclass(getattr(np, n))]
@@ -4259,7 +4270,7 @@ for mode, settings in MODES.items():
 # Bead .26's open residual: native kernels not yet converted to the per-ROUTE non-finite recompute.
 # A divergence outside this set fails, and so does a name in it that no longer diverges - the list
 # can only shrink.
-RESIDUAL = {"cov", "nancumprod", "nancumsum", "nanprod", "nansum", "nanstd", "nanvar"}
+RESIDUAL = set()
 unexpected = [text for name, text in bad if name not in RESIDUAL]
 stale = sorted(RESIDUAL - {name for name, _ in bad})
 print(len(names), cells, "|", unexpected, "|", stale)
@@ -4280,7 +4291,7 @@ print(len(names), cells, "|", unexpected, "|", stale)
         "numpy callables drifted: {result}"
     );
     assert!(
-        cells.parse::<usize>().unwrap_or(0) >= 8000,
+        cells.parse::<usize>().unwrap_or(0) >= 14000,
         "cell table drifted: {result}"
     );
     assert_eq!(
@@ -4290,6 +4301,73 @@ print(len(names), cells, "|", unexpected, "|", stale)
     assert_eq!(
         stale, "[]",
         "these residual names now match numpy - drop them from RESIDUAL: {result}"
+    );
+    Ok(())
+}
+
+/// The parallel complex and float16 accumulation/reduction routes are size-gated, so the
+/// small operands above never reach them: on a (4096, 256) complex128 and a (2048, 256) float16
+/// holding +-inf / 1e308 / 60000, cumsum, cumprod, nancumsum, nancumprod, sum, prod, nansum,
+/// nanprod and cumulative_sum/_prod must warn (default errstate) or raise (`all='raise'`) exactly
+/// as numpy does; 26 cells were silent before the per-route fix (bead .26). The negative case:
+/// unit-magnitude complex and small float16 operands, where both must stay silent - an
+/// implementation that warns whenever it sees a large operand fails there.
+#[test]
+fn large_complex_and_float16_accumulations_report_fp_events_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+inf = np.inf
+OPS = {
+    "c16": np.tile(np.array([[inf + 0j, -inf + 0j, 1e308 + 0j, 0j]]), (4096, 64)),
+    "f2": np.tile(np.array([60000.0, 60000.0, 1.0, 2.0], dtype="f2"), (2048, 64)),
+    "c16_clean": np.tile(np.array([[1j, -1 + 0j, 1 + 0j, -1j]]), (4096, 64)),
+    "f2_clean": np.tile(np.array([1.0, -1.0, 1.0, 0.5], dtype="f2"), (2048, 64)),
+}
+NAMES = ["cumsum", "cumprod", "nancumsum", "nancumprod", "sum", "prod", "nansum", "nanprod",
+         "cumulative_sum", "cumulative_prod"]
+def run(fn, a, kw):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            fn(a.copy(), **kw)
+            outcome = "ok"
+        except BaseException as ex:
+            outcome = type(ex).__name__
+    return outcome, sorted({(w.category.__name__, str(w.message)) for w in caught})
+bad, cells, warned = [], 0, 0
+for mode, settings in (("default", {}), ("raise", {"all": "raise", "under": "ignore"})):
+    with np.errstate(**settings):
+        for name in NAMES:
+            for key, a in OPS.items():
+                for kw in ({"axis": -1}, {"axis": 0}):
+                    s = run(getattr(np, name), a, kw)
+                    r = run(getattr(fnp, name), a, kw)
+                    cells += 1
+                    warned += bool(s[1]) or s[0] == "FloatingPointError"
+                    if key.endswith("_clean") and (s[1] or s[0] != "ok"):
+                        bad.append(f"clean operand not clean in numpy: {mode} {name} {key} {kw} {s}")
+                    if r != s:
+                        bad.append(f"{mode} {name} {key} {kw}: fnp={r} numpy={s}")
+print(cells, warned, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (cells, warned, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert_eq!(cells, "160", "cell table drifted: {result}");
+    assert!(
+        warned.parse::<usize>().unwrap_or(0) >= 40,
+        "the hazard operands stopped provoking numpy: {result}"
+    );
+    assert_eq!(
+        bad, "[]",
+        "large complex/float16 accumulations must report like numpy: {result}"
     );
     Ok(())
 }
