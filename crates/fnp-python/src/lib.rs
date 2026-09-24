@@ -1915,18 +1915,27 @@ pub struct PyRClass;
 #[pyclass(name = "CClass")]
 pub struct PyCClass;
 
-#[pyclass(name = "Generator", unsendable)]
+// The RNG classes name their real home so pickle can find them again: without `module`, PyO3
+// reports `builtins`, and `pickle.dumps(rng)` failed with "attribute lookup Generator on
+// builtins failed" for Generator, every bit generator, SeedSequence and RandomState. The
+// module init re-points `__module__` when the extension is loaded under another name.
+#[pyclass(name = "Generator", module = "fnp_python.random", unsendable)]
 pub struct PyRandomGenerator {
     inner: RandomGenerator,
     bit_generator: Py<PyAny>,
 }
 
-#[pyclass(name = "RandomState")]
+#[pyclass(name = "RandomState", module = "fnp_python.random")]
 pub struct PyRandomState {
     inner: CoreRandomState,
 }
 
-#[pyclass(name = "SeedSequence", unsendable, skip_from_py_object)]
+#[pyclass(
+    name = "SeedSequence",
+    module = "fnp_python.random",
+    unsendable,
+    skip_from_py_object
+)]
 pub struct PySeedSequence {
     inner: SeedSequence,
     entropy: Py<PyAny>,
@@ -1934,7 +1943,12 @@ pub struct PySeedSequence {
 
 macro_rules! define_py_bit_generator {
     ($type_name:ident, $py_name:literal, $kind:expr) => {
-        #[pyclass(name = $py_name, unsendable, skip_from_py_object)]
+        #[pyclass(
+            name = $py_name,
+            module = "fnp_python.random",
+            unsendable,
+            skip_from_py_object
+        )]
         pub struct $type_name {
             inner: BitGenerator,
             seed_sequence: Option<Py<PySeedSequence>>,
@@ -3962,6 +3976,26 @@ impl PyRandomState {
         self.inner
             .set_gaussian_cache(state.has_gaussian, state.gaussian);
         Ok(())
+    }
+
+    // Pickle / copy support, as numpy.random.RandomState has: the full legacy state including
+    // the cached Gaussian, restored with `set_state`. RandomState had no reduce at all, so
+    // `pickle.dumps` and `copy.deepcopy` raised "cannot pickle 'RandomState' object".
+    fn __getstate__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.get_state(py, false)
+    }
+
+    fn __setstate__(&mut self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
+        self.set_state(py, state)
+    }
+
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let state = slf.borrow().get_state(py, false)?;
+        Ok((slf.get_type(), (), state)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
     }
 
     #[pyo3(signature = (size=None))]
@@ -121016,6 +121050,25 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         random.add_class::<PyPcg64Dxsm>()?;
         random.add_class::<PyPhilox>()?;
         random.add_class::<PySfc64>()?;
+        // The classes declare `module = "fnp_python.random"`; loaded under another name (the
+        // in-process test harness, a vendored copy) pickle must still find them, so point
+        // `__module__` at the submodule actually registered in `sys.modules` below.
+        if random_qualified_name != "fnp_python.random" {
+            for class_name in [
+                "SeedSequence",
+                "Generator",
+                "RandomState",
+                "MT19937",
+                "PCG64",
+                "PCG64DXSM",
+                "Philox",
+                "SFC64",
+            ] {
+                random
+                    .getattr(class_name)?
+                    .setattr(intern!(py, "__module__"), &random_qualified_name)?;
+            }
+        }
         random.add_function(wrap_pyfunction!(default_rng, &random)?)?;
         // g1ji: re-export numpy.random.BitGenerator so user code can do
         // isinstance(fnp_python.random.PCG64(), fnp_python.random.BitGenerator)

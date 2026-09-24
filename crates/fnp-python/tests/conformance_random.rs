@@ -752,3 +752,65 @@ result = bad
         Ok(())
     });
 }
+
+/// RNG objects must survive `pickle` and `copy.deepcopy` mid-stream (multiprocessing,
+/// joblib and checkpointing all pickle generators). The classes reported module `builtins`,
+/// so `pickle.dumps` failed for Generator, every bit generator and SeedSequence, and
+/// RandomState had no reduce at all. Each object is advanced first so the hidden state
+/// matters - a Generator with a buffered uint32, a RandomState with a cached Gaussian, a
+/// SeedSequence that has spawned - and each clone must continue the ORIGINAL's stream.
+#[test]
+fn rng_objects_pickle_and_deepcopy_mid_stream() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+import copy, pickle, sys
+# pickle finds a class through its module: a real install imports `fnp_python`, but this
+# harness builds the module in-process, so register it the way an import would.
+sys.modules[fnp.__name__] = fnp
+bad = []
+def check(label, obj, draw):
+    try:
+        snap = pickle.dumps(obj)
+        deep = copy.deepcopy(obj)
+    except Exception as exc:
+        bad.append(f"{label}: {type(exc).__name__}: {exc}")
+        return
+    expected = draw(obj)
+    for how, clone in (("pickle", pickle.loads(snap)), ("deepcopy", deep)):
+        if type(clone) is not type(obj):
+            bad.append(f"{label} {how}: type {type(clone).__name__}")
+        elif not np.array_equal(draw(clone), expected):
+            bad.append(f"{label} {how}: stream differs")
+for kind in ("MT19937", "PCG64", "PCG64DXSM", "Philox", "SFC64"):
+    bg = getattr(fnp.random, kind)(11)
+    bg.random_raw(3)
+    check(kind, bg, lambda b: b.random_raw(4))
+    g = fnp.random.Generator(getattr(fnp.random, kind)(5))
+    g.integers(0, 10, size=3, dtype=np.int32)
+    check(f"Generator({kind})", g, lambda r: np.concatenate([r.integers(0, 10, size=3, dtype=np.int32), r.random(3)]))
+rs = fnp.random.RandomState(9)
+rs.normal()
+check("RandomState", rs, lambda r: r.normal(size=3))
+ss = fnp.random.SeedSequence(5)
+ss.spawn(2)
+check("SeedSequence", ss, lambda s: np.concatenate([s.generate_state(4), [len(s.spawn(1)[0].spawn_key)]]))
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "RNG pickle/deepcopy round trips diverge: {bad:?}"
+        );
+        Ok(())
+    });
+}
