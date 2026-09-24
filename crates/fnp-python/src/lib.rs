@@ -31285,10 +31285,18 @@ fn pinv(
         .getattr(intern!(py, "kind"))?
         .extract::<char>()?;
 
-    // Complex arrays or empty matrices must fall back to numpy
+    // Complex arrays or empty matrices must fall back to numpy, and so must float16/float32:
+    // numpy computes their pinv in that precision and returns it, where the native SVD works
+    // in float64 and returned a float64 array (bead .8).
     let arr_shape = arr.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()?;
     let is_empty = arr_shape.contains(&0);
-    if dtype_kind == 'c' || is_empty {
+    let narrow_float = dtype_kind == 'f'
+        && arr
+            .getattr(intern!(py, "dtype"))?
+            .getattr(intern!(py, "itemsize"))?
+            .extract::<usize>()?
+            != 8;
+    if dtype_kind == 'c' || is_empty || narrow_float {
         let pinv_fn = cached_numpy_linalg_pinv(py)?;
         let rcond_parsed = OptionalFloatKwarg::parse(py, rcond, "rcond")?;
         let rtol = parse_pinv_rtol_kwarg(py, kwargs)?;
