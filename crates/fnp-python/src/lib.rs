@@ -513,6 +513,8 @@ pub struct PyUFuncProxy {
     nin: usize,
     native_keywords: Vec<String>,
     native_accepts_any_keyword: bool,
+    /// See [`NATIVE_ROUTES_WITHOUT_FP_EVENTS`].
+    recompute_non_finite: bool,
 }
 
 #[pymethods]
@@ -536,12 +538,14 @@ impl PyUFuncProxy {
                         })
                 }
             };
-        let target = if native_ok {
-            &self.native
-        } else {
-            &self.numpy_ufunc
-        };
-        call_native_mapping_alloc_failure(target.bind(py), args, kwargs)
+        if !native_ok {
+            return Ok(self.numpy_ufunc.bind(py).call(args, kwargs)?.unbind());
+        }
+        let result = call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)?;
+        if !self.recompute_non_finite {
+            return Ok(result);
+        }
+        native_result_or_numpy_fp_events(py, result, self.numpy_ufunc.bind(py), args, kwargs)
     }
 
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
@@ -677,6 +681,7 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
             }
         }
         let proxy = PyUFuncProxy {
+            recompute_non_finite: NATIVE_ROUTES_WITHOUT_FP_EVENTS.contains(&name.as_str()),
             name: name.clone(),
             native: ours.unbind(),
             numpy_ufunc: np_obj.unbind(),
@@ -749,6 +754,91 @@ pub struct PyArrayFunctionDispatcher {
     qualified_path: String,
     native: Py<PyAny>,
     numpy_function: Py<PyAny>,
+    /// See [`NATIVE_ROUTES_WITHOUT_FP_EVENTS`].
+    recompute_non_finite: bool,
+}
+
+/// Native routes whose kernels report NONE of numpy's floating-point events (bead .26), found
+/// by the warning-parity sweep over every numpy.__all__ callable: fed inf/-inf/NaN/1e308
+/// operands, they returned numpy's values without numpy's "invalid value encountered in
+/// subtract", "overflow encountered in square", ... warnings, and without FloatingPointError
+/// under `errstate(all='raise')`. Every such event leaves a NaN or an infinity in the result,
+/// so for these names a non-finite result is recomputed by numpy, which then warns or raises
+/// exactly as it does. A finite result pays one scan and nothing else. Underflow leaves no such
+/// trace and stays out of reach (only visible under the non-default `under=`). Routes that
+/// already report events natively (cumsum/cumprod) are deliberately absent: recomputing them
+/// would warn twice.
+const NATIVE_ROUTES_WITHOUT_FP_EVENTS: &[&str] = &[
+    "cov", "degrees", "diff", "ediff1d", "gradient", "i0", "kron", "nancumprod", "nancumsum",
+    "nanprod", "nansum", "nanstd", "nanvar", "outer", "rad2deg", "sinc", "std", "unwrap", "var",
+];
+
+/// True when `value` - a float or complex scalar, an ndarray, or a tuple/list of them - holds a
+/// NaN or an infinity. Native-order contiguous float64/float32 arrays are scanned directly;
+/// anything else asks numpy (`isfinite(value).all()`).
+fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if value.is_instance_of::<PyTuple>() || value.is_instance_of::<PyList>() {
+        for item in value.try_iter()? {
+            if result_has_non_finite(py, &item?)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    if value.is_instance_of::<pyo3::types::PyFloat>() {
+        return Ok(!value.extract::<f64>()?.is_finite());
+    }
+    let Ok(dtype) = value.getattr(intern!(py, "dtype")) else {
+        return Ok(false);
+    };
+    let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
+    if kind != 'f' && kind != 'c' {
+        return Ok(false);
+    }
+    if is_exact_numpy_ndarray(py, value)? && dtype_is_native(value) {
+        if let Ok(buffer) = PyBuffer::<f64>::get(value)
+            && buffer.is_c_contiguous()
+            && let Some(cells) = buffer.as_slice(py)
+        {
+            // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+            let data: &[f64] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+            return Ok(!data.iter().fold(true, |finite, v| finite & v.is_finite()));
+        }
+        if let Ok(buffer) = PyBuffer::<f32>::get(value)
+            && buffer.is_c_contiguous()
+            && let Some(cells) = buffer.as_slice(py)
+        {
+            // SAFETY: as above, for f32.
+            let data: &[f32] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+            return Ok(!data.iter().fold(true, |finite, v| finite & v.is_finite()));
+        }
+    }
+    let finite = cached_numpy(py)?
+        .getattr(intern!(py, "isfinite"))?
+        .call1((value,))?
+        .call_method0(intern!(py, "all"))?
+        .is_truthy()?;
+    Ok(!finite)
+}
+
+/// The call-time half of [`NATIVE_ROUTES_WITHOUT_FP_EVENTS`]: after the native route answered,
+/// hand a non-finite result to numpy. A call with `out=` keeps the native answer, because the
+/// native route may already have written into a buffer that aliases an input.
+fn native_result_or_numpy_fp_events(
+    py: Python<'_>,
+    native_result: Py<PyAny>,
+    numpy_function: &Bound<'_, PyAny>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_some_and(|kw| kw.contains(intern!(py, "out")).unwrap_or(true))
+        || !result_has_non_finite(py, native_result.bind(py))?
+    {
+        return Ok(native_result);
+    }
+    Ok(numpy_function.call(args, kwargs)?.unbind())
 }
 
 #[pymethods]
@@ -760,12 +850,14 @@ impl PyArrayFunctionDispatcher {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let target = if call_has_array_function_override(py, args, kwargs)? {
-            &self.numpy_function
-        } else {
-            &self.native
-        };
-        call_native_mapping_alloc_failure(target.bind(py), args, kwargs)
+        if call_has_array_function_override(py, args, kwargs)? {
+            return Ok(self.numpy_function.bind(py).call(args, kwargs)?.unbind());
+        }
+        let result = call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)?;
+        if !self.recompute_non_finite {
+            return Ok(result);
+        }
+        native_result_or_numpy_fp_events(py, result, self.numpy_function.bind(py), args, kwargs)
     }
 
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
@@ -970,6 +1062,8 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                     let created: Py<PyAny> = Py::new(
                         py,
                         PyArrayFunctionDispatcher {
+                            recompute_non_finite: NATIVE_ROUTES_WITHOUT_FP_EVENTS
+                                .contains(&name.as_str()),
                             name: name.clone(),
                             qualified_path: path,
                             native: ours.unbind(),
@@ -95862,6 +95956,12 @@ fn cumprod(
         && numpy_dtype_is_f16(a.bind(py))
         && let Some(result) = try_zerocopy_f16_cumulative_axis(py, a.bind(py), ax, true, false)?
     {
+        // This scan reports no FP event, and `finish_native_accumulation` reads only f64/f32:
+        // a NaN or infinity in the product (inf * 0, overflow past 65504) is numpy's to
+        // compute, warn about or raise on (bead .26).
+        if result_has_non_finite(py, result.bind(py))? {
+            return fallback();
+        }
         return Ok(result);
     }
     // complex128/complex64 per-lane last-axis cumprod: numpy's complex cumprod is a single-threaded

@@ -3976,6 +3976,98 @@ print(len(names), cells, panics, bad)
     Ok(())
 }
 
+/// Floating-point EVENTS, not just values (bead .26): every numpy.__all__ callable on operands
+/// that provoke numpy's warnings (0, -1, 1e308, +-inf, NaN, -0.0 in f8/f4/f2/c16, an all-NaN
+/// array, an empty one, and integer/bool arrays), called as f(a), f(a, a) and f(a, axis=0) under
+/// numpy's default errstate, under `errstate(all='raise', under='ignore')` and under
+/// `errstate(all='ignore')`. fnp must end the same way as numpy (ok or the same exception type)
+/// with the same set of (category, message) warnings. Under 'ignore' that set is empty, which is
+/// the negative case. Each arm gets fresh copies (numpy's rot90 reduces an array `k` in place).
+/// Before the fix, 35 default-errstate cells differed: var/std/nanvar/nanstd/cov ("invalid value
+/// encountered in subtract", "overflow encountered in square"), nansum/nanprod ("... in
+/// reduce"), nancumsum/nancumprod and float16 cumprod ("... in accumulate"),
+/// kron/outer/diff/ediff1d/gradient/unwrap/sinc/i0/degrees/rad2deg all returned numpy's values
+/// silently, and each returned a value where `raise` makes numpy raise FloatingPointError.
+/// Underflow is out of scope: it leaves no NaN/inf in the result for the recompute to see
+/// (arctan2/nextafter under a non-default `under=`).
+#[test]
+fn array_functions_match_numpy_fp_warnings_and_errors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import copy, inspect, warnings
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "empty", "empty_like", "ndarray", "broadcast", "iinfo", "finfo", "dtype", "getbufsize",
+        "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray", "record",
+        "put", "place", "putmask", "copyto", "fill_diagonal"}
+SPECIAL = [0.0, -1.0, 1e308, np.inf, -np.inf, np.nan, 2.0, -0.0]
+with np.errstate(all="ignore"):
+    OPS = {
+        "f8": np.array(SPECIAL, dtype="f8").reshape(2, 4),
+        "f4": np.array(SPECIAL, dtype="f8").astype("f4").reshape(2, 4),
+        "f2": np.array(SPECIAL, dtype="f8").astype("f2").reshape(2, 4),
+        "i8": np.array([0, -1, 2, 3, 0, 5, -7, 1], dtype="i8").reshape(2, 4),
+        "u1": np.array([0, 1, 2, 3, 0, 5, 7, 255], dtype="u1").reshape(2, 4),
+        "?": np.array([True, False, True, True, False, False, True, False]).reshape(2, 4),
+        "c16": (np.array(SPECIAL) + 1j * np.array(SPECIAL[::-1])).reshape(2, 4),
+        "nan": np.full((2, 4), np.nan),
+        "empty": np.empty((0, 4)),
+    }
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+def run(fn, args, kw):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            fn(*copy.deepcopy(args), **kw)
+            outcome = "ok"
+        except BaseException as ex:
+            outcome = type(ex).__name__
+    return outcome, sorted({(w.category.__name__, str(w.message)) for w in caught})
+MODES = {"default": {}, "raise": {"all": "raise", "under": "ignore"}, "ignore": {"all": "ignore"}}
+bad = []
+cells = 0
+for mode, settings in MODES.items():
+    with np.errstate(**settings):
+        for name in names:
+            npf, fnf = getattr(np, name), getattr(fnp, name, None)
+            if fnf is None:
+                continue
+            for dt, a in OPS.items():
+                for label, args, kw in (("1", (a,), {}), ("2", (a, a[::-1].copy()), {}),
+                                        ("ax0", (a,), {"axis": 0})):
+                    s = run(npf, args, kw)
+                    if s[0] not in ("ok", "FloatingPointError") and not s[1]:
+                        continue
+                    cells += 1
+                    r = run(fnf, args, kw)
+                    if r != s:
+                        bad.append(f"{mode} {name}{label} {dt}: fnp={r} numpy={s}")
+print(len(names), cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (functions, cells, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 8000,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "fp warnings/errors must match numpy: {result}");
+    Ok(())
+}
+
 /// Business-day and datetime helpers, bit packing, the indexing helpers over eight dtypes
 /// (incl. unicode and datetime64), fft with every norm, the six polynomial classes, stride
 /// tricks and fnp.testing assertions, compared with numpy by type, dtype, shape, layout, bytes
