@@ -55,7 +55,8 @@ use fnp_ufunc::{
 use fnp_runtime::{
     CompatibilityClass, DecisionAction, DecisionAuditContext, EvidenceLedger, RuntimeMode,
 };
-use std::sync::atomic::{AtomicU8, Ordering};
+use pyo3::sync::MutexExt;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 static RUNTIME_MODE: AtomicU8 = AtomicU8::new(0); // 0 = Strict, 1 = Hardened
@@ -304,7 +305,7 @@ fn buffer_format_is_native_order(format: &std::ffi::CStr) -> bool {
 }
 use pyo3::exceptions::{
     PyDeprecationWarning, PyMemoryError, PyNotImplementedError, PyOSError, PyOverflowError,
-    PyTypeError, PyUserWarning, PyValueError, PyZeroDivisionError,
+    PyRuntimeError, PyTypeError, PyUserWarning, PyValueError, PyZeroDivisionError,
 };
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -316,7 +317,10 @@ use pyo3::types::{
 use pyo3::wrap_pyfunction;
 use pyo3::{Bound, IntoPyObject};
 
-#[pyclass(name = "NditerStep", get_all, unsendable, skip_from_py_object)]
+// None of these is `unsendable`: their state is plain data. `unsendable` made a
+// `frompyfunc` object built on one thread raise PanicException ("is unsendable, but sent to
+// another thread") when a thread pool called it (bead rc0923 .8).
+#[pyclass(name = "NditerStep", get_all, skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyNditerStep {
     pub iterindex: usize,
@@ -324,12 +328,12 @@ pub struct PyNditerStep {
     pub linear_indices: Vec<usize>,
 }
 
-#[pyclass(name = "Nditer", unsendable)]
+#[pyclass(name = "Nditer")]
 pub struct PyNditer {
     inner: Nditer,
 }
 
-#[pyclass(name = "FromPyFunc", unsendable)]
+#[pyclass(name = "FromPyFunc")]
 pub struct PyFromPyFunc {
     callable: Py<PyAny>,
     display_name: String,
@@ -2522,23 +2526,106 @@ pub struct PyCClass;
 // reports `builtins`, and `pickle.dumps(rng)` failed with "attribute lookup Generator on
 // builtins failed" for Generator, every bit generator, SeedSequence and RandomState. The
 // module init re-points `__module__` when the extension is loaded under another name.
-#[pyclass(name = "Generator", module = "fnp_python.random", unsendable)]
+//
+// None of them is `unsendable`: their state is plain data, and no method releases the GIL
+// while holding `&mut self`. With `unsendable`, a Generator made on one thread and used on
+// another (a thread pool, numpy's own TestThread) raised PanicException ("is unsendable, but
+// sent to another thread") and left its output uninitialized (bead rc0923 .8).
+#[pyclass(name = "Generator", module = "fnp_python.random", frozen)]
 pub struct PyRandomGenerator {
+    core: RngLock<GeneratorCore>,
+}
+
+/// A Generator's state, behind its `RngLock`: every method holds the lock from syncing with
+/// the bit generator object to writing the advanced state back, so two threads can never
+/// draw the same stream.
+struct GeneratorCore {
     inner: RandomGenerator,
     bit_generator: Py<PyAny>,
 }
 
-#[pyclass(name = "RandomState", module = "fnp_python.random")]
-pub struct PyRandomState {
-    inner: CoreRandomState,
+/// The lock numpy puts on every RNG object (`bit_generator.lock`, a `threading.Lock`). PyO3's
+/// borrow flag was no substitute. A method holds its `&mut self` borrow while numpy code
+/// inside it releases the GIL (a large copy, one of numpy's own distributions), or while the
+/// interpreter switches threads, and a second thread's call then failed with
+/// "RuntimeError: Already borrowed". From 8 threads that happened on 287 of 320 `np.random.*`
+/// calls, where numpy raised nothing (bead rc0923 .8). Waiting on this lock detaches from
+/// the interpreter, so the holder can always take the GIL back and finish. A call back into
+/// the same object from the thread that holds it raises instead of deadlocking (numpy's
+/// non-reentrant Lock would hang).
+struct RngLock<T> {
+    state: Mutex<T>,
+    owner: AtomicU64,
 }
 
-#[pyclass(
-    name = "SeedSequence",
-    module = "fnp_python.random",
-    unsendable,
-    skip_from_py_object
-)]
+struct RngGuard<'a, T> {
+    guard: std::sync::MutexGuard<'a, T>,
+    owner: &'a AtomicU64,
+}
+
+/// A process-unique non-zero token for the calling thread.
+fn current_thread_token() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    thread_local! {
+        static TOKEN: u64 = NEXT.fetch_add(1, Ordering::Relaxed);
+    }
+    TOKEN.with(|token| *token)
+}
+
+impl<T> RngLock<T> {
+    fn new(value: T) -> Self {
+        Self {
+            state: Mutex::new(value),
+            owner: AtomicU64::new(0),
+        }
+    }
+
+    fn lock(&self, py: Python<'_>) -> PyResult<RngGuard<'_, T>> {
+        let me = current_thread_token();
+        if self.owner.load(Ordering::Acquire) == me {
+            return Err(PyRuntimeError::new_err(
+                "this random number generator is already in use by the calling thread \
+                 (a call back into it from inside one of its own methods)",
+            ));
+        }
+        let guard = self
+            .state
+            .lock_py_attached(py)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.owner.store(me, Ordering::Release);
+        Ok(RngGuard {
+            guard,
+            owner: &self.owner,
+        })
+    }
+}
+
+impl<T> Drop for RngGuard<'_, T> {
+    fn drop(&mut self) {
+        self.owner.store(0, Ordering::Release);
+    }
+}
+
+impl<T> std::ops::Deref for RngGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> std::ops::DerefMut for RngGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+#[pyclass(name = "RandomState", module = "fnp_python.random", frozen)]
+pub struct PyRandomState {
+    inner: RngLock<CoreRandomState>,
+}
+
+#[pyclass(name = "SeedSequence", module = "fnp_python.random", skip_from_py_object)]
 pub struct PySeedSequence {
     inner: SeedSequence,
     entropy: Py<PyAny>,
@@ -2579,12 +2666,7 @@ fn bit_generator_advance(
 /// `#[pymethods]` impl would not be registered as a Python method.
 macro_rules! define_py_bit_generator {
     ($type_name:ident, $py_name:literal, $kind:expr, { $($extra:tt)* }) => {
-        #[pyclass(
-            name = $py_name,
-            module = "fnp_python.random",
-            unsendable,
-            skip_from_py_object
-        )]
+        #[pyclass(name = $py_name, module = "fnp_python.random", skip_from_py_object)]
         pub struct $type_name {
             inner: BitGenerator,
             seed_sequence: Option<Py<PySeedSequence>>,
@@ -3046,7 +3128,7 @@ fn shuffle_buffer_inplace<T: pyo3::buffer::Element + Copy>(
     Ok(true)
 }
 
-impl PyRandomGenerator {
+impl GeneratorCore {
     fn sync_bit_generator(&self, py: Python<'_>) -> PyResult<()> {
         let current_bg = self.inner.bit_generator();
         if let Ok(mut bg) = self.bit_generator.extract::<PyRefMut<'_, PyPcg64>>(py) {
@@ -3137,7 +3219,21 @@ impl PyRandomGenerator {
 impl PyRandomGenerator {
     #[new]
     fn new(bit_generator: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let (extracted_bg, seed_sequence) = extract_bit_generator_binding(bit_generator)?;
+        let (extracted_bg, seed_sequence) = match extract_bit_generator_binding(bit_generator) {
+            Ok(binding) => binding,
+            Err(err) => {
+                // numpy reads `bit_generator.capsule` and requires a live one: a CLASS passed
+                // for an instance (`Generator(MT19937)`) is "must be instantiated", and an
+                // object with no `capsule` raises that attribute's AttributeError.
+                if bit_generator.is_instance_of::<PyType>() {
+                    return Err(PyValueError::new_err(
+                        "Invalid bit generator. The bit generator must be instantiated.",
+                    ));
+                }
+                bit_generator.getattr(intern!(bit_generator.py(), "capsule"))?;
+                return Err(err);
+            }
+        };
         let inner = match seed_sequence.as_ref() {
             Some(seed_sequence) => {
                 RandomGenerator::bind_seed_sequence(extracted_bg.clone(), seed_sequence)
@@ -3146,91 +3242,103 @@ impl PyRandomGenerator {
             None => RandomGenerator::from_bit_generator(extracted_bg),
         };
         Ok(Self {
-            inner,
-            bit_generator: bit_generator.clone().unbind(),
+            core: RngLock::new(GeneratorCore {
+                inner,
+                bit_generator: bit_generator.clone().unbind(),
+            }),
         })
+    }
+
+    /// numpy's class attribute: the largest `lam` poisson accepts (its tests read it).
+    #[classattr]
+    fn _poisson_lam_max() -> f64 {
+        fnp_random::POISSON_LAM_MAX
     }
 
     #[getter]
     fn bit_generator(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.sync_bit_generator(py)?;
-        Ok(self.bit_generator.clone_ref(py))
+        let this = self.core.lock(py)?;
+        this.sync_bit_generator(py)?;
+        Ok(this.bit_generator.clone_ref(py))
     }
 
     #[getter]
     fn state(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        self.sync_bit_generator(py)?;
-        build_numpy_compatible_bit_generator_state_dict(py, self.inner.bit_generator())
+        let this = self.core.lock(py)?;
+        this.sync_bit_generator(py)?;
+        build_numpy_compatible_bit_generator_state_dict(py, this.inner.bit_generator())
     }
 
-    fn spawn(&mut self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
+    fn spawn(&self, py: Python<'_>, n_children: usize) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let list = PyList::empty(py);
         if n_children == 0 {
             return Ok(list.into_any().unbind());
         }
-        self.sync_from_bit_generator(py)?;
-        let bound_bg = self.bit_generator.bind(py);
+        this.sync_from_bit_generator(py)?;
+        let bound_bg = this.bit_generator.bind(py);
         let spawned_bgs = bound_bg.call_method1(intern!(py, "spawn"), (n_children,))?;
         for child_bg in spawned_bgs.try_iter()? {
             let child_bg = child_bg?;
             let child_gen = Py::new(py, PyRandomGenerator::new(&child_bg)?)?;
             list.append(child_gen)?;
         }
-        self.sync_bit_generator(py)?;
+        this.sync_bit_generator(py)?;
         Ok(list.into_any().unbind())
     }
 
-    fn __repr__(slf: &Bound<'_, Self>) -> String {
-        let borrow = slf.borrow();
-        let kind = borrow.inner.bit_generator().kind();
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let kind = slf.get().core.lock(slf.py())?.inner.bit_generator().kind();
         let bg_name = bit_generator_numpy_name(kind);
+        // numpy: f'{self} at 0x{id(self):X}' - a lowercase prefix ({:#X} wrote "0X").
         let ptr = slf.as_ptr() as usize;
-        format!("Generator({bg_name}) at {ptr:#X}")
+        Ok(format!("Generator({bg_name}) at 0x{ptr:X}"))
     }
 
-    fn __str__(&self) -> String {
-        let kind = self.inner.bit_generator().kind();
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        let kind = self.core.lock(py)?.inner.bit_generator().kind();
         let bg_name = bit_generator_numpy_name(kind);
-        format!("Generator({bg_name})")
+        Ok(format!("Generator({bg_name})"))
     }
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let borrow = slf.borrow();
-        borrow.sync_bit_generator(py)?;
+        let this = slf.get().core.lock(py)?;
+        this.sync_bit_generator(py)?;
         let cls = slf.get_type();
-        let args = (borrow.bit_generator.clone_ref(py),);
+        let args = (this.bit_generator.clone_ref(py),);
         Ok((cls, args).into_pyobject(py)?.into_any().unbind())
     }
 
     #[pyo3(signature = (size=None, dtype=None, out=None))]
     fn random(
-        &mut self,
+        &self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        self.before_draw(py)?;
+        let mut this = self.core.lock(py)?;
+        this.before_draw(py)?;
         let dtype = extract_random_float_dtype(py, dtype, "Generator.random(dtype)")?;
         let requested_size = random_size_from_py(py, size, "Generator.random(size)")?;
         let (size, out) =
             resolve_random_out(py, requested_size, dtype, out, "Generator.random(out)")?;
         let generated = match dtype {
             DType::F32 => {
-                let output = self
+                let output = this
                     .inner
                     .random_f32_shaped(size.as_deref())
                     .map_err(map_random_error)?;
-                self.after_draw(py);
+                this.after_draw(py);
                 build_random_f32_output(py, output)?
             }
             DType::F64 => {
-                let output = self
+                let output = this
                     .inner
                     .random_shaped(size.as_deref())
                     .map_err(map_random_error)?;
-                self.after_draw(py);
+                this.after_draw(py);
                 build_random_f64_output(py, output)?
             }
             _ => {
@@ -3255,12 +3363,13 @@ impl PyRandomGenerator {
     // dtype runs NumPy's sampler on this generator's exact state.
     #[pyo3(signature = (size=None, dtype=None, out=None))]
     fn standard_normal(
-        &mut self,
+        &self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         if let Some(dtype_obj) = dtype.as_ref()
             && !dtype_obj.bind(py).is_none()
             && extract_random_float_dtype(
@@ -3275,9 +3384,9 @@ impl PyRandomGenerator {
             if let Some(out) = out {
                 params.push(("out", out));
             }
-            return self.numpy_distribution(py, "standard_normal", &params, size);
+            return this.numpy_distribution(py, "standard_normal", &params, size);
         }
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let requested_size = random_size_from_py(py, size, "Generator.standard_normal(size)")?;
         let (size, out) = resolve_random_out(
             py,
@@ -3286,11 +3395,11 @@ impl PyRandomGenerator {
             out,
             "Generator.standard_normal(out)",
         )?;
-        let output = self
+        let output = this
             .inner
             .standard_normal_shaped(size.as_deref())
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         let generated = build_random_f64_output(py, output)?;
         if let Some(out) = out {
             cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
@@ -3302,45 +3411,47 @@ impl PyRandomGenerator {
 
     #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn normal(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
-            return self.numpy_distribution(py, "normal", &params, size);
+            return this.numpy_distribution(py, "normal", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.normal(size)")?;
-        let output = self
+        let output = this
             .inner
             .normal_shaped(loc, scale, size.as_deref())
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_output(py, output)
     }
 
     #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
     fn exponential(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(scale) = scale.native() else {
             let params = [("scale", scale.to_object(py)?)];
-            return self.numpy_distribution(py, "exponential", &params, size);
+            return this.numpy_distribution(py, "exponential", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.exponential(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .exponential(scale, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -3349,13 +3460,14 @@ impl PyRandomGenerator {
     // sampler on this generator's exact state (NumPy validates `method` itself).
     #[pyo3(signature = (size=None, dtype=None, method="zig", out=None))]
     fn standard_exponential(
-        &mut self,
+        &self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
         dtype: Option<Py<PyAny>>,
         method: &str,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let non_f64_dtype = dtype.as_ref().is_some_and(|d| {
             !d.bind(py).is_none()
                 && extract_random_float_dtype(
@@ -3377,9 +3489,9 @@ impl PyRandomGenerator {
             if let Some(out) = out {
                 params.push(("out", out));
             }
-            return self.numpy_distribution(py, "standard_exponential", &params, size);
+            return this.numpy_distribution(py, "standard_exponential", &params, size);
         }
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let requested_size = random_size_from_py(py, size, "Generator.standard_exponential(size)")?;
         let (size, out) = resolve_random_out(
             py,
@@ -3390,11 +3502,11 @@ impl PyRandomGenerator {
         )?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = if method == "zig" {
-            self.inner.standard_exponential(len)
+            this.inner.standard_exponential(len)
         } else {
-            self.inner.standard_exponential_inv(len)
+            this.inner.standard_exponential_inv(len)
         };
-        self.after_draw(py);
+        this.after_draw(py);
         let generated = build_random_f64_parts(py, shape, values, scalar)?;
         if let Some(out) = out {
             cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
@@ -3406,13 +3518,14 @@ impl PyRandomGenerator {
 
     #[pyo3(signature = (shape, size=None, dtype=None, out=None))]
     fn standard_gamma(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] shape: RngArg<f64>,
         size: Option<Py<PyAny>>,
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         // float32 (numpy's random_standard_gamma_f, with its own f32 ziggurat draws) and array
         // shapes run numpy's own method on the synced state, like standard_normal's dtype path.
         // This raised "Unsupported dtype dtype('f32')" for float32 (bead rc0923 .8, numpy's
@@ -3436,9 +3549,9 @@ impl PyRandomGenerator {
             if let Some(out) = out {
                 params.push(("out", out));
             }
-            return self.numpy_distribution(py, "standard_gamma", &params, size);
+            return this.numpy_distribution(py, "standard_gamma", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let requested_size = random_size_from_py(py, size, "Generator.standard_gamma(size)")?;
         let (size, out) = resolve_random_out(
             py,
@@ -3448,11 +3561,11 @@ impl PyRandomGenerator {
             "Generator.standard_gamma(out)",
         )?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .standard_gamma(shape, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         let generated = build_random_f64_parts(py, out_shape, values, scalar)?;
         if let Some(out) = out {
             cached_numpy_copyto(py)?.call1((out.bind(py), generated.bind(py)))?;
@@ -3464,166 +3577,175 @@ impl PyRandomGenerator {
 
     #[pyo3(signature = (shape, scale=RngArg::Native(1.0), size=None))]
     fn gamma(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] shape: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(shape), Some(scale)) = (shape.native(), scale.native()) else {
             let params = [("shape", shape.to_object(py)?), ("scale", scale.to_object(py)?)];
-            return self.numpy_distribution(py, "gamma", &params, size);
+            return this.numpy_distribution(py, "gamma", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.gamma(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .gamma(shape, scale, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (lam=RngArg::Native(1.0), size=None))]
     fn poisson(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] lam: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(lam) = lam.native() else {
             let params = [("lam", lam.to_object(py)?)];
-            return self.numpy_distribution(py, "poisson", &params, size);
+            return this.numpy_distribution(py, "poisson", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.poisson(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.poisson(lam, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.poisson(lam, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (n, p, size=None))]
     fn binomial(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_u64_arg)] n: RngArg<u64>,
         #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(n), Some(p)) = (n.native(), p.native()) else {
             let params = [("n", n.to_object(py)?), ("p", p.to_object(py)?)];
-            return self.numpy_distribution(py, "binomial", &params, size);
+            return this.numpy_distribution(py, "binomial", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.binomial(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.binomial(n, p, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.binomial(n, p, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (a, b, size=None))]
     fn beta(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] b: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(a), Some(b)) = (a.native(), b.native()) else {
             let params = [("a", a.to_object(py)?), ("b", b.to_object(py)?)];
-            return self.numpy_distribution(py, "beta", &params, size);
+            return this.numpy_distribution(py, "beta", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.beta(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.beta(a, b, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.beta(a, b, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (mean=RngArg::Native(0.0), sigma=RngArg::Native(1.0), size=None))]
     fn lognormal(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] mean: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] sigma: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(mean), Some(sigma)) = (mean.native(), sigma.native()) else {
             let params = [("mean", mean.to_object(py)?), ("sigma", sigma.to_object(py)?)];
-            return self.numpy_distribution(py, "lognormal", &params, size);
+            return this.numpy_distribution(py, "lognormal", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.lognormal(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .lognormal(mean, sigma, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (df, size=None))]
     fn chisquare(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(df) = df.native() else {
             let params = [("df", df.to_object(py)?)];
-            return self.numpy_distribution(py, "chisquare", &params, size);
+            return this.numpy_distribution(py, "chisquare", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.chisquare(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.chisquare(df, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.chisquare(df, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (p, size=None))]
     fn geometric(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(p) = p.native() else {
             let params = [("p", p.to_object(py)?)];
-            return self.numpy_distribution(py, "geometric", &params, size);
+            return this.numpy_distribution(py, "geometric", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.geometric(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.geometric(p, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.geometric(p, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (size=None))]
-    fn standard_cauchy(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        self.before_draw(py)?;
+    fn standard_cauchy(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.standard_cauchy(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.standard_cauchy(len);
-        self.after_draw(py);
+        let values = this.inner.standard_cauchy(len);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (left, mode, right, size=None))]
     fn triangular(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] left: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] mode: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] right: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(left), Some(mode), Some(right)) = (left.native(), mode.native(), right.native())
         else {
             let params = [
@@ -3631,92 +3753,96 @@ impl PyRandomGenerator {
                 ("mode", mode.to_object(py)?),
                 ("right", right.to_object(py)?),
             ];
-            return self.numpy_distribution(py, "triangular", &params, size);
+            return this.numpy_distribution(py, "triangular", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.triangular(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .triangular(left, mode, right, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn laplace(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
-            return self.numpy_distribution(py, "laplace", &params, size);
+            return this.numpy_distribution(py, "laplace", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.laplace(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .laplace(loc, scale, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn gumbel(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
-            return self.numpy_distribution(py, "gumbel", &params, size);
+            return this.numpy_distribution(py, "gumbel", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.gumbel(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .gumbel(loc, scale, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn weibull(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(a) = a.native() else {
             let params = [("a", a.to_object(py)?)];
-            return self.numpy_distribution(py, "weibull", &params, size);
+            return this.numpy_distribution(py, "weibull", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.weibull(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.weibull(a, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.weibull(a, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (n, p, size=None))]
     fn negative_binomial(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] n: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         // numpy validates scalars before drawing: `n > 0`, `0 < p <= 1`, and a Poisson
         // overflow bound on `(1 - p) / p * (n + 10 sqrt(n))`. The native kernel accepted
         // `negative_binomial(2**62, 0.1)` (numpy's own
@@ -3736,150 +3862,157 @@ impl PyRandomGenerator {
         };
         let Some((n, p)) = native else {
             let params = [("n", n.to_object(py)?), ("p", p.to_object(py)?)];
-            return self.numpy_distribution(py, "negative_binomial", &params, size);
+            return this.numpy_distribution(py, "negative_binomial", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.negative_binomial(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .negative_binomial(n, p, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (dfnum, dfden, size=None))]
     fn f(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] dfnum: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] dfden: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(dfnum), Some(dfden)) = (dfnum.native(), dfden.native()) else {
             let params = [("dfnum", dfnum.to_object(py)?), ("dfden", dfden.to_object(py)?)];
-            return self.numpy_distribution(py, "f", &params, size);
+            return this.numpy_distribution(py, "f", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.f(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.f(dfnum, dfden, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.f(dfnum, dfden, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (df, size=None))]
     fn standard_t(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(df) = df.native() else {
             let params = [("df", df.to_object(py)?)];
-            return self.numpy_distribution(py, "standard_t", &params, size);
+            return this.numpy_distribution(py, "standard_t", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.standard_t(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .standard_t(df, len)
             .map_err(|_| PyValueError::new_err("df <= 0"))?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn power(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(a) = a.native() else {
             let params = [("a", a.to_object(py)?)];
-            return self.numpy_distribution(py, "power", &params, size);
+            return this.numpy_distribution(py, "power", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.power(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.power(a, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.power(a, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
     fn rayleigh(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(scale) = scale.native() else {
             let params = [("scale", scale.to_object(py)?)];
-            return self.numpy_distribution(py, "rayleigh", &params, size);
+            return this.numpy_distribution(py, "rayleigh", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.rayleigh(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.rayleigh(scale, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.rayleigh(scale, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn pareto(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(a) = a.native() else {
             let params = [("a", a.to_object(py)?)];
-            return self.numpy_distribution(py, "pareto", &params, size);
+            return this.numpy_distribution(py, "pareto", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.pareto(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.pareto(a, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.pareto(a, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn logistic(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
             let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
-            return self.numpy_distribution(py, "logistic", &params, size);
+            return this.numpy_distribution(py, "logistic", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.logistic(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .logistic(loc, scale, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (ngood, nbad, nsample, size=None))]
     fn hypergeometric(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_u64_arg)] ngood: RngArg<u64>,
         #[pyo3(from_py_with = rng_u64_arg)] nbad: RngArg<u64>,
         #[pyo3(from_py_with = rng_u64_arg)] nsample: RngArg<u64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(ngood), Some(nbad), Some(nsample)) =
             (ngood.native(), nbad.native(), nsample.native())
         else {
@@ -3888,61 +4021,63 @@ impl PyRandomGenerator {
                 ("nbad", nbad.to_object(py)?),
                 ("nsample", nsample.to_object(py)?),
             ];
-            return self.numpy_distribution(py, "hypergeometric", &params, size);
+            return this.numpy_distribution(py, "hypergeometric", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.hypergeometric(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .hypergeometric(ngood, nbad, nsample, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (mean, scale, size=None))]
     fn wald(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] mean: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(mean), Some(scale)) = (mean.native(), scale.native()) else {
             let params = [("mean", mean.to_object(py)?), ("scale", scale.to_object(py)?)];
-            return self.numpy_distribution(py, "wald", &params, size);
+            return this.numpy_distribution(py, "wald", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.wald(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.wald(mean, scale, len).map_err(|_| {
+        let values = this.inner.wald(mean, scale, len).map_err(|_| {
             if mean <= 0.0 || mean.is_sign_negative() {
                 PyValueError::new_err("mean <= 0")
             } else {
                 PyValueError::new_err("scale <= 0")
             }
         })?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn zipf(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(a) = a.native() else {
             let params = [("a", a.to_object(py)?)];
-            return self.numpy_distribution(py, "zipf", &params, size);
+            return this.numpy_distribution(py, "zipf", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.zipf(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.zipf(a, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.zipf(a, len).map_err(map_random_error)?;
+        this.after_draw(py);
         let values = values
             .into_iter()
             .map(|value| {
@@ -3957,78 +4092,82 @@ impl PyRandomGenerator {
 
     #[pyo3(signature = (p, size=None))]
     fn logseries(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let Some(p) = p.native() else {
             let params = [("p", p.to_object(py)?)];
-            return self.numpy_distribution(py, "logseries", &params, size);
+            return this.numpy_distribution(py, "logseries", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.logseries(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.logseries(p, len).map_err(map_random_error)?;
-        self.after_draw(py);
+        let values = this.inner.logseries(p, len).map_err(map_random_error)?;
+        this.after_draw(py);
         build_random_u64_as_i64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (mu, kappa, size=None))]
     fn vonmises(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] mu: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] kappa: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(mu), Some(kappa)) = (mu.native(), kappa.native()) else {
             let params = [("mu", mu.to_object(py)?), ("kappa", kappa.to_object(py)?)];
-            return self.numpy_distribution(py, "vonmises", &params, size);
+            return this.numpy_distribution(py, "vonmises", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.vonmises(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .vonmises(mu, kappa, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (df, nonc, size=None))]
     fn noncentral_chisquare(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] nonc: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(df), Some(nonc)) = (df.native(), nonc.native()) else {
             let params = [("df", df.to_object(py)?), ("nonc", nonc.to_object(py)?)];
-            return self.numpy_distribution(py, "noncentral_chisquare", &params, size);
+            return this.numpy_distribution(py, "noncentral_chisquare", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.noncentral_chisquare(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .noncentral_chisquare(df, nonc, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (dfnum, dfden, nonc, size=None))]
     fn noncentral_f(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] dfnum: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] dfden: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] nonc: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(dfnum), Some(dfden), Some(nonc)) = (dfnum.native(), dfden.native(), nonc.native())
         else {
             let params = [
@@ -4036,16 +4175,16 @@ impl PyRandomGenerator {
                 ("dfden", dfden.to_object(py)?),
                 ("nonc", nonc.to_object(py)?),
             ];
-            return self.numpy_distribution(py, "noncentral_f", &params, size);
+            return this.numpy_distribution(py, "noncentral_f", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.noncentral_f(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self
+        let values = this
             .inner
             .noncentral_f(dfnum, dfden, nonc, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -4057,12 +4196,13 @@ impl PyRandomGenerator {
     // TestMultinomial::test_invalid_n).
     #[pyo3(signature = (n, pvals, size=None))]
     fn multinomial(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_i64_arg)] n: RngArg<i64>,
         pvals: Py<PyAny>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let pvals_ndim = match pvals
             .bind(py)
             .getattr(intern!(py, "ndim"))
@@ -4075,11 +4215,12 @@ impl PyRandomGenerator {
         };
         let Some(n) = n.native().filter(|&n| n >= 0 && pvals_ndim == 1) else {
             let params = [("n", n.to_object(py)?), ("pvals", pvals)];
-            return self.numpy_distribution(py, "multinomial", &params, size);
+            return this.numpy_distribution(py, "multinomial", &params, size);
         };
         let n = n as u64;
-        self.before_draw(py)?;
-        let pvals = extract_random_f64_vector(py, pvals.bind(py))?;
+        this.before_draw(py)?;
+        let pvals_obj = pvals.bind(py).clone();
+        let pvals = extract_random_f64_vector(py, &pvals_obj)?;
         if pvals.is_empty() {
             return Err(PyValueError::new_err(
                 "pvals must have at least 1 dimension and the last dimension of pvals must be greater than 0.",
@@ -4093,19 +4234,29 @@ impl PyRandomGenerator {
                 "pvals < 0, pvals > 1 or pvals contains NaNs",
             ));
         }
-        if pvals
-            .iter()
-            .take(pvals.len().saturating_sub(1))
-            .sum::<f64>()
-            > 1.0 + 1e-12
-        {
+        // numpy: a Kahan sum of pvals[:-1] against 1 + 1e-12. A float32/float16 `pvals` whose own
+        // sum is below 1.0001 gets the longer message, which explains that the cast to float64
+        // tipped it over.
+        if fnp_random::kahan_sum(&pvals[..pvals.len() - 1]) > 1.0 + 1e-12 {
+            let narrow_float = pvals_obj.is_instance(cached_ndarray_type(py)?)? && {
+                let dtype = pvals_obj.getattr(intern!(py, "dtype"))?;
+                dtype.getattr(intern!(py, "kind"))?.extract::<char>()? == 'f'
+                    && dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+            };
+            if narrow_float && pvals_obj.call_method0(intern!(py, "sum"))?.lt(1.0001)? {
+                return Err(PyValueError::new_err(
+                    "sum(pvals[:-1].astype(np.float64)) > 1.0. The pvals array is cast to \
+                     64-bit floating point prior to checking the sum. Precision changes when \
+                     casting may cause problems even if the sum of the original pvals is valid.",
+                ));
+            }
             return Err(PyValueError::new_err("sum(pvals[:-1]) > 1.0"));
         }
         let size = random_size_from_py(py, size, "Generator.multinomial(size)")?;
         let (shape, len, _) = random_len_and_shape(size)?;
         let width = pvals.len();
-        let values = self.inner.multinomial(n, &pvals, len);
-        self.after_draw(py);
+        let values = this.inner.multinomial(n, &pvals, len);
+        this.after_draw(py);
         build_random_u64_matrix_as_i64_parts(py, shape, values, width)
     }
 
@@ -4117,11 +4268,12 @@ impl PyRandomGenerator {
     // sampler on this generator's exact state; numpy raises its own errors.
     #[pyo3(signature = (alpha, size=None))]
     fn dirichlet(
-        &mut self,
+        &self,
         py: Python<'_>,
         alpha: Py<PyAny>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let alpha_ndim = match alpha
             .bind(py)
             .getattr(intern!(py, "ndim"))
@@ -4141,44 +4293,46 @@ impl PyRandomGenerator {
             values.iter().all(|a| !a.is_nan() && *a >= 0.0)
                 && (values.is_empty() || values.iter().copied().fold(f64::MIN, f64::max) >= 0.1)
         }) else {
-            return self.numpy_distribution(py, "dirichlet", &[("alpha", alpha)], size);
+            return this.numpy_distribution(py, "dirichlet", &[("alpha", alpha)], size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.dirichlet(size)")?;
         let (shape, len, _) = random_len_and_shape(size)?;
         let width = alpha.len();
-        let values = self
+        let values = this
             .inner
             .dirichlet(&alpha, len)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_matrix_parts(py, shape, values, width)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn multivariate_normal(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        self.before_draw(py)?;
+        let mut this = self.core.lock(py)?;
+        this.before_draw(py)?;
         let res =
-            random_generator_numpy_method(py, &mut self.inner, "multivariate_normal", args, kwargs);
-        self.after_draw(py);
+            random_generator_numpy_method(py, &mut this.inner, "multivariate_normal", args, kwargs);
+        this.after_draw(py);
         res
     }
 
     #[pyo3(signature = (colors, nsample, size=None, method="marginals"))]
     fn multivariate_hypergeometric(
-        &mut self,
+        &self,
         py: Python<'_>,
         colors: Py<PyAny>,
         nsample: Py<PyAny>,
         size: Option<Py<PyAny>>,
         method: &str,
     ) -> PyResult<Py<PyAny>> {
-        self.before_draw(py)?;
+        let mut this = self.core.lock(py)?;
+        this.before_draw(py)?;
         // numpy's checks, in its order and with its messages; the kernels' RandomError
         // cannot carry them.
         if !matches!(method, "count" | "marginals") {
@@ -4223,28 +4377,29 @@ impl PyRandomGenerator {
             return build_random_u64_matrix_as_i64_parts(py, shape, vec![Vec::new(); len], 0);
         }
         let values = if method == "count" {
-            self.inner
+            this.inner
                 .multivariate_hypergeometric_count(&colors, nsample, len)
         } else {
-            self.inner
+            this.inner
                 .multivariate_hypergeometric(&colors, nsample, len)
         }
         .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_u64_matrix_as_i64_parts(py, shape, values, width)
     }
 
     #[pyo3(signature = (low=RngArg::Native(0.0), high=RngArg::Native(1.0), size=None))]
     fn uniform(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] low: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] high: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         let (Some(low), Some(high)) = (low.native(), high.native()) else {
             let params = [("low", low.to_object(py)?), ("high", high.to_object(py)?)];
-            return self.numpy_distribution(py, "uniform", &params, size);
+            return this.numpy_distribution(py, "uniform", &params, size);
         };
         // numpy's scalar path rejects a non-finite `high - low` before anything else: a range
         // that overflows (-1e308, 1e308) returned inf values here, and an infinite bound raised
@@ -4254,19 +4409,19 @@ impl PyRandomGenerator {
                 "high - low range exceeds valid bounds",
             ));
         }
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.uniform(size)")?;
-        let output = self
+        let output = this
             .inner
             .uniform_shaped(low, high, size.as_deref())
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         build_random_f64_output(py, output)
     }
 
     #[pyo3(signature = (low, high=None, size=None, dtype=None, endpoint=false))]
     fn integers(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_i64_arg)] low: RngArg<i64>,
         high: Option<Py<PyAny>>,
@@ -4274,6 +4429,7 @@ impl PyRandomGenerator {
         dtype: Option<Py<PyAny>>,
         endpoint: bool,
     ) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
         // `high=None` (or omitted) means [0, low); anything non-scalar goes to NumPy, as does
         // any dtype the native kernels do not cover (e.g. `bool`, which used to raise
         // "Unsupported dtype"). NumPy then applies its own validation and errors.
@@ -4303,6 +4459,10 @@ impl PyRandomGenerator {
                     | DType::U64
             )
         });
+        // numpy: `dtype=int` (the builtin type itself) with size=None returns a Python int.
+        let builtin_int_dtype = dtype
+            .as_ref()
+            .is_some_and(|dtype| dtype.bind(py).is(py.get_type::<PyInt>()));
         let native_high = match &high_arg {
             Some(h) => h.native().map(Some),
             None => Some(None),
@@ -4317,23 +4477,36 @@ impl PyRandomGenerator {
                 params.push(("dtype", dtype));
             }
             params.push(("endpoint", pyo3::IntoPyObjectExt::into_py_any(endpoint, py)?));
-            return self.numpy_distribution(py, "integers", &params, size);
+            return this.numpy_distribution(py, "integers", &params, size);
         };
-        self.before_draw(py)?;
+        this.before_draw(py)?;
         let (low, high) = match high {
             Some(high) => (low, high),
             None => (0, low),
         };
         let dtype = dtype_native;
-        validate_random_integer_dtype_bounds(low, high, dtype, endpoint)?;
         let size = random_size_from_py(py, size, "Generator.integers(size)")?;
+        // numpy's order: a zero-size request returns before any bounds check, then low / high
+        // against the dtype, then the empty-range message (was the kernel's "upper_bound must be
+        // > 0").
+        if !size
+            .as_ref()
+            .is_some_and(|shape| shape.iter().product::<usize>() == 0)
+        {
+            validate_random_integer_dtype_bounds(low, high, dtype, endpoint)?;
+            if (endpoint && low > high) || (!endpoint && low >= high) {
+                return Err(PyValueError::new_err(random_integer_bounds_message(
+                    low, endpoint,
+                )));
+            }
+        }
         match dtype {
             DType::I8 => {
-                let output = self
+                let output = this
                     .inner
                     .integers_i8_shaped(low, high, size.as_deref(), endpoint)
                     .map_err(map_random_error)?;
-                self.after_draw(py);
+                this.after_draw(py);
                 let (shape, values, scalar) = output.into_parts();
                 return build_random_integer_storage_parts(
                     py,
@@ -4343,11 +4516,11 @@ impl PyRandomGenerator {
                 );
             }
             DType::I16 => {
-                let output = self
+                let output = this
                     .inner
                     .integers_i16_shaped(low, high, size.as_deref(), endpoint)
                     .map_err(map_random_error)?;
-                self.after_draw(py);
+                this.after_draw(py);
                 let (shape, values, scalar) = output.into_parts();
                 return build_random_integer_storage_parts(
                     py,
@@ -4357,11 +4530,11 @@ impl PyRandomGenerator {
                 );
             }
             DType::U8 => {
-                let output = self
+                let output = this
                     .inner
                     .integers_u8_shaped(low, high, size.as_deref(), endpoint)
                     .map_err(map_random_error)?;
-                self.after_draw(py);
+                this.after_draw(py);
                 let (shape, values, scalar) = output.into_parts();
                 return build_random_integer_storage_parts(
                     py,
@@ -4371,11 +4544,11 @@ impl PyRandomGenerator {
                 );
             }
             DType::U16 => {
-                let output = self
+                let output = this
                     .inner
                     .integers_u16_shaped(low, high, size.as_deref(), endpoint)
                     .map_err(map_random_error)?;
-                self.after_draw(py);
+                this.after_draw(py);
                 let (shape, values, scalar) = output.into_parts();
                 return build_random_integer_storage_parts(
                     py,
@@ -4387,28 +4560,35 @@ impl PyRandomGenerator {
             _ => {}
         }
         let output = if endpoint {
-            self.inner
+            this.inner
                 .integers_endpoint_shaped(low, high, size.as_deref())
         } else {
-            self.inner.integers_shaped(low, high, size.as_deref())
+            this.inner.integers_shaped(low, high, size.as_deref())
         }
         .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         let (shape, values, scalar) = output.into_parts();
+        if scalar
+            && builtin_int_dtype
+            && let [value] = values.as_slice()
+        {
+            return pyo3::IntoPyObjectExt::into_py_any(*value, py);
+        }
         build_random_integer_parts(py, shape, values, scalar, dtype)
     }
 
-    fn bytes(&mut self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
-        self.before_draw(py)?;
-        let bytes = self.inner.bytes(length);
-        self.after_draw(py);
+    fn bytes(&self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
+        this.before_draw(py)?;
+        let bytes = this.inner.bytes(length);
+        this.after_draw(py);
         Ok(PyBytes::new(py, &bytes).into_any().unbind())
     }
 
     #[pyo3(signature = (a, size=None, replace=true, p=None, axis=0, shuffle=true))]
     #[allow(clippy::too_many_arguments)]
     fn choice(
-        &mut self,
+        &self,
         py: Python<'_>,
         a: Py<PyAny>,
         size: Option<Py<PyAny>>,
@@ -4417,7 +4597,8 @@ impl PyRandomGenerator {
         axis: isize,
         shuffle: bool,
     ) -> PyResult<Py<PyAny>> {
-        self.before_draw(py)?;
+        let mut this = self.core.lock(py)?;
+        this.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.choice(size)")?;
         let p = p.filter(|value| !value.bind(py).is_none());
         if let Ok(n) = a.bind(py).extract::<i64>() {
@@ -4447,11 +4628,11 @@ impl PyRandomGenerator {
                 let population = (0..population_len)
                     .map(|value| value as f64)
                     .collect::<Vec<_>>();
-                let drawn = self
+                let drawn = this
                     .inner
                     .choice_weighted(&population, len, replace, weights, *atol)
                     .map_err(map_random_error)?;
-                self.after_draw(py);
+                this.after_draw(py);
                 drawn
                     .into_iter()
                     .map(|value| {
@@ -4468,15 +4649,15 @@ impl PyRandomGenerator {
                 // path `integers` uses) instead of the per-element numpy_bounded_uint64 loop
                 // + u64->i64 conversion pass — bit-exact (numpy choice == numpy integers,
                 // and fnp integers is bit-exact with numpy integers) and ~5x faster.
-                let drawn = self.inner.integers(0, n, len).map_err(map_random_error)?;
-                self.after_draw(py);
+                let drawn = this.inner.integers(0, n, len).map_err(map_random_error)?;
+                this.after_draw(py);
                 drawn
             } else {
-                let drawn = self
+                let drawn = this
                     .inner
                     .choice_indices_with_shuffle(population_len, len, replace, shuffle)
                     .map_err(map_random_error)?;
-                self.after_draw(py);
+                this.after_draw(py);
                 drawn
                     .into_iter()
                     .map(|value| {
@@ -4505,7 +4686,7 @@ impl PyRandomGenerator {
                 population_shape.len()
             ))
         })?;
-        let (sample_shape, sample_len, _scalar) = random_len_and_shape(size)?;
+        let (sample_shape, sample_len, scalar) = random_len_and_shape(size)?;
         let axis_len = population_shape[axis];
         if axis_len == 0 && sample_len > 0 {
             return Err(PyValueError::new_err(
@@ -4524,11 +4705,11 @@ impl PyRandomGenerator {
         )?;
         let sample_indices = if let Some((weights, atol)) = weights.as_ref() {
             let axis_population = (0..axis_len).map(|value| value as f64).collect::<Vec<_>>();
-            let drawn = self
+            let drawn = this
                 .inner
                 .choice_weighted(&axis_population, sample_len, replace, weights, *atol)
                 .map_err(map_random_error)?;
-            self.after_draw(py);
+            this.after_draw(py);
             drawn
                 .into_iter()
                 .map(|value| {
@@ -4539,11 +4720,11 @@ impl PyRandomGenerator {
                 })
                 .collect::<PyResult<Vec<_>>>()?
         } else {
-            let drawn = self
+            let drawn = this
                 .inner
                 .choice_indices_with_shuffle(axis_len, sample_len, replace, shuffle)
                 .map_err(map_random_error)?;
-            self.after_draw(py);
+            this.after_draw(py);
             drawn
         };
         // Gather the sampled elements from the ORIGINAL array via numpy.take so the
@@ -4552,33 +4733,53 @@ impl PyRandomGenerator {
         // index array carries the sample shape; take then yields numpy's exact output
         // shape (population_shape with `axis` replaced by the sample shape). A 0-d result
         // (size=None over a 1-D population) collapses to numpy's scalar element.
+        //
+        // numpy's tail, case by case: a size=None draw is `a.take(int, axis)` (the element
+        // itself, an object element included); a size=() draw over a 1-D population is a 0-d
+        // array holding `a[idx]`, even for an object element. Collapsing every 0-d result
+        // instead returned the bare element for size=() and raised "'NoneType' object has no
+        // attribute 'ndim'" for an object population (numpy's test_choice_return_shape).
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "axis"), axis as isize)?;
+        if scalar {
+            let index = sample_indices.first().copied().unwrap_or(0) as i64;
+            return Ok(arr
+                .call_method(intern!(py, "take"), (index,), Some(&kwargs))?
+                .unbind());
+        }
+        if sample_shape.is_empty() && population_shape.len() == 1 {
+            let index = sample_indices.first().copied().unwrap_or(0) as i64;
+            let res = numpy.call_method1(
+                intern!(py, "empty"),
+                (PyTuple::empty(py), arr.getattr(intern!(py, "dtype"))?),
+            )?;
+            res.set_item(PyTuple::empty(py), arr.get_item(index)?)?;
+            return Ok(res.unbind());
+        }
         let index_i64: Vec<i64> = sample_indices.iter().map(|&value| value as i64).collect();
         let index_array =
             build_numpy_array_from_storage(py, &sample_shape, ArrayStorage::I64(index_i64))?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item(intern!(py, "axis"), axis as isize)?;
-        let result =
-            arr.call_method(intern!(py, "take"), (index_array.bind(py),), Some(&kwargs))?;
-        if result.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 0 {
-            return Ok(result.get_item(())?.unbind());
-        }
-        Ok(result.unbind())
+        Ok(arr
+            .call_method(intern!(py, "take"), (index_array.bind(py),), Some(&kwargs))?
+            .unbind())
     }
 
     #[pyo3(signature = (x, axis=0))]
-    fn permutation(&mut self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
-        self.before_draw(py)?;
+    fn permutation(&self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
+        this.before_draw(py)?;
         let bound = x.bind(py);
-        if let Ok(n) = bound.extract::<i64>() {
-            if n < 0 {
-                return Err(PyValueError::new_err(
-                    "permutation length must be non-negative",
-                ));
-            }
-            let n = usize::try_from(n)
+        // numpy: an int or np.integer `x` is `np.arange(x)` shuffled, so a negative one is an
+        // empty permutation (this raised ValueError), while a 0-d ARRAY is not an int and takes
+        // the array path (and its AxisError).
+        if (bound.is_instance_of::<PyInt>()
+            || bound.is_instance(&cached_numpy(py)?.getattr(intern!(py, "integer"))?)?)
+            && let Ok(n) = bound.extract::<i64>()
+        {
+            let n = usize::try_from(n.max(0))
                 .map_err(|_| PyValueError::new_err("permutation length is too large"))?;
-            let values = self.inner.permutation_range(n).map_err(map_random_error)?;
-            self.after_draw(py);
+            let values = this.inner.permutation_range(n).map_err(map_random_error)?;
+            this.after_draw(py);
             let values = values
                 .into_iter()
                 .map(|value| {
@@ -4597,17 +4798,13 @@ impl PyRandomGenerator {
         let numpy = cached_numpy(py)?;
         let arr = numpy.call_method1(intern!(py, "asarray"), (bound,))?;
         let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
-        let axis = try_normalize_axis(axis, shape.len()).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "axis {axis} is out of bounds for array of dimension {}",
-                shape.len()
-            ))
-        })?;
-        let order = self
+        let axis = try_normalize_axis(axis, shape.len())
+            .ok_or_else(|| numpy_axis_error(py, axis, shape.len()))?;
+        let order = this
             .inner
             .permutation_range(shape[axis])
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         let order_i64: Vec<i64> = order.into_iter().map(|value| value as i64).collect();
         let index_array =
             build_numpy_array_from_storage(py, &[shape[axis]], ArrayStorage::I64(order_i64))?;
@@ -4619,8 +4816,9 @@ impl PyRandomGenerator {
     }
 
     #[pyo3(signature = (x, axis=0))]
-    fn shuffle(&mut self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
-        self.before_draw(py)?;
+    fn shuffle(&self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
+        let mut this = self.core.lock(py)?;
+        this.before_draw(py)?;
         let bound = x.bind(py);
         // Shuffle in place while preserving x's dtype. The previous path extracted x to
         // float64 and then copyto'd the float64 result back, which raised for integer x
@@ -4660,8 +4858,8 @@ impl PyRandomGenerator {
                 ));
             }
             let mut order: Vec<usize> = (0..n).collect();
-            self.inner.shuffle_slice(&mut order);
-            self.after_draw(py);
+            this.inner.shuffle_slice(&mut order);
+            this.after_draw(py);
             let items = (0..n)
                 .map(|i| bound.get_item(i))
                 .collect::<PyResult<Vec<_>>>()?;
@@ -4674,12 +4872,17 @@ impl PyRandomGenerator {
         if shape.is_empty() {
             return Err(PyTypeError::new_err("len() of unsized object"));
         }
-        let axis = try_normalize_axis(axis, shape.len()).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "axis {axis} is out of bounds for array of dimension {}",
-                shape.len()
-            ))
-        })?;
+        // numpy: read-only, then `normalize_axis_index` (an AxisError, which numpy's tests
+        // assert by class; this raised a plain ValueError).
+        if !bound
+            .getattr(intern!(py, "flags"))?
+            .getattr(intern!(py, "writeable"))?
+            .extract::<bool>()?
+        {
+            return Err(PyValueError::new_err("array is read-only"));
+        }
+        let axis = try_normalize_axis(axis, shape.len())
+            .ok_or_else(|| numpy_axis_error(py, axis, shape.len()))?;
         // Fast path: a 1-D C-contiguous writeable numeric ndarray is shuffled in place
         // through its same-width unsigned-integer view (itemsize 1/2/4/8). This matches
         // numpy's single in-place Fisher-Yates and is bit-exact (same random_interval(i)
@@ -4706,36 +4909,36 @@ impl PyRandomGenerator {
                     1 => {
                         let v =
                             bound.call_method1(intern!(py, "view"), (cached_uint8_type(py)?,))?;
-                        shuffle_buffer_inplace::<u8>(&mut self.inner, py, &v)?
+                        shuffle_buffer_inplace::<u8>(&mut this.inner, py, &v)?
                     }
                     2 => {
                         let v =
                             bound.call_method1(intern!(py, "view"), (cached_uint16_type(py)?,))?;
-                        shuffle_buffer_inplace::<u16>(&mut self.inner, py, &v)?
+                        shuffle_buffer_inplace::<u16>(&mut this.inner, py, &v)?
                     }
                     4 => {
                         let v =
                             bound.call_method1(intern!(py, "view"), (cached_uint32_type(py)?,))?;
-                        shuffle_buffer_inplace::<u32>(&mut self.inner, py, &v)?
+                        shuffle_buffer_inplace::<u32>(&mut this.inner, py, &v)?
                     }
                     8 => {
                         let v =
                             bound.call_method1(intern!(py, "view"), (cached_uint64_type(py)?,))?;
-                        shuffle_buffer_inplace::<u64>(&mut self.inner, py, &v)?
+                        shuffle_buffer_inplace::<u64>(&mut this.inner, py, &v)?
                     }
                     _ => false,
                 };
                 if handled {
-                    self.after_draw(py);
+                    this.after_draw(py);
                     return Ok(py.None());
                 }
             }
         }
-        let order = self
+        let order = this
             .inner
             .permutation_range(shape[axis])
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         let order_i64: Vec<i64> = order.into_iter().map(|value| value as i64).collect();
         let index_array =
             build_numpy_array_from_storage(py, &[shape[axis]], ArrayStorage::I64(order_i64))?;
@@ -4743,19 +4946,27 @@ impl PyRandomGenerator {
         kwargs.set_item(intern!(py, "axis"), axis as isize)?;
         let shuffled =
             bound.call_method(intern!(py, "take"), (index_array.bind(py),), Some(&kwargs))?;
-        numpy.call_method1(intern!(py, "copyto"), (bound, &shuffled))?;
+        if is_exact_numpy_ndarray(py, bound)? {
+            numpy.call_method1(intern!(py, "copyto"), (bound, &shuffled))?;
+        } else {
+            // A subclass writes through its own __setitem__, as numpy's swap loop does: a
+            // MaskedArray's mask then moves with its data. copyto moved the data alone, leaving
+            // the mask on the wrong elements (numpy's test_shuffle_masked).
+            bound.set_item(pyo3::types::PyEllipsis::get(py), &shuffled)?;
+        }
         Ok(py.None())
     }
 
     #[pyo3(signature = (x, *, axis=None, out=None))]
     fn permuted(
-        &mut self,
+        &self,
         py: Python<'_>,
         x: Py<PyAny>,
         axis: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        self.before_draw(py)?;
+        let mut this = self.core.lock(py)?;
+        this.before_draw(py)?;
         let arr = cached_numpy_asarray(py)?.call1((x.bind(py),))?;
         let shape: Vec<usize> = arr.getattr(intern!(py, "shape"))?.extract()?;
         let axis_spec =
@@ -4767,18 +4978,10 @@ impl PyRandomGenerator {
             None => None,
             Some(axes) if axes.len() == 1 => {
                 let axis = axes[0];
-                Some(try_normalize_axis(axis, shape.len()).ok_or_else(|| {
-                    let axis_error = cached_numpy_exceptions(py)
-                        .and_then(|exceptions| exceptions.getattr(intern!(py, "AxisError")))
-                        .and_then(|axis_error| axis_error.call1((axis, shape.len())));
-                    match axis_error {
-                        Ok(error) => PyErr::from_value(error),
-                        Err(_) => PyValueError::new_err(format!(
-                            "axis {axis} is out of bounds for array of dimension {}",
-                            shape.len()
-                        )),
-                    }
-                })?)
+                Some(
+                    try_normalize_axis(axis, shape.len())
+                        .ok_or_else(|| numpy_axis_error(py, axis, shape.len()))?,
+                )
             }
             Some(_) => {
                 return Err(PyTypeError::new_err(
@@ -4794,11 +4997,11 @@ impl PyRandomGenerator {
         // indices are exact for any real array size (< 2^53 elements).
         let total: usize = shape.iter().product();
         let identity: Vec<f64> = (0..total).map(|index| index as f64).collect();
-        let permuted_index = self
+        let permuted_index = this
             .inner
             .permuted(&identity, &shape, axis)
             .map_err(map_random_error)?;
-        self.after_draw(py);
+        this.after_draw(py);
         let index_i64: Vec<i64> = permuted_index.iter().map(|&value| value as i64).collect();
         let index_array =
             build_numpy_array_from_storage(py, &[total], ArrayStorage::I64(index_i64))?;
@@ -4835,39 +5038,57 @@ impl PyRandomState {
     #[pyo3(signature = (seed=None))]
     fn new(py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<Self> {
         Ok(Self {
-            inner: seeded_core_random_state(py, seed)?,
+            inner: RngLock::new(seeded_core_random_state(py, seed)?),
         })
+    }
+
+    /// numpy's class attribute: the largest `lam` poisson accepts (its tests read it).
+    #[classattr]
+    fn _poisson_lam_max() -> f64 {
+        fnp_random::POISSON_LAM_MAX
+    }
+
+    // numpy: `RandomState(MT19937)` and f'{self} at 0x{id(self):X}' (the default PyO3 repr
+    // failed numpy's test_repr).
+    fn __str__(&self) -> &'static str {
+        "RandomState(MT19937)"
+    }
+
+    fn __repr__(slf: &Bound<'_, Self>) -> String {
+        format!("RandomState(MT19937) at 0x{:X}", slf.as_ptr() as usize)
     }
 
     #[getter]
     fn _bit_generator(&self, py: Python<'_>) -> PyResult<Py<PyMt19937>> {
+        let bit_generator = self.inner.lock(py)?.bit_generator().clone();
         Py::new(
             py,
             PyMt19937 {
-                inner: self.inner.bit_generator().clone(),
+                inner: bit_generator,
                 seed_sequence: None,
             },
         )
     }
 
     #[pyo3(signature = (seed=None))]
-    fn seed(&mut self, py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<()> {
-        self.inner = seeded_core_random_state(py, seed)?;
+    fn seed(&self, py: Python<'_>, seed: Option<Py<PyAny>>) -> PyResult<()> {
+        let seeded = seeded_core_random_state(py, seed)?;
+        *self.inner.lock(py)? = seeded;
         Ok(())
     }
 
     #[pyo3(signature = (legacy=true))]
     fn get_state(&self, py: Python<'_>, legacy: bool) -> PyResult<Py<PyAny>> {
-        build_random_state_state(py, &self.inner, legacy)
+        build_random_state_state(py, &*self.inner.lock(py)?, legacy)
     }
 
-    fn set_state(&mut self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
+    fn set_state(&self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
         let state = random_state_state_from_py(py, state.bind(py))?;
-        self.inner
+        let mut inner = self.inner.lock(py)?;
+        inner
             .set_state(&state.bit_generator_state)
             .map_err(map_bit_generator_error)?;
-        self.inner
-            .set_gaussian_cache(state.has_gaussian, state.gaussian);
+        inner.set_gaussian_cache(state.has_gaussian, state.gaussian);
         Ok(())
     }
 
@@ -4878,13 +5099,13 @@ impl PyRandomState {
         self.get_state(py, false)
     }
 
-    fn __setstate__(&mut self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
+    fn __setstate__(&self, py: Python<'_>, state: Py<PyAny>) -> PyResult<()> {
         self.set_state(py, state)
     }
 
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let state = slf.borrow().get_state(py, false)?;
+        let state = slf.get().get_state(py, false)?;
         Ok((slf.get_type(), (), state)
             .into_pyobject(py)?
             .into_any()
@@ -4892,43 +5113,43 @@ impl PyRandomState {
     }
 
     #[pyo3(signature = (size=None))]
-    fn random_sample(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn random_sample(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.random_sample(size)")?;
-        let (shape, values, scalar) = random_state_f64_parts(&mut self.inner, size)?;
+        let (shape, values, scalar) = random_state_f64_parts(&mut *self.inner.lock(py)?, size)?;
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (size=None))]
-    fn random(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn random(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         self.random_sample(py, size)
     }
 
     #[pyo3(signature = (*dims))]
-    fn rand(&mut self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+    fn rand(&self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let size = random_state_rand_size_from_dims(dims)?;
-        let (shape, values, scalar) = random_state_f64_parts(&mut self.inner, size)?;
+        let (shape, values, scalar) = random_state_f64_parts(&mut *self.inner.lock(py)?, size)?;
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (size=None))]
-    fn standard_normal(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn standard_normal(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.standard_normal(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.standard_normal(len);
+        let values = self.inner.lock(py)?.standard_normal(len);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (*dims))]
-    fn randn(&mut self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+    fn randn(&self, py: Python<'_>, dims: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         let size = random_state_rand_size_from_dims(dims)?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.standard_normal(len);
+        let values = self.inner.lock(py)?.standard_normal(len);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn normal(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
@@ -4942,6 +5163,7 @@ impl PyRandomState {
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
+            .lock(py)?
             .normal(loc, scale, len)
             .map_err(map_random_error)?;
         build_random_f64_parts(py, shape, values, scalar)
@@ -4949,7 +5171,7 @@ impl PyRandomState {
 
     #[pyo3(signature = (mean=RngArg::Native(0.0), sigma=RngArg::Native(1.0), size=None))]
     fn lognormal(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] mean: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] sigma: RngArg<f64>,
@@ -4966,34 +5188,35 @@ impl PyRandomState {
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
+            .lock(py)?
             .lognormal(mean, sigma, len)
             .map_err(map_random_error)?;
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (size=None))]
-    fn standard_cauchy(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn standard_cauchy(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.standard_cauchy(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.standard_cauchy(len);
+        let values = self.inner.lock(py)?.standard_cauchy(len);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (size=None))]
     fn standard_exponential(
-        &mut self,
+        &self,
         py: Python<'_>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let size = random_size_from_py(py, size, "RandomState.standard_exponential(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.standard_exponential(len);
+        let values = self.inner.lock(py)?.standard_exponential(len);
         build_random_f64_parts(py, shape, values, scalar)
     }
 
     #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
     fn exponential(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5009,6 +5232,7 @@ impl PyRandomState {
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
+            .lock(py)?
             .exponential(scale, len)
             .map_err(map_random_error)?;
         build_random_f64_parts(py, shape, values, scalar)
@@ -5016,7 +5240,7 @@ impl PyRandomState {
 
     #[pyo3(signature = (shape, size=None))]
     fn standard_gamma(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] shape: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5032,6 +5256,7 @@ impl PyRandomState {
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
+            .lock(py)?
             .standard_gamma(shape, len)
             .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
@@ -5039,7 +5264,7 @@ impl PyRandomState {
 
     #[pyo3(signature = (shape, scale=RngArg::Native(1.0), size=None))]
     fn gamma(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] shape: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
@@ -5059,6 +5284,7 @@ impl PyRandomState {
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
+            .lock(py)?
             .gamma(shape, scale, len)
             .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
@@ -5066,7 +5292,7 @@ impl PyRandomState {
 
     #[pyo3(signature = (a, b, size=None))]
     fn beta(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] b: RngArg<f64>,
@@ -5084,13 +5310,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.beta(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.beta(a, b, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .beta(a, b, len)
+            .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (df, size=None))]
     fn chisquare(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5104,13 +5334,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.chisquare(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.chisquare(df, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .chisquare(df, len)
+            .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (dfnum, dfden, size=None))]
     fn f(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] dfnum: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] dfden: RngArg<f64>,
@@ -5128,13 +5362,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.f(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.f(dfnum, dfden, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .f(dfnum, dfden, len)
+            .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (p, size=None))]
     fn geometric(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5148,13 +5386,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.geometric(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.geometric(p, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .geometric(p, len)
+            .map_err(map_random_error)?;
         build_random_u64_as_i64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (df, size=None))]
     fn standard_t(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5168,13 +5410,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.standard_t(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.standard_t(df, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .standard_t(df, len)
+            .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn weibull(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5188,13 +5434,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.weibull(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.weibull(a, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .weibull(a, len)
+            .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
     fn rayleigh(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5208,13 +5458,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.rayleigh(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.rayleigh(scale, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .rayleigh(scale, len)
+            .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn pareto(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5228,13 +5482,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.pareto(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.pareto(a, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .pareto(a, len)
+            .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (a, size=None))]
     fn power(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5248,13 +5506,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.power(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.power(a, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .power(a, len)
+            .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn laplace(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
@@ -5271,6 +5533,7 @@ impl PyRandomState {
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
+            .lock(py)?
             .laplace(loc, scale, len)
             .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
@@ -5278,7 +5541,7 @@ impl PyRandomState {
 
     #[pyo3(signature = (left, mode, right, size=None))]
     fn triangular(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] left: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] mode: RngArg<f64>,
@@ -5307,6 +5570,7 @@ impl PyRandomState {
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
+            .lock(py)?
             .triangular(left, mode, right, len)
             .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
@@ -5314,7 +5578,7 @@ impl PyRandomState {
 
     #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn logistic(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
@@ -5331,6 +5595,7 @@ impl PyRandomState {
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
+            .lock(py)?
             .logistic(loc, scale, len)
             .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
@@ -5338,7 +5603,7 @@ impl PyRandomState {
 
     #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn gumbel(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
@@ -5355,6 +5620,7 @@ impl PyRandomState {
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
             .inner
+            .lock(py)?
             .gumbel(loc, scale, len)
             .map_err(map_random_error)?;
         build_random_f64_parts(py, out_shape, values, scalar)
@@ -5362,7 +5628,7 @@ impl PyRandomState {
 
     #[pyo3(signature = (a, size=None))]
     fn zipf(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
         size: Option<Py<PyAny>>,
@@ -5376,13 +5642,17 @@ impl PyRandomState {
         }
         let size = random_size_from_py(py, size, "RandomState.zipf(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.zipf(a, len).map_err(map_random_error)?;
+        let values = self
+            .inner
+            .lock(py)?
+            .zipf(a, len)
+            .map_err(map_random_error)?;
         build_random_u64_as_i64_parts(py, out_shape, values, scalar)
     }
 
     #[pyo3(signature = (low=RngArg::Native(0.0), high=RngArg::Native(1.0), size=None))]
     fn uniform(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_f64_arg)] low: RngArg<f64>,
         #[pyo3(from_py_with = rng_f64_arg)] high: RngArg<f64>,
@@ -5397,19 +5667,32 @@ impl PyRandomState {
             return Err(PyOverflowError::new_err("Range exceeds valid bounds"));
         }
         let size = random_size_from_py(py, size, "RandomState.uniform(size)")?;
-        let (shape, values, scalar) = random_state_uniform_parts(&mut self.inner, low, high, size)?;
+        let (shape, values, scalar) =
+            random_state_uniform_parts(&mut *self.inner.lock(py)?, low, high, size)?;
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (low, high=None, size=None, dtype=None))]
+    #[pyo3(signature = (low, high=None, size=None, dtype=SuppliedArg::Omitted))]
     fn randint(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_i64_arg)] low: RngArg<i64>,
         high: Option<Py<PyAny>>,
         size: Option<Py<PyAny>>,
-        dtype: Option<Py<PyAny>>,
+        #[pyo3(from_py_with = parse_supplied_arg)] dtype: SuppliedArg,
     ) -> PyResult<Py<PyAny>> {
+        // numpy's default is `dtype=int`, the builtin type, and a scalar draw of that type is
+        // a Python int: `np.random.randint(10)` returned np.int64 here (not JSON-serializable,
+        // unlike numpy's). An explicit `dtype=None` is float64 to numpy, so it is numpy's.
+        let builtin_int_dtype = match &dtype {
+            SuppliedArg::Omitted => true,
+            SuppliedArg::Supplied(value) => value.bind(py).is(py.get_type::<PyInt>()),
+        };
+        let explicit_none = matches!(&dtype, SuppliedArg::Supplied(value) if value.is_none(py));
+        let dtype = match dtype {
+            SuppliedArg::Omitted => None,
+            SuppliedArg::Supplied(value) => Some(value),
+        };
         // Array bounds, and dtypes the native path does not cover (e.g. `bool`), go to
         // NumPy's legacy RandomState on this exact state (see `RngArg`).
         let high_arg = match high.as_ref().map(|h| h.bind(py)) {
@@ -5429,7 +5712,10 @@ impl PyRandomState {
         .ok()
         // Non-integer dtypes go to NumPy as well, for its own "Unsupported dtype ... for
         // randint" (this raised the Generator's "for integers" wording).
-        .filter(|dtype| matches!(dtype, DType::I32 | DType::U32 | DType::I64 | DType::U64));
+        .filter(|dtype| {
+            !explicit_none
+                && matches!(dtype, DType::I32 | DType::U32 | DType::I64 | DType::U64)
+        });
         let native_high = match &high_arg {
             Some(h) => h.native().map(Some),
             None => Some(None),
@@ -5449,27 +5735,42 @@ impl PyRandomState {
             Some(high) => (low, high),
             None => (0, low),
         };
-        validate_random_integer_dtype_bounds(low, high, dtype, false)?;
-        if high <= low {
-            return Err(PyValueError::new_err("high <= low"));
-        }
         let size = random_size_from_py(py, size, "RandomState.randint(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
+        // numpy returns a zero-size request before it checks the bounds at all
+        // (`randint(0, 0, size=(3, 0, 4))` is an empty array, not "high <= low").
+        if !scalar && len == 0 {
+            return build_random_integer_parts(py, shape, Vec::new(), scalar, dtype);
+        }
+        validate_random_integer_dtype_bounds(low, high, dtype, false)?;
+        if high <= low {
+            return Err(PyValueError::new_err(random_integer_bounds_message(
+                low, false,
+            )));
+        }
         let span = i128::from(high) - i128::from(low);
         let span =
             u64::try_from(span).map_err(|_| PyValueError::new_err("integer range is too large"))?;
         let mut values = Vec::with_capacity(len);
+        let mut inner = self.inner.lock(py)?;
         for _ in 0..len {
-            let offset = random_state_integer_offset(&mut self.inner, span)?;
+            let offset = random_state_integer_offset(&mut inner, span)?;
             // low + offset < high <= i64::MAX, so the unsigned add cannot overflow.
             values.push(low.wrapping_add_unsigned(offset));
+        }
+        drop(inner);
+        if scalar
+            && builtin_int_dtype
+            && let [value] = values.as_slice()
+        {
+            return pyo3::IntoPyObjectExt::into_py_any(*value, py);
         }
         build_random_integer_parts(py, shape, values, scalar, dtype)
     }
 
     #[pyo3(signature = (low, high=None, size=None))]
     fn random_integers(
-        &mut self,
+        &self,
         py: Python<'_>,
         #[pyo3(from_py_with = rng_i64_arg)] low: RngArg<i64>,
         high: Option<Py<PyAny>>,
@@ -5501,187 +5802,204 @@ impl PyRandomState {
         let size = random_size_from_py(py, size, "RandomState.random_integers(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let mut values = Vec::with_capacity(len);
+        let mut inner = self.inner.lock(py)?;
         for _ in 0..len {
-            values.push(random_state_integer_inclusive_sample(
-                &mut self.inner,
-                low,
-                high,
-            ));
+            values.push(random_state_integer_inclusive_sample(&mut inner, low, high));
         }
+        drop(inner);
         build_random_integer_parts(py, shape, values, scalar, DType::I64)
     }
 
     #[pyo3(signature = (size=None))]
-    fn tomaxint(&mut self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn tomaxint(&self, py: Python<'_>, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let size = random_state_tomaxint_size_from_py(py, size)?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let mut values = Vec::with_capacity(len);
+        let mut inner = self.inner.lock(py)?;
         for _ in 0..len {
             values.push(
-                i64::try_from(self.inner.next_u64() >> 1)
+                i64::try_from(inner.next_u64() >> 1)
                     .map_err(|_| PyValueError::new_err("tomaxint sample exceeds int64"))?,
             );
         }
+        drop(inner);
         build_random_integer_parts(py, shape, values, scalar, DType::I64)
     }
 
-    fn bytes(&mut self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
+    fn bytes(&self, py: Python<'_>, length: usize) -> PyResult<Py<PyAny>> {
         let mut out = Vec::with_capacity(length);
+        let mut inner = self.inner.lock(py)?;
         while out.len() < length {
-            out.extend_from_slice(&self.inner.next_u32().to_le_bytes());
+            out.extend_from_slice(&inner.next_u32().to_le_bytes());
         }
+        drop(inner);
         out.truncate(length);
         Ok(PyBytes::new(py, &out).into_any().unbind())
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn binomial(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "binomial", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "binomial", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn poisson(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "poisson", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "poisson", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn negative_binomial(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "negative_binomial", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "negative_binomial", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn hypergeometric(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "hypergeometric", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "hypergeometric", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn logseries(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "logseries", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "logseries", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn vonmises(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "vonmises", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "vonmises", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn wald(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "wald", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "wald", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn multinomial(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "multinomial", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "multinomial", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn dirichlet(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "dirichlet", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "dirichlet", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn multivariate_normal(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "multivariate_normal", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "multivariate_normal", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn noncentral_chisquare(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "noncentral_chisquare", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "noncentral_chisquare", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn noncentral_f(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "noncentral_f", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "noncentral_f", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn choice(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "choice", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "choice", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn shuffle(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "shuffle", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "shuffle", args, kwargs)
     }
 
     #[pyo3(signature = (*args, **kwargs))]
     fn permutation(
-        &mut self,
+        &self,
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        random_state_numpy_legacy_method(py, &mut self.inner, "permutation", args, kwargs)
+        let mut inner = self.inner.lock(py)?;
+        random_state_numpy_legacy_method(py, &mut inner, "permutation", args, kwargs)
     }
 }
 
@@ -6802,33 +7120,30 @@ fn random_state_state_from_parts(keys: Vec<u32>, pos: usize) -> PyResult<BitGene
     Ok(state)
 }
 
-fn random_state_state_from_legacy_tuple(
+/// numpy's legacy `set_state(sequence)`: a tuple OR list, indexed with bounds checking, so a
+/// short one is IndexError (`set_state(())` raised ValueError here; gh-25402, numpy's
+/// test_set_invalid_state) and entries 3 and 4 are read once it is longer than 3.
+fn random_state_state_from_legacy_sequence(
     py: Python<'_>,
-    tuple: &Bound<'_, PyTuple>,
+    state: &Bound<'_, PyAny>,
 ) -> PyResult<RandomStateState> {
-    if tuple.len() != 3 && tuple.len() != 5 {
+    if !(state.is_instance_of::<PyTuple>() || state.is_instance_of::<PyList>()) {
+        return Err(PyTypeError::new_err("state must be a dict or a tuple."));
+    }
+    if !state.get_item(0)?.eq("MT19937")? {
         return Err(PyValueError::new_err(
-            "state tuple must have length 3 or 5 for RandomState",
+            "set_state can only be used with legacy MT19937 state instances.",
         ));
     }
-    let algo_item = tuple.get_item(0)?;
-    let algorithm = algo_item.extract::<&str>()?;
-    if algorithm != "MT19937" {
-        return Err(PyValueError::new_err(
-            "set_state can only be used with legacy MT19937 state",
-        ));
-    }
-    let keys = random_state_state_keys_from_py(py, &tuple.get_item(1)?)?;
-    let pos = tuple.get_item(2)?.extract::<usize>()?;
-    let has_gaussian = if tuple.len() == 5 {
-        tuple.get_item(3)?.extract::<i64>()? != 0
+    let keys = random_state_state_keys_from_py(py, &state.get_item(1)?)?;
+    let pos = state.get_item(2)?.extract::<usize>()?;
+    let (has_gaussian, gaussian) = if state.len()? > 3 {
+        (
+            state.get_item(3)?.extract::<i64>()? != 0,
+            state.get_item(4)?.extract::<f64>()?,
+        )
     } else {
-        false
-    };
-    let gaussian = if tuple.len() == 5 {
-        tuple.get_item(4)?.extract::<f64>()?
-    } else {
-        0.0
+        (false, 0.0)
     };
     Ok(RandomStateState {
         bit_generator_state: random_state_state_from_parts(keys, pos)?,
@@ -6874,8 +7189,7 @@ fn random_state_state_from_py(
     if let Ok(dict) = value.cast::<PyDict>() {
         return random_state_state_from_dict(py, dict);
     }
-    let tuple = value.cast::<PyTuple>()?;
-    random_state_state_from_legacy_tuple(py, tuple)
+    random_state_state_from_legacy_sequence(py, value)
 }
 
 fn random_state_numpy_legacy_method(
@@ -6968,6 +7282,15 @@ fn rng_param_is_scalar_like(obj: &Bound<'_, PyAny>) -> bool {
     if obj.is_instance_of::<pyo3::types::PyFloat>() || obj.is_instance_of::<PyInt>() {
         return true;
     }
+    // An ndarray SUBCLASS is numpy's to convert: numpy calls its __int__/__float__, which
+    // may differ from (or raise where) the __index__ a native extract uses. Its own test,
+    // test_scalar_exception_propagation, passes a 0-d subclass whose __int__ raises.
+    let py = obj.py();
+    if cached_ndarray_type(py).is_ok_and(|ndarray| obj.is_instance(ndarray).unwrap_or(false))
+        && !is_exact_numpy_ndarray(py, obj).unwrap_or(false)
+    {
+        return false;
+    }
     obj.getattr(intern!(obj.py(), "ndim"))
         .and_then(|ndim| ndim.extract::<usize>())
         .is_ok_and(|ndim| ndim == 0)
@@ -7034,7 +7357,7 @@ fn text_arg(obj: &Bound<'_, PyAny>) -> PyResult<TextArg> {
     Ok(TextArg::Other(obj.clone().unbind()))
 }
 
-impl PyRandomGenerator {
+impl GeneratorCore {
     /// Run `numpy.random.Generator.<name>(**params, size=size)` on this generator's state.
     fn numpy_distribution(
         &mut self,
@@ -7067,7 +7390,7 @@ impl PyRandomState {
     /// Run `numpy.random.RandomState.<name>(**params, size=size)` on this state (legacy
     /// Gaussian cache included); see `RngArg`.
     fn numpy_distribution(
-        &mut self,
+        &self,
         py: Python<'_>,
         name: &str,
         params: &[(&str, Py<PyAny>)],
@@ -7082,7 +7405,7 @@ impl PyRandomState {
         }
         random_state_numpy_legacy_method(
             py,
-            &mut self.inner,
+            &mut *self.inner.lock(py)?,
             name,
             &PyTuple::empty(py),
             Some(&kwargs),
@@ -7329,6 +7652,18 @@ fn build_random_integer_parts(
 ) -> PyResult<Py<PyAny>> {
     let storage = random_integer_storage(values, dtype)?;
     build_random_integer_storage_parts(py, shape, storage, scalar)
+}
+
+/// numpy's `format_bounds_error` (`random/_bounded_integers.pyx`) for an empty integer range:
+/// when `low` is 0, the single-argument call, the message names `high` alone. `closed` is
+/// `endpoint=True`.
+fn random_integer_bounds_message(low: i64, closed: bool) -> &'static str {
+    match (low == 0, closed) {
+        (true, true) => "high < 0",
+        (true, false) => "high <= 0",
+        (false, true) => "low > high",
+        (false, false) => "low >= high",
+    }
 }
 
 fn validate_random_integer_dtype_bounds(
@@ -8553,6 +8888,23 @@ fn try_normalize_axis(axis: isize, ndim: usize) -> Option<usize> {
     };
     let normalized = usize::try_from(normalized).ok()?;
     (normalized < usize::try_from(ndim).ok()?).then_some(normalized)
+}
+
+/// numpy's own `AxisError(axis, ndim)` (a ValueError and IndexError subclass, and what
+/// `normalize_axis_index` raises), falling back to a plain ValueError with its message only if
+/// numpy's exception type cannot be reached.
+fn numpy_axis_error(py: Python<'_>, axis: isize, ndim: usize) -> PyErr {
+    cached_numpy_exceptions(py)
+        .and_then(|exceptions| exceptions.getattr(intern!(py, "AxisError")))
+        .and_then(|axis_error| axis_error.call1((axis, ndim)))
+        .map_or_else(
+            |_| {
+                PyValueError::new_err(format!(
+                    "axis {axis} is out of bounds for array of dimension {ndim}"
+                ))
+            },
+            PyErr::from_value,
+        )
 }
 
 /// Extract and validate axes for tensorsolve permutation.

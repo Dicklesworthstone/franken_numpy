@@ -1515,3 +1515,291 @@ result = (len(cases), bad)
         Ok(())
     });
 }
+
+/// Second round of numpy's own random suites through the drop-in harness (bead rc0923 .8).
+/// Every cell compares fnp's full outcome with numpy's (MaskedArray data and mask; object
+/// arrays by value). 37 of these 46 cells failed on 3d00b659. The failures included:
+/// - `choice([None], size=())` returned the bare element instead of a 0-d array;
+/// - `shuffle` of a MaskedArray left its mask behind;
+/// - `randint(10)` returned np.int64 where numpy returns a Python int;
+/// - `multivariate_hypergeometric(method='marginals')` left numpy's stream after the first
+///   variate;
+/// - the shuffle/permutation axis errors were plain ValueErrors instead of AxisError;
+/// - `set_state(())` raised ValueError instead of IndexError.
+#[test]
+fn generator_and_random_state_round_two_surfaces_match_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+import warnings
+
+def outcome(call):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            value = call()
+            if isinstance(value, np.ma.MaskedArray):
+                got = ("masked", value.dtype.str, value.data.tobytes(), np.ma.getmaskarray(value).tobytes())
+            elif isinstance(value, np.ndarray) and value.dtype == object:
+                got = ("ok", "O", value.shape, repr(value.tolist()))
+            elif isinstance(value, np.ndarray):
+                got = ("ok", value.dtype.str, value.shape, value.tobytes())
+            elif isinstance(value, np.generic):
+                got = ("ok", value.dtype.str, repr(value))
+            else:
+                got = ("ok", type(value).__name__, repr(value))
+        except Exception as ex:
+            got = (type(ex).__name__, str(ex))
+    return got + (sorted((w.category.__name__, str(w.message)) for w in caught),)
+
+def address_form(text):
+    # `<name>(<bitgen>) at 0x<HEX>`: compare everything but the address digits themselves.
+    head, _, address = text.partition(" at ")
+    return (head, address[:2], address[2:] == address[2:].upper() and len(address) > 2)
+
+def shuffled(m, x, **kw):
+    m.random.default_rng(7).shuffle(x, **kw)
+    return x
+
+def masked(m):
+    a = np.ma.masked_values(np.reshape(range(20), (5, 4)) % 3 - 1, -1)
+    m.random.default_rng(4).shuffle(a)
+    return a
+
+def read_only():
+    a = np.arange(5)
+    a.flags.writeable = False
+    return a
+
+class ThrowingInteger(np.ndarray):
+    def __int__(self):
+        raise TypeError("no int")
+
+obj_array = np.empty(1, dtype=object)
+obj_array[0] = np.array([1, 2])
+x32 = np.array([9.9e-01, 9.9e-01] + [1.0e-09] * 8, dtype=np.float32)
+cases = {
+    # choice: numpy's size=None / size=() tails.
+    "choice int size=()": lambda m: m.random.default_rng(3).choice(5, ()),
+    "choice array size=()": lambda m: m.random.default_rng(3).choice(np.arange(5) * 10, ()),
+    "choice object size=()": lambda m: m.random.default_rng(3).choice([None], ()),
+    "choice object scalar": lambda m: m.random.default_rng(3).choice([None]),
+    "choice object array element": lambda m: m.random.default_rng(3).choice(obj_array),
+    "choice p no-replace scalar": lambda m: m.random.default_rng(3).choice(2, replace=False, p=[0.1, 0.9]),
+    "choice 2-D size=()": lambda m: m.random.default_rng(3).choice(np.arange(6).reshape(3, 2), ()),
+    # shuffle / permutation: subclass writes, AxisError, read-only, numpy's int rule.
+    "shuffle masked": lambda m: masked(m),
+    "shuffle axis error": lambda m: shuffled(m, np.arange(10), axis=1),
+    "shuffle read-only": lambda m: shuffled(m, read_only()),
+    "shuffle 0-d": lambda m: shuffled(m, np.array(3)),
+    "permutation str": lambda m: m.random.default_rng(3).permutation("abcd"),
+    "permutation negative int": lambda m: m.random.default_rng(3).permutation(-3),
+    "permutation 0-d array": lambda m: m.random.default_rng(3).permutation(np.array(5)),
+    "permutation axis error": lambda m: m.random.default_rng(3).permutation(np.arange(9).reshape(3, 3), 3),
+    "permutation np.int8": lambda m: m.random.default_rng(3).permutation(np.int8(6)),
+    # integers / randint: zero size first, numpy's bounds messages, Python ints for dtype=int.
+    "randint default scalar type": lambda m: m.random.RandomState(1).randint(10),
+    "randint dtype=int": lambda m: m.random.RandomState(1).randint(0, 10, dtype=int),
+    "randint dtype=None": lambda m: m.random.RandomState(1).randint(0, 10, dtype=None),
+    "randint zero size": lambda m: m.random.RandomState(1).randint(0, 0, size=(3, 0, 4)),
+    "randint low >= high": lambda m: m.random.RandomState(1).randint(5, 3),
+    "randint high <= 0": lambda m: m.random.RandomState(1).randint(0),
+    "integers high <= 0": lambda m: m.random.default_rng(1).integers(-2),
+    "integers high < 0": lambda m: m.random.default_rng(1).integers(-2, endpoint=True),
+    "integers low >= high": lambda m: m.random.default_rng(1).integers(5, 3),
+    "integers low > high": lambda m: m.random.default_rng(1).integers(5, 3, endpoint=True),
+    "integers zero size bad bounds": lambda m: m.random.default_rng(1).integers(5, 3, size=0),
+    "integers dtype=int": lambda m: m.random.default_rng(1).integers(0, 10, dtype=int),
+    "integers dtype=int endpoint": lambda m: m.random.default_rng(1).integers(-2**63, 2**63 - 1, dtype=int, endpoint=True),
+    # multivariate_hypergeometric marginals: numpy's loop (remainder to the last color, complement).
+    "mvhg marginals": lambda m: m.random.Generator(m.random.MT19937(8675309)).multivariate_hypergeometric([20, 30, 50], 50, size=5, method="marginals"),
+    "mvhg marginals > half": lambda m: m.random.Generator(m.random.MT19937(8675309)).multivariate_hypergeometric([20, 30, 50], 60, size=3, method="marginals"),
+    # multinomial: Kahan sum and numpy's float32 message.
+    "multinomial float32 pvals": lambda m: m.random.Generator(m.random.MT19937(1432985819)).multinomial(1, x32 / x32.sum()),
+    # constructors, attributes, reprs, state.
+    "Generator(class)": lambda m: m.random.Generator(m.random.MT19937),
+    "Generator(int)": lambda m: m.random.Generator(5),
+    "Generator _poisson_lam_max": lambda m: m.random.default_rng(1)._poisson_lam_max,
+    "RandomState _poisson_lam_max": lambda m: m.random.RandomState(1)._poisson_lam_max,
+    "Generator repr": lambda m: address_form(repr(m.random.Generator(m.random.PCG64(1)))),
+    "Generator str": lambda m: str(m.random.Generator(m.random.PCG64(1))),
+    "RandomState repr": lambda m: address_form(repr(m.random.RandomState(1))),
+    "RandomState str": lambda m: str(m.random.RandomState(1)),
+    "set_state ()": lambda m: m.random.RandomState(1).set_state(()),
+    "set_state short": lambda m: m.random.RandomState(1).set_state(("MT19937",)),
+    "set_state list": lambda m: (lambda r: (r.set_state(list(np.random.RandomState(2).get_state())), r.random_sample(3))[1])(m.random.RandomState(1)),
+    "set_state int": lambda m: m.random.RandomState(1).set_state(5),
+    "set_state bad name": lambda m: m.random.RandomState(1).set_state(("PCG64", np.zeros(624, dtype=np.uint32), 0)),
+    "hypergeometric throwing int": lambda m: m.random.default_rng(1).hypergeometric(np.array(1).view(ThrowingInteger), 1, 1),
+}
+bad = []
+for name, case in cases.items():
+    ours, theirs = outcome(lambda: case(fnp)), outcome(lambda: case(np))
+    if ours != theirs:
+        bad.append(f"{name}: fnp={str(ours)[:160]} numpy={str(theirs)[:160]}")
+result = (len(cases), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (cells, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(cells, 46, "cell table drifted");
+        assert!(
+            bad.is_empty(),
+            "random surfaces diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
+
+/// The RNG objects under threads (bead rc0923 .8), as numpy's TestThread and ordinary
+/// thread-pool code use them.
+/// - Generator, bit generators and SeedSequence were `unsendable`, so a Generator built on
+///   one thread and used on another raised PanicException.
+/// - A RandomState or Generator SHARED by threads raised "RuntimeError: Already borrowed"
+///   whenever one call released the GIL mid-method. That was 287 of 320 module-level
+///   `np.random.*` calls from 8 threads.
+/// - A `frompyfunc` object used from another thread panicked.
+///
+/// numpy serializes each object on its lock, so the shared RandomState must produce exactly
+/// the serial stream. The re-entrant case has no numpy oracle: numpy's Lock deadlocks there,
+/// and fnp must raise instead of hanging. The pre-fix build failed 9 of these checks.
+#[test]
+fn rng_objects_are_usable_and_serialized_across_threads() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
+bad = []
+
+def on_threads(count, work):
+    """Run work(i) on `count` threads; collect every exception, BaseException included."""
+    errors = []
+    def run(i):
+        try:
+            work(i)
+        except BaseException as ex:
+            errors.append(f"{type(ex).__name__}: {str(ex)[:80]}")
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return errors
+
+# 1. numpy's TestThread shape: one Generator per thread, all built on this thread.
+for name, draw in (
+    ("normal", lambda g: g.normal(size=20000)),
+    ("exponential", lambda g: g.exponential(scale=np.ones((50, 400)))),
+    ("multinomial", lambda g: g.multinomial(10, [1 / 6.0] * 6, size=5000)),
+):
+    outputs = {}
+    for label, m in (("fnp", fnp), ("numpy", np)):
+        gens = [m.random.Generator(m.random.MT19937(seed)) for seed in range(4)]
+        out = [None] * 4
+        def work(i, gens=gens, out=out):
+            out[i] = draw(gens[i])
+        errors = on_threads(4, work)
+        if errors:
+            bad.append(f"per-thread {name} ({label}): {errors[:2]}")
+        outputs[label] = out
+    if not all(o is not None and t is not None and np.array_equal(o, t)
+               for o, t in zip(outputs["fnp"], outputs["numpy"])):
+        bad.append(f"per-thread {name}: values differ from numpy")
+
+# 2. ONE RandomState shared by 8 threads. numpy serializes every call on its lock, so none
+#    fails, and with fixed-consumption draws the final state and the multiset of values are
+#    exactly those of the same calls made serially.
+calls, per_call = 8 * 25, 1000
+serial = np.random.RandomState(2024)
+expected = np.sort(np.concatenate([serial.random_sample(per_call) for _ in range(calls)]))
+shared = fnp.random.RandomState(2024)
+chunks = []
+chunks_lock = threading.Lock()
+def work(i):
+    for _ in range(25):
+        chunk = shared.random_sample(per_call)
+        with chunks_lock:
+            chunks.append(chunk)
+errors = on_threads(8, work)
+if errors:
+    bad.append(f"shared RandomState: {len(errors)} failures, e.g. {errors[:2]}")
+elif not np.array_equal(np.sort(np.concatenate(chunks)), expected):
+    bad.append("shared RandomState: the draws are not the serial stream")
+else:
+    ours, theirs = shared.get_state(), serial.get_state()
+    if not (np.array_equal(ours[1], theirs[1]) and ours[2] == theirs[2]):
+        bad.append("shared RandomState: final state differs from the serial one")
+
+# 3. The module-level legacy functions (all bound to one RandomState) and a shared Generator,
+#    mixing native and numpy-delegated methods: no call may fail.
+rng = fnp.random.default_rng(7)
+mixed = [
+    lambda: fnp.random.rand(20000),
+    lambda: fnp.random.normal(size=20000),
+    lambda: fnp.random.randint(0, 100, 20000),
+    lambda: fnp.random.gamma(2.0, size=20000),
+    lambda: fnp.random.shuffle(np.arange(50000)),
+    lambda: rng.normal(size=20000),
+    lambda: rng.integers(0, 100, 20000),
+    lambda: rng.standard_gamma(2.0, 20000, dtype=np.float32),
+    lambda: rng.choice(1000, 2000, p=np.full(1000, 1e-3)),
+    lambda: rng.permutation(50000),
+]
+def work(i):
+    for j in range(20):
+        mixed[(i + j) % len(mixed)]()
+errors = on_threads(8, work)
+if errors:
+    bad.append(f"module functions / shared Generator: {len(errors)} failures, e.g. {errors[:2]}")
+
+# 4. A frompyfunc object built here and called from other threads.
+add_one = fnp.frompyfunc(lambda x: x + 1, 1, 1)
+out = [None] * 4
+def work(i):
+    out[i] = add_one(np.arange(100) + i)
+errors = on_threads(4, work)
+if errors or any(o is None or o.tolist() != list(range(1 + i, 101 + i)) for i, o in enumerate(out)):
+    bad.append(f"frompyfunc across threads: {errors[:2]}")
+
+# 5. A call back into the RandomState from inside one of its own methods raises instead of
+#    hanging (numpy's non-reentrant Lock would deadlock here, so there is no numpy oracle).
+class Hostile(list):
+    def __setitem__(self, index, value):
+        reentrant.random_sample()
+        super().__setitem__(index, value)
+reentrant = fnp.random.RandomState(1)
+try:
+    reentrant.shuffle(Hostile(range(5)))
+    bad.append("re-entrant call did not raise")
+except RuntimeError as ex:
+    if "already in use by the calling thread" not in str(ex):
+        bad.append(f"re-entrant call raised the wrong RuntimeError: {ex}")
+reentrant.random_sample()  # the lock was released
+result = bad
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let bad: Vec<String> = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert!(
+            bad.is_empty(),
+            "RNG objects misbehave across threads: {bad:#?}"
+        );
+        Ok(())
+    });
+}

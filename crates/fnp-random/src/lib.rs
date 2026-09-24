@@ -7296,25 +7296,43 @@ impl Generator {
         if nsample > total {
             return Err(RandomError::InvalidParameter);
         }
+        // numpy's random_multivariate_hypergeometric_marginals, step for step: sample the
+        // smaller side (`nsample > total / 2` draws the complement), draw no color after the
+        // sample is exhausted and never the LAST color (it takes what is left). Drawing the last
+        // color anyway, and every color of a big sample, consumed extra hypergeometric draws,
+        // so every variate after the first left numpy's stream (numpy's test_repeatability2).
+        let more_than_half = nsample > total / 2;
+        let nsample = if more_than_half {
+            total - nsample
+        } else {
+            nsample
+        };
         Ok((0..size)
             .map(|_| {
+                let mut result = vec![0_u64; colors.len()];
+                let mut num_to_sample = nsample;
                 let mut remaining = total;
-                let mut draws_left = nsample;
-                let mut result = Vec::with_capacity(colors.len());
-                for &color_count in colors {
-                    if remaining == 0 || draws_left == 0 {
-                        result.push(0);
-                        continue;
+                let mut j = 0;
+                while num_to_sample > 0 && j + 1 < colors.len() {
+                    remaining -= colors[j];
+                    let drawn = self.sample_hypergeometric(
+                        colors[j] as i64,
+                        remaining as i64,
+                        num_to_sample as i64,
+                    ) as u64;
+                    result[j] = drawn;
+                    num_to_sample -= drawn;
+                    j += 1;
+                }
+                if num_to_sample > 0
+                    && let Some(last) = result.last_mut()
+                {
+                    *last = num_to_sample;
+                }
+                if more_than_half {
+                    for (variate, &color) in result.iter_mut().zip(colors) {
+                        *variate = color - *variate;
                     }
-                    // Draw from hypergeometric(color_count, remaining - color_count, draws_left)
-                    let ngood = color_count;
-                    let nbad = remaining - color_count;
-                    let n = draws_left;
-                    let drawn =
-                        self.sample_hypergeometric(ngood as i64, nbad as i64, n as i64) as u64;
-                    result.push(drawn);
-                    remaining -= color_count;
-                    draws_left -= drawn;
                 }
                 result
             })
@@ -15517,6 +15535,42 @@ for child in rng.spawn(n_children):
         assert!(rng.multivariate_hypergeometric(&[5, 10], 20, 1).is_err());
         // valid parameters should succeed
         assert!(rng.multivariate_hypergeometric(&[100, 200], 50, 1).is_ok());
+    }
+
+    #[test]
+    fn multivariate_hypergeometric_marginals_matches_numpy_stream() {
+        // numpy's test_repeatability2: Generator(MT19937(8675309)).multivariate_hypergeometric(
+        // [20, 30, 50], 50, size=5, method='marginals'). The last color takes the remainder
+        // without a draw; this kernel drew it too and left numpy's stream from the second row.
+        let sequence = SeedSequence::new(&[8_675_309]).expect("seed sequence");
+        let mut rng =
+            Generator::from_seed_sequence(BitGeneratorKind::Mt19937, &sequence).expect("generator");
+        let sample = rng
+            .multivariate_hypergeometric(&[20, 30, 50], 50, 5)
+            .expect("marginals");
+        assert_eq!(
+            sample,
+            vec![
+                vec![9, 17, 24],
+                vec![7, 13, 30],
+                vec![9, 15, 26],
+                vec![9, 17, 24],
+                vec![12, 14, 24],
+            ]
+        );
+
+        // More than half the population: numpy samples the 40 left behind and complements.
+        // Values and the stream position after them are numpy 2.3.5 / 2.4.3's.
+        let mut rng =
+            Generator::from_seed_sequence(BitGeneratorKind::Mt19937, &sequence).expect("generator");
+        let sample = rng
+            .multivariate_hypergeometric(&[20, 30, 50], 60, 3)
+            .expect("marginals");
+        assert_eq!(
+            sample,
+            vec![vec![13, 19, 28], vec![9, 20, 31], vec![12, 19, 29]]
+        );
+        assert_eq!(rng.integers(0, 1000, 3).expect("integers"), [864, 119, 289]);
     }
 
     #[test]
