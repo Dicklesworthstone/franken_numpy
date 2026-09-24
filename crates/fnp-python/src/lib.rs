@@ -9465,6 +9465,31 @@ fn numpy_explog_matches_libm() -> bool {
 // Cached per NumPy function name; the probe runs at most once per name per
 // process. Adding an op is one call site, which is what the AVX-512
 // transcendental sibling (deadlock-audit-fs5pu) needs.
+/// Run fnp's OWN internal NumPy call under `numpy.errstate(all="ignore")`.
+///
+/// The byte-equality probes below evaluate NumPy on `f64::MAX`, subnormals and `1e300` squared,
+/// and they run lazily inside the caller's FIRST call of an op - so under the CALLER'S errstate.
+/// Measured on the drop-in probe: the first `fnp.sin([0.0])` of a process warned "underflow
+/// encountered in sin" and the first `fnp.sinh([0.0])` warned overflow AND underflow, none of it
+/// the caller's; under `errstate(all='raise')` or `-W error` the probe's own event failed the
+/// probe, whose `unwrap_or(false)` then cached "not byte-exact" and disabled that op's native
+/// route for the rest of the process. The probe's events are not the caller's to see.
+fn with_numpy_errstate_ignored<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    call: impl FnOnce() -> PyResult<T>,
+) -> PyResult<T> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(intern!(py, "all"), intern!(py, "ignore"))?;
+    let guard = numpy
+        .getattr(intern!(py, "errstate"))?
+        .call((), Some(&kwargs))?;
+    guard.call_method0(intern!(py, "__enter__"))?;
+    let result = call();
+    guard.call_method1(intern!(py, "__exit__"), (py.None(), py.None(), py.None()))?;
+    result
+}
+
 fn numpy_f64_unary_matches_libm(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -9546,7 +9571,7 @@ fn numpy_f64_unary_matches_libm(
             .zip(theirs.iter())
             .all(|(&x, &t)| native(x).to_bits() == t.to_bits()))
     };
-    let matches = probe().unwrap_or(false);
+    let matches = with_numpy_errstate_ignored(py, numpy, probe).unwrap_or(false);
     cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -9756,7 +9781,7 @@ fn numpy_f64_binary_matches_libm(
             .zip(theirs.iter())
             .all(|(&(x, y), &t)| (probed.native)(x, y).to_bits() == t.to_bits()))
     };
-    let matches = probe().unwrap_or(false);
+    let matches = with_numpy_errstate_ignored(py, numpy, probe).unwrap_or(false);
     cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

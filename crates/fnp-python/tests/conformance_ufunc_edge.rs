@@ -2948,3 +2948,57 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// fnp's lazy byte-equality probes (numpy vs libm, run inside an op's FIRST call) evaluate numpy
+/// on f64::MAX, subnormals and 1e300**2. They ran under the CALLER'S errstate, so the first
+/// `fnp.sin([0.0])` of a process warned "underflow encountered in sin", the first
+/// `fnp.sinh([0.0])` warned overflow and underflow, an `errstate(all='call')` handler received
+/// events that were not the caller's, and under `raise` the failed probe silently disabled the
+/// op's native route. This runs every probed op's FIRST call, in this fresh process, on a benign
+/// in-domain operand under `call` and `raise`: fnp must report exactly what numpy reports
+/// (nothing), then still agree with numpy on the values.
+#[test]
+fn first_call_host_probes_do_not_leak_fp_events_into_the_callers_errstate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+seen = []
+def handler(kind, flag):
+    seen.append(kind)
+def first_call(m, name, args):
+    seen.clear()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with np.errstate(all="call", call=handler):
+            r1 = getattr(m, name)(*args)
+        with np.errstate(all="raise"):
+            try:
+                r2 = getattr(m, name)(*args)
+            except FloatingPointError as exc:
+                r2 = "raised " + str(exc)
+    return list(seen), [str(w.message) for w in caught], np.asarray(r1).tolist(), np.asarray(r2).tolist() if not isinstance(r2, str) else r2
+x = np.array([0.0, 0.5])
+unary = ["sin", "cos", "tan", "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh", "arcsinh",
+         "arctanh", "cbrt", "expm1", "log1p", "exp", "exp2", "log", "log2", "log10"]
+bad = []
+for name in unary:
+    if first_call(fnp, name, (x,)) != first_call(np, name, (x,)):
+        bad.append(name)
+for name in ["power", "arctan2"]:
+    operands = (np.array([0.5, 2.0]), np.array([2.0, 0.5]))
+    if first_call(fnp, name, operands) != first_call(np, name, operands):
+        bad.append(name)
+if first_call(fnp, "arccosh", (np.array([1.0, 1.5]),)) != first_call(np, "arccosh", (np.array([1.0, 1.5]),)):
+    bad.append("arccosh")
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "a first call must not surface fnp's own probe events: {result}"
+    );
+    Ok(())
+}
