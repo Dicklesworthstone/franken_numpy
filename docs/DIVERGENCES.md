@@ -15,15 +15,14 @@ defect, or any `ExpectedFail("...")` — must cite a row id below, and every row
 `crates/fnp-conformance/src/divergence_ledger.rs` enforces both; it runs in CI G2, and
 `run_divergence_ledger` prints the same audit.
 
-**Active rows: 4** (as of 2026-09-24): two intentional (one Hardened-only; one an FMA rounding
-contract), one parity debt (host-dependent last-bit sums), one upstream defect fnp declines to
-copy. The resolution notes below the table record former entries and why they closed.
+**Active rows: 3** (as of 2026-09-24): two intentional (one Hardened-only; one an FMA rounding
+contract) and one upstream defect fnp declines to copy. The resolution notes below the table
+record former entries and why they closed.
 
 | ID | Disposition | Surface | Affected behavior | NumPy scope | Strict behavior | Hardened behavior | Follow-up | Evidence |
 |---|---|---|---|---|---|---|---|---|
 | DIV-HARDENED-LINALG-NONFINITE | intentional | fnp_python.linalg svd, qr, cholesky, lstsq, solve, inv, det, slogdet, eigh, eigvals, eigvalsh, eig, pinv, matrix_rank (and their top-level aliases) | an operand containing inf or NaN | NumPy answers inconsistently: svd / pinv raise LinAlgError("SVD did not converge"), inv / solve / det / slogdet return NaN-filled results with a RuntimeWarning, an inf-only matrix can yield a finite pinv | NumPy-identical: no check is made, NumPy's outcome is returned | raises LinAlgError("OP: array must not contain infs or NaNs (hardened mode)") before any work and records a `linalg_nonfinite_operand` / `full_validate` runtime decision | deadlock-audit-rc0923-epic-71qy3.10 (further hardened guards) | crates/fnp-python/tests/conformance_runtime_mode.rs::hardened_mode_rejects_nonfinite_linalg_operands_strict_matches_numpy |
 | DIV-COV-GRAM-NO-FMA | intentional | fnp_python cov / corrcoef native Gram path (contiguous float64) | entries can differ from NumPy in the last bit (bounded relative deviation 1e-12; observed ~1e-16) | NumPy computes `dot(X, X.T)` through BLAS dgemm, whose micro-kernels are FMA-contracted and chosen by shape, so NumPy's own bytes vary with shape and BLAS build | fnp accumulates without FMA, the workspace-wide bit-reproducibility rule; results are equal within 1e-12 relative | same as strict | none; reopen if NumPy's cov stops depending on the BLAS kernel | crates/fnp-python/tests/conformance_statistics.rs::cov_native_fast_path_matches_numpy_across_shape_ddof_bias, crates/fnp-python/tests/conformance_statistics.rs::cov_corrcoef_long_observation_ufunc_gate_matches_numpy_within_fma_bound |
-| PD-F64-FLAT-SUM-ISA | parity_debt | fnp_python nansum / var / std with axis=None over contiguous float64 | on some hosts the result differs from NumPy in the last bit: nansum from n=131072, var/std from ~2M elements and on every N-D flattened input | NumPy's pairwise-sum leaf keeps a number of partial accumulators set by the SIMD width it dispatches to (AVX-512 vs AVX2), so its bits depend on the host | fnp's base_sum_simd reproduces one leaf layout: bit-identical where NumPy dispatches that layout, last-bit different elsewhere (all 12 probe rows pass on a non-AVX-512 host with numpy 2.4.3, 2026-09-24) | same as strict | deadlock-audit-rc0923-epic-71qy3.29 | crates/fnp-python/tests/conformance_var.rs::f64_var_flat_byte_parity_probe_vs_numpy (`#[ignore]`d until .29 lands) |
 | UD-F16-SORT-X86SIMDSORT | upstream_drift | fnp_python sort / unique on float16 | fnp returns ascending output where NumPy does not | numpy 2.3.x on AVX-512 hosts: the x86-simd-sort fp16 qsort emits non-ascending output (observed on hz2; fleet workers on numpy 2.4.3 are clean) | fnp output is correctly sorted and byte-equal to NumPy's own float32-widened sort; on hosts without the defect it is byte-equal to NumPy directly | same as strict | deadlock-audit-f7qjf (closed: the affected version left the fleet; the upstream report needs an external account and is not filed) | crates/fnp-python/tests/conformance_sorting.rs::f16_sort_flat_widening_matches_numpy, crates/fnp-python/tests/conformance_unravel_unique.rs::f16_unique_presence_table_bit_exact |
 
 Merged ledger note (2026-09-24, bead deadlock-audit-rc0923-epic-71qy3.16):
@@ -49,6 +48,17 @@ None is an active NumPy divergence:
   re-enabled and pass.
 - DISC-011 (signed-zero accumulation in dot/inner/vdot/matmul/tensordot): all five of its
   `#[ignore]`d tests pass at the Python surface and were re-enabled in this bead.
+
+Resolved PD-F64-FLAT-SUM-ISA (2026-09-24, bead deadlock-audit-rc0923-epic-71qy3.29): the
+host-dependent last-bit sums were a NumPy VERSION effect, not a SIMD-width one. NumPy's pairwise
+leaf is fixed C code (eight accumulators, `loops_utils.h.src`); what changed is that NumPy before
+2.3 sums a contiguous run in 8192-element buffer chunks and 2.3+ sums it as one tree. On one host
+numpy 2.2.6 and 1.26.4 differ from 2.3.5/2.4.3/2.4.4 from n = 8193 on. Every native route that
+evaluates the tree now consults the runtime witness `float_pairwise_tree_matches_numpy` (only flat
+sum/mean did before) and declines to NumPy where it fails, and the nan-reductions' sequential
+cold path now delegates too. The probe is un-ignored as
+`crates/fnp-python/tests/conformance_var.rs::pairwise_tree_reductions_are_bit_identical_to_the_installed_numpy`
+(99 cells: 0 mismatches under numpy 2.4.3 and 2.2.6; 40 under 2.2.6 before the fix).
 
 Resolved no-seed RNG note: `franken_numpy-iqo31` changed `SeedMaterial::None`
 and no-seed `default_rng()` from the fixed `DEFAULT_RNG_SEED` stream to a fresh

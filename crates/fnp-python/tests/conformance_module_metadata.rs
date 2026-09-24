@@ -231,6 +231,83 @@ print(len(np.__all__) - len(pristine))
     Ok(())
 }
 
+/// The test above watches numpy's TOP-LEVEL `__all__` and five submodules by identity. The same
+/// aliasing lived on in the overlay helper `copy_numpy_module_attrs` (strings, char) and in seven
+/// `setattr("__all__", all_names.clone())` sites (`clone()` on a `Bound` copies the reference, not
+/// the list): under numpy 2.4.3 importing fnp_python grew numpy.strings.__all__ 46 -> 80,
+/// numpy.char 53 -> 69, numpy.testing 50 -> 93 and numpy.lib 12 -> 21 (duplicates plus `test`),
+/// and under numpy 2.2.6 the appended `slice` made numpy's own `from numpy.strings import *` raise,
+/// so `import fnp_python` itself failed. Compared here as exact LISTS (order and duplicates count)
+/// against an interpreter that never loaded fnp, for every public numpy submodule, plus a
+/// star-import of each and an identity check on every fnp overlay.
+#[test]
+fn importing_fnp_leaves_every_numpy_submodule_all_unchanged() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import importlib, json, subprocess, sys
+
+names = ["char", "strings", "testing", "lib", "dtypes", "exceptions", "rec", "emath",
+         "matrixlib", "polynomial", "random", "linalg", "fft", "ma", "ctypeslib",
+         "lib.recfunctions", "lib.scimath", "lib.array_utils", "lib.stride_tricks", "lib.mixins"]
+probe = (
+    "import importlib, json\n"
+    f"names = {names!r}\n"
+    "out = {}\n"
+    "for n in names:\n"
+    "    try:\n"
+    "        out[n] = list(getattr(importlib.import_module('numpy.' + n), '__all__', []))\n"
+    "    except Exception:\n"
+    "        out[n] = None\n"
+    "print(json.dumps(out))\n"
+)
+pristine = json.loads(subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                                     text=True, check=True).stdout)
+changed = []
+star = []
+checked = 0
+for n in names:
+    if pristine[n] is None:
+        continue
+    module = importlib.import_module("numpy." + n)
+    checked += 1
+    now = list(getattr(module, "__all__", []))
+    if now != pristine[n]:
+        changed.append(f"{n}: {len(pristine[n])} -> {len(now)}")
+    try:
+        exec(f"from numpy.{n} import *", {})
+    except Exception as exc:
+        star.append(f"{n}: {type(exc).__name__}")
+# fnp overlays (their own module objects) must hold their own list. Passthroughs (fnp.rec IS
+# numpy.rec) share it by identity of the module, which is not aliasing.
+shared = []
+for n in names:
+    if "." in n or not hasattr(fnp, n) or pristine[n] is None:
+        continue
+    theirs = importlib.import_module("numpy." + n)
+    overlay = getattr(fnp, n)
+    if overlay is theirs:
+        continue
+    ours = getattr(overlay, "__all__", None)
+    if ours is not None and ours is getattr(theirs, "__all__", None):
+        shared.append(n)
+print(checked, changed, star, shared)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (checked, rest) = result.split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        checked.parse::<usize>().unwrap_or(0) >= 15,
+        "too few numpy submodules resolved to make this check meaningful: {result}"
+    );
+    assert_eq!(
+        rest, "[] [] []",
+        "importing fnp_python changed a numpy submodule's __all__ (changed, star-import \
+         failures, fnp overlays sharing numpy's list): {result}"
+    );
+    Ok(())
+}
+
 /// The converse of the test above: every name fnp's OWN submodule `__all__`
 /// advertises must actually resolve on that submodule.
 ///

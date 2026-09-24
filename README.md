@@ -701,7 +701,7 @@ The `fnp_python` PyO3 extension is the parity-oracle surface. The heavy lifting 
 **Three architectural moves drive the 100% surface coverage:**
 
 1. **Engine vs surface separation.** Performance-relevant wrappers (`sum`, `mean`, `var`, `sort`, `partition`, `fft.*`, `linalg.*`, `polynomial.*`) implement the common shape on the Rust engine; they fall back to numpy for unusual kwarg combinations. This preserves drop-in semantics while delivering native speed on hot paths.
-2. **Re-export-where-safe.** Submodules whose semantics are pure numpy state (`numpy.strings`, `numpy.char`, `numpy.rec`, `numpy.emath`, `numpy.matrixlib`, `numpy.ma`, `numpy.testing`, `numpy.typing`, `numpy.ctypeslib`, `numpy.core`, `numpy.f2py`) and class instances (`mgrid`, `ogrid`, `s_`, `True_`, …) are re-exported via `m.add(name, &numpy.getattr(name))`. This keeps `fnp_python` identity-equal to numpy on those surfaces with zero maintenance and full upstream parity (including version-gated and deprecation behaviors).
+2. **Re-export-where-safe.** Submodules whose semantics are pure numpy state (`numpy.rec`, `numpy.emath`, `numpy.matrixlib`, `numpy.typing`, `numpy.ctypeslib`, `numpy.core`, `numpy.f2py`) and class instances (`mgrid`, `ogrid`, `s_`, `True_`, …) are re-exported via `m.add(name, &numpy.getattr(name))`. This keeps `fnp_python` identity-equal to numpy on those surfaces with zero maintenance and full upstream parity (including version-gated and deprecation behaviors). `strings`, `char`, `ma` and `testing` are overlays instead: fnp modules that copy numpy's attributes (with their own copy of `__all__`) and replace selected functions with native ones.
 3. **Structural lock-in.** `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs` iterates `numpy.__all__` at run time against the live numpy on the build host and fails CI if any name regresses. The guarantee holds as numpy evolves: new `__all__` entries fail the test until explicitly added.
 
 11 PyO3 classes are registered (`Nditer`, `NditerStep`, `FromPyFunc`, `SeedSequence`, `Generator`, `RandomState`, `MT19937`, `PCG64`, `PCG64DXSM`, `Philox`, `SFC64`). `mgrid`, `ogrid`, `r_`, `c_` are exposed as live singleton instances. Module-level attributes include `__version__`, `__numpy_version__`, `pi`, `e`, `euler_gamma`, `inf`, `nan`, `little_endian`, the 52 dtype scalars, and all the wired submodules.
@@ -2037,13 +2037,12 @@ The `asupersync` RaptorQ primitives (`fnp-conformance` uses them for the sidecar
 
 Behavioral differences vs upstream NumPy that we accept either intentionally or as tracked parity debt live in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md). The ledger is machine-readable: a diagnostic case can only be marked `intentional_divergence` when it references a row here.
 
-**Current state (2026-09-24): 4 rows, one ledger.** The former second ledger, `crates/fnp-conformance/DISCREPANCIES.md`, was merged in; each of its twelve entries was re-probed at the Python surface and none is an active NumPy divergence (the resolution notes in `docs/DIVERGENCES.md` give the evidence per entry).
+**Current state (2026-09-24): 3 rows, one ledger.** The former second ledger, `crates/fnp-conformance/DISCREPANCIES.md`, was merged in; each of its twelve entries was re-probed at the Python surface and none is an active NumPy divergence (the resolution notes in `docs/DIVERGENCES.md` give the evidence per entry).
 
 | ID | Disposition | Surface | Behavior |
 |---|---|---|---|
 | `DIV-HARDENED-LINALG-NONFINITE` | intentional | `linalg` decompositions and solvers, Hardened mode only | inf/NaN operands raise `LinAlgError`; Strict matches NumPy |
 | `DIV-COV-GRAM-NO-FMA` | intentional | `cov` / `corrcoef` native Gram path | within 1e-12 relative of NumPy's FMA-contracted BLAS result |
-| `PD-F64-FLAT-SUM-ISA` | parity_debt | flat float64 `nansum` / `var` / `std` | last-bit differences on hosts where NumPy dispatches a different SIMD width |
 | `UD-F16-SORT-X86SIMDSORT` | upstream_drift | float16 `sort` / `unique` | fnp sorts correctly where numpy 2.3.x's AVX-512 fp16 qsort does not |
 
 No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy.
@@ -2084,7 +2083,7 @@ cargo +nightly-2026-08-31 fuzz run fuzz_npy -- -max_total_time=300
 
 - **ufunc objects:** 105 of NumPy's 106 ufunc names are fnp objects that fail `isinstance(x, numpy.ufunc)`, and most lack `.reduce` / `.accumulate` / `.outer` / `.at` (`.5`).
 - **cov / corrcoef:** not bit-exact on general shapes (no-FMA Gram path, within 1e-12; ledger row `DIV-COV-GRAM-NO-FMA`), and peak memory is more than 2x NumPy's on large outputs (`.7`).
-- **Flat float64 `nansum`/`var`/`std`:** last-bit differences on some hosts, depending on the SIMD width NumPy dispatches to (ledger row `PD-F64-FLAT-SUM-ISA`, `.29`).
+- Fixed 2026-09-24 (bead `.29`): the sum-family reductions (`nansum`, `nanmean`, `var`, `std`, `nanvar`, `nanstd`, norms, `masked_sum`, and their float32/float16 lane forms) follow the installed NumPy's reduction tree, including NumPy before 2.3, which sums in 8192-element chunks; nan-reductions of Python lists and byte-swapped arrays match NumPy; `norm(x, ord=±1)` over matrices adds columns in NumPy's order; importing `fnp_python` no longer appends to NumPy's own `__all__` lists (`numpy.strings`, `numpy.char`, `numpy.testing`, `numpy.lib`), which also made it importable under NumPy 2.2.
 - Fixed 2026-09-24 (bead `.16`): `median`/`percentile`/`quantile` now return NumPy's NaN payload; `nansum` along the only axis of a 1-D float64 array matches NumPy's bits; float64 `average` is byte-identical to NumPy (its native kernels summed in their own order); the `dot`/`inner`/`matmul`/`tensordot`/`vdot` signed-zero tests are re-enabled.
 
 | Feature family | Status |

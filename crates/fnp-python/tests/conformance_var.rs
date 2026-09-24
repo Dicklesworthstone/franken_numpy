@@ -844,45 +844,130 @@ print(verdicts if verdicts else True)
     Ok(())
 }
 
+/// Every native route that evaluates numpy's pairwise-sum tree, byte-compared with the INSTALLED
+/// numpy: flat and last-axis sum/mean/nansum/nanmean/var/std/nanvar/nanstd over float64, the
+/// float32 and float16 lane routes, the float16 flat routes, vector and matrix norms, and
+/// masked_sum/masked_mean against `a[mask].sum()/.mean()`. Sizes straddle 8192 because numpy < 2.3
+/// sums a contiguous run in 8192-element buffer chunks while 2.3+ sums it as one tree; the routes
+/// must follow whichever the host runs. Formerly an `#[ignore]`d probe booked as an ISA
+/// divergence (PD-F64-FLAT-SUM-ISA). The cause is the numpy VERSION: on one host numpy 2.2.6 and
+/// 1.26.4 give different bits from 2.3.5/2.4.3/2.4.4 from n = 8193 on. Before the fix, under
+/// numpy 2.2.6, nansum/nanmean failed from n = 8193 and var/std/nanvar/nanstd at 2M and on the
+/// 3-D input, while the witness-gated flat sum/mean stayed exact (bead
+/// deadlock-audit-rc0923-epic-71qy3.29).
 #[test]
-#[ignore = "PARITY GAP PD-F64-FLAT-SUM-ISA (ISA-dependent): flat f64 nansum/var/std byte parity vs numpy depends on the WORKER's numpy SIMD build - one gate worker read all-True at every size, another read False from n=131072 (nansum) / ~2M + all N-D flats (var/std). numpy's pairwise-sum leaf structure varies with vector width (AVX-512 vs AVX2 partial accumulators), so base_sum_simd matches one ISA and sub-ULP-diverges on others - the transcendental ISA-divergence class, sum edition. Fix requires the ISA-gate treatment (worker_isa_probe grid); see dtype-gap-audit memory 2026-07-13."]
-fn f64_var_flat_byte_parity_probe_vs_numpy() -> Result<(), String> {
-    // PROBE preserved for the ISA-gate investigation: nansum rows isolate the
-    // shared pairwise sum core; var/std rows add the sqr-dev pass; 2-D/3-D
-    // rows cover flattened N-D routing.
+fn pairwise_tree_reductions_are_bit_identical_to_the_installed_numpy() -> Result<(), String> {
     let script = fnp_var_script(
         r#"
+import warnings
+warnings.simplefilter("ignore")
 rng = np.random.default_rng(241)
-rows = []
-for n in [7, 100, 128, 129, 1000, 4096, 131072, 2_000_000, 2_097_152, 4_000_001]:
-    a = rng.standard_normal(n) * 7
-    s_ok = np.float64(fnp.nansum(a)).tobytes() == np.float64(np.nansum(a)).tobytes()
-    v_ok = np.float64(fnp.var(a)).tobytes() == np.float64(np.var(a)).tobytes()
-    sd_ok = np.float64(fnp.std(a)).tobytes() == np.float64(np.std(a)).tobytes()
-    rows.append((n, s_ok, v_ok, sd_ok))
-# 2-D CONTIGUOUS flat (axis=None) f64: distinguishes kernel-vs-routing -
-# the converted-int gate failure was a 2-D flat input
-M2 = rng.standard_normal((2048, 1024)) * 7
-rows.append(("2Dflat", np.float64(fnp.nansum(M2)).tobytes() == np.float64(np.nansum(M2)).tobytes(),
-             np.float64(fnp.var(M2)).tobytes() == np.float64(np.var(M2)).tobytes(),
-             np.float64(fnp.std(M2)).tobytes() == np.float64(np.std(M2)).tobytes()))
-M3 = rng.standard_normal((64, 128, 128))
-rows.append(("3Dflat", True,
-             np.float64(fnp.var(M3)).tobytes() == np.float64(np.var(M3)).tobytes(),
-             np.float64(fnp.std(M3)).tobytes() == np.float64(np.std(M3)).tobytes()))
-for r in rows:
-    print("PROBE", r)
-bad = [r for r in rows if not (r[1] and r[2] and r[3])]
-print([] if not bad else bad)
+bad = []
+cells = 0
+def same(name, ours, theirs):
+    global cells
+    cells += 1
+    r, s = np.asarray(ours()), np.asarray(theirs())
+    if r.dtype != s.dtype or r.shape != s.shape or r.tobytes() != s.tobytes():
+        bad.append(name)
+FNS = ["sum", "mean", "nansum", "nanmean", "var", "std", "nanvar", "nanstd"]
+def grid(label, x, fns=FNS, **kw):
+    for f in fns:
+        same(f"{f} {label}", lambda: getattr(fnp, f)(x, **kw), lambda: getattr(np, f)(x, **kw))
+for n in [7, 100, 129, 4096, 8193, 131072, 2_000_001]:
+    grid(f"n={n}", rng.standard_normal(n) * 7)
+grid("2-D flat", rng.standard_normal((2048, 1024)) * 7)
+grid("3-D flat", rng.standard_normal((64, 128, 128)))
+L = rng.standard_normal((6, 40_000)) * 7
+grid("f64 axis=-1", L, axis=-1)
+grid("f32 axis=-1", L.astype(np.float32), fns=["nanmean", "nanvar", "nanstd"], axis=-1)
+grid("f16 axis=-1", rng.standard_normal((64, 20_000)).astype(np.float16),
+     fns=["sum", "mean", "nanmean", "nanvar"], axis=-1)
+grid("f16 flat", rng.standard_normal(1 << 22).astype(np.float16),
+     fns=["sum", "mean", "nansum", "nanmean"])
+for o in (None, 1, 2):
+    same(f"norm ord={o} axis=-1", lambda: fnp.linalg.norm(L, ord=o, axis=-1),
+         lambda: np.linalg.norm(L, ord=o, axis=-1))
+T = rng.standard_normal((3, 200, 300))
+for o in ("fro", 1, np.inf):
+    same(f"norm ord={o} axes=(-2,-1)", lambda: fnp.linalg.norm(T, ord=o, axis=(-2, -1)),
+         lambda: np.linalg.norm(T, ord=o, axis=(-2, -1)))
+d = rng.standard_normal(2_000_001) * 7
+m = rng.random(2_000_001) < 0.6
+same("masked_sum", lambda: fnp.masked_sum(d, m), lambda: d[m].sum())
+same("masked_mean", lambda: fnp.masked_mean(d, m), lambda: d[m].mean())
+print(np.__version__, cells, bad)
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    println!("{result}");
-    let last = result.lines().last().unwrap_or("").trim();
+    let mut fields = result.trim().splitn(3, ' ');
+    let (version, cells, bad) = (
+        fields.next().unwrap_or(""),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 95,
+        "cell table drifted: {result}"
+    );
     assert_eq!(
-        last, "[]",
-        "flat f64 var/std/nansum must be bit-identical to numpy: {result}"
+        bad, "[]",
+        "pairwise-tree reductions must match numpy {version} bit for bit: {result}"
+    );
+    Ok(())
+}
+
+/// The inputs the zero-copy routes decline - Python lists and tuples, byte-swapped, strided and
+/// Fortran-ordered arrays - for the sum family with axis None/0/-1. nansum/nanmean/nanvar/nanstd
+/// used to send them to an extract path that summed SEQUENTIALLY instead of in numpy's pairwise
+/// tree: 84 of these 480 cells differed from numpy 2.4.3 (nanmean of a 10-element list among
+/// them). They now go to numpy (bead deadlock-audit-rc0923-epic-71qy3.29).
+#[test]
+fn sum_family_matches_numpy_on_inputs_the_zero_copy_routes_decline() -> Result<(), String> {
+    let script = fnp_var_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(5)
+inputs = {}
+for n in (10, 100, 1000, 20000):
+    a = rng.standard_normal(n) * 7
+    inputs[f"list n={n}"] = a.tolist()
+    inputs[f"tuple n={n}"] = tuple(a.tolist())
+    inputs[f"big-endian n={n}"] = a.astype(">f8")
+    inputs[f"strided n={n}"] = np.repeat(a, 2)[::2]
+    inputs[f"F-order n={n}"] = np.asfortranarray(a.reshape(-1, 2))
+bad = []
+cells = 0
+for name, x in inputs.items():
+    for f in ("sum", "mean", "nansum", "nanmean", "var", "std", "nanvar", "nanstd"):
+        for kw in ({}, {"axis": 0}, {"axis": -1}):
+            cells += 1
+            try:
+                s = np.asarray(getattr(np, f)(x, **kw))
+            except Exception as ex:
+                s = type(ex).__name__
+            try:
+                r = np.asarray(getattr(fnp, f)(x, **kw))
+            except Exception as ex:
+                r = type(ex).__name__
+            if isinstance(s, str) or isinstance(r, str):
+                ok = r == s
+            else:
+                ok = r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+            if not ok:
+                bad.append(f"{f}{kw} {name}")
+print(cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cells, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert_eq!(cells, "480", "cell table drifted: {result}");
+    assert_eq!(
+        bad, "[]",
+        "sum family must match numpy bit for bit: {result}"
     );
     Ok(())
 }

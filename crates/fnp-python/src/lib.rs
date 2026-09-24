@@ -47852,6 +47852,10 @@ fn try_zerocopy_f64_nansum_axis(
 
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
+    // The last-axis branch evaluates numpy's pairwise tree per lane (bead .29).
+    if inner == 1 && !numpy_sums_runs_as_one_tree(py)? {
+        return Ok(None);
+    }
     let total_out = outer * inner;
     let mut out_shape: Vec<usize> = shape[..ax].to_vec();
     out_shape.extend_from_slice(&shape[ax + 1..]);
@@ -48112,45 +48116,11 @@ fn nanmean(
     {
         return Ok(out);
     }
-    // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
-    // into the cold extract → scalar scan (3-9x slower than numpy's cache-blocked
-    // strided reduction). Delegate them to numpy (same parity).
-    if noncontiguous_ndarray(numpy, a.bind(py))? {
-        return fallback();
-    }
-    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
-    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
-    if axis
-        .as_ref()
-        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
-    {
-        return fallback();
-    }
-    let a = match extract_numeric_array(py, a.bind(py), "nanmean(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    if a.values().is_empty() {
-        return fallback();
-    }
-    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanmean") {
-        Ok(None) => None,
-        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
-        Ok(Some(_)) => return fallback(),
-        Err(_) => return fallback(),
-    };
-    let result = match a.nanmean(axis, keepdims) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    // NaN: an all-NaN lane (numpy's "Mean of empty slice") or inf - inf; inf: an overflowing
-    // or inf-carrying sum. Every one of them is numpy's to report (bead .26).
-    if result.values().iter().any(|value| !value.is_finite()) {
-        return fallback();
-    }
-    // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
-    // 0-d ndarray; collapse the 0-d case to a scalar to match.
-    build_numpy_scalar_or_array(py, &result)
+    // Everything the zero-copy routes above decline (lists and tuples, non-native byte order,
+    // strided views, axis tuples, and every route under a numpy whose reduction tree is not
+    // ours) is numpy's. The extract path this replaced summed SEQUENTIALLY, not in numpy's
+    // pairwise tree: nanmean of a 10-element Python list differed from numpy (bead .29).
+    fallback()
 }
 
 // numpy's <=128-element pairwise base case (loops_utils.h.src), ported exactly:
@@ -48392,7 +48362,7 @@ fn masked_total_and_count(
         return Ok(None);
     };
     let n = a_cells.len();
-    if mask_cells.len() != n {
+    if mask_cells.len() != n || !numpy_sums_runs_as_one_tree(py)? {
         return Ok(None);
     }
     // SAFETY: ReadOnlyCell<f64>/<u8> are repr(transparent) over their element
@@ -48499,7 +48469,7 @@ fn try_zerocopy_f64_nansum_flat(
     let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
     };
-    if !in_buffer.is_c_contiguous() {
+    if !in_buffer.is_c_contiguous() || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -48637,6 +48607,9 @@ fn try_zerocopy_f64_nanmean_flat(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
+    if !float_pairwise_tree_matches_numpy(numpy) {
+        return Ok(None);
+    }
     let mut buf = [0.0f64; 128];
     let (total, count) = pairwise_nansum_count_f64(cells, 0, cells.len(), &mut buf);
     if count == 0 {
@@ -48904,7 +48877,10 @@ fn try_zerocopy_f16_nansum_flat(
     }
     let shape: Vec<usize> = x.getattr(intern!(py, "shape"))?.extract()?;
     let n: usize = shape.iter().product();
-    if n < F16_NANSUM_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    if n < F16_NANSUM_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+        || !float_pairwise_tree_matches_numpy(numpy)
+    {
         return Ok(None);
     }
     let u16t = cached_uint16_type(py)?;
@@ -48954,7 +48930,10 @@ fn try_zerocopy_f16_nanmean_flat(
     }
     let shape: Vec<usize> = x.getattr(intern!(py, "shape"))?.extract()?;
     let n: usize = shape.iter().product();
-    if n < F16_NANMEAN_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    if n < F16_NANMEAN_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+        || !float_pairwise_tree_matches_numpy(numpy)
+    {
         return Ok(None);
     }
     let u16t = cached_uint16_type(py)?;
@@ -49035,6 +49014,7 @@ fn try_zerocopy_f16_sum_lastaxis(
         || outer < 2
         || total < F16_SUM_AXIS_PARALLEL_MIN
         || rayon::current_num_threads() < 2
+        || !float_pairwise_tree_matches_numpy(numpy)
     {
         return Ok(None);
     }
@@ -49141,6 +49121,7 @@ fn try_zerocopy_f16_average_lastaxis(
         || outer < 2
         || total < F16_AVERAGE_AXIS_PARALLEL_MIN
         || rayon::current_num_threads() < 2
+        || !float_pairwise_tree_matches_numpy(numpy)
     {
         return Ok(None);
     }
@@ -49229,6 +49210,7 @@ fn try_zerocopy_f16_nanmean_lastaxis(
         || outer < 2
         || total < F16_NANMEAN_AXIS_PARALLEL_MIN
         || rayon::current_num_threads() < 2
+        || !float_pairwise_tree_matches_numpy(numpy)
     {
         return Ok(None);
     }
@@ -49652,6 +49634,7 @@ fn try_zerocopy_f16_nanvar_lastaxis(
         || outer < 2
         || total < F16_NANVAR_LASTAXIS_PARALLEL_MIN
         || rayon::current_num_threads() < 2
+        || !float_pairwise_tree_matches_numpy(numpy)
     {
         return Ok(None);
     }
@@ -49749,7 +49732,10 @@ fn try_zerocopy_f16_sum_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<O
     }
     let shape: Vec<usize> = x.getattr(intern!(py, "shape"))?.extract()?;
     let n: usize = shape.iter().product();
-    if n < F16_SUM_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    if n < F16_SUM_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+        || !float_pairwise_tree_matches_numpy(numpy)
+    {
         return Ok(None);
     }
     let u16t = cached_uint16_type(py)?;
@@ -49802,7 +49788,10 @@ fn try_zerocopy_f16_mean_flat(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<
     }
     let shape: Vec<usize> = x.getattr(intern!(py, "shape"))?.extract()?;
     let n: usize = shape.iter().product();
-    if n < F16_MEAN_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+    if n < F16_MEAN_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+        || !float_pairwise_tree_matches_numpy(numpy)
+    {
         return Ok(None);
     }
     let u16t = cached_uint16_type(py)?;
@@ -49949,6 +49938,9 @@ fn compute_f64_nanvar_flat(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
+    if !float_pairwise_tree_matches_numpy(numpy) {
+        return Ok(None);
+    }
     let n = cells.len();
     let mut buf = [0.0f64; 128];
     let (total, count) = pairwise_nansum_count_f64(cells, 0, n, &mut buf);
@@ -49985,7 +49977,7 @@ fn compute_f64_var_flat(
         return Ok(None);
     };
     let n = cells.len();
-    if n == 0 || n <= ddof {
+    if n == 0 || n <= ddof || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None); // numpy warns + returns NaN for n - ddof <= 0 — defer
     }
     let mut buf = [0.0f64; 128];
@@ -50172,37 +50164,12 @@ fn nansum(
         }
         return Ok(out);
     }
-    // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
-    // into the cold extract → scalar scan (3-9x slower than numpy's cache-blocked
-    // strided reduction). Delegate them to numpy (same parity).
-    if noncontiguous_ndarray(numpy, a.bind(py))? {
-        return fallback();
-    }
-    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
-    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
-    if axis
-        .as_ref()
-        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
-    {
-        return fallback();
-    }
-    let a = match extract_numeric_array(py, a.bind(py), "nansum(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nansum") {
-        Ok(None) => None,
-        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
-        Ok(Some(_)) => return fallback(),
-        Err(_) => return fallback(),
-    };
-    let result = match a.nansum(axis, keepdims) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
-    // 0-d ndarray; collapse the 0-d case to a scalar to match.
-    build_numpy_scalar_or_array(py, &result)
+    // Everything the zero-copy routes above decline (lists and tuples, non-native byte order,
+    // strided views, axis tuples, lanes past the axis route's length cap, and every route under
+    // a numpy whose reduction tree is not ours) is numpy's. The extract path this replaced summed
+    // SEQUENTIALLY, not in numpy's pairwise tree: nansum of a 100-element Python list differed
+    // from numpy (bead .29).
+    fallback()
 }
 
 #[pyfunction]
@@ -51148,6 +51115,9 @@ fn try_zerocopy_f64_nanmean_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
+    if !float_pairwise_tree_matches_numpy(numpy) {
+        return Ok(None);
+    }
     let outer: usize = shape[..ax].iter().product();
     let mut out: Vec<f64> = Vec::with_capacity(outer);
     let mut any_empty = false;
@@ -51692,6 +51662,9 @@ fn try_zerocopy_f64_nanvar_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
+    if !float_pairwise_tree_matches_numpy(numpy) {
+        return Ok(None);
+    }
     let outer: usize = shape[..keep].iter().product();
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
     // under the GIL -> &[f64] (Sync) for the parallel per-lane fold below.
@@ -51805,7 +51778,7 @@ fn try_zerocopy_f32_nanmean_last_axis(
     let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
         return Ok(None);
     };
-    if !in_buffer.is_c_contiguous() {
+    if !in_buffer.is_c_contiguous() || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -51918,7 +51891,7 @@ fn try_zerocopy_f32_nanvar_last_axis(
     let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
         return Ok(None);
     };
-    if !in_buffer.is_c_contiguous() {
+    if !in_buffer.is_c_contiguous() || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -52028,6 +52001,9 @@ fn try_zerocopy_f64_var_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
+    if !float_pairwise_tree_matches_numpy(numpy) {
+        return Ok(None);
+    }
     let outer: usize = shape[..keep].iter().product();
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
     // under the GIL -> &[f64] (Sync) for the parallel per-lane fold below.
@@ -52825,6 +52801,12 @@ fn try_zerocopy_f64_vector_norm_axis(
     if axis_len == 0 {
         return Ok(None);
     }
+    // L2/L1 lanes evaluate numpy's pairwise tree (bead .29); max/min |x| do not.
+    if matches!(kind, VectorNormKind::L2 | VectorNormKind::L1)
+        && !float_pairwise_tree_matches_numpy(numpy)
+    {
+        return Ok(None);
+    }
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
@@ -53267,7 +53249,7 @@ fn try_zerocopy_f64_frobenius_lastaxes(
     }
     let nd = ndim as usize;
     let block = shape[nd - 2] * shape[nd - 1];
-    if block == 0 {
+    if block == 0 || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None);
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -53335,11 +53317,11 @@ fn reduce_extreme_f64(sums: &[f64], want_max: bool) -> f64 {
 // abs-sum `add.reduce(|x|, axis=-1)` followed by max/min over rows, and for
 // ord=+-1 a per-COLUMN abs-sum `add.reduce(|x|, axis=-2)` followed by max/min over
 // columns - three passes over the materialized temp, single-threaded. This
-// per-(M,N)-block fold reuses pairwise_abs_f64 (rows are contiguous; columns are
-// gathered into a small M-buffer) so each row/column abs-sum matches numpy's
-// pairwise reduce bit-for-bit, then a NaN-propagating max/min, parallel across
-// blocks. Verified bit-exact: add.reduce(|x|,axis=-1).max(-1) == numpy inf-norm,
-// add.reduce(|x|,axis=-2).max(-1) == numpy 1-norm. NaN/Inf propagate (no defer).
+// per-(M,N)-block fold reuses pairwise_abs_f64 for the contiguous rows (numpy's
+// axis=-1 reduce is its pairwise tree) and adds the rows in order for the column
+// sums (numpy's axis=-2 reduce is sequential: the pairwise form used here before
+// differed for M >= 8, bead .29), then a NaN-propagating max/min, parallel across
+// blocks. NaN/Inf propagate (no defer).
 // ax0/ax1 are the raw axis pair; validated to resolve to the last two axes.
 fn try_zerocopy_f64_matrix_norm_lastaxes(
     py: Python<'_>,
@@ -53387,6 +53369,10 @@ fn try_zerocopy_f64_matrix_norm_lastaxes(
         MatrixNormKind::MaxColSum => (false, true),
         MatrixNormKind::MinColSum => (false, false),
     };
+    // Row abs-sums evaluate numpy's pairwise tree (bead .29); column sums are sequential.
+    if by_row && !float_pairwise_tree_matches_numpy(numpy) {
+        return Ok(None);
+    }
     let block_norm = move |blk: &[f64]| -> f64 {
         let mut buf = [0.0f64; 128];
         if by_row {
@@ -53396,16 +53382,15 @@ fn try_zerocopy_f64_matrix_norm_lastaxes(
                 .collect();
             reduce_extreme_f64(&row_sums, want_max)
         } else {
-            // per column: gather the M strided entries, pairwise abs-sum, extreme over N
-            let mut col = vec![0.0f64; m];
-            let col_sums: Vec<f64> = (0..n)
-                .map(|c| {
-                    for r in 0..m {
-                        col[r] = blk[r * n + c];
-                    }
-                    pairwise_abs_f64(&col, &mut buf)
-                })
-                .collect();
+            // per column: numpy's add.reduce(|x|, axis=-2) adds the M rows IN ORDER (the reduced
+            // axis is the outer loop of a binary add, not a pairwise tree; a pairwise column sum
+            // differed from it for M >= 8), so accumulate row by row, then extreme over N.
+            let mut col_sums: Vec<f64> = blk[..n].iter().map(|v| v.abs()).collect();
+            for row in blk[n..].chunks_exact(n) {
+                for (acc, v) in col_sums.iter_mut().zip(row) {
+                    *acc += v.abs();
+                }
+            }
             reduce_extreme_f64(&col_sums, want_max)
         }
     };
@@ -54059,42 +54044,11 @@ fn nanstd(
     {
         return Ok(out);
     }
-    if noncontiguous_ndarray(numpy, a.bind(py))? {
-        return fallback();
-    }
-    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
-    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
-    if axis
-        .as_ref()
-        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
-    {
-        return fallback();
-    }
-    let a = match extract_numeric_array(py, a.bind(py), "nanstd(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanstd") {
-        Ok(None) => None,
-        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
-        Ok(Some(_)) => return fallback(),
-        Err(_) => return fallback(),
-    };
-    let ddof = match ddof.as_ref() {
-        None => 0,
-        Some(value) => match value.bind(py).extract::<isize>() {
-            Ok(parsed) if parsed >= 0 => parsed as usize,
-            _ => return fallback(),
-        },
-    };
-    let result = match a.nanstd(axis, keepdims.unwrap_or(false), ddof) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    if contains_nan_value(&result) {
-        return fallback();
-    }
-    build_numpy_scalar_or_array(py, &result)
+    // Everything the zero-copy routes above decline is numpy's: the extract path this replaced
+    // summed SEQUENTIALLY, not in numpy's pairwise tree (nanstd of a Python list or a
+    // byte-swapped array differed from numpy), and every route declines under a numpy whose
+    // reduction tree is not ours (bead .29).
+    fallback()
 }
 
 #[pyfunction]
@@ -54361,45 +54315,11 @@ fn nanvar(
     {
         return Ok(out);
     }
-    if noncontiguous_ndarray(numpy, a.bind(py))? {
-        return fallback();
-    }
-    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
-    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
-    if axis
-        .as_ref()
-        .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
-    {
-        return fallback();
-    }
-    let a = match extract_numeric_array(py, a.bind(py), "nanvar(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "nanvar") {
-        Ok(None) => None,
-        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
-        Ok(Some(_)) => return fallback(),
-        Err(_) => return fallback(),
-    };
-    let ddof = match ddof.as_ref() {
-        None => 0,
-        Some(value) => match value.bind(py).extract::<isize>() {
-            Ok(parsed) if parsed >= 0 => parsed as usize,
-            _ => return fallback(),
-        },
-    };
-    let result = match a.nanvar(axis, keepdims.unwrap_or(false), ddof) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    // The zero-copy paths above defer DoF <= 0 / all-NaN slices so numpy owns its "Degrees of
-    // freedom <= 0 for slice." warning; this generic tail (small, 0-d, and strided inputs)
-    // returned the NaN silently. Same rule here: a NaN result recomputes through numpy.
-    if contains_nan_value(&result) {
-        return fallback();
-    }
-    build_numpy_scalar_or_array(py, &result)
+    // Everything the zero-copy routes above decline is numpy's: the extract path this replaced
+    // summed SEQUENTIALLY, not in numpy's pairwise tree (nanvar of a Python list or a
+    // byte-swapped array differed from numpy), and every route declines under a numpy whose
+    // reduction tree is not ours (bead .29).
+    fallback()
 }
 
 // Zero-copy parallel flat nanargmax/nanargmin (axis=None) for C-contiguous f64 ndarrays.
@@ -91325,7 +91245,7 @@ fn try_zerocopy_f64_sum_lastaxis(
     }
     let ax = ax as usize;
     let axis_len = shape[ax];
-    if axis_len == 0 {
+    if axis_len == 0 || !float_pairwise_tree_matches_numpy(numpy) {
         return Ok(None); // empty reduction axis: defer (chunks_exact(0) + numpy's 0.0)
     }
     let Some(cells) = in_buffer.as_slice(py) else {
@@ -91378,10 +91298,17 @@ fn try_zerocopy_f64_sum_lastaxis(
 /// deterministic probe whose result is sensitive to tree shape both ways and
 /// compare bits, deferring the whole route on disagreement.
 ///
-/// THE PROBE MUST BE LARGE. The two trees agree for every length up to 32,768
-/// and only diverge from 65,536 upward, where NumPy switches reduction strategy
-/// — a 4,096-element probe was measured reporting a FALSE match on the 2.2.4
-/// host, letting the route engage on exactly the build it must exclude.
+/// THE PROBE MUST BE LARGE. Before 2.3 NumPy sums a contiguous run in 8192-element buffer
+/// chunks (a tree per chunk, chunks added in sequence); 2.3+ sums the whole run as one tree. The
+/// two agree up to 8192 elements and can differ from 8193 (measured 2026-09-24 on one host:
+/// numpy 2.2.6 and 1.26.4 differ from 2.3.5/2.4.3/2.4.4 at n = 8193, 131072 and 2M; whether a
+/// given length shows it depends on the data) — a 4,096-element probe was measured reporting a
+/// FALSE match on the 2.2.4 host, letting the route engage on exactly the build it must exclude.
+///
+/// EVERY route that evaluates this tree over a run must consult it, not only flat sum/mean:
+/// nansum/nanmean/var/std/nanvar/nanstd/norm/masked-sum and their f32/f16 lane forms used to
+/// skip it and returned last-bit-different results under numpy 2.2.6 (bead
+/// deadlock-audit-rc0923-epic-71qy3.29). `numpy_sums_runs_as_one_tree` is the handle they use.
 fn float_pairwise_tree_matches_numpy(numpy: &Bound<'_, PyModule>) -> bool {
     static MATCHES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *MATCHES.get_or_init(|| {
@@ -91409,6 +91336,12 @@ fn float_pairwise_tree_matches_numpy(numpy: &Bound<'_, PyModule>) -> bool {
         };
         ours.to_bits() == theirs.to_bits()
     })
+}
+
+// `float_pairwise_tree_matches_numpy` for routes that hold only `py`. Call it after a route's
+// own cheap eligibility checks: the first call in a process builds the 131,072-element probe.
+fn numpy_sums_runs_as_one_tree(py: Python<'_>) -> PyResult<bool> {
+    Ok(float_pairwise_tree_matches_numpy(cached_numpy(py)?))
 }
 
 // ONE attribute read that disqualifies EVERY flat native sum/mean path at once.
@@ -114389,12 +114322,20 @@ fn resolve_numpy_submodule<'py>(
     }
 }
 
+// `__all__` is copied into a fresh list (`copied_all_names`): binding numpy's own list made every
+// later `add_function` on the overlay append to NUMPY's `__all__` (numpy.strings 46 -> 80 names
+// and numpy.char 53 -> 69 under numpy 2.4.3), and on numpy 2.2 the appended `slice` made numpy's
+// own `from numpy.strings import *` raise inside `import fnp_python`.
 fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
     let dict_any = from.getattr(intern!(from.py(), "__dict__"))?;
     let dict = dict_any.cast::<PyDict>()?;
     for (key, value) in dict.iter() {
         if let Ok(name) = key.extract::<&str>() {
-            to.setattr(name, value)?;
+            if name == "__all__" {
+                to.setattr(name, copied_all_names(&value)?)?;
+            } else {
+                to.setattr(name, value)?;
+            }
         }
     }
     Ok(())
@@ -123629,7 +123570,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ];
         if let Ok(np_testing) = cached_numpy_testing(py) {
             if let Ok(all_names) = np_testing.getattr(intern!(py, "__all__")) {
-                testing.setattr("__all__", all_names.clone())?;
+                testing.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if testing.getattr(name.as_str()).is_err()
@@ -123690,7 +123631,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             // Mirror __all__ verbatim when present, else use the
             // canonical fallback list.
             if let Ok(all_names) = np_exceptions.getattr(intern!(py, "__all__")) {
-                exceptions.setattr("__all__", all_names.clone())?;
+                exceptions.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if exceptions.getattr(name.as_str()).is_err()
@@ -123779,7 +123720,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ];
         if let Ok(np_dtypes) = cached_numpy_dtypes(py) {
             if let Ok(all_names) = np_dtypes.getattr(intern!(py, "__all__")) {
-                dtypes_module.setattr("__all__", all_names.clone())?;
+                dtypes_module.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if dtypes_module.getattr(name.as_str()).is_err()
@@ -123899,7 +123840,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Ok(np_recfunctions) = cached_numpy_recfunctions(py)
             && let Ok(all_names) = np_recfunctions.getattr(intern!(py, "__all__"))
         {
-            recfunctions.setattr("__all__", all_names.clone())?;
+            recfunctions.setattr("__all__", copied_all_names(&all_names)?)?;
             for item in all_names.try_iter()? {
                 let name = item?.extract::<String>()?;
                 if recfunctions.getattr(name.as_str()).is_err()
@@ -123939,7 +123880,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Ok(np_scimath) = cached_numpy_scimath(py)
             && let Ok(all_names) = np_scimath.getattr(intern!(py, "__all__"))
         {
-            scimath.setattr("__all__", all_names.clone())?;
+            scimath.setattr("__all__", copied_all_names(&all_names)?)?;
             for item in all_names.try_iter()? {
                 let name = item?.extract::<String>()?;
                 if scimath.getattr(name.as_str()).is_err()
@@ -123980,7 +123921,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if let Ok(np_array_utils) = cached_numpy_array_utils(py)
             && let Ok(all_names) = np_array_utils.getattr(intern!(py, "__all__"))
         {
-            array_utils.setattr("__all__", all_names.clone())?;
+            array_utils.setattr("__all__", copied_all_names(&all_names)?)?;
             for item in all_names.try_iter()? {
                 let name = item?.extract::<String>()?;
                 if array_utils.getattr(name.as_str()).is_err()
@@ -124067,7 +124008,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ];
         if let Ok(np_lib) = cached_numpy_lib(py) {
             if let Ok(all_names) = np_lib.getattr(intern!(py, "__all__")) {
-                lib_module.setattr("__all__", all_names.clone())?;
+                lib_module.setattr("__all__", copied_all_names(&all_names)?)?;
                 for item in all_names.try_iter()? {
                     let name = item?.extract::<String>()?;
                     if lib_module.getattr(name.as_str()).is_err()
