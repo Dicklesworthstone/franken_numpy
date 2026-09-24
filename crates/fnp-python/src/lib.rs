@@ -2380,14 +2380,18 @@ impl PyRandomGenerator {
         }
     }
 
-    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn normal(
         &mut self,
         py: Python<'_>,
-        loc: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "normal", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.normal(size)")?;
         let output = self
@@ -2398,13 +2402,17 @@ impl PyRandomGenerator {
         build_random_f64_output(py, output)
     }
 
-    #[pyo3(signature = (scale=1.0, size=None))]
+    #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
     fn exponential(
         &mut self,
         py: Python<'_>,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(scale) = scale.native() else {
+            let params = [("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "exponential", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.exponential(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2453,11 +2461,21 @@ impl PyRandomGenerator {
     fn standard_gamma(
         &mut self,
         py: Python<'_>,
-        shape: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] shape: RngArg<f64>,
         size: Option<Py<PyAny>>,
         dtype: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(shape) = shape.native() else {
+            let mut params = vec![("shape", shape.to_object(py)?)];
+            if let Some(dtype) = dtype {
+                params.push(("dtype", dtype));
+            }
+            if let Some(out) = out {
+                params.push(("out", out));
+            }
+            return self.numpy_distribution(py, "standard_gamma", &params, size);
+        };
         self.before_draw(py)?;
         let dtype = extract_random_float_dtype(py, dtype, "Generator.standard_gamma(dtype)")?;
         if dtype != DType::F64 {
@@ -2489,14 +2507,18 @@ impl PyRandomGenerator {
         }
     }
 
-    #[pyo3(signature = (shape, scale=1.0, size=None))]
+    #[pyo3(signature = (shape, scale=RngArg::Native(1.0), size=None))]
     fn gamma(
         &mut self,
         py: Python<'_>,
-        shape: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] shape: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(shape), Some(scale)) = (shape.native(), scale.native()) else {
+            let params = [("shape", shape.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "gamma", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.gamma(size)")?;
         let (out_shape, len, scalar) = random_len_and_shape(size)?;
@@ -2508,13 +2530,17 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (lam=1.0, size=None))]
+    #[pyo3(signature = (lam=RngArg::Native(1.0), size=None))]
     fn poisson(
         &mut self,
         py: Python<'_>,
-        lam: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] lam: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(lam) = lam.native() else {
+            let params = [("lam", lam.to_object(py)?)];
+            return self.numpy_distribution(py, "poisson", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.poisson(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2527,10 +2553,14 @@ impl PyRandomGenerator {
     fn binomial(
         &mut self,
         py: Python<'_>,
-        n: u64,
-        p: f64,
+        #[pyo3(from_py_with = rng_u64_arg)] n: RngArg<u64>,
+        #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(n), Some(p)) = (n.native(), p.native()) else {
+            let params = [("n", n.to_object(py)?), ("p", p.to_object(py)?)];
+            return self.numpy_distribution(py, "binomial", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.binomial(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2543,10 +2573,14 @@ impl PyRandomGenerator {
     fn beta(
         &mut self,
         py: Python<'_>,
-        a: f64,
-        b: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] b: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(a), Some(b)) = (a.native(), b.native()) else {
+            let params = [("a", a.to_object(py)?), ("b", b.to_object(py)?)];
+            return self.numpy_distribution(py, "beta", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.beta(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2555,14 +2589,18 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (mean=0.0, sigma=1.0, size=None))]
+    #[pyo3(signature = (mean=RngArg::Native(0.0), sigma=RngArg::Native(1.0), size=None))]
     fn lognormal(
         &mut self,
         py: Python<'_>,
-        mean: f64,
-        sigma: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] mean: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] sigma: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(mean), Some(sigma)) = (mean.native(), sigma.native()) else {
+            let params = [("mean", mean.to_object(py)?), ("sigma", sigma.to_object(py)?)];
+            return self.numpy_distribution(py, "lognormal", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.lognormal(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2578,9 +2616,13 @@ impl PyRandomGenerator {
     fn chisquare(
         &mut self,
         py: Python<'_>,
-        df: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(df) = df.native() else {
+            let params = [("df", df.to_object(py)?)];
+            return self.numpy_distribution(py, "chisquare", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.chisquare(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2593,9 +2635,13 @@ impl PyRandomGenerator {
     fn geometric(
         &mut self,
         py: Python<'_>,
-        p: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(p) = p.native() else {
+            let params = [("p", p.to_object(py)?)];
+            return self.numpy_distribution(py, "geometric", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.geometric(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2618,11 +2664,20 @@ impl PyRandomGenerator {
     fn triangular(
         &mut self,
         py: Python<'_>,
-        left: f64,
-        mode: f64,
-        right: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] left: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] mode: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] right: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(left), Some(mode), Some(right)) = (left.native(), mode.native(), right.native())
+        else {
+            let params = [
+                ("left", left.to_object(py)?),
+                ("mode", mode.to_object(py)?),
+                ("right", right.to_object(py)?),
+            ];
+            return self.numpy_distribution(py, "triangular", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.triangular(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2634,14 +2689,18 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn laplace(
         &mut self,
         py: Python<'_>,
-        loc: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "laplace", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.laplace(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2653,14 +2712,18 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn gumbel(
         &mut self,
         py: Python<'_>,
-        loc: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "gumbel", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.gumbel(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2673,7 +2736,16 @@ impl PyRandomGenerator {
     }
 
     #[pyo3(signature = (a, size=None))]
-    fn weibull(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn weibull(
+        &mut self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(a) = a.native() else {
+            let params = [("a", a.to_object(py)?)];
+            return self.numpy_distribution(py, "weibull", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.weibull(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2686,10 +2758,14 @@ impl PyRandomGenerator {
     fn negative_binomial(
         &mut self,
         py: Python<'_>,
-        n: f64,
-        p: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] n: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(n), Some(p)) = (n.native(), p.native()) else {
+            let params = [("n", n.to_object(py)?), ("p", p.to_object(py)?)];
+            return self.numpy_distribution(py, "negative_binomial", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.negative_binomial(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2705,10 +2781,14 @@ impl PyRandomGenerator {
     fn f(
         &mut self,
         py: Python<'_>,
-        dfnum: f64,
-        dfden: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] dfnum: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] dfden: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(dfnum), Some(dfden)) = (dfnum.native(), dfden.native()) else {
+            let params = [("dfnum", dfnum.to_object(py)?), ("dfden", dfden.to_object(py)?)];
+            return self.numpy_distribution(py, "f", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.f(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2721,9 +2801,13 @@ impl PyRandomGenerator {
     fn standard_t(
         &mut self,
         py: Python<'_>,
-        df: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(df) = df.native() else {
+            let params = [("df", df.to_object(py)?)];
+            return self.numpy_distribution(py, "standard_t", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.standard_t(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2736,7 +2820,16 @@ impl PyRandomGenerator {
     }
 
     #[pyo3(signature = (a, size=None))]
-    fn power(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn power(
+        &mut self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(a) = a.native() else {
+            let params = [("a", a.to_object(py)?)];
+            return self.numpy_distribution(py, "power", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.power(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2745,13 +2838,17 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (scale=1.0, size=None))]
+    #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
     fn rayleigh(
         &mut self,
         py: Python<'_>,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(scale) = scale.native() else {
+            let params = [("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "rayleigh", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.rayleigh(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2761,7 +2858,16 @@ impl PyRandomGenerator {
     }
 
     #[pyo3(signature = (a, size=None))]
-    fn pareto(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn pareto(
+        &mut self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(a) = a.native() else {
+            let params = [("a", a.to_object(py)?)];
+            return self.numpy_distribution(py, "pareto", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.pareto(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2770,14 +2876,18 @@ impl PyRandomGenerator {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn logistic(
         &mut self,
         py: Python<'_>,
-        loc: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "logistic", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.logistic(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2793,11 +2903,21 @@ impl PyRandomGenerator {
     fn hypergeometric(
         &mut self,
         py: Python<'_>,
-        ngood: u64,
-        nbad: u64,
-        nsample: u64,
+        #[pyo3(from_py_with = rng_u64_arg)] ngood: RngArg<u64>,
+        #[pyo3(from_py_with = rng_u64_arg)] nbad: RngArg<u64>,
+        #[pyo3(from_py_with = rng_u64_arg)] nsample: RngArg<u64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(ngood), Some(nbad), Some(nsample)) =
+            (ngood.native(), nbad.native(), nsample.native())
+        else {
+            let params = [
+                ("ngood", ngood.to_object(py)?),
+                ("nbad", nbad.to_object(py)?),
+                ("nsample", nsample.to_object(py)?),
+            ];
+            return self.numpy_distribution(py, "hypergeometric", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.hypergeometric(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2813,10 +2933,14 @@ impl PyRandomGenerator {
     fn wald(
         &mut self,
         py: Python<'_>,
-        mean: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] mean: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(mean), Some(scale)) = (mean.native(), scale.native()) else {
+            let params = [("mean", mean.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "wald", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.wald(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2832,7 +2956,16 @@ impl PyRandomGenerator {
     }
 
     #[pyo3(signature = (a, size=None))]
-    fn zipf(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn zipf(
+        &mut self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(a) = a.native() else {
+            let params = [("a", a.to_object(py)?)];
+            return self.numpy_distribution(py, "zipf", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.zipf(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2854,9 +2987,13 @@ impl PyRandomGenerator {
     fn logseries(
         &mut self,
         py: Python<'_>,
-        p: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(p) = p.native() else {
+            let params = [("p", p.to_object(py)?)];
+            return self.numpy_distribution(py, "logseries", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.logseries(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2869,10 +3006,14 @@ impl PyRandomGenerator {
     fn vonmises(
         &mut self,
         py: Python<'_>,
-        mu: f64,
-        kappa: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] mu: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] kappa: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(mu), Some(kappa)) = (mu.native(), kappa.native()) else {
+            let params = [("mu", mu.to_object(py)?), ("kappa", kappa.to_object(py)?)];
+            return self.numpy_distribution(py, "vonmises", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.vonmises(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2888,10 +3029,14 @@ impl PyRandomGenerator {
     fn noncentral_chisquare(
         &mut self,
         py: Python<'_>,
-        df: f64,
-        nonc: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] nonc: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(df), Some(nonc)) = (df.native(), nonc.native()) else {
+            let params = [("df", df.to_object(py)?), ("nonc", nonc.to_object(py)?)];
+            return self.numpy_distribution(py, "noncentral_chisquare", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.noncentral_chisquare(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -2907,11 +3052,20 @@ impl PyRandomGenerator {
     fn noncentral_f(
         &mut self,
         py: Python<'_>,
-        dfnum: f64,
-        dfden: f64,
-        nonc: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] dfnum: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] dfden: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] nonc: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(dfnum), Some(dfden), Some(nonc)) = (dfnum.native(), dfden.native(), nonc.native())
+        else {
+            let params = [
+                ("dfnum", dfnum.to_object(py)?),
+                ("dfden", dfden.to_object(py)?),
+                ("nonc", nonc.to_object(py)?),
+            ];
+            return self.numpy_distribution(py, "noncentral_f", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.noncentral_f(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
@@ -3031,14 +3185,18 @@ impl PyRandomGenerator {
         build_random_u64_matrix_as_i64_parts(py, shape, values, width)
     }
 
-    #[pyo3(signature = (low=0.0, high=1.0, size=None))]
+    #[pyo3(signature = (low=RngArg::Native(0.0), high=RngArg::Native(1.0), size=None))]
     fn uniform(
         &mut self,
         py: Python<'_>,
-        low: f64,
-        high: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] low: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] high: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(low), Some(high)) = (low.native(), high.native()) else {
+            let params = [("low", low.to_object(py)?), ("high", high.to_object(py)?)];
+            return self.numpy_distribution(py, "uniform", &params, size);
+        };
         self.before_draw(py)?;
         let size = random_size_from_py(py, size, "Generator.uniform(size)")?;
         let output = self
@@ -3053,23 +3211,49 @@ impl PyRandomGenerator {
     fn integers(
         &mut self,
         py: Python<'_>,
-        low: i64,
-        high: Option<i64>,
+        #[pyo3(from_py_with = rng_i64_arg)] low: RngArg<i64>,
+        high: Option<Py<PyAny>>,
         size: Option<Py<PyAny>>,
         dtype: Option<Py<PyAny>>,
         endpoint: bool,
     ) -> PyResult<Py<PyAny>> {
+        // `high=None` (or omitted) means [0, low); anything non-scalar goes to NumPy, as does
+        // any dtype the native kernels do not cover (e.g. `bool`, which used to raise
+        // "Unsupported dtype"). NumPy then applies its own validation and errors.
+        let high_arg = match high.as_ref().map(|h| h.bind(py)) {
+            Some(h) if !h.is_none() => Some(rng_i64_arg(h)?),
+            _ => None,
+        };
+        let native_dtype = extract_python_dtype_bound(
+            py,
+            dtype.as_ref().map(|d| d.bind(py)),
+            DType::I64,
+            "Generator.integers(dtype)",
+        )
+        .ok()
+        .filter(|dtype| !matches!(dtype, DType::Bool));
+        let native_high = match &high_arg {
+            Some(h) => h.native().map(Some),
+            None => Some(None),
+        };
+        let (Some(low), Some(high), Some(dtype_native)) = (low.native(), native_high, native_dtype)
+        else {
+            let mut params = vec![("low", low.to_object(py)?)];
+            if let Some(h) = &high_arg {
+                params.push(("high", h.to_object(py)?));
+            }
+            if let Some(dtype) = dtype {
+                params.push(("dtype", dtype));
+            }
+            params.push(("endpoint", pyo3::IntoPyObjectExt::into_py_any(endpoint, py)?));
+            return self.numpy_distribution(py, "integers", &params, size);
+        };
         self.before_draw(py)?;
         let (low, high) = match high {
             Some(high) => (low, high),
             None => (0, low),
         };
-        let dtype = extract_python_dtype_bound(
-            py,
-            dtype.as_ref().map(|d| d.bind(py)),
-            DType::I64,
-            "Generator.integers(dtype)",
-        )?;
+        let dtype = dtype_native;
         validate_random_integer_dtype_bounds(low, high, dtype, endpoint)?;
         let size = random_size_from_py(py, size, "Generator.integers(size)")?;
         match dtype {
@@ -3590,14 +3774,18 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn normal(
         &mut self,
         py: Python<'_>,
-        loc: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "normal", &params, size);
+        };
         let size = random_size_from_py(py, size, "RandomState.normal(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
         let values = self
@@ -3607,14 +3795,18 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (mean=0.0, sigma=1.0, size=None))]
+    #[pyo3(signature = (mean=RngArg::Native(0.0), sigma=RngArg::Native(1.0), size=None))]
     fn lognormal(
         &mut self,
         py: Python<'_>,
-        mean: f64,
-        sigma: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] mean: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] sigma: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(mean), Some(sigma)) = (mean.native(), sigma.native()) else {
+            let params = [("mean", mean.to_object(py)?), ("sigma", sigma.to_object(py)?)];
+            return self.numpy_distribution(py, "lognormal", &params, size);
+        };
         if sigma < 0.0 {
             return Err(PyValueError::new_err("sigma < 0"));
         }
@@ -3647,13 +3839,17 @@ impl PyRandomState {
         build_random_f64_parts(py, shape, values, scalar)
     }
 
-    #[pyo3(signature = (scale=1.0, size=None))]
+    #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
     fn exponential(
         &mut self,
         py: Python<'_>,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(scale) = scale.native() else {
+            let params = [("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "exponential", &params, size);
+        };
         if scale < 0.0 {
             return Err(PyValueError::new_err("scale < 0"));
         }
@@ -3670,9 +3866,13 @@ impl PyRandomState {
     fn standard_gamma(
         &mut self,
         py: Python<'_>,
-        shape: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] shape: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(shape) = shape.native() else {
+            let params = [("shape", shape.to_object(py)?)];
+            return self.numpy_distribution(py, "standard_gamma", &params, size);
+        };
         if shape < 0.0 {
             return Err(PyValueError::new_err("shape < 0"));
         }
@@ -3685,14 +3885,18 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (shape, scale=1.0, size=None))]
+    #[pyo3(signature = (shape, scale=RngArg::Native(1.0), size=None))]
     fn gamma(
         &mut self,
         py: Python<'_>,
-        shape: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] shape: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(shape), Some(scale)) = (shape.native(), scale.native()) else {
+            let params = [("shape", shape.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "gamma", &params, size);
+        };
         if shape < 0.0 {
             return Err(PyValueError::new_err("shape < 0"));
         }
@@ -3712,10 +3916,14 @@ impl PyRandomState {
     fn beta(
         &mut self,
         py: Python<'_>,
-        a: f64,
-        b: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] b: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(a), Some(b)) = (a.native(), b.native()) else {
+            let params = [("a", a.to_object(py)?), ("b", b.to_object(py)?)];
+            return self.numpy_distribution(py, "beta", &params, size);
+        };
         if a <= 0.0 {
             return Err(PyValueError::new_err("a <= 0"));
         }
@@ -3732,9 +3940,13 @@ impl PyRandomState {
     fn chisquare(
         &mut self,
         py: Python<'_>,
-        df: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(df) = df.native() else {
+            let params = [("df", df.to_object(py)?)];
+            return self.numpy_distribution(py, "chisquare", &params, size);
+        };
         if df <= 0.0 {
             return Err(PyValueError::new_err("df <= 0"));
         }
@@ -3748,10 +3960,14 @@ impl PyRandomState {
     fn f(
         &mut self,
         py: Python<'_>,
-        dfnum: f64,
-        dfden: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] dfnum: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] dfden: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(dfnum), Some(dfden)) = (dfnum.native(), dfden.native()) else {
+            let params = [("dfnum", dfnum.to_object(py)?), ("dfden", dfden.to_object(py)?)];
+            return self.numpy_distribution(py, "f", &params, size);
+        };
         if dfnum <= 0.0 {
             return Err(PyValueError::new_err("dfnum <= 0"));
         }
@@ -3768,9 +3984,13 @@ impl PyRandomState {
     fn geometric(
         &mut self,
         py: Python<'_>,
-        p: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] p: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(p) = p.native() else {
+            let params = [("p", p.to_object(py)?)];
+            return self.numpy_distribution(py, "geometric", &params, size);
+        };
         if p <= 0.0 || p > 1.0 || p.is_nan() {
             return Err(PyValueError::new_err("p <= 0, p > 1 or p contains NaNs"));
         }
@@ -3784,9 +4004,13 @@ impl PyRandomState {
     fn standard_t(
         &mut self,
         py: Python<'_>,
-        df: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] df: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(df) = df.native() else {
+            let params = [("df", df.to_object(py)?)];
+            return self.numpy_distribution(py, "standard_t", &params, size);
+        };
         if df <= 0.0 {
             return Err(PyValueError::new_err("df <= 0"));
         }
@@ -3797,7 +4021,16 @@ impl PyRandomState {
     }
 
     #[pyo3(signature = (a, size=None))]
-    fn weibull(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn weibull(
+        &mut self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(a) = a.native() else {
+            let params = [("a", a.to_object(py)?)];
+            return self.numpy_distribution(py, "weibull", &params, size);
+        };
         if a < 0.0 || (a == 0.0 && a.is_sign_negative()) {
             return Err(PyValueError::new_err("a < 0"));
         }
@@ -3807,13 +4040,17 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (scale=1.0, size=None))]
+    #[pyo3(signature = (scale=RngArg::Native(1.0), size=None))]
     fn rayleigh(
         &mut self,
         py: Python<'_>,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let Some(scale) = scale.native() else {
+            let params = [("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "rayleigh", &params, size);
+        };
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(PyValueError::new_err("scale < 0"));
         }
@@ -3824,7 +4061,16 @@ impl PyRandomState {
     }
 
     #[pyo3(signature = (a, size=None))]
-    fn pareto(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn pareto(
+        &mut self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(a) = a.native() else {
+            let params = [("a", a.to_object(py)?)];
+            return self.numpy_distribution(py, "pareto", &params, size);
+        };
         if a <= 0.0 {
             return Err(PyValueError::new_err("a <= 0"));
         }
@@ -3835,7 +4081,16 @@ impl PyRandomState {
     }
 
     #[pyo3(signature = (a, size=None))]
-    fn power(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn power(
+        &mut self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(a) = a.native() else {
+            let params = [("a", a.to_object(py)?)];
+            return self.numpy_distribution(py, "power", &params, size);
+        };
         if a <= 0.0 {
             return Err(PyValueError::new_err("a <= 0"));
         }
@@ -3845,14 +4100,18 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn laplace(
         &mut self,
         py: Python<'_>,
-        loc: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "laplace", &params, size);
+        };
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(PyValueError::new_err("scale < 0"));
         }
@@ -3869,11 +4128,20 @@ impl PyRandomState {
     fn triangular(
         &mut self,
         py: Python<'_>,
-        left: f64,
-        mode: f64,
-        right: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] left: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] mode: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] right: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(left), Some(mode), Some(right)) = (left.native(), mode.native(), right.native())
+        else {
+            let params = [
+                ("left", left.to_object(py)?),
+                ("mode", mode.to_object(py)?),
+                ("right", right.to_object(py)?),
+            ];
+            return self.numpy_distribution(py, "triangular", &params, size);
+        };
         if left > mode {
             return Err(PyValueError::new_err("left > mode"));
         }
@@ -3892,14 +4160,18 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn logistic(
         &mut self,
         py: Python<'_>,
-        loc: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "logistic", &params, size);
+        };
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(PyValueError::new_err("scale < 0"));
         }
@@ -3912,14 +4184,18 @@ impl PyRandomState {
         build_random_f64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (loc=0.0, scale=1.0, size=None))]
+    #[pyo3(signature = (loc=RngArg::Native(0.0), scale=RngArg::Native(1.0), size=None))]
     fn gumbel(
         &mut self,
         py: Python<'_>,
-        loc: f64,
-        scale: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] loc: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] scale: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(loc), Some(scale)) = (loc.native(), scale.native()) else {
+            let params = [("loc", loc.to_object(py)?), ("scale", scale.to_object(py)?)];
+            return self.numpy_distribution(py, "gumbel", &params, size);
+        };
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(PyValueError::new_err("scale < 0"));
         }
@@ -3933,7 +4209,16 @@ impl PyRandomState {
     }
 
     #[pyo3(signature = (a, size=None))]
-    fn zipf(&mut self, py: Python<'_>, a: f64, size: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    fn zipf(
+        &mut self,
+        py: Python<'_>,
+        #[pyo3(from_py_with = rng_f64_arg)] a: RngArg<f64>,
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(a) = a.native() else {
+            let params = [("a", a.to_object(py)?)];
+            return self.numpy_distribution(py, "zipf", &params, size);
+        };
         if a.is_nan() || a <= 1.0 {
             return Err(PyValueError::new_err("a <= 1 or a is NaN"));
         }
@@ -3943,14 +4228,18 @@ impl PyRandomState {
         build_random_u64_as_i64_parts(py, out_shape, values, scalar)
     }
 
-    #[pyo3(signature = (low=0.0, high=1.0, size=None))]
+    #[pyo3(signature = (low=RngArg::Native(0.0), high=RngArg::Native(1.0), size=None))]
     fn uniform(
         &mut self,
         py: Python<'_>,
-        low: f64,
-        high: f64,
+        #[pyo3(from_py_with = rng_f64_arg)] low: RngArg<f64>,
+        #[pyo3(from_py_with = rng_f64_arg)] high: RngArg<f64>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let (Some(low), Some(high)) = (low.native(), high.native()) else {
+            let params = [("low", low.to_object(py)?), ("high", high.to_object(py)?)];
+            return self.numpy_distribution(py, "uniform", &params, size);
+        };
         let size = random_size_from_py(py, size, "RandomState.uniform(size)")?;
         let (shape, values, scalar) = random_state_uniform_parts(&mut self.inner, low, high, size)?;
         build_random_f64_parts(py, shape, values, scalar)
@@ -3960,21 +4249,44 @@ impl PyRandomState {
     fn randint(
         &mut self,
         py: Python<'_>,
-        low: i64,
-        high: Option<i64>,
+        #[pyo3(from_py_with = rng_i64_arg)] low: RngArg<i64>,
+        high: Option<Py<PyAny>>,
         size: Option<Py<PyAny>>,
         dtype: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let (low, high) = match high {
-            Some(high) => (low, high),
-            None => (0, low),
+        // Array bounds, and dtypes the native path does not cover (e.g. `bool`), go to
+        // NumPy's legacy RandomState on this exact state (see `RngArg`).
+        let high_arg = match high.as_ref().map(|h| h.bind(py)) {
+            Some(h) if !h.is_none() => Some(rng_i64_arg(h)?),
+            _ => None,
         };
-        let dtype = extract_python_dtype_bound(
+        let native_dtype = extract_python_dtype_bound(
             py,
             dtype.as_ref().map(|d| d.bind(py)),
             DType::I64,
             "RandomState.randint(dtype)",
-        )?;
+        )
+        .ok()
+        .filter(|dtype| !matches!(dtype, DType::Bool));
+        let native_high = match &high_arg {
+            Some(h) => h.native().map(Some),
+            None => Some(None),
+        };
+        let (Some(low), Some(high), Some(dtype)) = (low.native(), native_high, native_dtype)
+        else {
+            let mut params = vec![("low", low.to_object(py)?)];
+            if let Some(h) = &high_arg {
+                params.push(("high", h.to_object(py)?));
+            }
+            if let Some(dtype) = dtype {
+                params.push(("dtype", dtype));
+            }
+            return self.numpy_distribution(py, "randint", &params, size);
+        };
+        let (low, high) = match high {
+            Some(high) => (low, high),
+            None => (0, low),
+        };
         validate_random_integer_dtype_bounds(low, high, dtype, false)?;
         if high <= low {
             return Err(PyValueError::new_err("high <= low"));
@@ -3999,10 +4311,25 @@ impl PyRandomState {
     fn random_integers(
         &mut self,
         py: Python<'_>,
-        low: i64,
-        high: Option<i64>,
+        #[pyo3(from_py_with = rng_i64_arg)] low: RngArg<i64>,
+        high: Option<Py<PyAny>>,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
+        let high_arg = match high.as_ref().map(|h| h.bind(py)) {
+            Some(h) if !h.is_none() => Some(rng_i64_arg(h)?),
+            _ => None,
+        };
+        let native_high = match &high_arg {
+            Some(h) => h.native().map(Some),
+            None => Some(None),
+        };
+        let (Some(low), Some(high)) = (low.native(), native_high) else {
+            let mut params = vec![("low", low.to_object(py)?)];
+            if let Some(h) = &high_arg {
+                params.push(("high", h.to_object(py)?));
+            }
+            return self.numpy_distribution(py, "random_integers", &params, size);
+        };
         let (low, high) = match high {
             Some(high) => (low, high),
             None => (1, low),
@@ -5407,6 +5734,137 @@ fn random_generator_numpy_method(
         .set_state(&updated_state)
         .map_err(map_bit_generator_error)?;
     Ok(result)
+}
+
+/// A distribution parameter as received from Python. `Native` when it is a scalar the Rust
+/// kernel takes directly; `Object` for anything NumPy must broadcast, convert or reject
+/// itself (arrays, lists, negative counts, strings, `None`, ...). `Object` calls are routed
+/// through `random_generator_numpy_method`, which runs NumPy's own Generator on this
+/// generator's exact state and hands the advanced state back, so array-valued parameters
+/// get NumPy's broadcasting, validation and stream (deadlock-audit-rc0923-epic-71qy3.6;
+/// every one of 30 distributions used to raise TypeError on an array parameter).
+enum RngArg<T> {
+    Native(T),
+    Object(Py<PyAny>),
+}
+
+impl<T: Copy> RngArg<T> {
+    fn native(&self) -> Option<T> {
+        match self {
+            Self::Native(value) => Some(*value),
+            Self::Object(_) => None,
+        }
+    }
+}
+
+impl<T> RngArg<T>
+where
+    T: Copy + for<'py> IntoPyObject<'py>,
+{
+    fn to_object(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self {
+            Self::Native(value) => pyo3::IntoPyObjectExt::into_py_any(*value, py),
+            Self::Object(obj) => Ok(obj.clone_ref(py)),
+        }
+    }
+}
+
+/// Python scalars and 0-d NumPy values (numpy scalars, 0-d arrays) are scalar parameters;
+/// anything with `ndim > 0`, and any sequence, is array-valued and NumPy's to broadcast.
+/// A 1-element 1-D array must NOT count as a scalar: it extracts to a float, but NumPy
+/// returns a shape-(1,) array for it.
+fn rng_param_is_scalar_like(obj: &Bound<'_, PyAny>) -> bool {
+    if obj.is_instance_of::<pyo3::types::PyFloat>() || obj.is_instance_of::<PyInt>() {
+        return true;
+    }
+    obj.getattr(intern!(obj.py(), "ndim"))
+        .and_then(|ndim| ndim.extract::<usize>())
+        .is_ok_and(|ndim| ndim == 0)
+}
+
+fn rng_f64_arg(obj: &Bound<'_, PyAny>) -> PyResult<RngArg<f64>> {
+    if rng_param_is_scalar_like(obj)
+        && let Ok(value) = obj.extract::<f64>()
+    {
+        return Ok(RngArg::Native(value));
+    }
+    Ok(RngArg::Object(obj.clone().unbind()))
+}
+
+fn rng_u64_arg(obj: &Bound<'_, PyAny>) -> PyResult<RngArg<u64>> {
+    if rng_param_is_scalar_like(obj)
+        && !obj.is_instance_of::<pyo3::types::PyFloat>()
+        && let Ok(value) = obj.extract::<u64>()
+    {
+        return Ok(RngArg::Native(value));
+    }
+    Ok(RngArg::Object(obj.clone().unbind()))
+}
+
+fn rng_i64_arg(obj: &Bound<'_, PyAny>) -> PyResult<RngArg<i64>> {
+    if rng_param_is_scalar_like(obj)
+        && !obj.is_instance_of::<pyo3::types::PyFloat>()
+        && let Ok(value) = obj.extract::<i64>()
+    {
+        return Ok(RngArg::Native(value));
+    }
+    Ok(RngArg::Object(obj.clone().unbind()))
+}
+
+impl PyRandomGenerator {
+    /// Run `numpy.random.Generator.<name>(**params, size=size)` on this generator's state.
+    fn numpy_distribution(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+        params: &[(&str, Py<PyAny>)],
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        for (key, value) in params {
+            kwargs.set_item(*key, value.bind(py))?;
+        }
+        if let Some(size) = size {
+            kwargs.set_item(intern!(py, "size"), size.bind(py))?;
+        }
+        self.before_draw(py)?;
+        let result = random_generator_numpy_method(
+            py,
+            &mut self.inner,
+            name,
+            &PyTuple::empty(py),
+            Some(&kwargs),
+        );
+        self.after_draw(py);
+        result
+    }
+}
+
+impl PyRandomState {
+    /// Run `numpy.random.RandomState.<name>(**params, size=size)` on this state (legacy
+    /// Gaussian cache included); see `RngArg`.
+    fn numpy_distribution(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+        params: &[(&str, Py<PyAny>)],
+        size: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        for (key, value) in params {
+            kwargs.set_item(*key, value.bind(py))?;
+        }
+        if let Some(size) = size {
+            kwargs.set_item(intern!(py, "size"), size.bind(py))?;
+        }
+        random_state_numpy_legacy_method(
+            py,
+            &mut self.inner,
+            name,
+            &PyTuple::empty(py),
+            Some(&kwargs),
+        )
+    }
 }
 
 fn random_len_and_shape(size: Option<Vec<usize>>) -> PyResult<(Vec<usize>, usize, bool)> {

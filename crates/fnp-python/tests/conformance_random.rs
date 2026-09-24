@@ -555,3 +555,84 @@ result = (len(seq), bad)
         Ok(())
     });
 }
+
+/// Every Generator distribution, the legacy RandomState ones and the module-level
+/// `random.<dist>` functions (bound methods of the global RandomState) used to declare
+/// `f64`/`i64`/`u64` parameters, so ANY array-valued parameter raised
+/// `TypeError: only 0-dimensional arrays can be converted to Python scalars`
+/// (deadlock-audit-rc0923-epic-71qy3.6). Array-valued calls now run NumPy's own sampler on
+/// this generator's exact state, so they must match NumPy bit-for-bit, leave the stream
+/// where NumPy leaves it (checked by drawing again afterwards), and raise what NumPy raises.
+#[test]
+fn array_valued_distribution_parameters_match_numpy_stream() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+A = np.array([0.5, 1.0, 2.5]); B = np.array([[1.0], [3.0]])
+P = np.array([0.2, 0.5, 0.7]); N = np.array([5, 10, 20])
+gen_cases = {
+ "normal": dict(loc=A, scale=B), "uniform": dict(low=A, high=B+5), "exponential": dict(scale=A),
+ "gamma": dict(shape=A, scale=B), "beta": dict(a=A, b=B), "chisquare": dict(df=A+1),
+ "f": dict(dfnum=A+1, dfden=B+1), "noncentral_chisquare": dict(df=A+1, nonc=B),
+ "noncentral_f": dict(dfnum=A+1, dfden=B+1, nonc=A), "standard_gamma": dict(shape=A),
+ "standard_t": dict(df=A+1), "vonmises": dict(mu=A, kappa=B), "pareto": dict(a=A),
+ "weibull": dict(a=A), "power": dict(a=A), "laplace": dict(loc=A, scale=B), "gumbel": dict(loc=A, scale=B),
+ "logistic": dict(loc=A, scale=B), "lognormal": dict(mean=A, sigma=B), "rayleigh": dict(scale=A),
+ "wald": dict(mean=A, scale=B), "triangular": dict(left=A-1, mode=A, right=B+3),
+ "binomial": dict(n=N, p=P), "negative_binomial": dict(n=N, p=P), "poisson": dict(lam=A),
+ "zipf": dict(a=A+1.5), "geometric": dict(p=P), "hypergeometric": dict(ngood=N, nbad=N+1, nsample=N//2+1),
+ "logseries": dict(p=P), "integers": dict(low=np.array([0, 5, 10]), high=np.array([[20], [40]])),
+}
+bad = []
+def same(a, b):
+    return type(a) is type(b) and np.shape(a) == np.shape(b) and np.asarray(a).tobytes() == np.asarray(b).tobytes()
+for name, kw in gen_cases.items():
+    f = fnp.random.default_rng(7); n = np.random.default_rng(7)
+    if not (same(getattr(f, name)(**kw), getattr(n, name)(**kw)) and same(f.random(3), n.random(3))):
+        bad.append(f"Generator.{name}")
+# edge cases that must behave exactly like NumPy (value or exception type)
+edge = [
+ ("normal loc=None", lambda r: r.normal(loc=None)), ("binomial n=-1", lambda r: r.binomial(-1, 0.5)),
+ ("normal 1-elem array", lambda r: r.normal(loc=np.array([1.0]))), ("normal list loc", lambda r: r.normal(loc=[0, 1], size=(3, 2))),
+ ("normal bad broadcast", lambda r: r.normal(loc=[0, 1], size=3)), ("integers bool", lambda r: r.integers(0, 2, 5, dtype=bool)),
+ ("integers high=None", lambda r: r.integers(5, size=4)), ("binomial float n", lambda r: r.binomial(5.0, 0.5)),
+]
+for label, fn in edge:
+    try: w = fn(np.random.default_rng(3)); we = None
+    except Exception as e: w, we = None, type(e).__name__
+    try: g = fn(fnp.random.default_rng(3)); ge = None
+    except Exception as e: g, ge = None, type(e).__name__
+    if we != ge or (we is None and not same(g, w)):
+        bad.append(f"edge {label}: numpy={we} fnp={ge}")
+rs_cases = [("normal", dict(loc=A, scale=B)), ("uniform", dict(low=A, high=B+5)), ("gamma", dict(shape=A, scale=B)),
+            ("exponential", dict(scale=A)), ("triangular", dict(left=A-1, mode=A, right=B+3)),
+            ("randint", dict(low=np.array([0, 5, 10]), high=np.array([[20], [40]]))), ("randint", dict(low=0, high=2, size=5, dtype=bool))]
+for name, kw in rs_cases:
+    f = fnp.random.RandomState(9); n = np.random.RandomState(9)
+    # a scalar normal first leaves the legacy Gaussian cache populated; it must survive the delegated call
+    ok = same(f.normal(), n.normal()) and same(getattr(f, name)(**kw), getattr(n, name)(**kw)) and same(f.normal(size=3), n.normal(size=3))
+    if not ok:
+        bad.append(f"RandomState.{name}")
+np.random.seed(4); w = np.random.normal(loc=A, scale=B); fnp.random.seed(4); g = fnp.random.normal(loc=A, scale=B)
+if not same(g, w):
+    bad.append("module-level random.normal")
+result = (len(gen_cases), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (count, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(count, 30, "distribution table drifted");
+        assert!(
+            bad.is_empty(),
+            "array-valued parameters diverge from numpy: {bad:?}"
+        );
+        Ok(())
+    });
+}
