@@ -623,7 +623,13 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
             continue;
         }
         let canonical: String = np_obj.getattr(intern!(py, "__name__"))?.extract()?;
+        // An alias fnp already binds to numpy's OWN object is correct as it is (right name,
+        // right repr) and is pinned that way by `remaining_top_level_attrs_identity_equal_to_numpy`.
+        let already_numpys = m
+            .getattr(name.as_str())
+            .is_ok_and(|current| current.is(&np_obj));
         if canonical != name
+            && !already_numpys
             && let Ok(ours) = m.getattr(canonical.as_str())
         {
             m.setattr(name.as_str(), ours)?;
