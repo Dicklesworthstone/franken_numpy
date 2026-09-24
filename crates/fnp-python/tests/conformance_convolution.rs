@@ -242,6 +242,7 @@ fn convolution_fnp_python_module_paths_match_numpy() {
         }
 
         eprintln!("{}", TOTALS.summarize("convolution-fnp-python"));
+        TOTALS.assert_no_failures("convolution-fnp-python");
         Ok(())
     });
 }

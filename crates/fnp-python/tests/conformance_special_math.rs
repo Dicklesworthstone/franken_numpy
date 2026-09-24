@@ -455,6 +455,7 @@ fn conformance_special_math_matrix() {
         }
 
         eprintln!("\n{}", t.summarize("special_math"));
+        t.assert_no_failures("special_math");
         Ok(())
     });
 }

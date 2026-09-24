@@ -5,7 +5,9 @@
 
 mod common;
 
-use common::{CompareMode, RequirementLevel, Totals, run_case, with_fnp_and_numpy};
+use common::{
+    CaseOutcome, CompareMode, RequirementLevel, Totals, compare_close, run_case, with_fnp_and_numpy,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -135,6 +137,7 @@ fn ptp_native_fnp_python_path_matches_numpy() {
         );
 
         eprintln!("{}", TOTALS.summarize("ptp-native"));
+        TOTALS.assert_no_failures("ptp-native");
         Ok(())
     });
 }
@@ -195,6 +198,39 @@ fn ptp_zerocopy_f64_axis_matches_numpy_bytes_and_golden() {
         assert_eq!(
             h, 0x1df562ae07a2a4c0,
             "ptp zero-copy f64 axis golden FNV drifted"
+        );
+        Ok(())
+    });
+}
+
+/// Bead rc0923 .17 negative case for the shared `Close` comparison: it is ULP-bounded, not
+/// `np.allclose` at its defaults. A 1e-9 relative perturbation (millions of ULPs, which the old
+/// criterion accepted - asserted below) must fail; exactly 1 ULP passes; 2 ULPs fail at the
+/// default budget and pass under `CloseUlps(2)`; a flipped zero sign and a moved NaN fail.
+#[test]
+fn close_mode_is_ulp_bounded() {
+    with_fnp_and_numpy(|py, _module, numpy| {
+        let base = numpy.call_method1("arange", (1.0, 6.0))?;
+        let next = numpy.call_method1("nextafter", (&base, f64::INFINITY))?;
+        let next2 = numpy.call_method1("nextafter", (&next, f64::INFINITY))?;
+        let perturbed = base.call_method1("__mul__", (1.0 + 1e-9,))?;
+        let zero = numpy.call_method1("array", (vec![0.0_f64],))?;
+        let neg_zero = numpy.call_method1("array", (vec![-0.0_f64],))?;
+        let nan_first = numpy.call_method1("array", (vec![f64::NAN, 1.0],))?;
+        let nan_second = numpy.call_method1("array", (vec![1.0, f64::NAN],))?;
+        let passes = |outcome: CaseOutcome| matches!(outcome, CaseOutcome::Pass);
+        assert!(passes(compare_close(py, &base, &base, 1)));
+        assert!(passes(compare_close(py, &base, &next, 1)));
+        assert!(!passes(compare_close(py, &base, &next2, 1)));
+        assert!(passes(compare_close(py, &base, &next2, 2)));
+        assert!(!passes(compare_close(py, &base, &perturbed, 1)));
+        assert!(!passes(compare_close(py, &zero, &neg_zero, 1)));
+        assert!(!passes(compare_close(py, &nan_first, &nan_second, 1)));
+        assert!(
+            numpy
+                .call_method1("allclose", (&base, &perturbed))?
+                .extract::<bool>()?,
+            "the old criterion accepted this perturbation"
         );
         Ok(())
     });

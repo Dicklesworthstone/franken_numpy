@@ -56,9 +56,14 @@ pub enum CompareMode {
     /// Exact equality of shape, dtype, and value string representation.
     /// Use for integer / boolean arrays and dtype-class checks.
     Strict,
-    /// Float-array match under numpy.allclose semantics; shapes and
-    /// dtype names must still be identical.
+    /// Float-array match within 1 ULP of the arrays' own dtype (per component for complex),
+    /// NaN positions identical, infinities and the sign of zeros identical; shapes and dtype
+    /// names must match. It used to be `numpy.allclose` at its defaults (rtol 1e-5), ~10^11x
+    /// looser than the 1 ULP it was documented as (bead rc0923 .17).
     Close,
+    /// `Close` with an explicit budget of `k` ULPs, for a case whose kernel legitimately
+    /// reassociates or re-rounds. Every use states its reason next to the case.
+    CloseUlps(u32),
     /// Tuple / structured / scalar surface — each component strict.
     Surface,
     /// Both implementations must raise the same exception type.
@@ -120,6 +125,18 @@ impl Totals {
                 self.fail_count.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    /// Fail the suite if ANY case failed. MUST failures already panicked at the case; SHOULD
+    /// and MAY failures only printed, so a suite that never called this could not fail on them
+    /// at all (bead rc0923 .17: 19 such cases across five suites).
+    pub fn assert_no_failures(&self, family: &str) {
+        let failures = self.fail_count.load(Ordering::Relaxed);
+        assert_eq!(
+            failures, 0,
+            "{failures} conformance case(s) failed in the {family} family (SHOULD/MAY failures \
+             printed above)"
+        );
     }
 
     pub fn summarize(&self, family: &str) -> String {
@@ -490,7 +507,8 @@ fn compare(
     match (ours, theirs) {
         (Ok(a), Ok(b)) => match mode {
             CompareMode::Strict => compare_strict(py, &a, &b),
-            CompareMode::Close => compare_close(py, &a, &b),
+            CompareMode::Close => compare_close(py, &a, &b, 1),
+            CompareMode::CloseUlps(k) => compare_close(py, &a, &b, k),
             CompareMode::Surface => compare_surface(py, &a, &b),
             CompareMode::Error => {
                 CaseOutcome::Fail("expected both to raise but both succeeded".to_string())
@@ -665,10 +683,46 @@ fn shapes_equivalent(a: &Option<Vec<usize>>, b: &Option<Vec<usize>>) -> bool {
     }
 }
 
-fn compare_close(
+/// Largest distance between two same-shape results in ULPs of their own dtype (complex: per
+/// component). `inf` when NaN positions differ, an infinity differs, the sign of a zero differs,
+/// or a non-float result is not exactly equal.
+const ULP_DISTANCE_PY: &str = r#"
+import numpy as np
+def ulp_distance(ours, theirs):
+    a, b = np.asarray(ours), np.asarray(theirs)
+    if a.dtype.kind not in "fc":
+        return 0.0 if np.array_equal(a, b) else float("inf")
+    parts = [(a.real, b.real), (a.imag, b.imag)] if a.dtype.kind == "c" else [(a, b)]
+    worst = 0.0
+    for x, y in parts:
+        x, y = np.asarray(x), np.asarray(y)
+        nan_x, nan_y = np.isnan(x), np.isnan(y)
+        if not np.array_equal(nan_x, nan_y):
+            return float("inf")
+        finite = np.isfinite(x) & np.isfinite(y)
+        infinite = ~finite & ~nan_x
+        if not np.array_equal(x[infinite], y[infinite]):
+            return float("inf")
+        zeros = finite & (x == 0) & (y == 0)
+        if not np.array_equal(np.signbit(x[zeros]), np.signbit(y[zeros])):
+            return float("inf")
+        if finite.any():
+            xf, yf = x[finite], y[finite]
+            spacing = np.spacing(np.maximum(np.abs(xf), np.abs(yf))).astype(np.float64)
+            with np.errstate(all="ignore"):
+                gap = np.abs(xf.astype(np.float64) - yf.astype(np.float64)) / spacing
+            worst = max(worst, float(np.max(gap)))
+    return worst
+"#;
+
+/// `Close` / `CloseUlps(k)` comparison: dtype and shape identical, then every value within
+/// `max_ulps` ULPs (see `ULP_DISTANCE_PY`). Prints the case's measured maximum so a budget can
+/// be set from evidence rather than guessed.
+pub fn compare_close(
     py: Python<'_>,
     ours: &Bound<'_, pyo3::types::PyAny>,
     theirs: &Bound<'_, pyo3::types::PyAny>,
+    max_ulps: u32,
 ) -> CaseOutcome {
     let ours_dtype = fetch_dtype_name(py, ours);
     let theirs_dtype = fetch_dtype_name(py, theirs);
@@ -684,27 +738,31 @@ fn compare_close(
             "shape mismatch: ours={ours_shape:?} theirs={theirs_shape:?}"
         ));
     }
-    // numpy.allclose with equal_nan=True — close enough for the ULP-level
-    // drift that integer-reducing / geometric-stepping native ports can
-    // introduce.
-    let numpy = match py.import("numpy") {
-        Ok(np) => np,
-        Err(_) => return CaseOutcome::Fail("numpy import failed during compare".into()),
-    };
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("equal_nan", true).unwrap();
-    let allclose = numpy.getattr("allclose").unwrap();
-    match allclose.call((ours, theirs), Some(&kwargs)) {
-        Ok(verdict) => match verdict.extract::<bool>() {
-            Ok(true) => CaseOutcome::Pass,
-            Ok(false) => CaseOutcome::Fail(format!(
-                "values drift beyond allclose default tol: ours={} theirs={}",
-                pyobject_repr(py, ours),
-                pyobject_repr(py, theirs)
-            )),
-            Err(e) => CaseOutcome::Fail(format!("allclose non-bool result: {e}")),
+    let distance = std::ffi::CString::new(ULP_DISTANCE_PY)
+        .ok()
+        .and_then(|code| {
+            PyModule::from_code(py, &code, c"fnp_ulp_distance.py", c"fnp_ulp_distance").ok()
+        })
+        .and_then(|helper| helper.getattr("ulp_distance").ok())
+        .map(|ulp_distance| ulp_distance.call1((ours, theirs)));
+    match distance {
+        Some(Ok(value)) => match value.extract::<f64>() {
+            Ok(ulps) => {
+                eprintln!("{{\"max_ulp_distance\": {ulps}, \"budget\": {max_ulps}}}");
+                if ulps <= f64::from(max_ulps) {
+                    CaseOutcome::Pass
+                } else {
+                    CaseOutcome::Fail(format!(
+                        "values differ by {ulps} ULP (budget {max_ulps}): ours={} theirs={}",
+                        pyobject_repr(py, ours),
+                        pyobject_repr(py, theirs)
+                    ))
+                }
+            }
+            Err(e) => CaseOutcome::Fail(format!("ulp_distance non-float result: {e}")),
         },
-        Err(e) => CaseOutcome::Fail(format!("allclose raised: {e}")),
+        Some(Err(e)) => CaseOutcome::Fail(format!("ulp_distance raised: {e}")),
+        None => CaseOutcome::Fail("could not build the ulp_distance helper".into()),
     }
 }
 

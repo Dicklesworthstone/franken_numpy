@@ -284,6 +284,7 @@ fn cumsum_cumprod_native_fnp_python_paths_match_numpy() {
         }
 
         eprintln!("{}", TOTALS.summarize("cumsum-cumprod-native"));
+        TOTALS.assert_no_failures("cumsum-cumprod-native");
         Ok(())
     });
 }

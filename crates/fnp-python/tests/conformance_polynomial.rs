@@ -316,6 +316,7 @@ fn conformance_polynomial_matrix() {
         }
 
         eprintln!("\n{}", t.summarize("polynomial"));
+        t.assert_no_failures("polynomial");
         Ok(())
     });
 }
