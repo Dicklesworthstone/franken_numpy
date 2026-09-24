@@ -1983,7 +1983,7 @@ impl RngBackend {
         }
     }
 
-    fn try_fill_pcg_bytes(&mut self, out: &mut [u8]) -> Option<Option<u32>> {
+    fn try_fill_pcg_bytes(&mut self, out: &mut [u8]) -> Option<SplitTail> {
         match self {
             Self::Pcg64(rng) => Some(fill_pcg_bytes_from_u64_words(rng, out)),
             Self::Pcg64Dxsm(rng) => Some(fill_pcg_bytes_from_u64_words(rng, out)),
@@ -1991,7 +1991,7 @@ impl RngBackend {
         }
     }
 
-    fn try_append_pcg_bytes(&mut self, out: &mut Vec<u8>, len: usize) -> Option<Option<u32>> {
+    fn try_append_pcg_bytes(&mut self, out: &mut Vec<u8>, len: usize) -> Option<SplitTail> {
         match self {
             Self::Pcg64(rng) => Some(append_pcg_bytes_serial(rng, out, len)),
             Self::Pcg64Dxsm(rng) => Some(append_pcg_bytes_serial(rng, out, len)),
@@ -2153,39 +2153,44 @@ fn parallel_pcg_u64_words<R: PcgAdvanceFill>(rng: &mut R, len: usize) -> Vec<u64
     out
 }
 
-fn fill_pcg_bytes_serial<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> Option<u32> {
+/// What a word-split fill leaves in NumPy's `(has_uint32, uinteger)` pair: whether the LAST
+/// 64-bit word was only half consumed (its high half pending), and that word's high half,
+/// which NumPy keeps in `uinteger` even after consuming it. `None` if no word was drawn.
+type SplitTail = Option<(bool, u32)>;
+
+fn fill_pcg_bytes_serial<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> SplitTail {
     let mut offset = 0usize;
-    let mut buffered = None;
+    let mut tail = None;
     while offset < out.len() {
         let word = rng.next_u64_word();
         let bytes = word.to_le_bytes();
         let take = (out.len() - offset).min(8);
         out[offset..offset + take].copy_from_slice(&bytes[..take]);
         offset += take;
-        buffered = (take <= 4).then_some((word >> 32) as u32);
+        tail = Some((take <= 4, (word >> 32) as u32));
     }
-    buffered
+    tail
 }
 
 fn append_pcg_bytes_serial<R: PcgAdvanceFill>(
     rng: &mut R,
     out: &mut Vec<u8>,
     len: usize,
-) -> Option<u32> {
+) -> SplitTail {
     let mut remaining = len;
-    let mut buffered = None;
+    let mut tail = None;
     while remaining > 0 {
         let word = rng.next_u64_word();
         let bytes = word.to_le_bytes();
         let take = remaining.min(8);
         out.extend_from_slice(&bytes[..take]);
         remaining -= take;
-        buffered = (take <= 4).then_some((word >> 32) as u32);
+        tail = Some((take <= 4, (word >> 32) as u32));
     }
-    buffered
+    tail
 }
 
-fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> Option<u32> {
+fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> SplitTail {
     use rayon::prelude::*;
 
     let u32_count = out.len().div_ceil(4);
@@ -2195,13 +2200,13 @@ fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8])
         return fill_pcg_bytes_serial(rng, out);
     }
 
-    let buffered = if u32_count % 2 == 1 {
+    // The last word's high half is NumPy's `uinteger` after the fill whether or not it was
+    // consumed; it is still pending only for an odd number of 32-bit draws.
+    let buffered = (words > 0).then(|| {
         let mut tail = rng.clone();
         tail.advance_by((words - 1) as u128);
-        Some((tail.next_u64_word() >> 32) as u32)
-    } else {
-        None
-    };
+        (u32_count % 2 == 1, (tail.next_u64_word() >> 32) as u32)
+    });
 
     let chunk_words = words.div_ceil(threads).max(1);
     let chunk_bytes = chunk_words.saturating_mul(8).max(8);
@@ -2265,37 +2270,35 @@ fn fill_pcg_random_f32_chunk<R: PcgAdvanceFill>(rng: &mut R, start: usize, out: 
 /// Generate `size` uniform `[0,1)` float32 values for PCG-family cores. NumPy's
 /// float32 path consumes u64 words as low-then-high u32 halves; this keeps that
 /// schedule exactly, including the buffered high half after odd-length fills.
-fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<f32>, Option<u32>) {
+fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<f32>, SplitTail) {
     use rayon::prelude::*;
     let mut out = vec![0.0f32; size];
     let words = size.div_ceil(2);
     let threads = rayon::current_num_threads();
     if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
         let mut idx = 0usize;
+        let mut tail = None;
         while idx + 1 < out.len() {
             let word = rng.next_u64_word();
             out[idx] = random_f32_from_uint32(word as u32);
             out[idx + 1] = random_f32_from_uint32((word >> 32) as u32);
+            tail = Some((false, (word >> 32) as u32));
             idx += 2;
         }
-        let buffered = if idx < out.len() {
+        if idx < out.len() {
             let word = rng.next_u64_word();
             out[idx] = random_f32_from_uint32(word as u32);
-            Some((word >> 32) as u32)
-        } else {
-            None
-        };
-        return (out, buffered);
+            tail = Some((true, (word >> 32) as u32));
+        }
+        return (out, tail);
     }
 
-    let buffered = if size % 2 == 1 {
+    // See `SplitTail`: the last word's high half is NumPy's `uinteger` either way.
+    let buffered = (words > 0).then(|| {
         let mut tail = rng.clone();
         tail.advance_by((words - 1) as u128);
-        let word = tail.next_u64_word();
-        Some((word >> 32) as u32)
-    } else {
-        None
-    };
+        (size % 2 == 1, (tail.next_u64_word() >> 32) as u32)
+    });
 
     let chunk = size.div_ceil(threads).max(1);
     out.par_chunks_mut(chunk)
@@ -2917,6 +2920,15 @@ fn sample_ziggurat_exponential_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) ->
 pub struct BitGenerator {
     kind: BitGeneratorKind,
     rng: RngBackend,
+    /// NumPy's `has_uint32` / `uinteger`, with NumPy's exact representation: `uinteger` is
+    /// the high half of a 64-bit output left over by a 32-bit draw, and `has_uint32` says
+    /// whether it is still pending. Consuming it clears only the flag; the stale value stays
+    /// visible in the state dict, as in NumPy. NumPy keeps this in the BIT GENERATOR state
+    /// (not the Generator), so it survives 64-bit and float draws; a state set replaces it and
+    /// a jump/advance zeroes both. MT19937 never uses it: its 32-bit draw is the native
+    /// tempered output (NumPy's `mt19937_next32`).
+    has_uint32: bool,
+    uinteger: u32,
 }
 
 impl BitGenerator {
@@ -3003,7 +3015,12 @@ impl BitGenerator {
                 RngBackend::Deterministic(rng)
             }
         };
-        Ok(Self { kind, rng })
+        Ok(Self {
+            kind,
+            rng,
+            has_uint32: false,
+            uinteger: 0,
+        })
     }
 
     pub fn from_seed_sequence(
@@ -3035,7 +3052,12 @@ impl BitGenerator {
                     .map_err(|_| BitGeneratorError::InitFailed("SFC64 SeedSequence init failed"))?,
             ),
         };
-        Ok(Self { kind, rng: backend })
+        Ok(Self {
+            kind,
+            rng: backend,
+            has_uint32: false,
+            uinteger: 0,
+        })
     }
 
     /// Create a BitGenerator backed by a real PCG64-DXSM PRNG.
@@ -3044,6 +3066,8 @@ impl BitGenerator {
         Self {
             kind: BitGeneratorKind::Pcg64Dxsm,
             rng: RngBackend::Pcg64Dxsm(pcg),
+            has_uint32: false,
+            uinteger: 0,
         }
     }
 
@@ -3064,6 +3088,55 @@ impl BitGenerator {
     #[must_use]
     pub fn next_f64(&mut self) -> f64 {
         self.rng.next_f64()
+    }
+
+    /// NumPy's `next_uint32` for this bit generator.
+    ///
+    /// PCG64 / PCG64DXSM / Philox / SFC64 split a 64-bit output: the low half is returned
+    /// and the high half is kept for the next 32-bit draw (`has_uint32`/`uinteger`).
+    /// MT19937 returns its native 32-bit output and never buffers.
+    #[must_use]
+    pub fn next_u32(&mut self) -> u32 {
+        if let RngBackend::Mt19937(mt) = &mut self.rng {
+            return mt.next_u32();
+        }
+        if self.has_uint32 {
+            // Like NumPy, consuming the half-word clears only the flag.
+            self.has_uint32 = false;
+            return self.uinteger;
+        }
+        let value = self.rng.next_u64();
+        self.has_uint32 = true;
+        self.uinteger = (value >> 32) as u32;
+        (value & 0xFFFF_FFFF) as u32
+    }
+
+    /// The buffered high half-word left by an odd number of 32-bit draws, if any.
+    #[must_use]
+    pub fn pending_u32(&self) -> Option<u32> {
+        self.has_uint32.then_some(self.uinteger)
+    }
+
+    /// NumPy's raw `(has_uint32, uinteger)` pair, exactly as its state dict reports it.
+    #[must_use]
+    pub fn uint32_buffer_state(&self) -> (bool, u32) {
+        (self.has_uint32, self.uinteger)
+    }
+
+    fn take_pending_u32(&mut self) -> Option<u32> {
+        let pending = self.pending_u32();
+        self.has_uint32 = false;
+        pending
+    }
+
+    /// Apply what a bulk word-split fill left behind (see `SplitTail`).
+    fn apply_split_tail(&mut self, tail: SplitTail) {
+        if let Some((pending, last_high)) = tail
+            && !matches!(self.rng, RngBackend::Mt19937(_))
+        {
+            self.has_uint32 = pending;
+            self.uinteger = last_high;
+        }
     }
 
     pub fn bounded_u64(&mut self, upper_bound: u64) -> Result<u64, RandomError> {
@@ -3088,6 +3161,9 @@ impl BitGenerator {
                 "jump count overflowed deterministic step budget",
             ))?;
         self.rng.jump_ahead(steps);
+        // NumPy's jump/advance call `_reset_state_variables`, which zeroes both fields.
+        self.has_uint32 = false;
+        self.uinteger = 0;
         Ok(())
     }
 
@@ -3137,6 +3213,8 @@ impl BitGenerator {
                     u128::from(child_seed),
                     u128::from(child_counter),
                 )),
+                has_uint32: false,
+                uinteger: 0,
             });
         }
 
@@ -3156,6 +3234,12 @@ impl BitGenerator {
                 schema_entries.push(entry);
             }
         }
+        // NumPy's `has_uint32` / `uinteger` are part of the observable state. They are only
+        // emitted once either is non-zero, so a never-used buffer leaves the state unchanged.
+        if self.has_uint32 || self.uinteger != 0 {
+            schema_entries.push((STATE_KEY_HAS_UINT32.to_string(), u64::from(self.has_uint32)));
+            schema_entries.push((STATE_KEY_UINTEGER.to_string(), u64::from(self.uinteger)));
+        }
 
         BitGeneratorState {
             kind: self.kind,
@@ -3173,6 +3257,24 @@ impl BitGenerator {
             ));
         }
         state.validate()?;
+
+        // Setting state replaces the 32-bit buffer with whatever the state carries (NumPy:
+        // `has_uint32`/`uinteger` from the state dict), so an absent entry clears it.
+        let entry = |key: &str| {
+            state
+                .schema_entries
+                .iter()
+                .find(|(k, _)| k.trim() == key)
+                .map(|(_, v)| *v)
+        };
+        let (has_uint32, uinteger) = if state.kind == BitGeneratorKind::Mt19937 {
+            (false, 0)
+        } else {
+            let uinteger = u32::try_from(entry(STATE_KEY_UINTEGER).unwrap_or(0)).map_err(|_| {
+                BitGeneratorError::StateSchemaInvalid("uinteger must fit in 32 bits")
+            })?;
+            (entry(STATE_KEY_HAS_UINT32).unwrap_or(0) != 0, uinteger)
+        };
 
         self.rng = match state.kind {
             BitGeneratorKind::Pcg64 => {
@@ -3206,10 +3308,16 @@ impl BitGenerator {
                 RngBackend::Sfc64(sfc)
             }
         };
+        self.has_uint32 = has_uint32;
+        self.uinteger = uinteger;
 
         Ok(())
     }
 }
+
+/// State-schema keys for NumPy's buffered 32-bit half-word (see `BitGenerator::has_uint32`).
+pub const STATE_KEY_HAS_UINT32: &str = "has_uint32";
+pub const STATE_KEY_UINTEGER: &str = "uinteger";
 
 macro_rules! define_algorithm_adapter {
     ($name:ident, $kind:path) => {
@@ -4016,10 +4124,8 @@ impl HypergeometricHruaCache {
 pub struct Generator {
     bit_generator: BitGenerator,
     seed_sequence: Option<SeedSequence>,
-    /// Internal buffer for NumPy-compatible `next_uint32` buffering.
-    /// Each u64 produces two u32 values (low first, then high).
-    u32_buf: u32,
-    u32_buf_ready: bool,
+    // The NumPy `next_uint32` half-word buffer lives in the BitGenerator (as `has_uint32`
+    // does in NumPy's bitgen state), not here: see `BitGenerator::next_u32`.
 }
 
 impl Generator {
@@ -4028,8 +4134,6 @@ impl Generator {
         Self {
             bit_generator,
             seed_sequence: None,
-            u32_buf: 0,
-            u32_buf_ready: false,
         }
     }
 
@@ -4040,10 +4144,10 @@ impl Generator {
             bit_generator: BitGenerator {
                 kind: BitGeneratorKind::Pcg64,
                 rng: RngBackend::Pcg64(pcg),
+                has_uint32: false,
+                uinteger: 0,
             },
             seed_sequence: None,
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4053,8 +4157,6 @@ impl Generator {
         Ok(Self {
             bit_generator: BitGenerator::from_pcg64_dxsm(pcg),
             seed_sequence: None,
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4066,8 +4168,6 @@ impl Generator {
         Ok(Self {
             bit_generator,
             seed_sequence: Some(seed_sequence.clone()),
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4089,8 +4189,6 @@ impl Generator {
         Ok(Self {
             bit_generator,
             seed_sequence: Some(seed_sequence.clone()),
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4099,15 +4197,15 @@ impl Generator {
         &self.bit_generator
     }
 
+    // 64-bit and float draws leave the pending 32-bit half-word alone, exactly as NumPy's
+    // `next_uint64`/`next_double` leave `has_uint32` alone.
     #[must_use]
     pub fn next_u64(&mut self) -> u64 {
-        self.u32_buf_ready = false;
         self.bit_generator.next_u64()
     }
 
     #[must_use]
     pub fn next_f64(&mut self) -> f64 {
-        self.u32_buf_ready = false;
         self.bit_generator.next_f64()
     }
 
@@ -4133,8 +4231,6 @@ impl Generator {
         Ok(Self {
             bit_generator: self.bit_generator.jumped(jumps)?,
             seed_sequence: self.seed_sequence.clone(),
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
@@ -4164,8 +4260,6 @@ impl Generator {
                 children.push(Self {
                     bit_generator,
                     seed_sequence: Some(child_sequence),
-                    u32_buf: 0,
-                    u32_buf_ready: false,
                 });
             }
             return Ok(children);
@@ -4184,7 +4278,6 @@ impl Generator {
     }
 
     pub fn set_state(&mut self, state: &BitGeneratorState) -> Result<(), BitGeneratorError> {
-        self.u32_buf_ready = false;
         self.bit_generator.set_state(state)
     }
 
@@ -4229,28 +4322,15 @@ impl Generator {
         Ok(Self {
             bit_generator,
             seed_sequence,
-            u32_buf: 0,
-            u32_buf_ready: false,
         })
     }
 
     // ── NumPy-compatible bounded integer primitives ──────────────────────
 
-    /// Generate a 32-bit random integer using NumPy's buffering strategy.
-    ///
-    /// Each u64 from the underlying bit generator is split into two u32s:
-    /// the low 32 bits are returned first, and the high 32 bits are buffered
-    /// for the next call.  Matches `next_uint32()` in NumPy's `pcg64.c`.
+    /// NumPy's `next_uint32` (see `BitGenerator::next_u32`: buffered half-word split for
+    /// the 64-bit generators, native output for MT19937).
     fn next_uint32(&mut self) -> u32 {
-        if self.u32_buf_ready {
-            self.u32_buf_ready = false;
-            self.u32_buf
-        } else {
-            let val = self.bit_generator.next_u64();
-            self.u32_buf = (val >> 32) as u32;
-            self.u32_buf_ready = true;
-            (val & 0xFFFF_FFFF) as u32
-        }
+        self.bit_generator.next_u32()
     }
 
     /// 32-bit Lemire's method for bounded integers in `[0, rng]`.
@@ -4477,7 +4557,6 @@ impl Generator {
             return Vec::new();
         }
 
-        self.u32_buf_ready = false;
         match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => random_f64_from_core(rng, size),
             // PCG64 / PCG64-DXSM support jump-ahead, so a large uniform fill runs
@@ -4501,22 +4580,16 @@ impl Generator {
 
         // If a prior scalar f32 draw left a high u32 buffered, preserve the
         // exact NumPy half-word schedule by finishing on the serial path.
-        if !self.u32_buf_ready {
+        if self.bit_generator.pending_u32().is_none() {
             match &mut self.bit_generator.rng {
                 RngBackend::Pcg64(rng) => {
-                    let (values, buffered) = parallel_pcg_random_f32(rng, size);
-                    if let Some(buf) = buffered {
-                        self.u32_buf = buf;
-                        self.u32_buf_ready = true;
-                    }
+                    let (values, tail) = parallel_pcg_random_f32(rng, size);
+                    self.bit_generator.apply_split_tail(tail);
                     return values;
                 }
                 RngBackend::Pcg64Dxsm(rng) => {
-                    let (values, buffered) = parallel_pcg_random_f32(rng, size);
-                    if let Some(buf) = buffered {
-                        self.u32_buf = buf;
-                        self.u32_buf_ready = true;
-                    }
+                    let (values, tail) = parallel_pcg_random_f32(rng, size);
+                    self.bit_generator.apply_split_tail(tail);
                     return values;
                 }
                 RngBackend::Deterministic(_)
@@ -4569,7 +4642,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => uniform_from_core(rng, low, range, size),
             // PCG jump-ahead: parallel draw + affine map, bit-identical stream.
@@ -4883,7 +4955,6 @@ impl Generator {
             return Vec::new();
         }
 
-        self.u32_buf_ready = false;
         match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => standard_normal_from_core(rng, size),
             RngBackend::Pcg64(rng) => standard_normal_from_core(rng, size),
@@ -4917,7 +4988,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => normal_from_core(rng, loc, scale, size),
             RngBackend::Pcg64(rng) => normal_from_core(rng, loc, scale, size),
@@ -4953,7 +5023,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => exponential_from_core(rng, scale, size),
             RngBackend::Pcg64(rng) => exponential_from_core(rng, scale, size),
@@ -4983,7 +5052,6 @@ impl Generator {
             return Vec::new();
         }
 
-        self.u32_buf_ready = false;
         match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => standard_exponential_inv_from_core(rng, size),
             RngBackend::Pcg64(rng) => parallel_pcg_standard_exponential_inv(rng, size),
@@ -5026,45 +5094,38 @@ impl Generator {
 
         if length < PCG_BYTES_DIRECT_MIN_LEN + 4 {
             let mut result = Vec::with_capacity(length);
-            if self.u32_buf_ready {
-                let bytes = self.u32_buf.to_le_bytes();
+            if let Some(word) = self.bit_generator.take_pending_u32() {
+                let bytes = word.to_le_bytes();
                 let take = length.min(4);
                 result.extend_from_slice(&bytes[..take]);
-                self.u32_buf_ready = false;
             }
             let remaining = length - result.len();
             if remaining > 0
-                && let Some(buffered) = self
+                && let Some(tail) = self
                     .bit_generator
                     .rng
                     .try_append_pcg_bytes(&mut result, remaining)
-                && let Some(word) = buffered
             {
-                self.u32_buf = word;
-                self.u32_buf_ready = true;
+                self.bit_generator.apply_split_tail(tail);
             }
             return result;
         }
 
         let mut result = vec![0u8; length];
         let mut offset = 0usize;
-        if self.u32_buf_ready {
-            let bytes = self.u32_buf.to_le_bytes();
+        if let Some(word) = self.bit_generator.take_pending_u32() {
+            let bytes = word.to_le_bytes();
             let take = length.min(4);
             result[..take].copy_from_slice(&bytes[..take]);
-            self.u32_buf_ready = false;
             offset = take;
         }
         if length - offset >= PCG_BYTES_DIRECT_MIN_LEN
-            && let Some(buffered) = self
+            && let Some(tail) = self
                 .bit_generator
                 .rng
                 .try_fill_pcg_bytes(&mut result[offset..])
         {
-            if let Some(word) = buffered {
-                self.u32_buf = word;
-                self.u32_buf_ready = true;
-            }
+            self.bit_generator.apply_split_tail(tail);
             return result;
         }
         while offset < length {
@@ -5825,14 +5886,12 @@ impl Generator {
     /// Bit layout from a single u64: bits 0..7 = rectangle index,
     /// bit 8 = sign, bits 9..60 = rectangle position (rabs, 52 bits).
     fn sample_ziggurat_normal(&mut self) -> f64 {
-        self.u32_buf_ready = false;
         sample_ziggurat_normal_core(&mut self.bit_generator.rng)
     }
 
     /// Ziggurat method for standard exponential, matching NumPy's
     /// `random_standard_exponential` in distributions.c exactly.
     fn sample_ziggurat_exponential(&mut self) -> f64 {
-        self.u32_buf_ready = false;
         sample_ziggurat_exponential_core(&mut self.bit_generator.rng)
     }
 
@@ -6040,7 +6099,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => {
                 triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
@@ -6074,7 +6132,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => laplace_from_core(rng, loc, scale, size),
             RngBackend::Pcg64(rng) => parallel_pcg_laplace(rng, loc, scale, size),
@@ -6153,7 +6210,6 @@ impl Generator {
             return Ok(Vec::new());
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => gumbel_from_core(rng, loc, scale, size),
             RngBackend::Pcg64(rng) => parallel_pcg_gumbel(rng, loc, scale, size),
@@ -6626,7 +6682,6 @@ impl Generator {
             return Ok(Vec::new());
         }
         if kappa < 1e-8 {
-            self.u32_buf_ready = false;
             return Ok(match &mut self.bit_generator.rng {
                 RngBackend::Deterministic(rng) => vonmises_uniform_from_core(rng, size),
                 RngBackend::Pcg64(rng) => parallel_pcg_vonmises_uniform(rng, size),
@@ -6705,7 +6760,6 @@ impl Generator {
             return Ok(vec![loc; size]);
         }
 
-        self.u32_buf_ready = false;
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => logistic_from_core(rng, loc, scale, size),
             RngBackend::Pcg64(rng) => parallel_pcg_logistic(rng, loc, scale, size),
@@ -20006,11 +20060,19 @@ print("\n".join(out))
 
                 let mut parallel = mk(77);
                 let values = parallel.random_f32(n);
+                let state_after_parallel = parallel.state();
                 let after_parallel: Vec<u32> =
                     (0..17).map(|_| parallel.next_f32().to_bits()).collect();
 
                 let mut serial = mk(77);
                 let expected: Vec<f32> = (0..n).map(|_| serial.random_f32(1)[0]).collect();
+                // The whole state must agree, including NumPy's stale `uinteger` after an
+                // even-length fill (deadlock-audit-rc0923-epic-71qy3.25).
+                assert_eq!(
+                    state_after_parallel,
+                    serial.state(),
+                    "dxsm={dxsm} n={n}: post-fill bit-generator state diverged"
+                );
                 let after_serial: Vec<u32> = (0..17).map(|_| serial.next_f32().to_bits()).collect();
 
                 assert_eq!(values.len(), expected.len());

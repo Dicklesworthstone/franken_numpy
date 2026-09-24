@@ -1,9 +1,9 @@
 //! Conformance matrix: random family.
 //!
 //! Verifies that fnp_python.random produces identical seeded samples
-//! to numpy.random. Both surfaces wrap the same numpy RNG, so any
-//! divergence here signals a re-export / wrapper bug rather than an
-//! RNG correctness bug.
+//! to numpy.random. fnp's Generator/BitGenerator classes are native Rust
+//! (fnp-random), not wrappers of numpy's, so a divergence here is an RNG
+//! correctness bug.
 //!
 //! This family doesn't fit the table-driven `run_case` pattern (the
 //! object-method-on-RandomState shape doesn't match the module-level
@@ -482,6 +482,76 @@ fn default_rng_accepts_diverse_seed_types() {
             "default_rng(generator) should preserve generator identity"
         );
 
+        Ok(())
+    });
+}
+
+/// NumPy's `next_uint32` buffers the high half of a 64-bit output in the BIT GENERATOR
+/// (`has_uint32` / `uinteger`); only a state set, jump or advance clears it, and MT19937
+/// draws 32 bits natively. fnp used to drop the half-word on every float/64-bit draw and on
+/// MT19937 split a 64-bit word, so any interleaving of 32-bit bounded integers with another
+/// draw diverged from NumPy (e.g. PCG64(123): int32 x3, random(2), int32 x5 gave
+/// [333, 175, ...] instead of [53, 333, ...]) and `bit_generator.state` always reported
+/// has_uint32=0 (deadlock-audit-rc0923-epic-71qy3.25). Single-call-from-fresh-seed checks
+/// cannot see this; the sequence below interleaves every draw family on all five bit
+/// generators and compares every output AND the full state dict against NumPy.
+#[test]
+fn interleaved_draws_keep_numpy_uint32_buffer_and_state_on_all_bit_generators() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+def norm(st):
+    def f(v):
+        if isinstance(v, dict): return {k: f(x) for k, x in v.items()}
+        if isinstance(v, np.ndarray): return v.tolist()
+        return v
+    return f(st)
+seq = [
+ ("integers", (0, 100, 3), {"dtype": np.int32}), ("random", (2,), {}),
+ ("integers", (0, 1000, 5), {"dtype": np.int32}), ("standard_normal", (3,), {}),
+ ("integers", (0, 50000, 3), {"dtype": np.uint16}), ("normal", (1.0, 2.0, 2), {}),
+ ("integers", (-100, 100, 5), {"dtype": np.int8}), ("exponential", (1.5, 2), {}),
+ ("integers", (0, 255, 7), {"dtype": np.uint8}), ("random", (3,), {"dtype": np.float32}),
+ ("uniform", (0.0, 5.0, 3), {}), ("bytes", (5,), {}), ("integers", (0, 7, 1), {"dtype": np.int32}),
+ ("STATE_ROUNDTRIP", (), {}), ("integers", (0, 9, 3), {"dtype": np.int32}),
+ ("gamma", (2.0, 1.0, 3), {}), ("integers", (0, 10**12, 2), {}), ("standard_exponential", (2,), {}),
+ ("permutation", (7,), {}), ("integers", (0, 3, 3), {"dtype": np.uint32}), ("choice", (10, 3), {}),
+ ("random", (5,), {"dtype": np.float32}), ("bytes", (3,), {}),
+ ("random", (1 << 17,), {"dtype": np.float32}), ("bytes", ((1 << 18) + 4,), {}),
+ ("integers", (0, 2**31, 2), {"dtype": np.int64}), ("integers", (0, 9, 1), {"dtype": np.int32}),
+]
+bad = []
+for kind in ["PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"]:
+    f = fnp.random.Generator(getattr(fnp.random, kind)(123))
+    n = np.random.Generator(getattr(np.random, kind)(123))
+    for i, (m, a, kw) in enumerate(seq):
+        if m == "STATE_ROUNDTRIP":
+            f.bit_generator.state = f.bit_generator.state
+            n.bit_generator.state = n.bit_generator.state
+        else:
+            g = getattr(f, m)(*a, **kw); w = getattr(n, m)(*a, **kw)
+            ga, wa = np.asarray(g), np.asarray(w)
+            if type(g) is not type(w) or ga.dtype != wa.dtype or ga.tobytes() != wa.tobytes():
+                bad.append(f"{kind} step{i} {m} draws differ"); break
+        if norm(f.bit_generator.state) != norm(n.bit_generator.state):
+            bad.append(f"{kind} step{i} {m} state differs"); break
+result = (len(seq), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (steps, bad): (usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(steps, 27, "sequence length drifted");
+        assert!(
+            bad.is_empty(),
+            "RNG stream/state diverged from numpy: {bad:?}"
+        );
         Ok(())
     });
 }

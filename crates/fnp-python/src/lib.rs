@@ -4744,8 +4744,14 @@ fn build_numpy_compatible_bit_generator_state_dict(
         }
     }
 
-    dict.set_item(intern!(py, "has_uint32"), 0)?;
-    dict.set_item(intern!(py, "uinteger"), 0)?;
+    // NumPy's MT19937 state has no `has_uint32`/`uinteger` (its 32-bit draw is native); the
+    // 64-bit generators carry the half-word left pending by an odd number of 32-bit draws
+    // (deadlock-audit-rc0923-epic-71qy3.25 - these used to be hard-coded to 0).
+    if state.kind != BitGeneratorKind::Mt19937 {
+        let (has_uint32, uinteger) = bit_generator.uint32_buffer_state();
+        dict.set_item(intern!(py, "has_uint32"), i64::from(has_uint32))?;
+        dict.set_item(intern!(py, "uinteger"), uinteger)?;
+    }
     Ok(dict.into_any().unbind())
 }
 
@@ -4844,6 +4850,34 @@ fn numpy_pcg_state_schema_entries(
 }
 
 fn py_bit_generator_state_from_dict(state: &Bound<'_, PyAny>) -> PyResult<BitGeneratorState> {
+    let mut parsed = py_bit_generator_state_from_dict_core(state)?;
+    // Carry NumPy's pending 32-bit half-word (`has_uint32`/`uinteger`) into the Rust state so
+    // `bg.state = numpy_bg.state` round-trips it; `BitGenerator::set_state` applies it and
+    // ignores it for MT19937 (deadlock-audit-rc0923-epic-71qy3.25).
+    let dict = state.cast::<PyDict>()?;
+    let has_uint32 = match dict.get_item("has_uint32")? {
+        Some(flag) => flag.is_truthy()?,
+        None => false,
+    };
+    let uinteger: u32 = match dict.get_item("uinteger")? {
+        Some(value) => value.extract()?,
+        None => 0,
+    };
+    if has_uint32 || uinteger != 0 {
+        parsed.schema_entries.push((
+            fnp_random::STATE_KEY_HAS_UINT32.to_string(),
+            u64::from(has_uint32),
+        ));
+        parsed
+            .schema_entries
+            .push((fnp_random::STATE_KEY_UINTEGER.to_string(), u64::from(uinteger)));
+    }
+    Ok(parsed)
+}
+
+fn py_bit_generator_state_from_dict_core(
+    state: &Bound<'_, PyAny>,
+) -> PyResult<BitGeneratorState> {
     let dict = state.cast::<PyDict>()?;
     let bg_item = required_dict_item(dict, "bit_generator")?;
     let kind_name = bg_item.extract::<&str>()?;
