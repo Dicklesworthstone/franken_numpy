@@ -7460,16 +7460,26 @@ fn extract_precise_numeric_array(
         // uint16 view (f16 and uint16 share a 2-byte layout, so .view is valid on any
         // layout) and reconstruct via f16::from_bits. The old astype->tolist->Vec<f32>
         // path boxed one Python float per element — ~2500x slower than numpy on a 4M abs.
-        DType::F16 => ArrayStorage::F16(
-            numpy_cast_contiguous_to_vec::<u16>(
-                py,
-                &flat.call_method1(intern!(py, "view"), ("uint16",))?,
-                "uint16",
-            )?
-            .into_iter()
-            .map(f16::from_bits)
-            .collect(),
-        ),
+        // The bits are only the value in NATIVE order: a '>f2' array is first converted by
+        // value (the other arms cast by value already); reading its swapped bits made outer,
+        // kron and lexsort of big-endian float16 answer zeros / a wrong order (bead .8).
+        DType::F16 => {
+            let native = if dtype_is_native(&flat) {
+                flat
+            } else {
+                flat.call_method1(intern!(py, "astype"), ("float16",))?
+            };
+            ArrayStorage::F16(
+                numpy_cast_contiguous_to_vec::<u16>(
+                    py,
+                    &native.call_method1(intern!(py, "view"), ("uint16",))?,
+                    "uint16",
+                )?
+                .into_iter()
+                .map(f16::from_bits)
+                .collect(),
+            )
+        }
         DType::F32 => ArrayStorage::F32(numpy_cast_contiguous_to_vec::<f32>(py, &flat, "float32")?),
         DType::F64 => ArrayStorage::F64(numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")?),
         _ => {
@@ -13056,6 +13066,18 @@ fn logaddexp2_f32(x: f32, y: f32) -> f32 {
 /// `is_ok_and` rather than `?` on the `kind` read, matching the complex probe: a dtype
 /// whose `kind` is not a single character has no f16 route either, so it must DECLINE
 /// rather than raise.
+/// True when `v`'s dtype is in native byte order. Every route that `.view()`s an operand as a
+/// native integer and computes on it (the datetime64/timedelta64 int64 views, the f16 uint16
+/// views) must check it: a '>m8' viewed as int64 reads its big-endian bytes as little-endian,
+/// and argmax/argmin/min/max/ptp of big-endian timedelta64 returned wrong answers (bead .8).
+fn dtype_is_native(v: &Bound<'_, PyAny>) -> bool {
+    let py = v.py();
+    v.getattr(intern!(py, "dtype"))
+        .and_then(|dtype| dtype.getattr(intern!(py, "isnative")))
+        .and_then(|native| native.extract::<bool>())
+        .unwrap_or(false)
+}
+
 fn dtype_is_f16(v: &Bound<'_, PyAny>) -> PyResult<bool> {
     let py = v.py();
     let dt = v.getattr(intern!(py, "dtype"))?;
@@ -13067,10 +13089,18 @@ fn dtype_is_f16(v: &Bound<'_, PyAny>) -> PyResult<bool> {
     if dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 2 {
         return Ok(false);
     }
+    // NATIVE BYTE ORDER TOO. The f16 routes view the operand as native uint16 and compute on
+    // those bits, so a '>f2' operand (the only f16 dtype that reaches this branch: native
+    // float16 is the cached object above) was read byte-swapped - kron, outer, frexp, lexsort
+    // and the nancumsum/nancumprod axis routes returned wrong values (bead .8).
     Ok(dt
         .getattr(intern!(py, "kind"))
         .and_then(|kind| kind.extract::<char>())
-        .is_ok_and(|kind| kind == 'f'))
+        .is_ok_and(|kind| kind == 'f')
+        && dt
+            .getattr(intern!(py, "isnative"))
+            .and_then(|native| native.extract::<bool>())
+            .unwrap_or(false))
 }
 
 fn try_zerocopy_f16_binary_widen(
@@ -37441,8 +37471,11 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
         Ok(extract_fn.call1((b_cond, b_arr))?.unbind())
     };
     // NumPy's extract preserves the data array's dtype; our native kernel
-    // canonicalizes narrow ints/floats, so defer non-canonical widths to NumPy.
-    if !numpy_dtype_native_roundtrip_preserves(py, b_arr) {
+    // canonicalizes narrow ints/floats, so defer non-canonical widths to NumPy - and byte
+    // order: a '>f8' operand came back as native float64 where numpy keeps '>f8' (bead .8).
+    if !numpy_dtype_native_roundtrip_preserves(py, b_arr)
+        || (b_arr.hasattr(intern!(py, "dtype"))? && !dtype_is_native(b_arr))
+    {
         return fallback();
     }
     // Typed BRANCHLESS compaction (extract == compress over the raveled
@@ -37722,8 +37755,12 @@ fn try_zerocopy_int_choose(
             return Ok(None);
         }
         let d = c.getattr(intern!(py, "dtype"))?;
+        // Native byte order only: the float route views each choice as a native unsigned
+        // integer and back as a native float, which read a '>f8' choice's bytes little-endian
+        // and returned garbage (4.585e-320 for 10.0), bead .8.
         if dtype_kind_of(c) != Some(kind)
             || d.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != itemsize
+            || !d.getattr(intern!(py, "isnative"))?.extract::<bool>()?
         {
             return Ok(None);
         }
@@ -37890,32 +37927,18 @@ fn choose(
         return Ok(result);
     }
 
-    let index = extract_integer_array(py, b_a, "choose(a)")?;
-    let extracted_choices = extract_numeric_array_sequence(py, choices_bound, "choose(choices)")?;
-    // ERROR CASES BELONG TO NUMPY, exactly as for `searchsorted`'s invalid side.
-    // The native path raises its own house-style strings - `choose: unsupported
-    // mode 'bad'` where numpy says `clipmode must be one of 'clip', 'raise', or
-    // 'wrap' (got 'bad')`, and `choose: index 3 out of range for 2 choices` for
-    // an out-of-range index under mode='raise'. Same exception TYPE, different
-    // text, which a caller matching on the message can see. Rather than pin
-    // numpy's literals in Rust - which silently re-break on every numpy
-    // rewording - hand any failing case back to numpy so it raises its own.
-    // This cannot mask a wrong ANSWER: it only runs when the native path
-    // produced no answer at all.
-    match index.choose_with_mode(&extracted_choices, mode) {
-        Ok(result) => build_numpy_array_from_ufunc(py, &result),
-        Err(_) => {
-            let choose_fn = cached_numpy_choose(py)?;
-            if mode == "raise" {
-                Ok(choose_fn.call1((b_a, choices_bound))?.unbind())
-            } else {
-                let kwargs = PyDict::new(py);
-                kwargs.set_item(intern!(py, "mode"), mode)?;
-                Ok(choose_fn
-                    .call((b_a, choices_bound), Some(&kwargs))?
-                    .unbind())
-            }
-        }
+    // Everything the zero-copy select declines is numpy's. The extract -> choose -> rebuild path
+    // this replaced canonicalised narrow integers to int64 (int8 and '>i4' choices came back as
+    // int64 where numpy keeps int8 / int32), bead .8, and raised house-style error strings.
+    let choose_fn = cached_numpy_choose(py)?;
+    if mode == "raise" {
+        Ok(choose_fn.call1((b_a, choices_bound))?.unbind())
+    } else {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "mode"), mode)?;
+        Ok(choose_fn
+            .call((b_a, choices_bound), Some(&kwargs))?
+            .unbind())
     }
 }
 
@@ -42591,6 +42614,7 @@ fn diff(
                 const DATETIME_DIFF_NATIVE_MIN: usize = 1 << 14;
                 if a_bound.getattr(intern!(py, "size"))?.extract::<usize>()?
                     < DATETIME_DIFF_NATIVE_MIN
+                    || !dtype_is_native(a_bound)
                 {
                     return fallback();
                 }
@@ -57564,7 +57588,10 @@ fn try_native_datetime_setop(
     }
     let a_dt = ar1.getattr(intern!(py, "dtype"))?;
     let a_kind = a_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if (a_kind != 'M' && a_kind != 'm') || !a_dt.eq(&ar2.getattr(intern!(py, "dtype"))?)? {
+    if (a_kind != 'M' && a_kind != 'm')
+        || !dtype_is_native(ar1)
+        || !a_dt.eq(&ar2.getattr(intern!(py, "dtype"))?)?
+    {
         return Ok(None);
     }
     // NaT (i64::MIN) pre-scan on both operands -> defer.
@@ -57838,6 +57865,13 @@ fn setdiff1d(
             .call1((ar1.bind(py), ar2.bind(py)))?
             .unbind())
     };
+    // numpy's result is a slice of unique(ar1) and keeps a byte-swapped operand's order; the
+    // native set-ops below build native arrays ('>i4' in, int32 out), bead .8.
+    for operand in [ar1.bind(py), ar2.bind(py)] {
+        if operand.hasattr(intern!(py, "dtype"))? && !dtype_is_native(operand) {
+            return fallback();
+        }
+    }
     let numpy = cached_numpy(py)?;
     // Flatten normalization (see setop_flatten_view); delegates keep the
     // ORIGINAL args via ar1/ar2 in fallback above.
@@ -61872,8 +61906,11 @@ fn try_zerocopy_complex_angle(
         return Ok(None);
     }
     let dtype = z.getattr(intern!(py, "dtype"))?;
+    // Native byte order only: `view(float64)` of a '>c16' array reinterprets its big-endian
+    // bytes as native doubles, and angle() returned values off by up to 5.6 (bead .8).
     if dtype.getattr(intern!(py, "kind"))?.extract::<char>()? != 'c'
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 16
+        || !dtype.getattr(intern!(py, "isnative"))?.extract::<bool>()?
     {
         return Ok(None);
     }
@@ -67136,6 +67173,20 @@ fn triangular_impl(
     upper: bool,
     numpy_name: &'static str,
 ) -> PyResult<Py<PyAny>> {
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy_fn = if upper {
+            cached_numpy_triu(py)?
+        } else {
+            cached_numpy_tril(py)?
+        };
+        Ok(numpy_fn.call1((m.bind(py), k))?.unbind())
+    };
+    // numpy's triu/tril build the result with `where(mask, zeros(1, m.dtype), m)`, which comes
+    // back in NATIVE byte order; the verbatim copies below keep a byte-swapped operand's order
+    // ('>f8' in, '>f8' out where numpy gives float64), bead .8.
+    if m.bind(py).hasattr(intern!(py, "dtype"))? && !dtype_is_native(m.bind(py)) {
+        return fallback();
+    }
     // Zero-copy per-row triangle copy for 2-D f64 ndarrays; skips the cold
     // extract + full n*n build Vecs. Bit-identical; N-D and other dtypes fall
     // through to the general path.
@@ -67148,14 +67199,6 @@ fn triangular_impl(
     if let Some(result) = try_zerocopy_any_triangular(py, m.bind(py), k, upper)? {
         return Ok(result);
     }
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy_fn = if upper {
-            cached_numpy_triu(py)?
-        } else {
-            cached_numpy_tril(py)?
-        };
-        Ok(numpy_fn.call1((m.bind(py), k))?.unbind())
-    };
     let array = match extract_precise_numeric_array(py, m.bind(py), numpy_name) {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -71257,8 +71300,10 @@ fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Uses the Abramowitz and Stegun polynomial approximation via UnaryOp::I0.
     //
     // numpy's i0 is built on its own `exp`, which on AVX-512 hosts is not libm (the same
-    // hazard CI found in `kaiser`, which is i0 over i0); those hosts delegate.
-    if !numpy_explog_matches_libm() {
+    // hazard CI found in `kaiser`, which is i0 over i0); those hosts delegate. float16/float32
+    // do too: numpy evaluates the Chebyshev series in that precision, and the float64 kernel
+    // rounded once at the end differed in the last place on 15 of 24 float32 values (bead .8).
+    if !numpy_explog_matches_libm() || numpy_dtype_is_narrow_float(py, x.bind(py)) {
         return Ok(cached_numpy(py)?
             .call_method1(intern!(py, "i0"), (x.bind(py),))?
             .unbind());
@@ -73428,6 +73473,7 @@ fn try_native_datetime_unique_flat(
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     if (kind != 'M' && kind != 'm')
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native(a)
     {
         return Ok(None);
     }
@@ -76617,7 +76663,7 @@ fn try_native_datetime_searchsorted(
         return Ok(None);
     }
     let a_dt = a_arr.getattr(intern!(py, "dtype"))?;
-    if !a_dt.eq(&v.getattr(intern!(py, "dtype"))?)? {
+    if !dtype_is_native(a_arr) || !a_dt.eq(&v.getattr(intern!(py, "dtype"))?)? {
         return Ok(None);
     }
     if datetime_has_nat(py, a_arr)? || datetime_has_nat(py, v)? {
@@ -76646,7 +76692,10 @@ fn try_native_datetime_isin(
     }
     let e_dt = element.getattr(intern!(py, "dtype"))?;
     let e_kind = e_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if (e_kind != 'M' && e_kind != 'm') || !e_dt.eq(&test.getattr(intern!(py, "dtype"))?)? {
+    if (e_kind != 'M' && e_kind != 'm')
+        || !dtype_is_native(element)
+        || !e_dt.eq(&test.getattr(intern!(py, "dtype"))?)?
+    {
         return Ok(None);
     }
     if datetime_has_nat(py, element)? || datetime_has_nat(py, test)? {
@@ -77768,6 +77817,7 @@ fn try_native_datetime_sort_flat(
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     if (kind != 'M' && kind != 'm')
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native(a)
     {
         return Ok(None);
     }
@@ -77837,6 +77887,7 @@ fn try_native_datetime_sort_axes(
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     if (kind != 'M' && kind != 'm')
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native(a)
     {
         return Ok(None);
     }
@@ -81146,7 +81197,9 @@ fn try_native_datetime_argsort_stable(
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if (kind != 'M' && kind != 'm') || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+    if (kind != 'M' && kind != 'm')
+        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native(a)
     {
         return Ok(None);
     }
@@ -81486,7 +81539,9 @@ fn try_native_datetime_argsort_flat(
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if (kind != 'M' && kind != 'm') || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+    if (kind != 'M' && kind != 'm')
+        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native(a)
     {
         return Ok(None);
     }
@@ -81540,7 +81595,9 @@ fn try_native_datetime_argsort_axes(
     }
     let dt = a.getattr(intern!(py, "dtype"))?;
     let kind = dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if (kind != 'M' && kind != 'm') || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+    if (kind != 'M' && kind != 'm')
+        || dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native(a)
     {
         return Ok(None);
     }
@@ -84087,7 +84144,12 @@ fn try_zerocopy_f64_polyval(
         .getattr(intern!(py, "dtype"))?
         .getattr(intern!(py, "kind"))?
         .extract::<char>()?;
-    if pkind != 'f' && pkind != 'i' && pkind != 'u' {
+    // 1-D coefficients only: numpy's `for pv in p: y = y * x + pv` walks the ROWS of an N-D
+    // `p` (each row a coefficient broadcast against x); raveling one made a 4x6 p a 24-term
+    // polynomial and answered 1.9e22 where numpy gives values near 4e3 (bead .8).
+    if (pkind != 'f' && pkind != 'i' && pkind != 'u')
+        || p_arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
+    {
         return Ok(None);
     }
     let coeffs: Vec<f64> = match p_arr
@@ -84176,9 +84238,11 @@ fn try_zerocopy_f32_polyval(
     }
     let p_arr = numpy.call_method1(intern!(py, "asarray"), (p,))?;
     let pdt = p_arr.getattr(intern!(py, "dtype"))?;
-    // Only f32 coeffs keep the result in f32 (int/f64 coeffs trigger numpy promotion -> defer).
+    // Only f32 coeffs keep the result in f32 (int/f64 coeffs trigger numpy promotion -> defer),
+    // and only 1-D ones (see try_zerocopy_f64_polyval: an N-D p is numpy's row loop).
     if pdt.getattr(intern!(py, "kind"))?.extract::<char>()? != 'f'
         || pdt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 4
+        || p_arr.getattr(intern!(py, "ndim"))?.extract::<usize>()? != 1
     {
         return Ok(None);
     }
@@ -89197,8 +89261,6 @@ fn try_zerocopy_take_along_axis(
         4 => "uint32",
         _ => "uint64",
     };
-    let orig_name_attr = arr_dtype.getattr(intern!(py, "name"))?;
-    let orig_name = orig_name_attr.extract::<&str>()?;
     let numpy = cached_numpy(py)?;
     let arr_u = arr.call_method1(intern!(py, "view"), (numpy.getattr(mover_name)?,))?;
     let flat = match itemsize {
@@ -89218,7 +89280,11 @@ fn try_zerocopy_take_along_axis(
     let Some(flat) = flat else {
         return Ok(None);
     };
-    let restored = flat.call_method1(intern!(py, "view"), (numpy.getattr(orig_name)?,))?;
+    // View the gathered bits back through the ORIGINAL dtype object. Looking it up by name
+    // (`numpy.<dtype.name>`) raised AttributeError for str/bytes/datetime dtypes ('str64',
+    // 'datetime64[D]') and silently read a byte-swapped '>i4' back as native int32 - wrong
+    // values (bead .8).
+    let restored = flat.call_method1(intern!(py, "view"), (&arr_dtype,))?;
     finish_preshaped_output(restored, &s_idx).map(Some)
 }
 
@@ -93310,11 +93376,13 @@ fn py_min(
     // result viewed back as the SAME temporal dtype. numpy's temporal reduce is slow; native int64
     // min wins ~7-8x. NaT (i64::MIN) makes numpy propagate NaT -> pre-scan isnat + defer if any.
     if is_temporal {
-        if numpy
-            .getattr(intern!(py, "isnat"))?
-            .call1((a.bind(py),))?
-            .call_method0(intern!(py, "any"))?
-            .extract::<bool>()?
+        // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
+        if !dtype_is_native(a.bind(py))
+            || numpy
+                .getattr(intern!(py, "isnat"))?
+                .call1((a.bind(py),))?
+                .call_method0(intern!(py, "any"))?
+                .extract::<bool>()?
         {
             return fallback();
         }
@@ -93520,11 +93588,13 @@ fn py_max(
     // result viewed back as the SAME temporal dtype. numpy's temporal reduce is slow; native int64
     // max wins ~7-8x. NaT (i64::MIN) makes numpy propagate NaT -> pre-scan isnat + defer if any.
     if is_temporal {
-        if numpy
-            .getattr(intern!(py, "isnat"))?
-            .call1((a.bind(py),))?
-            .call_method0(intern!(py, "any"))?
-            .extract::<bool>()?
+        // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
+        if !dtype_is_native(a.bind(py))
+            || numpy
+                .getattr(intern!(py, "isnat"))?
+                .call1((a.bind(py),))?
+                .call_method0(intern!(py, "any"))?
+                .extract::<bool>()?
         {
             return fallback();
         }
@@ -95368,11 +95438,13 @@ fn cumsum(
             .and_then(|k| k.extract::<char>())
         && kind == 'm'
     {
-        if numpy
-            .getattr(intern!(py, "isnat"))?
-            .call1((a.bind(py),))?
-            .call_method0(intern!(py, "any"))?
-            .extract::<bool>()?
+        // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
+        if !dtype_is_native(a.bind(py))
+            || numpy
+                .getattr(intern!(py, "isnat"))?
+                .call1((a.bind(py),))?
+                .call_method0(intern!(py, "any"))?
+                .extract::<bool>()?
         {
             return fallback();
         }
@@ -96730,11 +96802,13 @@ fn argmax(
             .and_then(|k| k.extract::<char>())
         && (kind == 'M' || kind == 'm')
     {
-        if numpy
-            .getattr(intern!(py, "isnat"))?
-            .call1((a_bound,))?
-            .call_method0(intern!(py, "any"))?
-            .extract::<bool>()?
+        // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
+        if !dtype_is_native(a_bound)
+            || numpy
+                .getattr(intern!(py, "isnat"))?
+                .call1((a_bound,))?
+                .call_method0(intern!(py, "any"))?
+                .extract::<bool>()?
         {
             return fallback();
         }
@@ -96952,11 +97026,13 @@ fn argmin(
             .and_then(|k| k.extract::<char>())
         && (kind == 'M' || kind == 'm')
     {
-        if numpy
-            .getattr(intern!(py, "isnat"))?
-            .call1((a_bound,))?
-            .call_method0(intern!(py, "any"))?
-            .extract::<bool>()?
+        // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
+        if !dtype_is_native(a_bound)
+            || numpy
+                .getattr(intern!(py, "isnat"))?
+                .call1((a_bound,))?
+                .call_method0(intern!(py, "any"))?
+                .extract::<bool>()?
         {
             return fallback();
         }
@@ -107364,6 +107440,7 @@ fn try_native_unique_rows_datetime(
     let kind = dtype.getattr(intern!(py, "kind"))?.extract::<char>()?;
     if (kind != 'M' && kind != 'm')
         || dtype.getattr(intern!(py, "itemsize"))?.extract::<usize>()? != 8
+        || !dtype_is_native(item)
     {
         return Ok(None);
     }
@@ -115257,11 +115334,13 @@ fn ptp(
             .and_then(|k| k.extract::<char>())
         && (kind == 'M' || kind == 'm')
     {
-        if numpy
-            .getattr(intern!(py, "isnat"))?
-            .call1((a.bind(py),))?
-            .call_method0(intern!(py, "any"))?
-            .extract::<bool>()?
+        // A non-native '>m8' viewed as int64 below would be read byte-swapped (bead .8).
+        if !dtype_is_native(a.bind(py))
+            || numpy
+                .getattr(intern!(py, "isnat"))?
+                .call1((a.bind(py),))?
+                .call_method0(intern!(py, "any"))?
+                .extract::<bool>()?
         {
             return fallback();
         }
@@ -115603,7 +115682,7 @@ fn try_native_temporal_astype(
     }
     let src_dt = arr.getattr(intern!(py, "dtype"))?;
     let src_kind = src_dt.getattr(intern!(py, "kind"))?.extract::<char>()?;
-    if !matches!(src_kind, 'M' | 'm') {
+    if !matches!(src_kind, 'M' | 'm') || !dtype_is_native(arr) {
         return Ok(None);
     }
     // Normalize the requested dtype and require the SAME kind (M->M or m->m; cross-kind converts
@@ -118404,6 +118483,13 @@ fn histogramdd(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // A float16/float32 sample gets float16/float32 edges from numpy; the native edge
+    // derivation below works in float64 and returned float64 edges (bead .8).
+    if let Ok(sample) = args.get_item(0)
+        && numpy_dtype_is_narrow_float(py, &sample)
+    {
+        return core_numpy_passthrough_interned(py, intern!(py, "histogramdd"), args, kwargs);
+    }
     if let Some(result) = histogramdd_native(py, args, kwargs)? {
         return Ok(result);
     }

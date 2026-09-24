@@ -1104,19 +1104,22 @@ impl BinaryOp {
                 }
             }
             Self::Logaddexp2 => {
-                // log2(2^lhs + 2^rhs), numerically stable
-                if lhs.is_nan() || rhs.is_nan() {
-                    return f64::NAN;
-                }
-                let max = lhs.max(rhs);
-                let min = lhs.min(rhs);
-                if max.is_infinite() && max.is_sign_positive() {
-                    f64::INFINITY
-                } else if max.is_infinite() && max.is_sign_negative() {
-                    f64::NEG_INFINITY
+                // numpy's npy_logaddexp2 (npy_math_internal.h.src), operation for operation:
+                // equal operands add exactly 1 (same-sign infinities stay put), otherwise the
+                // larger plus LOG2E * log1p(exp2(-|x - y|)), and a NaN difference is returned as
+                // is. Dividing log1p by LN_2 instead of multiplying by LOG2E differed from numpy
+                // in the last bit on ~4% of float64 inputs (bead .8).
+                if lhs == rhs {
+                    lhs + 1.0
                 } else {
-                    let diff = min - max;
-                    max + diff.exp2().ln_1p() / std::f64::consts::LN_2
+                    let tmp = lhs - rhs;
+                    if tmp > 0.0 {
+                        lhs + std::f64::consts::LOG2_E * (-tmp).exp2().ln_1p()
+                    } else if tmp <= 0.0 {
+                        rhs + std::f64::consts::LOG2_E * tmp.exp2().ln_1p()
+                    } else {
+                        tmp
+                    }
                 }
             }
             Self::Ldexp => {
@@ -42160,27 +42163,13 @@ pub fn logaddexp(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncEr
 pub fn logaddexp2(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     let bc = UFuncArray::broadcast_arrays(&[x1, x2])?;
     let (x1_bc, x2_bc) = (&bc[0], &bc[1]);
-    let ln2 = std::f64::consts::LN_2;
+    // The same numpy-exact scalar as the ufunc route (BinaryOp::Logaddexp2): this used its own
+    // max + log2(1 + exp((min - max) * ln2)), which is not numpy's operation order.
     let values: Vec<f64> = x1_bc
         .values
         .iter()
         .zip(x2_bc.values.iter())
-        .map(|(&a, &b)| {
-            // log2(2**a + 2**b) = max(a,b) + log2(1 + 2**(min-max))
-            if a.is_nan() || b.is_nan() {
-                f64::NAN
-            } else if a == f64::NEG_INFINITY {
-                b
-            } else if b == f64::NEG_INFINITY {
-                a
-            } else if a == f64::INFINITY || b == f64::INFINITY {
-                f64::INFINITY
-            } else {
-                let max = a.max(b);
-                let min = a.min(b);
-                max + (1.0 + ((min - max) * ln2).exp()).log2()
-            }
-        })
+        .map(|(&a, &b)| BinaryOp::Logaddexp2.apply(a, b))
         .collect();
     Ok(UFuncArray {
         shape: x1_bc.shape.clone(),

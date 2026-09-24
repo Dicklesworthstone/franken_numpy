@@ -3617,6 +3617,246 @@ print(len(cases), bad)
     Ok(())
 }
 
+/// Every numpy.__all__ callable (346 after excluding IO, state and class entry points) that numpy
+/// accepts with one or two same-dtype arrays, with no keyword and with axis=0 / axis=-1, over ten
+/// dtypes in BOTH byte orders (f8, i4, c16, f4, u2, i8, f2, c8, i2, m8[s]): fnp must match
+/// numpy's result type, dtype, shape and bytes, or raise the same exception type (7,552 cells).
+/// Big-endian operands used to reach native kernels that `.view()` the data as a native integer
+/// and compute on the reinterpreted bits (bead .8): argmax/argmin/min/max/ptp of '>m8' gave
+/// wrong answers, angle('>c16') was off by up to 5.6, outer/kron/lexsort/frexp and the
+/// nancumsum/nancumprod axis routes of '>f2' returned zeros or wrong orders, choose('>f8')
+/// returned 4.585e-320 for 10.0 and take_along_axis('>i4') 33554432 for 2; triu/tril/extract/
+/// setdiff1d and the '>m8' set-ops and axis min/max had the wrong byte order. The native-order
+/// half found polyval of a 2-D coefficient array wrong by 1.9e22, float64 logaddexp2 off by one
+/// ulp (it divided by ln 2 where numpy multiplies by log2 e), float32 i0 off in the last place,
+/// and float32 histogramdd edges in float64. cov/corrcoef are excluded by name: their last-bit
+/// difference is the documented DIV-COV-GRAM-NO-FMA contract.
+#[test]
+fn array_functions_match_numpy_on_native_and_byteswapped_operands() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import inspect, warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(12)
+SKIP = {"save", "savez", "savez_compressed", "savetxt", "load", "loadtxt", "genfromtxt", "fromfile",
+        "memmap", "seterr", "seterrcall", "setbufsize", "set_printoptions", "printoptions", "info",
+        "show_config", "show_runtime", "test", "from_dlpack", "frompyfunc", "vectorize", "piecewise",
+        "apply_along_axis", "apply_over_axes", "fromfunction", "fromregex", "nditer", "nested_iters",
+        "busday_offset", "busday_count", "is_busday", "put", "place", "putmask", "copyto",
+        "fill_diagonal", "shares_memory", "may_share_memory", "empty", "empty_like", "ndarray",
+        "broadcast", "iinfo", "finfo", "dtype", "format_float_positional", "format_float_scientific",
+        "getbufsize", "geterr", "geterrcall", "errstate", "asmatrix", "matrix", "bmat", "recarray",
+        "record",
+        # DIV-COV-GRAM-NO-FMA: fnp's Gram path is within 1e-12 of numpy's FMA-contracted BLAS
+        "cov", "corrcoef"}
+def make(dt, shape=(4, 6)):
+    kind = np.dtype(dt).kind
+    if kind == "c":
+        base = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+    elif kind == "f":
+        base = rng.standard_normal(shape) * 5
+    elif kind == "m":
+        return rng.integers(-500, 500, shape).astype(np.dtype(dt).newbyteorder("<")).astype(dt)
+    else:
+        base = rng.integers(0, 50, shape)
+    return base.astype(np.dtype(dt).newbyteorder("<")).astype(dt)
+KINDS = ["f8", "i4", "c16", "f4", "u2", "i8", "f2", "c8", "i2", "m8[s]"]
+OPS = {order + k: make(order + k) for order in (">", "<") for k in KINDS}
+names = [n for n in np.__all__ if callable(getattr(np, n, None)) and n not in SKIP
+         and not inspect.isclass(getattr(np, n))]
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def run(fn):
+    try:
+        return fn()
+    except BaseException as ex:  # a Rust panic surfaces as PanicException, a BaseException
+        return Raised(ex)
+def same(r, s):
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        return isinstance(s, Raised) and isinstance(r, Raised) and r.name == s.name
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(a, b) for a, b in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    if s is None or isinstance(s, (str, bool, int, float)):
+        return r == s or (s != s and r != r)
+    try:
+        r2, s2 = np.asarray(r), np.asarray(s)
+    except Exception:
+        return repr(r) == repr(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape:
+        return False
+    if r2.dtype.kind == "O":
+        return repr(r) == repr(s)
+    return r2.tobytes() == s2.tobytes()
+bad = []
+cells = 0
+for name in names:
+    npf, fnf = getattr(np, name), getattr(fnp, name, None)
+    if fnf is None:
+        continue
+    for dt, a in OPS.items():
+        for args, kw in (((a,), {}), ((a, a[::-1].copy()), {}), ((a,), {"axis": 0}), ((a,), {"axis": -1})):
+            s = run(lambda: npf(*args, **kw))
+            if isinstance(s, Raised):
+                continue
+            cells += 1
+            if not same(run(lambda: fnf(*args, **kw)), s):
+                bad.append(f"{name}{len(args)}{kw} {dt}")
+print(len(names), cells, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (functions, cells, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        functions.parse::<usize>().unwrap_or(0) >= 300,
+        "numpy callables drifted: {result}"
+    );
+    assert!(
+        cells.parse::<usize>().unwrap_or(0) >= 7000,
+        "cell table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "array functions must match numpy: {result}");
+    Ok(())
+}
+
+/// Business-day and datetime helpers, bit packing, the indexing helpers over eight dtypes
+/// (incl. unicode and datetime64), fft with every norm, the six polynomial classes, stride
+/// tricks and fnp.testing assertions, compared with numpy by type, dtype, shape, layout, bytes
+/// and exception type (218 cases). Before the fixes (bead .8): take_along_axis raised
+/// AttributeError on unicode and datetime64 arrays (it viewed its gather back through
+/// `numpy.<dtype.name>`, and 'str64' / 'datetime64[D]' are no numpy attributes), and choose of
+/// int8 choices returned int64 (its extract fallback canonicalised narrow integers).
+#[test]
+fn datetime_packing_indexing_fft_polynomial_and_testing_helpers_match_numpy() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(8)
+cases = []
+def add(name, fn):
+    cases.append((name, fn))
+days = np.datetime64("2024-01-01") + rng.integers(-400, 400, 60).astype("timedelta64[D]")
+days[5] = np.datetime64("NaT")
+ends = days + rng.integers(0, 90, 60).astype("timedelta64[D]")
+hol = ["2024-01-15", "2024-02-19", "2024-05-27", "2024-07-04"]
+for roll in ("raise", "nat", "forward", "following", "backward", "preceding", "modifiedfollowing", "modifiedpreceding"):
+    add(f"busday_offset {roll}", lambda m, r=roll: m.busday_offset(days, 3, roll=r))
+    add(f"busday_offset holidays {roll}", lambda m, r=roll: m.busday_offset(days, -7, roll=r, holidays=hol))
+for mask in ("1111100", "1010101", [1, 1, 1, 1, 1, 1, 0], "0000011"):
+    add(f"busday_count {mask}", lambda m, w=mask: m.busday_count(days, ends, weekmask=w))
+    add(f"is_busday {mask}", lambda m, w=mask: m.is_busday(days, weekmask=w, holidays=hol))
+add("busday_count reversed", lambda m: m.busday_count(ends, days))
+add("datetime_as_string", lambda m: m.datetime_as_string(days, unit="D"))
+add("datetime_as_string tz", lambda m: m.datetime_as_string(days.astype("M8[s]"), unit="m", timezone="UTC"))
+add("datetime floor_divide", lambda m: m.floor_divide(ends - days, np.timedelta64(7, "D")))
+for dt in (np.uint8, np.int32, bool):
+    bits = (rng.random((7, 13)) < 0.5).astype(dt)
+    for order in ("big", "little"):
+        for axis in (None, 0, 1):
+            add(f"packbits {dt.__name__} {order} {axis}", lambda m, b=bits, o=order, a=axis: m.packbits(b, axis=a, bitorder=o))
+packed = rng.integers(0, 256, (5, 3), dtype=np.uint8)
+for order in ("big", "little"):
+    for count in (None, 5, -3, 20):
+        add(f"unpackbits {order} {count}", lambda m, o=order, c=count: m.unpackbits(packed, axis=1, count=c, bitorder=o))
+for dt in (np.float64, np.float32, np.int8, np.uint64, np.complex128, bool, "U3", "M8[D]"):
+    if dt == "U3":
+        base = np.array([["ab", "c", "de"], ["f", "gh", "i"]])
+    elif dt == "M8[D]":
+        base = days[:6].reshape(2, 3)
+    else:
+        base = (rng.standard_normal((2, 3)) * 10).astype(dt)
+    tag = getattr(dt, "__name__", dt)
+    idx = np.array([[2, 0, 1], [1, 1, 0]])
+    eye = np.eye(2, 3, dtype=bool)
+    add(f"take_along_axis {tag}", lambda m, b=base, i=idx: m.take_along_axis(b, i, axis=1))
+    add(f"take_along_axis None {tag}", lambda m, b=base: m.take_along_axis(b, np.array([5, 0, 3]), axis=None))
+    add(f"compress {tag}", lambda m, b=base: m.compress([True, False, True], b, axis=1))
+    add(f"where {tag}", lambda m, b=base: m.where(np.array([[True, False, True], [False, True, False]]), b, b[:, ::-1]))
+    add(f"select {tag}", lambda m, b=base, e=eye: m.select([e], [b], default=b[0, 0]))
+    add(f"extract {tag}", lambda m, b=base, e=eye: m.extract(e, b))
+    add(f"place {tag}", lambda m, b=base, e=eye: (lambda x: (m.place(x, e, [b[1, 2]]), x)[1])(b.copy()))
+    add(f"putmask {tag}", lambda m, b=base, e=eye: (lambda x: (m.putmask(x, e, b[::-1]), x)[1])(b.copy()))
+    add(f"put_along_axis {tag}", lambda m, b=base, i=idx: (lambda x: (m.put_along_axis(x, i[:, :1], b[:, -1:], axis=1), x)[1])(b.copy()))
+    add(f"choose {tag}", lambda m, b=base: m.choose(np.array([[0, 1, 0], [1, 0, 1]]), [b, b[::-1]]))
+    add(f"repeat {tag}", lambda m, b=base: m.repeat(b, [1, 2, 0], axis=1))
+    add(f"roll {tag}", lambda m, b=base: m.roll(b, -4))
+    add(f"rot90 {tag}", lambda m, b=base: m.rot90(b, 3))
+x = rng.standard_normal(64)
+X = rng.standard_normal((8, 6)) + 1j * rng.standard_normal((8, 6))
+for norm in (None, "ortho", "forward"):
+    for f in ("fft", "ifft", "rfft", "hfft", "ihfft"):
+        add(f"fft.{f} {norm}", lambda m, f=f, n=norm: getattr(m.fft, f)(x, norm=n))
+    add(f"fft.irfft n=70 {norm}", lambda m, n=norm: m.fft.irfft(m.fft.rfft(x), n=70, norm=n))
+    add(f"fft.fft2 {norm}", lambda m, n=norm: m.fft.fft2(X, norm=n))
+    add(f"fft.rfftn s {norm}", lambda m, n=norm: m.fft.rfftn(X.real, s=(10, 4), norm=n))
+add("fft.fft f32", lambda m: m.fft.fft(x.astype(np.float32)))
+add("fft.fft prime n", lambda m: m.fft.fft(x[:61]))
+add("fftfreq", lambda m: m.fft.fftfreq(9, d=0.3))
+add("fftshift", lambda m: m.fft.fftshift(X, axes=1))
+for cls in ("Polynomial", "Chebyshev", "Legendre", "Hermite", "HermiteE", "Laguerre"):
+    add(f"{cls} eval", lambda m, c=cls: getattr(m.polynomial, c)([1, -2, 0.5, 3])(x[:10]))
+    add(f"{cls} deriv integ", lambda m, c=cls: getattr(m.polynomial, c)([1, -2, 0.5, 3]).deriv(2).integ(1, k=[0.5]).coef)
+    add(f"{cls} fit", lambda m, c=cls: getattr(m.polynomial, c).fit(x[:30], np.sin(x[:30]), 4).coef)
+    add(f"{cls} mul pow", lambda m, c=cls: (getattr(m.polynomial, c)([1, 2]) * getattr(m.polynomial, c)([0, 1, 3]) ** 2).coef)
+add("sliding_window_view", lambda m: m.lib.stride_tricks.sliding_window_view(np.arange(10), 3)[::2])
+add("as_strided", lambda m: m.lib.stride_tricks.as_strided(np.arange(10), shape=(4, 3), strides=(16, 8)))
+for f, args in (("assert_array_equal", (np.arange(3), np.array([0, 1, 3]))), ("assert_allclose", (np.array([1.0]), np.array([1.1]))),
+                ("assert_equal", ({"a": 1}, {"a": 2})), ("assert_array_less", (np.arange(3), np.arange(1, 4))),
+                ("assert_string_equal", ("abc", "abd")), ("assert_approx_equal", (1.0, 1.0000001))):
+    add(f"testing.{f}", lambda m, f=f, a=args: getattr(m.testing, f)(*a))
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(a, b) for a, b in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    if s is None or isinstance(s, (str, int, float, bool, tuple)):
+        return r == s
+    r2, s2 = np.asarray(r), np.asarray(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape:
+        return False
+    if isinstance(s, np.ndarray) and (r.flags.c_contiguous != s.flags.c_contiguous or r.flags.f_contiguous != s.flags.f_contiguous):
+        return False
+    return r2.tobytes() == s2.tobytes()
+bad = []
+for name, fn in cases:
+    try:
+        s = fn(np)
+    except Exception as ex:
+        s = Raised(ex)
+    try:
+        r = fn(fnp)
+    except Exception as ex:
+        r = Raised(ex)
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+            bad.append(f"{name}: fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+    elif not same(r, s):
+        bad.append(name)
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cases, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cases.parse::<usize>().unwrap_or(0) >= 200,
+        "case table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "helper parity with numpy: {result}");
+    Ok(())
+}
+
 /// fnp's ufunc objects report NumPy's docstring. The proxy class for natively implemented ufunc
 /// names carried a Rust `///` class docstring, which CPython writes into the type dict after
 /// PyO3's `__doc__` getter and so replaces it: `fnp.sin.__doc__` was fnp's implementation note.
