@@ -36306,6 +36306,17 @@ fn frexp(py: Python<'_>, x: Py<PyAny>, out: &Bound<'_, PyTuple>) -> PyResult<Py<
     if !out.is_empty() {
         return numpy_ufunc_with_positional_out(py, intern!(py, "frexp"), &[x.bind(py)], out);
     }
+    // AVX-512 hosts run NumPy's own SIMD frexp kernel, whose NaN encodings differ from the
+    // native libm-semantics split: CI G2 (GitHub runner, numpy 2.4.6) failed
+    // `frexp_f64_zerocopy_bit_exact_golden_sha256` on the custom-NaN case while every
+    // AVX2 host passes. Same fail-closed trade as the exp/log gate (`numpy_explog_matches_libm`,
+    // which is the no-AVX-512F predicate): those hosts delegate.
+    if !numpy_explog_matches_libm() {
+        return Ok(cached_numpy(py)?
+            .getattr(intern!(py, "frexp"))?
+            .call1((x.bind(py),))?
+            .unbind());
+    }
     if let Some(out) = try_zerocopy_f64_frexp(py, x.bind(py))? {
         return Ok(out);
     }
@@ -66315,7 +66326,12 @@ fn kaiser(py: Python<'_>, M: Py<PyAny>, beta: Py<PyAny>) -> PyResult<Py<PyAny>> 
         beta.bind(py).is_instance_of::<pyo3::types::PyFloat>()
             || beta.bind(py).is_instance_of::<PyInt>()
     });
-    let (Some(m), Some(beta_value)) = (native_m, native_beta) else {
+    // numpy's kaiser divides two `i0` values, and its i0 runs numpy's own `exp`, which on
+    // AVX-512 hosts is not libm: CI G2 (GitHub runner, numpy 2.4.6) found every native kaiser
+    // window byte-different from numpy there (window_length_keyword_is_capital_m_like_numpy).
+    // Those hosts delegate (`numpy_explog_matches_libm` is the no-AVX-512F predicate).
+    let (Some(m), Some(beta_value), true) = (native_m, native_beta, numpy_explog_matches_libm())
+    else {
         return Ok(cached_numpy(py)?
             .call_method1(intern!(py, "kaiser"), (M.bind(py), beta.bind(py)))?
             .unbind());
@@ -70332,6 +70348,14 @@ fn einsum_path(
 fn i0(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Native implementation of modified Bessel function of the first kind, order 0.
     // Uses the Abramowitz and Stegun polynomial approximation via UnaryOp::I0.
+    //
+    // numpy's i0 is built on its own `exp`, which on AVX-512 hosts is not libm (the same
+    // hazard CI found in `kaiser`, which is i0 over i0); those hosts delegate.
+    if !numpy_explog_matches_libm() {
+        return Ok(cached_numpy(py)?
+            .call_method1(intern!(py, "i0"), (x.bind(py),))?
+            .unbind());
+    }
     let result = native_unary_promoting(py, x.bind(py), UnaryOp::I0, intern!(py, "i0"), "i0(x)")?;
     // numpy's i0 is `piecewise` over `asanyarray(x)`, so a scalar in gives a 0-d ndarray out,
     // not a numpy scalar (numpy's own Test_I0::test_non_array).
