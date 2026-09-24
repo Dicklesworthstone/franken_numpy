@@ -548,7 +548,13 @@ impl PyUFuncProxy {
         if !self.recompute_non_finite {
             return Ok(result);
         }
-        native_result_or_numpy_fp_events(py, result, self.numpy_ufunc.bind(py), args, kwargs)
+        native_result_or_numpy_fp_events(
+            py,
+            result,
+            || self.numpy_ufunc.bind(py).clone(),
+            args,
+            kwargs,
+        )
     }
 
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
@@ -771,10 +777,29 @@ pub struct PyArrayFunctionDispatcher {
 /// trace and stays out of reach (only visible under the non-default `under=`). Routes that
 /// already report events natively (cumsum/cumprod) are deliberately absent: recomputing them
 /// would warn twice.
+///
+/// `var` and `std` are NOT listed although their axis routes report nothing: their FLAT route
+/// does report, and a name-level recompute warned twice there (the peer probe
+/// `native_kernels_report_numpys_fp_events_under_every_errstate`, var_overflow/std_inf). Their
+/// axis routes decline per route instead ([`native_or_numpy_on_non_finite`]).
 const NATIVE_ROUTES_WITHOUT_FP_EVENTS: &[&str] = &[
     "cov", "degrees", "diff", "ediff1d", "gradient", "i0", "kron", "nancumprod", "nancumsum",
-    "nanprod", "nansum", "nanstd", "nanvar", "outer", "rad2deg", "sinc", "std", "unwrap", "var",
+    "nanprod", "nansum", "nanstd", "nanvar", "outer", "rad2deg", "sinc", "unwrap",
 ];
+
+/// The per-ROUTE form of [`NATIVE_ROUTES_WITHOUT_FP_EVENTS`], for a function whose other routes
+/// do report FP events: a non-finite result from this route is recomputed by numpy's call.
+fn native_or_numpy_on_non_finite(
+    py: Python<'_>,
+    native: Py<PyAny>,
+    numpy_call: impl FnOnce() -> PyResult<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    if result_has_non_finite(py, native.bind(py))? {
+        numpy_call()
+    } else {
+        Ok(native)
+    }
+}
 
 /// True when `value` - a float or complex scalar, an ndarray, or a tuple/list of them - holds a
 /// NaN or an infinity. Native-order contiguous float64/float32 arrays are scanned directly;
@@ -829,19 +854,39 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
 /// The call-time half of [`NATIVE_ROUTES_WITHOUT_FP_EVENTS`]: after the native route answered,
 /// hand a non-finite result to numpy. A call with `out=` keeps the native answer, because the
 /// native route may already have written into a buffer that aliases an input.
-fn native_result_or_numpy_fp_events(
-    py: Python<'_>,
+fn native_result_or_numpy_fp_events<'py>(
+    py: Python<'py>,
     native_result: Py<PyAny>,
-    numpy_function: &Bound<'_, PyAny>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    numpy_function: impl FnOnce() -> Bound<'py, PyAny>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_some_and(|kw| kw.contains(intern!(py, "out")).unwrap_or(true))
         || !result_has_non_finite(py, native_result.bind(py))?
     {
         return Ok(native_result);
     }
-    Ok(numpy_function.call(args, kwargs)?.unbind())
+    Ok(numpy_function().call(args, kwargs)?.unbind())
+}
+
+impl PyArrayFunctionDispatcher {
+    /// numpy's function for this name, looked up on the LIVE module at call time: a caller's
+    /// monkeypatch of `numpy.<name>` is honoured on the delegate path, as fnp's other fallbacks
+    /// honour it (conformance_concat_append counts `np.delete` calls that way). The object
+    /// captured at import answers when the dotted path no longer resolves.
+    fn live_numpy_function<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
+        let mut current = match cached_numpy(py) {
+            Ok(numpy) => numpy.clone().into_any(),
+            Err(_) => return self.numpy_function.bind(py).clone(),
+        };
+        for part in self.qualified_path.split('.') {
+            match current.getattr(part) {
+                Ok(next) => current = next,
+                Err(_) => return self.numpy_function.bind(py).clone(),
+            }
+        }
+        current
+    }
 }
 
 #[pymethods]
@@ -854,13 +899,19 @@ impl PyArrayFunctionDispatcher {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         if call_has_array_function_override(py, args, kwargs)? {
-            return Ok(self.numpy_function.bind(py).call(args, kwargs)?.unbind());
+            return Ok(self.live_numpy_function(py).call(args, kwargs)?.unbind());
         }
         let result = call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)?;
         if !self.recompute_non_finite {
             return Ok(result);
         }
-        native_result_or_numpy_fp_events(py, result, self.numpy_function.bind(py), args, kwargs)
+        native_result_or_numpy_fp_events(
+            py,
+            result,
+            || self.live_numpy_function(py),
+            args,
+            kwargs,
+        )
     }
 
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
@@ -93016,6 +93067,34 @@ fn py_std(
             .call1((v.sqrt(),))?
             .unbind());
     }
+    // numpy's own call: the delegate for everything below, and the recompute for an axis route's
+    // non-finite result - those routes report no FP event, unlike the flat route above (bead .26).
+    let numpy_std = || -> PyResult<Py<PyAny>> {
+        let std_fn = numpy.getattr(intern!(py, "std"))?;
+        if axis.is_none()
+            && dtype.is_none()
+            && out.is_none()
+            && matches!(ddof, DdofArg::Native(0))
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && kwargs.is_none_or(|kw| kw.is_empty())
+        {
+            return Ok(std_fn.call1((a.bind(py),))?.unbind());
+        }
+        let kw = clone_py_kwargs(py, kwargs)?;
+        if let Some(ax) = axis.as_ref() {
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
+        }
+        if let Some(dt) = dtype.as_ref() {
+            kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
+        }
+        if let Some(o) = out.as_ref() {
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
+        }
+        ddof.set_numpy_kwarg(py, &kw)?;
+        // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
+        keepdims.set_numpy_kwarg(py, &kw)?;
+        Ok(std_fn.call((a.bind(py),), Some(&kw))?.unbind())
+    };
     // Native last-axis fast path (single contiguous axis, f64, no out/dtype, native ddof):
     // per-lane no-alloc two-pass pairwise fold parallel across lanes beats numpy's
     // allocate-temps var(axis=-1).
@@ -93027,7 +93106,7 @@ fn py_std(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_std);
     }
     // Native first-axis (axis=0) streaming two-pass — the ML standardization reduction
     // numpy materializes two temps + a sequential reduce for. See try_zerocopy_f64_var_axis0.
@@ -93039,7 +93118,7 @@ fn py_std(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_std);
     }
     // Native middle-axis (0 < ax < ndim-1) block-parallel two-pass — take_sqrt = true.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93051,7 +93130,7 @@ fn py_std(
         && let Some(o) =
             try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_std);
     }
     // Native FLOAT32 non-last-axis (axis 0 or middle) sequential two-pass — take_sqrt = true.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93063,7 +93142,7 @@ fn py_std(
         && let Some(o) =
             try_zerocopy_f32_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, true, kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_std);
     }
     // Native FLOAT16 LAST-axis std (per-lane f32-pairwise mean + sqr-dev). take_sqrt=true, nan_skip=false.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93076,7 +93155,7 @@ fn py_std(
         && let Some(o) =
             try_zerocopy_f16_nanvar_lastaxis(py, a.bind(py), Some(ax_i), *d, true, kd, false)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_std);
     }
     // Native FLOAT16 non-last-axis std (per-lane narrow-each-step two-pass; nan_skip=false so NaN
     // propagates). take_sqrt = true. numpy's strided f16 std is a slow scalar two-pass.
@@ -93090,32 +93169,9 @@ fn py_std(
         && let Some(o) =
             try_zerocopy_f16_nanvar_nonlast_axis(py, a.bind(py), Some(ax_i), *d, true, kd, false)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_std);
     }
-    let std_fn = numpy.getattr(intern!(py, "std"))?;
-    if axis.is_none()
-        && dtype.is_none()
-        && out.is_none()
-        && matches!(ddof, DdofArg::Native(0))
-        && matches!(keepdims, KeepdimsArg::NotGiven)
-        && kwargs.is_none_or(|kw| kw.is_empty())
-    {
-        return Ok(std_fn.call1((a.bind(py),))?.unbind());
-    }
-    let kw = clone_py_kwargs(py, kwargs)?;
-    if let Some(ax) = axis.as_ref() {
-        kw.set_item(intern!(py, "axis"), ax.bind(py))?;
-    }
-    if let Some(dt) = dtype.as_ref() {
-        kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
-    }
-    if let Some(o) = out.as_ref() {
-        kw.set_item(intern!(py, "out"), o.bind(py))?;
-    }
-    ddof.set_numpy_kwarg(py, &kw)?;
-    // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
-    keepdims.set_numpy_kwarg(py, &kw)?;
-    Ok(std_fn.call((a.bind(py),), Some(&kw))?.unbind())
+    numpy_std()
 }
 
 // Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
@@ -93160,6 +93216,34 @@ fn var(
     {
         return Ok(cached_float64_type(py)?.call1((v,))?.unbind());
     }
+    // numpy's own call: the delegate for everything below, and the recompute for an axis route's
+    // non-finite result - those routes report no FP event, unlike the flat route above (bead .26).
+    let numpy_var = || -> PyResult<Py<PyAny>> {
+        let var_fn = numpy.getattr(intern!(py, "var"))?;
+        if axis.is_none()
+            && dtype.is_none()
+            && out.is_none()
+            && matches!(ddof, DdofArg::Native(0))
+            && matches!(keepdims, KeepdimsArg::NotGiven)
+            && kwargs.is_none_or(|kw| kw.is_empty())
+        {
+            return Ok(var_fn.call1((a.bind(py),))?.unbind());
+        }
+        let kw = clone_py_kwargs(py, kwargs)?;
+        if let Some(ax) = axis.as_ref() {
+            kw.set_item(intern!(py, "axis"), ax.bind(py))?;
+        }
+        if let Some(dt) = dtype.as_ref() {
+            kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
+        }
+        if let Some(o) = out.as_ref() {
+            kw.set_item(intern!(py, "out"), o.bind(py))?;
+        }
+        ddof.set_numpy_kwarg(py, &kw)?;
+        // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
+        keepdims.set_numpy_kwarg(py, &kw)?;
+        Ok(var_fn.call((a.bind(py),), Some(&kw))?.unbind())
+    };
     // Native last-axis fast path — see py_std. take_sqrt = false for var.
     if kwargs.is_none_or(|kw| kw.is_empty())
         && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
@@ -93169,7 +93253,7 @@ fn var(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_var);
     }
     // Native first-axis (axis=0) streaming two-pass — see py_std. take_sqrt = false for var.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93180,7 +93264,7 @@ fn var(
         && let Some(kd) = keepdims_effective
         && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_var);
     }
     // Native middle-axis (0 < ax < ndim-1) block-parallel two-pass — take_sqrt = false.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93192,7 +93276,7 @@ fn var(
         && let Some(o) =
             try_zerocopy_f64_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_var);
     }
     // Native FLOAT32 non-last-axis (axis 0 or middle) sequential two-pass — take_sqrt = false.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93204,7 +93288,7 @@ fn var(
         && let Some(o) =
             try_zerocopy_f32_var_nonlast_axis(py, a.bind(py), ax.bind(py), *d, false, kd)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_var);
     }
     // Native FLOAT16 LAST-axis var (per-lane f32-pairwise mean + sqr-dev). take_sqrt=false, nan_skip=false.
     if kwargs.is_none_or(|kw| kw.is_empty())
@@ -93217,7 +93301,7 @@ fn var(
         && let Some(o) =
             try_zerocopy_f16_nanvar_lastaxis(py, a.bind(py), Some(ax_i), *d, false, kd, false)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_var);
     }
     // Native FLOAT16 non-last-axis var (per-lane narrow-each-step two-pass; nan_skip=false, NaN
     // propagates). take_sqrt = false. numpy's strided f16 var is a slow scalar two-pass.
@@ -93231,32 +93315,9 @@ fn var(
         && let Some(o) =
             try_zerocopy_f16_nanvar_nonlast_axis(py, a.bind(py), Some(ax_i), *d, false, kd, false)?
     {
-        return Ok(o);
+        return native_or_numpy_on_non_finite(py, o, &numpy_var);
     }
-    let var_fn = numpy.getattr(intern!(py, "var"))?;
-    if axis.is_none()
-        && dtype.is_none()
-        && out.is_none()
-        && matches!(ddof, DdofArg::Native(0))
-        && matches!(keepdims, KeepdimsArg::NotGiven)
-        && kwargs.is_none_or(|kw| kw.is_empty())
-    {
-        return Ok(var_fn.call1((a.bind(py),))?.unbind());
-    }
-    let kw = clone_py_kwargs(py, kwargs)?;
-    if let Some(ax) = axis.as_ref() {
-        kw.set_item(intern!(py, "axis"), ax.bind(py))?;
-    }
-    if let Some(dt) = dtype.as_ref() {
-        kw.set_item(intern!(py, "dtype"), dt.bind(py))?;
-    }
-    if let Some(o) = out.as_ref() {
-        kw.set_item(intern!(py, "out"), o.bind(py))?;
-    }
-    ddof.set_numpy_kwarg(py, &kw)?;
-    // Only forward `keepdims` if the caller supplied it (`deadlock-audit-30d18`).
-    keepdims.set_numpy_kwarg(py, &kw)?;
-    Ok(var_fn.call((a.bind(py),), Some(&kw))?.unbind())
+    numpy_var()
 }
 
 /// Below this NumPy's single-threaded scan is already at one core's memory
