@@ -2830,6 +2830,16 @@ def check(n, f, g):
     for attr in ("nin", "nout", "nargs", "ntypes", "types", "identity", "signature", "__name__"):
         if getattr(f, attr) != getattr(g, attr):
             bad.append(f"{n}: .{attr} differs")
+    if g.nin == 2 and g.nout == 1:
+        # `reduction=` was missing from a hand-written forwarder on the native class.
+        outcomes = []
+        for u in (f, g):
+            try:
+                outcomes.append(u.resolve_dtypes((None, np.dtype("f8"), None), reduction=True))
+            except Exception as e:
+                outcomes.append(type(e).__name__)
+        if outcomes[0] != outcomes[1]:
+            bad.append(f"{n}.resolve_dtypes(reduction=True): {outcomes[0]} vs {outcomes[1]}")
     if repr(f) != repr(g):
         bad.append(f"{n}: repr {repr(f)!r}")
     if pickle.loads(pickle.dumps(f)) is not g:

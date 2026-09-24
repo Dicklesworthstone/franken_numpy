@@ -654,34 +654,6 @@ impl PyUFunc {
         py.None()
     }
 
-    #[pyo3(signature = (dtypes, *, signature=None, casting=None))]
-    fn resolve_dtypes(
-        &self,
-        py: Python<'_>,
-        dtypes: Py<PyAny>,
-        signature: Option<Py<PyAny>>,
-        casting: Option<&str>,
-    ) -> PyResult<Py<PyAny>> {
-        let numpy = cached_numpy(py)?;
-        let np_ufunc = numpy.getattr(interned_ufunc_name(py, self.kind))?;
-        if signature.is_none() && casting.is_none() {
-            return Ok(np_ufunc
-                .call_method1(intern!(py, "resolve_dtypes"), (dtypes.bind(py),))?
-                .unbind());
-        }
-        let kwargs = PyDict::new(py);
-        if let Some(sig) = signature.as_ref() {
-            kwargs.set_item(intern!(py, "signature"), sig.bind(py))?;
-        }
-        if let Some(c) = casting {
-            kwargs.set_item(intern!(py, "casting"), c)?;
-        }
-        Ok(np_ufunc
-            .getattr(intern!(py, "resolve_dtypes"))?
-            .call((dtypes.bind(py),), Some(&kwargs))?
-            .unbind())
-    }
-
     fn __repr__(&self) -> String {
         format!("<ufunc '{}'>", self.kind.name())
     }
@@ -694,7 +666,10 @@ impl PyUFunc {
     }
 
     /// Anything this class does not implement natively resolves on NumPy's ufunc of the same
-    /// name (e.g. `_resolve_dtypes_and_context`, `__qualname__`).
+    /// name (e.g. `resolve_dtypes`, `_resolve_dtypes_and_context`, `__qualname__`).
+    /// `resolve_dtypes` used to be a hand-written forwarder here whose signature had no
+    /// `reduction=`, so `fnp.add.resolve_dtypes(..., reduction=True)` raised TypeError; the
+    /// fallback hands out NumPy's bound method with NumPy's exact signature.
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
         let numpy = cached_numpy(py)?;
         Ok(numpy
