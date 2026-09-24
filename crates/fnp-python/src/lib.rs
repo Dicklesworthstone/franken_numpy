@@ -513,8 +513,6 @@ pub struct PyUFuncProxy {
     nin: usize,
     native_keywords: Vec<String>,
     native_accepts_any_keyword: bool,
-    /// See [`NATIVE_ROUTES_WITHOUT_FP_EVENTS`].
-    recompute_non_finite: bool,
 }
 
 #[pymethods]
@@ -544,17 +542,7 @@ impl PyUFuncProxy {
         if !native_ok || call_has_array_function_override(py, args, kwargs)? {
             return Ok(self.numpy_ufunc.bind(py).call(args, kwargs)?.unbind());
         }
-        let result = call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)?;
-        if !self.recompute_non_finite {
-            return Ok(result);
-        }
-        native_result_or_numpy_fp_events(
-            py,
-            result,
-            || self.numpy_ufunc.bind(py).clone(),
-            args,
-            kwargs,
-        )
+        call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)
     }
 
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
@@ -690,7 +678,6 @@ fn wrap_plain_ufunc_names(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<(
             }
         }
         let proxy = PyUFuncProxy {
-            recompute_non_finite: NATIVE_ROUTES_WITHOUT_FP_EVENTS.contains(&name.as_str()),
             name: name.clone(),
             native: ours.unbind(),
             numpy_ufunc: np_obj.unbind(),
@@ -763,32 +750,18 @@ pub struct PyArrayFunctionDispatcher {
     qualified_path: String,
     native: Py<PyAny>,
     numpy_function: Py<PyAny>,
-    /// See [`NATIVE_ROUTES_WITHOUT_FP_EVENTS`].
-    recompute_non_finite: bool,
 }
 
-/// Native routes whose kernels report NONE of numpy's floating-point events (bead .26), found
-/// by the warning-parity sweep over every numpy.__all__ callable: fed inf/-inf/NaN/1e308
-/// operands, they returned numpy's values without numpy's "invalid value encountered in
-/// subtract", "overflow encountered in square", ... warnings, and without FloatingPointError
-/// under `errstate(all='raise')`. Every such event leaves a NaN or an infinity in the result,
-/// so for these names a non-finite result is recomputed by numpy, which then warns or raises
-/// exactly as it does. A finite result pays one scan and nothing else. Underflow leaves no such
-/// trace and stays out of reach (only visible under the non-default `under=`). Routes that
-/// already report events natively (cumsum/cumprod) are deliberately absent: recomputing them
-/// would warn twice.
+/// A native KERNEL whose loop reports none of numpy's floating-point events (bead .26) hands a
+/// non-finite result to numpy's call, which recomputes it and warns or raises exactly as numpy
+/// does: every invalid/overflow/divide event leaves a NaN or an infinity in the result
+/// (underflow does not, and stays out of reach). A finite result pays one scan.
 ///
-/// `var` and `std` are NOT listed although their axis routes report nothing: their FLAT route
-/// does report, and a name-level recompute warned twice there (the peer probe
-/// `native_kernels_report_numpys_fp_events_under_every_errstate`, var_overflow/std_inf). Their
-/// axis routes decline per route instead ([`native_or_numpy_on_non_finite`]).
-const NATIVE_ROUTES_WITHOUT_FP_EVENTS: &[&str] = &[
-    "cov", "degrees", "diff", "ediff1d", "gradient", "i0", "kron", "nancumprod", "nancumsum",
-    "nanprod", "nansum", "nanstd", "nanvar", "outer", "rad2deg", "sinc", "unwrap",
-];
-
-/// The per-ROUTE form of [`NATIVE_ROUTES_WITHOUT_FP_EVENTS`], for a function whose other routes
-/// do report FP events: a non-finite result from this route is recomputed by numpy's call.
+/// PER ROUTE, never per function name. A name-level version of this in the NEP 18 dispatcher
+/// (6a050102) warned TWICE wherever the native function had returned numpy's own result - its
+/// internal fallbacks, `nanvar`'s all-NaN deferral ("Degrees of freedom <= 0 for slice.") - or
+/// where another route of the name already reports (flat `var`/`std`). Only the result of a
+/// kernel that emitted nothing may be recomputed.
 fn native_or_numpy_on_non_finite(
     py: Python<'_>,
     native: Py<PyAny>,
@@ -851,24 +824,6 @@ fn result_has_non_finite(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<b
     Ok(!finite)
 }
 
-/// The call-time half of [`NATIVE_ROUTES_WITHOUT_FP_EVENTS`]: after the native route answered,
-/// hand a non-finite result to numpy. A call with `out=` keeps the native answer, because the
-/// native route may already have written into a buffer that aliases an input.
-fn native_result_or_numpy_fp_events<'py>(
-    py: Python<'py>,
-    native_result: Py<PyAny>,
-    numpy_function: impl FnOnce() -> Bound<'py, PyAny>,
-    args: &Bound<'py, PyTuple>,
-    kwargs: Option<&Bound<'py, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    if kwargs.is_some_and(|kw| kw.contains(intern!(py, "out")).unwrap_or(true))
-        || !result_has_non_finite(py, native_result.bind(py))?
-    {
-        return Ok(native_result);
-    }
-    Ok(numpy_function().call(args, kwargs)?.unbind())
-}
-
 impl PyArrayFunctionDispatcher {
     /// numpy's function for this name, looked up on the LIVE module at call time: a caller's
     /// monkeypatch of `numpy.<name>` is honoured on the delegate path, as fnp's other fallbacks
@@ -901,17 +856,7 @@ impl PyArrayFunctionDispatcher {
         if call_has_array_function_override(py, args, kwargs)? {
             return Ok(self.live_numpy_function(py).call(args, kwargs)?.unbind());
         }
-        let result = call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)?;
-        if !self.recompute_non_finite {
-            return Ok(result);
-        }
-        native_result_or_numpy_fp_events(
-            py,
-            result,
-            || self.live_numpy_function(py),
-            args,
-            kwargs,
-        )
+        call_native_mapping_alloc_failure(self.native.bind(py), args, kwargs)
     }
 
     fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
@@ -1126,8 +1071,6 @@ fn wrap_array_function_dispatchers(py: Python<'_>, m: &Bound<'_, PyModule>) -> P
                     let created: Py<PyAny> = Py::new(
                         py,
                         PyArrayFunctionDispatcher {
-                            recompute_non_finite: NATIVE_ROUTES_WITHOUT_FP_EVENTS
-                                .contains(&name.as_str()),
                             name: name.clone(),
                             qualified_path: path,
                             native: ours.unbind(),
