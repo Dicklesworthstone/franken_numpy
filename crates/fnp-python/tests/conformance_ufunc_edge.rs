@@ -2904,6 +2904,130 @@ print("OK" if not bad else " || ".join(bad))
     );
 }
 
+/// The ufunc METHODS, not just their presence (bead .5's acceptance): every ufunc name of the
+/// live numpy x eight dtypes (float64/float32/int64/int32/uint8/bool/complex128/timedelta64) x
+/// __call__ with out= / where= / dtype= / casting= / broadcasting, reduce (axis 0/1/None,
+/// keepdims, initial, where, dtype), accumulate, outer, reduceat and at (array and scalar
+/// values), plus nin/nout/nargs/identity/signature/ntypes/types/__name__: fnp must match numpy's
+/// result type, dtype, shape and bytes, or raise the same exception type. `where=` without
+/// `out=` leaves the unselected outputs uninitialised in numpy, so only selected positions are
+/// compared there.
+#[test]
+fn every_ufunc_method_matches_numpy_results() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(71)
+names = sorted(n for n in dir(np) if isinstance(getattr(np, n), np.ufunc))
+def operands(dt):
+    kind = np.dtype(dt).kind
+    if kind == "b":
+        return rng.random((5, 6)) < 0.5
+    if kind in "iu":
+        return rng.integers(1, 9, (5, 6)).astype(dt)
+    if kind == "c":
+        return (rng.standard_normal((5, 6)) + 1j * rng.standard_normal((5, 6))).astype(dt)
+    if kind == "m":
+        return rng.integers(-9, 9, (5, 6)).astype("timedelta64[s]")
+    return (rng.standard_normal((5, 6)) * 3).astype(dt)
+cases = []
+def add(name, fn, mask=None):
+    cases.append((name, fn, mask))
+def into_out(m, call):
+    # numpy's own result fixes the out= buffers (one per output); each arm fills a fresh set.
+    ref = call(np, None)
+    outs = tuple(np.empty_like(np.asarray(r)) for r in (ref if isinstance(ref, tuple) else (ref,)))
+    call(m, outs)
+    return outs
+for n in names:
+    for attr in ("nin", "nout", "nargs", "identity", "signature", "ntypes", "types", "__name__"):
+        add(f"{n}.{attr}", lambda m, n=n, a=attr: getattr(getattr(m, n), a))
+    for dt in ("f8", "f4", "i8", "i4", "u1", "?", "c16", "m8[s]"):
+        a, b = operands(dt), operands(dt)
+        u = lambda m, n=n: getattr(m, n)
+        tag = f"{n} {dt}"
+        if getattr(np, n).nin == 1:
+            sel = a.real > 0 if a.dtype.kind in "fic" else np.ones(a.shape, bool)
+            add(f"{tag} call", lambda m, a=a, u=u: u(m)(a))
+            add(f"{tag} call out", lambda m, a=a, u=u: into_out(m, lambda mm, o: u(mm)(a) if o is None else u(mm)(a, out=o)))
+            add(f"{tag} call where", lambda m, a=a, u=u, w=sel: u(m)(a, where=w), sel)
+            add(f"{tag} call dtype f8", lambda m, a=a, u=u: u(m)(a, dtype="f8"))
+            add(f"{tag} at", lambda m, a=a, u=u: (lambda x: (u(m).at(x, [0, 2, 0]), x)[1])(a.copy().ravel()))
+        else:
+            add(f"{tag} call", lambda m, a=a, b=b, u=u: u(m)(a, b))
+            add(f"{tag} call broadcast", lambda m, a=a, b=b, u=u: u(m)(a, b[:1]))
+            add(f"{tag} call out", lambda m, a=a, b=b, u=u: into_out(m, lambda mm, o: u(mm)(a, b) if o is None else u(mm)(a, b, out=o)))
+            add(f"{tag} call dtype f8", lambda m, a=a, b=b, u=u: u(m)(a, b, dtype="f8"))
+            add(f"{tag} call casting", lambda m, a=a, b=b, u=u: u(m)(a, b, casting="same_kind", dtype="f4"))
+            for axis in (0, 1, None):
+                add(f"{tag} reduce axis={axis}", lambda m, a=a, u=u, ax=axis: u(m).reduce(a, axis=ax))
+            add(f"{tag} reduce keepdims", lambda m, a=a, u=u: u(m).reduce(a, axis=1, keepdims=True))
+            add(f"{tag} reduce initial", lambda m, a=a, u=u: u(m).reduce(a, axis=0, initial=1))
+            add(f"{tag} reduce where", lambda m, a=a, u=u: u(m).reduce(a, axis=0, where=np.eye(5, 6, dtype=bool), initial=0))
+            add(f"{tag} reduce dtype", lambda m, a=a, u=u: u(m).reduce(a, axis=0, dtype="f8"))
+            add(f"{tag} accumulate", lambda m, a=a, u=u: u(m).accumulate(a, axis=1))
+            add(f"{tag} accumulate axis0", lambda m, a=a, u=u: u(m).accumulate(a, axis=0))
+            add(f"{tag} outer", lambda m, a=a, b=b, u=u: u(m).outer(a[0], b[:, 0]))
+            add(f"{tag} reduceat", lambda m, a=a, u=u: u(m).reduceat(a, [0, 2, 5], axis=0))
+            add(f"{tag} at", lambda m, a=a, b=b, u=u: (lambda x: (u(m).at(x, [0, 2, 0], b.ravel()[:3]), x)[1])(a.copy().ravel()))
+            add(f"{tag} at scalar", lambda m, a=a, b=b, u=u: (lambda x: (u(m).at(x, [1, 1], b.ravel()[0]), x)[1])(a.copy().ravel()))
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s, mask):
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(x, y, mask) for x, y in zip(r, s))
+    if s is None or isinstance(s, (str, int, float, bool)):
+        return type(r) is type(s) and (r == s or (s != s and r != r))
+    if type(r) is not type(s):
+        return False
+    r2, s2 = np.asarray(r), np.asarray(s)
+    if r2.dtype != s2.dtype or r2.shape != s2.shape:
+        return False
+    if mask is not None:
+        r2, s2 = r2[mask], s2[mask]
+    return r2.tobytes() == s2.tobytes()
+bad = []
+compared = 0
+for name, fn, mask in cases:
+    try:
+        s = fn(np)
+    except Exception as ex:
+        s = Raised(ex)
+    try:
+        r = fn(fnp)
+    except Exception as ex:
+        r = Raised(ex)
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+            bad.append(f"{name}: fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+        continue
+    compared += 1
+    if not same(r, s, mask):
+        bad.append(name)
+print(len(names), compared, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let (ufuncs, compared, bad) = (
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or("0"),
+        fields.next().unwrap_or(""),
+    );
+    assert!(
+        ufuncs.parse::<usize>().unwrap_or(0) >= 100,
+        "expected ~106 numpy ufunc names: {result}"
+    );
+    assert!(
+        compared.parse::<usize>().unwrap_or(0) >= 5000,
+        "too few cells produced a result to compare: {result}"
+    );
+    assert_eq!(bad, "[]", "ufunc methods must match numpy: {result}");
+    Ok(())
+}
+
 /// NumPy's binary ufuncs still take the legacy `sig=` spelling of `signature=`: they normalize
 /// it before `__array_ufunc__` sees it, refuse it alongside `signature=`, and refuse
 /// `sig=None`. fnp's `ufunc.__call__` named only its own keywords, so every `sig=` call -
