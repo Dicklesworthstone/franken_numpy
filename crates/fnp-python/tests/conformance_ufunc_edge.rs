@@ -2903,3 +2903,48 @@ print("OK" if not bad else " || ".join(bad))
         "ufunc protocol diverges: {result}"
     );
 }
+
+/// NumPy's binary ufuncs still take the legacy `sig=` spelling of `signature=`: they normalize
+/// it before `__array_ufunc__` sees it, refuse it alongside `signature=`, and refuse
+/// `sig=None`. fnp's `ufunc.__call__` named only its own keywords, so every `sig=` call -
+/// and every other keyword numpy's ufunc owns - raised "unexpected keyword argument" (numpy's
+/// own TestBinop::test_ufunc_override_normalize_signature under the drop-in harness).
+#[test]
+fn binary_ufunc_accepts_numpys_legacy_sig_keyword() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+class Override:
+    def __array_ufunc__(self, ufunc, method, *inputs, **kw):
+        return sorted(kw.items())
+def outcome(fn):
+    try:
+        r = fn()
+        return ("ok", repr(r))
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+x = np.array([1.5, 2.5])
+cases = [
+    lambda m: m.add(Override(), [1], sig="ii->i"),
+    lambda m: m.multiply(Override(), [1], signature="ii->i"),
+    lambda m: m.add(x, x, sig="dd->d"),
+    lambda m: m.subtract(x, x, sig=("d", "d", "d")),
+    lambda m: m.add(x, x, sig="ii->i"),
+    lambda m: m.add(x, x, sig="dd->d", signature="dd->d"),
+    lambda m: m.add(x, x, sig=None),
+    lambda m: m.add(x, x, keepdims=True),
+    lambda m: m.add(x, x, bogus=1),
+    lambda m: m.add(x, x),
+]
+bad = [i for i, c in enumerate(cases) if outcome(lambda: c(fnp)) != outcome(lambda: c(np))]
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "sig= must behave as numpy's: {result}"
+    );
+    Ok(())
+}

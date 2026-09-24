@@ -520,6 +520,45 @@ impl PyUFuncProxy {
     }
 }
 
+/// The keywords of a delegated binary-ufunc call that are NOT at NumPy's default. Omitting a
+/// keyword whose value equals the callee's own default cannot change behaviour, and it spares
+/// NumPy parsing `casting`/`order`/`subok` only to be told what it would have assumed.
+#[allow(clippy::too_many_arguments)]
+fn ufunc_non_default_kwargs<'py>(
+    py: Python<'py>,
+    out: Option<&Py<PyAny>>,
+    r#where: Option<&Py<PyAny>>,
+    casting: &str,
+    order: &str,
+    dtype: Option<&Py<PyAny>>,
+    subok: bool,
+    signature: Option<&Py<PyAny>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let kwargs = PyDict::new(py);
+    if let Some(o) = out {
+        kwargs.set_item(intern!(py, "out"), o.bind(py))?;
+    }
+    if let Some(w) = r#where {
+        kwargs.set_item(intern!(py, "where"), w.bind(py))?;
+    }
+    if casting != "same_kind" {
+        kwargs.set_item(intern!(py, "casting"), casting)?;
+    }
+    if order != "K" {
+        kwargs.set_item(intern!(py, "order"), order)?;
+    }
+    if let Some(d) = dtype {
+        kwargs.set_item(intern!(py, "dtype"), d.bind(py))?;
+    }
+    if !subok {
+        kwargs.set_item(intern!(py, "subok"), subok)?;
+    }
+    if let Some(s) = signature {
+        kwargs.set_item(intern!(py, "signature"), s.bind(py))?;
+    }
+    Ok(kwargs)
+}
+
 /// Replace every top-level NumPy ufunc name that fnp exposes as a plain native function
 /// with a `PyUFuncProxy` (see there). Names already bound to a `PyUFunc` or to NumPy's own
 /// ufunc object are left alone.
@@ -760,7 +799,7 @@ impl PyUFunc {
     // nothing, so the string defaults come back - they also state NumPy's actual defaults
     // directly, which the Option form only recovered via the separately built
     // `__signature__`.
-    #[pyo3(signature = (x1, x2, /, out=None, *, r#where=None, casting="same_kind", order="K", dtype=None, subok=true, signature=None))]
+    #[pyo3(signature = (x1, x2, /, out=None, *, r#where=None, casting="same_kind", order="K", dtype=None, subok=true, signature=None, **extra))]
     #[allow(clippy::too_many_arguments)]
     fn __call__(
         &self,
@@ -774,12 +813,38 @@ impl PyUFunc {
         dtype: Option<Py<PyAny>>,
         subok: bool,
         signature: Option<Py<PyAny>>,
+        extra: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         // Cached module handle, not `py.import("numpy")`: the import is 310 ns on every
         // invocation (`deadlock-audit-cydda`) against a ~7-8 us per-call floor, and this
         // is the route that floor belongs to. See `cached_numpy` for why holding the
         // handle is sound and why the module — not a bound callable — is what is held.
         let numpy = cached_numpy(py)?;
+        // A keyword outside the named set is NumPy's to accept or reject: its legacy `sig=`
+        // spelling of `signature=` (which it normalizes before `__array_ufunc__` sees it, and
+        // refuses alongside `signature=` or as `sig=None`), `axes=`/`keepdims=`, a misspelling.
+        // PyO3 used to answer all of them "unexpected keyword argument" (numpy's own
+        // TestBinop::test_ufunc_override_normalize_signature). Only a call that carries one
+        // builds `extra`, so the plain call shape is unchanged.
+        if let Some(extra) = extra
+            && !extra.is_empty()
+        {
+            let kwargs = ufunc_non_default_kwargs(
+                py,
+                out.as_ref(),
+                r#where.as_ref(),
+                casting,
+                order,
+                dtype.as_ref(),
+                subok,
+                signature.as_ref(),
+            )?;
+            kwargs.update(extra.as_mapping())?;
+            return Ok(numpy
+                .getattr(interned_ufunc_name(py, self.kind))?
+                .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
+                .unbind());
+        }
         // Fast parallel f64 path for the high-compute binary ufuncs numpy runs single-threaded
         // (remainder = floored-mod, power = libm pow). Only the plain call surface (every kwarg
         // at its default) routes to the zero-copy parallel kernel; any out/where/dtype/casting/
@@ -1243,28 +1308,16 @@ impl PyUFunc {
         // break: `casting="unsafe"` is what permits a narrowing `out=`, `order` decides
         // the result's memory layout, and `subok=False` strips an ndarray subclass.
         // `delegated_kwargs_omit_defaults_and_forward_non_defaults` pins all three.
-        let kwargs = PyDict::new(py);
-        if let Some(o) = out.as_ref() {
-            kwargs.set_item(intern!(py, "out"), o.bind(py))?;
-        }
-        if let Some(w) = r#where {
-            kwargs.set_item(intern!(py, "where"), w.bind(py))?;
-        }
-        if casting != "same_kind" {
-            kwargs.set_item(intern!(py, "casting"), casting)?;
-        }
-        if order != "K" {
-            kwargs.set_item(intern!(py, "order"), order)?;
-        }
-        if let Some(d) = dtype.as_ref() {
-            kwargs.set_item(intern!(py, "dtype"), d.bind(py))?;
-        }
-        if !subok {
-            kwargs.set_item(intern!(py, "subok"), subok)?;
-        }
-        if let Some(s) = signature.as_ref() {
-            kwargs.set_item(intern!(py, "signature"), s.bind(py))?;
-        }
+        let kwargs = ufunc_non_default_kwargs(
+            py,
+            out.as_ref(),
+            r#where.as_ref(),
+            casting,
+            order,
+            dtype.as_ref(),
+            subok,
+            signature.as_ref(),
+        )?;
         Ok(np_ufunc
             .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
             .unbind())
@@ -19741,6 +19794,9 @@ fn try_zerocopy_f64_putmask(
         // numpy raises ValueError("Cannot insert from an empty object"); defer.
         return Ok(false);
     }
+    if pybuffers_overlap(&a_buffer, &mask_buffer) || pybuffers_overlap(&a_buffer, &val_buffer) {
+        return Ok(false);
+    }
     let Some(a_out) = a_buffer.as_mut_slice(py) else {
         return Ok(false);
     };
@@ -19749,7 +19805,8 @@ fn try_zerocopy_f64_putmask(
     // every output slot is independent — embarrassingly parallel. Scatter into a's own buffer
     // over disjoint raw-slice chunks (in-place, no copy-back); numpy runs this single-threaded.
     // SAFETY: ReadOnlyCell<u8/f64>/Cell<f64> are repr(transparent); read-only mask/values under
-    // the GIL, a's buffer written only at disjoint, non-overlapping chunk positions.
+    // the GIL and disjoint from a's buffer (checked above), a's buffer written only at
+    // disjoint, non-overlapping chunk positions.
     let a_slice: &mut [f64] =
         unsafe { std::slice::from_raw_parts_mut(a_out.as_ptr() as *mut f64, n) };
     let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
@@ -19779,6 +19836,20 @@ fn try_zerocopy_f64_putmask(
         }
     }
     Ok(true)
+}
+
+// Whether two buffers' byte ranges intersect. numpy.putmask COPIES a mask or values operand
+// that overlaps the target before scattering (gh-6272); the in-place scatters here read them
+// live, so `putmask(x[1:], m, x[:-1])` smeared x[0] across the whole array (numpy's own
+// TestPutmask::test_overlaps under the drop-in harness), and the `&mut [T]` over the target
+// would alias the `&[T]` over the operand. An overlapping call declines to the copying path.
+fn pybuffers_overlap<A: pyo3::buffer::Element, B: pyo3::buffer::Element>(
+    a: &PyBuffer<A>,
+    b: &PyBuffer<B>,
+) -> bool {
+    let a_start = a.buf_ptr() as usize;
+    let b_start = b.buf_ptr() as usize;
+    a_start < b_start + b.len_bytes() && b_start < a_start + a.len_bytes()
 }
 
 // Generic in-place masked scatter for np.putmask over an unsigned-integer view of
@@ -19812,12 +19883,16 @@ fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     if v == 0 {
         return Ok(false);
     }
+    if pybuffers_overlap(&a_buffer, &mask_buffer) || pybuffers_overlap(&a_buffer, &val_buffer) {
+        return Ok(false);
+    }
     let Some(a_out) = a_buffer.as_mut_slice(py) else {
         return Ok(false);
     };
     let n = a_out.len();
     // SAFETY: ReadOnlyCell<u8/T>/Cell<T> are repr(transparent); mask/values are
-    // read-only under the GIL and a's buffer is written through disjoint chunks.
+    // read-only under the GIL, disjoint from a's buffer (checked above), and a's
+    // buffer is written through disjoint chunks.
     let a_slice: &mut [T] = unsafe { std::slice::from_raw_parts_mut(a_out.as_ptr() as *mut T, n) };
     let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
     let vals: &[T] = unsafe { std::slice::from_raw_parts(val_in.as_ptr().cast::<T>(), v) };
@@ -116070,21 +116145,22 @@ fn try_zerocopy_f32_around(
     finish_preshaped_output(flat, &shape).map(Some)
 }
 
-// np.around/np.round of an integer ndarray.
+// np.around/np.round of an integer ndarray goes to numpy.around whole, and the decline is
+// what keeps it off the cold extract -> f64 Vec -> Rint -> rebuild path (~140-270x slower).
 //
-// decimals >= 0 is the identity (rounding an integer to zero-or-more decimal
-// places leaves it unchanged); numpy returns a fresh copy preserving the input
-// dtype, so a.copy() is bit-identical and skips the cold extract -> f64 Vec ->
-// Rint -> rebuild path (~140-270x slower).
+// decimals >= 0 leaves an integer unchanged, but WHICH object comes back is numpy-version
+// behaviour: numpy <= 2.3 returns the operand ITSELF, 2.4 returns a copy that keeps the
+// operand's layout (numpy's own TestMethods::test_round_copies). A native `.copy()` matched
+// neither (a C-order copy), and `.copy("K")` matched 2.4 while diverging from 2.3.5 on a
+// worker running it. numpy's integer path is itself just that copy, so there is no kernel
+// here to own.
 //
-// decimals < 0 rounds to a power of ten. numpy computes this with a *lossy*
-// float cast (int -> f64 -> round -> back), which overflow-wraps and warns for
-// wide ints. fnp's extract path instead RAISES on any int that cannot round-trip
-// through f64 exactly (`to_storage ... cannot be represented exactly`), so it
-// CRASHED where numpy returns a value (bead xti0b). Delegate this case straight
-// to numpy.around for exact parity (including numpy's own overflow behavior) and
-// no crash. Returns None for non-integer / non-ndarray inputs.
-fn try_zerocopy_int_around(
+// decimals < 0 rounds to a power of ten through numpy's *lossy* float cast (int -> f64 ->
+// round -> back), which overflow-wraps and warns for wide ints; fnp's extract path RAISED
+// on any int that cannot round-trip through f64 exactly (bead xti0b).
+//
+// Returns None for non-integer / non-ndarray inputs.
+fn numpy_integer_around(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     decimals: i32,
@@ -116099,9 +116175,6 @@ fn try_zerocopy_int_around(
         .extract::<char>()?;
     if kind != 'i' && kind != 'u' {
         return Ok(None);
-    }
-    if decimals >= 0 {
-        return Ok(Some(a.call_method0(intern!(py, "copy"))?.unbind()));
     }
     let kwargs = PyDict::new(py);
     kwargs.set_item(intern!(py, "decimals"), decimals)?;
@@ -116299,8 +116372,8 @@ fn around(
         return Ok(result);
     }
 
-    // Integer input with decimals >= 0 is the identity; return a fast copy.
-    if let Some(result) = try_zerocopy_int_around(py, a.bind(py), decimals)? {
+    // Integer input is numpy's (see `numpy_integer_around`).
+    if let Some(result) = numpy_integer_around(py, a.bind(py), decimals)? {
         return Ok(result);
     }
 

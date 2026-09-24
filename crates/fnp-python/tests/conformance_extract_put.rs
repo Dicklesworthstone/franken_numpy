@@ -791,3 +791,49 @@ print(bad if bad else True)
     );
     Ok(())
 }
+
+/// numpy.putmask COPIES a mask or values operand that overlaps the target before scattering
+/// (gh-6272). fnp's zero-copy scatters read them live, so an aliasing values view smeared its
+/// first element across the target for every fixed-width dtype, and `putmask(x[1:4], x[:3],
+/// [True, False, True])` answered [T, T, F, F] for numpy's [T, T, T, T] (numpy's own
+/// TestPutmask::test_overlaps under the drop-in harness). Non-overlapping calls are the
+/// native control.
+#[test]
+fn putmask_copies_operands_that_overlap_the_target_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def run(m, dt, which):
+    x = (np.arange(10) % 3 == 0).astype(dt)
+    a = x[1:9]
+    if which == "values":
+        m.putmask(a, np.ones(8, bool), x[:8])
+    elif which == "mask":
+        mask_src = np.array([True, False, True, True, False, True, False, True, True, False])
+        m.putmask(mask_src[1:9], mask_src[:8], np.array([True, False, True]))
+        return mask_src.tolist()
+    elif which == "harness":
+        y = np.array([True, False, True, False])
+        m.putmask(y[1:4], y[:3], [True, False, True])
+        z = np.array([True, False, True, False])
+        m.putmask(z[1:4], [True, True, True], z[:3])
+        return y.tolist(), z.tolist()
+    else:
+        m.putmask(a, np.arange(8) % 2 == 0, np.arange(3).astype(dt))
+    return x.tolist()
+bad = []
+for dt in (bool, np.uint8, np.int16, np.int32, np.int64, np.float32, np.float64):
+    for which in ("values", "mask", "harness", "control"):
+        if run(fnp, dt, which) != run(np, dt, which):
+            bad.append((np.dtype(dt).name, which))
+print(bad if bad else True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().last().unwrap_or("").trim(),
+        "True",
+        "overlapping putmask must match numpy: {result}"
+    );
+    Ok(())
+}
