@@ -9766,7 +9766,10 @@ for child in rng.spawn(n_children):
     /// half of the first word instead (0x3a32b18d for PCG64).
     #[test]
     fn advance_matches_numpy_streams_and_drops_the_buffered_u32() {
-        let cases: [(BitGeneratorKind, [u64; 2], [u64; 2], u32, u32); 3] = [
+        // (kind, words after advance(0), words after advance(2**64 + 3), uint32 before, uint32
+        // after advance(5)); the alias keeps clippy's type_complexity quiet.
+        type Case = (BitGeneratorKind, [u64; 2], [u64; 2], u32, u32);
+        let cases: [Case; 3] = [
             (
                 BitGeneratorKind::Pcg64,
                 [0x3a32_b18d_b2ff_c19d, 0x5117_1315_c9e4_c4de],
