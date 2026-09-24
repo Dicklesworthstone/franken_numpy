@@ -29,8 +29,26 @@ const MIX_CONST1: u64 = 0xBF58_476D_1CE4_E5B9;
 const MIX_CONST2: u64 = 0x94D0_49BB_1331_11EB;
 const BETA_TINY_THRESHOLD: f64 = 3e-103;
 
-fn wrap_angle_to_pi(angle: f64) -> f64 {
-    (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
+/// numpy's `random_vonmises` wrap for the rejection sampler: fold |angle| with `fmod` and
+/// restore the sign. A `rem_euclid` of the signed angle is the same function mathematically
+/// but rounds differently for negative angles (4 of 1000 draws differed by one ulp).
+fn vonmises_wrap_to_pi(angle: f64) -> f64 {
+    let folded =
+        (angle.abs() + std::f64::consts::PI) % std::f64::consts::TAU - std::f64::consts::PI;
+    if angle < 0.0 { -folded } else { folded }
+}
+
+/// numpy's bound for the kappa > 1e6 wrapped-normal fallback: one conditional shift by 2*pi,
+/// no fmod.
+fn vonmises_wrapped_normal_to_pi(angle: f64) -> f64 {
+    let mut result = angle;
+    if result < -std::f64::consts::PI {
+        result += std::f64::consts::TAU;
+    }
+    if result > std::f64::consts::PI {
+        result -= std::f64::consts::TAU;
+    }
+    result
 }
 
 fn c_order_strides(shape: &[usize]) -> Vec<usize> {
@@ -6490,7 +6508,10 @@ impl Generator {
                 if sum == 0.0 {
                     vec![0.0; gamma_samples.len()]
                 } else {
-                    gamma_samples.into_iter().map(|g| g / sum).collect()
+                    // numpy normalises by multiplying with `invacc = 1. / acc`; dividing by
+                    // `acc` differed from it in the last bit on some rows.
+                    let inverse = 1.0 / sum;
+                    gamma_samples.into_iter().map(|g| g * inverse).collect()
                 }
             })
             .collect())
@@ -6900,7 +6921,7 @@ impl Generator {
         Ok((0..size)
             .map(|_| {
                 if kappa > 1e6 {
-                    return wrap_angle_to_pi(
+                    return vonmises_wrapped_normal_to_pi(
                         mu + (1.0 / kappa).sqrt() * self.sample_standard_normal_single(),
                     );
                 }
@@ -6920,7 +6941,7 @@ impl Generator {
                     if y * (2.0 - y) - u2 >= 0.0 || (y / u2).ln() + 1.0 - y >= 0.0 {
                         let u3 = self.next_f64();
                         let theta = if u3 < 0.5 { -w.acos() } else { w.acos() };
-                        return wrap_angle_to_pi(mu + theta);
+                        return vonmises_wrap_to_pi(mu + theta);
                     }
                 }
             })

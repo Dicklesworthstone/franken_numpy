@@ -1188,3 +1188,118 @@ result = (len(cells), len(distinct), bad)
         Ok(())
     });
 }
+
+/// Seed-exactness across the Generator surface (47 distribution calls incl. both branches of
+/// gamma/binomial/poisson/hypergeometric/vonmises, plus choice/permutation/permuted/shuffle/
+/// multinomial/dirichlet/bytes/spawn), RandomState's legacy methods, and every bit generator's
+/// raw stream, jumped stream and SeedSequence state - byte-compared with numpy, with the stream
+/// position after each Generator draw compared too. The rest of this file compares with
+/// allclose, which is why two one-ulp divergences went unseen (bead .8): dirichlet divided by
+/// the gamma sum where numpy multiplies by its reciprocal, and vonmises wrapped the angle with
+/// rem_euclid where numpy folds |angle| with fmod (and bounds the kappa > 1e6 wrapped normal
+/// with one conditional shift). vonmises(0.5, 4.0, size=1000) differed in 4 draws per seed.
+#[test]
+fn generator_randomstate_and_bit_generator_streams_are_seed_exact_with_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("fnp", &module)?;
+        globals.set_item("np", &numpy)?;
+        let code = std::ffi::CString::new(
+            r#"
+GEN = [
+    ("random", (), {}), ("random", (), {"dtype": np.float32}),
+    ("integers", (0, 10), {}), ("integers", (-5, 2**40), {}), ("integers", (0, 256), {"dtype": np.uint8}),
+    ("integers", (0, 7), {"endpoint": True, "dtype": np.int16}),
+    ("standard_normal", (), {}), ("standard_normal", (), {"dtype": np.float32}),
+    ("normal", (3.0, 2.5), {}), ("uniform", (-2.0, 5.0), {}), ("standard_exponential", (), {}),
+    ("standard_exponential", (), {"method": "inv"}), ("exponential", (2.0,), {}),
+    ("standard_gamma", (0.5,), {}), ("standard_gamma", (3.0,), {}), ("gamma", (2.0, 1.5), {}),
+    ("beta", (0.3, 0.7), {}), ("beta", (2.0, 5.0), {}), ("chisquare", (3.0,), {}), ("f", (5.0, 7.0), {}),
+    ("noncentral_chisquare", (3.0, 1.5), {}), ("noncentral_f", (5.0, 7.0, 0.5), {}),
+    ("standard_t", (4.0,), {}), ("standard_cauchy", (), {}), ("laplace", (1.0, 2.0), {}),
+    ("logistic", (0.5, 1.5), {}), ("lognormal", (0.2, 0.9), {}), ("gumbel", (0.0, 1.2), {}),
+    ("weibull", (1.7,), {}), ("pareto", (3.0,), {}), ("power", (2.5,), {}), ("rayleigh", (1.5,), {}),
+    ("wald", (1.0, 2.0), {}), ("vonmises", (0.5, 4.0), {}), ("vonmises", (-2.9, 50.0), {}),
+    ("vonmises", (0.5, 2e6), {}), ("vonmises", (3.1, 1e-9), {}),
+    ("triangular", (-1.0, 0.5, 2.0), {}), ("binomial", (10, 0.3), {}), ("binomial", (1000, 0.6), {}),
+    ("negative_binomial", (5, 0.4), {}), ("poisson", (3.5,), {}), ("poisson", (150.0,), {}),
+    ("geometric", (0.2,), {}), ("hypergeometric", (20, 30, 15), {}), ("hypergeometric", (2000, 3000, 500), {}),
+    ("logseries", (0.7,), {}), ("zipf", (2.5,), {}),
+]
+EXTRA = [
+    lambda g, n: g.choice(100, n), lambda g, n: g.choice(1000, min(n, 1000), replace=False),
+    lambda g, n: g.choice(4, n, p=[0.1, 0.2, 0.3, 0.4]), lambda g, n: g.permutation(n),
+    lambda g, n: g.permuted(np.arange(n)), lambda g, n: (lambda a: (g.shuffle(a), a)[1])(np.arange(n)),
+    lambda g, n: g.multinomial(20, [0.1, 0.4, 0.5], n), lambda g, n: g.dirichlet([0.5, 1.0, 2.0], n),
+    lambda g, n: g.dirichlet([5.0] * 6, n), lambda g, n: g.bytes(n),
+]
+LEGACY = [
+    lambda r, n: r.rand(n), lambda r, n: r.randn(n), lambda r, n: r.randint(0, 100, n),
+    lambda r, n: r.normal(1, 2, n), lambda r, n: r.standard_gamma(2.5, n), lambda r, n: r.beta(0.5, 0.5, n),
+    lambda r, n: r.binomial(20, 0.3, n), lambda r, n: r.poisson(4.0, n), lambda r, n: r.choice(50, n),
+    lambda r, n: r.permutation(n), lambda r, n: r.multinomial(10, [0.2, 0.3, 0.5], n),
+    lambda r, n: r.hypergeometric(10, 20, 7, n), lambda r, n: r.zipf(3.0, n),
+]
+def same(a, b):
+    if isinstance(b, bytes):
+        return a == b
+    a, b2 = np.asarray(a), np.asarray(b)
+    return type(a) is type(b2) and a.dtype == b2.dtype and a.shape == b2.shape and a.tobytes() == b2.tobytes()
+bad = []
+cells = 0
+distinct = set()
+for seed in (0, 12345, 2**40 + 7):
+    for size in (None, 1, 7, 1000):
+        for name, args, kw in GEN:
+            g1, g2 = fnp.random.default_rng(seed), np.random.default_rng(seed)
+            r = getattr(g1, name)(*args, size=size, **kw)
+            s = getattr(g2, name)(*args, size=size, **kw)
+            cells += 1
+            distinct.add(np.asarray(s).tobytes())
+            if type(r) is not type(s) or not same(r, s) or not same(g1.random(2), g2.random(2)):
+                bad.append(f"Generator.{name}{args}{kw} size={size} seed={seed}")
+    for n in (1, 7, 500):
+        for i, fn in enumerate(EXTRA):
+            cells += 1
+            if not same(fn(fnp.random.default_rng(seed), n), fn(np.random.default_rng(seed), n)):
+                bad.append(f"Generator extra #{i} n={n} seed={seed}")
+        for i, fn in enumerate(LEGACY):
+            cells += 1
+            if not same(fn(fnp.random.RandomState(seed % 2**32), n), fn(np.random.RandomState(seed % 2**32), n)):
+                bad.append(f"RandomState #{i} n={n} seed={seed}")
+    for bg in ("PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64"):
+        b1, b2 = getattr(fnp.random, bg)(seed), getattr(np.random, bg)(seed)
+        cells += 1
+        if not same(b1.random_raw(64), b2.random_raw(64)):
+            bad.append(f"{bg}.random_raw seed={seed}")
+        if hasattr(np.random, bg) and bg != "SFC64":
+            cells += 1
+            if not same(b1.jumped(3).random_raw(8), b2.jumped(3).random_raw(8)):
+                bad.append(f"{bg}.jumped seed={seed}")
+    cells += 1
+    if not same(fnp.random.SeedSequence(seed).generate_state(8), np.random.SeedSequence(seed).generate_state(8)):
+        bad.append(f"SeedSequence seed={seed}")
+result = (cells, len(distinct), bad)
+"#,
+        )
+        .expect("script has no NUL");
+        py.run(&code, Some(&globals), None)?;
+        let (cells, distinct, bad): (usize, usize, Vec<String>) = globals
+            .get_item("result")?
+            .expect("script sets result")
+            .extract()?;
+        assert_eq!(cells, 813, "cell table drifted");
+        // Negative control: seeds, sizes and parameters must move the draws, or byte equality
+        // would be satisfied by a constant stream (421 distinct under numpy 2.4.3; draws that
+        // coincide are the size=None / size=1 pairs and degenerate parameters).
+        assert!(
+            distinct >= 400,
+            "only {distinct} distinct numpy Generator draws across the table"
+        );
+        assert!(
+            bad.is_empty(),
+            "random streams diverge from numpy: {bad:#?}"
+        );
+        Ok(())
+    });
+}
