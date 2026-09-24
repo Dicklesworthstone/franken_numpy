@@ -46421,6 +46421,11 @@ fn median(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
+    // A NaN lane's median is the NaN that numpy's partition leaves last, payload included; the
+    // native kernel returns the canonical NaN. Only NaN inputs pay for asking numpy.
+    if result.values().iter().any(|value| value.is_nan()) {
+        return fallback();
+    }
     if keepdims && let Some(ax) = axis {
         let Some(ndim) = orig_ndim else {
             return fallback();
@@ -47762,6 +47767,22 @@ fn numpy_dtype_is_integer(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool
     Ok(kind == 'i' || kind == 'u')
 }
 
+// True when `axis` is the only axis (0 or -1) of a 1-D exact ndarray, so reducing along it IS
+// the flat reduction and NumPy gives both the same bits.
+fn axis_is_sole_axis_of_1d(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    if axis.is_instance_of::<PyBool>() || !is_exact_numpy_ndarray(py, a)? {
+        return Ok(false);
+    }
+    let Ok(axis) = axis.extract::<i64>() else {
+        return Ok(false);
+    };
+    Ok((axis == 0 || axis == -1) && a.getattr(intern!(py, "ndim"))?.extract::<usize>()? == 1)
+}
+
 // Direct exact-f64 np.nansum(axis=...) for C-contiguous ndarrays. The generic
 // native axis path first materializes a NaN-filled copy and then reduces it; this
 // scans the source once and writes the output directly. It stays in the same
@@ -48558,32 +48579,6 @@ fn f64_contiguous_cells<'py>(
         return Ok(None);
     }
     Ok(Some(in_buffer))
-}
-
-// Bit-exact flat mean (axis=None) = numpy's pairwise sum / n. numpy's unweighted
-// np.average and np.mean both reduce to umr_sum (pairwise) / n, so this matches
-// both. Empty input defers (numpy raises / warns). C-contiguous f64 only.
-fn try_zerocopy_f64_mean_flat(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = cached_numpy(py)?;
-    let Some(in_buffer) = f64_contiguous_cells(py, a, numpy)? else {
-        return Ok(None);
-    };
-    let Some(cells) = in_buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    let n = cells.len();
-    if n == 0 {
-        return Ok(None); // numpy mean/average of empty raises/warns — defer
-    }
-    let mut buf = [0.0f64; 128];
-    let total = pairwise_simd_f64(cells, 0, n, false, &mut buf);
-    let mean = total / n as f64;
-    Ok(Some(
-        numpy
-            .getattr(intern!(py, "float64"))?
-            .call1((mean,))?
-            .unbind(),
-    ))
 }
 
 // Bit-exact flat nanmean (axis=None) = pairwise nansum / count(non-NaN). All-NaN
@@ -50153,9 +50148,16 @@ fn nansum(
     }
     // Bit-exact SIMD-pairwise flat fast path (axis=None): ~7x faster than the extract
     // → scalar nan-scan, and beats numpy (no whole-array temp). keepdims reshapes the
-    // scalar to numpy's all-ones shape.
-    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && let Some(out) = try_zerocopy_f64_nansum_flat(py, a.bind(py))?
+    // scalar to numpy's all-ones shape. A 1-D array reduced along its only axis takes it too:
+    // the axis kernel below writes into a 0-d output whose PyBuffer yields no slice, so that
+    // case declined to the sequential extract path and missed NumPy's pairwise bits (n >= 100).
+    let flat_reduction = match axis.as_ref() {
+        None => true,
+        Some(value) => {
+            value.bind(py).is_none() || axis_is_sole_axis_of_1d(py, a.bind(py), value.bind(py))?
+        }
+    };
+    if flat_reduction && let Some(out) = try_zerocopy_f64_nansum_flat(py, a.bind(py))?
     {
         if keepdims {
             return keepdims_reshape_scalar(py, numpy, a.bind(py), out);
@@ -55526,6 +55528,10 @@ fn percentile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
+        // NaN lanes carry the payload of the NaN numpy's partition leaves last - see `median`.
+        if result.values().iter().any(|value| value.is_nan()) {
+            return fallback();
+        }
         let output = build_numpy_array_from_ufunc(py, &result)?;
         if keepdims && let Some(ax) = axis {
             let Some(ndim) = orig_ndim else {
@@ -55551,6 +55557,9 @@ fn percentile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
+        if result.values().iter().any(|value| value.is_nan()) {
+            return fallback();
+        }
         let output = build_numpy_array_from_ufunc(py, &result)?;
         if keepdims {
             // numpy keepdims for axis=None array-q: [k] ++ ones(input ndim).
@@ -71896,603 +71905,15 @@ fn average(
         return Ok(output);
     }
 
-    if keepdims {
-        return fallback();
-    }
-
-    // The native f64 fast-path only reproduces NumPy when the output dtype is
-    // float64. float16/float32/complex inputs (and weights that would alter the
-    // result dtype) are preserved by NumPy, so defer those to numpy.average to
-    // match both the averaged values and the returned sum-of-weights dtype.
-    if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
-        return fallback();
-    }
-    if let Some(weights_val) = weights.as_ref()
-        && !native_f64_reduction_preserves_dtype(py, weights_val.bind(py))
-    {
-        return fallback();
-    }
-
-    // Integer/bool data or weights are f64-preserving (so they pass the checks above) but the f64
-    // fast path below is f64-buffer-only -> they fell to the cold extract path (~5-6.4x). Delegate
-    // to numpy.average for parity (the f64 fast path stays for true f64 data + f64 weights).
-    if !numpy_dtype_is_f64(py, a.bind(py))
-        || weights
-            .as_ref()
-            .is_some_and(|w| !w.bind(py).is_none() && !numpy_dtype_is_f64(py, w.bind(py)))
-    {
-        return fallback();
-    }
-
-    // Fused one-pass flat weighted average (axis=None) — avoids numpy's
-    // multiply-into-temp + sum + the cold extract path (~3.6x slower).
-    let axis_is_none = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
-    if axis_is_none
-        && let Some(weights_val) = weights.as_ref()
-        && let Some(out) =
-            try_zerocopy_f64_average_flat(py, a.bind(py), weights_val.bind(py), returned)?
-    {
-        return Ok(out);
-    }
-    // Unweighted flat average (axis=None, no `returned`) == mean == bit-exact
-    // pairwise sum / n; ~8x faster than the extract → native average path.
-    if axis_is_none
-        && !returned
-        && weights.as_ref().is_none_or(|w| w.bind(py).is_none())
-        && let Some(out) = try_zerocopy_f64_mean_flat(py, a.bind(py))?
-    {
-        return Ok(out);
-    }
-    // Fused per-axis f64 average. Exact dtype gates above keep float32/float16,
-    // complex, keepdims, and incompatible weight cases on the NumPy fallback.
-    if !axis_is_none
-        && let Some(axis_val) = axis.as_ref()
-        && let Some(out) = try_zerocopy_f64_average_axis(
-            py,
-            a.bind(py),
-            weights.as_ref().map(|w| w.bind(py)),
-            axis_val.bind(py),
-            returned,
-        )?
-    {
-        return Ok(out);
-    }
-
-    // Non-contiguous (transposed/strided) operands bail into the cold extract (~45x
-    // slower); a tuple (multi-axis) reduction extracts then falls back on the axis
-    // re-parse below (~10x wasted). Delegate both to numpy up front.
-    if noncontiguous_ndarray(numpy, a.bind(py))?
-        || weights
-            .as_ref()
-            .is_some_and(|w| noncontiguous_ndarray(numpy, w.bind(py)).unwrap_or(false))
-        || axis
-            .as_ref()
-            .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
-    {
-        return fallback();
-    }
-    // Full-shape element-wise weights (w.shape == a.shape) along a NON-LAST axis have no native fast path
-    // (try_zerocopy_f64_average_axis's full-shape branch only handles the contiguous last axis, inner==1);
-    // the cold extract + strided native average below is ~10x SLOWER than numpy for this case (measured
-    // 2000x2000 axis=0 2-D-weights: fnp 67ms vs numpy 6ms = 0.09x). numpy.average is fast, so delegate
-    // BEFORE the extract. Last-axis full-shape weights + 1-D weights already returned via the fast paths
-    // above; this only catches the losing non-last full-shape case.
-    if let Some(w) = weights.as_ref()
-        && !w.bind(py).is_none()
-        && let Ok(a_shape) = a
-            .bind(py)
-            .getattr(intern!(py, "shape"))
-            .and_then(|s| s.extract::<Vec<usize>>())
-        && let Ok(w_shape) = w
-            .bind(py)
-            .getattr(intern!(py, "shape"))
-            .and_then(|s| s.extract::<Vec<usize>>())
-        && a_shape == w_shape
-        && a_shape.len() >= 2
-        && let Some(ax_obj) = axis.as_ref()
-        && let Ok(ax_raw) = ax_obj.bind(py).extract::<i64>()
-    {
-        let nd = a_shape.len() as i64;
-        let ax = if ax_raw < 0 { ax_raw + nd } else { ax_raw };
-        if ax >= 0 && ax != nd - 1 {
-            return fallback();
-        }
-    }
-    let a = match extract_numeric_array(py, a.bind(py), "average(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let axis = match extract_axis_spec_bound(py, axis.as_ref().map(|v| v.bind(py)), "average") {
-        Ok(None) => None,
-        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
-        Ok(Some(_)) => return fallback(),
-        Err(_) => return fallback(),
-    };
-
-    let mut sum_of_weights = None;
-    let average = match weights.as_ref() {
-        None => {
-            let average = match a.average(None, axis) {
-                Ok(average) => average,
-                Err(_) => return fallback(),
-            };
-            if returned {
-                let sum = match axis {
-                    None => UFuncArray::new(vec![], vec![a.values().len() as f64], DType::F64),
-                    Some(axis) => {
-                        let Some(axis) = try_normalize_axis(axis, a.shape().len()) else {
-                            return fallback();
-                        };
-                        let out_len = match element_count(average.shape()) {
-                            Ok(out_len) => out_len,
-                            Err(_) => return fallback(),
-                        };
-                        UFuncArray::new(
-                            average.shape().to_vec(),
-                            vec![a.shape()[axis] as f64; out_len],
-                            DType::F64,
-                        )
-                    }
-                }
-                .map_err(map_ufunc_error)?;
-                sum_of_weights = Some(sum);
-            }
-            average
-        }
-        Some(weights) => {
-            let weights = match extract_numeric_array(py, weights.bind(py), "average(weights)") {
-                Ok(weights) => weights,
-                Err(_) => return fallback(),
-            };
-            // NumPy raises ZeroDivisionError("Weights sum to zero, can't be
-            // normalized") when the weights sum to zero; the native path would
-            // divide by zero and yield NaN. Defer to numpy for the exact error.
-            if weights.values().iter().sum::<f64>() == 0.0 {
-                return fallback();
-            }
-            match axis {
-                None => {
-                    if weights.shape() != a.shape() {
-                        return fallback();
-                    }
-                    if returned {
-                        // NumPy computes scl = wgt.sum(dtype=result_dtype); for the
-                        // float64-safe inputs that reach this path result_dtype is
-                        // float64, so emit the weight total as F64 (mirrors the
-                        // axis=Some branch) rather than the weights' native int dtype.
-                        let weight_total = weights.values().iter().sum::<f64>();
-                        sum_of_weights = Some(
-                            UFuncArray::new(vec![], vec![weight_total], DType::F64)
-                                .map_err(map_ufunc_error)?,
-                        );
-                    }
-                    match a.average(Some(&weights), None) {
-                        Ok(average) => average,
-                        Err(_) => return fallback(),
-                    }
-                }
-                Some(axis) => {
-                    let Some(normalized_axis) = try_normalize_axis(axis, a.shape().len()) else {
-                        return fallback();
-                    };
-                    if weights.shape() != [a.shape()[normalized_axis]] {
-                        return fallback();
-                    }
-
-                    let average = match a.average(Some(&weights), Some(axis)) {
-                        Ok(average) => average,
-                        Err(_) => return fallback(),
-                    };
-                    if returned {
-                        let weight_total = weights.values().iter().sum::<f64>();
-                        let out_len = match element_count(average.shape()) {
-                            Ok(out_len) => out_len,
-                            Err(_) => return fallback(),
-                        };
-                        sum_of_weights = Some(
-                            UFuncArray::new(
-                                average.shape().to_vec(),
-                                vec![weight_total; out_len],
-                                DType::F64,
-                            )
-                            .map_err(map_ufunc_error)?,
-                        );
-                    }
-                    average
-                }
-            }
-        }
-    };
-
-    let average_output = build_numpy_scalar_or_array(py, &average)?;
-    if returned {
-        let sum_of_weights = sum_of_weights.expect("sum_of_weights must be set when returned=true");
-        let sum_output = build_numpy_scalar_or_array(py, &sum_of_weights)?;
-        return Ok(
-            PyTuple::new(py, [average_output.bind(py), sum_output.bind(py)])?
-                .into_any()
-                .unbind(),
-        );
-    }
-    Ok(average_output)
-}
-
-// Zero-copy flat weighted np.average: avg = Σ(a·w) / Σ(w) over the whole array
-// (axis=None), fused into one pass with 8 independent accumulators (breaking the
-// float-add dependency chain so the FMAs vectorize) instead of numpy's
-// multiply-into-temp + pairwise sum + divide. Both buffers are f64 of equal shape.
-// numpy's float reductions aren't bit-reproducible (pairwise vs this), but the
-// 8-way sum matches to ~1e-14 — well inside np.allclose, the conformance bar.
-// Returns None (caller defers) for non-f64, shape mismatch, empty, weights summing
-// to zero (numpy ZeroDivisionError), or returned with a needed exact dtype.
-fn try_zerocopy_f64_average_flat(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    weights: &Bound<'_, PyAny>,
-    returned: bool,
-) -> PyResult<Option<Py<PyAny>>> {
-    let ndarray_type = cached_ndarray_type(py)?;
-    if !a.is_exact_instance(ndarray_type) || !weights.is_exact_instance(ndarray_type) {
-        return Ok(None);
-    }
-    let is_f64 = |x: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = x.getattr(intern!(py, "dtype"))?;
-        Ok(dt.getattr(intern!(py, "kind"))?.extract::<char>()? == 'f'
-            && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 8)
-    };
-    if !is_f64(a)? || !is_f64(weights)? {
-        return Ok(None);
-    }
-    let ash: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let wsh: Vec<usize> = weights.getattr(intern!(py, "shape"))?.extract()?;
-    if ash != wsh {
-        return Ok(None); // axis=None requires identical shapes; else defer
-    }
-    let (Ok(ab), Ok(wb)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(weights)) else {
-        return Ok(None);
-    };
-    let (Some(asl), Some(wsl)) = (ab.as_slice(py), wb.as_slice(py)) else {
-        return Ok(None);
-    };
-    let n = asl.len();
-    if n == 0 {
-        return Ok(None);
-    }
-    let mut dotacc = [0.0f64; 8];
-    let mut wacc = [0.0f64; 8];
-    let chunks = n / 8;
-    for c in 0..chunks {
-        let base = c * 8;
-        for j in 0..8 {
-            let ai = asl[base + j].get();
-            let wi = wsl[base + j].get();
-            dotacc[j] += ai * wi;
-            wacc[j] += wi;
-        }
-    }
-    let mut dot = 0.0f64;
-    let mut wsum = 0.0f64;
-    for j in 0..8 {
-        dot += dotacc[j];
-        wsum += wacc[j];
-    }
-    for i in chunks * 8..n {
-        let ai = asl[i].get();
-        let wi = wsl[i].get();
-        dot += ai * wi;
-        wsum += wi;
-    }
-    if wsum == 0.0 {
-        return Ok(None); // numpy raises ZeroDivisionError; defer for the exact error
-    }
-    let avg = dot / wsum;
-    let numpy = cached_numpy(py)?;
-    let avg_scalar = numpy.getattr(intern!(py, "float64"))?.call1((avg,))?;
-    if returned {
-        let w_scalar = numpy.getattr(intern!(py, "float64"))?.call1((wsum,))?;
-        return Ok(Some(
-            PyTuple::new(py, [avg_scalar, w_scalar])?
-                .into_any()
-                .unbind(),
-        ));
-    }
-    Ok(Some(avg_scalar.unbind()))
-}
-
-// Zero-copy per-axis np.average for exact f64 arrays reduced along one axis.
-// Weighted last-axis lanes keep the existing 8-accumulator dot; unweighted lanes
-// mirror the generic reduce_sum_axis_contiguous order for exact output-cell
-// ordering while skipping Python-side extraction into UFuncArray. Cases outside
-// the exact f64 single-axis contract return None so the existing NumPy-parity
-// path owns dtype preservation, errors, keepdims, and shape corner cases.
-fn try_zerocopy_f64_average_axis(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    weights: Option<&Bound<'_, PyAny>>,
-    axis_obj: &Bound<'_, PyAny>,
-    returned: bool,
-) -> PyResult<Option<Py<PyAny>>> {
-    if !is_exact_numpy_ndarray(py, a)? {
-        return Ok(None);
-    }
-    let numpy = cached_numpy(py)?;
-    let is_f64 = |x: &Bound<'_, PyAny>| -> PyResult<bool> {
-        let dt = x.getattr(intern!(py, "dtype"))?;
-        Ok(dt.getattr(intern!(py, "kind"))?.extract::<char>()? == 'f'
-            && dt.getattr(intern!(py, "itemsize"))?.extract::<usize>()? == 8)
-    };
-    if !is_f64(a)? {
-        return Ok(None);
-    }
-
-    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
-        return Ok(None);
-    };
-    let shape: Vec<usize> = a.getattr(intern!(py, "shape"))?.extract()?;
-    let ndim = shape.len() as i64;
-    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
-    if ax < 0 || ax >= ndim {
-        return Ok(None);
-    }
-    let ax = ax as usize;
-    let axis_len = shape[ax];
-    if axis_len == 0 {
-        return Ok(None);
-    }
-    let outer: usize = shape[..ax].iter().product();
-    let inner: usize = shape[ax + 1..].iter().product();
-
-    // Full-shape element-wise weights (w.shape == a.shape) along the contiguous LAST
-    // axis: numpy weights each element and the denominator is the PER-LANE weight sum
-    // (sum_j(a*w)/sum_j(w)), so the 1-D-weights path below (constant denominator)
-    // can't serve it. Compute per-lane numerator+denominator with the same
-    // 8-accumulator fold as the 1-D path, fanned across the rayon pool. A lane whose
-    // weights sum to zero defers the whole call to numpy (it raises ZeroDivisionError).
-    if let Some(w) = weights
-        && is_f64(w)?
-        && inner == 1
-        && w.getattr(intern!(py, "shape"))?.extract::<Vec<usize>>()? == shape
-    {
-        let Ok(ab) = PyBuffer::<f64>::get(a) else {
-            return Ok(None);
-        };
-        let Some(asl) = ab.as_slice(py) else {
-            return Ok(None);
-        };
-        let Ok(wb) = PyBuffer::<f64>::get(w) else {
-            return Ok(None);
-        };
-        let Some(wsl) = wb.as_slice(py) else {
-            return Ok(None);
-        };
-        if asl.len() != outer * axis_len || wsl.len() != outer * axis_len {
-            return Ok(None);
-        }
-        // SAFETY: read-only contiguous f64 buffers held under the GIL -> &[f64] (Sync).
-        let adata: &[f64] =
-            unsafe { std::slice::from_raw_parts(asl.as_ptr().cast::<f64>(), asl.len()) };
-        let wdata: &[f64] =
-            unsafe { std::slice::from_raw_parts(wsl.as_ptr().cast::<f64>(), wsl.len()) };
-        use rayon::prelude::*;
-        let lane_avg = |i: usize| -> (f64, f64) {
-            let a_lane = &adata[i * axis_len..i * axis_len + axis_len];
-            let w_lane = &wdata[i * axis_len..i * axis_len + axis_len];
-            let mut num = [0.0f64; 8];
-            let mut den = [0.0f64; 8];
-            let chunks = axis_len / 8;
-            for c in 0..chunks {
-                let b = c * 8;
-                for j in 0..8 {
-                    num[j] += a_lane[b + j] * w_lane[b + j];
-                    den[j] += w_lane[b + j];
-                }
-            }
-            let mut n = 0.0f64;
-            let mut d = 0.0f64;
-            for j in 0..8 {
-                n += num[j];
-                d += den[j];
-            }
-            for k in chunks * 8..axis_len {
-                n += a_lane[k] * w_lane[k];
-                d += w_lane[k];
-            }
-            (n, d)
-        };
-        let parallel = outer * axis_len >= (1 << 16) && rayon::current_num_threads() >= 2;
-        let pairs: Vec<(f64, f64)> = if parallel {
-            (0..outer).into_par_iter().map(lane_avg).collect()
-        } else {
-            (0..outer).map(lane_avg).collect()
-        };
-        if pairs.iter().any(|(_, d)| *d == 0.0) {
-            return Ok(None); // weights sum to zero on some lane — numpy raises; defer
-        }
-        let out_shape: Vec<usize> = shape[..ax].to_vec();
-        let avg: Vec<f64> = pairs.iter().map(|(n, d)| n / d).collect();
-        let avg_arr = numpy_array_from_slice_shaped(py, numpy, &avg, "float64", &out_shape)?;
-        let avg_output = finish_preshaped_output(avg_arr, &out_shape)?;
-        if returned {
-            let sow: Vec<f64> = pairs.iter().map(|(_, d)| *d).collect();
-            let sow_arr = numpy_array_from_slice_shaped(py, numpy, &sow, "float64", &out_shape)?;
-            let sow_output = finish_preshaped_output(sow_arr, &out_shape)?;
-            return Ok(Some(
-                PyTuple::new(py, [avg_output.bind(py), sow_output.bind(py)])?
-                    .into_any()
-                    .unbind(),
-            ));
-        }
-        return Ok(Some(avg_output));
-    }
-
-    let (weights_vec, denominator) = match weights {
-        Some(w) => {
-            if !is_f64(w)? {
-                return Ok(None);
-            }
-            let wshape: Vec<usize> = w.getattr(intern!(py, "shape"))?.extract()?;
-            if wshape.len() != 1 || wshape[0] != axis_len {
-                return Ok(None);
-            }
-            let Ok(wb) = PyBuffer::<f64>::get(w) else {
-                return Ok(None);
-            };
-            let Some(wsl) = wb.as_slice(py) else {
-                return Ok(None);
-            };
-            let wvec: Vec<f64> = wsl.iter().map(|cell| cell.get()).collect();
-            let mut wsum = 0.0f64;
-            for &weight in &wvec {
-                wsum += weight;
-            }
-            if wsum == 0.0 {
-                return Ok(None);
-            }
-            (Some(wvec), wsum)
-        }
-        None => {
-            // The generic Rust path switches to compensated summation only for
-            // extremely long axes. Defer there so the fast path keeps the same
-            // floating-point order for all accelerated unweighted reductions.
-            const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
-            if axis_len > COMPENSATED_SUM_MIN_LEN {
-                return Ok(None);
-            }
-            (None, axis_len as f64)
-        }
-    };
-    let invden = 1.0 / denominator;
-
-    let Ok(ab) = PyBuffer::<f64>::get(a) else {
-        return Ok(None);
-    };
-    let Some(asl) = ab.as_slice(py) else {
-        return Ok(None);
-    };
-    let mut out_shape: Vec<usize> = shape[..ax].to_vec();
-    out_shape.extend_from_slice(&shape[ax + 1..]);
-    let total_out = outer * inner;
-    let flat = if out_shape.is_empty() {
-        numpy.call_method1(intern!(py, "empty"), (total_out, intern!(py, "float64")))?
-    } else {
-        let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
-        numpy.call_method1(intern!(py, "empty"), (&shape_tuple, intern!(py, "float64")))?
-    };
-    if total_out > 0 {
-        let Ok(ob) = PyBuffer::<f64>::get(&flat) else {
-            return Ok(None);
-        };
-        let Some(osl) = ob.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        if inner == 1 {
-            if let Some(wvec) = weights_vec.as_ref() {
-                let input_values = asl.iter().map(|cell| cell.get()).collect::<Vec<_>>();
-                for (row, lane) in input_values.chunks_exact(axis_len).enumerate() {
-                    let mut acc = [0.0f64; 8];
-                    let chunks = axis_len / 8;
-                    for chunk in 0..chunks {
-                        let base = chunk * 8;
-                        for j in 0..8 {
-                            acc[j] += lane[base + j] * wvec[base + j];
-                        }
-                    }
-                    let mut sum = 0.0f64;
-                    for value in acc {
-                        sum += value;
-                    }
-                    for i in chunks * 8..axis_len {
-                        sum += lane[i] * wvec[i];
-                    }
-                    osl[row].set(sum * invden);
-                }
-            } else {
-                for (row, lane) in asl.chunks_exact(axis_len).enumerate() {
-                    let mut acc = [0.0f64; 8];
-                    let (chunks, remainder) = lane.as_chunks::<8>();
-                    for group in chunks {
-                        for (slot, value) in acc.iter_mut().zip(group.iter()) {
-                            *slot += value.get();
-                        }
-                    }
-                    let mut sum = acc.iter().sum::<f64>();
-                    for value in remainder {
-                        sum += value.get();
-                    }
-                    if sum == 0.0 {
-                        sum = 0.0;
-                    }
-                    osl[row].set(sum * invden);
-                }
-            }
-        } else {
-            let mut accs = vec![0.0f64; inner];
-            if let Some(wvec) = weights_vec.as_ref() {
-                for out_outer in 0..outer {
-                    accs.fill(0.0);
-                    let base = out_outer * axis_len * inner;
-                    for axis_index in 0..axis_len {
-                        let slab =
-                            &asl[base + axis_index * inner..base + axis_index * inner + inner];
-                        let weight = wvec[axis_index];
-                        for (acc, value) in accs.iter_mut().zip(slab.iter()) {
-                            *acc += value.get() * weight;
-                        }
-                    }
-                    let out_base = out_outer * inner;
-                    for inner_index in 0..inner {
-                        osl[out_base + inner_index].set(accs[inner_index] * invden);
-                    }
-                }
-            } else {
-                for out_outer in 0..outer {
-                    accs.fill(0.0);
-                    let base = out_outer * axis_len * inner;
-                    for axis_index in 0..axis_len {
-                        let slab =
-                            &asl[base + axis_index * inner..base + axis_index * inner + inner];
-                        for (acc, value) in accs.iter_mut().zip(slab.iter()) {
-                            *acc += value.get();
-                        }
-                    }
-                    let out_base = out_outer * inner;
-                    for inner_index in 0..inner {
-                        let mut sum = accs[inner_index];
-                        if sum == 0.0 {
-                            sum = 0.0;
-                        }
-                        osl[out_base + inner_index].set(sum * invden);
-                    }
-                }
-            }
-        }
-    }
-
-    let avg_output = if out_shape.is_empty() {
-        flat.get_item(0)?
-    } else {
-        flat
-    };
-    if returned {
-        let sow = if out_shape.is_empty() {
-            numpy
-                .getattr(intern!(py, "float64"))?
-                .call1((denominator,))?
-        } else {
-            let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
-            let sum_kwargs = PyDict::new(py);
-            sum_kwargs.set_item(intern!(py, "dtype"), "float64")?;
-            numpy.call_method(
-                intern!(py, "full"),
-                (&shape_tuple, denominator),
-                Some(&sum_kwargs),
-            )?
-        };
-        return Ok(Some(
-            PyTuple::new(py, [&avg_output, &sow])?.into_any().unbind(),
-        ));
-    }
-    Ok(Some(avg_output.unbind()))
+    // Every other case delegates to numpy.average. The native float64 routes that used to
+    // follow (a fused flat weighted pass, a per-axis 8-accumulator fold, and the extract path)
+    // summed in their own order rather than NumPy's pairwise tree along a contiguous axis or its
+    // sequential accumulation across a strided one, so 53 of 156 probed (shape, axis, weights,
+    // returned) groups differed from numpy.average in the last bits (relative 1e-16..1e-13).
+    // Unweighted per-axis average is NumPy's own `a.mean(axis)`, which `mean` delegates too, so
+    // no exact native route was lost; the 2026-06-24 ledger NO-GO already recorded that weighted
+    // average is not reproducible bit-for-bit without NumPy's broadcast-weight reduction.
+    fallback()
 }
 
 #[pyfunction]
@@ -85246,6 +84667,10 @@ fn quantile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
+        // NaN lanes carry the payload of the NaN numpy's partition leaves last - see `median`.
+        if result.values().iter().any(|value| value.is_nan()) {
+            return fallback();
+        }
         let output = build_numpy_array_from_ufunc(py, &result)?;
         if keepdims && let Some(ax) = axis {
             let Some(ndim) = orig_ndim else {
@@ -85266,6 +84691,9 @@ fn quantile(
             Ok(result) => result,
             Err(_) => return fallback(),
         };
+        if result.values().iter().any(|value| value.is_nan()) {
+            return fallback();
+        }
         let output = build_numpy_array_from_ufunc(py, &result)?;
         if keepdims {
             // numpy keepdims for axis=None array-q: [k] ++ ones(input ndim).
@@ -92884,7 +92312,7 @@ fn try_zerocopy_f64_minmax(
     // `np.empty(())` exposes no buffer slice through PyO3 0.28 ("shape is null"). Since
     // ecb5bed8 that made this whole path decline for every `np.max(a)`/`np.min(a)` below the
     // parallel threshold. Allocate the empty-shape result as a 1-element 1-D array and hand
-    // NumPy's scalar back via `[0]`, as `try_zerocopy_f64_average_axis` does.
+    // NumPy's scalar back via `[0]`.
     let flat = if out_shape.is_empty() {
         numpy.call_method1(intern!(py, "empty"), (out_elems, intern!(py, "float64")))?
     } else {
@@ -171933,8 +171361,13 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
         });
     }
 
+    /// GOLDEN-CHANGE (bead rc0923 .16): two tests here used to pin a sha256 of fnp's OWN float64
+    /// average bytes, checked against numpy only with `allclose`. That locked in native kernels
+    /// that summed in their own order and differed from numpy.average in the last bits. The
+    /// oracle is now numpy itself, byte for byte, across shapes, axes, weight forms, `returned`
+    /// and `keepdims`.
     #[test]
-    fn average_unweighted_axis_f64_fast_path_golden_sha256() {
+    fn average_float64_is_byte_identical_to_numpy() {
         with_python(|py| {
             if !numpy_available(py) {
                 return Ok(());
@@ -171942,214 +171375,59 @@ b = np.array([1 + 0j, 2 - 1j, -1 + 4j, -1 + 4j], dtype=np.complex128)\n",
 
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
-            let avg_fn = module.getattr("average")?;
-            let numpy = py.import("numpy")?;
-            let numpy_avg = numpy.getattr("average")?;
-            let array_fn = numpy.getattr("array")?;
-            let allclose = numpy.getattr("allclose")?;
-
-            let matrix = array_fn.call1((vec![
-                vec![-3.25_f64, -1.5, 0.0, 2.0, 4.5, 6.25, 8.0, 11.5],
-                vec![13.0_f64, -17.25, 19.5, -23.75, 29.0, -31.5, 37.25, -41.0],
-                vec![43.5_f64, 47.0, -53.25, 59.5, -61.75, 67.0, -71.25, 73.5],
-                vec![79.0_f64, -83.25, 89.5, 97.0, -101.25, 103.5, 107.75, -109.0],
-            ],))?;
-
-            let mut proof_bytes = Vec::new();
-
-            let axis1_kwargs = PyDict::new(py);
-            axis1_kwargs.set_item("axis", 1_i64)?;
-            let ours_axis1 = avg_fn.call((matrix.clone(),), Some(&axis1_kwargs))?;
-            let theirs_axis1 = numpy_avg.call((matrix.clone(),), Some(&axis1_kwargs))?;
-            let ok_axis1: bool = allclose.call1((&ours_axis1, &theirs_axis1))?.extract()?;
-            assert!(ok_axis1, "unweighted average axis=1 f64 mismatch");
-            append_numpy_array_bytes(py, &ours_axis1, &mut proof_bytes)?;
-
-            let neg_axis_kwargs = PyDict::new(py);
-            neg_axis_kwargs.set_item("axis", -1_i64)?;
-            let ours_neg_axis = avg_fn.call((matrix.clone(),), Some(&neg_axis_kwargs))?;
-            assert_eq!(
-                repr_string(&ours_neg_axis),
-                repr_string(&ours_axis1),
-                "axis=-1 must preserve axis=1 ordering for a 2-D array"
-            );
-            append_numpy_array_bytes(py, &ours_neg_axis, &mut proof_bytes)?;
-
-            let axis0_kwargs = PyDict::new(py);
-            axis0_kwargs.set_item("axis", 0_i64)?;
-            let ours_axis0 = avg_fn.call((matrix.clone(),), Some(&axis0_kwargs))?;
-            let theirs_axis0 = numpy_avg.call((matrix.clone(),), Some(&axis0_kwargs))?;
-            let ok_axis0: bool = allclose.call1((&ours_axis0, &theirs_axis0))?.extract()?;
-            assert!(ok_axis0, "unweighted average axis=0 f64 mismatch");
-            append_numpy_array_bytes(py, &ours_axis0, &mut proof_bytes)?;
-
-            let returned_kwargs = PyDict::new(py);
-            returned_kwargs.set_item("axis", 1_i64)?;
-            returned_kwargs.set_item("returned", true)?;
-            let ours_returned = avg_fn.call((matrix.clone(),), Some(&returned_kwargs))?;
-            let theirs_returned = numpy_avg.call((matrix.clone(),), Some(&returned_kwargs))?;
-            let ours_avg = ours_returned.get_item(0_i64)?;
-            let ours_sow = ours_returned.get_item(1_i64)?;
-            let theirs_avg = theirs_returned.get_item(0_i64)?;
-            let theirs_sow = theirs_returned.get_item(1_i64)?;
-            let ok_avg: bool = allclose.call1((&ours_avg, &theirs_avg))?.extract()?;
-            let ok_sow: bool = allclose.call1((&ours_sow, &theirs_sow))?.extract()?;
-            assert!(
-                ok_avg,
-                "returned=True unweighted average component mismatch"
-            );
-            assert!(
-                ok_sow,
-                "returned=True unweighted sum-of-weights component mismatch"
-            );
-            append_numpy_array_bytes(py, &ours_avg, &mut proof_bytes)?;
-            append_numpy_array_bytes(py, &ours_sow, &mut proof_bytes)?;
-
-            let vector = array_fn.call1((vec![-2.0_f64, 0.5, 7.25, 12.0],))?;
-            let scalar_kwargs = PyDict::new(py);
-            scalar_kwargs.set_item("axis", 0_i64)?;
-            scalar_kwargs.set_item("returned", true)?;
-            let ours_scalar_returned = avg_fn.call((vector.clone(),), Some(&scalar_kwargs))?;
-            let theirs_scalar_returned = numpy_avg.call((vector.clone(),), Some(&scalar_kwargs))?;
-            assert_eq!(
-                repr_string(&ours_scalar_returned),
-                repr_string(&theirs_scalar_returned),
-                "scalar axis reduction must return numpy scalar tuple components"
-            );
-            append_numpy_array_bytes(py, &ours_scalar_returned.get_item(0_i64)?, &mut proof_bytes)?;
-            append_numpy_array_bytes(py, &ours_scalar_returned.get_item(1_i64)?, &mut proof_bytes)?;
-
-            let f32_kwargs = PyDict::new(py);
-            f32_kwargs.set_item("dtype", "float32")?;
-            let matrix_f32 = array_fn.call(
-                (vec![
-                    vec![1.25_f64, 2.5, 3.75, 4.0],
-                    vec![5.5_f64, 6.25, 7.75, 8.5],
-                ],),
-                Some(&f32_kwargs),
+            let locals = PyDict::new(py);
+            locals.set_item("np", py.import("numpy")?)?;
+            locals.set_item("fnp_average", module.getattr("average")?)?;
+            py.run(
+                std::ffi::CString::new(
+                    r#"
+rng = np.random.default_rng(9)
+def same(r, s):
+    if isinstance(s, tuple):
+        return isinstance(r, tuple) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    return (type(r) is type(s) and np.shape(r) == np.shape(s)
+            and np.asarray(r).dtype == np.asarray(s).dtype
+            and np.asarray(r).tobytes() == np.asarray(s).tobytes())
+cells, bad, naive_differs = 0, [], 0
+for shape in ((7,), (129,), (1000,), (40, 300), (300, 40), (6, 5, 130)):
+    a = rng.standard_normal(shape) * 7
+    naive_differs += np.float64(sum(a.ravel().tolist()) / a.size).tobytes() != np.average(a).tobytes()
+    for axis in [None] + list(range(-a.ndim, a.ndim)):
+        n_axis = a.size if axis is None else shape[axis]
+        forms = [None, rng.random(shape) + 0.1]
+        if axis is not None or a.ndim == 1:
+            forms.append(rng.random(n_axis) + 0.1)
+        for weights in forms:
+            for returned in (False, True):
+                for keepdims in (False, True):
+                    kw = dict(axis=axis, weights=weights, returned=returned)
+                    if keepdims:
+                        kw["keepdims"] = True
+                    cells += 1
+                    r = fnp_average(a, **kw)
+                    s = np.average(a, **kw)
+                    if not same(r, s):
+                        bad.append(repr((shape, axis, None if weights is None else weights.shape, returned, keepdims)))
+result = (cells, naive_differs, bad)
+"#,
+                )
+                .unwrap()
+                .as_c_str(),
+                Some(&locals),
+                Some(&locals),
             )?;
-            let fallback_kwargs = PyDict::new(py);
-            fallback_kwargs.set_item("axis", 1_i64)?;
-            let ours_f32 = avg_fn.call((matrix_f32.clone(),), Some(&fallback_kwargs))?;
-            let theirs_f32 = numpy_avg.call((matrix_f32.clone(),), Some(&fallback_kwargs))?;
-            assert_eq!(
-                repr_string(&ours_f32),
-                repr_string(&theirs_f32),
-                "float32 unweighted axis average must stay on the generic dtype path"
+            let (cells, naive_differs, bad): (usize, usize, Vec<String>) = locals
+                .get_item("result")?
+                .expect("script sets result")
+                .extract()?;
+            assert!(cells >= 200, "cell table drifted: {cells}");
+            // Negative control: a left-to-right mean must be distinguishable from numpy's on
+            // these inputs, or byte equality would not separate summation orders.
+            assert!(
+                naive_differs >= 2,
+                "only {naive_differs} shapes separate summation orders"
             );
-            append_numpy_array_bytes(py, &ours_f32, &mut proof_bytes)?;
-
-            let digest = py_sha256_hex(py, &proof_bytes)?;
-            assert_eq!(
-                digest, "4e97d98ac0fedaedef207fd454790aa0d2cf081396c99d75a96df106b3961099",
-                "unweighted f64 axis average golden output changed"
-            );
-
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn average_weighted_axis_f64_fast_path_golden_sha256() {
-        with_python(|py| {
-            if !numpy_available(py) {
-                return Ok(());
-            }
-
-            let module = PyModule::new(py, "fnp_python_test")?;
-            fnp_python(&module)?;
-            let avg_fn = module.getattr("average")?;
-            let numpy = py.import("numpy")?;
-            let numpy_avg = numpy.getattr("average")?;
-            let array_fn = numpy.getattr("array")?;
-            let allclose = numpy.getattr("allclose")?;
-
-            let matrix = array_fn.call1((vec![
-                vec![-3.25_f64, -1.5, 0.0, 2.0, 4.5, 6.25, 8.0, 11.5],
-                vec![13.0_f64, -17.25, 19.5, -23.75, 29.0, -31.5, 37.25, -41.0],
-                vec![43.5_f64, 47.0, -53.25, 59.5, -61.75, 67.0, -71.25, 73.5],
-                vec![79.0_f64, -83.25, 89.5, 97.0, -101.25, 103.5, 107.75, -109.0],
-            ],))?;
-            let axis1_weights =
-                array_fn.call1((vec![0.25_f64, 1.5, -0.75, 2.25, 0.5, 3.0, -1.25, 4.0],))?;
-            let axis0_weights = array_fn.call1((vec![1.0_f64, -0.5, 2.0, 3.5],))?;
-
-            let mut proof_bytes = Vec::new();
-
-            let axis1_kwargs = PyDict::new(py);
-            axis1_kwargs.set_item("axis", 1_i64)?;
-            axis1_kwargs.set_item("weights", axis1_weights.clone())?;
-            let ours_axis1 = avg_fn.call((matrix.clone(),), Some(&axis1_kwargs))?;
-            let theirs_axis1 = numpy_avg.call((matrix.clone(),), Some(&axis1_kwargs))?;
-            let ok_axis1: bool = allclose.call1((&ours_axis1, &theirs_axis1))?.extract()?;
-            assert!(ok_axis1, "weighted average axis=1 f64 mismatch");
-            append_numpy_array_bytes(py, &ours_axis1, &mut proof_bytes)?;
-
-            let neg_axis_kwargs = PyDict::new(py);
-            neg_axis_kwargs.set_item("axis", -1_i64)?;
-            neg_axis_kwargs.set_item("weights", axis1_weights.clone())?;
-            let ours_neg_axis = avg_fn.call((matrix.clone(),), Some(&neg_axis_kwargs))?;
-            assert_eq!(
-                repr_string(&ours_neg_axis),
-                repr_string(&ours_axis1),
-                "axis=-1 must preserve axis=1 ordering for a 2-D array"
-            );
-            append_numpy_array_bytes(py, &ours_neg_axis, &mut proof_bytes)?;
-
-            let axis0_kwargs = PyDict::new(py);
-            axis0_kwargs.set_item("axis", 0_i64)?;
-            axis0_kwargs.set_item("weights", axis0_weights.clone())?;
-            let ours_axis0 = avg_fn.call((matrix.clone(),), Some(&axis0_kwargs))?;
-            let theirs_axis0 = numpy_avg.call((matrix.clone(),), Some(&axis0_kwargs))?;
-            let ok_axis0: bool = allclose.call1((&ours_axis0, &theirs_axis0))?.extract()?;
-            assert!(ok_axis0, "weighted average axis=0 f64 mismatch");
-            append_numpy_array_bytes(py, &ours_axis0, &mut proof_bytes)?;
-
-            let returned_kwargs = PyDict::new(py);
-            returned_kwargs.set_item("axis", 1_i64)?;
-            returned_kwargs.set_item("weights", axis1_weights.clone())?;
-            returned_kwargs.set_item("returned", true)?;
-            let ours_returned = avg_fn.call((matrix.clone(),), Some(&returned_kwargs))?;
-            let theirs_returned = numpy_avg.call((matrix.clone(),), Some(&returned_kwargs))?;
-            let ours_avg = ours_returned.get_item(0_i64)?;
-            let ours_sow = ours_returned.get_item(1_i64)?;
-            let theirs_avg = theirs_returned.get_item(0_i64)?;
-            let theirs_sow = theirs_returned.get_item(1_i64)?;
-            let ok_avg: bool = allclose.call1((&ours_avg, &theirs_avg))?.extract()?;
-            let ok_sow: bool = allclose.call1((&ours_sow, &theirs_sow))?.extract()?;
-            assert!(ok_avg, "returned=True weighted average component mismatch");
-            assert!(ok_sow, "returned=True sum-of-weights component mismatch");
-            append_numpy_array_bytes(py, &ours_avg, &mut proof_bytes)?;
-            append_numpy_array_bytes(py, &ours_sow, &mut proof_bytes)?;
-
-            let f32_kwargs = PyDict::new(py);
-            f32_kwargs.set_item("dtype", "float32")?;
-            let matrix_f32 = array_fn.call(
-                (vec![
-                    vec![1.25_f64, 2.5, 3.75, 4.0],
-                    vec![5.5_f64, 6.25, 7.75, 8.5],
-                ],),
-                Some(&f32_kwargs),
-            )?;
-            let weights_f32 = array_fn.call((vec![0.5_f64, 1.0, 1.5, 2.0],), Some(&f32_kwargs))?;
-            let fallback_kwargs = PyDict::new(py);
-            fallback_kwargs.set_item("axis", 1_i64)?;
-            fallback_kwargs.set_item("weights", weights_f32.clone())?;
-            let ours_f32 = avg_fn.call((matrix_f32.clone(),), Some(&fallback_kwargs))?;
-            let theirs_f32 = numpy_avg.call((matrix_f32.clone(),), Some(&fallback_kwargs))?;
-            assert_eq!(
-                repr_string(&ours_f32),
-                repr_string(&theirs_f32),
-                "float32 weighted axis average must stay on the generic dtype path"
-            );
-            append_numpy_array_bytes(py, &ours_f32, &mut proof_bytes)?;
-
-            let digest = py_sha256_hex(py, &proof_bytes)?;
-            assert_eq!(
-                digest, "00b10a1fea1c69a6409b4d09f5bd285e9d2b2a9dea6244680e610dd0113115c9",
-                "weighted f64 axis average golden output changed"
-            );
-
+            assert!(bad.is_empty(), "average differs from numpy: {bad:?}");
             Ok(())
         });
     }

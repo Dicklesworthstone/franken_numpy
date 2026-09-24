@@ -157,6 +157,61 @@ print(np.allclose(result, expected))
     Ok(())
 }
 
+/// A NaN lane's median / percentile / quantile is the NaN numpy's partition leaves last, payload
+/// and sign included. The native kernels returned the canonical NaN (0x7ff8000000000000).
+#[test]
+fn median_percentile_quantile_return_numpys_nan_payload() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+pos = np.array([0x7FF8000000000123], dtype=np.uint64).view(np.float64)[0]
+neg = np.array([0xFFF8000000000456], dtype=np.uint64).view(np.float64)[0]
+canonical = np.array([0x7FF8000000000000], dtype=np.uint64)
+bad = []
+cells = 0
+payload_results = 0
+for n in (5, 1000, 200_000):
+    base = np.linspace(-3.0, 7.0, n)
+    one = base.copy(); one[n // 2] = pos
+    two = one.copy(); two[1] = neg
+    grid = base.reshape(-1, 5).copy() if n % 5 == 0 else None
+    for arr, label in ((one, "one payload"), (two, "two payloads")):
+        calls = [("median", (arr,), {}), ("percentile", (arr, 50), {}), ("quantile", (arr, 0.25), {}),
+                 ("percentile", (arr, [10, 90]), {}), ("quantile", (arr, [0.5, 0.75]), {})]
+        if grid is not None:
+            g = grid.copy(); g.flat[n // 2] = pos
+            calls += [("median", (g,), {"axis": 1}), ("percentile", (g, 50), {"axis": 0}),
+                      ("quantile", (g, 0.5), {"axis": -1, "keepdims": True})]
+        for name, args, kw in calls:
+            cells += 1
+            r = getattr(fnp, name)(*args, **kw); e = getattr(np, name)(*args, **kw)
+            r_bits = np.asarray(r, dtype=np.float64).view(np.uint64)
+            e_bits = np.asarray(e, dtype=np.float64).view(np.uint64)
+            payload_results += bool(np.any((e_bits != canonical[0]) & np.isnan(np.asarray(e, dtype=np.float64))))
+            if type(r) is not type(e) or r_bits.shape != e_bits.shape or not np.array_equal(r_bits, e_bits):
+                bad.append((name, n, label, kw))
+print(cells, payload_results, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let cells: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let payload_results: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert!(cells >= 30, "cell table drifted: {result}");
+    // Negative control: numpy must actually return non-canonical NaNs here, or a kernel that
+    // canonicalises would pass.
+    assert!(
+        payload_results * 2 >= cells,
+        "too few cells where numpy returns a payload NaN: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "NaN payload differs from numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn percentile_quantile_large_bounded_integer_scalar_match_numpy() -> Result<(), String> {
     let script = fnp_script(

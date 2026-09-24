@@ -2037,14 +2037,18 @@ The `asupersync` RaptorQ primitives (`fnp-conformance` uses them for the sidecar
 
 Behavioral differences vs upstream NumPy that we accept either intentionally or as tracked parity debt live in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md). The ledger is machine-readable: a diagnostic case can only be marked `intentional_divergence` when it references a row here.
 
-**Current state (2026-09-23): 0 rows here, but the ledger is incomplete.** `crates/fnp-conformance/DISCREPANCIES.md` separately records 8 accepted intentional divergences (DISC-001..007, DISC-009) and one open item (DISC-011, signed-zero accumulation in `dot`/`inner`/`matmul`/`tensordot`/`vdot`, whose tests are `#[ignore]`d). Merging the two into one ledger, and making `run_divergence_ledger` fail on unregistered divergences, is bead `deadlock-audit-rc0923-epic-71qy3.16`.
+**Current state (2026-09-24): 4 rows, one ledger.** The former second ledger, `crates/fnp-conformance/DISCREPANCIES.md`, was merged in; each of its twelve entries was re-probed at the Python surface and none is an active NumPy divergence (the resolution notes in `docs/DIVERGENCES.md` give the evidence per entry).
 
 | ID | Disposition | Surface | Behavior |
 |---|---|---|---|
+| `DIV-HARDENED-LINALG-NONFINITE` | intentional | `linalg` decompositions and solvers, Hardened mode only | inf/NaN operands raise `LinAlgError`; Strict matches NumPy |
+| `DIV-COV-GRAM-NO-FMA` | intentional | `cov` / `corrcoef` native Gram path | within 1e-12 relative of NumPy's FMA-contracted BLAS result |
+| `PD-F64-FLAT-SUM-ISA` | parity_debt | flat float64 `nansum` / `var` / `std` | last-bit differences on hosts where NumPy dispatches a different SIMD width |
+| `UD-F16-SORT-X86SIMDSORT` | upstream_drift | float16 `sort` / `unique` | fnp sorts correctly where numpy 2.3.x's AVX-512 fp16 qsort does not |
 
 No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy.
 
-The ledger gate is enforced by:
+The ledger gate runs in CI G2 as `repository_markers_and_ledger_rows_agree` (`crates/fnp-conformance/src/divergence_ledger.rs`). It fails when an ignored test or `ExpectedFail` that tolerates a NumPy divergence cites no live row, when an `#[ignore]` has no reason, or when a row's `path.rs::test_fn` probe no longer exists. The same audit prints from:
 
 ```bash
 cargo run -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
@@ -2079,10 +2083,9 @@ cargo +nightly-2026-08-31 fuzz run fuzz_npy -- -max_total_time=300
 `parity_green` below means the family's conformance suites pass against NumPy; it is not a claim that no divergence remains. Known open gaps (2026-09-23), each tracked under epic `deadlock-audit-rc0923-epic-71qy3`:
 
 - **ufunc objects:** 105 of NumPy's 106 ufunc names are fnp objects that fail `isinstance(x, numpy.ufunc)`, and most lack `.reduce` / `.accumulate` / `.outer` / `.at` (`.5`).
-- **NaN payloads:** `ptp` and `median` return the canonical NaN where NumPy propagates the input NaN's bits; `nansum` along an axis of a 1-D f64 array differs from NumPy in the last bits (summation order).
-- **cov / corrcoef:** not bit-exact on general shapes (reassociated Gram path, within 1e-12), and peak memory is more than 2x NumPy's on large outputs (`.7`).
-- **Signed-zero accumulation** in `dot`/`inner`/`matmul`/`tensordot`/`vdot` (DISC-011; tests ignored).
-- The accepted divergences in `crates/fnp-conformance/DISCREPANCIES.md` (see Divergence Ledger).
+- **cov / corrcoef:** not bit-exact on general shapes (no-FMA Gram path, within 1e-12; ledger row `DIV-COV-GRAM-NO-FMA`), and peak memory is more than 2x NumPy's on large outputs (`.7`).
+- **Flat float64 `nansum`/`var`/`std`:** last-bit differences on some hosts, depending on the SIMD width NumPy dispatches to (ledger row `PD-F64-FLAT-SUM-ISA`, `.29`).
+- Fixed 2026-09-24 (bead `.16`): `median`/`percentile`/`quantile` now return NumPy's NaN payload; `nansum` along the only axis of a 1-D float64 array matches NumPy's bits; float64 `average` is byte-identical to NumPy (its native kernels summed in their own order); the `dot`/`inner`/`matmul`/`tensordot`/`vdot` signed-zero tests are re-enabled.
 
 | Feature family | Status |
 |---|---|
@@ -2390,7 +2393,7 @@ Project-specific vocabulary used throughout the README, docs, and code comments:
 | **Evidence ledger** | Append-only structured log of every runtime decision (action, class, evidence terms, posterior probability, timestamp, env fingerprint). Lives in `fnp-runtime`. |
 | **Override audit event** | A separate, narrowly-scoped record for any explicit human-requested bypass of a fail-closed gate. Always paired with an audit reference. |
 | **Parity debt** | A behavioral divergence from NumPy that is **scheduled to be closed**, not an accepted scope reduction. The `parity_debt` rows in `docs/DIVERGENCES.md` are the live tracker. |
-| **Intentional divergence** | A behavioral difference from NumPy that we deliberately accept. Currently recorded as the 8 ACCEPTED rows in `crates/fnp-conformance/DISCREPANCIES.md` (see Divergence Ledger). |
+| **Intentional divergence** | A behavioral difference from NumPy that we deliberately accept. Recorded as an `intentional` row in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) (see Divergence Ledger). |
 | **Oracle** | The reference implementation we compare against; almost always a real NumPy on the build host. A `pure_python_fallback` oracle is rejected by the G3 gate. |
 | **Witness** | A hard-coded expected output for a specific RNG seed or kernel input. Witness comparison catches silent algorithmic drift even when the new output is mathematically valid. |
 | **Phase2C extraction packet** | One of nine domain-scoped specification bundles (FNP-P2C-001 through FNP-P2C-009). Each packet ships a fixture manifest, contract table, parity gate, risk note, and parity report with RaptorQ sidecar + decode proof. |
@@ -2465,7 +2468,7 @@ Yes. `fnp-random` keeps dependencies minimal (`fnp-ndarray`, `getrandom` for no-
 `fnp_python` is the parity oracle surface. Hot operations execute on the Rust engine for native speed; everything else falls back to numpy verbatim so behavior is identical (including version-gated and deprecation paths). You get one drop-in module, with Rust under the hood where it matters.
 
 **Is anything intentionally divergent from NumPy?**
-Yes. `crates/fnp-conformance/DISCREPANCIES.md` records 8 accepted divergences (e.g. `empty()` zero-fills, Unicode width tables, error-message text, `multivariate_normal` via Cholesky) and one open signed-zero item (DISC-011). [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) has no rows yet; unifying the two ledgers and gating on them in CI is bead `deadlock-audit-rc0923-epic-71qy3.16`. No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy.
+Two things, both recorded in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md): Hardened mode rejects inf/NaN linalg operands (Strict matches NumPy), and `cov`/`corrcoef` accumulate without FMA, so they agree with NumPy's BLAS result to 1e-12 rather than bit for bit. The ledger also carries one parity-debt row (host-dependent last bits in flat float64 `nansum`/`var`/`std`) and one upstream NumPy defect fnp does not copy (float16 sort on AVX-512 with numpy 2.3.x). CI fails if a test tolerates a divergence the ledger does not name. No-seed RNG constructors source OS entropy via `getrandom`, matching NumPy.
 
 **Are there any stubs, TODOs, or mock code in production?**
 No stubs or TODOs: the `codebase_hygiene` tests fail CI on `TODO` / `FIXME` / `HACK` / `STUB` / `unimplemented!()` / `todo!()` in library code. Panic sites do exist (42 `.unwrap()`, 138 `.expect(`, 23 `unreachable!` outside tests as of 2026-09-23), mostly guarding internal invariants; see the Error Taxonomy section.

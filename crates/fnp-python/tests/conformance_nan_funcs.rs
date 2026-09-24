@@ -263,6 +263,56 @@ print(np.allclose(result, expected))
     Ok(())
 }
 
+/// A 1-D float64 array reduced along its only axis must carry numpy's pairwise-sum bits, as
+/// `axis=None` does. It used to decline to a sequential sum (its 0-d output exposes no buffer
+/// slice) and differ in the last bit from n = 100, with or without NaNs.
+#[test]
+fn nansum_along_the_only_axis_of_1d_float64_is_bit_exact() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(3)
+bad = []
+cells = 0
+naive_differs = 0
+for n in (7, 100, 129, 1000, 4096, 70_000):
+    for with_nan in (False, True):
+        a = rng.standard_normal(n) * 7
+        if with_nan:
+            a[::13] = np.nan
+        z = np.where(np.isnan(a), 0.0, a)
+        naive = 0.0
+        for v in z.tolist():
+            naive += v
+        naive_differs += np.float64(naive).tobytes() != np.float64(np.nansum(a)).tobytes()
+        for axis in (0, -1, np.int64(0)):
+            for keepdims in (False, True):
+                cells += 1
+                r = fnp.nansum(a, axis=axis, keepdims=keepdims)
+                e = np.nansum(a, axis=axis, keepdims=keepdims)
+                if type(r) is not type(e) or np.shape(r) != np.shape(e) or np.asarray(r).tobytes() != np.asarray(e).tobytes():
+                    bad.append((n, with_nan, int(axis), keepdims))
+print(cells, naive_differs, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let cells: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let naive_differs: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert_eq!(cells, 6 * 2 * 3 * 2, "cell table drifted: {result}");
+    // Negative control: a left-to-right sum is a wrong answer these inputs must expose.
+    assert!(
+        naive_differs >= 4,
+        "inputs too easy to separate pairwise from sequential summation: {result}"
+    );
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "nansum along a 1-D array's only axis must match numpy bit-for-bit: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // nanmean
 // ─────────────────────────────────────────────────────────────────────────────
