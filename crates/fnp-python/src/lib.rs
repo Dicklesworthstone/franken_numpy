@@ -774,18 +774,72 @@ fn native_or_numpy_on_non_finite(
     }
 }
 
-/// The branch-free `&` fold vectorises; an elementwise route's output is as large as its input,
-/// so a serial pass would cost about as much as the parallel kernel that produced it. Above 2^16
-/// elements the scan runs on rayon's pool in per-thread chunks.
-fn slice_all_finite<T: Copy + Sync>(data: &[T], is_finite: impl Fn(T) -> bool + Sync) -> bool {
-    const PARALLEL_SCAN_MIN: usize = 1 << 16;
-    let fold = |chunk: &[T]| chunk.iter().fold(true, |finite, &v| finite & is_finite(v));
-    if data.len() < PARALLEL_SCAN_MIN || rayon::current_num_threads() < 2 {
-        return fold(data);
+/// A branch-free `&` fold, which vectorises. SERIAL on purpose: a rayon version (2^16+ elements,
+/// per-thread chunks) put a pool dispatch on routes whose kernels are serial - 1-D diff below
+/// 2^21, degrees at 2^16 - and on a loaded host the call then waits for the slowest-scheduled
+/// worker: fnp/numpy went 0.95x -> 6.8x (diff 2^20) and 0.13x -> 3.3-4.8x (degrees 2^16) on
+/// thinkstation1 at load 30-40 (triage, two builds, 2026-09-24). One read of an output the kernel
+/// just wrote is bounded and predictable; fusing the check into the kernel removes even that
+/// (bead deadlock-audit-vo85m).
+fn slice_all_finite<T: Copy>(data: &[T], is_finite: impl Fn(T) -> bool) -> bool {
+    data.iter().fold(true, |finite, &v| finite & is_finite(v))
+}
+
+/// The largest |x| of a native-order C-contiguous float64 / float32 ndarray, or None when it holds
+/// a NaN or an infinity or is not such an array. Feeds `products_are_finite`.
+fn finite_max_abs(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<(f64, bool)>> {
+    if !is_exact_numpy_ndarray(py, value)? || !dtype_is_native(value) {
+        return Ok(None);
     }
-    use rayon::prelude::*;
-    let chunk = data.len().div_ceil(rayon::current_num_threads());
-    data.par_chunks(chunk).all(fold)
+    let fold = |(finite, max): (bool, f64), x: f64| (finite & x.is_finite(), max.max(x.abs()));
+    if let Ok(buffer) = PyBuffer::<f64>::get(value)
+        && buffer.is_c_contiguous()
+        && let Some(cells) = buffer.as_slice(py)
+    {
+        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+        let data: &[f64] =
+            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+        let (finite, max) = data.iter().fold((true, 0.0), |acc, &x| fold(acc, x));
+        return Ok(finite.then_some((max, true)));
+    }
+    if let Ok(buffer) = PyBuffer::<f32>::get(value)
+        && buffer.is_c_contiguous()
+        && let Some(cells) = buffer.as_slice(py)
+    {
+        // SAFETY: as above, for f32.
+        let data: &[f32] =
+            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+        let (finite, max) = data
+            .iter()
+            .fold((true, 0.0), |acc, &x| fold(acc, f64::from(x)));
+        return Ok(finite.then_some((max, false)));
+    }
+    Ok(None)
+}
+
+/// True when no product a[i] * b[j] can be NaN or infinite: both operands are finite float arrays
+/// of one width and max|a| * max|b| stays under half that width's maximum (headroom for the
+/// product's rounding). kron and outer then skip `native_or_numpy_on_non_finite`'s scan of their
+/// n*m output for this n+m one (bead .26's cost, deadlock-audit-vo85m). False means "scan".
+fn products_are_finite(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let (Some((max_a, a_is_f64)), Some((max_b, b_is_f64))) =
+        (finite_max_abs(py, a)?, finite_max_abs(py, b)?)
+    else {
+        return Ok(false);
+    };
+    if a_is_f64 != b_is_f64 {
+        return Ok(false);
+    }
+    let limit = if a_is_f64 {
+        f64::MAX
+    } else {
+        f64::from(f32::MAX)
+    };
+    Ok(max_a * max_b < limit / 2.0)
 }
 
 /// True when `value` - a float or complex scalar, an ndarray, or a tuple/list of them - holds a
@@ -87045,22 +87099,29 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // multi-dim inputs and other dtypes fall through to the general path.
     //
     // Every route here multiplies silently (numpy's `inf * 0` warns "invalid value encountered
-    // in multiply"): a non-finite result is numpy's to recompute (bead .26).
+    // in multiply"): a non-finite result is numpy's to recompute (bead .26). Operands that bound
+    // every product skip the scan of the n*m output.
+    let checked = |result: Py<PyAny>| -> PyResult<Py<PyAny>> {
+        if products_are_finite(py, b_a, b_b)? {
+            return Ok(result);
+        }
+        native_or_numpy_on_non_finite(py, result, fallback)
+    };
     if let Some(result) = try_zerocopy_f64_kron1d(py, b_a, b_b)? {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return checked(result);
     }
     if let Some(result) = try_zerocopy_int_kron1d(py, b_a, b_b)? {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return checked(result);
     }
     // SIMD block-fill 2-D f64 Kronecker product (~7x faster than the cold extract
     // + native build); other ndims/dtypes fall through.
     if let Some(result) = try_zerocopy_f64_kron2d(py, b_a, b_b)? {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return checked(result);
     }
     // f32 / integer 2-D Kronecker product (the f64 path above is f64-only; f32/int otherwise hit the
     // cold extract ~6-36x). Element-wise block products, bit-identical to numpy.
     if let Some(result) = try_zerocopy_typed_kron2d(py, b_a, b_b)? {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return checked(result);
     }
 
     // Everything the typed routes decline (float16, lists, N-D, mixed dtypes) is numpy's. The
@@ -87404,12 +87465,19 @@ fn outer(
     // skips the cold extract + full n*m build Vecs. Bit-identical; other dtypes
     // and non-contiguous inputs fall through to the general path.
     // The native outer kernels multiply silently (numpy's `inf * 0` warns "invalid value
-    // encountered in multiply"): a non-finite result is numpy's to recompute (bead .26).
+    // encountered in multiply"): a non-finite result is numpy's to recompute (bead .26), unless
+    // the operands bound every product (see `products_are_finite`, as in kron).
+    let checked = |result: Py<PyAny>| -> PyResult<Py<PyAny>> {
+        if products_are_finite(py, b_a, b_b)? {
+            return Ok(result);
+        }
+        native_or_numpy_on_non_finite(py, result, fallback)
+    };
     if let Some(result) = try_zerocopy_f64_outer(py, b_a, b_b)? {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return checked(result);
     }
     if let Some(result) = try_zerocopy_int_outer(py, b_a, b_b)? {
-        return native_or_numpy_on_non_finite(py, result, fallback);
+        return checked(result);
     }
 
     // Everything the zero-copy routes decline (float16, lists, mixed dtypes) is numpy's: the
