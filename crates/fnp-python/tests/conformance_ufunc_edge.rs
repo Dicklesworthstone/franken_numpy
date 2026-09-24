@@ -3341,6 +3341,138 @@ print(cells, shifts, bad[:40], len(bad))
     Ok(())
 }
 
+/// Creation, manipulation, set and search functions with edge parameters, compared with numpy by
+/// result type, dtype, shape, bytes and exception type (140 cases). Before the fix only
+/// `linspace(..., retstep=True)` failed: `num=1, endpoint=False` returned step NaN (numpy:
+/// `stop - start`), and numpy's undefined step is the Python float `nan`, not `np.float64(nan)`.
+#[test]
+fn creation_and_manipulation_functions_match_numpy_on_edge_parameters() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.simplefilter("ignore")
+rng = np.random.default_rng(13)
+f8 = rng.standard_normal(40) * 10
+i8 = rng.integers(-20, 20, 40)
+f4 = f8.astype(np.float32)
+m = rng.standard_normal((5, 6))
+cases = []
+def add(name, fn):
+    cases.append((name, fn))
+for start, stop, num in [(0, 1, 7), (1, 10, 50), (-3.3, 7.1, 13), (0, 1, 1), (5, 5, 4), (0, 1e-300, 5), (1, 2, 0)]:
+    for endpoint in (True, False):
+        add(f"linspace({start},{stop},{num},{endpoint})", lambda m_, a=start, b=stop, n=num, e=endpoint: m_.linspace(a, b, n, endpoint=e))
+        add(f"linspace_retstep({start},{stop},{num},{endpoint})", lambda m_, a=start, b=stop, n=num, e=endpoint: m_.linspace(a, b, n, endpoint=e, retstep=True))
+add("linspace_int_dtype", lambda m_: m_.linspace(0, 10, 7, dtype=np.int64))
+add("linspace_f32", lambda m_: m_.linspace(0, 1, 9, dtype=np.float32))
+add("linspace_array", lambda m_: m_.linspace([0, 1], [5, 11], 4))
+add("linspace_axis1", lambda m_: m_.linspace([0, 1], [5, 11], 4, axis=1))
+for base in (10.0, 2.0, np.e):
+    add(f"logspace base={base}", lambda m_, b=base: m_.logspace(0, 3, 7, base=b))
+add("geomspace", lambda m_: m_.geomspace(1, 1000, 7))
+add("geomspace_neg", lambda m_: m_.geomspace(-1, -1000, 5))
+add("geomspace_complex", lambda m_: m_.geomspace(1j, 1000j, 4))
+for args in [(10,), (0, 1, 0.1), (1, 2, 0.3), (-5, 5, 1.5), (0.0, 1.0, 1 / 3), (5, 0, -1), (0, 10, 3), (1e10, 1e10 + 5, 1)]:
+    add(f"arange{args}", lambda m_, a=args: m_.arange(*a))
+add("arange_f32", lambda m_: m_.arange(0, 1, 0.1, dtype=np.float32))
+for mode in ("constant", "edge", "reflect", "symmetric", "wrap", "linear_ramp", "maximum", "mean", "median", "minimum"):
+    add(f"pad {mode}", lambda m_, md=mode: m_.pad(m, ((1, 2), (3, 0)), mode=md))
+add("pad reflect odd", lambda m_: m_.pad(f8[:5], 3, mode="reflect", reflect_type="odd"))
+add("pad constant values", lambda m_: m_.pad(i8[:5], (2, 3), constant_values=(-1, 7)))
+for sh in (3, -2, 45):
+    add(f"roll {sh}", lambda m_, s=sh: m_.roll(m, s))
+    add(f"roll axis {sh}", lambda m_, s=sh: m_.roll(m, s, axis=1))
+add("roll tuple", lambda m_: m_.roll(m, (1, -2), axis=(0, 1)))
+for k in (1, 2, 3, -1):
+    add(f"rot90 {k}", lambda m_, kk=k: m_.rot90(m, kk))
+for fn in ("union1d", "intersect1d", "setdiff1d", "setxor1d"):
+    add(fn, lambda m_, f=fn: getattr(m_, f)(i8[:25], i8[15:]))
+    add(fn + " f8", lambda m_, f=fn: getattr(m_, f)(np.round(f8[:25]), np.round(f8[15:])))
+add("intersect1d indices", lambda m_: m_.intersect1d(i8[:25], i8[15:], return_indices=True))
+add("unique all", lambda m_: m_.unique(i8, return_index=True, return_inverse=True, return_counts=True))
+add("unique axis0", lambda m_: m_.unique(np.array([[1, 2], [1, 2], [0, 5]]), axis=0))
+add("unique f8 nan", lambda m_: m_.unique(np.array([np.nan, 1.0, np.nan, -0.0, 0.0])))
+add("unique equal_nan False", lambda m_: m_.unique(np.array([np.nan, 1.0, np.nan]), equal_nan=False))
+for kth in (0, 5, -1, [2, 7]):
+    add(f"partition {kth}", lambda m_, k=kth: np.sort(m_.partition(f8, k)))
+    add(f"partition kth-element {kth}", lambda m_, k=kth: m_.partition(f8, k)[k])
+    add(f"argpartition values {kth}", lambda m_, k=kth: f8[m_.argpartition(f8, k)][k])
+for side in ("left", "right"):
+    add(f"searchsorted {side}", lambda m_, s=side: m_.searchsorted(np.sort(i8), [-20, 0, 3, 19, 25], side=s))
+    add(f"searchsorted sorter {side}", lambda m_, s=side: m_.searchsorted(i8, [0, 3], side=s, sorter=np.argsort(i8, kind="stable")))
+for right in (False, True):
+    add(f"digitize {right}", lambda m_, r=right: m_.digitize(f8, [-10, 0, 5, 10], right=r))
+    add(f"digitize decreasing {right}", lambda m_, r=right: m_.digitize(f8, [10, 5, 0, -10], right=r))
+add("interp", lambda m_: m_.interp([-50, -1, 0.5, 3, 99], np.sort(f8), np.arange(40.0)))
+add("interp lr", lambda m_: m_.interp([-50, 99], np.sort(f8), np.arange(40.0), left=-7, right=7))
+add("interp period", lambda m_: m_.interp([-50, 3, 400], [0, 90, 180, 270], [1, 2, 3, 4], period=360))
+add("interp complex", lambda m_: m_.interp([0.5, 1.5], [0, 1, 2], [1 + 1j, 2, 3 - 1j]))
+for mode in ("full", "same", "valid"):
+    add(f"convolve {mode}", lambda m_, md=mode: m_.convolve(f8, f8[:7], mode=md))
+    add(f"correlate {mode}", lambda m_, md=mode: m_.correlate(f8, f8[:7], mode=md))
+    add(f"convolve int {mode}", lambda m_, md=mode: m_.convolve(i8, i8[:5], mode=md))
+add("correlate complex", lambda m_: m_.correlate(f8[:9] + 1j * f8[9:18], f8[:3] - 2j))
+add("lexsort", lambda m_: m_.lexsort((i8 % 3, i8 // 3)))
+add("sort kind stable f4", lambda m_: m_.sort(f4, kind="stable"))
+add("argsort kind stable f4", lambda m_: m_.argsort(f4, kind="stable"))
+add("take_along_axis", lambda m_: m_.take_along_axis(m, np.argsort(m, axis=1), axis=1))
+add("meshgrid ij", lambda m_: m_.meshgrid([1, 2, 3], [4, 5], indexing="ij"))
+add("meshgrid sparse", lambda m_: m_.meshgrid([1, 2, 3], [4, 5], sparse=True))
+add("tri", lambda m_: m_.tri(4, 5, 1))
+add("eye k", lambda m_: m_.eye(4, 6, k=-2, dtype=np.int8))
+add("diagflat", lambda m_: m_.diagflat([1, 2, 3], 1))
+add("vander", lambda m_: m_.vander([1, 2, 3.5], 4))
+add("histogram density", lambda m_: m_.histogram(f8, bins=5, density=True))
+add("histogram range", lambda m_: m_.histogram(f8, bins="auto", range=(-5, 5)))
+add("histogram weights", lambda m_: m_.histogram(f8, bins=6, weights=np.abs(f8)))
+add("histogram2d", lambda m_: m_.histogram2d(f8[:20], f8[20:], bins=4))
+add("bincount weights minlength", lambda m_: m_.bincount(np.abs(i8), weights=f8, minlength=30))
+add("cumulative_sum include_initial", lambda m_: m_.cumulative_sum(f8, include_initial=True))
+add("gradient", lambda m_: m_.gradient(m, 0.5, axis=1))
+add("gradient edge2", lambda m_: m_.gradient(f8, edge_order=2))
+add("ediff1d", lambda m_: m_.ediff1d(i8, to_begin=[-99], to_end=99))
+add("polyfit", lambda m_: m_.polyfit(np.arange(40.0), f8, 3))
+add("polyval", lambda m_: m_.polyval([1.5, -2, 0.25], f8))
+add("round half", lambda m_: m_.round(np.array([0.5, 1.5, 2.5, -0.5, 2.675, 1.005]), 2))
+add("around neg decimals", lambda m_: m_.around(i8 * 137, -2))
+class Raised:
+    def __init__(self, ex): self.name = type(ex).__name__
+def same(r, s):
+    if isinstance(s, (tuple, list)):
+        return isinstance(r, (tuple, list)) and len(r) == len(s) and all(same(x, y) for x, y in zip(r, s))
+    if type(r) is not type(s):
+        return False
+    r, s = np.asarray(r), np.asarray(s)
+    return r.dtype == s.dtype and r.shape == s.shape and r.tobytes() == s.tobytes()
+bad = []
+for name, fn in cases:
+    try:
+        s = fn(np)
+    except Exception as ex:
+        s = Raised(ex)
+    try:
+        r = fn(fnp)
+    except Exception as ex:
+        r = Raised(ex)
+    if isinstance(s, Raised) or isinstance(r, Raised):
+        if not (isinstance(s, Raised) and isinstance(r, Raised) and s.name == r.name):
+            bad.append(f"{name}: fnp={getattr(r, 'name', 'ok')} numpy={getattr(s, 'name', 'ok')}")
+    elif not same(r, s):
+        bad.append(name)
+print(len(cases), bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let (cases, bad) = result.trim().split_once(' ').unwrap_or(("0", &result));
+    assert!(
+        cases.parse::<usize>().unwrap_or(0) >= 140,
+        "case table drifted: {result}"
+    );
+    assert_eq!(bad, "[]", "edge-parameter parity with numpy: {result}");
+    Ok(())
+}
+
 /// fnp's ufunc objects report NumPy's docstring. The proxy class for natively implemented ufunc
 /// names carried a Rust `///` class docstring, which CPython writes into the type dict after
 /// PyO3's `__doc__` getter and so replaces it: `fnp.sin.__doc__` was fnp's implementation note.

@@ -5777,9 +5777,9 @@ impl UFuncArray {
 
     /// `np.linspace` with `retstep=True`: returns `(array, step)`.
     ///
-    /// The step is `(stop - start) / (num - 1)` when endpoint is true,
-    /// or `(stop - start) / num` when endpoint is false.
-    /// Returns `NaN` as step when `num < 2`.
+    /// The step is `(stop - start) / div` with numpy's `div = num - 1` when endpoint is true
+    /// and `div = num` when it is false; the step is `NaN` exactly when `div == 0` (no items,
+    /// or one item with an endpoint). `num = 1, endpoint = false` has a real step: `stop - start`.
     pub fn linspace_retstep(
         start: f64,
         stop: f64,
@@ -5787,15 +5787,11 @@ impl UFuncArray {
         endpoint: bool,
         dtype: DType,
     ) -> Result<(Self, f64), UFuncError> {
-        let step = if num < 2 {
+        let divisor = if endpoint { num.saturating_sub(1) } else { num };
+        let step = if divisor == 0 {
             f64::NAN
         } else {
-            let divisor = if endpoint {
-                (num - 1) as f64
-            } else {
-                num as f64
-            };
-            (stop - start) / divisor
+            (stop - start) / divisor as f64
         };
         let arr = Self::linspace_endpoint(start, stop, num, endpoint, dtype)?;
         Ok((arr, step))
@@ -54852,6 +54848,22 @@ print(json.dumps(payload))
         let (arr, step) = UFuncArray::linspace_retstep(5.0, 10.0, 1, true, DType::F64).unwrap();
         assert_eq!(arr.values(), &[5.0]);
         assert!(step.is_nan());
+    }
+
+    /// numpy divides by `num` without an endpoint, so one item has the step `stop - start`
+    /// (`np.linspace(5, 10, 1, endpoint=False, retstep=True)` is `(array([5.]), 5.0)`); only a
+    /// zero divisor is NaN.
+    #[test]
+    fn linspace_retstep_nan_only_for_a_zero_divisor() {
+        let (arr, step) = UFuncArray::linspace_retstep(5.0, 10.0, 1, false, DType::F64).unwrap();
+        assert_eq!(arr.values(), &[5.0]);
+        assert_eq!(step, 5.0);
+        for endpoint in [true, false] {
+            let (arr, step) =
+                UFuncArray::linspace_retstep(5.0, 10.0, 0, endpoint, DType::F64).unwrap();
+            assert!(arr.values().is_empty());
+            assert!(step.is_nan());
+        }
     }
 
     #[test]

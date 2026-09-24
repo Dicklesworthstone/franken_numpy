@@ -60915,12 +60915,19 @@ fn linspace(
             Err(_) => return fallback(py),
         };
         let array_py = build_numpy_array_from_ufunc(py, &array)?;
-        let step_type = match resolved_dtype {
-            DType::F16 => cached_float16_type(py)?,
-            DType::F32 => cached_float32_type(py)?,
-            _ => cached_float64_type(py)?,
+        // numpy's undefined step (no items, or one item with an endpoint) is the Python float
+        // `nan`, not a numpy scalar; a defined step is a scalar of the computation dtype.
+        let divisor = if endpoint { num_usize.saturating_sub(1) } else { num_usize };
+        let step_py = if divisor == 0 {
+            pyo3::types::PyFloat::new(py, f64::NAN).into_any()
+        } else {
+            let step_type = match resolved_dtype {
+                DType::F16 => cached_float16_type(py)?,
+                DType::F32 => cached_float32_type(py)?,
+                _ => cached_float64_type(py)?,
+            };
+            step_type.call1((step,))?
         };
-        let step_py = step_type.call1((step,))?;
         let tuple = PyTuple::new(py, [array_py.bind(py), &step_py])?;
         return Ok(tuple.into_any().unbind());
     }
