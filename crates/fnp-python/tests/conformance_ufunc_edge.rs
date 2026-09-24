@@ -2850,21 +2850,23 @@ def check(n, f, g):
     if pickle.loads(pickle.dumps(f)) is not f:
         bad.append(f"{n}: pickle does not round-trip to the same object")
     if g.nin == 2 and g.nout == 1 and g.signature is None and "d" in "".join(g.types):
-        for meth, call in (("reduce", lambda u: u.reduce(x)), ("accumulate", lambda u: u.accumulate(x)),
-                           ("outer", lambda u: u.outer(x[:3], x[:3]))):
+        # Compare OUTCOMES: numpy itself raises for some methods on float input (equal.reduce,
+        # ldexp.outer, ...), and fnp must raise the same exception type there.
+        def outcome(call):
             try:
-                ok = np.array_equal(call(f), call(g), equal_nan=True)
+                return ("ok", np.asarray(call()))
             except Exception as e:
-                ok = f"raised {type(e).__name__}"
-            if ok is not True:
-                bad.append(f"{n}.{meth}: {ok}")
-        a1, a2 = np.zeros(4), np.zeros(4)
-        try:
-            f.at(a1, [0, 0, 2], 1.5); g.at(a2, [0, 0, 2], 1.5)
-            if not np.array_equal(a1, a2, equal_nan=True):
-                bad.append(f"{n}.at differs")
-        except Exception as e:
-            bad.append(f"{n}.at raised {type(e).__name__}")
+                return ("err", type(e).__name__)
+        def at_call(u):
+            a = np.zeros(4)
+            u.at(a, [0, 0, 2], 1.5)
+            return a
+        for meth, call in (("reduce", lambda u: u.reduce(x)), ("accumulate", lambda u: u.accumulate(x)),
+                           ("outer", lambda u: u.outer(x[:3], x[:3])), ("at", at_call)):
+            got, want = outcome(lambda: call(f)), outcome(lambda: call(g))
+            if got[0] != want[0] or (got[0] == "err" and got[1] != want[1]) or (
+                    got[0] == "ok" and not np.array_equal(got[1], want[1], equal_nan=True)):
+                bad.append(f"{n}.{meth}: fnp {got[0]} {got[1] if got[0] == 'err' else ''} vs numpy {want[0]} {want[1] if want[0] == 'err' else ''}")
     if g.nin == 1 and g.nout == 1 and g.signature is None and "d->d" in g.types:
         o1, o2 = np.empty_like(x), np.empty_like(x)
         r1, r2 = f(x, out=o1), g(x, out=o2)

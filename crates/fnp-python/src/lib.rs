@@ -333,28 +333,6 @@ impl UFuncKind {
             Self::LessEqual => "less_equal",
         }
     }
-
-    fn identity(self) -> Option<f64> {
-        match self {
-            Self::Add => Some(0.0),
-            Self::Multiply => Some(1.0),
-            Self::Maximum => None,
-            Self::Minimum => None,
-            Self::BitwiseAnd => None,
-            Self::BitwiseOr => Some(0.0),
-            Self::BitwiseXor => Some(0.0),
-            Self::LogicalAnd => Some(1.0),
-            Self::LogicalOr => Some(0.0),
-            Self::LogicalXor => Some(0.0),
-            Self::Equal
-            | Self::NotEqual
-            | Self::Greater
-            | Self::GreaterEqual
-            | Self::Less
-            | Self::LessEqual => None,
-            _ => None,
-        }
-    }
 }
 
 /// The NumPy ufunc name for a kind, as an INTERNED Python string (`deadlock-audit-ei9jz`).
@@ -653,16 +631,6 @@ impl PyUFunc {
     #[getter]
     fn nargs(&self) -> usize {
         3
-    }
-
-    #[getter]
-    fn identity(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        Ok(match self.kind.identity() {
-            Some(0.0) => 0i64.into_pyobject(py)?.into_any().unbind(),
-            Some(1.0) => 1i64.into_pyobject(py)?.into_any().unbind(),
-            Some(v) => v.into_pyobject(py)?.into_any().unbind(),
-            None => py.None(),
-        })
     }
 
     // CACHED MODULE HANDLE THROUGHOUT THIS IMPL (`deadlock-audit-v46rn`).
