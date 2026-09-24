@@ -56,6 +56,83 @@ print(
     Ok(())
 }
 
+/// Bead rc0923 .22. For every dtype x {C, F} x {0-d, 1-d, empty, 3-d}:
+/// (a) fnp.save bytes == numpy.save bytes;
+/// (b) fnp.load(numpy's bytes) has numpy's values, dtype, shape and contiguity;
+/// (c) savez members are byte-identical to numpy.savez members (the zip container carries
+///     timestamps, so members are compared, not archives).
+/// Before this, fnp.load returned PERMUTED values for any Fortran-order float file with ndim >= 2,
+/// and fnp.save wrote F-ordered and big-endian float arrays with a different header.
+#[test]
+fn save_load_savez_are_byte_identical_to_numpy_across_dtypes_orders_and_shapes()
+-> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import zipfile
+dtypes = ["?", "i1", "u1", "<i2", "<u2", "<i4", "<u4", "<i8", "<u8", "<f2", "<f4", "<f8",
+          "<c8", "<c16", ">i4", ">u8", ">f2", ">f4", ">f8", ">c16", "S5", "<U3", "<M8[s]", "<m8[ms]"]
+rng = np.random.default_rng(22)
+def make(dt, shape, order):
+    d = np.dtype(dt)
+    size = int(np.prod(shape)) if shape else 1
+    if d.kind in "iu":
+        vals = rng.integers(0, 100, size).astype(d)
+    elif d.kind in "fc":
+        vals = (rng.standard_normal(size) * 10).astype(d)
+    elif d.kind == "b":
+        vals = rng.integers(0, 2, size).astype(d)
+    elif d.kind == "S":
+        vals = np.array([b"ab", b"xyz12", b""] * size, dtype=d)[:size]
+    elif d.kind == "U":
+        vals = np.array(["ab", "éx", ""] * size, dtype=d)[:size]
+    else:
+        vals = rng.integers(0, 10**6, size).astype(d)
+    arr = vals.reshape(shape) if shape else vals.reshape(())
+    return np.asfortranarray(arr) if order == "F" else np.ascontiguousarray(arr)
+def members(payload):
+    with zipfile.ZipFile(BytesIO(payload)) as z:
+        return {name: z.read(name) for name in z.namelist()}
+bad, cells, fortran_files = [], 0, 0
+for dt in dtypes:
+    for shape in [(), (5,), (0,), (2, 3, 4)]:
+        for order in "CF":
+            arr = make(dt, shape, order)
+            cells += 1
+            theirs = BytesIO(); np.save(theirs, arr); theirs = theirs.getvalue()
+            ours = BytesIO(); fnp.save(ours, arr); ours = ours.getvalue()
+            fortran_files += b"'fortran_order': True" in theirs[:128]
+            if ours != theirs:
+                off = next((i for i, (x, y) in enumerate(zip(ours, theirs)) if x != y), min(len(ours), len(theirs)))
+                bad.append(f"save {np.dtype(dt)} {shape} {order}: first differing byte {off}")
+            got, want = fnp.load(BytesIO(theirs)), np.load(BytesIO(theirs))
+            if (got.dtype != want.dtype or got.shape != want.shape or got.tobytes() != want.tobytes()
+                    or got.flags.f_contiguous != want.flags.f_contiguous
+                    or got.flags.c_contiguous != want.flags.c_contiguous):
+                bad.append(f"load {np.dtype(dt)} {shape} {order}: values/dtype/layout differ")
+            za, zb = BytesIO(), BytesIO()
+            fnp.savez(za, a=arr, b=arr); np.savez(zb, a=arr, b=arr)
+            if members(za.getvalue()) != members(zb.getvalue()):
+                bad.append(f"savez {np.dtype(dt)} {shape} {order}: members differ")
+print(cells, fortran_files, bad)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut fields = result.trim().splitn(3, ' ');
+    let cells: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    let fortran_files: usize = fields.next().unwrap_or("").parse().unwrap_or(0);
+    assert_eq!(cells, 24 * 4 * 2, "cell table drifted: {result}");
+    // Negative control: the grid must contain Fortran-order files, where a loader that ignores
+    // `fortran_order` returns permuted values.
+    assert!(fortran_files >= 20, "too few Fortran-order files: {result}");
+    assert_eq!(
+        fields.next().unwrap_or(""),
+        "[]",
+        "npy IO differs from numpy: {result}"
+    );
+    Ok(())
+}
+
 #[test]
 fn load_numpy_saved_bytesio_float32_preserves_shape_dtype_and_values() -> Result<(), String> {
     let script = fnp_script(

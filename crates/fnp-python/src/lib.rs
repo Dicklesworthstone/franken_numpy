@@ -26,7 +26,7 @@ mod searchsorted_array_needle;
 
 use fnp_dtype::{ArrayStorage, DType, f16};
 use fnp_io::{
-    IOSupportedDType, load as io_load, save as io_save, savez as io_savez,
+    IOSupportedDType, load as io_load, read_npy_header, save as io_save, savez as io_savez,
     savez_compressed as io_savez_compressed,
 };
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
@@ -8527,6 +8527,25 @@ struct NativeNpzEntry {
     dtype: IOSupportedDType,
 }
 
+/// Whether numpy.save would write `value` in a form the native NPY writer does not produce:
+/// an F-contiguous (not C-contiguous) array goes out as `fortran_order: True` with a column-major
+/// payload, and a non-native byte order keeps its own descr ('>f8'). The native writer emits C
+/// order in native byte order, so both came out byte-different from numpy.save, and the second
+/// reloaded with a different dtype.
+fn npy_layout_needs_numpy_writer(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !value.is_instance(cached_ndarray_type(py)?)? {
+        return Ok(false);
+    }
+    let flags = value.getattr(intern!(py, "flags"))?;
+    let fortran_only = flags.getattr(intern!(py, "f_contiguous"))?.extract::<bool>()?
+        && !flags.getattr(intern!(py, "c_contiguous"))?.extract::<bool>()?;
+    let native = value
+        .getattr(intern!(py, "dtype"))?
+        .getattr(intern!(py, "isnative"))?
+        .extract::<bool>()?;
+    Ok(fortran_only || !native)
+}
+
 fn collect_native_npz_entries(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -8544,6 +8563,9 @@ fn collect_native_npz_entries(
         {
             return Ok(None);
         }
+        if npy_layout_needs_numpy_writer(py, &arg)? {
+            return Ok(None);
+        }
         let array = match extract_precise_numeric_array(py, &arg, "savez(args)") {
             Ok(array) => array,
             Err(_) => return Ok(None),
@@ -8557,6 +8579,9 @@ fn collect_native_npz_entries(
     if let Some(kwds) = kwds {
         for (key, value) in kwds.iter() {
             let name = key.extract::<String>()?;
+            if npy_layout_needs_numpy_writer(py, &value)? {
+                return Ok(None);
+            }
             let array = match extract_precise_numeric_array(py, &value, "savez(kwds)") {
                 Ok(array) => array,
                 Err(_) => return Ok(None),
@@ -68308,6 +68333,9 @@ fn save(
     if !file_bound.hasattr(intern!(py, "write"))? {
         return fallback();
     }
+    if npy_layout_needs_numpy_writer(py, arr.bind(py))? {
+        return fallback();
+    }
 
     let array = match extract_precise_numeric_array(py, arr.bind(py), "save(arr)") {
         Ok(array) => array,
@@ -68402,6 +68430,19 @@ fn load(
         return fallback();
     };
 
+    // A Fortran-order file loads as an F-contiguous array in numpy. The native route builds a
+    // C-contiguous one (and, before fnp-io reordered such payloads, returned PERMUTED values), so
+    // numpy reads it.
+    if read_npy_header(&bytes).is_ok_and(|header| header.fortran_order && header.shape.len() >= 2) {
+        return load_via_numpy_bytes(
+            py,
+            &bytes,
+            allow_pickle,
+            fix_imports,
+            encoding,
+            max_header_size,
+        );
+    }
     let (shape, values, io_dtype) = match io_load(&bytes) {
         Ok(loaded) => loaded,
         Err(_) => {
