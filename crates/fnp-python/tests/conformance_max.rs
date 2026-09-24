@@ -429,6 +429,8 @@ def digest(which):
         chunks.append(b";")
     return hashlib.sha256(b"".join(chunks)).hexdigest()
 
+# The oracle arm must really be numpy's, or the parity line below would be vacuous.
+assert np.max is not fnp.max and np.max.__module__.startswith("numpy"), np.max
 ours = digest("fnp")
 theirs = digest("numpy")
 print(ours)
@@ -439,21 +441,17 @@ print(hmac.compare_digest(ours, theirs))
     );
     let result = numpy_oracle(&script)?;
     let lines: Vec<&str> = result.lines().collect();
-    let expected_sha = "213a8b9db2d434b6624f5494db8d1d7222e31ee8ad5637fd57f8641c36e2105b";
+    // Byte-equality with the LIVE numpy (line 3) is the contract. The digest itself is
+    // host-dependent because numpy's own NaN-payload selection is: numpy 2.4.3 on an AVX2 host
+    // (thinkstation1) gives 213a8b9d..., the GitHub runner in CI G2 (numpy 2.4.6) gave
+    // 3e44a453... for BOTH arms. A pinned digest therefore failed G2 on every host but the
+    // pinning one while parity held, so it is reported, not asserted. What a pinned oracle
+    // digest also guarded - an oracle arm that is secretly fnp, which would make parity
+    // vacuous - is asserted directly in the script instead.
     assert_eq!(
         lines.get(2).copied(),
         Some("True"),
         "max raw bytes must match numpy for NaNs and signed zeros: {result}"
-    );
-    assert_eq!(
-        lines.first().copied(),
-        Some(expected_sha),
-        "max fnp raw-byte hash changed: {result}"
-    );
-    assert_eq!(
-        lines.get(1).copied(),
-        Some(expected_sha),
-        "max numpy raw-byte golden changed: {result}"
     );
     Ok(())
 }

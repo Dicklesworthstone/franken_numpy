@@ -429,6 +429,8 @@ def digest(which):
         chunks.append(b";")
     return hashlib.sha256(b"".join(chunks)).hexdigest()
 
+# The oracle arm must really be numpy's, or the parity line below would be vacuous.
+assert np.min is not fnp.min and np.min.__module__.startswith("numpy"), np.min
 ours = digest("fnp")
 theirs = digest("numpy")
 print(ours)
@@ -439,21 +441,13 @@ print(hmac.compare_digest(ours, theirs))
     );
     let result = numpy_oracle(&script)?;
     let lines: Vec<&str> = result.lines().collect();
-    let expected_sha = "ced2021a2238f28f2f4a33b842282f66e0b34fb4be253d473d113d014422789f";
+    // Byte-equality with the LIVE numpy is the contract; the digest is host-dependent because
+    // numpy's NaN-payload selection is (numpy 2.4.3 / AVX2: ced2021a...; CI G2's GitHub runner,
+    // numpy 2.4.6: 5e625ef3... for BOTH arms). See the `max` twin for the full reasoning.
     assert_eq!(
         lines.get(2).copied(),
         Some("True"),
         "min raw bytes must match numpy for NaNs and signed zeros: {result}"
-    );
-    assert_eq!(
-        lines.first().copied(),
-        Some(expected_sha),
-        "min fnp raw-byte hash changed: {result}"
-    );
-    assert_eq!(
-        lines.get(1).copied(),
-        Some(expected_sha),
-        "min numpy raw-byte golden changed: {result}"
     );
     Ok(())
 }
